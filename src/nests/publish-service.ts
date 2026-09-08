@@ -31,6 +31,7 @@ import { hashPassword, verifyPassword } from "../auth/keys.js";
 import { ValidationError } from "../shared/errors.js";
 import { normalizeEmail } from "../shared/email.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
+import { getApprovedVersion } from "../governance/version-service.js";
 
 export type PublishMode = "public" | "email" | "code" | "invite";
 
@@ -140,6 +141,15 @@ export async function createPublish(params: {
   // publish row to explain why.
   if (!(await nodeExists(nestId, nodeId))) {
     throw new ValidationError(`No such document in this nest: ${nodeId}`);
+  }
+  // Same rule, one step further: /p serves the APPROVED snapshot, never the
+  // working copy (publish-render-routes.renderPublished), so a document that
+  // has never been approved has nothing to serve and its link 404s for every
+  // reader. Refuse the link instead of minting a dead one (CU-wdqcq01e73).
+  if ((await getApprovedVersion(nestId, nodeId)) == null) {
+    throw new ValidationError(
+      "This document has no approved version, so a link to it would show nothing. Get it approved first, then publish.",
+    );
   }
 
   const db = getDb();

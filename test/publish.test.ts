@@ -494,8 +494,8 @@ describe("governed content", () => {
     expect(html).toContain("approved content here");
     expect(html).not.toContain("unapproved draft leak");
 
-    // A document that has never been approved has no snapshot to publish, so
-    // the link must 404 rather than fall back to serving the draft.
+    // A document that has never been approved has no snapshot to serve, so the
+    // link is refused outright rather than minted dead (CU-wdqcq01e73).
     await jsonRequest(
       app,
       "POST",
@@ -503,20 +503,18 @@ describe("governed content", () => {
       { title: "Never Approved", content: "draft nobody signed off" },
       owner.apiKey,
     );
-    const draft = await jsonRequest(
+    const refused = await jsonRequest(
       app,
       "POST",
       `/nests/${gNest}/publications`,
       { node_id: "nodes/never-approved", access_mode: "public" },
       owner.apiKey,
     );
-    const draftSlug = draft.data.publish.slug;
-    const draftRes = await app.request(`/p/${draftSlug}`);
-    expect(draftRes.status).toBe(404);
-    expect(await draftRes.text()).not.toContain("draft nobody signed off");
+    expect(refused.status).toBe(400);
+    expect(String(refused.data.error)).toMatch(/approved/i);
 
-    // ...and the 404 is the approval gate, not a bad slug: approve it and the
-    // very same link starts serving.
+    // ...and the refusal is the approval gate, not the document: approve it and
+    // the same request mints a link that serves.
     await jsonRequest(
       app,
       "POST",
@@ -531,7 +529,15 @@ describe("governed content", () => {
       { note: "ship it" },
       reviewer.apiKey,
     );
-    const live = await app.request(`/p/${draftSlug}`);
+    const nowAllowed = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${gNest}/publications`,
+      { node_id: "nodes/never-approved", access_mode: "public" },
+      owner.apiKey,
+    );
+    expect(nowAllowed.status).toBe(201);
+    const live = await app.request(`/p/${nowAllowed.data.publish.slug}`);
     expect(live.status).toBe(200);
     expect(await live.text()).toContain("draft nobody signed off");
   });

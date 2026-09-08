@@ -3201,7 +3201,6 @@ export function DocumentEditor({
           nestId={nestId}
           nodeId={nodeId}
           nodeTitle={title || nodeId}
-          unapproved={stewardshipEnabled && status !== "published"}
           onClose={() => setShowPublish(false)}
         />
       )}
