@@ -2,6 +2,13 @@
  * NestVisibilityControl — private ↔ public for a whole nest
  * (PATCH /nests/:id/visibility, admin-gated server-side).
  *
+ * The switch is deliberately still two-state. The API also accepts 'org'
+ * (readable by every authenticated user of this deployment), but nothing in
+ * the UI sets it yet — so this control only has to REPORT that state
+ * honestly, not offer it. Saying "Private" for an org nest would tell an
+ * owner the opposite of the truth, which is why the label reads off the
+ * visibility string rather than a boolean.
+ *
  * Lives on its own so the Collaborators tab and the Share dialog show the
  * same control instead of the tab deferring visibility to the dialog
  * (CU-wdqcpzzzy6). Self-fetches the current value; reports failures through
@@ -24,7 +31,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Globe, Lock, Loader2 } from "lucide-react";
+import { Globe, Lock, Loader2, Building2 } from "lucide-react";
 import * as api from "../lib/api";
 
 interface Props {
@@ -35,7 +42,9 @@ interface Props {
 }
 
 export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
-  const [isPublic, setIsPublic] = useState(false);
+  const [visibility, setVisibility] = useState<string>("private");
+  const isPublic = visibility === "public";
+  const isOrg = visibility === "org";
   const [saving, setSaving] = useState(false);
   // Publishing (→ public) is guarded by an acknowledgement dialog: the nest
   // becomes readable by anyone on the internet, outside your organization.
@@ -46,7 +55,7 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
     // reflects truth without the parent having to thread it through.
     api
       .getNest(nestId)
-      .then((res) => setIsPublic(res.nest?.visibility === "public"))
+      .then((res) => setVisibility(res.nest?.visibility || "private"))
       .catch(() => {
         /* leave default; the roster below surfaces any real error */
       });
@@ -55,7 +64,7 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
   const apply = async (next: boolean, acknowledgePublic?: boolean) => {
     // Optimistic flip; revert on failure so the switch never lies about
     // server state (same pattern as NestSettingsModal's stewardship save).
-    setIsPublic(next);
+    setVisibility(next ? "public" : "private");
     setSaving(true);
     onError?.(null);
     try {
@@ -65,7 +74,7 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
         acknowledgePublic,
       );
       if ((result.visibility === "public") !== next) {
-        setIsPublic(!next);
+        setVisibility(result.visibility || (next ? "private" : "public"));
         onError?.(
           "Server did not accept the change. You may not have admin access to this nest.",
         );
@@ -73,7 +82,7 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
       }
       onChanged();
     } catch (err: any) {
-      setIsPublic(!next);
+      setVisibility(next ? "private" : "public");
       onError?.(err?.message || "Failed to change visibility");
     } finally {
       setSaving(false);
@@ -97,20 +106,34 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
           <Label className="flex items-center gap-2 text-sm font-medium">
             {isPublic ? (
               <Globe className="h-4 w-4 text-green-600" />
+            ) : isOrg ? (
+              <Building2 className="h-4 w-4 text-blue-600" />
             ) : (
               <Lock className="h-4 w-4" />
             )}
-            {isPublic ? "Public" : "Private"}
+            {isPublic ? "Public" : isOrg ? "Organization" : "Private"}
           </Label>
           <p className="text-xs text-muted-foreground">
             {isPublic
               ? "Anyone on this server can read this nest. Editing still requires being added below."
-              : "Only people added below (and the owner) can see this nest."}
+              : isOrg
+                ? "Everyone signed in to this deployment can read this nest. Editing still requires being added below."
+                : "Only people added below (and the owner) can see this nest."}
           </p>
         </div>
         <div className="flex items-center gap-2">
           {saving && (
             <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+          )}
+          {isOrg && (
+            <button
+              type="button"
+              className="text-xs underline text-muted-foreground hover:text-foreground"
+              disabled={saving}
+              onClick={() => void apply(false)}
+            >
+              Make private
+            </button>
           )}
           <Switch
             checked={isPublic}

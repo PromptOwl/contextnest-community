@@ -23,7 +23,7 @@ import {
 import {
   FileText, FileCode2, Plus, ArrowLeft, History, Shield, Search, Upload, Sparkles,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
-  Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
+  Pencil, Trash2, FileWarning, Globe, Lock, Building2, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
   FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus, Wrench, Table2,
   Activity, Share2, BookOpen,
@@ -356,7 +356,7 @@ export function NestView({
   const [allowSelfApprove, setAllowSelfApprove] = useState(false);
   const [primeOnlyReview, setPrimeOnlyReview] = useState(false);
   const [primeTags, setPrimeTags] = useState<string[]>([]);
-  const [visibility, setVisibility] = useState<"private" | "public">("private");
+  const [visibility, setVisibility] = useState<api.NestVisibility>("private");
   const [visibilitySaving, setVisibilitySaving] = useState(false);
   // Publishing (→ public) is guarded by an acknowledgement dialog: the nest
   // becomes readable by anyone on the internet, outside your organization.
@@ -1660,7 +1660,7 @@ export function NestView({
   // never lies about server state. Surfaces the public/private switch outside
   // the Share dialog, where it was easy to miss. (CU-wdqcpztgwk)
   const applyVisibility = async (
-    next: "private" | "public",
+    next: api.NestVisibility,
     acknowledgePublic?: boolean,
   ) => {
     const prev = visibility;
@@ -1934,17 +1934,25 @@ export function NestView({
               title={
                 visibility === "public"
                   ? "Public — anyone with the URL can read. Click to make private."
-                  : "Private. Click to make public (anyone with the URL can read)."
+                  : visibility === "org"
+                    ? "Organization — everyone signed in to this deployment can read. Click to make public (anyone with the URL can read)."
+                    : "Private. Click to make public (anyone with the URL can read)."
               }
             >
               {visibilitySaving ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : visibility === "public" ? (
                 <Globe className="h-3.5 w-3.5" />
+              ) : visibility === "org" ? (
+                <Building2 className="h-3.5 w-3.5" />
               ) : (
                 <Lock className="h-3.5 w-3.5" />
               )}
-              {visibility === "public" ? "Public" : "Private"}
+              {visibility === "public"
+                ? "Public"
+                : visibility === "org"
+                  ? "Organization"
+                  : "Private"}
             </Button>
           ) : (
             visibility === "public" && (

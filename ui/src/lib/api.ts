@@ -14,6 +14,14 @@
 
 import { clearDraft } from "./draft";
 
+/**
+ * A nest's visibility tier. 'org' = every authenticated user of this
+ * deployment (a self-hosted install is one organization); 'public' = anyone,
+ * including anonymous callers. Nothing in the UI sets 'org' yet, but the API
+ * returns it, so every surface that renders visibility has to handle it.
+ */
+export type NestVisibility = "private" | "org" | "public";
+
 const API_BASE = "";
 const STALE_LOCAL_STORAGE_KEY = "cnst_token";
 
@@ -742,14 +750,14 @@ export async function deleteUnsyncedFolder(name: string) {
 
 export async function setNestVisibility(
   nestId: string,
-  visibility: "private" | "public",
+  visibility: NestVisibility,
   // Publishing (→ public) requires an explicit acknowledgement that the nest
   // becomes readable by anyone on the internet, outside your organization.
   // Without it the server returns 409 requires_acknowledgement. Going back to
   // private needs no acknowledgement, so this is optional.
   acknowledgePublic?: boolean,
 ) {
-  return request<{ visibility: "private" | "public" }>(
+  return request<{ visibility: NestVisibility }>(
     `/nests/${nestId}/visibility`,
     {
       method: "PATCH",
@@ -779,7 +787,7 @@ export async function getNest(nestId: string) {
     nest: {
       id: string;
       name: string;
-      visibility: "private" | "public";
+      visibility: NestVisibility;
       // Public Docs Reader Mode fields — surfaced straight off the SELECT *.
       reader_mode?: number;
       reader_home_node?: string | null;

@@ -78,8 +78,15 @@ describe("visibility='org' behaviour", () => {
   });
 
   it("still refuses an unauthenticated caller — org is not world-readable", async () => {
+    // 404, not 401: flexAuthMiddleware treats any GET on /nests/:id as
+    // public-read-eligible and hands the caller the anon user id, so the
+    // request never reaches the 401 branch. It is the access gate that
+    // refuses it, and that gate answers "no access" and "no such nest" the
+    // same way on purpose — the existence oracle (app.ts). What matters here
+    // is that anon is refused at all; resolveNestAccess is what decides it,
+    // and the case above pins that directly.
     const res = await app.request(`/nests/${orgNest}`);
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(404);
   });
 
   it("leaves the owner at owner", async () => {

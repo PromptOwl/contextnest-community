@@ -222,7 +222,14 @@ Turning stewardship **off** wipes stewards and pending reviews and is owner-only
 ```json
 { "visibility": "public", "acknowledge_public": true }
 ```
-- **Outside-org publish guardrail.** Setting `visibility: "public"` **requires** `acknowledge_public: true`. Without it the request is rejected `409`:
+- **`visibility`** is one of:
+  | value | who can read without being added |
+  |---|---|
+  | `private` | nobody — owner, collaborators and stewards only |
+  | `org` | any **authenticated** user of this deployment (a self-hosted install is one organization). Anonymous callers get nothing. |
+  | `public` | anyone, including anonymous callers |
+  `org` and `public` readers see **approved content only** — drafts and pending versions stay with collaborators and stewards.
+- **Outside-org publish guardrail.** Setting `visibility: "public"` **requires** `acknowledge_public: true` (`org` does not — it stays inside the deployment, so it crosses no organizational boundary). Without it the request is rejected `409`:
   ```json
   {
     "error": "Publishing this nest requires acknowledgement.",
