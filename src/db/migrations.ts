@@ -18,7 +18,7 @@ export function runMigrations(db: Database.Database): void {
       slug TEXT NOT NULL,
       description TEXT,
       visibility TEXT NOT NULL DEFAULT 'private'
-        CHECK(visibility IN ('private', 'public')),
+        CHECK(visibility IN ('private', 'org', 'public')),
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE(user_id, slug)
     );
@@ -1430,6 +1430,83 @@ export function runMigrations(db: Database.Database): void {
       db.exec("ALTER TABLE publish ADD COLUMN no_download INTEGER NOT NULL DEFAULT 0");
     }
   }
+
+  // 038: widen nests.visibility to accept 'org'. See widenNestVisibilityCheck
+  // for why this is a table rebuild and why the pragma is toggled out here —
+  // PRAGMA foreign_keys is a no-op inside a transaction, so doing it any other
+  // way silently leaves enforcement ON and cascades the database away.
+  if (!hasMigration("038_nest_visibility_org")) {
+    const fkWasOn = db.pragma("foreign_keys", { simple: true }) === 1;
+    if (fkWasOn) db.pragma("foreign_keys = OFF");
+    try {
+      db.transaction(() => {
+        widenNestVisibilityCheck(db);
+      })();
+      // Belt and braces: prove the rebuild left every child row pointing at a
+      // nest that still exists before we record the migration as applied.
+      const dangling = db.pragma("foreign_key_check") as unknown[];
+      if (dangling.length > 0) {
+        throw new Error(
+          `038_nest_visibility_org left ${dangling.length} dangling foreign-key row(s)`,
+        );
+      }
+    } finally {
+      if (fkWasOn) db.pragma("foreign_keys = ON");
+    }
+    recordMigration("038_nest_visibility_org");
+  }
+}
+
+/**
+ * Widen the `nests.visibility` CHECK constraint to allow 'org'.
+ *
+ * SQLite cannot alter a CHECK in place, so the table has to be rebuilt — and
+ * `nests` is the most-referenced table in the schema: 27 tables point at
+ * `nests(id)`, every one of them ON DELETE CASCADE. The connection runs with
+ * `foreign_keys = ON` (db/client.ts), so a plain `DROP TABLE nests` would take
+ * every node-index row, version, steward, grant and run with it. The caller
+ * MUST disable foreign keys around this, outside any transaction.
+ *
+ * The replacement table is derived from the LIVE schema rather than a literal
+ * column list: `nests` grows columns from plain ALTERs on other branches
+ * (marketplace adds is_pack/pack_meta/installed_from_pack), and a hardcoded
+ * list would quietly drop whichever ones this file had not heard about.
+ *
+ * Idempotent — returns immediately once 'org' is already in the constraint.
+ */
+export function widenNestVisibilityCheck(db: Database.Database): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'nests'")
+    .get() as { sql?: string } | undefined;
+  const ddl = row?.sql;
+  if (!ddl) return; // fresh database — the CREATE TABLE above already has 'org'
+
+  const checkRe = /CHECK\s*\(\s*visibility\s+IN\s*\([^)]*\)\s*\)/i;
+  const current = ddl.match(checkRe);
+  if (!current) return; // no visibility CHECK to widen — nothing to do
+  if (/'org'/i.test(current[0])) return; // already widened
+
+  const newDdl = ddl
+    .replace(
+      /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["'`\[]?nests["'`\]]?/i,
+      "CREATE TABLE nests_new",
+    )
+    .replace(checkRe, "CHECK(visibility IN ('private', 'org', 'public'))");
+  if (!newDdl.startsWith("CREATE TABLE nests_new")) {
+    throw new Error("038: could not rewrite the nests CREATE TABLE statement");
+  }
+
+  const cols = (db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>)
+    .map((c) => `"${c.name}"`)
+    .join(", ");
+
+  db.exec(`
+    ${newDdl};
+    INSERT INTO nests_new (${cols}) SELECT ${cols} FROM nests;
+    DROP TABLE nests;
+    ALTER TABLE nests_new RENAME TO nests;
+    CREATE INDEX IF NOT EXISTS idx_nests_user ON nests(user_id);
+  `);
 }
 
 /**

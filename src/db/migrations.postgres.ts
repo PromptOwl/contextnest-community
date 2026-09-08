@@ -71,6 +71,7 @@ const HISTORICAL_MIGRATIONS = [
   "035_multiple_api_keys_per_user",
   "036_node_index",
   "037_publish",
+  "038_nest_visibility_org",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -98,7 +99,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       slug TEXT NOT NULL,
       description TEXT,
       visibility TEXT NOT NULL DEFAULT 'private'
-        CHECK(visibility IN ('private', 'public')),
+        CHECK(visibility IN ('private', 'org', 'public')),
       created_at TEXT NOT NULL DEFAULT ${NOW},
       stewardship_enabled INTEGER NOT NULL DEFAULT 0,
       is_imported INTEGER NOT NULL DEFAULT 0,
@@ -704,6 +705,19 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       [id],
     );
   }
+
+  // Migration 038 parity: widen the visibility CHECK to accept 'org' on a
+  // database created before it existed. Postgres has no ADD CONSTRAINT IF NOT
+  // EXISTS, so drop-then-add by the constraint's generated name — idempotent,
+  // and a no-op in effect when the CREATE TABLE above already wrote it.
+  // (Unlike SQLite this is a catalogue-only change: no table rebuild, so none
+  // of the ON DELETE CASCADE hazard that makes the SQLite side delicate.)
+  await db.run(
+    "ALTER TABLE nests DROP CONSTRAINT IF EXISTS nests_visibility_check",
+  );
+  await db.run(
+    "ALTER TABLE nests ADD CONSTRAINT nests_visibility_check CHECK (visibility IN ('private', 'org', 'public'))",
+  );
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(

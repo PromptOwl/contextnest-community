@@ -124,14 +124,18 @@ sharingRoutes.patch("/visibility", async (c) => {
     visibility?: string;
     acknowledge_public?: boolean;
   }>();
-  if (!body.visibility || !["private", "public"].includes(body.visibility)) {
-    throw new ValidationError("visibility must be private or public");
+  if (
+    !body.visibility ||
+    !["private", "org", "public"].includes(body.visibility)
+  ) {
+    throw new ValidationError("visibility must be private, org or public");
   }
 
   // Outside-org publish guardrail: flipping a nest to public makes it readable
   // by anyone on the internet, outside your organization. Require an explicit
   // acknowledgement so this can never happen on a stray click. Going back to
-  // private needs no acknowledgement.
+  // private needs no acknowledgement — and neither does 'org', which stays
+  // inside the deployment and so crosses no organizational boundary.
   if (body.visibility === "public" && body.acknowledge_public !== true) {
     return c.json(
       {
