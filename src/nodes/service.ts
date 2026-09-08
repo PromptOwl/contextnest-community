@@ -79,8 +79,10 @@ async function userIdFromEmail(email: string): Promise<string> {
 
 /** Tag as stored: "#" + bare + lowercased. Casing is folded here so the tag a
  *  document carries keys the same as the one the tag index, facets and steward
- *  scopes resolve by — "GTM" and "gtm" are one tag, not two. */
-const normalizeTag = (t: string) =>
+ *  scopes resolve by — "GTM" and "gtm" are one tag, not two. Named apart from
+ *  the tag index's `normalizeTag` (which yields the bare key) because the two
+ *  differ by exactly that "#" and a shared name invites the wrong one. */
+const storedTag = (t: string) =>
   `#${String(t).trim().replace(/^#+/, "").toLowerCase()}`;
 
 /**
@@ -90,7 +92,7 @@ const normalizeTag = (t: string) =>
  * unsaved document with it (a `café` tag did exactly that).
  */
 function requireTag(raw: string): string {
-  const tag = normalizeTag(raw);
+  const tag = storedTag(raw);
   if (!TAG_PATTERN.test(tag)) {
     throw new ValidationError(
       `"${String(raw).trim()}" isn't a usable tag — a tag starts with a letter ` +
@@ -296,7 +298,7 @@ async function departmentTagFor(userEmail: string): Promise<string | null> {
       [userEmail],
     )) as { department?: string | null } | undefined;
     const slug = slugify(String(row?.department ?? ""));
-    return slug ? normalizeTag(`dept:${slug}`) : null;
+    return slug ? storedTag(`dept:${slug}`) : null;
   } catch (err) {
     console.error("[dept-tag] department lookup failed (tag skipped):", err);
     return null;
@@ -406,7 +408,7 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
           fm.tags
             .map((t) => String(t).trim())
             .filter(Boolean)
-            .map(normalizeTag),
+            .map(storedTag),
         ),
       ]
     : [];
@@ -1112,7 +1114,7 @@ export async function nestCensus(
     // Keyed by the normalized tag, because the filter a facet chip applies
     // matches case-insensitively: counting "#GTM" and "#gtm" apart put a "2"
     // on a chip that then returned 3 documents.
-    for (const t of new Set((fm.tags || []).map((t) => normalizeTag(String(t)))))
+    for (const t of new Set((fm.tags || []).map((t) => storedTag(String(t)))))
       tags[t] = (tags[t] || 0) + 1;
     const folder = folderOfId(d.id);
     if (folder) direct.set(folder, (direct.get(folder) || 0) + 1);
@@ -1444,11 +1446,11 @@ async function createNodeOnce(
     }
 
     // Optional dept:<slug> auto-tag — after the validations above so a request
-    // that fails them never pays the DB lookup. Deduped case-insensitively
-    // against the user-supplied tags (normalizeTag keeps the user's casing, so
-    // "#Dept:Engineering" must still match the all-lowercase auto tag).
+    // that fails them never pays the DB lookup. Both sides are already folded
+    // to lower case by storedTag, so "#Dept:Engineering" and the auto tag are
+    // the same string and a plain match dedupes them.
     const deptTag = await departmentTagFor(userEmail);
-    if (deptTag && !tags.some((t) => t.toLowerCase() === deptTag)) {
+    if (deptTag && !tags.includes(deptTag)) {
       tags.push(deptTag);
     }
 
@@ -1710,7 +1712,7 @@ export async function registerImportedDocuments(
   // longer reconstructs) still registers — as a draft, at its own version, with
   // its history left untouched on disk. Losing the doc would be the worse loss.
   for (const d of docs) {
-    const tags = d.tags.map((t) => normalizeTag(String(t)));
+    const tags = d.tags.map((t) => storedTag(String(t)));
     await versions.createVersion({
       nestId,
       nodeId: d.id,
@@ -2344,7 +2346,7 @@ export async function discardDraft(
     await syncNodeTags(
       nestId,
       nodeId,
-      ((restored.frontmatter.tags as string[]) || []).map(normalizeTag),
+      ((restored.frontmatter.tags as string[]) || []).map(storedTag),
     );
 
     await versions.deleteUnsealedVersions(nestId, nodeId, sealed);
