@@ -22,3 +22,12 @@ export function nestNameProblem(name: string): string | null {
   }
   return null;
 }
+
+/**
+ * The form a nest name takes when it is typed back to confirm a destructive
+ * action. HTML collapses runs of whitespace, so a name holding one (older nests
+ * kept the gap a stripped tag left behind) rendered shorter than it was stored
+ * — copying it off the dialog then never matched and the nest could not be
+ * deleted (CU-wdqcq01e6u).
+ */
+export const confirmableName = (s: string) => s.trim().replace(/\s+/g, " ");

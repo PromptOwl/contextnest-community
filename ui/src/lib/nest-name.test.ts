@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { nestNameProblem } from "./nest-name";
+import { confirmableName, nestNameProblem } from "./nest-name";
 
 describe("nestNameProblem", () => {
   it("accepts a plain name", () => {
@@ -22,5 +22,19 @@ describe("nestNameProblem", () => {
   it("keeps the empty and slug refusals", () => {
     expect(nestNameProblem("   ")).toMatch(/required/i);
     expect(nestNameProblem("###")).toMatch(/slug/i);
+  });
+});
+
+describe("confirmableName", () => {
+  it("matches a name the way the dialog renders it", () => {
+    expect(confirmableName("Roadmap  plan")).toBe(confirmableName("Roadmap plan"));
+  });
+
+  it("tolerates the whitespace a paste carries", () => {
+    expect(confirmableName("  Roadmap plan ")).toBe(confirmableName("Roadmap plan"));
+  });
+
+  it("still separates a different name", () => {
+    expect(confirmableName("Roadmap plans")).not.toBe(confirmableName("Roadmap plan"));
   });
 });
