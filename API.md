@@ -229,6 +229,7 @@ Turning stewardship **off** wipes stewards and pending reviews and is owner-only
   | `org` | any **authenticated** user of this deployment (a self-hosted install is one organization). Anonymous callers get nothing. |
   | `public` | anyone, including anonymous callers |
   `org` and `public` readers see **approved content only** — drafts and pending versions stay with collaborators and stewards.
+  Under `AUTH_MODE=open` every caller resolves to the anonymous user, so there is no "other authenticated user" for `org` to admit: on an open-mode deployment `org` behaves as `private`. Use it on a deployment with real logins.
 - **Outside-org publish guardrail.** Setting `visibility: "public"` **requires** `acknowledge_public: true` (`org` does not — it stays inside the deployment, so it crosses no organizational boundary). Without it the request is rejected `409`:
   ```json
   {

@@ -1922,6 +1922,12 @@ export function NestView({
               private switch isn't buried in the Share dialog), a read-only
               badge for everyone else. */}
           {canManage ? (
+            // Two-state on purpose: this button offers private <-> public,
+            // and for an org nest its only move is escalate-to-public (the
+            // tooltip says so). Walking an org nest back to private lives in
+            // NestVisibilityControl (Collaborators tab / Share dialog), which
+            // is also the only place the org tier is explained. Revisit when
+            // the UI can actually SET org rather than only report it.
             <Button
               variant="outline"
               size="sm"

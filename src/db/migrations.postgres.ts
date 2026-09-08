@@ -708,16 +708,31 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
 
   // Migration 038 parity: widen the visibility CHECK to accept 'org' on a
   // database created before it existed. Postgres has no ADD CONSTRAINT IF NOT
-  // EXISTS, so drop-then-add by the constraint's generated name — idempotent,
-  // and a no-op in effect when the CREATE TABLE above already wrote it.
-  // (Unlike SQLite this is a catalogue-only change: no table rebuild, so none
-  // of the ON DELETE CASCADE hazard that makes the SQLite side delicate.)
-  await db.run(
-    "ALTER TABLE nests DROP CONSTRAINT IF EXISTS nests_visibility_check",
-  );
-  await db.run(
-    "ALTER TABLE nests ADD CONSTRAINT nests_visibility_check CHECK (visibility IN ('private', 'org', 'public'))",
-  );
+  // EXISTS, so this is a drop-then-add by the constraint's generated name.
+  //
+  // Read the current definition first rather than swapping unconditionally:
+  // ADD CONSTRAINT re-validates every existing row and takes a lock to do it,
+  // so an unguarded swap would pay that cost on every server start and grow
+  // with the table. Every other statement in this file is a true no-op on an
+  // up-to-date database (IF NOT EXISTS / ADD COLUMN IF NOT EXISTS); this one
+  // has to be as well.
+  //
+  // Unlike SQLite this is catalogue-only — no table rebuild, so none of the
+  // ON DELETE CASCADE hazard that makes the SQLite side delicate.
+  const visibilityCheck = (await db.get(
+    `SELECT pg_get_constraintdef(oid) AS def
+       FROM pg_constraint
+      WHERE conrelid = 'nests'::regclass
+        AND conname = 'nests_visibility_check'`,
+  )) as { def?: string } | undefined;
+  if (!visibilityCheck?.def?.includes("'org'")) {
+    await db.run(
+      "ALTER TABLE nests DROP CONSTRAINT IF EXISTS nests_visibility_check",
+    );
+    await db.run(
+      "ALTER TABLE nests ADD CONSTRAINT nests_visibility_check CHECK (visibility IN ('private', 'org', 'public'))",
+    );
+  }
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(
