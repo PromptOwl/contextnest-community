@@ -289,8 +289,12 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
             <div className="px-4 py-6 text-center text-sm text-muted-foreground">
               {searching
                 ? "Searching…"
-                : global && !query.trim()
-                  ? "Type to search nests and documents"
+                : !query.trim()
+                  ? // Nothing was searched yet, so "No matches" would be a lie
+                    // in either scope (CU-wdqcq01e6x).
+                    global
+                    ? "Type to search nests and documents…"
+                    : "Type to search documents in this nest…"
                   : !global && query.trim() ? (
                     // A scoped miss is not "it doesn't exist" — name the nest
                     // that was searched and offer the wider one right here,
