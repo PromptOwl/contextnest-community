@@ -169,7 +169,9 @@ beforeAll(async () => {
     owner.apiKey,
   );
   expect(rejected.status).toBe(201);
-}, 120_000);
+// 183 sequential creates: ~30s with the file to itself, several times that
+// while the rest of the suite runs beside it — which is where 120s ran out.
+}, 300_000);
 
 /** Count SQL statements issued through the app's DB adapter while `fn` runs. */
 async function countQueries<T>(fn: () => Promise<T>): Promise<{ out: T; queries: number }> {
