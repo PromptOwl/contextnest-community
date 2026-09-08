@@ -20,12 +20,16 @@ import { widenNestVisibilityCheck } from "../src/db/migrations.js";
  *  same ON DELETE CASCADE every real child of `nests` carries, and a column
  *  added by a later ALTER (marketplace adds three of these) so the rebuild is
  *  proven to derive its column list from the live schema, not a stale literal. */
-function oldSchemaDb(): Database.Database {
+function oldSchemaDb(ifNotExists = true): Database.Database {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
+  // Default to the form the real migration writes (`CREATE TABLE IF NOT
+  // EXISTS nests`), since sqlite_master stores the statement verbatim and the
+  // rebuild regex has to match whatever is actually there. The bare form is
+  // covered explicitly below.
   db.exec(`
     CREATE TABLE users (id TEXT PRIMARY KEY);
-    CREATE TABLE nests (
+    CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}nests (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id),
       name TEXT NOT NULL,
@@ -122,6 +126,19 @@ describe("migration 038 — widening the nests.visibility CHECK", () => {
     runWiden(db);
     const idx = db.pragma("index_list(nests)") as Array<{ name: string }>;
     expect(idx.some((i) => i.name === "idx_nests_user")).toBe(true);
+    db.close();
+  });
+
+  it("widens the bare `CREATE TABLE nests` form too", () => {
+    // sqlite_master keeps the original statement text, so a database created
+    // by an older build — or by hand — may carry either form. The regex
+    // handles both; this pins that rather than trusting it.
+    const db = oldSchemaDb(false);
+    runWiden(db);
+    db.prepare(
+      "INSERT INTO nests (id, user_id, name, slug, visibility) VALUES ('n3','u1','Org','org','org')",
+    ).run();
+    expect(db.prepare("SELECT COUNT(*) AS c FROM node_index").get()).toEqual({ c: 2 });
     db.close();
   });
 
