@@ -10,7 +10,7 @@ import {
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
-import { reads } from "../lib/queries";
+import { reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import {
@@ -92,6 +92,16 @@ import {
   clearHighlight,
   caretAt,
 } from "../lib/anchor-highlight";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { SubmitForReviewModal, ReasonDialog, ReviewActions, ExternalEditBanner, VersionHistoryModal, DiffViewer } from "./governance";
 import { unifiedDiff } from "./governance/diff-util";
 import {
@@ -221,13 +231,27 @@ export function DocumentEditor({
   // nest above. Same owner/admin gate the /grants routes enforce.
   const [showShareDoc, setShowShareDoc] = useState(false);
   const qc = useQueryClient();
-  // Caller's resolved steward role for this node (null = none / not a steward).
+  // Permissions are SUBSCRIBED, not snapshotted. Assigning a steward, changing
+  // a collaborator or toggling stewardship already invalidates these reads
+  // (invalidateForPath in lib/queries), but this screen used to copy them into
+  // state on mount — so an open editor kept the rights the caller had when they
+  // opened it, and only a page reload showed the change (CU-wdqcpzzmk0).
+  const nestMeta = useNestMeta(nestId);
+  const nestSettings = useNestSettings(nestId);
+  const nodeStewardsQuery = useNodeStewards(nestId, isNew ? undefined : nodeId);
+  // Caller's resolved steward role for this node (empty = none / not a steward).
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
-  const [myNodeRoles, setMyNodeRoles] = useState<string[]>([]);
-  // True once the steward-role fetch below has resolved (even to []) — lets
-  // the default-comment-mode effect wait for a real answer instead of racing
-  // the initial empty array.
-  const [rolesLoaded, setRolesLoaded] = useState(false);
+  const myNodeRoles = useMemo(
+    () =>
+      ((nodeStewardsQuery.data?.stewards ?? []) as any[])
+        .filter((s) => (s.email || "").toLowerCase() === currentEmail)
+        .map((s) => String(s.role)),
+    [nodeStewardsQuery.data, currentEmail],
+  );
+  // True once the steward-role read has resolved (even to []) — lets the
+  // default-comment-mode effect wait for a real answer instead of racing the
+  // initial empty array. A new document has no node to resolve against.
+  const rolesLoaded = isNew || !nodeStewardsQuery.isLoading;
   // Caller's share grant on THIS document (server-resolved on GET /nodes/:id).
   // A grant is access, not stewardship: it appears in neither `permission` (a
   // grantee always reads as "read" at nest level, whatever their grant says)
@@ -237,9 +261,10 @@ export function DocumentEditor({
   const grantCanWrite = myGrant === "write";
   // Caller's nest-wide scoped steward rows (from GET /nests/:id). Needed for
   // NEW docs, where there's no node yet to resolve a per-node role against.
-  const [myStewards, setMyStewards] = useState<
-    Array<{ role: string; scope: string }>
-  >([]);
+  const myStewards = ((nestMeta.data as any)?.myStewards ?? []) as Array<{
+    role: string;
+    scope: string;
+  }>;
 
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
   // Folder path under nodes/ for new docs (e.g. "gtm/deals"). Create-only:
@@ -255,7 +280,7 @@ export function DocumentEditor({
   // the server re-checks (assertMayFlagPrime).
   const [prime, setPrime] = useState<boolean | null>(null);
   const loadedPrimeRef = useRef<boolean | null>(null);
-  const [primeTags, setPrimeTags] = useState<string[]>([]);
+  const primeTags = ((nestSettings.data as any)?.prime_tags ?? []) as string[];
   // Node kind. An "artifact" node is rich HTML hosted + annotated, not edited
   // as markdown — once loaded we hand off to ArtifactViewer (see below).
   const [nodeType, setNodeType] = useState<string | null>(null);
@@ -287,14 +312,14 @@ export function DocumentEditor({
   // rule and 403s if you try, but hiding the affordance avoids the
   // user clicking through an error.
   const [pendingReviewBy, setPendingReviewBy] = useState<string | null>(null);
-  const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
+  const stewardshipEnabled = !!nestSettings.data?.stewardship_enabled;
   // When on, the submitter may approve their own pending review (per-nest
   // self-approve bypass). Off = separation of duties enforced for everyone.
-  const [allowSelfApprove, setAllowSelfApprove] = useState(false);
+  const allowSelfApprove = !!nestSettings.data?.allow_self_approve;
   // Caller's nest-level permission (GET /nests/:id). 'read' = no write access
   // (public reader OR a read-only collaborator); 'write'/'admin'/'owner' can
   // edit. null until loaded.
-  const [permission, setPermission] = useState<string | null>(null);
+  const permission = (nestMeta.data?.permission ?? null) as string | null;
   // Every edit/approve affordance below gates on these — see editor-access.ts
   // for the rules and ui/src/lib/editor-access.test.ts for the role matrix.
   const {
@@ -834,64 +859,6 @@ export function DocumentEditor({
   // Local draft couldn't be stored (quota exhausted / storage blocked).
   const [draftUnbacked, setDraftUnbacked] = useState(false);
 
-  // Settings → Submit-for-Review visibility; permission → read-only gate.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [settings, meta] = await Promise.all([
-          qc.fetchQuery(reads.settings(nestId)).catch(() => ({
-            stewardship_enabled: false,
-            allow_self_approve: false,
-            prime_only_review: false,
-            prime_tags: [] as string[],
-          })),
-          qc.fetchQuery(reads.nest(nestId)).catch(() => null),
-        ]);
-        if (cancelled) return;
-        setStewardshipEnabled(!!settings.stewardship_enabled);
-        setAllowSelfApprove(!!settings.allow_self_approve);
-        setPrimeTags(((settings as any).prime_tags ?? []) as string[]);
-        setPermission(meta?.permission ?? null);
-        setMyStewards(((meta as any)?.myStewards ?? []) as Array<{
-          role: string;
-          scope: string;
-        }>);
-      } catch {
-        /* non-fatal */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [nestId]);
-
-  // Resolve per-node steward role; null = no special permissions.
-  useEffect(() => {
-    if (isNew || !nodeId || !currentEmail) {
-      setMyNodeRoles([]);
-      setRolesLoaded(true);
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      try {
-        const { stewards } = await qc.fetchQuery(reads.nodeStewards(nestId, nodeId));
-        if (cancelled) return;
-        const mine = (stewards as any[]).filter(
-          (s) => (s.email || "").toLowerCase() === currentEmail,
-        );
-        setMyNodeRoles(mine.map((s) => s.role));
-      } catch {
-        if (!cancelled) setMyNodeRoles([]);
-      } finally {
-        if (!cancelled) setRolesLoaded(true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [isNew, nestId, nodeId, currentEmail]);
 
   const loadNode = useCallback(async () => {
     if (isNew) return;
@@ -996,13 +963,9 @@ export function DocumentEditor({
   // both, and a delete navigates out rather than leaving the editor pointed at
   // a document that no longer exists.
   const [discarding, setDiscarding] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const handleDiscardDraft = useCallback(async () => {
-    const ok = window.confirm(
-      `Discard the draft of "${title || nodeId}"?\n\n` +
-        "The document goes back to its last approved version. If it was never " +
-        "approved, it is deleted instead. This can't be undone.",
-    );
-    if (!ok) return;
+    setConfirmDiscard(false);
     setDiscarding(true);
     try {
       // api.discardDraft clears the parked localStorage draft itself, so every
@@ -3279,6 +3242,32 @@ export function DocumentEditor({
         </Dialog>
       )}
 
+      {/* Discard confirmation — the app's own dialog, like every other
+          destructive action. Names both outcomes: only the server knows whether
+          this document has an approved version to fall back to. */}
+      <AlertDialog open={confirmDiscard} onOpenChange={setConfirmDiscard}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Discard the draft of "{title || nodeId}"?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              The document goes back to its last approved version. If it was
+              never approved, it is deleted instead. This can't be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => void handleDiscardDraft()}
+              data-testid="document-editor-discard-confirm"
+            >
+              Discard draft
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {/* Sticky action bar. The write actions sit at the END of the form the
           user is filling in and stay reachable at any scroll depth — this
           document is long, and Save used to scroll off the top of a page that
@@ -3317,7 +3306,7 @@ export function DocumentEditor({
               {showDiscard && (
                 <Button
                   variant="ghost"
-                  onClick={() => void handleDiscardDraft()}
+                  onClick={() => setConfirmDiscard(true)}
                   disabled={discarding}
                   className="text-muted-foreground hover:text-destructive"
                   title="Throw away the unreviewed edits and go back to the last approved version"

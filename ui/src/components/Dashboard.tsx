@@ -39,6 +39,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ReasonDialog, ReviewActions, SubmitForReviewModal } from "./governance";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { ImportFolderModal } from "./ImportFolderModal";
@@ -91,6 +101,8 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   const [draftSort, setDraftSort] = useState<"updated" | "title">("updated");
   const [draftsSelected, setDraftsSelected] = useState<Set<string>>(new Set());
   const [draftsBusy, setDraftsBusy] = useState(false);
+  // Drafts awaiting the discard confirmation — one row, or a whole selection.
+  const [discardTargets, setDiscardTargets] = useState<api.MyDraft[] | null>(null);
   // Deletion flag being resolved from the inbox, and which dialog it opens.
   const [deletionTarget, setDeletionTarget] = useState<api.WorkItem | null>(null);
   const [deletionAction, setDeletionAction] = useState<"delete" | "decline">("delete");
@@ -519,22 +531,14 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   }, [draftSearch, draftSort]);
 
   /**
-   * Throw drafts away. What that means per document is the server's call — a
-   * document that was approved before goes back to that version, one that never
-   * was is deleted — so the confirm names both outcomes rather than promising
-   * the wrong one.
+   * Throw drafts away, once the dialog below has confirmed. What that means per
+   * document is the server's call — a document that was approved before goes
+   * back to that version, one that never was is deleted — so the dialog names
+   * both outcomes rather than promising the wrong one.
    */
   const discardDrafts = async (targets: api.MyDraft[]) => {
     if (targets.length === 0) return;
-    const what =
-      targets.length === 1 ? `"${targets[0].title}"` : `${targets.length} drafts`;
-    const ok = window.confirm(
-      `Discard ${what}?\n\n` +
-        "Each document goes back to its last approved version. A document that " +
-        "was never approved is deleted instead. This can't be undone.",
-    );
-    if (!ok) return;
-
+    setDiscardTargets(null);
     setDraftsBusy(true);
     let reverted = 0;
     let deleted = 0;
@@ -1093,24 +1097,41 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                 aria-label="Search your drafts"
                 data-testid="drafts-search"
               />
-              <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                <span className="mr-1">Sort</span>
-                <Button
-                  size="sm"
-                  variant={draftSort === "updated" ? "secondary" : "ghost"}
-                  className="h-7 px-2"
-                  onClick={() => setDraftSort("updated")}
+              {/* Segmented control, not three look-alike words. The label is
+                  muted and carries its colon; both options sit inside one
+                  bordered group so each reads as a control whether or not it is
+                  the selected one, and the selection is the filled pill. */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium text-muted-foreground">
+                  Sort:
+                </span>
+                <div
+                  className="inline-flex items-center rounded-md border bg-muted/40 p-0.5"
+                  role="group"
+                  aria-label="Sort drafts"
                 >
-                  Recently edited
-                </Button>
-                <Button
-                  size="sm"
-                  variant={draftSort === "title" ? "secondary" : "ghost"}
-                  className="h-7 px-2"
-                  onClick={() => setDraftSort("title")}
-                >
-                  Title
-                </Button>
+                  {(
+                    [
+                      ["updated", "Recently edited"],
+                      ["title", "Title"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      aria-pressed={draftSort === value}
+                      onClick={() => setDraftSort(value)}
+                      className={`h-6 rounded px-2 text-xs transition-colors ${
+                        draftSort === value
+                          ? "bg-background font-medium text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                      data-testid={`drafts-sort-${value}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
             {draftsLoading ? (
@@ -1162,7 +1183,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                           variant="outline"
                           disabled={draftsBusy}
                           onClick={() =>
-                            void discardDrafts(
+                            setDiscardTargets(
                               drafts.filter((d) => draftsSelected.has(draftKey(d))),
                             )
                           }
@@ -1250,7 +1271,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                         disabled={draftsBusy}
                         className="shrink-0 text-muted-foreground hover:text-destructive"
                         title="Discard this draft — back to the last approved version, or delete it if there isn't one"
-                        onClick={() => void discardDrafts([d])}
+                        onClick={() => setDiscardTargets([d])}
                         data-testid="draft-discard"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
@@ -1988,6 +2009,38 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
           onSubmit={(note, priority) => submitDraft(submitTarget, note, priority)}
         />
       )}
+
+      {/* Discard confirmation — the app's own dialog, like every other
+          destructive action. It names both outcomes because only the server
+          knows which applies per document. */}
+      <AlertDialog
+        open={!!discardTargets}
+        onOpenChange={(open) => !open && setDiscardTargets(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {discardTargets?.length === 1
+                ? `Discard "${discardTargets[0].title}"?`
+                : `Discard ${discardTargets?.length ?? 0} drafts?`}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {discardTargets?.length === 1 ? "The document goes" : "Each document goes"}{" "}
+              back to its last approved version. A document that was never
+              approved is deleted instead. This can't be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => void discardDrafts(discardTargets ?? [])}
+              data-testid="drafts-discard-confirm"
+            >
+              Discard
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {deleteTarget && (
         <DeleteNestDialog

@@ -534,13 +534,13 @@ export interface MyDraft {
  * Mirrors getDisplayStatus: the LATEST version row decides, and an open
  * review request means pending (that belongs in /me/work), not a draft.
  *
- * Paginated at the SQL level — `total` counts every matching row, the returned
- * page is `limit`/`offset` of them.
- *
- * `q` and `sort: "title"` are the exception: a draft's title lives on disk, not
- * in SQL (buildTitleMap resolves it), so neither can be expressed in the query.
- * Those two read the whole matching set — capped, and a person's own drafts are
- * a bounded list — then filter, sort and slice the page in memory.
+ * A draft's title lives on disk, not in SQL (buildTitleMap resolves it), so
+ * neither a title search nor a title sort can be expressed in the query. Rather
+ * than keep a SQL-paged path beside an in-memory one and have the two disagree
+ * on how many drafts there are, every mode reads the whole matching set —
+ * capped, and a person's own drafts are a bounded list — then filters, sorts
+ * and slices the page in memory. `total` is therefore always the number of
+ * drafts whose document still exists, which is what the list shows.
  */
 export async function listMyDrafts(params: {
   authorEmail: string;
@@ -578,35 +578,24 @@ export async function listMyDrafts(params: {
   const limit = Math.min(Math.max(params.limit ?? 25, 1), 100);
   const offset = Math.max(params.offset ?? 0, 0);
   const q = params.q?.trim().toLowerCase() || "";
-  // Title lives on disk, so neither a title search nor a title sort can be
-  // pushed into SQL — those read the whole set and page it in memory.
-  const inMemory = q !== "" || params.sort === "title";
-  // Ceiling on the in-memory path: one person's own unsubmitted drafts, not a
-  // nest's documents. A list past this is already telling them to clean up.
+  // Ceiling on the scan: one person's own unsubmitted drafts, not a nest's
+  // documents. A list past this is already telling them to clean up.
   const SCAN_CAP = 500;
 
-  // Number(): Postgres returns COUNT(*) as a bigint string.
-  // Counted before the existence filter below, so a draft deleted outside the
-  // app (leaving orphan version rows) can inflate this by a row — the page it
-  // sits on is simply one shorter. Not worth a second pass over every row.
-  // The in-memory path counts what survives the filter instead, which is exact.
-  const sqlTotal = inMemory
-    ? 0
-    : Number(
-        (
-          (await db.get(
-            `SELECT COUNT(*) as c FROM node_versions v ${where}`,
-            args,
-          )) as { c: number }
-        ).c,
-      );
-
+  // ONE path for every sort and search. There used to be two — a SQL-paged one
+  // for the default view and an in-memory one for title search/sort — and they
+  // disagreed on `total`: SQL counted rows, the in-memory path counted rows
+  // whose document still exists on disk. A single draft deleted outside the app
+  // leaves its version row behind, so the same list reported 104 sorted by date
+  // and 103 sorted by title (CU-wdqcq01cb3). The count a person reads has to be
+  // the count of what they can actually see, so the existence filter now decides
+  // it in every mode, and the SQL COUNT is gone rather than made to agree.
   const rows = (await db.all(
     `SELECT v.nest_id, v.node_id, v.status, v.version, v.created_at
        FROM node_versions v ${where}
       ORDER BY v.created_at DESC
-      LIMIT ? OFFSET ?`,
-    inMemory ? [...args, SCAN_CAP, 0] : [...args, limit, offset],
+      LIMIT ?`,
+    [...args, SCAN_CAP],
   )) as Array<{
     nest_id: string;
     node_id: string;
@@ -644,8 +633,6 @@ export async function listMyDrafts(params: {
       version: Number(r.version),
       updatedAt: r.created_at,
     }));
-
-  if (!inMemory) return { drafts, total: sqlTotal };
 
   if (q) {
     drafts = drafts.filter((d) =>

@@ -1457,8 +1457,8 @@ export function createApp(): Hono<AuthEnv> {
         version: d.version,
         updated_at: d.updatedAt,
       })),
-      // has_more off the REQUESTED page size, not the returned row count: the
-      // existence filter can shorten a page, and that must not read as "last".
+      // `total` counts drafts whose document still exists — the same set the
+      // page is sliced from — so this is exact in every sort and search mode.
       pagination: { total, limit, offset, has_more: offset + limit < total },
     });
   });
