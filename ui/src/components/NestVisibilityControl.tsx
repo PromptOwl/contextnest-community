@@ -62,19 +62,23 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
   }, [nestId]);
 
   const apply = async (next: boolean, acknowledgePublic?: boolean) => {
-    // Optimistic flip; revert on failure so the switch never lies about
-    // server state (same pattern as NestSettingsModal's stewardship save).
-    setVisibility(next ? "public" : "private");
+    // Optimistic flip, reverting to the PREVIOUS value on failure — not to
+    // the opposite of `next`. Those are the same thing only while visibility
+    // is binary: "Make private" on an org nest is apply(false), and inverting
+    // `next` would revert a failed call to "public", showing a green Globe
+    // for a nest that was never public. Capture and restore instead, the way
+    // NestView's applyVisibility already does.
+    const prev = visibility;
+    const target: api.NestVisibility = next ? "public" : "private";
+    setVisibility(target);
     setSaving(true);
     onError?.(null);
     try {
-      const result = await api.setNestVisibility(
-        nestId,
-        next ? "public" : "private",
-        acknowledgePublic,
-      );
-      if ((result.visibility === "public") !== next) {
-        setVisibility(result.visibility || (next ? "private" : "public"));
+      const result = await api.setNestVisibility(nestId, target, acknowledgePublic);
+      // The server re-reads and echoes the persisted row, so its answer is DB
+      // truth — take it verbatim rather than re-deriving it from `next`.
+      setVisibility(result.visibility || target);
+      if (result.visibility !== target) {
         onError?.(
           "Server did not accept the change. You may not have admin access to this nest.",
         );
@@ -82,7 +86,7 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
       }
       onChanged();
     } catch (err: any) {
-      setVisibility(next ? "private" : "public");
+      setVisibility(prev);
       onError?.(err?.message || "Failed to change visibility");
     } finally {
       setSaving(false);

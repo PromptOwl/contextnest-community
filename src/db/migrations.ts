@@ -1442,8 +1442,14 @@ export function runMigrations(db: Database.Database): void {
       db.transaction(() => {
         widenNestVisibilityCheck(db);
       })();
-      // Belt and braces: prove the rebuild left every child row pointing at a
-      // nest that still exists before we record the migration as applied.
+      // Prove the rebuild left every child row pointing at a nest that still
+      // exists before recording the migration as applied. This is a DETECTION
+      // net, not a rollback: the rebuild's own transaction has already
+      // committed by the time this runs (it has to — foreign_keys can only be
+      // toggled outside a transaction), so throwing here leaves the new table
+      // in place and the migration unrecorded, and the next boot retries it.
+      // The retry is harmless — widenNestVisibilityCheck is idempotent and
+      // returns early once 'org' is in the constraint.
       const dangling = db.pragma("foreign_key_check") as unknown[];
       if (dangling.length > 0) {
         throw new Error(
