@@ -4104,12 +4104,25 @@ export function NestView({
             <Card>
               <CardHeader className="pb-3">
                 <CardTitle className="text-lg">Collaborators</CardTitle>
-                <CardDescription>
-                  Who can reach this nest — visibility, people and teams.
-                  Sharing grants plain access (viewer/editor/admin); it does
-                  not make anyone a steward.{" "}
-                  {!stewardshipEnabled &&
-                    "Stewards need Stewardship & Approval Workflow turned on in Nest settings."}
+                {/* Two lines, not one paragraph — the stewardship caveat read
+                    as an aside and was missed (CU-wdqcq018qu). */}
+                <CardDescription className="space-y-1">
+                  <span className="block">
+                    <strong className="font-medium text-foreground">
+                      Who can access this nest
+                    </strong>{" "}
+                    — visibility and access for people and teams. Sharing
+                    grants viewer, editor or admin access.
+                  </span>
+                  <span className="block">
+                    <strong className="font-medium text-foreground">
+                      Stewardship
+                    </strong>{" "}
+                    — sharing does not make anyone a steward.
+                    {stewardshipEnabled
+                      ? " Stewards are assigned on the Stewards tab."
+                      : " Turn on Stewardship & Approval Workflow in Nest settings to use stewards."}
+                  </span>
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
