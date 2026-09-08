@@ -858,6 +858,9 @@ export function DocumentEditor({
   const [justSaved, setJustSaved] = useState(false);
   // Local draft couldn't be stored (quota exhausted / storage blocked).
   const [draftUnbacked, setDraftUnbacked] = useState(false);
+  // When a parked local draft was put back on load — the restored body is not
+  // what the server holds, and that used to be invisible (CU-wdqcpzzgz9).
+  const [restoredDraftAt, setRestoredDraftAt] = useState<number | null>(null);
 
 
   const loadNode = useCallback(async () => {
@@ -912,6 +915,7 @@ export function DocumentEditor({
       // Restore unsaved edits parked in localStorage, but only if they were
       // taken from the version we just loaded — a newer server copy wins.
       const draft = readDraft(nestId, nodeId);
+      setRestoredDraftAt(null);
       if (draft) {
         if (draft.baseVersion !== node?.version) {
           clearDraft(nestId, nodeId);
@@ -921,6 +925,7 @@ export function DocumentEditor({
           setTags(draft.tags);
           setSchedule(draft.schedule);
           setTouched(true);
+          setRestoredDraftAt(draft.savedAt ?? Date.now());
         }
       }
     } catch (err: any) {
@@ -1200,6 +1205,7 @@ export function DocumentEditor({
     // Edits are on the server now; the local draft is spent.
     if (!isNew) clearDraft(nestId, nodeId);
     setTouched(false);
+    setRestoredDraftAt(null);
     return { ok: true, savedId, ...(isNew ? { createdStatus } : {}) };
   };
 
@@ -1294,11 +1300,10 @@ export function DocumentEditor({
       intent?.();
     });
 
-  const handleLeaveDiscard = () => {
-    if (!leaveIntent) return;
-    const intent = leaveIntent.run;
-    // Drop the parked draft AND revert the fields — the intent may navigate
-    // within this component (wiki link, breadcrumb) instead of unmounting it.
+  /** Drop the parked draft AND put the loaded server copy back in the fields —
+   *  a leave intent may navigate within this component (wiki link, breadcrumb)
+   *  instead of unmounting it, and the restored-draft banner discards in place. */
+  const revertToSaved = () => {
     if (!isNew) clearDraft(nestId, nodeId);
     const snap = initialSnapshotRef.current;
     setTitle(snap.title);
@@ -1306,6 +1311,13 @@ export function DocumentEditor({
     setTags([...snap.tags]);
     setSchedule(snap.schedule);
     setTouched(false);
+    setRestoredDraftAt(null);
+  };
+
+  const handleLeaveDiscard = () => {
+    if (!leaveIntent) return;
+    const intent = leaveIntent.run;
+    revertToSaved();
     setLeaveIntent(null);
     intent();
   };
@@ -1815,6 +1827,29 @@ export function DocumentEditor({
         <Alert variant="destructive" className="mb-4">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {restoredDraftAt !== null && (
+        <Alert className="mb-4 border-amber-300 bg-amber-50 text-amber-800">
+          <AlertCircle className="h-4 w-4 text-amber-600" />
+          <AlertDescription className="flex flex-wrap items-center gap-x-2 gap-y-1 text-amber-800">
+            <span>
+              Unsaved edits from this browser
+              {" ("}
+              {new Date(restoredDraftAt).toLocaleString()}
+              {") "}
+              were restored — the saved document still says something else.
+            </span>
+            <button
+              type="button"
+              onClick={revertToSaved}
+              className="font-medium underline underline-offset-2 hover:no-underline"
+              data-testid="discard-restored-draft"
+            >
+              Discard them
+            </button>
+          </AlertDescription>
         </Alert>
       )}
 
