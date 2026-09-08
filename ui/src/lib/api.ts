@@ -1452,7 +1452,11 @@ export function hostedArtifactUrl(
   if (version != null) params.set("v", String(version));
   if (cacheBust != null) params.set("_", String(cacheBust));
   const qs = params.toString();
-  return `${API_BASE}/nests/${nestId}/nodes/${nodeId}/hosted${qs ? `?${qs}` : ""}`;
+  // The route already lives under /nodes, and a node id carries its own
+  // `nodes/` prefix — emitting both produced …/nodes/nodes/<slug>/hosted. The
+  // server accepts either spelling; this one says the segment once.
+  const path = nodeId.replace(/^nodes\//, "");
+  return `${API_BASE}/nests/${nestId}/nodes/${path}/hosted${qs ? `?${qs}` : ""}`;
 }
 
 /**

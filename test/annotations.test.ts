@@ -256,6 +256,23 @@ describe("annotations: hosted artifact + threaded comments", () => {
     expect(list.data.threads).toHaveLength(1);
   });
 
+  // The route is mounted under /nodes and the id carries its own "nodes/"
+  // prefix, so the viewer's URL used to name the segment twice. Both spellings
+  // serve the same artifact; the doubled one stays valid for old links.
+  it("serves /hosted whether or not the URL repeats the nodes/ segment", async () => {
+    const doubled = await app.request(
+      `/nests/${nestId}/nodes/${nodeId}/hosted`,
+      { headers: { Authorization: `Bearer ${alice.apiKey}` } },
+    );
+    const single = await app.request(
+      `/nests/${nestId}/nodes/${nodeId.replace(/^nodes\//, "")}/hosted`,
+      { headers: { Authorization: `Bearer ${alice.apiKey}` } },
+    );
+    expect(doubled.status).toBe(200);
+    expect(single.status).toBe(200);
+    expect(await single.text()).toBe(await doubled.text());
+  });
+
   // Regression: node ids are multi-segment paths ("nodes/<folder>/<slug>").
   // A foldered artifact's id has 2+ slashes, and the greedy /:nodeId{.+} param
   // used to let the bare node catch-all shadow /hosted + /annotations, so
