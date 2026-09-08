@@ -525,6 +525,9 @@ export function NestView({
       await api.createFolder(nestId, folder);
       setNewFolderPath("");
       setShowNewFolder(false);
+      // An empty folder barely changes the tree, so say it landed
+      // (CU-wdqcq01caq) — the failure path already speaks.
+      toast.success(`Folder "${folder}" created`);
       fetchData();
     } catch (e: any) {
       console.error("[NestView] createFolder failed", e);
