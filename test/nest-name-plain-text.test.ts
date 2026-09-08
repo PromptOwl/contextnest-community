@@ -56,6 +56,28 @@ describe("nest names are stored as plain text", () => {
     expect(data.nest.name).toBe("Roadmap <2026> plan");
   });
 
+  // Regression: with the brackets stripped, both of these slugged to
+  // "roadmap-plan" and the second was refused as a duplicate (CU-wdqcq01e6v).
+  it("does not collide two names that differ only inside the brackets", async () => {
+    const first = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Release <2026> notes" },
+      alice.apiKey,
+    );
+    const second = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Release <2025> notes" },
+      alice.apiKey,
+    );
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(second.data.nest.slug).not.toBe(first.data.nest.slug);
+  });
+
   it("rejects markup on rename", async () => {
     const created = await jsonRequest(
       app,
