@@ -64,6 +64,7 @@ import {
   type Schedule,
 } from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
+import { wireLabel } from "../lib/wire-label";
 import { Button } from "./ui/button";
 import { OverflowMenu, type OverflowAction } from "./ui/overflow-menu";
 import { Badge } from "./ui/badge";
@@ -1457,23 +1458,6 @@ interface CanvasNode {
   id: string;
   x: number;
   y: number;
-}
-
-/** One character of the label's 10px monospace face. */
-const WIRE_CHAR_W = 6;
-/** About a column pitch of text — beyond that a label starts crowding the
- *  next wire, and the full rule is on hover anyway. */
-const WIRE_LABEL_MAX = 46;
-
-/** The wire's label: what is drawn, the whole rule for the hover title, and
- *  the width of the plate that keeps the wire from striking through it. */
-function wireLabel(typeName: string, condition: string) {
-  const full = condition ? `${typeName} · ${condition}` : typeName;
-  const short =
-    full.length > WIRE_LABEL_MAX
-      ? `${full.slice(0, WIRE_LABEL_MAX - 1).trimEnd()}…`
-      : full;
-  return { full, short, width: short.length * WIRE_CHAR_W + 8 };
 }
 
 const CARD_W = 168;
