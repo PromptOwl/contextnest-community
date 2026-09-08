@@ -1459,6 +1459,20 @@ interface CanvasNode {
   y: number;
 }
 
+/** The wire's label: what fits on the wire, and the whole rule for the hover
+ *  title. Roughly the width of one card gap at 10px monospace. */
+const WIRE_LABEL_MAX = 40;
+function wireLabel(typeName: string, condition: string) {
+  const full = condition ? `${typeName} · ${condition}` : typeName;
+  return {
+    full,
+    short:
+      full.length > WIRE_LABEL_MAX
+        ? `${full.slice(0, WIRE_LABEL_MAX - 1).trimEnd()}…`
+        : full,
+  };
+}
+
 const CARD_W = 168;
 const CARD_H = 56;
 const COL_GAP = 260;
@@ -1914,15 +1928,27 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                         selectEdge(e);
                       }}
                     />
+                    {/* Truncated with an ellipsis, never cut mid-word with no
+                        sign: a long condition is centred on the wire, so it
+                        used to run off both ends and over the source card. The
+                        full rule stays one hover away, and clicking the label
+                        selects the wire like the wire itself does. */}
                     <text
                       x={mid.x}
                       y={mid.y}
                       textAnchor="middle"
-                      className="pointer-events-none"
-                      style={{ font: "10px ui-monospace, monospace", fill: "hsl(var(--muted-foreground))" }}
+                      style={{
+                        font: "10px ui-monospace, monospace",
+                        fill: "hsl(var(--muted-foreground))",
+                        cursor: "pointer",
+                      }}
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        selectEdge(e);
+                      }}
                     >
-                      {e.type.name}
-                      {condText ? ` · ${condText.slice(0, 34)}` : ""}
+                      {wireLabel(e.type.name, condText).short}
+                      <title>{wireLabel(e.type.name, condText).full}</title>
                     </text>
                   </g>
                 );
