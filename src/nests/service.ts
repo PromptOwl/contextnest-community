@@ -34,23 +34,21 @@ export async function isImportedNest(nestId: string): Promise<boolean> {
 }
 
 /**
- * Nest names are plain text. Strip tag-shaped markup before it is stored so no
- * downstream surface that renders unescaped (exports, email) inherits it.
- *
- * A name that was nothing but markup strips to "" — reporting that as an empty
- * name is confusing, since the user did type something, so it gets its own
- * message naming the actual problem.
+ * Nest names are plain text. Tag-shaped markup is refused rather than stripped:
+ * silently deleting it lost legitimate text ("Roadmap <2026> plan" was stored
+ * as "Roadmap  plan") and collapsed distinct names onto one slug. Angle
+ * brackets that aren't a tag are kept as typed — every surface that renders a
+ * name into HTML escapes it (publish pages, email, Slack, React).
  */
 function plainName(name: string, emptyMessage = "Name cannot be empty"): string {
   const typed = (name ?? "").trim();
   if (!typed) throw new ValidationError(emptyMessage);
-  const stripped = typed.replace(/<[^>]*>/g, "").trim();
-  if (!stripped) {
+  if (/<\/?[a-zA-Z][^>]*>/.test(typed)) {
     throw new ValidationError(
-      "That's not a valid nest name — it's only HTML markup. Use plain text.",
+      "Nest names are plain text — remove the HTML tags.",
     );
   }
-  return stripped;
+  return typed;
 }
 
 function toSlug(name: string): string {

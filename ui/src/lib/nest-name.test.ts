@@ -6,13 +6,17 @@ describe("nestNameProblem", () => {
     expect(nestNameProblem("Research Notes")).toBeNull();
   });
 
-  it("names markup as the problem instead of calling it empty", () => {
+  it("names the tag as the problem instead of calling it empty", () => {
     const problem = nestNameProblem("<img src=x onerror=alert(1)>");
-    expect(problem).toMatch(/markup/i);
+    expect(problem).toMatch(/plain text/i);
   });
 
-  it("still accepts a name that merely contains markup", () => {
-    expect(nestNameProblem("Research <b>Notes</b>")).toBeNull();
+  it("refuses a name carrying a tag rather than silently stripping it", () => {
+    expect(nestNameProblem("Research <b>Notes</b>")).toMatch(/plain text/i);
+  });
+
+  it("accepts angle brackets that are not a tag", () => {
+    expect(nestNameProblem("Roadmap <2026> plan")).toBeNull();
   });
 
   it("keeps the empty and slug refusals", () => {

@@ -6,8 +6,9 @@ import {
   jsonRequest,
 } from "./helpers.js";
 
-// Nest names are plain text (CU-wdqcq015xt). Markup must not reach storage —
-// exports and email render some of these values unescaped.
+// Nest names are plain text (CU-wdqcq015xt). A tag is refused outright rather
+// than stripped (CU-wdqcq01e6t): stripping ate legitimate "<…>" text and made
+// two distinct names collide on one slug.
 describe("nest names are stored as plain text", () => {
   let env: ReturnType<typeof setupTestEnv>;
   let app: any;
@@ -21,16 +22,15 @@ describe("nest names are stored as plain text", () => {
 
   afterAll(() => env.cleanup());
 
-  it("strips markup on create", async () => {
-    const { status, data } = await jsonRequest(
+  it("rejects a name carrying markup on create", async () => {
+    const { status } = await jsonRequest(
       app,
       "POST",
       "/nests",
       { name: "Research <b>Notes</b>" },
       alice.apiKey,
     );
-    expect(status).toBe(201);
-    expect(data.nest.name).toBe("Research Notes");
+    expect(status).toBe(400);
   });
 
   it("rejects a name that is only markup", async () => {
@@ -44,7 +44,19 @@ describe("nest names are stored as plain text", () => {
     expect(status).toBe(400);
   });
 
-  it("strips markup on rename", async () => {
+  it("keeps angle-bracket text that is not a tag", async () => {
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Roadmap <2026> plan" },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
+    expect(data.nest.name).toBe("Roadmap <2026> plan");
+  });
+
+  it("rejects markup on rename", async () => {
     const created = await jsonRequest(
       app,
       "POST",
@@ -52,14 +64,13 @@ describe("nest names are stored as plain text", () => {
       { name: "Plain Nest" },
       alice.apiKey,
     );
-    const { status, data } = await jsonRequest(
+    const { status } = await jsonRequest(
       app,
       "PATCH",
       `/nests/${created.data.nest.id}`,
       { name: "<b>Renamed</b> Nest" },
       alice.apiKey,
     );
-    expect(status).toBe(200);
-    expect(data.nest.name).toBe("Renamed Nest");
+    expect(status).toBe(400);
   });
 });
