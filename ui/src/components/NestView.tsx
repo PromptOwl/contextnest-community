@@ -4656,6 +4656,7 @@ export function NestView({
           nestId={nestId}
           nodeId={publishNode.id}
           nodeTitle={publishNode.title || publishNode.id}
+          unapproved={stewardshipEnabled && publishNode.status !== "published"}
           onClose={() => setPublishNode(null)}
         />
       )}

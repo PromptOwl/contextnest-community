@@ -49,6 +49,9 @@ interface PublishDialogProps {
   nodeId: string;
   nodeTitle: string;
   onClose: () => void;
+  /** Stewardship is on for this nest and the document has not been approved —
+   *  publishing is still allowed, but it is said out loud (CU-wdqcq01e73). */
+  unapproved?: boolean;
 }
 
 const MODES: Array<{
@@ -63,7 +66,13 @@ const MODES: Array<{
   { value: "invite", label: "Invite only", hint: "Named people only", icon: UserCheck },
 ];
 
-export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDialogProps) {
+export function PublishDialog({
+  nestId,
+  nodeId,
+  nodeTitle,
+  onClose,
+  unapproved = false,
+}: PublishDialogProps) {
   const [mode, setMode] = useState<api.PublishMode>("public");
   const [comments, setComments] = useState(false);
   const [watermark, setWatermark] = useState(false);
@@ -205,6 +214,16 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
           <Alert variant="destructive">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+
+        {unapproved && (
+          <Alert className="border-amber-300 bg-amber-50 text-amber-900">
+            <AlertCircle className="h-4 w-4 text-amber-600" />
+            <AlertDescription className="text-amber-900">
+              This document has not been approved. Anyone opening the link
+              reads content that never went through review.
+            </AlertDescription>
           </Alert>
         )}
 
