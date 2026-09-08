@@ -122,6 +122,20 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
     inputRef.current?.focus();
   }, []);
 
+  // Esc closes the palette whatever holds focus. A handler on the palette
+  // element only sees the key while focus is INSIDE it, and a click on a scope
+  // tab or the widen-scope link leaves focus on the body (buttons don't take
+  // focus on click in Safari/Firefox, and the link unmounts with the empty
+  // state that carried it) — so the advertised "esc" hint stopped working
+  // (CU-wdqcq01e6w). Listen on the document instead.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   // Empty query → the current nest's documents (there is no equivalent for
   // "every nest", so global mode simply waits for a term); otherwise debounced
   // full-text search (title + tags + content).
@@ -243,11 +257,6 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
       <div
         className="w-full max-w-lg rounded-lg border bg-background shadow-xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
-        // Esc closes from anywhere in the palette, not only from the input —
-        // focus may be sitting on a scope tab.
-        onKeyDown={(e) => {
-          if (e.key === "Escape") onClose();
-        }}
       >
         <div className="flex items-center gap-2 border-b px-3">
           {searching ? (
@@ -260,7 +269,6 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Escape") onClose();
               // Tab flips the scope instead of leaving the field: the palette
               // is keyboard-first and has one input, so there is nothing else
               // worth tabbing to, and reaching for the mouse to widen a search
