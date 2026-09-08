@@ -396,7 +396,20 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
   // boundary so every surface (editor, list search, MCP) gets strings.
   const title =
     fm.title === undefined || fm.title === null ? "" : String(fm.title);
-  const tags = Array.isArray(fm.tags) ? fm.tags.map((t) => String(t)) : [];
+  // Normalized and deduped on the way out, so every surface sees one tag set:
+  // a card showing "#GTM" and "#gtm" while the editor (which keys tags
+  // case-insensitively) showed a single "gtm" was the same document described
+  // two ways.
+  const tags = Array.isArray(fm.tags)
+    ? [
+        ...new Set(
+          fm.tags
+            .map((t) => String(t).trim())
+            .filter(Boolean)
+            .map(normalizeTag),
+        ),
+      ]
+    : [];
   return {
     id: node.id,
     title,

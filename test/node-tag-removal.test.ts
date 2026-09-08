@@ -103,4 +103,12 @@ describe("a tags-only patch assigns the tag without touching the document", () =
     expect((await patchTags(["doing"])).status).toBe(200);
     expect(await readTags()).toEqual(["#doing"]);
   });
+
+  // The card read the stored set raw while the editor keyed tags
+  // case-insensitively, so a document carrying both casings was described two
+  // ways at once. Every surface reads this response, so it folds here.
+  it("reads back one tag for a document carrying both casings", async () => {
+    expect((await patchTags(["GTM", "gtm", "Pricing"])).status).toBe(200);
+    expect(await readTags()).toEqual(["#gtm", "#pricing"]);
+  });
 });
