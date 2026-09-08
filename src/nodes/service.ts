@@ -1096,7 +1096,11 @@ export async function nestCensus(
   for (const d of visible) {
     const fm = d.frontmatter;
     types[fm.type || "document"] = (types[fm.type || "document"] || 0) + 1;
-    for (const t of fm.tags || []) tags[String(t)] = (tags[String(t)] || 0) + 1;
+    // Keyed by the normalized tag, because the filter a facet chip applies
+    // matches case-insensitively: counting "#GTM" and "#gtm" apart put a "2"
+    // on a chip that then returned 3 documents.
+    for (const t of new Set((fm.tags || []).map((t) => normalizeTag(String(t)))))
+      tags[t] = (tags[t] || 0) + 1;
     const folder = folderOfId(d.id);
     if (folder) direct.set(folder, (direct.get(folder) || 0) + 1);
     const edited = Date.parse(String(fm.updated_at || ""));
