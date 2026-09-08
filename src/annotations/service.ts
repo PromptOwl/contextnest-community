@@ -243,15 +243,25 @@ export async function setThreadStatus(
  *
  * The route is mounted under `/nests/:id/nodes`, and a structured nest's ids
  * already start with `nodes/` — so the honest URL for one names the segment
- * once (`…/nodes/<slug>/hosted`). An imported flat nest has ids with no such
- * prefix, so the id as given is tried first and the prefixed form is only a
- * fallback; the older doubled URL keeps working untouched.
+ * once (`…/nodes/<slug>/hosted`), and the doubled form keeps working too.
+ *
+ * Which layout the nest uses is already recorded (`is_imported`), so the
+ * likely id is formed rather than probed: this runs on every artifact view,
+ * and guessing wrong the other way meant a read that always failed before the
+ * real one. Storage is only consulted when the first form turns out to be
+ * wrong — an imported vault that happens to keep its documents under nodes/.
  */
 export async function resolveHostedNodeId(
   nestId: string,
   nodeId: string,
 ): Promise<string> {
   if (nodeId.startsWith("nodes/")) return nodeId;
+  const row = (await getDb().get(
+    "SELECT is_imported FROM nests WHERE id = ?",
+    [nestId],
+  )) as { is_imported?: number } | undefined;
+  if (!row?.is_imported) return `nodes/${nodeId}`;
+
   const { storage } = await engineCache.get(nestId);
   try {
     await storage.readDocument(nodeId);
