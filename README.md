@@ -15,7 +15,7 @@ ContextNest Community Edition is a self-hosted server that lets you:
 - Export a nest as a portable bundle and re-import it on another self-hosted host
 - Apply stewardship workflows — draft, pending review, approved
 - Share nests with collaborators or publish them read-only to the public
-- Serve approved context to AI agents via MCP or HTTP — connect one by pasting a generated setup prompt or downloading a ready `.env`
+- Serve approved context to AI agents via MCP or HTTP — connect one by pasting a generated setup prompt or downloading a ready `.env`, or register the nest in the ctx CLI (`ctx vault add <alias> --url <server>/nests/<id>/mcp --bearer-env CONTEXTNEST_API_KEY`, then `ctx query "#tag" --vault <alias>`)
 - Sync with the PromptOwl hosted platform for multi-user collaboration
 
 The server runs locally or on your own infrastructure. Your PromptOwl account handles authentication, entitlement, and governance metadata.
