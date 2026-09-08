@@ -215,10 +215,13 @@ export default function App() {
   // They render differently: only the second one owes the user an explanation.
   const [deepLinkProbe, setDeepLinkProbe] = useState<
     | { status: "idle" }
-    | { status: "loading" }
+    // The id being probed, once it is no longer readable from the URL: an
+    // unresolved ?nest is cleared from the address bar (CU-wdqcq01e70), so
+    // "Try again" carries it in state instead.
+    | { status: "loading"; nestId?: string }
     | { status: "ok"; nestId: string; nestName: string }
     | { status: "missing" }
-    | { status: "unreachable" }
+    | { status: "unreachable"; nestId: string }
   >(() => {
     if (typeof window === "undefined") return { status: "idle" };
     const params = new URLSearchParams(window.location.search);
@@ -365,7 +368,8 @@ export default function App() {
   useEffect(() => {
     if (deepLinkProbe.status !== "loading") return;
     const params = new URLSearchParams(window.location.search);
-    const nestId = params.get("nest");
+    // A retry re-probes the id it failed on, which is no longer in the URL.
+    const nestId = deepLinkProbe.nestId ?? params.get("nest");
     if (!nestId) {
       setDeepLinkProbe({ status: "missing" });
       return;
@@ -472,7 +476,7 @@ export default function App() {
             : undefined,
         });
       } catch {
-        if (!cancelled) setDeepLinkProbe({ status: "unreachable" });
+        if (!cancelled) setDeepLinkProbe({ status: "unreachable", nestId });
       }
     })();
     return () => {
@@ -488,10 +492,10 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (deepLinkProbe.status === "loading") return;
-    // An unresolved ?nest stays in the URL while its error screen is up, so
-    // "Try again" (and a plain refresh) has an id to re-probe. Going back to
-    // the dashboard flips the probe to "missing" and this clears it then.
-    if (deepLinkProbe.status === "unreachable") return;
+    // An unresolved ?nest is dropped from the address bar as soon as its error
+    // screen goes up (CU-wdqcq01e70): leaving it there made every refresh — and
+    // any link copied off that screen — land back on the same dead end. The id
+    // rides in the probe state instead, so "Try again" still has one.
     const params = new URLSearchParams(window.location.search);
     if (view.page === "document") {
       params.set("nest", view.nestId);
@@ -910,7 +914,12 @@ export default function App() {
                   permanent verdict. */}
               <Button
                 variant="outline"
-                onClick={() => setDeepLinkProbe({ status: "loading" })}
+                onClick={() =>
+                  setDeepLinkProbe({
+                    status: "loading",
+                    nestId: deepLinkProbe.nestId,
+                  })
+                }
               >
                 Try again
               </Button>
