@@ -12,6 +12,7 @@ import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
+import { setNavGuard, bypassNavGuard } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import {
   clampTagInput,
@@ -858,6 +859,9 @@ export function DocumentEditor({
   const [justSaved, setJustSaved] = useState(false);
   // Local draft couldn't be stored (quota exhausted / storage blocked).
   const [draftUnbacked, setDraftUnbacked] = useState(false);
+  // When a parked local draft was put back on load — the restored body is not
+  // what the server holds, and that used to be invisible (CU-wdqcpzzgz9).
+  const [restoredDraftAt, setRestoredDraftAt] = useState<number | null>(null);
 
 
   const loadNode = useCallback(async () => {
@@ -912,6 +916,7 @@ export function DocumentEditor({
       // Restore unsaved edits parked in localStorage, but only if they were
       // taken from the version we just loaded — a newer server copy wins.
       const draft = readDraft(nestId, nodeId);
+      setRestoredDraftAt(null);
       if (draft) {
         if (draft.baseVersion !== node?.version) {
           clearDraft(nestId, nodeId);
@@ -921,6 +926,7 @@ export function DocumentEditor({
           setTags(draft.tags);
           setSchedule(draft.schedule);
           setTouched(true);
+          setRestoredDraftAt(draft.savedAt ?? Date.now());
         }
       }
     } catch (err: any) {
@@ -1065,13 +1071,65 @@ export function DocumentEditor({
   // dirty indicator, alongside the badge in the header.
   const canSave = hasSaveableFields && (isNew || isDirty);
 
+  // Set once the user has answered the leave dialog and the navigation is
+  // going through — the browser-level guards below must not ask a second time.
+  const leavingRef = useRef(false);
+
   // Reloading or closing the tab with unsaved edits loses them — the in-app
   // leave dialog can't see a browser-level navigation, so hook it here too.
   useEffect(() => {
     if (!isDirty || isReviewerOnly) return;
-    const onBeforeUnload = (e: BeforeUnloadEvent) => e.preventDefault();
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (leavingRef.current) return;
+      e.preventDefault();
+    };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [isDirty, isReviewerOnly]);
+
+  // Anything that leaves this editor from the app chrome — the header logo,
+  // the nav tabs, the account menu — asks first, the same way this component's
+  // own back arrow does.
+  useEffect(() => {
+    setNavGuard((proceed) => {
+      if (!isDirty || isReviewerOnly) return false;
+      setLeaveIntent({ label: "leave this document", run: proceed });
+      return true;
+    });
+    return () => setNavGuard(null);
+  }, [isDirty, isReviewerOnly]);
+
+  // Browser Back. The app keeps one history entry, so Back used to unload the
+  // page — and a real unload can only ever raise the browser's own alert.
+  // Parking a spare entry while the document is dirty turns Back into a
+  // popstate we can answer with the same dialog every other exit uses.
+  useEffect(() => {
+    if (!isDirty || isReviewerOnly) return;
+    leavingRef.current = false;
+    const park = () => window.history.pushState({ cnLeaveGuard: true }, "");
+    park();
+    const onPop = () => {
+      // The parked entry is spent; park another so a cancelled leave is still
+      // caught, then ask. Leaving for real is two entries back — the spare and
+      // the page's own.
+      park();
+      setLeaveIntent({
+        label: "leave this page",
+        run: () => {
+          leavingRef.current = true;
+          window.history.go(-2);
+        },
+      });
+    };
+    window.addEventListener("popstate", onPop);
+    return () => {
+      window.removeEventListener("popstate", onPop);
+      // Left by some other route (saved, discarded, navigated in-app): drop the
+      // spare entry so Back still means Back.
+      if (!leavingRef.current && (window.history.state as any)?.cnLeaveGuard) {
+        window.history.back();
+      }
+    };
   }, [isDirty, isReviewerOnly]);
 
   // Feedback only — the schedule is saved exactly as typed either way (it's
@@ -1200,6 +1258,7 @@ export function DocumentEditor({
     // Edits are on the server now; the local draft is spent.
     if (!isNew) clearDraft(nestId, nodeId);
     setTouched(false);
+    setRestoredDraftAt(null);
     return { ok: true, savedId, ...(isNew ? { createdStatus } : {}) };
   };
 
@@ -1291,14 +1350,15 @@ export function DocumentEditor({
     runSave(() => {
       const intent = leaveIntent?.run;
       setLeaveIntent(null);
-      intent?.();
+      // The question has been answered — bypassNavGuard keeps the app-level
+      // guard from asking again about the very navigation it just asked about.
+      if (intent) bypassNavGuard(intent);
     });
 
-  const handleLeaveDiscard = () => {
-    if (!leaveIntent) return;
-    const intent = leaveIntent.run;
-    // Drop the parked draft AND revert the fields — the intent may navigate
-    // within this component (wiki link, breadcrumb) instead of unmounting it.
+  /** Drop the parked draft AND put the loaded server copy back in the fields —
+   *  a leave intent may navigate within this component (wiki link, breadcrumb)
+   *  instead of unmounting it, and the restored-draft banner discards in place. */
+  const revertToSaved = () => {
     if (!isNew) clearDraft(nestId, nodeId);
     const snap = initialSnapshotRef.current;
     setTitle(snap.title);
@@ -1306,8 +1366,15 @@ export function DocumentEditor({
     setTags([...snap.tags]);
     setSchedule(snap.schedule);
     setTouched(false);
+    setRestoredDraftAt(null);
+  };
+
+  const handleLeaveDiscard = () => {
+    if (!leaveIntent) return;
+    const intent = leaveIntent.run;
+    revertToSaved();
     setLeaveIntent(null);
-    intent();
+    bypassNavGuard(intent);
   };
 
   const handleSubmitForReview = async (note: string, priority: string) => {
@@ -1815,6 +1882,29 @@ export function DocumentEditor({
         <Alert variant="destructive" className="mb-4">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {restoredDraftAt !== null && (
+        <Alert className="mb-4 border-amber-300 bg-amber-50 text-amber-800">
+          <AlertCircle className="h-4 w-4 text-amber-600" />
+          <AlertDescription className="flex flex-wrap items-center gap-x-2 gap-y-1 text-amber-800">
+            <span>
+              Unsaved edits from this browser
+              {" ("}
+              {new Date(restoredDraftAt).toLocaleString()}
+              {") "}
+              were restored — the saved document still says something else.
+            </span>
+            <button
+              type="button"
+              onClick={revertToSaved}
+              className="font-medium underline underline-offset-2 hover:no-underline"
+              data-testid="discard-restored-draft"
+            >
+              Discard them
+            </button>
+          </AlertDescription>
         </Alert>
       )}
 

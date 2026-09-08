@@ -203,6 +203,38 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
 
   const shownDocs = results.filter((r) => r.kind === "node").length;
 
+  /**
+   * What an empty list means here, which is rarely "no matches" (CU-wdqcq01e6x).
+   * The global scope searches nothing until a term is typed, so it invites one.
+   * The nest scope has ALREADY listed the nest's documents on an empty query,
+   * so an empty list there is an empty nest, not a search waiting to happen.
+   */
+  const emptyState = () => {
+    if (searching) return "Searching…";
+    if (!query.trim()) {
+      if (global) return "Type to search nests and documents…";
+      return "This nest has no documents yet.";
+    }
+    // A scoped miss is not "it doesn't exist" — name the nest that was searched
+    // and offer the wider one right here, where the dead end is (CU-wdqcq012ut).
+    if (!global) {
+      return (
+        <>
+          No matches in {nestName ?? "this nest"}.{" "}
+          <button
+            type="button"
+            onClick={() => setAllNests(true)}
+            className="font-medium text-foreground underline underline-offset-2 hover:no-underline"
+            data-testid="quick-open-widen-scope"
+          >
+            Search all nests
+          </button>
+        </>
+      );
+    }
+    return "No matches";
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 bg-black/30 flex items-start justify-center pt-[15vh]"
@@ -287,28 +319,7 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
         <div className="max-h-72 overflow-y-auto py-1">
           {results.length === 0 ? (
             <div className="px-4 py-6 text-center text-sm text-muted-foreground">
-              {searching
-                ? "Searching…"
-                : global && !query.trim()
-                  ? "Type to search nests and documents"
-                  : !global && query.trim() ? (
-                    // A scoped miss is not "it doesn't exist" — name the nest
-                    // that was searched and offer the wider one right here,
-                    // where the dead end is (CU-wdqcq012ut).
-                    <>
-                      No matches in {nestName ?? "this nest"}.{" "}
-                      <button
-                        type="button"
-                        onClick={() => setAllNests(true)}
-                        className="font-medium text-foreground underline underline-offset-2 hover:no-underline"
-                        data-testid="quick-open-widen-scope"
-                      >
-                        Search all nests
-                      </button>
-                    </>
-                  ) : (
-                    "No matches"
-                  )}
+              {emptyState()}
             </div>
           ) : (
             results.map((r, i) => (

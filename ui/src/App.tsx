@@ -17,6 +17,7 @@ import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
+import { navigateGuarded } from "./lib/nav-guard";
 import {
   deriveNestCaps,
   isReaderHiddenView,
@@ -199,7 +200,14 @@ export default function App() {
     error,
     logout,
   } = useAuth();
-  const [view, setView] = useState<View>({ page: "dashboard" });
+  const [view, setViewNow] = useState<View>({ page: "dashboard" });
+  // Every view change asks the mounted screen first — an editor holding
+  // unsaved edits answers with its leave dialog instead of losing them. The
+  // guard is a no-op anywhere that registered none, so call sites are unchanged.
+  const setView = useCallback(
+    (next: View) => navigateGuarded(() => setViewNow(next)),
+    [],
+  );
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   // ?nest=<id> deep-link probe; 200 → skip Login, mount NestView.
   // "missing" is "no ?nest to open"; "unreachable" is "there was one and it
@@ -733,7 +741,9 @@ export default function App() {
     const wasLoggedIn = prevUserEmailRef.current !== null;
     prevUserEmailRef.current = currentUserEmail;
     if (wasLoggedIn) {
-      setView({ page: "dashboard" });
+      // Not a navigation the user can be asked about — the session it belonged
+      // to is already gone, so it skips the leave guard.
+      setViewNow({ page: "dashboard" });
     }
   }, [currentUserEmail]);
 

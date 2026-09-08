@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2, Trash2 } from "lucide-react";
 import * as api from "../lib/api";
+import { confirmableName } from "../lib/nest-name";
 
 interface DeleteNestDialogProps {
   nestId: string;
@@ -146,7 +147,7 @@ export function DeleteNestDialog({
           <Button
             variant="destructive"
             onClick={handleDelete}
-            disabled={deleting || confirmText !== nestName}
+            disabled={deleting || confirmableName(confirmText) !== confirmableName(nestName)}
           >
             {deleting ? (
               <>

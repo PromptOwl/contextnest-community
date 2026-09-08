@@ -43,6 +43,7 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import * as api from "../lib/api";
 import { reads } from "../lib/queries";
+import { publishApproval } from "../lib/publish-approval";
 
 interface PublishDialogProps {
   nestId: string;
@@ -86,6 +87,15 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
   // Assume mail works until told otherwise, so a slow health read never blocks
   // a gate that would have been fine.
   const [emailReady, setEmailReady] = useState(true);
+  // Which version a reader would get: /p serves the approved snapshot, never
+  // the working copy, so a document with no approved version has nothing to
+  // publish and one with newer edits publishes the older approved text.
+  // null while unknown — an unread version list must not block a valid publish
+  // (the server refuses it anyway).
+  const [approval, setApproval] = useState<{
+    approved: number | null;
+    current: number;
+  } | null>(null);
   const qc = useQueryClient();
 
   async function refreshLinks() {
@@ -109,6 +119,14 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
     qc.fetchQuery(reads.health())
       .then((h) => setEmailReady(h.email_configured !== false))
       .catch(() => setEmailReady(true)); // unknown → let the server decide
+    qc.fetchQuery(reads.nodeVersions(nestId, nodeId))
+      .then((v) =>
+        setApproval({
+          approved: v.approvedVersion ?? null,
+          current: v.currentVersion,
+        }),
+      )
+      .catch(() => setApproval(null)); // unknown → let the server decide
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nestId, nodeId]);
 
@@ -190,6 +208,9 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
   const linkFor = (p: api.Publication) =>
     p.link || `${window.location.origin}/p/${p.slug}`;
 
+  const { blocked: blockedUnapproved, behindDraft: publishesOlderVersion } =
+    publishApproval(approval);
+
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="sm:max-w-lg max-h-[85vh] overflow-y-auto">
@@ -205,6 +226,28 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
           <Alert variant="destructive">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+
+        {blockedUnapproved && (
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              This document has never been approved, so a published link would
+              show nothing to whoever opens it. Get it approved first — then
+              publish.
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {publishesOlderVersion && (
+          <Alert className="border-amber-300 bg-amber-50 text-amber-900">
+            <AlertCircle className="h-4 w-4 text-amber-600" />
+            <AlertDescription className="text-amber-900">
+              Readers get the approved version (v{approval!.approved}), not the
+              current draft (v{approval!.current}). Newer edits appear on the
+              link once they are approved.
+            </AlertDescription>
           </Alert>
         )}
 
@@ -336,7 +379,16 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
               </div>
             )}
 
-            <Button onClick={handleCreate} disabled={creating} className="w-full">
+            <Button
+              onClick={handleCreate}
+              disabled={creating || blockedUnapproved}
+              title={
+                blockedUnapproved
+                  ? "This document has no approved version to serve."
+                  : undefined
+              }
+              className="w-full"
+            >
               {creating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               Publish
             </Button>
