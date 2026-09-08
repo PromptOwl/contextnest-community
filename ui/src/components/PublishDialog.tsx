@@ -43,6 +43,7 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import * as api from "../lib/api";
 import { reads } from "../lib/queries";
+import { publishApproval } from "../lib/publish-approval";
 
 interface PublishDialogProps {
   nestId: string;
@@ -207,13 +208,8 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
   const linkFor = (p: api.Publication) =>
     p.link || `${window.location.origin}/p/${p.slug}`;
 
-  // Only block on a known answer — approval stays null while the version list
-  // is unread or failed, and the server is the one that actually refuses.
-  const blockedUnapproved = approval !== null && approval.approved === null;
-  const publishesOlderVersion =
-    approval !== null &&
-    approval.approved !== null &&
-    approval.current > approval.approved;
+  const { blocked: blockedUnapproved, behindDraft: publishesOlderVersion } =
+    publishApproval(approval);
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>

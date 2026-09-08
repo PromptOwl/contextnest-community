@@ -38,7 +38,9 @@ export async function isImportedNest(nestId: string): Promise<boolean> {
  * silently deleting it lost legitimate text ("Roadmap <2026> plan" was stored
  * as "Roadmap  plan") and collapsed distinct names onto one slug. Angle
  * brackets that aren't a tag are kept as typed — every surface that renders a
- * name into HTML escapes it (publish pages, email, Slack, React).
+ * name into HTML escapes it (publish pages, email, Slack, React). That is now
+ * load-bearing: a name reaches storage unescaped, so any NEW surface that
+ * renders one (an export, a PDF, a webhook payload) must escape it there.
  */
 function plainName(name: string, emptyMessage = "Name cannot be empty"): string {
   const typed = (name ?? "").trim();
