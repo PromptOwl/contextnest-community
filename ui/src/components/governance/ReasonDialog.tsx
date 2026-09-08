@@ -28,6 +28,9 @@ interface ReasonDialogProps {
   description?: string;
   /** Textarea label. Omit for a confirm-only dialog (no reason collected). */
   label?: string;
+  /** Collect the text, but let the action go ahead without it — an approval
+   *  note is worth offering and never worth blocking on. */
+  optionalReason?: boolean;
   placeholder?: string;
   confirmLabel: string;
   destructive?: boolean;
@@ -49,6 +52,7 @@ export function ReasonDialog({
   title,
   description,
   label,
+  optionalReason,
   placeholder,
   confirmLabel,
   destructive,
@@ -142,8 +146,8 @@ export function ReasonDialog({
           <Button
             onClick={confirm}
             // A required reason is the whole point of the flow — no empty flags,
-            // no unexplained declines.
-            disabled={busy || (!!label && !reason.trim())}
+            // no unexplained declines. An optional note is offered, not demanded.
+            disabled={busy || (!!label && !optionalReason && !reason.trim())}
             variant={destructive ? "destructive" : "default"}
             data-testid="reason-dialog-confirm"
           >

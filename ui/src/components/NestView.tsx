@@ -4670,9 +4670,11 @@ export function NestView({
               ? "Approving publishes each one. Anything you can't review, or that changed since this queue loaded, is reported back and left alone."
               : "Each author gets the same reason and the work goes back to them."
           }
-          // Reject demands a reason in bulk exactly as it does one at a time;
-          // approve's note stays optional (ReasonDialog drops the field).
-          label={bulkAction === "reject" ? "Why?" : undefined}
+          // Reject demands a reason in bulk exactly as it does one at a time.
+          // Approve offers the same comment field the one-at-a-time flow has —
+          // shared across the batch — without demanding one.
+          label={bulkAction === "reject" ? "Why?" : "Comment (optional)"}
+          optionalReason={bulkAction === "approve"}
           placeholder="Shared with every author in this batch"
           confirmLabel={bulkAction === "approve" ? "Approve all" : "Reject all"}
           destructive={bulkAction === "reject"}
