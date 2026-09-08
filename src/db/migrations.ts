@@ -1436,30 +1436,72 @@ export function runMigrations(db: Database.Database): void {
   // PRAGMA foreign_keys is a no-op inside a transaction, so doing it any other
   // way silently leaves enforcement ON and cascades the database away.
   if (!hasMigration("038_nest_visibility_org")) {
-    const fkWasOn = db.pragma("foreign_keys", { simple: true }) === 1;
-    if (fkWasOn) db.pragma("foreign_keys = OFF");
-    try {
-      db.transaction(() => {
-        widenNestVisibilityCheck(db);
-      })();
-      // Prove the rebuild left every child row pointing at a nest that still
-      // exists before recording the migration as applied. This is a DETECTION
-      // net, not a rollback: the rebuild's own transaction has already
-      // committed by the time this runs (it has to — foreign_keys can only be
-      // toggled outside a transaction), so throwing here leaves the new table
-      // in place and the migration unrecorded, and the next boot retries it.
-      // The retry is harmless — widenNestVisibilityCheck is idempotent and
-      // returns early once 'org' is in the constraint.
-      const dangling = db.pragma("foreign_key_check") as unknown[];
-      if (dangling.length > 0) {
-        throw new Error(
-          `038_nest_visibility_org left ${dangling.length} dangling foreign-key row(s)`,
-        );
-      }
-    } finally {
-      if (fkWasOn) db.pragma("foreign_keys = ON");
-    }
+    widenNestVisibilityWithGuard(db);
     recordMigration("038_nest_visibility_org");
+  }
+}
+
+/**
+ * `foreign_key_check` violations, counted per (child table, parent table,
+ * constraint) — deliberately WITHOUT rowid, because the rebuild reassigns
+ * rowids in `nests` and keying on them would report every pre-existing
+ * violation there as newly introduced.
+ */
+function fkViolationCounts(db: Database.Database): Map<string, number> {
+  const rows = db.pragma("foreign_key_check") as Array<{
+    table: string;
+    parent: string;
+    fkid: number;
+  }>;
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    const key = `${r.table}|${r.parent}|${r.fkid}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * Run the `nests` rebuild with foreign keys disabled, and verify it introduced
+ * no new dangling rows.
+ *
+ * The comparison is before-vs-after, not "are there any violations at all".
+ * `PRAGMA foreign_key_check` with no argument scans the WHOLE database, and
+ * runMigrations is called uncaught from openSqlite() at startup — so failing
+ * on any violation would wedge boot permanently for a deployment carrying
+ * unrelated pre-existing corruption (a hand-edited database, a restore taken
+ * with foreign_keys off, a historic bug). That deployment's data is not this
+ * migration's doing and re-running cannot fix it: the rebuild is idempotent,
+ * so every subsequent boot would re-find the same violations and throw again.
+ * Only violations this rebuild ADDED are its business.
+ *
+ * Still a detection net rather than a rollback: the rebuild's transaction has
+ * necessarily committed by the time the check runs, because foreign_keys can
+ * only be toggled outside a transaction. A throw leaves the new table in place
+ * and the migration unrecorded; the retry is harmless because
+ * widenNestVisibilityCheck returns early once 'org' is in the constraint.
+ */
+export function widenNestVisibilityWithGuard(db: Database.Database): void {
+  const before = fkViolationCounts(db);
+  const fkWasOn = db.pragma("foreign_keys", { simple: true }) === 1;
+  if (fkWasOn) db.pragma("foreign_keys = OFF");
+  try {
+    db.transaction(() => {
+      widenNestVisibilityCheck(db);
+    })();
+    const after = fkViolationCounts(db);
+    const introduced = [...after].filter(
+      ([key, n]) => n > (before.get(key) ?? 0),
+    );
+    if (introduced.length > 0) {
+      throw new Error(
+        `038_nest_visibility_org introduced foreign-key violations: ${introduced
+          .map(([key]) => key)
+          .join(", ")}`,
+      );
+    }
+  } finally {
+    if (fkWasOn) db.pragma("foreign_keys = ON");
   }
 }
 

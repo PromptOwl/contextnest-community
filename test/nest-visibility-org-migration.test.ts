@@ -14,7 +14,10 @@
  */
 import Database from "better-sqlite3";
 import { describe, it, expect } from "vitest";
-import { widenNestVisibilityCheck } from "../src/db/migrations.js";
+import {
+  widenNestVisibilityCheck,
+  widenNestVisibilityWithGuard,
+} from "../src/db/migrations.js";
 
 /** A pre-migration database: the old two-value CHECK, one child table with the
  *  same ON DELETE CASCADE every real child of `nests` carries, and a column
@@ -139,6 +142,41 @@ describe("migration 038 — widening the nests.visibility CHECK", () => {
       "INSERT INTO nests (id, user_id, name, slug, visibility) VALUES ('n3','u1','Org','org','org')",
     ).run();
     expect(db.prepare("SELECT COUNT(*) AS c FROM node_index").get()).toEqual({ c: 2 });
+    db.close();
+  });
+
+  it("does not wedge boot on pre-existing, unrelated FK corruption", () => {
+    // runMigrations is called uncaught from openSqlite() at startup, and
+    // `foreign_key_check` with no argument scans the WHOLE database — so
+    // failing on any violation would permanently block boot for a deployment
+    // carrying corruption this migration did not cause and cannot fix (the
+    // rebuild is idempotent, so every retry re-finds the same rows). Only
+    // violations the rebuild ADDS are its business.
+    const db = oldSchemaDb();
+    db.exec(`CREATE TABLE unrelated (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id)
+    );`);
+    db.pragma("foreign_keys = OFF");
+    db.prepare("INSERT INTO unrelated (id, user_id) VALUES ('x','ghost')").run();
+    db.pragma("foreign_keys = ON");
+    expect((db.pragma("foreign_key_check") as unknown[]).length).toBe(1);
+
+    expect(() => widenNestVisibilityWithGuard(db)).not.toThrow();
+
+    // Migration done; the pre-existing violation is left exactly as found.
+    db.prepare(
+      "INSERT INTO nests (id, user_id, name, slug, visibility) VALUES ('n3','u1','Org','org','org')",
+    ).run();
+    expect((db.pragma("foreign_key_check") as unknown[]).length).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) AS c FROM node_index").get()).toEqual({ c: 2 });
+    db.close();
+  });
+
+  it("restores foreign-key enforcement after the guarded run", () => {
+    const db = oldSchemaDb();
+    widenNestVisibilityWithGuard(db);
+    expect(db.pragma("foreign_keys", { simple: true })).toBe(1);
     db.close();
   });
 
