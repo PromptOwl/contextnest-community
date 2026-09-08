@@ -4119,9 +4119,27 @@ export function NestView({
                       Stewardship
                     </strong>{" "}
                     — sharing does not make anyone a steward.
-                    {stewardshipEnabled
-                      ? " Stewards are assigned on the Stewards tab."
-                      : " Turn on Stewardship & Approval Workflow in Nest settings to use stewards."}
+                    {stewardshipEnabled ? (
+                      " Stewards are assigned on the Stewards tab."
+                    ) : canManageGovernance ? (
+                      // Naming the setting without a way to reach it left the
+                      // reader hunting through a menu (CU-wdqcq01e75). Only
+                      // owner/admin can open it, so only they get the link.
+                      <>
+                        {" "}
+                        Turn on Stewardship &amp; Approval Workflow in{" "}
+                        <button
+                          type="button"
+                          onClick={() => setShowSettings(true)}
+                          className="font-medium text-foreground underline underline-offset-2 hover:no-underline"
+                        >
+                          Nest settings
+                        </button>{" "}
+                        to use stewards.
+                      </>
+                    ) : (
+                      " Stewardship & Approval Workflow is off for this nest — an owner or admin can turn it on in Nest settings."
+                    )}
                   </span>
                 </CardDescription>
               </CardHeader>
