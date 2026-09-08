@@ -41,6 +41,7 @@ import {
   Ban,
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import * as api from "../lib/api";
 import { reads } from "../lib/queries";
 import { publishApproval } from "../lib/publish-approval";
@@ -165,6 +166,10 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
       setNewLink(res.link);
       setCode("");
       setAllowlist("");
+      // Say it worked. The link panel appearing is the only other signal, and
+      // on a long form it renders above the fold the user is looking at — the
+      // publish read as though nothing happened (CU-wdqcq01e74).
+      toast.success(`"${nodeTitle}" published — link ready to share`);
       await refreshLinks();
     } catch (e: any) {
       setError(e?.message || "Could not publish this document");
