@@ -10,6 +10,7 @@ import {
   filterDocuments,
   DocumentNotFoundError,
   NODE_TYPES,
+  TAG_PATTERN,
   generateIndexMd,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
@@ -76,7 +77,37 @@ async function userIdFromEmail(email: string): Promise<string> {
   return row?.id ?? ANON_USER_ID;
 }
 
-const normalizeTag = (t: string) => (t.startsWith("#") ? t : `#${t}`);
+/** Tag as stored: "#" + bare + lowercased. Casing is folded here so the tag a
+ *  document carries keys the same as the one the tag index, facets and steward
+ *  scopes resolve by — "GTM" and "gtm" are one tag, not two. */
+const normalizeTag = (t: string) =>
+  `#${String(t).trim().replace(/^#+/, "").toLowerCase()}`;
+
+/**
+ * The same, for caller-supplied tags: anything the ENGINE's TAG_PATTERN
+ * refuses is a 400 here. Otherwise it fails deep inside the engine write and
+ * reaches the user as "Something went wrong on the server", losing the
+ * unsaved document with it (a `café` tag did exactly that).
+ */
+function requireTag(raw: string): string {
+  const tag = normalizeTag(raw);
+  if (!TAG_PATTERN.test(tag)) {
+    throw new ValidationError(
+      `"${String(raw).trim()}" isn't a usable tag — a tag starts with a letter ` +
+        `and is built from letters a-z, digits, "_", ":" and "-".`,
+    );
+  }
+  return tag;
+}
+
+/** Caller-supplied tag list: blanks dropped, each validated, deduped. */
+function requireTags(raw: readonly unknown[] | undefined): string[] {
+  const tags = (raw || [])
+    .map((t) => String(t).trim())
+    .filter(Boolean)
+    .map(requireTag);
+  return [...new Set(tags)];
+}
 
 /** Result shape of the engine's `context_import` operation. A failed entry
  *  carries `id` (ids[] mode) or `title` (documents[] mode), never both. */
@@ -1321,7 +1352,7 @@ async function createNodeOnce(
     // addresses. Generate one instead of refusing the title.
     id = `${prefix}${slug || (await generatedSlug(storage, prefix))}`;
   }
-  const tags = (input.tags || []).map(normalizeTag);
+  const tags = requireTags(input.tags);
 
   // Content-type toggles: creation of a disabled type is refused here — the
   // shared choke point for REST + MCP — so every surface gates identically.
@@ -1742,7 +1773,7 @@ export async function updateNode(
         // save, so a union made removals impossible (CU: removed tag returns
         // after reopen). Callers wanting additive semantics (MCP
         // context_update) merge against the current tags themselves.
-        const nextTags = [...new Set(patch.tags.map(normalizeTag))];
+        const nextTags = requireTags(patch.tags);
         node = { ...node, frontmatter: { ...node.frontmatter, tags: nextTags } };
         // The engine performs the write, so the new set has to reach it — the
         // projection above only feeds the governance decisions below. It

@@ -87,6 +87,16 @@ describe("a tags-only patch assigns the tag without touching the document", () =
     expect(node.title).toBe("Tagged Doc");
   });
 
+  // A tag the engine's TAG_PATTERN refuses used to fail deep in the write and
+  // reach the user as a 500, losing the unsaved document with it.
+  it("refuses a tag the engine cannot store, as a 400 that names it", async () => {
+    const res = await patchTags(["café"]);
+    expect(res.status).toBe(400);
+    expect(String(res.data.error)).toContain("café");
+    // The document is untouched — the previous tag set survives the refusal.
+    expect(await readTags()).toEqual(["#doing"]);
+  });
+
   it("a bare tag is stored with the # the board reads back", async () => {
     // The board writes "#doing"; a layout typed without the # must land the same
     // way, or the card would not rejoin the column it was dropped on.

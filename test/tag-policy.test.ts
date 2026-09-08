@@ -26,10 +26,19 @@ describe("normalizeTagInput", () => {
     expect(normalizeTagInput("🚀rocket").tag).toBe("rocket");
   });
 
-  it("refuses a tag with no letters or digits", () => {
+  it("refuses a tag with nothing usable in it", () => {
     const { tag, note } = normalizeTagInput("!@#$%^&*");
     expect(tag).toBeNull();
-    expect(note).toContain("no letters or digits");
+    expect(note).toContain("no usable characters");
+  });
+
+  // The engine's TAG_PATTERN is ASCII and letter-initial. Anything wider was
+  // accepted here and then refused by the server, taking the whole save with it.
+  it("folds a tag to what the server will actually store", () => {
+    expect(normalizeTagInput("café").tag).toBe("caf");
+    expect(normalizeTagInput("2024-plan").tag).toBe("plan");
+    expect(normalizeTagInput("dept:sales").tag).toBe("dept:sales");
+    expect(normalizeTagInput("v2.0").tag).toBe("v20");
   });
 
   it("ignores an empty token without complaining", () => {
