@@ -1963,7 +1963,10 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
               : "Each author gets the same reason and the work goes back to them."
           }
           // Rejecting in bulk demands a reason exactly as one at a time does.
-          label={workBulkAction === "reject" ? "Why?" : undefined}
+          // Approving offers the same comment field, shared across the batch,
+          // without demanding one — as the review queue's bulk approve does.
+          label={workBulkAction === "reject" ? "Why?" : "Comment (optional)"}
+          optionalReason={workBulkAction === "approve"}
           placeholder="Shared with every author in this batch"
           confirmLabel={
             workBulkAction === "approve" ? "Approve all" : "Reject all"

@@ -66,6 +66,26 @@ function toSlug(name: string): string {
  * so importing a folder whose leaf name collides with an existing nest used
  * to error out — this helper produces "abc", "abc (1)", "abc (2)", ….
  */
+/**
+ * The one duplicate-name guard. UNIQUE(user_id, slug) would otherwise surface
+ * as a raw constraint error — friendly enough on SQLite, a bare 500 wherever
+ * the driver reports it differently. `exceptId` skips the nest being renamed.
+ */
+async function assertSlugFree(
+  userId: string,
+  slug: string,
+  message: string,
+  exceptId?: string,
+): Promise<void> {
+  const conflict = (await getDb().get(
+    exceptId
+      ? "SELECT id FROM nests WHERE user_id = ? AND slug = ? AND id != ? LIMIT 1"
+      : "SELECT id FROM nests WHERE user_id = ? AND slug = ? LIMIT 1",
+    exceptId ? [userId, slug, exceptId] : [userId, slug],
+  )) as { id: string } | undefined;
+  if (conflict) throw new ValidationError(message);
+}
+
 export async function uniqueNestName(
   userId: string,
   baseName: string,
@@ -297,15 +317,12 @@ export async function renameNest(
     const trimmed = plainName(patch.name);
     const slug = toSlug(trimmed);
     if (!slug) throw new ValidationError("Name must contain at least one alphanumeric character");
-    const conflict = (await db.get(
-      "SELECT id FROM nests WHERE user_id = ? AND slug = ? AND id != ? LIMIT 1",
-      [existing.user_id, slug, nestId],
-    )) as { id: string } | undefined;
-    if (conflict) {
-      throw new ValidationError(
-        `Another nest already uses this name. Pick a different one.`,
-      );
-    }
+    await assertSlugFree(
+      existing.user_id,
+      slug,
+      "Another nest already uses this name. Pick a different one.",
+      nestId,
+    );
     updates.push("name = ?", "slug = ?");
     params.push(trimmed, slug);
   }
@@ -346,15 +363,11 @@ export async function createNest(
   // Surface the duplicate BEFORE the INSERT would trip UNIQUE(user_id, slug) —
   // the raw constraint error otherwise bubbled up as a generic 500 with no
   // hint that the name was taken. Mirrors renameNest's conflict guard.
-  const conflict = (await db.get(
-    "SELECT id FROM nests WHERE user_id = ? AND slug = ? LIMIT 1",
-    [userId, slug],
-  )) as { id: string } | undefined;
-  if (conflict) {
-    throw new ValidationError(
-      "You already have a nest with this name. Pick a different one.",
-    );
-  }
+  await assertSlugFree(
+    userId,
+    slug,
+    "You already have a nest with this name. Pick a different one.",
+  );
 
   // Ungoverned (anon-owned) nests default to public so the shared commons
   // stays visible to everyone in both open and key modes. Admin can flip
@@ -398,6 +411,13 @@ export async function importNest(userId: string, name: string): Promise<Nest> {
   const db = getDb();
   const id = uuid();
   const slug = toSlug(nm);
+  // Same guard as createNest: re-importing a folder under a name that is
+  // already taken has to read as "pick another name", not as a server error.
+  await assertSlugFree(
+    userId,
+    slug,
+    "A nest with this name already exists. Pick a different name.",
+  );
   const visibility = userId === ANON_USER_ID ? "public" : "private";
 
   mkdirSync(resolveNestPath(id), { recursive: true });

@@ -10,6 +10,7 @@ import {
   filterDocuments,
   DocumentNotFoundError,
   NODE_TYPES,
+  TAG_PATTERN,
   generateIndexMd,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
@@ -76,7 +77,39 @@ async function userIdFromEmail(email: string): Promise<string> {
   return row?.id ?? ANON_USER_ID;
 }
 
-const normalizeTag = (t: string) => (t.startsWith("#") ? t : `#${t}`);
+/** Tag as stored: "#" + bare + lowercased. Casing is folded here so the tag a
+ *  document carries keys the same as the one the tag index, facets and steward
+ *  scopes resolve by — "GTM" and "gtm" are one tag, not two. Named apart from
+ *  the tag index's `normalizeTag` (which yields the bare key) because the two
+ *  differ by exactly that "#" and a shared name invites the wrong one. */
+const storedTag = (t: string) =>
+  `#${String(t).trim().replace(/^#+/, "").toLowerCase()}`;
+
+/**
+ * The same, for caller-supplied tags: anything the ENGINE's TAG_PATTERN
+ * refuses is a 400 here. Otherwise it fails deep inside the engine write and
+ * reaches the user as "Something went wrong on the server", losing the
+ * unsaved document with it (a `café` tag did exactly that).
+ */
+function requireTag(raw: string): string {
+  const tag = storedTag(raw);
+  if (!TAG_PATTERN.test(tag)) {
+    throw new ValidationError(
+      `"${String(raw).trim()}" isn't a usable tag — a tag starts with a letter ` +
+        `and is built from letters a-z, digits, "_", ":" and "-".`,
+    );
+  }
+  return tag;
+}
+
+/** Caller-supplied tag list: blanks dropped, each validated, deduped. */
+function requireTags(raw: readonly unknown[] | undefined): string[] {
+  const tags = (raw || [])
+    .map((t) => String(t).trim())
+    .filter(Boolean)
+    .map(requireTag);
+  return [...new Set(tags)];
+}
 
 /** Result shape of the engine's `context_import` operation. A failed entry
  *  carries `id` (ids[] mode) or `title` (documents[] mode), never both. */
@@ -265,7 +298,7 @@ async function departmentTagFor(userEmail: string): Promise<string | null> {
       [userEmail],
     )) as { department?: string | null } | undefined;
     const slug = slugify(String(row?.department ?? ""));
-    return slug ? normalizeTag(`dept:${slug}`) : null;
+    return slug ? storedTag(`dept:${slug}`) : null;
   } catch (err) {
     console.error("[dept-tag] department lookup failed (tag skipped):", err);
     return null;
@@ -365,7 +398,20 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
   // boundary so every surface (editor, list search, MCP) gets strings.
   const title =
     fm.title === undefined || fm.title === null ? "" : String(fm.title);
-  const tags = Array.isArray(fm.tags) ? fm.tags.map((t) => String(t)) : [];
+  // Normalized and deduped on the way out, so every surface sees one tag set:
+  // a card showing "#GTM" and "#gtm" while the editor (which keys tags
+  // case-insensitively) showed a single "gtm" was the same document described
+  // two ways.
+  const tags = Array.isArray(fm.tags)
+    ? [
+        ...new Set(
+          fm.tags
+            .map((t) => String(t).trim())
+            .filter(Boolean)
+            .map(storedTag),
+        ),
+      ]
+    : [];
   return {
     id: node.id,
     title,
@@ -1065,7 +1111,11 @@ export async function nestCensus(
   for (const d of visible) {
     const fm = d.frontmatter;
     types[fm.type || "document"] = (types[fm.type || "document"] || 0) + 1;
-    for (const t of fm.tags || []) tags[String(t)] = (tags[String(t)] || 0) + 1;
+    // Keyed by the normalized tag, because the filter a facet chip applies
+    // matches case-insensitively: counting "#GTM" and "#gtm" apart put a "2"
+    // on a chip that then returned 3 documents.
+    for (const t of new Set((fm.tags || []).map((t) => storedTag(String(t)))))
+      tags[t] = (tags[t] || 0) + 1;
     const folder = folderOfId(d.id);
     if (folder) direct.set(folder, (direct.get(folder) || 0) + 1);
     const edited = Date.parse(String(fm.updated_at || ""));
@@ -1321,7 +1371,7 @@ async function createNodeOnce(
     // addresses. Generate one instead of refusing the title.
     id = `${prefix}${slug || (await generatedSlug(storage, prefix))}`;
   }
-  const tags = (input.tags || []).map(normalizeTag);
+  const tags = requireTags(input.tags);
 
   // Content-type toggles: creation of a disabled type is refused here — the
   // shared choke point for REST + MCP — so every surface gates identically.
@@ -1396,11 +1446,11 @@ async function createNodeOnce(
     }
 
     // Optional dept:<slug> auto-tag — after the validations above so a request
-    // that fails them never pays the DB lookup. Deduped case-insensitively
-    // against the user-supplied tags (normalizeTag keeps the user's casing, so
-    // "#Dept:Engineering" must still match the all-lowercase auto tag).
+    // that fails them never pays the DB lookup. Both sides are already folded
+    // to lower case by storedTag, so "#Dept:Engineering" and the auto tag are
+    // the same string and a plain match dedupes them.
     const deptTag = await departmentTagFor(userEmail);
-    if (deptTag && !tags.some((t) => t.toLowerCase() === deptTag)) {
+    if (deptTag && !tags.includes(deptTag)) {
       tags.push(deptTag);
     }
 
@@ -1662,7 +1712,7 @@ export async function registerImportedDocuments(
   // longer reconstructs) still registers — as a draft, at its own version, with
   // its history left untouched on disk. Losing the doc would be the worse loss.
   for (const d of docs) {
-    const tags = d.tags.map((t) => normalizeTag(String(t)));
+    const tags = d.tags.map((t) => storedTag(String(t)));
     await versions.createVersion({
       nestId,
       nodeId: d.id,
@@ -1742,7 +1792,7 @@ export async function updateNode(
         // save, so a union made removals impossible (CU: removed tag returns
         // after reopen). Callers wanting additive semantics (MCP
         // context_update) merge against the current tags themselves.
-        const nextTags = [...new Set(patch.tags.map(normalizeTag))];
+        const nextTags = requireTags(patch.tags);
         node = { ...node, frontmatter: { ...node.frontmatter, tags: nextTags } };
         // The engine performs the write, so the new set has to reach it — the
         // projection above only feeds the governance decisions below. It
@@ -2296,7 +2346,7 @@ export async function discardDraft(
     await syncNodeTags(
       nestId,
       nodeId,
-      ((restored.frontmatter.tags as string[]) || []).map(normalizeTag),
+      ((restored.frontmatter.tags as string[]) || []).map(storedTag),
     );
 
     await versions.deleteUnsealedVersions(nestId, nodeId, sealed);
