@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { confirmableName, nestNameProblem } from "./nest-name";
+import {
+  confirmableName,
+  nestNameProblem,
+  MAX_NEST_NAME_LENGTH,
+} from "./nest-name";
 
 describe("nestNameProblem", () => {
   it("accepts a plain name", () => {
@@ -36,5 +40,14 @@ describe("confirmableName", () => {
 
   it("still separates a different name", () => {
     expect(confirmableName("Roadmap plans")).not.toBe(confirmableName("Roadmap plan"));
+  });
+});
+
+describe("nest name length", () => {
+  it("accepts a name at the cap and refuses one past it", () => {
+    expect(nestNameProblem("n".repeat(MAX_NEST_NAME_LENGTH))).toBeNull();
+    expect(nestNameProblem("n".repeat(MAX_NEST_NAME_LENGTH + 1))).toMatch(
+      /100 characters/,
+    );
   });
 });

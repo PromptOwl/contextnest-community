@@ -42,9 +42,19 @@ export async function isImportedNest(nestId: string): Promise<boolean> {
  * load-bearing: a name reaches storage unescaped, so any NEW surface that
  * renders one (an export, a PDF, a webhook payload) must escape it there.
  */
+/** A nest name is a card title and a list row; an unbounded one broke both
+ *  layouts (CU-wdqcq018qx). The UI refuses the same length up front
+ *  (ui/src/lib/nest-name.ts) so this is the guard for callers that skip it. */
+export const MAX_NEST_NAME_LENGTH = 100;
+
 function plainName(name: string, emptyMessage = "Name cannot be empty"): string {
   const typed = (name ?? "").trim();
   if (!typed) throw new ValidationError(emptyMessage);
+  if (typed.length > MAX_NEST_NAME_LENGTH) {
+    throw new ValidationError(
+      `Nest names are capped at ${MAX_NEST_NAME_LENGTH} characters`,
+    );
+  }
   if (/<\/?[a-zA-Z][^>]*>/.test(typed)) {
     throw new ValidationError(
       "Nest names are plain text — remove the HTML tags.",

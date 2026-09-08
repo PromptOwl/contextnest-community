@@ -1,3 +1,8 @@
+/** A nest name is a card title and a list row, so it has to fit one — an
+ *  unbounded name broke both layouts (CU-wdqcq018qx). Mirrors
+ *  MAX_NEST_NAME_LENGTH in src/nests/service.ts, which refuses the same. */
+export const MAX_NEST_NAME_LENGTH = 100;
+
 /**
  * Why a nest name can't be used, or null when it can. Mirrors the server's
  * refusals (src/nests/service.ts — createNest and renameNest share them): the
@@ -10,7 +15,11 @@
  * still refuses the same names for callers that skip the UI.
  */
 export function nestNameProblem(name: string): string | null {
-  if (!name.trim()) return "Name is required";
+  const trimmed = name.trim();
+  if (!trimmed) return "Name is required";
+  if (trimmed.length > MAX_NEST_NAME_LENGTH) {
+    return `Nest names are capped at ${MAX_NEST_NAME_LENGTH} characters — this one is ${trimmed.length}.`;
+  }
   // A tag is refused, not stripped — "Roadmap <2026> plan" is legitimate text
   // and keeps its brackets, while "<img src=x onerror=alert(1)>" is named as
   // the problem here instead of being silently rewritten.

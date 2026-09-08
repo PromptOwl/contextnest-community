@@ -1374,8 +1374,14 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                     aria-invalid={!!createError}
                     autoFocus
                   />
-                  {createError && (
-                    <p className="text-xs text-destructive">{createError}</p>
+                  {/* Say why the button is dead as it happens — a name over the
+                      length cap only disabled Create, with nothing to read
+                      (CU-wdqcq018qx). The submit error still wins. */}
+                  {(createError ??
+                    (newName ? nestNameProblem(newName) : null)) && (
+                    <p className="text-xs text-destructive">
+                      {createError ?? nestNameProblem(newName)}
+                    </p>
                   )}
                 </div>
                 <div className="space-y-1">

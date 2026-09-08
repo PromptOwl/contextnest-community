@@ -78,6 +78,38 @@ describe("nest names are stored as plain text", () => {
     expect(second.data.nest.slug).not.toBe(first.data.nest.slug);
   });
 
+  // A name is a card title and a list row, so it is capped (CU-wdqcq018qx).
+  it("rejects a name past the length cap, on create and on rename", async () => {
+    const tooLong = "n".repeat(101);
+    const created = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: tooLong },
+      alice.apiKey,
+    );
+    expect(created.status).toBe(400);
+    expect(created.data.error).toContain("100 characters");
+
+    const ok = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "n".repeat(100) },
+      alice.apiKey,
+    );
+    expect(ok.status).toBe(201);
+
+    const renamed = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${ok.data.nest.id}`,
+      { name: tooLong },
+      alice.apiKey,
+    );
+    expect(renamed.status).toBe(400);
+  });
+
   it("rejects markup on rename", async () => {
     const created = await jsonRequest(
       app,
