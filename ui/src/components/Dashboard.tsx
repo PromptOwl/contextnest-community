@@ -7,7 +7,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads, useNests } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft, Pin,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft, Bookmark,
 } from "lucide-react";
 import { ANON_USER_ID, BULK_REVIEW_LIMIT } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
@@ -1746,8 +1746,46 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                       commons in key mode.
                       Pin: NO gate — a pin is this person's own bookmark, so a
                       viewer pins exactly as an owner does, and it is the one
-                      action here everybody gets. */}
+                      action here everybody gets.
+                      All three share ONE row: two absolutely-positioned groups
+                      drifted apart as the gated icons came and went. */}
                       <div className="absolute top-2 right-2 flex items-center gap-0.5">
+                        {canRename && (
+                          <button
+                            type="button"
+                            aria-label={`Rename nest ${nest.name}`}
+                            title="Rename nest"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRenameTarget({
+                                id: nest.id,
+                                name: nest.name,
+                                description: nest.description ?? null,
+                              });
+                            }}
+                            className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          )}
+                          {canDelete && (
+                          <button
+                            type="button"
+                            aria-label={`Delete nest ${nest.name}`}
+                            title="Delete nest"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              requestDelete(nest.id, nest.name, !!nest.is_imported);
+                            }}
+                            className="p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        {/* Bookmark, not a pushpin: the pin glyph sits at an
+                            angle and read as clutter beside the upright pencil
+                            and bin. Not a star either — that already means
+                            "prime document" elsewhere in the app. */}
                         <button
                           type="button"
                           aria-label={
@@ -1765,56 +1803,22 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                             e.stopPropagation();
                             void togglePin(nest.id, !nest.pinned);
                           }}
-                          className={`p-1.5 rounded-md hover:bg-secondary focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                          className={`p-1.5 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                             nest.pinned
-                              ? "text-amber-600 hover:text-amber-700"
-                              : "text-muted-foreground hover:text-foreground"
+                              ? "text-amber-500 hover:text-amber-600 hover:bg-amber-50"
+                              : "text-muted-foreground hover:text-foreground hover:bg-secondary"
                           }`}
                           data-testid="pin-nest"
                         >
-                          <Pin
+                          <Bookmark
                             className={`h-3.5 w-3.5 ${nest.pinned ? "fill-current" : ""}`}
                           />
                         </button>
                       </div>
-                      {(canRename || canDelete) && (
-                        <div className="absolute top-2 right-9 flex items-center gap-0.5">
-                          {canRename && (
-                            <button
-                              type="button"
-                              aria-label={`Rename nest ${nest.name}`}
-                              title="Rename nest"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setRenameTarget({
-                                  id: nest.id,
-                                  name: nest.name,
-                                  description: nest.description ?? null,
-                                });
-                              }}
-                              className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                            >
-                              <Pencil className="h-3.5 w-3.5" />
-                            </button>
-                          )}
-                          {canDelete && (
-                            <button
-                              type="button"
-                              aria-label={`Delete nest ${nest.name}`}
-                              title="Delete nest"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                requestDelete(nest.id, nest.name, !!nest.is_imported);
-                              }}
-                              className="p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          )}
-                        </div>
-                      )}
 
-                      <div className="flex items-start gap-3 pr-12">
+                      {/* Reserve room for up to three icons — a long nest name
+                          ran under them once pinning added a third. */}
+                      <div className="flex items-start gap-3 pr-20">
                         <div
                           className={`p-2 rounded-md ${isAnonymous ? "bg-amber-100" : "bg-primary/10"
                             }`}
