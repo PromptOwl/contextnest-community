@@ -146,7 +146,7 @@ describe("nestSetupPrompt", () => {
     // nothing to do with egress. Those carry a JSON error body; a gateway
     // block generally does not, so the prompt splits on that.
     const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
-    expect(p).toMatch(/403[\s\S]*scoped to a different nest/);
+    expect(p).toMatch(/403[\s\S]*belongs to\s*\n?\s*a different nest/);
   });
 
   it("names where the key is expected instead of only asking for it", () => {
@@ -247,6 +247,23 @@ describe("nestSetupPrompt", () => {
     const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
     expect(p).toMatch(/ASK ME FIRST if setting either of these means/);
     expect(p).toMatch(/writing my key into a config file/);
+  });
+
+  it("conditions writes on the key's tier, not only on the licence", () => {
+    // Verified: a read-only collaborator key on a LICENSED server gets 200
+    // from /context and 403 from a create. Claiming "reads AND writes" off a
+    // 200 repeats the false-capability problem one layer down.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toMatch(/writes IF my key carries write access/);
+    expect(p).toMatch(/read-only key reads perfectly well/);
+  });
+
+  it("tells a permission-tier 403 apart from a wrong-nest 403", () => {
+    // Both are JSON-bodied refusals with different remedies; the body names
+    // which via required_permission.
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).toMatch(
+      /`required_permission` field means my key lacks the tier/,
+    );
   });
 
   it("names write tools rather than asserting write capability", () => {

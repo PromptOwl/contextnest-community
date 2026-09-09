@@ -228,8 +228,10 @@ export function nestSetupPrompt(
     openMode
       ? null
       : "         expand it, and you must substitute the value yourself. Otherwise ask me for the key.",
-    "    403  read the body. JSON with an `error` field is the server refusing you — usually a",
-    "         key scoped to a different nest. Tell me which; do not treat it as a network problem.",
+    "    403  read the body. JSON with an `error` field is the server refusing you, and it says",
+    "         which: a `required_permission` field means my key lacks the tier for that action",
+    "         (a read-only key does this on any write); a scope message means the key belongs to",
+    "         a different nest. Tell me which one; neither is a network problem.",
     "         A 403 with NO JSON body came from something between you and the server, not from us.",
     // A blocked CONNECT never reaches the server at all, so retrying and
     // re-authenticating are both useless. Cloud sandboxes, CI runners and
@@ -243,7 +245,9 @@ export function nestSetupPrompt(
     "",
     "WHAT YOU CAN DO — if step 1 returned 503 this server is unlicensed: read it as above, and",
     "do not attempt writes at all, they are blocked by the same gate. Otherwise this connection",
-    "reads AND writes. Over MCP the write tools are",
+    "reads, and writes IF my key carries write access — a read-only key reads perfectly well and",
+    "is refused on the first write. Assume nothing either way until you have my say-so to try.",
+    "Over MCP the write tools are",
     "context_create, context_update, context_move and context_submit_review; over REST it is",
     `POST ${base}/nests/${nestId}/nodes to create, and PATCH that same path with the document's`,
     "id appended to update. Never write, publish or share without asking me first.",
