@@ -1886,6 +1886,13 @@ export function createApp(): Hono<AuthEnv> {
     const isDeletionRequestAction =
       /\/request-deletion$/.test(path) ||
       /\/deletion-requests\/[^/]+\/withdraw$/.test(path);
+    // Pinning is read-tier: a pin is the caller's own bookmark, changes nothing
+    // about the nest and is visible to nobody else, so anyone who can open the
+    // nest may pin it — a viewer most of all, since they are the likeliest to
+    // be watching a handful of nests they cannot edit. The handler still
+    // refuses a caller with no access at all, so this is not an existence
+    // oracle for nest ids.
+    const isPinAction = parts.length === 2 && parts[1] === "pin";
     // The steward roster — list, assign, remove, sync — is restricted to the
     // server (license) admin plus the nest owner/admin collaborators, so an
     // owner can delegate vault people-management by granting admin. All
@@ -1945,6 +1952,7 @@ export function createApp(): Hono<AuthEnv> {
       !isStewardActionPath &&
       !isCommentAction &&
       !isDeletionRequestAction &&
+      !isPinAction &&
       !isAnnotationAction &&
       !isReadQuery &&
       !isMcpTransport

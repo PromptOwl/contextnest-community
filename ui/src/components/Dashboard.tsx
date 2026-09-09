@@ -7,7 +7,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads, useNests } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft, Pin,
 } from "lucide-react";
 import { ANON_USER_ID, BULK_REVIEW_LIMIT } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
@@ -145,13 +145,20 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
         (n.description ?? "").toLowerCase().includes(q)
       );
     });
-    return [...matched].sort((a: any, b: any) =>
-      nestSort === "name"
+    // Pinned first, then the chosen sort. One extra term rather than a separate
+    // list: the search box and scope filter still decide WHICH nests appear —
+    // a pinned nest that doesn't match what you typed should stay hidden — and
+    // because the page-size slice happens after this, pins are always on the
+    // first page.
+    return [...matched].sort((a: any, b: any) => {
+      const pin = Number(!!b.pinned) - Number(!!a.pinned);
+      if (pin !== 0) return pin;
+      return nestSort === "name"
         ? String(a.name ?? "").localeCompare(String(b.name ?? ""))
         : String(b.last_activity ?? b.created_at ?? "").localeCompare(
             String(a.last_activity ?? a.created_at ?? ""),
-          ),
-    );
+          );
+    });
   }, [allNests, nestQuery, nestScope, nestSort]);
   const nests = filteredNests.slice(0, nestPageSize);
   // The Documents browser offers a clear affordance whenever a control is
@@ -614,6 +621,34 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
       setCreateError(
         e instanceof Error ? e.message : "Failed to create nest",
       );
+    }
+  };
+
+  /**
+   * Pin or unpin, optimistically. A pin is a one-click reordering of the grid
+   * the user is looking at, so waiting a round trip to see the card move reads
+   * as a dropped click. The cached row is patched first and the write's own
+   * invalidation reconciles it; on failure the patch is rolled back and the
+   * error surfaces, since a silently-unpinned nest is worse than a toast.
+   */
+  const togglePin = async (nestId: string, pinned: boolean) => {
+    const patch = (value: boolean) =>
+      qc.setQueryData(reads.nestList().queryKey, (prev: any) =>
+        prev
+          ? {
+            ...prev,
+            nests: prev.nests.map((n: any) =>
+              n.id === nestId ? { ...n, pinned: value } : n,
+            ),
+          }
+          : prev,
+      );
+    patch(pinned);
+    try {
+      await api.setNestPinned(nestId, pinned);
+    } catch (err: any) {
+      patch(!pinned);
+      toast.error(err?.message ?? `Failed to ${pinned ? "pin" : "unpin"} this nest`);
     }
   };
 
@@ -1708,9 +1743,42 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                       shared/reviewer/viewer nests don't show teasing icons.
                       Rename: owner or nest-admin (PATCH /nests/:nestId).
                       Delete: owner, or admin caretaker on the ungoverned
-                      commons in key mode. */}
+                      commons in key mode.
+                      Pin: NO gate — a pin is this person's own bookmark, so a
+                      viewer pins exactly as an owner does, and it is the one
+                      action here everybody gets. */}
+                      <div className="absolute top-2 right-2 flex items-center gap-0.5">
+                        <button
+                          type="button"
+                          aria-label={
+                            nest.pinned
+                              ? `Unpin nest ${nest.name}`
+                              : `Pin nest ${nest.name}`
+                          }
+                          aria-pressed={!!nest.pinned}
+                          title={
+                            nest.pinned
+                              ? "Unpin — stop keeping this nest at the top"
+                              : "Pin — keep this nest at the top for you"
+                          }
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void togglePin(nest.id, !nest.pinned);
+                          }}
+                          className={`p-1.5 rounded-md hover:bg-secondary focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                            nest.pinned
+                              ? "text-amber-600 hover:text-amber-700"
+                              : "text-muted-foreground hover:text-foreground"
+                          }`}
+                          data-testid="pin-nest"
+                        >
+                          <Pin
+                            className={`h-3.5 w-3.5 ${nest.pinned ? "fill-current" : ""}`}
+                          />
+                        </button>
+                      </div>
                       {(canRename || canDelete) && (
-                        <div className="absolute top-2 right-2 flex items-center gap-0.5">
+                        <div className="absolute top-2 right-9 flex items-center gap-0.5">
                           {canRename && (
                             <button
                               type="button"

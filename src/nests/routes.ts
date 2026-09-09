@@ -13,6 +13,9 @@ import {
   listPublicNests,
   getNest,
   deleteNest,
+  pinNest,
+  unpinNest,
+  pinnedNestIds,
   renameNest,
   isStewardshipEnabled,
   setStewardshipEnabled,
@@ -124,6 +127,10 @@ nestRoutes.get("/", async (c) => {
   // resolves to permission='read' (see resolveNestPermission), so the card
   // would mislabel them "Viewer" unless we surface their steward roles too.
   const callerEmail = await resolveCallerEmail(userId);
+  // The caller's pins, in one query for the whole grid rather than a boolean
+  // lookup per card. Stamped onto every row below so the dashboard can float
+  // them to the top without a second round-trip.
+  const pinned = await pinnedNestIds(userId);
   // Nests the caller reaches ONLY through a share grant (one document or one
   // folder). resolveNestPermission returns "none" for them by design — a grant
   // is not nest-wide access — so the card is labelled from these rows instead,
@@ -161,6 +168,7 @@ nestRoutes.get("/", async (c) => {
         roles: ["viewer"],
         grant_only: true,
         stewardship_enabled: !!n.stewardship_enabled,
+        pinned: pinned.has(n.id),
       };
     }
     const is_owner = permission === "owner";
@@ -191,6 +199,7 @@ nestRoutes.get("/", async (c) => {
       roles,
       grant_only: false,
       stewardship_enabled: !!n.stewardship_enabled,
+      pinned: pinned.has(n.id),
     };
   };
   // Dedupe by id (owner/shared rows win over public discovery row), then
@@ -532,6 +541,34 @@ nestRoutes.patch("/:nestId", async (c) => {
     description: body.description,
   });
   return c.json({ nest });
+});
+
+/**
+ * POST/DELETE /nests/:nestId/pin — the caller's own bookmark on this nest.
+ *
+ * No permission tier beyond seeing the nest: a pin changes nothing about the
+ * nest and is visible to nobody else, so a viewer may pin exactly as an owner
+ * does. It is NOT ungated, though — the read check below is what stops the
+ * endpoint being used to find out whether a nest id exists.
+ */
+nestRoutes.post("/:nestId/pin", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  if ((await effectivePermission(nestId, userId)) === "none") {
+    throw new NotFoundError("Nest not found");
+  }
+  await pinNest(userId, nestId);
+  return c.json({ pinned: true });
+});
+
+nestRoutes.delete("/:nestId/pin", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  if ((await effectivePermission(nestId, userId)) === "none") {
+    throw new NotFoundError("Nest not found");
+  }
+  await unpinNest(userId, nestId);
+  return c.json({ pinned: false });
 });
 
 // DELETE /nests/:nestId
