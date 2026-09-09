@@ -43,7 +43,7 @@ import {
   isIdUnderFolder,
   isDerivedAnnotationsNode,
 } from "../nodes/service.js";
-import { deleteNest } from "../nests/service.js";
+import { deleteNest, archiveNest } from "../nests/service.js";
 import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
@@ -1645,7 +1645,15 @@ async function runTool(
         return `Rejected the deletion request for **${label}**. It stays, and ${request.requestedBy} has been told why.`;
       }
 
-      if (request.targetType === "nest") {
+      // Same branch set as the REST honour route (governance/routes.ts) — this
+      // is a parallel implementation of the same verdict, so a target type
+      // missing here doesn't fall through to a sensible default: it reaches
+      // deleteNode with a nodeId that is really a NEST id and throws
+      // "Node not found".
+      if (request.targetType === "nest_archive") {
+        // archiveNest clears the pending nest_archive row itself.
+        await archiveNest(nestId);
+      } else if (request.targetType === "nest") {
         await deleteNest(nestId);
       } else if (request.targetType === "folder") {
         await deleteFolder(nestId, request.nodeId, userEmail);
@@ -1664,7 +1672,9 @@ async function runTool(
         targetType: request.targetType,
         baseUrl: ctx.baseUrl,
       });
-      return `Deleted **${label}** — ${request.requestedBy}'s request was honoured. Irreversible.`;
+      return request.targetType === "nest_archive"
+        ? `Archived **${label}** — ${request.requestedBy}'s request was honoured. Nothing was deleted: the nest is read-only and hidden until someone restores it.`
+        : `Deleted **${label}** — ${request.requestedBy}'s request was honoured. Irreversible.`;
     }
 
     case "context_review_queue": {

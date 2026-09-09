@@ -3,11 +3,11 @@
  */
 import React, { useState, useEffect, useMemo } from "react";
 import * as api from "../lib/api";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, useQuery } from "@tanstack/react-query";
 import { reads, useNests } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft, Bookmark,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft, Archive, ArchiveRestore, Bookmark,
 } from "lucide-react";
 import { ANON_USER_ID, BULK_REVIEW_LIMIT } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
@@ -123,6 +123,20 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
     refetch: refetchNests,
   } = useNests();
   const allNests = nestsData?.nests ?? [];
+  // Which top-level tab is open. Controlled (it used to be uncontrolled) so the
+  // Archived list can stay unfetched until someone actually asks for it —
+  // archived nests are a rare visit, not part of every dashboard load.
+  const [tab, setTab] = useState("nests");
+  const { data: archivedData, isLoading: archivedLoading } = useQuery({
+    ...reads.nestList(true),
+    enabled: tab === "archived",
+  });
+  const archivedNests: any[] = archivedData?.nests ?? [];
+  const [restoreTarget, setRestoreTarget] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+  const [restoring, setRestoring] = useState(false);
   // Grid controls — a long account is otherwise one unbroken scroll. Filtering
   // and sorting are client-side over the list already in hand; the page size
   // just bounds how many cards are mounted at once.
@@ -729,7 +743,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
       {/* Tabbed view: Nests (default) vs My Work. With 200+ work items the
           stacked layout pushed the nest grid below a huge scroll — tabs keep
           nests one click away without touching either section's internals. */}
-      <Tabs defaultValue="nests">
+      <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="h-12 p-1.5">
           <TabsTrigger value="nests" className="px-6 py-2 text-sm">
             <Database className="h-4 w-4 mr-1.5" />
@@ -753,7 +767,86 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
               </span>
             )}
           </TabsTrigger>
+          {/* Archived nests are put away, not gone — this is the one place they
+              appear, and the only place they can be restored from. */}
+          <TabsTrigger value="archived" className="px-6 py-2 text-sm gap-1.5">
+            <Archive className="h-4 w-4" />
+            Archived
+          </TabsTrigger>
         </TabsList>
+
+        <TabsContent value="archived" className="space-y-4">
+          {archivedLoading ? (
+            <div className="flex items-center gap-2 py-10 justify-center text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading archived nests…
+            </div>
+          ) : archivedNests.length === 0 ? (
+            <div className="rounded-lg border border-dashed py-12 text-center">
+              <Archive className="h-8 w-8 mx-auto mb-3 text-muted-foreground" />
+              <p className="text-sm font-medium">No archived nests</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                Archiving a nest puts it here instead of deleting it — the option
+                is in the delete dialog on any nest you own.
+              </p>
+            </div>
+          ) : (
+            <>
+              <p className="text-xs text-muted-foreground">
+                These nests are read-only. They don't appear on your dashboard,
+                answer agents over MCP, or serve published links until restored.
+              </p>
+              <div className="space-y-2">
+                {archivedNests.map((n: any) => (
+                  <div
+                    key={n.id}
+                    className="flex items-center gap-3 rounded-lg border px-4 py-3"
+                  >
+                    <Archive className="h-4 w-4 text-muted-foreground shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium">{n.name}</div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        {n.archived_at
+                          ? `Archived ${relTime(n.archived_at)}`
+                          : "Archived"}
+                        {n.description ? ` — ${n.description}` : ""}
+                      </div>
+                    </div>
+                    {n.is_owner && (
+                      <>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            setRestoreTarget({ id: n.id, name: n.name })
+                          }
+                          data-testid="restore-nest"
+                        >
+                          <ArchiveRestore className="h-3.5 w-3.5 mr-1.5" />
+                          Restore
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-red-700 hover:text-red-800"
+                          onClick={() =>
+                            setDeleteTarget({
+                              id: n.id,
+                              name: n.name,
+                              isImported: !!n.is_imported,
+                            })
+                          }
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </TabsContent>
 
         <TabsContent value="work">
           {/* My Work — cross-nest inbox. Slack/CRM-clean: two tight lists, every
@@ -2151,8 +2244,74 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
             setDeleteTarget(null);
             await fetchNests();
           }}
+          // Already archived: the card offers Restore, so the dialog it opens
+          // is delete-only.
+          onArchived={
+            tab === "archived"
+              ? undefined
+              : async () => {
+                  setDeleteTarget(null);
+                  toast.success(
+                    `"${deleteTarget.name}" archived — find it under Archived`,
+                  );
+                  await fetchNests();
+                }
+          }
         />
       )}
+
+      {/* Restoring is reversible and non-destructive, but it puts a nest back in
+          front of collaborators and re-opens its published links — worth one
+          deliberate click rather than an instant, silent change. */}
+      <AlertDialog
+        open={!!restoreTarget}
+        onOpenChange={(open) => {
+          if (!open && !restoring) setRestoreTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Restore “{restoreTarget?.name}”?</AlertDialogTitle>
+            <AlertDialogDescription>
+              It goes back exactly as it was — same documents, versions and
+              stewards. It returns to your dashboard, becomes writable again,
+              and its published links and MCP access start answering.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={restoring}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={restoring}
+              onClick={async (e) => {
+                // Keep the dialog up while the request is in flight; it closes
+                // on success below.
+                e.preventDefault();
+                if (!restoreTarget) return;
+                setRestoring(true);
+                try {
+                  await api.restoreNest(restoreTarget.id);
+                  toast.success(`"${restoreTarget.name}" restored`);
+                  setRestoreTarget(null);
+                  await fetchNests();
+                } catch (err: any) {
+                  toast.error(err?.message ?? "Failed to restore this nest");
+                } finally {
+                  setRestoring(false);
+                }
+              }}
+            >
+              {restoring ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
+                  Restoring...
+                </>
+              ) : (
+                "Restore nest"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Dialog
         open={!!discardTarget}

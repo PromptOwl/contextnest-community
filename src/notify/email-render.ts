@@ -51,7 +51,8 @@ export interface EmailEventDetails {
     | "steward"
     | "deletion_requested"
     | "deletion_declined"
-    | "deletion_deleted";
+    | "deletion_deleted"
+    | "deletion_archived";
   /** Document title (or nest name for a share event). */
   docTitle: string;
   /** Location: "Nest name" or "Nest name / Subfolder". */
@@ -101,6 +102,14 @@ const STATUS_META: Record<
     subjectWord: "deleted",
     label: "Deleted",
     color: "#dc2626",
+  },
+  // An honoured ARCHIVE request. Deliberately not the deletion palette: the
+  // nest is intact and restorable, and red "Deleted" would tell the requester
+  // the opposite of what happened.
+  deletion_archived: {
+    subjectWord: "archived",
+    label: "Archived",
+    color: "#0891b2",
   },
 };
 
@@ -258,6 +267,16 @@ const TEMPLATES: Record<EmailEventDetails["status"], EmailTemplate> = {
       `${x.title} has been deleted${x.byT}${x.noteT} — your deletion request was accepted.`,
     lineH: (x) =>
       `${x.doc} has been deleted${x.byH}${x.noteH} — your deletion request was accepted.`,
+    rows: governanceRows,
+  },
+  deletion_archived: {
+    heading: (x) => `${x.title} was ${x.meta.subjectWord}`,
+    detailsHeader: "Nest details",
+    linkLabel: "Open nest",
+    lineT: (x) =>
+      `${x.title} has been archived${x.byT}${x.noteT} — your request was accepted. Nothing was deleted: every document and version is intact, and an owner can restore it.`,
+    lineH: (x) =>
+      `${x.doc} has been archived${x.byH}${x.noteH} — your request was accepted. Nothing was deleted: every document and version is intact, and an owner can restore it.`,
     rows: governanceRows,
   },
   steward: {

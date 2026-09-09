@@ -498,13 +498,34 @@ export async function pinnedNestIds(userId: string): Promise<Set<string>> {
   return new Set(rows.map((r) => r.nest_id));
 }
 
-export async function listNests(userId: string): Promise<Nest[]> {
+/**
+* Archived nests are absent from every listing unless one explicitly asks for
+* them. Kept as SQL fragments rather than a post-filter so a nest that is put
+* away stops costing a row, a discovery walk and a title map everywhere it used
+* to appear — the work inbox, drafts, global search and the MCP index all read
+* through these helpers.
+*/
+const LIVE_ONLY = "archived_at IS NULL";
+const LIVE_ONLY_N = "n.archived_at IS NULL";
+
+/**
+* Owned nests. `archived: true` flips the list to ONLY archived rows — the
+* dashboard's Archived tab. It is deliberately the only helper that can show
+* them: archive, restore and delete are the owner's, so nobody else has an
+* action to take on an archived nest, and surfacing it to a collaborator would
+* be a card they can only look at.
+*/
+export async function listNests(
+ userId: string,
+ opts: { archived?: boolean } = {},
+): Promise<Nest[]> {
   const db = getDb();
+  const scope = opts.archived ? "archived_at IS NOT NULL" : LIVE_ONLY;
   // Own rows + (for admin/open) all anon-owned. Public discovery is
   // listPublicNests; route layer dedupes by id.
   if (userId === ANON_USER_ID) {
     return (await db.all(
-      "SELECT * FROM nests WHERE user_id = ? ORDER BY created_at DESC",
+      `SELECT * FROM nests WHERE user_id = ? AND ${scope} ORDER BY created_at DESC`,
       [ANON_USER_ID],
     )) as Nest[];
   }
@@ -512,14 +533,46 @@ export async function listNests(userId: string): Promise<Nest[]> {
     config.AUTH_MODE === "open" || (await isLicenseAdminUserId(userId));
   if (!includeAnon) {
     return (await db.all(
-      "SELECT * FROM nests WHERE user_id = ? ORDER BY created_at DESC",
+      `SELECT * FROM nests WHERE user_id = ? AND ${scope} ORDER BY created_at DESC`,
       [userId],
     )) as Nest[];
   }
   return (await db.all(
-    "SELECT * FROM nests WHERE user_id = ? OR user_id = ? ORDER BY created_at DESC",
+    `SELECT * FROM nests WHERE (user_id = ? OR user_id = ?) AND ${scope}
+      ORDER BY created_at DESC`,
     [userId, ANON_USER_ID],
   )) as Nest[];
+}
+
+/**
+ * Put a nest away: hidden and read-only, nothing deleted. Idempotent.
+ *
+ * Both statements run in ONE transaction, for the reason deleteNest gives: the
+ * flag and the queue cleanup have to land together. An editor's "please archive
+ * this nest" is answered by the nest being archived, however that happened — the
+ * owner may well have done it directly rather than through the queue — and a
+ * request row that outlived the flag is stranded for good, since an archived
+ * nest caps everyone at read and the honour route can never action it again.
+ * Crashing between the two would produce exactly the state this cleanup exists
+ * to prevent.
+ */
+export async function archiveNest(nestId: string): Promise<void> {
+  await getDb().transaction(async (tx) => {
+    await tx.run(
+      "UPDATE nests SET archived_at = ? WHERE id = ? AND archived_at IS NULL",
+      [new Date().toISOString(), nestId],
+    );
+    await tx.run(
+      `DELETE FROM deletion_requests
+        WHERE nest_id = ? AND target_type = 'nest_archive' AND status = 'pending'`,
+      [nestId],
+    );
+  });
+}
+
+/** Bring it back exactly as it was — same documents, versions, stewards. */
+export async function restoreNest(nestId: string): Promise<void> {
+  await getDb().run("UPDATE nests SET archived_at = NULL WHERE id = ?", [nestId]);
 }
 
 export function isAnonymousNest(nest: Pick<Nest, "user_id">): boolean {
@@ -560,6 +613,7 @@ async function nestsSharedViaTeams(userId: string): Promise<Nest[]> {
   const candidates = (await db.all(
     `SELECT * FROM nests
        WHERE user_id != ?
+         AND ${LIVE_ONLY}
          AND (${ids.map(() => "shared_teams LIKE ?").join(" OR ")})`,
     [userId, ...ids.map((id) => `%${id}%`)],
   )) as Array<Nest & { shared_teams?: string }>;
@@ -602,6 +656,7 @@ export async function listSharedNests(userId: string): Promise<Nest[]> {
        LEFT JOIN grants g
          ON g.nest_id = n.id AND g.user_id = ?
        WHERE n.user_id != ?
+         AND ${LIVE_ONLY_N}
          AND (nc.user_id IS NOT NULL OR s.id IS NOT NULL OR g.id IS NOT NULL)
        ORDER BY n.created_at DESC`,
     [userId, userId, userId, userId],
@@ -623,7 +678,8 @@ export async function listSharedNests(userId: string): Promise<Nest[]> {
   // is shown: another real user's private nest still stays hidden.
   if (await isServerAdminUserId(userId)) {
     const anon = (await db.all(
-      "SELECT * FROM nests WHERE user_id = ? ORDER BY created_at DESC",
+      `SELECT * FROM nests WHERE user_id = ? AND ${LIVE_ONLY}
+        ORDER BY created_at DESC`,
       [ANON_USER_ID],
     )) as Nest[];
     for (const n of anon) {
@@ -698,11 +754,12 @@ export async function listVisibleNests(
          ON s.nest_id = n.id AND s.is_active = 1
         AND LOWER(s.user_email) = LOWER(u.email)
        ${opts.readable ? "LEFT JOIN grants g ON g.nest_id = n.id AND g.user_id = ?" : ""}
-      WHERE n.user_id = ?
+      WHERE ${LIVE_ONLY_N}
+        AND (n.user_id = ?
          OR nc.user_id IS NOT NULL
          OR s.id IS NOT NULL
          ${opts.readable ? "OR g.id IS NOT NULL OR n.visibility = 'public'" : ""}
-         ${includeAnon ? "OR n.user_id = ?" : ""}
+         ${includeAnon ? "OR n.user_id = ?" : ""})
       ORDER BY n.created_at DESC`,
     params,
   )) as Nest[];
@@ -725,6 +782,7 @@ export async function listPublicNests(userId: string): Promise<Nest[]> {
   return (await db.all(
     `SELECT n.* FROM nests n
        WHERE n.visibility = 'public'
+         AND ${LIVE_ONLY_N}
          AND n.user_id != ?
          AND NOT EXISTS (
            SELECT 1 FROM nest_collaborators nc

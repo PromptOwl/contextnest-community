@@ -200,10 +200,19 @@ export async function createPublish(params: {
   return row;
 }
 
+/**
+ * Every `/p/:slug` route resolves through here, so archiving the nest takes its
+ * published links off the internet in one place — they answer the same
+ * not-found page a revoked link does. Nothing is unpublished: restoring the
+ * nest brings every link back live at the same URL.
+ */
 export async function getPublishBySlug(slug: string): Promise<PublishRow | undefined> {
-  return (await getDb().get("SELECT * FROM publish WHERE slug = ?", [slug])) as
-    | PublishRow
-    | undefined;
+  return (await getDb().get(
+    `SELECT p.* FROM publish p
+       JOIN nests n ON n.id = p.nest_id
+      WHERE p.slug = ? AND n.archived_at IS NULL`,
+    [slug],
+  )) as PublishRow | undefined;
 }
 
 export async function getPublishById(
