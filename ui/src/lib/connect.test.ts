@@ -240,6 +240,15 @@ describe("nestSetupPrompt", () => {
     expect(p).toMatch(/without a shell to/);
   });
 
+  it("makes writing the key into a config file the user's call", () => {
+    // A released-prompt run wrote the key into ~/.claude.json unprompted,
+    // following "add an MCP server" literally. Same invitation here, so the
+    // same guard: a credential landing on disk is a decision, not a step.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toMatch(/ASK ME FIRST if setting either of these means/);
+    expect(p).toMatch(/writing my key into a config file/);
+  });
+
   it("names write tools rather than asserting write capability", () => {
     // Prose assertion ("this connection reads AND writes") left 5 of 6 agents
     // answering "unsure". A named mechanism is what they actually believed.

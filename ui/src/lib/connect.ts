@@ -250,7 +250,9 @@ export function nestSetupPrompt(
     "",
     `THEN — answer from the nest, cite what you use as \`${nestName}:nodes/<slug>\` (that is the id shape the server returns), and say plainly when something is not covered.`,
     "",
-    "LATER, optional, persists across sessions — either of these, with the same credential:",
+    "LATER, optional, persists across sessions — ASK ME FIRST if setting either of these means",
+    "writing my key into a config file on this machine; that is my call, not a step you take in",
+    "passing. Both use the same credential:",
     `    an MCP server "contextnest" at ${mcp}${openMode ? "" : " (Bearer header)"}`,
     ...ctxCliConnectSnippet(base, nestId, nestName, openMode)
       .split("\n")
