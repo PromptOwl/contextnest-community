@@ -1,5 +1,15 @@
 # @promptowl/contextnest-community
 
+## 1.21.1
+
+### Patch Changes
+
+- **Fix the notification inbox returning a 500 on Postgres.** On a Postgres deployment, `GET /me/work` and `GET /me/notifications` failed with `syntax error at or near ")"`, so the inbox and the work list were empty for everyone.
+
+  The cause was in the `?` → `$1` placeholder translation. The scanner skips a `?` inside a quoted string literal so a literal is never rewritten, but it did not know about SQL comments — and an apostrophe in an ordinary English comment ("there's no request row") read as the opening quote of a literal. Every placeholder after that point was left as a bare `?`, which Postgres parses as an operator rather than a parameter.
+
+  The scanner now skips `--` and `/* */` comments whole, so prose in a query can contain apostrophes without disarming the placeholders that follow it. SQLite deployments were never affected, since they take `?` natively.
+
 ## 1.21.0
 
 ### Minor Changes
