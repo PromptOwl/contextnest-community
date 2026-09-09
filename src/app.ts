@@ -2030,7 +2030,15 @@ export function createApp(): Hono<AuthEnv> {
       (parts[parts.length - 1] === "revert" ||
         parts[parts.length - 1] === "move");
     let stewardEditorBypass = false;
-    if (required === "write" && permission === "read" && parts[1] === "nodes") {
+    // `!access.archived`: the cap leaves every caller at "read", which is
+    // exactly the shape this bypass fires on — without it, archiving would
+    // ARM the bypass for write collaborators who also hold an editor row.
+    if (
+      required === "write" &&
+      permission === "read" &&
+      !access.archived &&
+      parts[1] === "nodes"
+    ) {
       const userEmail = await resolveCallerEmail(userId);
       if (
         parts.length >= 3 &&

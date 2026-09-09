@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { join } from "node:path";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import {
   setupTestEnv,
   createTestApp,
@@ -579,5 +581,250 @@ describe("nest archive — honouring an archive request over MCP", () => {
       owner.apiKey,
     );
     expect(put.data.nests.map((n: any) => n.id)).toEqual([nestId]);
+  });
+});
+
+// The cap in resolveNestAccess clamps the NEST-WIDE permission. Two callers
+// reach a write without one: a document/folder grantee (no collaborator row,
+// so the merge is already "none" and there is nothing to clamp) and an editor
+// steward (whose bypass fires precisely on the "read" shape the cap creates).
+// Both are capped where they resolve — resolveNodeGrant and the bypass guard.
+describe("nest archive — callers that bypass the nest-wide permission", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string; email: string };
+  let guest: { apiKey: string; email: string };
+  let stewardUser: { apiKey: string; email: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@acme.com", "Owner");
+    guest = await registerUser(app, "guest@acme.com", "Guest");
+    stewardUser = await registerUser(app, "steward@acme.com", "Steward");
+
+    const { data: nest } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Shared Then Archived" },
+      owner.apiKey,
+    );
+    nestId = nest.nest.id;
+
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Shared One", content: "# shared" },
+      owner.apiKey,
+    );
+    // A write grant on that document — guest is NOT a collaborator.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/grants`,
+      {
+        target_type: "document",
+        target: "nodes/shared-one",
+        email: guest.email,
+        role: "write",
+      },
+      owner.apiKey,
+    );
+    // A read collaborator who is also a nest-scope editor steward — the pair
+    // the bypass exists for.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: stewardUser.email, permission: "read" },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/stewards`,
+      { scope: "nest", email: stewardUser.email, role: "editor" },
+      owner.apiKey,
+    );
+  }, 30000);
+
+  afterAll(() => env.cleanup());
+
+  it("a write grantee can edit while the nest is live, and not once archived", async () => {
+    const before = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/nodes/shared-one`,
+      { content: "# edited while live" },
+      guest.apiKey,
+    );
+    expect(before.status).toBe(200);
+
+    const archived = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/archive`,
+      {},
+      owner.apiKey,
+    );
+    expect(archived.status).toBe(200);
+
+    const after = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/nodes/shared-one`,
+      { content: "# edited after archive" },
+      guest.apiKey,
+    );
+    expect(after.status).toBe(403);
+
+    // Still readable — the grant is capped to read, not revoked.
+    const read = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/nodes/shared-one`,
+      null,
+      guest.apiKey,
+    );
+    expect(read.status).toBe(200);
+
+    const del = await jsonRequest(
+      app,
+      "DELETE",
+      `/nests/${nestId}/nodes/nodes/shared-one`,
+      null,
+      guest.apiKey,
+    );
+    expect(del.status).toBe(403);
+  });
+
+  it("an editor steward's bypass does not survive the archive", async () => {
+    const patch = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/nodes/shared-one`,
+      { content: "# steward edit" },
+      stewardUser.apiKey,
+    );
+    expect(patch.status).toBe(403);
+
+    const restored = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/restore`,
+      {},
+      owner.apiKey,
+    );
+    expect(restored.status).toBe(200);
+
+    // Restore hands both callers their write back.
+    const again = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/nodes/shared-one`,
+      { content: "# steward edit after restore" },
+      stewardUser.apiKey,
+    );
+    expect(again.status).toBe(200);
+    const grantee = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/nodes/shared-one`,
+      { content: "# grantee edit after restore" },
+      guest.apiKey,
+    );
+    expect(grantee.status).toBe(200);
+  });
+});
+
+// The drift scanner is a background surface like trigger hooks and the
+// scheduler: it STAGES suggestion files and marks the index stale, so it must
+// stop on an archived nest. The GET ?refresh=true path is the sharp edge — a
+// GET slips past the middleware's write-tier bump, so the gate has to live in
+// scanNestForDrift itself.
+describe("nest archive — drift scanner", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let nestId: string;
+  let nodeId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@acme.com", "Owner");
+    const { data: nest } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Drifting Then Archived" },
+      owner.apiKey,
+    );
+    nestId = nest.nest.id;
+    const { data: node } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Rate Limits", content: "# Rate Limits\n\n100 rpm.\n" },
+      owner.apiKey,
+    );
+    nodeId = node.node.id;
+  }, 30000);
+
+  afterAll(() => env.cleanup());
+
+  it("stages nothing while archived, and picks the same edit up after restore", async () => {
+    const nestDir = join(process.env.DATA_ROOT!, "nests", nestId);
+    const docFile = (
+      readdirSync(nestDir, { recursive: true } as any) as string[]
+    )
+      .map(String)
+      .find(
+        (f) =>
+          f.endsWith(".md") &&
+          f.includes("nodes") &&
+          !f.endsWith("INDEX.md") &&
+          !f.endsWith("CONTEXT.md"),
+      );
+    expect(docFile).toBeTruthy();
+    const docPath = join(nestDir, docFile!);
+
+    await jsonRequest(app, "POST", `/nests/${nestId}/archive`, {}, owner.apiKey);
+    writeFileSync(docPath, readFileSync(docPath, "utf-8") + "\n\nEdited on disk.\n");
+
+    // The GET refresh path — a write side effect behind a read-tier method.
+    const refreshed = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/external-edits?refresh=true`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.data.entries).toEqual([]);
+
+    const pending = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/${nodeId}/external-edits`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(pending.data.pending).toBeFalsy();
+
+    // Restore, and the very same on-disk edit is staged — the scan was
+    // suspended, not the drift lost.
+    await jsonRequest(app, "POST", `/nests/${nestId}/restore`, {}, owner.apiKey);
+    const after = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/external-edits?refresh=true`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(after.data.entries.length).toBe(1);
   });
 });

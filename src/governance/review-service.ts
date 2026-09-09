@@ -1010,12 +1010,16 @@ export async function requestDeletion(params: {
   const targetType = params.targetType || "document";
   const noun =
     targetType === "document" ? "node" : targetType === "folder" ? "folder" : "nest";
+  // A nest and a nest_archive request target the same nest id and can both be
+  // open, so the clash message has to name which one is already there.
+  const kind =
+    targetType === "nest_archive" ? "An archive request" : "A deletion request";
   const existing = await db.get(
     "SELECT id FROM deletion_requests WHERE nest_id = ? AND node_id = ? AND target_type = ? AND status = 'pending'",
     [params.nestId, params.nodeId, targetType],
   );
   if (existing) {
-    throw new ConflictError(`A deletion request is already pending for this ${noun}`);
+    throw new ConflictError(`${kind} is already pending for this ${noun}`);
   }
 
   const id = uuid();
@@ -1043,7 +1047,7 @@ export async function requestDeletion(params: {
       params.nodeId,
       err,
     );
-    throw new ConflictError(`A deletion request is already pending for this ${noun}`);
+    throw new ConflictError(`${kind} is already pending for this ${noun}`);
   }
   const request = (await getDeletionRequest(id))!;
   await notifyDeletionRequested(request, params.baseUrl);
