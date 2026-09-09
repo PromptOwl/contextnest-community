@@ -172,7 +172,13 @@ export function nestSetupPrompt(
 ): string {
   const base = serverUrl.replace(/\/+$/, "");
   const mcp = `${base}/nests/${nestId}/mcp`;
-  const auth = openMode ? "" : ' -H "Authorization: Bearer $CONTEXTNEST_API_KEY"';
+  // One definition of the auth header, used by every curl in the brief. STEP 1
+  // built its own copy with a separate ternary, which is exactly how the two
+  // drift apart if the header format ever changes.
+  const authHeader = openMode
+    ? ""
+    : '-H "Authorization: Bearer $CONTEXTNEST_API_KEY" ';
+  const auth = authHeader ? ` ${authHeader.trimEnd()}` : "";
   return [
     `Connect to my ContextNest nest "${nestName}" and treat it as my source of truth.`,
     "",
@@ -184,9 +190,7 @@ export function nestSetupPrompt(
     "",
     "STEP 1 — read the nest:",
     `    curl -s -X POST ${base}/nests/${nestId}/context \\`,
-    openMode
-      ? '      -H "Content-Type: application/json" \\'
-      : '      -H "Authorization: Bearer $CONTEXTNEST_API_KEY" -H "Content-Type: application/json" \\',
+    `      ${authHeader}-H "Content-Type: application/json" \\`,
     "      -d '{\"selector\":\"type:document\",\"hops\":1,\"max_tokens\":2000}'",
     "",
     "  Documents back? You're connected. Name them, then read WHAT YOU CAN DO below.",
