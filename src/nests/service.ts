@@ -441,6 +441,63 @@ export async function importNest(userId: string, name: string): Promise<Nest> {
   return (await db.get("SELECT * FROM nests WHERE id = ?", [id])) as Nest;
 }
 
+/**
+ * Pin a nest for one person. Pinning is a personal bookmark, not a change to
+ * the nest — two people sharing one nest keep different pins — so there is no
+ * permission tier beyond being able to see it (the route gate handles that).
+ * Idempotent: pinning an already-pinned nest is a no-op, not a constraint error.
+ */
+export async function pinNest(userId: string, nestId: string): Promise<void> {
+  const db = getDb();
+  // No INSERT OR IGNORE / ON CONFLICT — the two dialects spell it differently.
+  // The check is the fast path; the catch is what makes it correct. Two clicks
+  // landing together both pass the SELECT, and the loser's INSERT trips the
+  // (user_id, nest_id) primary key — which would surface as a 409 on SQLite and
+  // a 500 on Postgres for an operation whose whole contract is idempotence. A
+  // double-click is the likeliest way to reach this, so it is not theoretical.
+  const existing = await db.get(
+    "SELECT 1 FROM nest_pins WHERE user_id = ? AND nest_id = ?",
+    [userId, nestId],
+  );
+  if (existing) return;
+  try {
+    await db.run(
+      "INSERT INTO nest_pins (user_id, nest_id) VALUES (?, ?)",
+      [userId, nestId],
+    );
+  } catch (err) {
+    // Re-read rather than pattern-match the driver's error text: if the row is
+    // there now, someone else's insert won and the caller's intent is satisfied.
+    // Anything else (a real failure) still throws.
+    const now = await db.get(
+      "SELECT 1 FROM nest_pins WHERE user_id = ? AND nest_id = ?",
+      [userId, nestId],
+    );
+    if (!now) throw err;
+  }
+}
+
+/** Remove a pin. Idempotent — unpinning what isn't pinned is a no-op. */
+export async function unpinNest(userId: string, nestId: string): Promise<void> {
+  await getDb().run(
+    "DELETE FROM nest_pins WHERE user_id = ? AND nest_id = ?",
+    [userId, nestId],
+  );
+}
+
+/**
+ * Every nest this person has pinned, as a Set. ONE query for the whole
+ * dashboard: the card annotation runs per nest, and asking per card would add a
+ * round trip to each one for a boolean.
+ */
+export async function pinnedNestIds(userId: string): Promise<Set<string>> {
+  const rows = (await getDb().all(
+    "SELECT nest_id FROM nest_pins WHERE user_id = ?",
+    [userId],
+  )) as Array<{ nest_id: string }>;
+  return new Set(rows.map((r) => r.nest_id));
+}
+
 export async function listNests(userId: string): Promise<Nest[]> {
   const db = getDb();
   // Own rows + (for admin/open) all anon-owned. Public discovery is
@@ -711,6 +768,13 @@ export async function deleteNest(nestId: string): Promise<void> {
       // Table not present on legacy DBs — fine, nothing to clean.
     }
     await tx.run("DELETE FROM api_keys WHERE nest_id = ?", [id]);
+    // Pins are FK-cascaded too; explicit for the same reason as the rows above,
+    // and wrapped because a DB predating the pins migration has no such table.
+    try {
+      await tx.run("DELETE FROM nest_pins WHERE nest_id = ?", [id]);
+    } catch {
+      // Table not present on legacy DBs — nothing to clean.
+    }
     await tx.run("DELETE FROM nests WHERE id = ?", [id]);
   });
 

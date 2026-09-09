@@ -7,7 +7,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads, useNests } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft, Bookmark,
 } from "lucide-react";
 import { ANON_USER_ID, BULK_REVIEW_LIMIT } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
@@ -145,13 +145,20 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
         (n.description ?? "").toLowerCase().includes(q)
       );
     });
-    return [...matched].sort((a: any, b: any) =>
-      nestSort === "name"
+    // Pinned first, then the chosen sort. One extra term rather than a separate
+    // list: the search box and scope filter still decide WHICH nests appear —
+    // a pinned nest that doesn't match what you typed should stay hidden — and
+    // because the page-size slice happens after this, pins are always on the
+    // first page.
+    return [...matched].sort((a: any, b: any) => {
+      const pin = Number(!!b.pinned) - Number(!!a.pinned);
+      if (pin !== 0) return pin;
+      return nestSort === "name"
         ? String(a.name ?? "").localeCompare(String(b.name ?? ""))
         : String(b.last_activity ?? b.created_at ?? "").localeCompare(
             String(a.last_activity ?? a.created_at ?? ""),
-          ),
-    );
+          );
+    });
   }, [allNests, nestQuery, nestScope, nestSort]);
   const nests = filteredNests.slice(0, nestPageSize);
   // The Documents browser offers a clear affordance whenever a control is
@@ -177,6 +184,8 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
+  // Nest ids with a pin write in flight — one click at a time per card.
+  const [pinBusy, setPinBusy] = useState<Set<string>>(new Set());
   // Pending target sits in state so the modal can render the nest name in
   // the confirmation copy without prop-drilling through a separate child.
   const [deleteTarget, setDeleteTarget] = useState<
@@ -614,6 +623,46 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
       setCreateError(
         e instanceof Error ? e.message : "Failed to create nest",
       );
+    }
+  };
+
+  /**
+   * Pin or unpin, optimistically. A pin is a one-click reordering of the grid
+   * the user is looking at, so waiting a round trip to see the card move reads
+   * as a dropped click. The cached row is patched first and the write's own
+   * invalidation reconciles it; on failure the patch is rolled back and the
+   * error surfaces, since a silently-unpinned nest is worse than a toast.
+   */
+  const togglePin = async (nestId: string, pinned: boolean) => {
+    // Ignore a second click while the first is in flight. Both would read the
+    // same `pinned` off the current render and send the SAME request rather
+    // than a pin/unpin pair — the server is idempotent about that now, but
+    // firing it at all is just a wasted round trip.
+    if (pinBusy.has(nestId)) return;
+    setPinBusy((prev) => new Set(prev).add(nestId));
+    const patch = (value: boolean) =>
+      qc.setQueryData(reads.nestList().queryKey, (prev: any) =>
+        prev
+          ? {
+            ...prev,
+            nests: prev.nests.map((n: any) =>
+              n.id === nestId ? { ...n, pinned: value } : n,
+            ),
+          }
+          : prev,
+      );
+    patch(pinned);
+    try {
+      await api.setNestPinned(nestId, pinned);
+    } catch (err: any) {
+      patch(!pinned);
+      toast.error(err?.message ?? `Failed to ${pinned ? "pin" : "unpin"} this nest`);
+    } finally {
+      setPinBusy((prev) => {
+        const next = new Set(prev);
+        next.delete(nestId);
+        return next;
+      });
     }
   };
 
@@ -1708,45 +1757,83 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                       shared/reviewer/viewer nests don't show teasing icons.
                       Rename: owner or nest-admin (PATCH /nests/:nestId).
                       Delete: owner, or admin caretaker on the ungoverned
-                      commons in key mode. */}
-                      {(canRename || canDelete) && (
-                        <div className="absolute top-2 right-2 flex items-center gap-0.5">
-                          {canRename && (
-                            <button
-                              type="button"
-                              aria-label={`Rename nest ${nest.name}`}
-                              title="Rename nest"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setRenameTarget({
-                                  id: nest.id,
-                                  name: nest.name,
-                                  description: nest.description ?? null,
-                                });
-                              }}
-                              className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                            >
-                              <Pencil className="h-3.5 w-3.5" />
-                            </button>
+                      commons in key mode.
+                      Pin: NO gate — a pin is this person's own bookmark, so a
+                      viewer pins exactly as an owner does, and it is the one
+                      action here everybody gets.
+                      All three share ONE row: two absolutely-positioned groups
+                      drifted apart as the gated icons came and went. */}
+                      <div className="absolute top-2 right-2 flex items-center gap-0.5">
+                        {canRename && (
+                          <button
+                            type="button"
+                            aria-label={`Rename nest ${nest.name}`}
+                            title="Rename nest"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRenameTarget({
+                                id: nest.id,
+                                name: nest.name,
+                                description: nest.description ?? null,
+                              });
+                            }}
+                            className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
                           )}
                           {canDelete && (
-                            <button
-                              type="button"
-                              aria-label={`Delete nest ${nest.name}`}
-                              title="Delete nest"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                requestDelete(nest.id, nest.name, !!nest.is_imported);
-                              }}
-                              className="p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          )}
-                        </div>
-                      )}
+                          <button
+                            type="button"
+                            aria-label={`Delete nest ${nest.name}`}
+                            title="Delete nest"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              requestDelete(nest.id, nest.name, !!nest.is_imported);
+                            }}
+                            className="p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        {/* Bookmark, not a pushpin: the pin glyph sits at an
+                            angle and read as clutter beside the upright pencil
+                            and bin. Not a star either — that already means
+                            "prime document" elsewhere in the app. */}
+                        <button
+                          type="button"
+                          aria-label={
+                            nest.pinned
+                              ? `Unpin nest ${nest.name}`
+                              : `Pin nest ${nest.name}`
+                          }
+                          aria-pressed={!!nest.pinned}
+                          title={
+                            nest.pinned
+                              ? "Unpin — stop keeping this nest at the top"
+                              : "Pin — keep this nest at the top for you"
+                          }
+                          disabled={pinBusy.has(nest.id)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void togglePin(nest.id, !nest.pinned);
+                          }}
+                          className={`p-1.5 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60 ${
+                            nest.pinned
+                              ? "text-amber-500 hover:text-amber-600 hover:bg-amber-50"
+                              : "text-muted-foreground hover:text-foreground hover:bg-secondary"
+                          }`}
+                          data-testid="pin-nest"
+                        >
+                          <Bookmark
+                            className={`h-3.5 w-3.5 ${nest.pinned ? "fill-current" : ""}`}
+                          />
+                        </button>
+                      </div>
 
-                      <div className="flex items-start gap-3 pr-12">
+                      {/* Reserve room for up to three icons — a long nest name
+                          ran under them once pinning added a third. */}
+                      <div className="flex items-start gap-3 pr-20">
                         <div
                           className={`p-2 rounded-md ${isAnonymous ? "bg-amber-100" : "bg-primary/10"
                             }`}

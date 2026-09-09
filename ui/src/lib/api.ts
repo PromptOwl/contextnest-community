@@ -592,6 +592,14 @@ export async function deleteNest(nestId: string) {
   return request("/nests/" + nestId, { method: "DELETE" });
 }
 
+/** Pin/unpin this nest for the signed-in user. A pin is personal — it changes
+ *  nothing about the nest and nobody else sees it. */
+export async function setNestPinned(nestId: string, pinned: boolean) {
+  return request<{ pinned: boolean }>("/nests/" + nestId + "/pin", {
+    method: pinned ? "POST" : "DELETE",
+  });
+}
+
 export async function updateNest(
   nestId: string,
   patch: { name?: string; description?: string | null },

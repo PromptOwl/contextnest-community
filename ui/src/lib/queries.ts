@@ -315,6 +315,10 @@ const NEST_WRITE_SCOPES: Array<{
     match: /^\/(delete-folder|request-deletion)/,
     affects: (n) => [keys.nodes(n), keys.nestList()],
   },
+  // Pinning reorders the dashboard grid and the palette's nest rows, both of
+  // which read `pinned` off the cached nest list. Nothing inside the nest
+  // changes, so this deliberately does NOT drop keys.nest(n).
+  { match: /^\/pin/, affects: () => [keys.nestList()] },
 ];
 
 /**
