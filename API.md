@@ -202,6 +202,10 @@ Owner only (same gate as delete, license-admin caretaker branch included). Puts 
 
 An archived nest is capped at `read` for **everyone**, the owner included — one guard in `resolveNestAccess`, so every REST route, MCP tool and workflow gate refuses writes. It also disappears from `GET /nests`, `/me/work`, `/me/drafts`, `GET /search`, the MCP nest index, and `GET /nests/:nestId/mcp` (404 — a pinned nest id or a nest-scoped key stops answering). Its published `/p/:slug` links return the standard not-found page. Nothing is unpublished or deleted.
 
+Three surfaces sit outside the `/nests/:nestId` auth chain, so the permission cap cannot reach them and each carries its own `archived_at` check: `/p/:slug` (via `getPublishBySlug`), `POST /hooks/:token` (404 while archived — a trigger hook must not keep creating agent runs in a nest that was put away), and `schedulerTick`, which skips archived nests. All three are suspended, not disabled: restoring the nest brings its links, hooks and schedules back with no re-wiring.
+
+Archiving also drops any pending `nest_archive` deletion request for the nest — the ask has been granted, and a row left pending could not be actioned afterwards (the honour route needs write tier, which an archived nest denies everyone). A pending `nest` **deletion** request does survive archiving and cannot be honoured from the queue while archived; the owner deletes the nest directly (`DELETE /nests/:nestId` stays open to them) or restores it first.
+
 ### POST `/nests/:nestId/restore`
 Owner only. `{ "restored": true }`. Puts everything back exactly as it was — same documents, versions, stewards, links.
 

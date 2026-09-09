@@ -21,8 +21,11 @@ describe("nest archive", () => {
   let nestId: string;
   let otherNestId: string;
   let nodeId: string;
+  let hookToken: string;
 
   beforeAll(async () => {
+    // The trigger-hook and scheduler cases below are workflow-plane surfaces.
+    process.env.FEATURE_WORKFLOW_PLANE = "true";
     env = setupTestEnv();
     app = await createTestApp("key");
     owner = await registerUser(app, "owner@acme.com", "Owner");
@@ -64,9 +67,44 @@ describe("nest archive", () => {
       owner.apiKey,
     );
     nodeId = node.node.id;
+
+    // An agent node with a live webhook trigger and an enabled schedule — the
+    // two ways a nest keeps working with nobody logged in.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Digest Agent", content: "# Digest", type: "agent" },
+      owner.apiKey,
+    );
+    const { data: hook } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/hooks`,
+      { agent_node: "nodes/digest-agent", preset: "webhook" },
+      owner.apiKey,
+    );
+    hookToken = hook.hook.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/schedules`,
+      { agent_node: "nodes/digest-agent", every_minutes: 60 },
+      owner.apiKey,
+    );
   }, 30000);
 
-  afterAll(() => env.cleanup());
+  const fireHook = (token: string) =>
+    app.request(`http://localhost/hooks/${token}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account: "Foley" }),
+    });
+
+  afterAll(() => {
+    delete process.env.FEATURE_WORKFLOW_PLANE;
+    env.cleanup();
+  });
 
   it("archives, hides from the default list, and shows under ?archived=1", async () => {
     const archived = await jsonRequest(
@@ -135,6 +173,21 @@ describe("nest archive", () => {
     expect(data.nodes.every((n: any) => n.nest_id !== nestId)).toBe(true);
   });
 
+  // Both surfaces below run with nobody logged in — a webhook POST carries only
+  // its token, and the scheduler tick has no request at all — so the read-only
+  // permission cap never reaches either. Without their own archived check an
+  // archived nest goes on firing agent runs, which is what archiving is for.
+  it("stops answering its trigger hooks while archived", async () => {
+    const res = await fireHook(hookToken);
+    expect(res.status).toBe(404);
+  });
+
+  it("is skipped by the scheduler while archived", async () => {
+    const { schedulerTick } = await import("../src/workflow/scheduler.js");
+    const created = await schedulerTick(Date.now());
+    expect(created.length).toBe(0);
+  });
+
   it("is invisible to MCP by id, not just absent from the index", async () => {
     const { status } = await jsonRequest(
       app,
@@ -178,6 +231,41 @@ describe("nest archive", () => {
       owner.apiKey,
     );
     expect(data.nodes.some((n: any) => n.nest_id === nestId)).toBe(true);
+
+    // Automation comes back too — archiving suspends hooks and schedules, it
+    // does not disable them, so restoring needs no re-wiring.
+    const fired = await fireHook(hookToken);
+    expect(fired.status).toBe(201);
+  });
+
+  it("archiving answers a pending archive request instead of stranding it", async () => {
+    const asked = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/request-deletion`,
+      { targetType: "nest_archive", target: nestId, reason: "wound down" },
+      editor.apiKey,
+    );
+    expect(asked.status).toBe(201);
+
+    // The owner archives directly rather than through the queue — nothing stops
+    // them, and it grants exactly what was asked for.
+    await jsonRequest(app, "POST", `/nests/${nestId}/archive`, {}, owner.apiKey);
+
+    // The request must not survive: an archived nest caps everyone at read, so
+    // a row left pending could never be actioned from the queue again.
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/deletion-requests?status=pending`,
+      null,
+      owner.apiKey,
+    );
+    expect(
+      data.requests.filter((r: any) => r.targetType === "nest_archive"),
+    ).toEqual([]);
+
+    await jsonRequest(app, "POST", `/nests/${nestId}/restore`, {}, owner.apiKey);
   });
 
   it("an editor can only REQUEST an archive; honouring it archives, not deletes", async () => {

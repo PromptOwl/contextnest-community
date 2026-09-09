@@ -128,10 +128,12 @@ export function capForArchive(
     : permission;
 }
 
+/** The merge itself. `rawPermission` is the wrapper's to add — it is the same
+ *  value as `permission` here, before any cap. */
 async function resolveNestAccessRaw(
   nestId: string,
   userId: string,
-): Promise<NestAccess> {
+): Promise<Omit<NestAccess, "rawPermission">> {
   const row = (await getDb().get(
     `SELECT n.user_id      AS owner_id,
             n.visibility   AS visibility,
@@ -191,8 +193,6 @@ async function resolveNestAccessRaw(
     isSteward: !!row.steward_hit,
     hasGrant: !!row.grant_hit,
     archived: !!row.archived_at,
-    // Filled in by the resolveNestAccess wrapper, which owns the cap.
-    rawPermission: "none" as NestPermission,
   };
 
   // 1. The owner.

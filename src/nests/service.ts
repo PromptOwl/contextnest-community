@@ -489,9 +489,20 @@ export async function listNests(
 
 /** Put a nest away: hidden and read-only, nothing deleted. Idempotent. */
 export async function archiveNest(nestId: string): Promise<void> {
-  await getDb().run(
+  const db = getDb();
+  await db.run(
     "UPDATE nests SET archived_at = ? WHERE id = ? AND archived_at IS NULL",
     [new Date().toISOString(), nestId],
+  );
+  // An editor's "please archive this nest" is answered by the nest being
+  // archived, however that happened — the owner may well have done it directly
+  // rather than through the queue. Leaving the row pending strands it: an
+  // archived nest caps everyone at read, so the honour route can no longer
+  // action it, and the queue would show a request nobody can resolve.
+  await db.run(
+    `DELETE FROM deletion_requests
+      WHERE nest_id = ? AND target_type = 'nest_archive' AND status = 'pending'`,
+    [nestId],
   );
 }
 
