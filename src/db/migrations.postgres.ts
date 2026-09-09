@@ -71,6 +71,7 @@ const HISTORICAL_MIGRATIONS = [
   "035_multiple_api_keys_per_user",
   "036_node_index",
   "037_publish",
+  "038_nest_archive",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -109,6 +110,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       index_synced_at TEXT,
       reader_mode INTEGER NOT NULL DEFAULT 0,
       reader_home_node TEXT,
+      -- Set = archived (migration 038): off the dashboard, out of MCP, read
+      -- only, nothing deleted. NULL is the whole "not archived" story.
+      archived_at TEXT,
       UNIQUE(user_id, slug)
     );
     CREATE INDEX IF NOT EXISTS idx_nests_user ON nests(user_id);
@@ -447,6 +451,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- upgrade. reader_mode is off by default; reader_home_node is nullable.
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS reader_mode INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS reader_home_node TEXT;
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS archived_at TEXT;
 
     CREATE TABLE IF NOT EXISTS schedules (
       id TEXT PRIMARY KEY,

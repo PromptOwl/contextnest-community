@@ -714,7 +714,23 @@ export async function getPendingReview(
 // content-review feed. Honouring a request deletes the node, which purges the
 // row via NODE_KEYED_TABLES; declining keeps it with the resolver's note.
 
-export type DeletionTargetType = "document" | "folder" | "nest";
+/**
+ * "nest_archive" is an editor asking for the nest to be ARCHIVED rather than
+ * destroyed (CU-wdqcpzy80h). It rides this table because the request, queue,
+ * notification, decline and withdraw paths are identical to a deletion's — only
+ * what honouring it does differs, in one branch of the resolve route. The
+ * column is plain TEXT with no CHECK, so the extra value needs no migration.
+ */
+export type DeletionTargetType =
+  | "document"
+  | "folder"
+  | "nest"
+  | "nest_archive";
+
+/** True for the two whole-nest targets — same label, same admin gate. */
+export function isNestTarget(t: DeletionTargetType): boolean {
+  return t === "nest" || t === "nest_archive";
+}
 
 export interface DeletionRequest {
   id: string;
@@ -739,7 +755,7 @@ export async function deletionTargetTitle(
   titles?: Map<string, string>,
 ): Promise<string> {
   if (request.targetType === "folder") return prettyFolderPath(request.nodeId);
-  if (request.targetType === "nest") return await nestName(request.nestId);
+  if (isNestTarget(request.targetType)) return await nestName(request.nestId);
   return (
     titles?.get(request.nodeId) ??
     (await titleForNode(request.nestId, request.nodeId))
@@ -810,7 +826,7 @@ async function deletionTargetContext(
       ? prettyFolderPath(request.nodeId)
       : name;
   return {
-    noun: request.targetType,
+    noun: request.targetType === "nest_archive" ? "nest" : request.targetType,
     label,
     docTitle: label,
     path: name,
@@ -905,7 +921,15 @@ export async function notifyDeletionResolved(params: {
 }): Promise<void> {
   try {
     const { outcome, resolvedBy, note } = params;
-    const verb = outcome === "deleted" ? "deleted" : "rejected the deletion of";
+    // Honouring a nest_archive request archives rather than destroys, so the
+    // verdict has to say so — the requester is told what actually happened.
+    const archivedInstead =
+      outcome === "deleted" && params.targetType === "nest_archive";
+    const verb = archivedInstead
+      ? "archived"
+      : outcome === "deleted"
+        ? "deleted"
+        : "rejected the deletion of";
     const line = `${resolvedBy} ${verb} *${params.docTitle}*${note ? ` — "${note}"` : ""}`;
     const recipient = params.requestedBy.toLowerCase();
 
@@ -922,7 +946,7 @@ export async function notifyDeletionResolved(params: {
         `deletion_${outcome}`,
         params.requestId,
         outcome === "deleted"
-          ? `"${params.docTitle}" was deleted by ${resolvedBy} — your request was accepted`
+          ? `"${params.docTitle}" was ${archivedInstead ? "archived" : "deleted"} by ${resolvedBy} — your request was accepted`
           : `Your deletion request for "${params.docTitle}" was rejected by ${resolvedBy}${note ? ` — "${note}"` : ""}`,
       );
     }

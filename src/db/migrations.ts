@@ -1430,6 +1430,19 @@ export function runMigrations(db: Database.Database): void {
       db.exec("ALTER TABLE publish ADD COLUMN no_download INTEGER NOT NULL DEFAULT 0");
     }
   }
+
+  // 038: archive a nest instead of deleting it (CU-wdqcpzy80h). One nullable
+  //   timestamp — archiving is a date, not a state machine, and NULL is the
+  //   whole "not archived" story, so every existing row is correct as-is.
+  if (!hasMigration("038_nest_archive")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("archived_at")) {
+      db.exec("ALTER TABLE nests ADD COLUMN archived_at TEXT");
+    }
+    recordMigration("038_nest_archive");
+  }
 }
 
 /**

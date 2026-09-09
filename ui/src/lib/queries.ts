@@ -25,7 +25,13 @@ import * as api from "./api";
  */
 export const keys = {
   nests: ["nests"] as const,
-  nestList: () => [...keys.nests, "list"] as const,
+  // Two lists share this prefix: the live dashboard grid and the Archived tab.
+  // A write can move a nest between them (archive, restore, delete), so the
+  // invalidation table names the prefix — dropping only one would leave the
+  // other showing a nest that is no longer in it.
+  nestList: (archived = false) =>
+    [...keys.nestListAll(), archived ? "archived" : "live"] as const,
+  nestListAll: () => [...keys.nests, "list"] as const,
   unsynced: () => [...keys.nests, "unsynced"] as const,
   nest: (nestId: string) => [...keys.nests, "detail", nestId] as const,
 
@@ -227,7 +233,7 @@ const NEST_WRITE_SCOPES: Array<{
     affects: (n, m) => [
       keys.node(n, m[1]),
       keys.nodes(n),
-      keys.nestList(),
+      keys.nestListAll(),
       [...keys.nest(n), "feed"],
     ],
   },
@@ -237,7 +243,7 @@ const NEST_WRITE_SCOPES: Array<{
     match: /^\/nodes(?:\/)?$/,
     affects: (n) => [
       keys.nodes(n),
-      keys.nestList(),
+      keys.nestListAll(),
       keys.search,
       [...keys.nest(n), "feed"],
     ],
@@ -250,7 +256,7 @@ const NEST_WRITE_SCOPES: Array<{
     affects: (n, m) => [
       keys.node(n, m[1]),
       keys.nodes(n),
-      keys.nestList(),
+      keys.nestListAll(),
       keys.search,
       [...keys.nest(n), "feed"],
     ],
@@ -286,11 +292,11 @@ const NEST_WRITE_SCOPES: Array<{
   // guard returns (`filterAccessible` returns every node outright while it is
   // off), so the document listing and everything gated with it change too.
   { match: /^\/settings/, affects: (n) => [keys.nest(n)] },
-  { match: /^\/visibility/, affects: (n) => [keys.nest(n), keys.nestList()] },
+  { match: /^\/visibility/, affects: (n) => [keys.nest(n), keys.nestListAll()] },
   // Reader mode changes what GET /nests/:id returns (reader_mode /
   // reader_home_node) and, for read-only callers, flips the whole presentation
   // to the docs reader — so the nest payload must refetch.
-  { match: /^\/reader-mode/, affects: (n) => [keys.nest(n), keys.nestList()] },
+  { match: /^\/reader-mode/, affects: (n) => [keys.nest(n), keys.nestListAll()] },
   { match: /^\/definitions/, affects: (n) => [keys.definitions(n)] },
   { match: /^\/edges/, affects: (n) => [keys.edges(n), keys.graph(n)] },
   { match: /^\/edge-types/, affects: (n) => [keys.edgeTypes(n), keys.edges(n)] },
@@ -307,13 +313,21 @@ const NEST_WRITE_SCOPES: Array<{
     affects: (n) => [
       [...keys.nest(n), "deletion-requests"],
       keys.nodes(n),
-      keys.nestList(),
+      keys.nestListAll(),
       keys.me,
     ],
   },
   {
     match: /^\/(delete-folder|request-deletion)/,
-    affects: (n) => [keys.nodes(n), keys.nestList()],
+    affects: (n) => [keys.nodes(n), keys.nestListAll()],
+  },
+  // Archiving or restoring moves the nest between the two lists and takes its
+  // pending reviews, deletion flags and drafts out of (or back into) the work
+  // inbox with it — /me/work and /me/drafts are scoped to visible nests. Its
+  // documents also leave the cross-nest search.
+  {
+    match: /^\/(archive|restore)/,
+    affects: (n) => [keys.nest(n), keys.nestListAll(), keys.me, keys.search],
   },
 ];
 
@@ -342,13 +356,13 @@ export function invalidateForPath(qc: QueryClient, path: string): void {
     // Unrecognised write (including PATCH/DELETE of the nest itself): assume
     // it touched everything under this nest.
     drop(keys.nest(nest));
-    drop(keys.nestList());
+    drop(keys.nestListAll());
     return;
   }
   if (path.startsWith("/nests")) {
     // Create, import, or sync-a-folder — the list itself, and the candidate
     // folders that a sync consumes.
-    drop(keys.nestList());
+    drop(keys.nestListAll());
     drop(keys.unsynced());
     return;
   }
@@ -410,10 +424,10 @@ export function connectReadCache(qc: QueryClient): void {
  */
 export const reads = {
   // ── Nest-scoped ────────────────────────────────────────────────────────
-  nestList: () =>
+  nestList: (archived = false) =>
     queryOptions({
-      queryKey: keys.nestList(),
-      queryFn: () => api.listNests(),
+      queryKey: keys.nestList(archived),
+      queryFn: () => api.listNests({ archived }),
       staleTime: STALE.reference,
     }),
   unsynced: () =>
@@ -720,7 +734,8 @@ export const reads = {
 
 // ── Hooks for screens that render one read and want it to update in place ──
 
-export const useNests = () => useQuery(reads.nestList());
+export const useNests = (archived = false) =>
+  useQuery(reads.nestList(archived));
 export const useNodes = (nestId: string | undefined) =>
   useQuery({ ...reads.nodes(nestId ?? ""), enabled: !!nestId });
 export const useCollaborators = (nestId: string | undefined) =>

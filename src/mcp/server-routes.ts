@@ -85,12 +85,18 @@ async function resolveNestRef(
   userId: string,
 ): Promise<Nest | null> {
   const db = getDb();
-  const byId = (await db.get("SELECT * FROM nests WHERE id = ?", [ref])) as
-    | Nest
-    | undefined;
+  // Archived nests resolve to nothing here, by id or by name: they are absent
+  // from the agent index, so serving one to a caller who happens to know the
+  // reference would be the one way an archived nest could still feed an agent.
+  const byId = (await db.get(
+    "SELECT * FROM nests WHERE id = ? AND archived_at IS NULL",
+    [ref],
+  )) as Nest | undefined;
   if (byId) return byId;
   const byName = (await db.all(
-    "SELECT * FROM nests WHERE LOWER(name) = LOWER(?) OR LOWER(slug) = LOWER(?)",
+    `SELECT * FROM nests
+      WHERE archived_at IS NULL
+        AND (LOWER(name) = LOWER(?) OR LOWER(slug) = LOWER(?))`,
     [ref, ref],
   )) as Nest[];
   if (byName.length <= 1) return byName[0] ?? null;

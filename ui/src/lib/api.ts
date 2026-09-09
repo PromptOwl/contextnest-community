@@ -577,8 +577,12 @@ export function isPrimeNode(
 
 // ─── Nests ──────────────────────────────────────────────────────────────
 
-export async function listNests() {
-  return request<{ nests: any[] }>("/nests");
+/** `archived` lists ONLY archived nests — the dashboard's Archived tab.
+ *  Without it archived nests are absent, as they are from every other surface. */
+export async function listNests(opts?: { archived?: boolean }) {
+  return request<{ nests: any[] }>(
+    opts?.archived ? "/nests?archived=1" : "/nests",
+  );
 }
 
 export async function createNest(name: string, description?: string) {
@@ -590,6 +594,20 @@ export async function createNest(name: string, description?: string) {
 
 export async function deleteNest(nestId: string) {
   return request("/nests/" + nestId, { method: "DELETE" });
+}
+
+/** Put the nest away: hidden and read-only, nothing deleted. */
+export async function archiveNest(nestId: string) {
+  return request<{ archived: true }>("/nests/" + nestId + "/archive", {
+    method: "POST",
+  });
+}
+
+/** Bring an archived nest back exactly as it was. */
+export async function restoreNest(nestId: string) {
+  return request<{ restored: true }>("/nests/" + nestId + "/restore", {
+    method: "POST",
+  });
 }
 
 export async function updateNest(
@@ -1141,7 +1159,7 @@ export interface DeletionRequest {
   id: string;
   /** Node id, folder path, or nest id — see targetType. */
   nodeId: string;
-  targetType?: "document" | "folder" | "nest";
+  targetType?: "document" | "folder" | "nest" | "nest_archive";
   title?: string;
   requestedBy: string;
   reason: string;
@@ -1170,10 +1188,12 @@ export async function deleteFolder(nestId: string, folder: string) {
   );
 }
 
-/** Flag a whole folder ("api/limits") or the nest itself for deletion. */
+/** Flag a whole folder ("api/limits") or the nest itself. "nest_archive" asks
+ *  for the nest to be archived rather than destroyed — same queue, same
+ *  reviewers, different outcome when it is honoured. */
 export async function requestTargetDeletion(
   nestId: string,
-  targetType: "folder" | "nest",
+  targetType: "folder" | "nest" | "nest_archive",
   target: string,
   reason: string,
 ) {
