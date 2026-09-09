@@ -154,9 +154,11 @@ export function ctxCliConnectSnippet(
  *
  * Three rules this text has to keep, all of them earned the hard way:
  *   - Never claim a capability the caller's current state contradicts. On an
- *     unlicensed server the gate is `method !== "GET"`, so writes, MCP and
- *     /context are all blocked; saying otherwise makes an agent distrust the
- *     rest of the brief, correctly.
+ *     unlicensed server every non-GET is blocked — writes, MCP and /context
+ *     alike — so saying otherwise makes an agent distrust the rest of the
+ *     brief, correctly. Every GET this prompt uses stays open, but that is not
+ *     true of GETs in general: see `isGovernance` in app.ts for the exceptions
+ *     before adding another.
  *   - Any signal a branch dispatches on must be visible in the command that
  *     produces it — hence -w on every curl, not just the first.
  *   - Never tell the agent to add or strip a `nodes/` id prefix. It exists on
@@ -214,7 +216,7 @@ export function nestSetupPrompt(
     "         nest imported from a folder has no such prefix. Do not add or strip one yourself:",
     `           curl -s -w '\\nHTTP_STATUS:%{http_code}\\n' "${base}/nests/${nestId}/nodes"${auth}`,
     `           curl -s -w '\\nHTTP_STATUS:%{http_code}\\n' "${base}/nests/${nestId}/nodes/<id-from-the-list>"${auth}`,
-    "         Documents back from either call counts as connected — the proof is real documents,",
+    "         Documents back from either call count as connected — the proof is real documents,",
     "         not which endpoint served them. Tell me the server is unlicensed, and note the same",
     "         gate covers every non-GET, so WRITES ARE ALSO UNAVAILABLE until a licence is installed.",
     openMode

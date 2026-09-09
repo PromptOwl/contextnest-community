@@ -118,8 +118,9 @@ describe("nestSetupPrompt", () => {
   it("says what to do when the first read is refused for a license", () => {
     const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
     expect(p).toContain("503");
-    // /context is a POST and POSTs are license-gated; these GETs are not, so
-    // they are the only reads that work on an unlicensed server.
+    // /context is a POST and POSTs are license-gated; these particular GETs
+    // are not, so they are the reads that work on an unlicensed server. Not
+    // every GET is exempt — see `isGovernance` in app.ts.
     // /export is a GET (so the gate misses it) and returns every document WITH
     // its body in ONE call — the cheapest unlicensed read. List-then-read
     // survives as the escape hatch for a nest too large to take whole.
@@ -225,7 +226,7 @@ describe("nestSetupPrompt", () => {
     // STEP 1 defines connected as documents back from /context; both test runs
     // asked whether reading everything via the 503 fallback qualified. It does.
     expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).toMatch(
-      /counts as connected/,
+      /count as connected/,
     );
   });
 
