@@ -25,6 +25,18 @@ describe("translatePlaceholders (?→$n)", () => {
     ).toBe("SELECT * FROM t WHERE x LIKE '%?%' AND y = $1");
   });
 
+  it("does not let an apostrophe in a -- comment swallow later placeholders", () => {
+    expect(
+      translatePlaceholders("SELECT 1\n-- there's no request row.\nWHERE a = ?"),
+    ).toBe("SELECT 1\n-- there's no request row.\nWHERE a = $1");
+  });
+
+  it("does not let an apostrophe in a block comment swallow later placeholders", () => {
+    expect(translatePlaceholders("SELECT /* it's fine */ ? , ?")).toBe(
+      "SELECT /* it's fine */ $1 , $2",
+    );
+  });
+
   it("handles many placeholders", () => {
     expect(translatePlaceholders("VALUES (?, ?, ?, ?, ?)")).toBe(
       "VALUES ($1, $2, $3, $4, $5)",

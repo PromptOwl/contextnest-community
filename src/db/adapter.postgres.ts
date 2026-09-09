@@ -14,6 +14,9 @@ import type {
  * is left untouched. `''` (an escaped quote inside a literal) is handled by
  * the toggle naturally — the pair flips `inStr` off then on again, leaving us
  * still "inside" the literal, which is correct.
+ *
+ * Comments are skipped whole, so an apostrophe in prose (`there's`) cannot be
+ * mistaken for the start of a literal and swallow every later placeholder.
  */
 export function translatePlaceholders(sql: string): string {
   let out = "";
@@ -21,7 +24,17 @@ export function translatePlaceholders(sql: string): string {
   let n = 0;
   for (let i = 0; i < sql.length; i++) {
     const ch = sql[i];
-    if (ch === "'") {
+    if (!inStr && ch === "-" && sql[i + 1] === "-") {
+      const end = sql.indexOf("\n", i);
+      const stop = end === -1 ? sql.length : end;
+      out += sql.slice(i, stop);
+      i = stop - 1;
+    } else if (!inStr && ch === "/" && sql[i + 1] === "*") {
+      const end = sql.indexOf("*/", i + 2);
+      const stop = end === -1 ? sql.length : end + 2;
+      out += sql.slice(i, stop);
+      i = stop - 1;
+    } else if (ch === "'") {
       inStr = !inStr;
       out += ch;
     } else if (ch === "?" && !inStr) {
