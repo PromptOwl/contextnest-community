@@ -971,7 +971,14 @@ export async function notifyDeletionResolved(params: {
         ? `${params.baseUrl}/?nest=${encodeURIComponent(params.nestId)}`
         : "";
       void sendEmailToRecipient(recipient, {
-        status: outcome === "deleted" ? "deletion_deleted" : "deletion_declined",
+        // The email has to agree with the inbox row and the channel line above:
+        // an honoured archive is not a deletion, and the deletion template says
+        // the nest is gone.
+        status: archivedInstead
+          ? "deletion_archived"
+          : outcome === "deleted"
+            ? "deletion_deleted"
+            : "deletion_declined",
         docTitle: params.docTitle,
         path: params.nestId,
         link: outcome === "deleted" ? link : undefined,

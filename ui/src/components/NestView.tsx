@@ -26,7 +26,7 @@ import {
   Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
   FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus, Wrench, Table2,
-  Activity, Share2, BookOpen,
+  Activity, Share2, BookOpen, Archive,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { FolderTree, prettyFolder, prettyFolderPath } from "./FolderTree";
@@ -1997,24 +1997,36 @@ export function NestView({
               Imported
             </Badge>
           )}
-          {/* Same red flag a doc/folder row gets — the requester's only sign
-              their nest deletion request is still waiting on an admin. */}
+          {/* Same flag a doc/folder row gets — the requester's only sign their
+              request is still waiting on an admin. An ARCHIVE ask is reversible,
+              so it says so and drops the red: telling every viewer the nest is
+              up for permanent deletion would be plainly wrong. */}
           {nestFlag && (() => {
             const isOwn = nestFlag.requestedBy.toLowerCase() === currentEmail;
+            const isArchiveAsk = nestFlag.targetType === "nest_archive";
+            const verb = isArchiveAsk ? "archived" : "deleted";
             return (
               <Badge
                 variant="outline"
-                className={`shrink-0 gap-1 border-red-200 bg-red-50 text-red-700 ${isOwn ? "cursor-pointer hover:bg-red-100" : ""}`}
+                className={`shrink-0 gap-1 ${
+                  isArchiveAsk
+                    ? "border-amber-200 bg-amber-50 text-amber-700"
+                    : "border-red-200 bg-red-50 text-red-700"
+                } ${isOwn ? "cursor-pointer hover:opacity-80" : ""}`}
                 title={
                   isOwn
-                    ? "Click to withdraw your deletion request"
-                    : `${nestFlag.requestedBy} asked for this nest to be deleted: "${nestFlag.reason}". A nest owner or admin decides.`
+                    ? `Click to withdraw your ${isArchiveAsk ? "archive" : "deletion"} request`
+                    : `${nestFlag.requestedBy} asked for this nest to be ${verb}: "${nestFlag.reason}". A nest owner or admin decides.`
                 }
                 data-testid="nest-deletion-flag"
                 onClick={isOwn ? () => handleWithdrawDeletion(nestFlag) : undefined}
               >
-                <Trash2 className="h-3 w-3" />
-                Deletion requested
+                {isArchiveAsk ? (
+                  <Archive className="h-3 w-3" />
+                ) : (
+                  <Trash2 className="h-3 w-3" />
+                )}
+                {isArchiveAsk ? "Archive requested" : "Deletion requested"}
                 {isOwn && <X className="h-3 w-3 ml-0.5" />}
               </Badge>
             );

@@ -147,3 +147,27 @@ describe("renderHtml (fallback path — burst digests)", () => {
     expect(html).toContain("line1<br>");
   });
 });
+
+// An honoured ARCHIVE request is not a deletion. It used to borrow the
+// deletion_deleted template, which told the requester their nest "has been
+// deleted" while every document in it was still there (CU-wdqcpzy80h review).
+describe("renderEmail — archive verdict", () => {
+  it("says archived and restorable, never deleted", () => {
+    const { subject, text, html } = renderEmail({
+      status: "deletion_archived",
+      docTitle: "Wound Down",
+      path: "n1",
+      actor: "owner@acme.com",
+      link: "https://nest.acme.com/?nest=n1",
+    });
+    expect(subject).toBe("Wound Down was archived");
+    expect(text).toContain("has been archived by owner@acme.com");
+    expect(text).toContain("restore");
+    // The whole point: it must not claim the nest was destroyed. ("Nothing was
+    // deleted" is part of the copy, so match the claim, not the word.)
+    expect(text).not.toContain("has been deleted");
+    expect(text).toContain("Nothing was deleted");
+    expect(html).not.toContain("has been deleted");
+    expect(html).toContain("Archived");
+  });
+});

@@ -477,3 +477,107 @@ describe("nest archive — open mode", () => {
     expect(write.status).toBe(200);
   });
 });
+
+// The MCP tool is a PARALLEL implementation of the REST honour route, so a
+// target type missing from its switch does not fall through to something
+// sensible: nest_archive reached the document branch with a nodeId that is
+// really a nest id and threw "Node not found", leaving the request unactionable
+// from that surface (CU-wdqcpzy80h review).
+describe("nest archive — honouring an archive request over MCP", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let editor: { apiKey: string };
+  let nestId: string;
+
+  const mcpHeaders = (key: string) => ({
+    "Content-Type": "application/json",
+    Accept: "application/json, text/event-stream",
+    Authorization: `Bearer ${key}`,
+  });
+
+  const callTool = async (key: string, name: string, args: any) => {
+    const res = await app.request(`/nests/${nestId}/mcp`, {
+      method: "POST",
+      headers: mcpHeaders(key),
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name, arguments: args },
+      }),
+    });
+    const ct = res.headers.get("content-type") || "";
+    const body = ct.includes("application/json")
+      ? await res.json()
+      : JSON.parse(
+          (await res.text())
+            .split("\n")
+            .find((l: string) => l.startsWith("data: "))!
+            .slice(6),
+        );
+    return (body.result?.content ?? []).map((x: any) => x.text).join("");
+  };
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@acme.com", "Owner");
+    editor = await registerUser(app, "editor@acme.com", "Editor");
+    const { data: nest } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Mcp Archive" },
+      owner.apiKey,
+    );
+    nestId = nest.nest.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "editor@acme.com", permission: "write" },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Keeper", content: "# Keeper" },
+      owner.apiKey,
+    );
+  }, 30000);
+
+  afterAll(() => env.cleanup());
+
+  it("archives the nest instead of erroring on a bogus node id", async () => {
+    const asked = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/request-deletion`,
+      { targetType: "nest_archive", target: nestId, reason: "wound down" },
+      editor.apiKey,
+    );
+    expect(asked.status).toBe(201);
+
+    const out = await callTool(owner.apiKey, "context_resolve_deletion", {
+      request_id: asked.data.request.id,
+      action: "delete",
+    });
+    expect(out).toContain("Archived");
+    expect(out).not.toContain("Not found");
+    expect(out).not.toContain("Irreversible");
+
+    // Archived, not deleted — and now absent from the live list.
+    const live = await jsonRequest(app, "GET", "/nests", null, owner.apiKey);
+    expect(live.data.nests.map((n: any) => n.id)).not.toContain(nestId);
+    const put = await jsonRequest(
+      app,
+      "GET",
+      "/nests?archived=1",
+      null,
+      owner.apiKey,
+    );
+    expect(put.data.nests.map((n: any) => n.id)).toEqual([nestId]);
+  });
+});
