@@ -1662,6 +1662,14 @@ export function createApp(): Hono<AuthEnv> {
       parts.length === 2 &&
       c.req.method === "POST" &&
       (parts[1] === "archive" || parts[1] === "restore");
+    // Pinning is read-tier: a pin is the caller's own bookmark, changes nothing
+    // about the nest and is visible to nobody else, so anyone who can open the
+    // nest may pin it — a viewer most of all, since they are the likeliest to
+    // be watching a handful of nests they cannot edit. The handler still
+    // refuses a caller with no access at all, so this is not an existence
+    // oracle for nest ids. Declared up here because the grant-only branch below
+    // needs it too, and that runs before the tier block.
+    const isPinAction = parts.length === 2 && parts[1] === "pin";
     const deny = async (
       status: 403 | 404 | 503,
       error: string,
@@ -1857,6 +1865,16 @@ export function createApp(): Hono<AuthEnv> {
         // handler's filterAccessible scopes every result to their grants, so
         // they can never read past what they were shared (same as the list).
         grantNestVisible = access.hasGrant;
+      } else if (isPinAction) {
+        // Pinning, for someone who reaches this nest only through a document or
+        // folder grant. They see the nest on their dashboard, so they see its
+        // pin control — and a control that 404s is worse than no control. The
+        // pin touches nothing they can't already reach: it is their own
+        // bookmark on a nest already listed for them, and it grants no wider
+        // read. effectiveAccess in nests/routes.ts already resolves a grantee
+        // to "read" for exactly this class of route; this is the middleware
+        // half of that same rule.
+        grantNestVisible = access.hasGrant;
       } else if (
         parts[1] === "definitions" &&
         parts.length === 2 &&
@@ -1994,6 +2012,7 @@ export function createApp(): Hono<AuthEnv> {
       !isCommentAction &&
       !isDeletionRequestAction &&
       !isNestLifecycleAction &&
+      !isPinAction &&
       !isAnnotationAction &&
       !isReadQuery &&
       !isMcpTransport

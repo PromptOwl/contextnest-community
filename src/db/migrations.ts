@@ -1443,6 +1443,29 @@ export function runMigrations(db: Database.Database): void {
     }
     recordMigration("038_nest_archive");
   }
+
+  // 039: pinned nests (CU-wdqcq00d63). A pin is per PERSON per nest, not a
+  //   property of the nest — two people sharing one nest pin different things —
+  //   so it is its own table rather than a column. The composite primary key is
+  //   the whole uniqueness rule (pinning twice is a no-op), and the nest FK
+  //   cascades so a deleted nest takes its pins with it.
+  if (!hasMigration("039_nest_pins")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS nest_pins (
+          -- BOTH sides cascade, as grants and nest_collaborators do. Without it
+          -- on user_id, deleting an account with a single pin fails the whole
+          -- transaction on a foreign-key violation (foreign_keys is ON).
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (user_id, nest_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_nest_pins_user ON nest_pins(user_id);
+      `);
+    })();
+    recordMigration("039_nest_pins");
+  }
 }
 
 /**

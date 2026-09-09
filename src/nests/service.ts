@@ -442,25 +442,82 @@ export async function importNest(userId: string, name: string): Promise<Nest> {
 }
 
 /**
- * Archived nests are absent from every listing unless one explicitly asks for
- * them. Kept as SQL fragments rather than a post-filter so a nest that is put
- * away stops costing a row, a discovery walk and a title map everywhere it used
- * to appear — the work inbox, drafts, global search and the MCP index all read
- * through these helpers.
+ * Pin a nest for one person. Pinning is a personal bookmark, not a change to
+ * the nest — two people sharing one nest keep different pins — so there is no
+ * permission tier beyond being able to see it (the route gate handles that).
+ * Idempotent: pinning an already-pinned nest is a no-op, not a constraint error.
  */
+export async function pinNest(userId: string, nestId: string): Promise<void> {
+  const db = getDb();
+  // No INSERT OR IGNORE / ON CONFLICT — the two dialects spell it differently.
+  // The check is the fast path; the catch is what makes it correct. Two clicks
+  // landing together both pass the SELECT, and the loser's INSERT trips the
+  // (user_id, nest_id) primary key — which would surface as a 409 on SQLite and
+  // a 500 on Postgres for an operation whose whole contract is idempotence. A
+  // double-click is the likeliest way to reach this, so it is not theoretical.
+  const existing = await db.get(
+    "SELECT 1 FROM nest_pins WHERE user_id = ? AND nest_id = ?",
+    [userId, nestId],
+  );
+  if (existing) return;
+  try {
+    await db.run(
+      "INSERT INTO nest_pins (user_id, nest_id) VALUES (?, ?)",
+      [userId, nestId],
+    );
+  } catch (err) {
+    // Re-read rather than pattern-match the driver's error text: if the row is
+    // there now, someone else's insert won and the caller's intent is satisfied.
+    // Anything else (a real failure) still throws.
+    const now = await db.get(
+      "SELECT 1 FROM nest_pins WHERE user_id = ? AND nest_id = ?",
+      [userId, nestId],
+    );
+    if (!now) throw err;
+  }
+}
+
+/** Remove a pin. Idempotent — unpinning what isn't pinned is a no-op. */
+export async function unpinNest(userId: string, nestId: string): Promise<void> {
+  await getDb().run(
+    "DELETE FROM nest_pins WHERE user_id = ? AND nest_id = ?",
+    [userId, nestId],
+  );
+}
+
+/**
+ * Every nest this person has pinned, as a Set. ONE query for the whole
+ * dashboard: the card annotation runs per nest, and asking per card would add a
+ * round trip to each one for a boolean.
+ */
+export async function pinnedNestIds(userId: string): Promise<Set<string>> {
+  const rows = (await getDb().all(
+    "SELECT nest_id FROM nest_pins WHERE user_id = ?",
+    [userId],
+  )) as Array<{ nest_id: string }>;
+  return new Set(rows.map((r) => r.nest_id));
+}
+
+/**
+* Archived nests are absent from every listing unless one explicitly asks for
+* them. Kept as SQL fragments rather than a post-filter so a nest that is put
+* away stops costing a row, a discovery walk and a title map everywhere it used
+* to appear — the work inbox, drafts, global search and the MCP index all read
+* through these helpers.
+*/
 const LIVE_ONLY = "archived_at IS NULL";
 const LIVE_ONLY_N = "n.archived_at IS NULL";
 
 /**
- * Owned nests. `archived: true` flips the list to ONLY archived rows — the
- * dashboard's Archived tab. It is deliberately the only helper that can show
- * them: archive, restore and delete are the owner's, so nobody else has an
- * action to take on an archived nest, and surfacing it to a collaborator would
- * be a card they can only look at.
- */
+* Owned nests. `archived: true` flips the list to ONLY archived rows — the
+* dashboard's Archived tab. It is deliberately the only helper that can show
+* them: archive, restore and delete are the owner's, so nobody else has an
+* action to take on an archived nest, and surfacing it to a collaborator would
+* be a card they can only look at.
+*/
 export async function listNests(
-  userId: string,
-  opts: { archived?: boolean } = {},
+ userId: string,
+ opts: { archived?: boolean } = {},
 ): Promise<Nest[]> {
   const db = getDb();
   const scope = opts.archived ? "archived_at IS NOT NULL" : LIVE_ONLY;
@@ -769,6 +826,13 @@ export async function deleteNest(nestId: string): Promise<void> {
       // Table not present on legacy DBs — fine, nothing to clean.
     }
     await tx.run("DELETE FROM api_keys WHERE nest_id = ?", [id]);
+    // Pins are FK-cascaded too; explicit for the same reason as the rows above,
+    // and wrapped because a DB predating the pins migration has no such table.
+    try {
+      await tx.run("DELETE FROM nest_pins WHERE nest_id = ?", [id]);
+    } catch {
+      // Table not present on legacy DBs — nothing to clean.
+    }
     await tx.run("DELETE FROM nests WHERE id = ?", [id]);
   });
 

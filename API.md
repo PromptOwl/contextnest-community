@@ -175,7 +175,7 @@ Related `/admin/settings` fields (GET/PATCH, superadmin only): `sso_token_exchan
 A nest = a context vault (folder of markdown documents + governance state).
 
 ### GET `/nests`
-Returns owned + shared nests. Archived nests are **absent** — as they are from every other listing, the work inbox, cross-nest search and the MCP index.
+Returns owned + shared nests. Archived nests are **absent** — as they are from every other listing, the work inbox, cross-nest search and the MCP index. Each row carries `pinned` — the calling user's own bookmark (see `POST /nests/:nestId/pin`).
 ```json
 { "nests": [{ "id": "...", "user_id": "...", "name": "...", "slug": "...", "visibility": "private", "created_at": "..." }] }
 ```
@@ -212,6 +212,15 @@ Archiving also drops any pending `nest_archive` deletion request for the nest �
 Owner only. `{ "restored": true }`. Puts everything back exactly as it was — same documents, versions, stewards, links.
 
 Editors, who cannot archive directly, ask via `POST /nests/:nestId/request-deletion` with `targetType: "nest_archive"` (see *Deletion requests*). Honouring that request archives instead of deleting.
+
+### POST / DELETE `/nests/:nestId/pin`
+The caller's own bookmark on this nest: `{ "pinned": true }` / `{ "pinned": false }`. Idempotent in both directions.
+
+**Read-tier, deliberately.** A pin changes nothing about the nest and is visible to nobody else, so any caller who can see the nest may pin it — a read-only collaborator, and someone who reaches the nest only through a single document or folder share grant, both included. It is not ungated: a caller with no access at all gets `404` (not `403`), so the endpoint can't be used to probe which nest ids exist.
+
+Idempotent under concurrency, not just in sequence: two simultaneous pins of the same nest both answer `200` rather than one tripping the composite primary key.
+
+Pins are per `(user, nest)` in the `nest_pins` table and cascade with the nest. Each row of `GET /nests` carries `pinned` for the calling user, and the dashboard floats pinned nests to the top of the grid under either sort.
 
 ### GET `/nests/:nestId/settings`
 ```json
