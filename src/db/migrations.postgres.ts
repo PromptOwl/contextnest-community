@@ -696,7 +696,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- nest: two people sharing one nest pin different things. The composite key
     -- is the whole uniqueness rule; the nest FK cascades.
     CREATE TABLE IF NOT EXISTS nest_pins (
-      user_id TEXT NOT NULL REFERENCES users(id),
+      -- Both sides cascade, as grants and nest_collaborators do: without it on
+      -- user_id, deleting an account holding a single pin fails on the FK.
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
       created_at TEXT NOT NULL DEFAULT ${NOW},
       PRIMARY KEY (user_id, nest_id)

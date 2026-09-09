@@ -1115,6 +1115,15 @@ authRoutes.delete("/users/:userId", async (c) => {
       target.id,
     ]);
     await tx.run("DELETE FROM api_keys WHERE user_id = ?", [target.id]);
+    // Pins cascade on user_id, but stay explicit like the rows above — and a
+    // database created by an earlier build of migration 039 has the FK without
+    // the cascade, where this delete is the only thing standing between an
+    // admin and a failed account removal.
+    try {
+      await tx.run("DELETE FROM nest_pins WHERE user_id = ?", [target.id]);
+    } catch {
+      // Table not present on a DB predating the pins migration.
+    }
     await tx.run("DELETE FROM users WHERE id = ?", [target.id]);
   });
   await deleteAllSessionsForUser(target.id);

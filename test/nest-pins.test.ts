@@ -303,3 +303,62 @@ describe("nest pins — concurrent pins of the same nest", () => {
     ).toBe(1);
   });
 });
+
+// A pin must never be the thing that stops an admin removing an account.
+// nest_pins.user_id cascades, and DELETE /users/:id clears it explicitly too —
+// without either, foreign_keys=ON fails the whole removal transaction on a
+// single pinned nest (CU-wdqcq00d63 review).
+describe("nest pins — removing a user who pinned something", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let admin: { apiKey: string };
+  let leaver: { apiKey: string; email: string; userId: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key", { ownerEmail: "admin@acme.com" });
+    admin = await registerUser(app, "admin@acme.com", "Admin");
+    leaver = await registerUser(app, "leaver@acme.com", "Leaver");
+
+    // The admin owns the nest, not the leaver: a user who owns nests is
+    // refused removal by an earlier guard, so the pin could never be what
+    // breaks it. The reachable case is a pin on someone else's shared nest.
+    const { data: nest } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Team Vault" },
+      admin.apiKey,
+    );
+    nestId = nest.nest.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "leaver@acme.com", permission: "read" },
+      admin.apiKey,
+    );
+    const pin = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/pin`,
+      {},
+      leaver.apiKey,
+    );
+    expect(pin.status).toBe(200);
+  }, 30000);
+
+  afterAll(() => env.cleanup());
+
+  it("removes the account instead of failing on a foreign key", async () => {
+    const removed = await jsonRequest(
+      app,
+      "DELETE",
+      `/auth/users/${leaver.userId}`,
+      null,
+      admin.apiKey,
+    );
+    expect(removed.status).toBe(200);
+  });
+});

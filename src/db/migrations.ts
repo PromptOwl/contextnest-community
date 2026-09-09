@@ -1440,7 +1440,10 @@ export function runMigrations(db: Database.Database): void {
     db.transaction(() => {
       db.exec(`
         CREATE TABLE IF NOT EXISTS nest_pins (
-          user_id TEXT NOT NULL REFERENCES users(id),
+          -- BOTH sides cascade, as grants and nest_collaborators do. Without it
+          -- on user_id, deleting an account with a single pin fails the whole
+          -- transaction on a foreign-key violation (foreign_keys is ON).
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
           PRIMARY KEY (user_id, nest_id)
