@@ -200,6 +200,30 @@ describe("nestSetupPrompt", () => {
     );
   });
 
+  it("does not tell an agent it cannot reach a host that just answered 403", () => {
+    // A bodyless 403 and a dead socket share a remedy but not their evidence:
+    // a 403 proves something answered. Routing it into "cannot reach this
+    // host" was self-contradictory, which testing caught.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).not.toMatch(/cannot reach this host/);
+    expect(p).toMatch(/something between you and the server is blocking this/);
+  });
+
+  it("surfaces the status code on the fallback calls too, not just step 1", () => {
+    // An agent whose fallback also fails is otherwise back to inferring the
+    // code from prose — the same defect this round fixed in step 1.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect((p.match(/%\{http_code\}/g) || []).length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("says the fallback read still counts as connected", () => {
+    // STEP 1 defines connected as documents back from /context; both test runs
+    // asked whether reading everything via the 503 fallback qualified. It does.
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).toMatch(
+      /counts as connected/,
+    );
+  });
+
   it("names write tools rather than asserting write capability", () => {
     // Prose assertion ("this connection reads AND writes") left 5 of 6 agents
     // answering "unsure". A named mechanism is what they actually believed.
