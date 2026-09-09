@@ -207,7 +207,8 @@ export function nestSetupPrompt(
     "         (the id the list returns already starts with `nodes/`, so the path doubles):",
     `           curl -s ${base}/nests/${nestId}/nodes${auth}`,
     `           curl -s ${base}/nests/${nestId}/nodes/nodes/<slug>${auth}`,
-    "         Either way, tell me the server is unlicensed.",
+    "         Either way, tell me the server is unlicensed — and note that the same gate covers",
+    "         every non-GET, so WRITES ARE ALSO UNAVAILABLE here until a licence is installed.",
     openMode
       ? null
       : "    401  the key is missing or wrong. Ask me for it. Do not retry with a different one.",
@@ -223,7 +224,8 @@ export function nestSetupPrompt(
     "         under Settings → Connectors → Add custom connector instead, which is dialled",
     "         server-side and is not subject to your egress rules.",
     "",
-    "WHAT YOU CAN DO — this connection reads AND writes. Over MCP the write tools are",
+    "WHAT YOU CAN DO — on a licensed server this connection reads AND writes (if step 1 returned",
+    "503, reads still work as above but writes do not). Over MCP the write tools are",
     "context_create, context_update, context_move and context_submit_review; over REST it is",
     `POST and PATCH on ${base}/nests/${nestId}/nodes. Never write, publish or share without asking me first.`,
     "",

@@ -157,6 +157,15 @@ describe("nestSetupPrompt", () => {
     );
   });
 
+  it("does not claim writes work on a server it just said is unlicensed", () => {
+    // The gate is `method !== "GET"`, so a 503 on /context means every write is
+    // blocked too. Both agents in testing spotted the contradiction and
+    // correctly disbelieved the write claim — so the prompt now scopes it.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toMatch(/WRITES ARE ALSO UNAVAILABLE/);
+    expect(p).toMatch(/on a licensed server this connection reads AND writes/);
+  });
+
   it("names write tools rather than asserting write capability", () => {
     // Prose assertion ("this connection reads AND writes") left 5 of 6 agents
     // answering "unsure". A named mechanism is what they actually believed.
