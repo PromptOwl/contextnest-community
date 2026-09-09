@@ -31,6 +31,7 @@ import { hashPassword, verifyPassword } from "../auth/keys.js";
 import { ValidationError } from "../shared/errors.js";
 import { normalizeEmail } from "../shared/email.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
+import { getApprovedVersion } from "../governance/version-service.js";
 
 export type PublishMode = "public" | "email" | "code" | "invite";
 
@@ -141,6 +142,15 @@ export async function createPublish(params: {
   if (!(await nodeExists(nestId, nodeId))) {
     throw new ValidationError(`No such document in this nest: ${nodeId}`);
   }
+  // Same rule, one step further: /p serves the APPROVED snapshot, never the
+  // working copy (publish-render-routes.renderPublished), so a document that
+  // has never been approved has nothing to serve and its link 404s for every
+  // reader. Refuse the link instead of minting a dead one (CU-wdqcq01e73).
+  if ((await getApprovedVersion(nestId, nodeId)) == null) {
+    throw new ValidationError(
+      "This document has no approved version, so a link to it would show nothing. Get it approved first, then publish.",
+    );
+  }
 
   const db = getDb();
   const id = uuid();
@@ -190,10 +200,19 @@ export async function createPublish(params: {
   return row;
 }
 
+/**
+ * Every `/p/:slug` route resolves through here, so archiving the nest takes its
+ * published links off the internet in one place — they answer the same
+ * not-found page a revoked link does. Nothing is unpublished: restoring the
+ * nest brings every link back live at the same URL.
+ */
 export async function getPublishBySlug(slug: string): Promise<PublishRow | undefined> {
-  return (await getDb().get("SELECT * FROM publish WHERE slug = ?", [slug])) as
-    | PublishRow
-    | undefined;
+  return (await getDb().get(
+    `SELECT p.* FROM publish p
+       JOIN nests n ON n.id = p.nest_id
+      WHERE p.slug = ? AND n.archived_at IS NULL`,
+    [slug],
+  )) as PublishRow | undefined;
 }
 
 export async function getPublishById(

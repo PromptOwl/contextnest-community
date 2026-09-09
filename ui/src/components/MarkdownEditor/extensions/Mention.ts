@@ -4,12 +4,19 @@ import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
 export interface MentionOptions {
   onMentionClick?: (name: string) => void;
+  /**
+   * Does this `@name` resolve to a real member of the nest? Unresolved
+   * mentions style as broken (like `wiki-link-broken`) so a typo can't
+   * pass for a live reference. Omit — or return true while the roster is
+   * still loading — and every mention styles optimistically as resolved.
+   */
+  isMember?: (name: string) => boolean;
 }
 
 // `@username`, `@user@email.com`, or `@(Name With Spaces)`. The `@` in
 // the simple-name char class lets emails (the common case in community
-// nests — users invite by email) decorate cleanly. No autocomplete: the
-// content is the source of truth, we just style what's there.
+// nests — users invite by email) decorate cleanly. The content stays the
+// source of truth; the editor's `@` picker just writes it for you.
 const mentionRegex = /(?:^|\s)@(?:\(([^)]+)\)|([a-zA-Z0-9._@-]+))/g;
 
 export const Mention = Extension.create<MentionOptions>({
@@ -18,11 +25,12 @@ export const Mention = Extension.create<MentionOptions>({
   addOptions() {
     return {
       onMentionClick: undefined,
+      isMember: undefined,
     };
   },
 
   addProseMirrorPlugins() {
-    const { onMentionClick } = this.options;
+    const { onMentionClick, isMember } = this.options;
 
     return [
       new Plugin({
@@ -51,12 +59,15 @@ export const Mention = Extension.create<MentionOptions>({
                 const start = pos + match.index + leadingSpace;
                 const end = start + fullMatch.length - leadingSpace;
 
-                decorations.push(
-                  Decoration.inline(start, end, {
-                    class: "mention mention-user",
-                    "data-mention-name": name,
-                  }),
-                );
+                const resolved = !isMember || isMember(name);
+                const attrs: Record<string, string> = {
+                  class: `mention ${resolved ? "mention-user" : "mention-unresolved"}`,
+                  "data-mention-name": name,
+                };
+                if (!resolved) {
+                  attrs.title = `No member named "${name}" in this nest`;
+                }
+                decorations.push(Decoration.inline(start, end, attrs));
               }
             });
 

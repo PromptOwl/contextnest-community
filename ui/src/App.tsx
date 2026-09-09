@@ -17,6 +17,7 @@ import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
+import { navigateGuarded } from "./lib/nav-guard";
 import {
   deriveNestCaps,
   isReaderHiddenView,
@@ -199,7 +200,14 @@ export default function App() {
     error,
     logout,
   } = useAuth();
-  const [view, setView] = useState<View>({ page: "dashboard" });
+  const [view, setViewNow] = useState<View>({ page: "dashboard" });
+  // Every view change asks the mounted screen first — an editor holding
+  // unsaved edits answers with its leave dialog instead of losing them. The
+  // guard is a no-op anywhere that registered none, so call sites are unchanged.
+  const setView = useCallback(
+    (next: View) => navigateGuarded(() => setViewNow(next)),
+    [],
+  );
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   // ?nest=<id> deep-link probe; 200 → skip Login, mount NestView.
   // "missing" is "no ?nest to open"; "unreachable" is "there was one and it
@@ -207,10 +215,13 @@ export default function App() {
   // They render differently: only the second one owes the user an explanation.
   const [deepLinkProbe, setDeepLinkProbe] = useState<
     | { status: "idle" }
-    | { status: "loading" }
+    // The id being probed, once it is no longer readable from the URL: an
+    // unresolved ?nest is cleared from the address bar (CU-wdqcq01e70), so
+    // "Try again" carries it in state instead.
+    | { status: "loading"; nestId?: string }
     | { status: "ok"; nestId: string; nestName: string }
     | { status: "missing" }
-    | { status: "unreachable" }
+    | { status: "unreachable"; nestId: string }
   >(() => {
     if (typeof window === "undefined") return { status: "idle" };
     const params = new URLSearchParams(window.location.search);
@@ -357,7 +368,8 @@ export default function App() {
   useEffect(() => {
     if (deepLinkProbe.status !== "loading") return;
     const params = new URLSearchParams(window.location.search);
-    const nestId = params.get("nest");
+    // A retry re-probes the id it failed on, which is no longer in the URL.
+    const nestId = deepLinkProbe.nestId ?? params.get("nest");
     if (!nestId) {
       setDeepLinkProbe({ status: "missing" });
       return;
@@ -464,7 +476,7 @@ export default function App() {
             : undefined,
         });
       } catch {
-        if (!cancelled) setDeepLinkProbe({ status: "unreachable" });
+        if (!cancelled) setDeepLinkProbe({ status: "unreachable", nestId });
       }
     })();
     return () => {
@@ -480,10 +492,10 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (deepLinkProbe.status === "loading") return;
-    // An unresolved ?nest stays in the URL while its error screen is up, so
-    // "Try again" (and a plain refresh) has an id to re-probe. Going back to
-    // the dashboard flips the probe to "missing" and this clears it then.
-    if (deepLinkProbe.status === "unreachable") return;
+    // An unresolved ?nest is dropped from the address bar as soon as its error
+    // screen goes up (CU-wdqcq01e70): leaving it there made every refresh — and
+    // any link copied off that screen — land back on the same dead end. The id
+    // rides in the probe state instead, so "Try again" still has one.
     const params = new URLSearchParams(window.location.search);
     if (view.page === "document") {
       params.set("nest", view.nestId);
@@ -733,7 +745,9 @@ export default function App() {
     const wasLoggedIn = prevUserEmailRef.current !== null;
     prevUserEmailRef.current = currentUserEmail;
     if (wasLoggedIn) {
-      setView({ page: "dashboard" });
+      // Not a navigation the user can be asked about — the session it belonged
+      // to is already gone, so it skips the leave guard.
+      setViewNow({ page: "dashboard" });
     }
   }, [currentUserEmail]);
 
@@ -900,7 +914,12 @@ export default function App() {
                   permanent verdict. */}
               <Button
                 variant="outline"
-                onClick={() => setDeepLinkProbe({ status: "loading" })}
+                onClick={() =>
+                  setDeepLinkProbe({
+                    status: "loading",
+                    nestId: deepLinkProbe.nestId,
+                  })
+                }
               >
                 Try again
               </Button>
@@ -1383,9 +1402,16 @@ export default function App() {
         )}
       </main>
 
-      <footer className={`${shellWidth} mx-auto px-4 py-4 text-xs text-muted-foreground text-center`}>
-        ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
-      </footer>
+      {/* Hidden on the document page: its editor ends in a sticky action bar,
+          and anything rendered after <main> sits BELOW that bar's containing
+          block — so the version line held Save and Discard off the bottom of
+          the window at full scroll. The build version is a footnote; a write
+          action reaching the edge of the screen is not. */}
+      {view.page !== "document" && (
+        <footer className={`${shellWidth} mx-auto px-4 py-4 text-xs text-muted-foreground text-center`}>
+          ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
+        </footer>
+      )}
 
       {showAdminLogin && (
         <AdminLoginModal

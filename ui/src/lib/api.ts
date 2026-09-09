@@ -12,6 +12,8 @@
  * /auth/keys and shown to the user once via the Connect modal.
  */
 
+import { clearDraft } from "./draft";
+
 const API_BASE = "";
 const STALE_LOCAL_STORAGE_KEY = "cnst_token";
 
@@ -575,8 +577,12 @@ export function isPrimeNode(
 
 // ─── Nests ──────────────────────────────────────────────────────────────
 
-export async function listNests() {
-  return request<{ nests: any[] }>("/nests");
+/** `archived` lists ONLY archived nests — the dashboard's Archived tab.
+ *  Without it archived nests are absent, as they are from every other surface. */
+export async function listNests(opts?: { archived?: boolean }) {
+  return request<{ nests: any[] }>(
+    opts?.archived ? "/nests?archived=1" : "/nests",
+  );
 }
 
 export async function createNest(name: string, description?: string) {
@@ -588,6 +594,27 @@ export async function createNest(name: string, description?: string) {
 
 export async function deleteNest(nestId: string) {
   return request("/nests/" + nestId, { method: "DELETE" });
+}
+
+/** Put the nest away: hidden and read-only, nothing deleted. */
+export async function archiveNest(nestId: string) {
+  return request<{ archived: true }>("/nests/" + nestId + "/archive", {
+    method: "POST",
+  });
+}
+
+/** Bring an archived nest back exactly as it was. */
+export async function restoreNest(nestId: string) {
+  return request<{ restored: true }>("/nests/" + nestId + "/restore", {
+    method: "POST",
+  });
+}
+/** Pin/unpin this nest for the signed-in user. A pin is personal — it changes
+ *  nothing about the nest and nobody else sees it. */
+export async function setNestPinned(nestId: string, pinned: boolean) {
+  return request<{ pinned: boolean }>("/nests/" + nestId + "/pin", {
+    method: pinned ? "POST" : "DELETE",
+  });
 }
 
 export async function updateNest(
@@ -1139,7 +1166,7 @@ export interface DeletionRequest {
   id: string;
   /** Node id, folder path, or nest id — see targetType. */
   nodeId: string;
-  targetType?: "document" | "folder" | "nest";
+  targetType?: "document" | "folder" | "nest" | "nest_archive";
   title?: string;
   requestedBy: string;
   reason: string;
@@ -1168,10 +1195,12 @@ export async function deleteFolder(nestId: string, folder: string) {
   );
 }
 
-/** Flag a whole folder ("api/limits") or the nest itself for deletion. */
+/** Flag a whole folder ("api/limits") or the nest itself. "nest_archive" asks
+ *  for the nest to be archived rather than destroyed — same queue, same
+ *  reviewers, different outcome when it is honoured. */
 export async function requestTargetDeletion(
   nestId: string,
-  targetType: "folder" | "nest",
+  targetType: "folder" | "nest" | "nest_archive",
   target: string,
   reason: string,
 ) {
@@ -1450,7 +1479,11 @@ export function hostedArtifactUrl(
   if (version != null) params.set("v", String(version));
   if (cacheBust != null) params.set("_", String(cacheBust));
   const qs = params.toString();
-  return `${API_BASE}/nests/${nestId}/nodes/${nodeId}/hosted${qs ? `?${qs}` : ""}`;
+  // The route already lives under /nodes, and a node id carries its own
+  // `nodes/` prefix — emitting both produced …/nodes/nodes/<slug>/hosted. The
+  // server accepts either spelling; this one says the segment once.
+  const path = nodeId.replace(/^nodes\//, "");
+  return `${API_BASE}/nests/${nestId}/nodes/${path}/hosted${qs ? `?${qs}` : ""}`;
 }
 
 /**
@@ -1781,7 +1814,17 @@ export async function revokePublication(nestId: string, publishId: string) {
 // ─── Sharing ────────────────────────────────────────────────────────────
 
 export async function listCollaborators(nestId: string) {
-  return request<{ collaborators: any[] }>(`/nests/${nestId}/collaborators`);
+  // `collaborators` is the manageable roster; `people` is everyone who can
+  // reach the nest (owner, shared teams, stewards, grant holders included) —
+  // what the editor's @mention picker offers and validates against.
+  return request<{
+    collaborators: any[];
+    people?: Array<{
+      email: string;
+      name: string | null;
+      source: "owner" | "collaborator" | "team" | "steward" | "grant";
+    }>;
+  }>(`/nests/${nestId}/collaborators`);
 }
 
 export async function addCollaborator(
@@ -2152,14 +2195,44 @@ export interface MyDraft {
   updated_at: string;
 }
 
-export async function getMyDrafts(opts?: { limit?: number; offset?: number }) {
+export async function getMyDrafts(opts?: {
+  limit?: number;
+  offset?: number;
+  /** Matched against title, nest name and node id. */
+  q?: string;
+  sort?: "updated" | "title";
+}) {
   const q = new URLSearchParams();
   if (opts?.limit != null) q.set("limit", String(opts.limit));
   if (opts?.offset != null) q.set("offset", String(opts.offset));
+  if (opts?.q) q.set("q", opts.q);
+  if (opts?.sort && opts.sort !== "updated") q.set("sort", opts.sort);
   const qs = q.toString();
   return request<{ drafts: MyDraft[]; pagination: WorkPagination }>(
     `/me/drafts${qs ? `?${qs}` : ""}`,
   );
+}
+
+/**
+ * Throw away the unreviewed work on a node. A document that was published
+ * before goes back to that version; one that never was is deleted outright —
+ * `deleted` says which happened.
+ *
+ * Clearing the locally parked draft is part of the operation, not something
+ * callers remember to do. Those edits describe a body the server no longer
+ * holds, and the editor re-applies a parked draft whenever its `baseVersion`
+ * matches the version it just loaded — which a discard can walk the document
+ * straight back onto, resurrecting the edits the user just threw away. Doing it
+ * here means every entry point (My Drafts, the version panel, the editor's own
+ * button) is covered by construction.
+ */
+export async function discardDraft(nestId: string, nodeId: string) {
+  const res = await request<{ ok: true; deleted: boolean; version: number | null }>(
+    `/nests/${nestId}/nodes/${nodeId}/discard`,
+    { method: "POST" },
+  );
+  clearDraft(nestId, nodeId);
+  return res;
 }
 
 export async function approveReview(nestId: string, nodeId: string, note?: string) {

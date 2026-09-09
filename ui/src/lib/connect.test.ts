@@ -6,6 +6,7 @@ import {
   nestChatPrompt,
   nestSetupPrompt,
   envFileContents,
+  ctxCliConnectSnippet,
 } from "./connect";
 
 // Regression tests written before the implementation (dev-loop: fail-before-build).
@@ -165,19 +166,65 @@ describe("write honesty (ticket AC: no false read-only claims)", () => {
   });
 });
 
-describe("ctx CLI contract (verified against contextnest-cli 1.2.1)", () => {
-  // `ctx push` takes --server/--nest/--key and reads NO api-key env var.
-  // Telling an agent to export CONTEXTNEST_API_KEY produced a silent 401.
-  it("passes the key as a --key flag, never as an env var", () => {
+describe("ctx CLI contract (CLI 2.2+: env-based key, remote vault alias)", () => {
+  // The CLI README says: never put the key on argv — `ctx` reads
+  // CONTEXTNEST_API_KEY. The old prompt told agents to run `push … --key <key>`
+  // (a comment claimed ctx read no env var, verified against 1.2.1 — stale).
+  it("passes the key through CONTEXTNEST_API_KEY, never as a --key flag", () => {
     const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
     expect(p).toContain("push --server https://x.ai --nest gtm");
-    expect(p).toContain("--key");
-    expect(p).not.toContain("CONTEXTNEST_API_KEY");
+    expect(p).toContain("CONTEXTNEST_API_KEY");
+    expect(p).not.toContain("--key <key>");
+    expect(p).not.toMatch(/--key\b/);
   });
 
-  it("omits the key flag entirely in open mode", () => {
+  it("omits both the env var and the key flag in open mode", () => {
     const p = nestSetupPrompt("GTM", "https://x.ai", "gtm", true);
     expect(p).toContain("push --server https://x.ai --nest gtm");
+    expect(p).not.toContain("CONTEXTNEST_API_KEY");
     expect(p).not.toContain("--key");
+  });
+
+  it("tells a shell agent to register the nest as a ctx vault alias", () => {
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toContain("ctx vault add");
+    expect(p).toContain("--url https://x.ai/nests/gtm/mcp");
+    expect(p).toContain("--bearer-env CONTEXTNEST_API_KEY");
+    expect(p).toMatch(/--vault \S+/);
+  });
+
+  it("allNestsChatPrompt is unchanged by the CLI work (regression)", () => {
+    const p = allNestsChatPrompt("https://x.ai");
+    expect(p).not.toContain("ctx vault add");
+    expect(p).not.toContain("CONTEXTNEST_API_KEY");
+    expect(p).toContain("https://x.ai/mcp");
+  });
+});
+
+describe("ctxCliConnectSnippet", () => {
+  it("emits the vault add line with a bearer env in key mode, plus a query example", () => {
+    const s = ctxCliConnectSnippet("https://x.ai/", "gtm", "gtm");
+    expect(s).toContain(
+      "ctx vault add gtm --url https://x.ai/nests/gtm/mcp --bearer-env CONTEXTNEST_API_KEY",
+    );
+    expect(s).toMatch(/ctx query "#\S+" --vault gtm/);
+  });
+
+  it("drops --bearer-env entirely in open mode", () => {
+    const s = ctxCliConnectSnippet("https://x.ai", "gtm", "gtm", true);
+    expect(s).toContain("ctx vault add gtm --url https://x.ai/nests/gtm/mcp");
+    expect(s).not.toContain("--bearer-env");
+    expect(s).not.toContain("CONTEXTNEST_API_KEY");
+  });
+
+  it("never carries key material", () => {
+    expect(ctxCliConnectSnippet("https://x.ai", "gtm", "gtm")).not.toMatch(/cnst_/);
+    expect(ctxCliConnectSnippet("https://x.ai", "gtm", "gtm", true)).not.toMatch(/cnst_/);
+  });
+
+  it("sanitizes a free-form alias into something ctx accepts", () => {
+    const s = ctxCliConnectSnippet("https://x.ai", "gtm", "GTM Strategy 2026!");
+    expect(s).toContain("ctx vault add gtm-strategy-2026 --url");
+    expect(s).toContain("--vault gtm-strategy-2026");
   });
 });

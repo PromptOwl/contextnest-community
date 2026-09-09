@@ -10,6 +10,7 @@ import {
   listThreads,
   syncAnnotationsNode,
   readArtifact,
+  resolveHostedNodeId,
 } from "./service.js";
 import { ARTIFACT_NODE_TYPE, type AnnotationAnchor } from "./types.js";
 
@@ -147,7 +148,8 @@ annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/reopen", async (c) => 
 // can't reach the nest's session. Self-hosted contains blast radius further.
 annotationRoutes.get("/:nodeId{.+}/hosted", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const nodeId = getNodeId(c);
+  // Resolved BEFORE the access check, so the gate always sees the real id.
+  const nodeId = await resolveHostedNodeId(nestId, getNodeId(c));
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
   if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {

@@ -238,7 +238,9 @@ export async function listNotifications(
     `SELECT n.id, n.nest_id, n.kind, n.subject_id, n.message, n.created_at, n.read_at,
             COALESCE(
               rr.node_id,
-              CASE WHEN dr.target_type = 'document' THEN dr.node_id END
+              CASE WHEN dr.target_type = 'document' THEN dr.node_id END,
+              -- A mention names the document directly; there's no request row.
+              CASE WHEN n.kind = 'mention' THEN n.subject_id END
             ) AS node_id
        FROM notifications n
        LEFT JOIN review_requests rr ON rr.id = n.subject_id

@@ -10,8 +10,9 @@ import {
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
-import { reads } from "../lib/queries";
+import { reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
+import { setNavGuard, bypassNavGuard } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import {
   clampTagInput,
@@ -92,6 +93,16 @@ import {
   clearHighlight,
   caretAt,
 } from "../lib/anchor-highlight";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { SubmitForReviewModal, ReasonDialog, ReviewActions, ExternalEditBanner, VersionHistoryModal, DiffViewer } from "./governance";
 import { unifiedDiff } from "./governance/diff-util";
 import {
@@ -221,13 +232,27 @@ export function DocumentEditor({
   // nest above. Same owner/admin gate the /grants routes enforce.
   const [showShareDoc, setShowShareDoc] = useState(false);
   const qc = useQueryClient();
-  // Caller's resolved steward role for this node (null = none / not a steward).
+  // Permissions are SUBSCRIBED, not snapshotted. Assigning a steward, changing
+  // a collaborator or toggling stewardship already invalidates these reads
+  // (invalidateForPath in lib/queries), but this screen used to copy them into
+  // state on mount — so an open editor kept the rights the caller had when they
+  // opened it, and only a page reload showed the change (CU-wdqcpzzmk0).
+  const nestMeta = useNestMeta(nestId);
+  const nestSettings = useNestSettings(nestId);
+  const nodeStewardsQuery = useNodeStewards(nestId, isNew ? undefined : nodeId);
+  // Caller's resolved steward role for this node (empty = none / not a steward).
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
-  const [myNodeRoles, setMyNodeRoles] = useState<string[]>([]);
-  // True once the steward-role fetch below has resolved (even to []) — lets
-  // the default-comment-mode effect wait for a real answer instead of racing
-  // the initial empty array.
-  const [rolesLoaded, setRolesLoaded] = useState(false);
+  const myNodeRoles = useMemo(
+    () =>
+      ((nodeStewardsQuery.data?.stewards ?? []) as any[])
+        .filter((s) => (s.email || "").toLowerCase() === currentEmail)
+        .map((s) => String(s.role)),
+    [nodeStewardsQuery.data, currentEmail],
+  );
+  // True once the steward-role read has resolved (even to []) — lets the
+  // default-comment-mode effect wait for a real answer instead of racing the
+  // initial empty array. A new document has no node to resolve against.
+  const rolesLoaded = isNew || !nodeStewardsQuery.isLoading;
   // Caller's share grant on THIS document (server-resolved on GET /nodes/:id).
   // A grant is access, not stewardship: it appears in neither `permission` (a
   // grantee always reads as "read" at nest level, whatever their grant says)
@@ -237,9 +262,10 @@ export function DocumentEditor({
   const grantCanWrite = myGrant === "write";
   // Caller's nest-wide scoped steward rows (from GET /nests/:id). Needed for
   // NEW docs, where there's no node yet to resolve a per-node role against.
-  const [myStewards, setMyStewards] = useState<
-    Array<{ role: string; scope: string }>
-  >([]);
+  const myStewards = ((nestMeta.data as any)?.myStewards ?? []) as Array<{
+    role: string;
+    scope: string;
+  }>;
 
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
   // Folder path under nodes/ for new docs (e.g. "gtm/deals"). Create-only:
@@ -255,7 +281,7 @@ export function DocumentEditor({
   // the server re-checks (assertMayFlagPrime).
   const [prime, setPrime] = useState<boolean | null>(null);
   const loadedPrimeRef = useRef<boolean | null>(null);
-  const [primeTags, setPrimeTags] = useState<string[]>([]);
+  const primeTags = ((nestSettings.data as any)?.prime_tags ?? []) as string[];
   // Node kind. An "artifact" node is rich HTML hosted + annotated, not edited
   // as markdown — once loaded we hand off to ArtifactViewer (see below).
   const [nodeType, setNodeType] = useState<string | null>(null);
@@ -287,14 +313,14 @@ export function DocumentEditor({
   // rule and 403s if you try, but hiding the affordance avoids the
   // user clicking through an error.
   const [pendingReviewBy, setPendingReviewBy] = useState<string | null>(null);
-  const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
+  const stewardshipEnabled = !!nestSettings.data?.stewardship_enabled;
   // When on, the submitter may approve their own pending review (per-nest
   // self-approve bypass). Off = separation of duties enforced for everyone.
-  const [allowSelfApprove, setAllowSelfApprove] = useState(false);
+  const allowSelfApprove = !!nestSettings.data?.allow_self_approve;
   // Caller's nest-level permission (GET /nests/:id). 'read' = no write access
   // (public reader OR a read-only collaborator); 'write'/'admin'/'owner' can
   // edit. null until loaded.
-  const [permission, setPermission] = useState<string | null>(null);
+  const permission = (nestMeta.data?.permission ?? null) as string | null;
   // Every edit/approve affordance below gates on these — see editor-access.ts
   // for the rules and ui/src/lib/editor-access.test.ts for the role matrix.
   const {
@@ -833,65 +859,10 @@ export function DocumentEditor({
   const [justSaved, setJustSaved] = useState(false);
   // Local draft couldn't be stored (quota exhausted / storage blocked).
   const [draftUnbacked, setDraftUnbacked] = useState(false);
+  // When a parked local draft was put back on load — the restored body is not
+  // what the server holds, and that used to be invisible (CU-wdqcpzzgz9).
+  const [restoredDraftAt, setRestoredDraftAt] = useState<number | null>(null);
 
-  // Settings → Submit-for-Review visibility; permission → read-only gate.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [settings, meta] = await Promise.all([
-          qc.fetchQuery(reads.settings(nestId)).catch(() => ({
-            stewardship_enabled: false,
-            allow_self_approve: false,
-            prime_only_review: false,
-            prime_tags: [] as string[],
-          })),
-          qc.fetchQuery(reads.nest(nestId)).catch(() => null),
-        ]);
-        if (cancelled) return;
-        setStewardshipEnabled(!!settings.stewardship_enabled);
-        setAllowSelfApprove(!!settings.allow_self_approve);
-        setPrimeTags(((settings as any).prime_tags ?? []) as string[]);
-        setPermission(meta?.permission ?? null);
-        setMyStewards(((meta as any)?.myStewards ?? []) as Array<{
-          role: string;
-          scope: string;
-        }>);
-      } catch {
-        /* non-fatal */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [nestId]);
-
-  // Resolve per-node steward role; null = no special permissions.
-  useEffect(() => {
-    if (isNew || !nodeId || !currentEmail) {
-      setMyNodeRoles([]);
-      setRolesLoaded(true);
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      try {
-        const { stewards } = await qc.fetchQuery(reads.nodeStewards(nestId, nodeId));
-        if (cancelled) return;
-        const mine = (stewards as any[]).filter(
-          (s) => (s.email || "").toLowerCase() === currentEmail,
-        );
-        setMyNodeRoles(mine.map((s) => s.role));
-      } catch {
-        if (!cancelled) setMyNodeRoles([]);
-      } finally {
-        if (!cancelled) setRolesLoaded(true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [isNew, nestId, nodeId, currentEmail]);
 
   const loadNode = useCallback(async () => {
     if (isNew) return;
@@ -945,6 +916,7 @@ export function DocumentEditor({
       // Restore unsaved edits parked in localStorage, but only if they were
       // taken from the version we just loaded — a newer server copy wins.
       const draft = readDraft(nestId, nodeId);
+      setRestoredDraftAt(null);
       if (draft) {
         if (draft.baseVersion !== node?.version) {
           clearDraft(nestId, nodeId);
@@ -954,6 +926,7 @@ export function DocumentEditor({
           setTags(draft.tags);
           setSchedule(draft.schedule);
           setTouched(true);
+          setRestoredDraftAt(draft.savedAt ?? Date.now());
         }
       }
     } catch (err: any) {
@@ -987,6 +960,36 @@ export function DocumentEditor({
     setShowVersions(true);
     await loadVersions();
   }, [loadVersions]);
+
+  // Throw away the unreviewed edits on this document.
+  //
+  // The outcome depends on the document and only the server can tell which:
+  // one that was published before goes back to that version, one that never
+  // was is deleted (there is nothing to fall back to). So the confirm names
+  // both, and a delete navigates out rather than leaving the editor pointed at
+  // a document that no longer exists.
+  const [discarding, setDiscarding] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const handleDiscardDraft = useCallback(async () => {
+    setConfirmDiscard(false);
+    setDiscarding(true);
+    try {
+      // api.discardDraft clears the parked localStorage draft itself, so every
+      // entry point gets that, not just this one.
+      const res = await api.discardDraft(nestId, nodeId);
+      if (res.deleted) {
+        toast.success("Never approved — document deleted");
+        onBack();
+        return;
+      }
+      toast.success(`Draft discarded — back to version ${res.version}`);
+      await Promise.all([loadNode(), loadVersions()]);
+    } catch (e: any) {
+      toast.error(e?.message || "Discard failed");
+    } finally {
+      setDiscarding(false);
+    }
+  }, [nestId, nodeId, title, onBack, loadNode, loadVersions]);
 
   // Load versions on demand when the Compare dropdown opens, so the list is
   // populated without forcing the user through the history modal first.
@@ -1068,13 +1071,65 @@ export function DocumentEditor({
   // dirty indicator, alongside the badge in the header.
   const canSave = hasSaveableFields && (isNew || isDirty);
 
+  // Set once the user has answered the leave dialog and the navigation is
+  // going through — the browser-level guards below must not ask a second time.
+  const leavingRef = useRef(false);
+
   // Reloading or closing the tab with unsaved edits loses them — the in-app
   // leave dialog can't see a browser-level navigation, so hook it here too.
   useEffect(() => {
     if (!isDirty || isReviewerOnly) return;
-    const onBeforeUnload = (e: BeforeUnloadEvent) => e.preventDefault();
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (leavingRef.current) return;
+      e.preventDefault();
+    };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [isDirty, isReviewerOnly]);
+
+  // Anything that leaves this editor from the app chrome — the header logo,
+  // the nav tabs, the account menu — asks first, the same way this component's
+  // own back arrow does.
+  useEffect(() => {
+    setNavGuard((proceed) => {
+      if (!isDirty || isReviewerOnly) return false;
+      setLeaveIntent({ label: "leave this document", run: proceed });
+      return true;
+    });
+    return () => setNavGuard(null);
+  }, [isDirty, isReviewerOnly]);
+
+  // Browser Back. The app keeps one history entry, so Back used to unload the
+  // page — and a real unload can only ever raise the browser's own alert.
+  // Parking a spare entry while the document is dirty turns Back into a
+  // popstate we can answer with the same dialog every other exit uses.
+  useEffect(() => {
+    if (!isDirty || isReviewerOnly) return;
+    leavingRef.current = false;
+    const park = () => window.history.pushState({ cnLeaveGuard: true }, "");
+    park();
+    const onPop = () => {
+      // The parked entry is spent; park another so a cancelled leave is still
+      // caught, then ask. Leaving for real is two entries back — the spare and
+      // the page's own.
+      park();
+      setLeaveIntent({
+        label: "leave this page",
+        run: () => {
+          leavingRef.current = true;
+          window.history.go(-2);
+        },
+      });
+    };
+    window.addEventListener("popstate", onPop);
+    return () => {
+      window.removeEventListener("popstate", onPop);
+      // Left by some other route (saved, discarded, navigated in-app): drop the
+      // spare entry so Back still means Back.
+      if (!leavingRef.current && (window.history.state as any)?.cnLeaveGuard) {
+        window.history.back();
+      }
+    };
   }, [isDirty, isReviewerOnly]);
 
   // Feedback only — the schedule is saved exactly as typed either way (it's
@@ -1203,6 +1258,7 @@ export function DocumentEditor({
     // Edits are on the server now; the local draft is spent.
     if (!isNew) clearDraft(nestId, nodeId);
     setTouched(false);
+    setRestoredDraftAt(null);
     return { ok: true, savedId, ...(isNew ? { createdStatus } : {}) };
   };
 
@@ -1294,14 +1350,15 @@ export function DocumentEditor({
     runSave(() => {
       const intent = leaveIntent?.run;
       setLeaveIntent(null);
-      intent?.();
+      // The question has been answered — bypassNavGuard keeps the app-level
+      // guard from asking again about the very navigation it just asked about.
+      if (intent) bypassNavGuard(intent);
     });
 
-  const handleLeaveDiscard = () => {
-    if (!leaveIntent) return;
-    const intent = leaveIntent.run;
-    // Drop the parked draft AND revert the fields — the intent may navigate
-    // within this component (wiki link, breadcrumb) instead of unmounting it.
+  /** Drop the parked draft AND put the loaded server copy back in the fields —
+   *  a leave intent may navigate within this component (wiki link, breadcrumb)
+   *  instead of unmounting it, and the restored-draft banner discards in place. */
+  const revertToSaved = () => {
     if (!isNew) clearDraft(nestId, nodeId);
     const snap = initialSnapshotRef.current;
     setTitle(snap.title);
@@ -1309,8 +1366,15 @@ export function DocumentEditor({
     setTags([...snap.tags]);
     setSchedule(snap.schedule);
     setTouched(false);
+    setRestoredDraftAt(null);
+  };
+
+  const handleLeaveDiscard = () => {
+    if (!leaveIntent) return;
+    const intent = leaveIntent.run;
+    revertToSaved();
     setLeaveIntent(null);
-    intent();
+    bypassNavGuard(intent);
   };
 
   const handleSubmitForReview = async (note: string, priority: string) => {
@@ -1576,17 +1640,10 @@ export function DocumentEditor({
                 </button>
               </Fragment>
             ))}
-            <span className="text-muted-foreground shrink-0">›</span>
-            <h3
-              className="text-sm font-bold text-foreground truncate max-w-[320px] mb-0 leading-none"
-              title={title || undefined}
-              data-testid="document-editor-header-title"
-            >
-              {/* "Untitled" is a fact about a saved document, not about one
-                  still loading — while the fetch is in flight say so instead
-                  of flashing it (CU-wdqcpzzzrr). */}
-              {title || (isNew ? "New document" : loading ? "Loading…" : "Untitled")}
-            </h3>
+            {/* The document's own name is deliberately NOT repeated here: the
+                Title field sits directly below (an <h1> in view mode), so the
+                trail ended in the same string the next line already shows. The
+                crumbs answer "where am I", the field answers "what is this". */}
             {!isNew && status && <StatusBadge status={status} />}
             {/* Pending only. A DECLINED flag is a past event, not a state of
                 the document — badging it forever nags everyone who opens a doc
@@ -1611,30 +1668,16 @@ export function DocumentEditor({
                 Auto-published
               </span>
             )}
-            {isDirty && (
-              <span
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900"
-                title="These edits are parked locally and not yet saved to the nest."
-                data-testid="document-editor-dirty-badge"
-              >
-                <Pencil className="h-3 w-3" />
-                Unsaved changes
-              </span>
-            )}
+            {/* "Unsaved changes" moved to the sticky action bar at the bottom,
+                where it sits beside the Save button it is about. */}
           </div>
         </div>
+        {/* Save, Submit for review and Discard live in the sticky footer at the
+            bottom of this page — the write actions belong at the end of the
+            form the user is filling in, not above it. What stays here is what
+            is ABOUT the document rather than a change to it: the review verdict,
+            the comparison picker, and the secondary menu. */}
         <div className="flex items-center gap-2 shrink-0">
-          {!isViewOnly && canSubmitForReview && (
-            <Button
-              variant="outline"
-              onClick={() => setShowSubmitModal(true)}
-              data-testid="document-editor-submit"
-              title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
-            >
-              <Send className="h-4 w-4 mr-2" />
-              Submit for review
-            </Button>
-          )}
           {/* NOT gated on isViewOnly: that flag answers "may this caller
               author?", and a reviewer-only steward is view-only by definition
               yet is exactly the person meant to act here. Gating approval on it
@@ -1648,42 +1691,6 @@ export function DocumentEditor({
               onApprove={handleApprove}
               onReject={handleReject}
             />
-          )}
-          {!isViewOnly && !isReviewerOnly && !isLocked && (
-            mode === "edit" ? (
-              <Button
-                // Keep focus in the editor field so clicking Save doesn't fire
-                // the field's blur (which would trigger a second, concurrent
-                // save alongside this click). One save per click.
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={handleSave}
-                disabled={!canSave}
-                data-testid="document-editor-save"
-              >
-                {saving ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : justSaved && !isDirty ? (
-                  <Check className="h-4 w-4 mr-2 text-green-600" />
-                ) : (
-                  <Save className="h-4 w-4 mr-2" />
-                )}
-                {saving
-                  ? "Saving…"
-                  : justSaved && !isDirty
-                    ? "Saved"
-                    : isNew
-                      ? "Create"
-                      : "Save"}
-              </Button>
-            ) : (
-              <Button
-                onClick={() => setMode("edit")}
-                data-testid="document-editor-start-edit"
-              >
-                <Pencil className="h-4 w-4 mr-2" />
-                Start Editing
-              </Button>
-            )
           )}
           {/* Compare ▾ — pick a past version; the doc area renders an
               ever-present current↔vN diff inline (no modal). */}
@@ -1875,6 +1882,29 @@ export function DocumentEditor({
         <Alert variant="destructive" className="mb-4">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {restoredDraftAt !== null && (
+        <Alert className="mb-4 border-amber-300 bg-amber-50 text-amber-800">
+          <AlertCircle className="h-4 w-4 text-amber-600" />
+          <AlertDescription className="flex flex-wrap items-center gap-x-2 gap-y-1 text-amber-800">
+            <span>
+              Unsaved edits from this browser
+              {" ("}
+              {new Date(restoredDraftAt).toLocaleString()}
+              {") "}
+              were restored — the saved document still says something else.
+            </span>
+            <button
+              type="button"
+              onClick={revertToSaved}
+              className="font-medium underline underline-offset-2 hover:no-underline"
+              data-testid="discard-restored-draft"
+            >
+              Discard them
+            </button>
+          </AlertDescription>
         </Alert>
       )}
 
@@ -3065,6 +3095,21 @@ export function DocumentEditor({
                 }
               }
           }
+          onDiscard={
+            // Same gate as revert — throwing the draft away rewrites the
+            // document, so it is the author's call, not a reviewer's.
+            !canEditContent
+              ? undefined
+              : async () => {
+                try {
+                  const { version } = await api.discardDraft(nestId, nodeId);
+                  toast.success(`Draft discarded — back to version ${version}`);
+                  await Promise.all([loadNode(), loadVersions()]);
+                } catch (e: any) {
+                  toast.error(e?.message || "Discard failed");
+                }
+              }
+          }
         />
       )}
 
@@ -3287,6 +3332,134 @@ export function DocumentEditor({
         </Dialog>
       )}
 
+      {/* Discard confirmation — the app's own dialog, like every other
+          destructive action. Names both outcomes: only the server knows whether
+          this document has an approved version to fall back to. */}
+      <AlertDialog open={confirmDiscard} onOpenChange={setConfirmDiscard}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Discard the draft of "{title || nodeId}"?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              The document goes back to its last approved version. If it was
+              never approved, it is deleted instead. This can't be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => void handleDiscardDraft()}
+              data-testid="document-editor-discard-confirm"
+            >
+              Discard draft
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Sticky action bar. The write actions sit at the END of the form the
+          user is filling in and stay reachable at any scroll depth — this
+          document is long, and Save used to scroll off the top of a page that
+          takes minutes to fill in. `-mx-4 px-4` spans the padding <main> owns
+          so the bar reads as a bar rather than an indented box. */}
+      {(() => {
+        const canWrite = !isViewOnly && !isReviewerOnly && !isLocked;
+        const showSubmit = !isViewOnly && canSubmitForReview;
+        // Discard only where there is unreviewed work to throw away — which is
+        // exactly what a draft or rejected status means.
+        const showDiscard =
+          canWrite &&
+          !isNew &&
+          canEditContent &&
+          (status === "draft" || status === "rejected");
+        if (!canWrite && !showSubmit) return null;
+        return (
+          <div
+            // -mb-4 cancels the py-4 <main> puts below every page, so at full
+            // scroll the bar ends flush with the window instead of floating
+            // above a strip of padding.
+            className="sticky bottom-0 z-20 -mx-4 -mb-4 mt-6 px-4 py-3 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 flex items-center gap-2"
+            data-testid="document-editor-actions"
+          >
+            {isDirty && (
+              <span
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900"
+                title="These edits are parked locally and not yet saved to the nest."
+                data-testid="document-editor-dirty-badge"
+              >
+                <Pencil className="h-3 w-3" />
+                Unsaved changes
+              </span>
+            )}
+            <div className="ml-auto flex items-center gap-2">
+              {showDiscard && (
+                <Button
+                  variant="ghost"
+                  onClick={() => setConfirmDiscard(true)}
+                  disabled={discarding}
+                  className="text-muted-foreground hover:text-destructive"
+                  title="Throw away the unreviewed edits and go back to the last approved version"
+                  data-testid="document-editor-discard"
+                >
+                  {discarding ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-4 w-4 mr-2" />
+                  )}
+                  Discard draft
+                </Button>
+              )}
+              {showSubmit && (
+                <Button
+                  variant="outline"
+                  onClick={() => setShowSubmitModal(true)}
+                  data-testid="document-editor-submit"
+                  title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
+                >
+                  <Send className="h-4 w-4 mr-2" />
+                  Submit for review
+                </Button>
+              )}
+              {canWrite &&
+                (mode === "edit" ? (
+                  <Button
+                    // Keep focus in the editor field so clicking Save doesn't
+                    // fire the field's blur (which would trigger a second,
+                    // concurrent save alongside this click). One save per click.
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={handleSave}
+                    disabled={!canSave}
+                    data-testid="document-editor-save"
+                  >
+                    {saving ? (
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : justSaved && !isDirty ? (
+                      <Check className="h-4 w-4 mr-2 text-green-600" />
+                    ) : (
+                      <Save className="h-4 w-4 mr-2" />
+                    )}
+                    {saving
+                      ? "Saving…"
+                      : justSaved && !isDirty
+                        ? "Saved"
+                        : isNew
+                          ? "Create"
+                          : "Save"}
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={() => setMode("edit")}
+                    data-testid="document-editor-start-edit"
+                  >
+                    <Pencil className="h-4 w-4 mr-2" />
+                    Start Editing
+                  </Button>
+                ))}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

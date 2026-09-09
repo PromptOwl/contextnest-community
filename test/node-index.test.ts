@@ -255,6 +255,40 @@ describe("node_index — reads served from it", () => {
     expect(census.tags["#gtm"]).toBe(2);
   });
 
+  // An imported folder carries whatever casing its frontmatter used. The chip
+  // filter matches case-insensitively, so counting the variants apart put a
+  // number on the chip that the filter then contradicted.
+  it("folds tag casing into one facet entry, counted the way the filter matches", async () => {
+    mkdirSync(vaultPath("nodes", "beta"), { recursive: true });
+    writeFileSync(
+      vaultPath("nodes", "beta", "shouty.md"),
+      `---\ntitle: Shouty\ntype: document\nstatus: draft\ntags:\n  - GTM\n  - gtm\n---\n\nimported\n`,
+      "utf-8",
+    );
+    await getDb().run("UPDATE nests SET index_synced_at = NULL WHERE id = ?", [
+      nestId,
+    ]);
+
+    const res = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/census`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(res.status).toBe(200);
+    const tags = res.data.census.tags;
+    expect(Object.keys(tags)).not.toContain("#GTM");
+    // One entry, and the document behind both variants counted once.
+    expect(tags["#gtm"]).toBe(3);
+
+    rmSync(vaultPath("nodes", "beta", "shouty.md"));
+    await getDb().run("UPDATE nests SET index_synced_at = NULL WHERE id = ?", [
+      nestId,
+    ]);
+    await jsonRequest(app, "POST", `/nests/${nestId}/reindex`, {}, owner.apiKey);
+  });
+
   it("the folder tree agrees with the census", async () => {
     const res = await jsonRequest(
       app,

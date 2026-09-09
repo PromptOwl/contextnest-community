@@ -288,6 +288,27 @@ describe("import folder as nest (upload model)", () => {
     expect(second.data.nest.id).not.toBe(first.data.nest.id);
   });
 
+  it("refuses a re-import under a name already taken, with a name error", async () => {
+    const files = [mdFile("doc.md", "title: Doc\ntype: document", "body")];
+    const first = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Same Folder", files },
+      alice.apiKey,
+    );
+    const again = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Same Folder", files },
+      alice.apiKey,
+    );
+    expect(first.status).toBe(201);
+    expect(again.status).toBe(400);
+    expect(String(again.data.error)).toContain("already exists");
+  });
+
   it("ignores unsafe paths (traversal / absolute), keeps safe ones", async () => {
     const files = [
       { path: "../escape.md", content: "x" },

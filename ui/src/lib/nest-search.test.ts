@@ -31,3 +31,33 @@ describe("matchNests", () => {
     expect(matchNests([{ id: "nest_x" }], "nest_x")[0].title).toBe("nest_x");
   });
 });
+
+// Pins order the palette's nest rows the same way they order the dashboard —
+// but only among things that already matched (CU-wdqcq00d63).
+describe("matchNests — pinned ordering", () => {
+  const withPins = [
+    { id: "nest_a", name: "Team Knowledge" },
+    { id: "nest_b", name: "Team Playbook", pinned: true },
+    { id: "nest_c", name: "Team Archive" },
+  ];
+
+  it("floats pinned matches above unpinned ones", () => {
+    expect(matchNests(withPins, "team").map((n) => n.id)).toEqual([
+      "nest_b",
+      "nest_a",
+      "nest_c",
+    ]);
+  });
+
+  it("never promotes a pinned nest that did not match", () => {
+    expect(matchNests(withPins, "archive").map((n) => n.id)).toEqual(["nest_c"]);
+  });
+
+  it("leaves order alone when nothing is pinned", () => {
+    expect(matchNests(nests, "e").map((n) => n.id)).toEqual([
+      "nest_a",
+      "nest_b",
+      "nest_c",
+    ]);
+  });
+});

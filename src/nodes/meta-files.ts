@@ -19,8 +19,10 @@ const META_BASENAMES = new Set([
 ]);
 
 /** True for a derived file, given a document id ("gtm/INDEX") or a
- *  vault-relative path ("gtm/INDEX.md"). */
+ *  vault-relative path ("gtm/INDEX.md"). Matched case-insensitively: on a
+ *  case-insensitive filesystem `context.md` and `CONTEXT.md` are the same file,
+ *  so treating one as a document and the other as derived is never right. */
 export function isMetaFile(idOrPath: string): boolean {
   const base = idOrPath.split(/[/\\]/).pop() ?? "";
-  return META_BASENAMES.has(base.replace(/\.md$/i, ""));
+  return META_BASENAMES.has(base.replace(/\.md$/i, "").toUpperCase());
 }

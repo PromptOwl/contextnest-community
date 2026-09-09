@@ -11,6 +11,7 @@ import {
   getStewardRolesForUser,
 } from "../governance/stewardship-service.js";
 import { addCollaborator } from "./sharing-service.js";
+import { listNestPeople } from "./people-service.js";
 import { setReaderMode } from "./service.js";
 import { isServerAdminUserId } from "../shared/access.js";
 import { config } from "../config.js";
@@ -44,7 +45,15 @@ sharingRoutes.get("/collaborators", async (c) => {
       roles: await resolveUserRoles(nestId, collab.email),
     });
   }
-  return c.json({ collaborators: enriched });
+  // `collaborators` is the roster this nest's Collaborators tab manages —
+  // nest_collaborators rows and nothing else. `people` is the wider question
+  // the @mention picker asks: everyone who can reach this nest, including the
+  // owner, shared-team members, stewards and grant holders, none of whom hold
+  // a collaborator row. Same read, same write-tier gate, one round trip.
+  return c.json({
+    collaborators: enriched,
+    people: await listNestPeople(nestId),
+  });
 });
 
 // POST /nests/:nestId/collaborators — share by email

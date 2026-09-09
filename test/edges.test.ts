@@ -177,9 +177,10 @@ describe("edge creation + validation", () => {
     });
     expect(res.status).toBe(409);
     // Names the exact closed cycle: alpha→beta→gamma (existing flow) then the
-    // proposed gamma→alpha edge closing back to alpha.
+    // proposed gamma→alpha edge closing back to alpha — by the titles on the
+    // canvas, not the ids behind them (CU-wdqcq018r1).
     expect(res.data.error).toContain(
-      'cycle: ["nodes/alpha","nodes/beta","nodes/gamma","nodes/alpha"]',
+      'cycle: "Alpha" → "Beta" → "Gamma" → "Alpha"',
     );
   });
 

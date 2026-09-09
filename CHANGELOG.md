@@ -1,5 +1,88 @@
 # @promptowl/contextnest-community
 
+## 1.21.0
+
+### Minor Changes
+
+- 0170c42: Drafts can be thrown away, and My Drafts can be managed at scale.
+
+  **Discard a draft.** Every document with unreviewed edits now offers Discard: the document goes back to its last approved version, and the edits are gone. A document that was never approved has nothing to fall back to, so discarding it deletes it — the confirmation says which will happen. It is refused while a review is pending; reject the review first. Reachable from three places, because the moment you decide an edit was a mistake is rarely the same place twice: the document's own action bar, its version history panel, and My Drafts.
+
+  **Drafts no longer add versions.** This is what made Discard possible. A draft save used to append to the document's version history, which is append-only and hash-linked — so a draft, once written, could never be taken back, and a long editing session left a trail of versions nobody wanted to read. Unreviewed work now lives in the document itself, and a version is recorded when the draft is submitted for review, and again when it is published. Version history is a record of what was released rather than of every save, and discarding costs no version at all. Existing documents are unaffected: nothing is migrated, old history stays exactly as it was, and the versions already in it remain readable.
+
+  **My Drafts is a list you can work.** Alongside Submit for review, each row now has Discard, rows can be selected in bulk and discarded together, and the list can be searched by title or nest and sorted by title or by most recently edited. `GET /me/drafts` takes `q` and `sort` to match.
+
+  **The document editor's write actions moved to a sticky bar** at the bottom of the page, holding Save, Submit for review and Discard, with the unsaved-changes marker beside the Save it refers to. A document takes minutes to fill in and runs well past one screen, so Save used to scroll out of reach exactly when it was wanted. The header keeps what describes the document rather than changes it — the review verdict, the version comparison, the secondary menu — and no longer repeats the document's name in the breadcrumb, which the title field directly below already shows.
+
+- 018255c: `@mention` now picks a real person.
+
+  Typing `@` in a document opens the same autocomplete `[[` uses, listing everyone who can reach the nest, and picking one writes their address into the text. An `@name` matching nobody on the nest is drawn muted and dashed with a "no member named X" tooltip, the same way a broken `[[wiki link]]` is, so a typed name is no longer indistinguishable from a real reference.
+
+  "Everyone who can reach the nest" is a wider set than the collaborator roster: the owner, the members of a team the nest is shared with, stewards, and holders of a document or folder grant all reach a nest without holding a collaborator row. `GET /nests/:id/collaborators` now returns that union alongside the roster as `people`, each entry carrying the path that lets them in. The roster itself, and the Collaborators tab that manages it, are unchanged.
+
+  Being mentioned now tells you. Saving a document drops an inbox row — the same place review requests and invites land — for everyone the save newly names: "someone mentioned you in "Doc"", opening straight to the document. Only new names notify, so the same mention surviving a dozen saves is one event; a name matching nobody notifies nobody; authors don't hear about mentioning themselves; and a mention only reaches someone who can actually open the document.
+
+- 5505c0f: **Archive a nest instead of deleting it.** Delete was the only way to get a finished nest off the dashboard, and it takes the documents and the whole version history with it — so people either kept the clutter or destroyed something they might still need.
+
+  Archiving is the reversible middle ground. The nest keeps every document, version and steward assignment, and leaves every surface it used to appear on: the dashboard grid, cross-nest search, the work inbox, My Drafts, the MCP nest index — and MCP by id too, so a pinned nest id or a nest-scoped key stops answering rather than quietly feeding an agent from a nest you put away. Published `/p/` links stop resolving, trigger hooks stop firing and schedules stop creating runs, so an archived nest genuinely stops working rather than only disappearing from view. It stays readable in the web UI, so you can check what is in there before restoring or deleting, and nothing at all can be written to it — the owner included, in both key and open auth modes.
+
+  A new **Archived** tab on the dashboard lists them and restores them, after a confirmation. Restoring puts everything back exactly as it was, links included.
+
+  Archive sits inside the delete dialog rather than in a menu of its own: someone reaching for Delete is deciding whether they still need the nest, and that is where the reversible option belongs. Editors, who cannot delete a nest, can now ask for one to be archived from the same request dialog they use to ask for it to be deleted — same queue, same reviewers, and honouring it archives rather than destroys.
+
+- b736d7b: **Pin the nests you actually use.** On an account with many nests, the same few get opened over and over, and the only way to reach them was to sort or search for them every time. Any nest you can see now takes a pin, and pinned nests lead the dashboard grid under either sort — so they are always in the first screenful, whatever the page size.
+
+  A pin belongs to a person, not to a nest: two people sharing one nest keep their own, and nobody can see anyone else's. It needs no write access either — a read-only collaborator is the likeliest person to be watching a handful of nests they cannot edit, so pinning is the one card action everybody gets.
+
+  Pins follow the account rather than the browser, so they are there on your laptop too, and `⌘K` orders its nest rows the same way — pinned matches first, though a pin never promotes a nest that did not match what you typed.
+
+### Patch Changes
+
+- 13c7eaa: Seven UX fixes across search, tags, deep links, publishing, stewardship guidance, workflow errors, and nest names.
+
+  **Esc closes Search from anywhere in the overlay.** The overlay advertises the shortcut but only honoured it while the search input held focus, so clicking the scope toggle or the "search all nests" link left Esc doing nothing.
+
+  **An accented tag keeps its word.** `café` was stored as `caf` — the accented letter was dropped whole rather than folded to its base. It now becomes `cafe`, and the rewrite is still stated inline. Tags remain ASCII, because that is what the engine stores, so a script with no ASCII base is still refused rather than mangled.
+
+  **A nest link that doesn't resolve no longer sticks in the address bar.** The dead id stayed in the URL behind the error screen, so refreshing — or sharing the address off it — landed on the same dead end. The error screen keeps its retry.
+
+  **Publishing says it worked.** The new link appearing was the only signal, and on a long form it was easy to miss.
+
+  **The stewardship note links to the setting it names.** The Collaborators tab told readers to turn on the approval workflow in nest settings without a way to get there; owners and admins now click through, and everyone else is told who can.
+
+  **A rejected workflow connection names the cards, not their ids.** A cycle was reported as a list of internal node identifiers that appear nowhere on the canvas; it now reads as a trail of document titles.
+
+  **Nest names are capped at 100 characters.** Any length was accepted, and a long one broke the card and list layouts that render it. The limit is enforced wherever a nest is named — created, renamed, or imported — and stated in the create form as the name is typed.
+
+- ee9ba7a: Surface `ctx vault add` everywhere, pass the CLI key through the environment, and make MCP `context_search` as fast as REST search.
+
+  **The ctx CLI is a first-class way in.** CLI 2.2+ can read a hosted nest directly — `ctx vault add <alias> --url <server>/nests/<id>/mcp --bearer-env CONTEXTNEST_API_KEY`, then `ctx query "#tag" --vault <alias>` — but nothing in the product said so. The Connect dialog now shows that snippet on both the MCP and CLI tabs (key placeholder only, never key material), `/llms.txt` gains a "From the ctx CLI" section covering the server-level `/mcp` alias and the per-nest form, the README's agent-serving bullet mentions it, and the "Set up an agent" prompt (`nestSetupPrompt`) adds the alias under its shell bullet. A new pure helper, `ctxCliConnectSnippet(serverUrl, nestId, alias, openMode)`, builds the lines; in open mode there is no `--bearer-env` at all.
+
+  **The key never goes on argv.** The setup prompt told agents to run `push … --key <key>`, on the strength of a stale note that ctx read no API-key env var (true of CLI 1.2.1, not since). The CLI's own README says the opposite, and a key on the command line lands in shell history. The prompt, and the CLI tab's push snippet, now use `CONTEXTNEST_API_KEY=<key> npx -y @promptowl/contextnest-cli@latest push …`. `allNestsChatPrompt` is unchanged.
+
+  **MCP `context_search` no longer times out on a large governed nest.** `ctx search --vault <remote>` hit the CLI's 30s `REMOTE_TIMEOUT` on a 444-node nest while `GET /nests/:id/search` answered instantly. The tool was resolving the access-gated, approved body of _every_ document in the nest — a permission lookup, an approved-version read and a version-chain reconstruction per node, all at once — before matching a single term. It now runs the exact REST path: match against the cached discovery set (title hits ranked first, like REST), gate only the hits with `filterAccessible`, and resolve gated bodies for the returned page alone. Same documents, same order, same access rule as REST. The tool takes an optional `limit` (default 20, max 200) and returns `count` alongside `results`, so a capped page can't read as the whole answer. Bodies stay gated exactly as before: under stewardship a hit with no approved version is listed (REST lists it) but carries no body.
+
+- 8b533f0: **Search inside a nest waits for a query instead of listing the nest.** Opening the palette in a nest immediately listed every document in it, which read as a search that had already run — and the same overlay in a nest with nothing in it read "No matches" on an empty query. Both scopes now invite a term first, the way the all-nests scope always has.
+- Fixes across the editor, publishing, tags, workflows and imports that shipped without a changeset of their own.
+
+  **Leaving a dirty document always asks.** The unsaved-changes dialog was wired only to the editor's own back arrow and breadcrumbs, so the app header — logo, nav tabs, account menu — walked away from unsaved edits in silence, and browser Back fell through to the browser's own alert. Every view change now routes through a nav guard the mounted screen registers, and the editor parks a spare history entry while dirty so Back arrives as a popstate it can answer with the same dialog. `beforeunload` still covers reload and tab close, which no page can style.
+
+  **A restored local draft says so.** Reopening a document put parked edits back with nothing to distinguish them from the saved version. A banner now names when they were parked and offers to discard them.
+
+  **The editor listens for permission changes.** Assigning a steward, changing a collaborator or toggling stewardship did not reach an open editor until the page was reloaded — it had copied the three permission reads into state on mount, so it kept whatever rights the caller held when the document was opened. Those reads are subscriptions now, and an invalidation repaints the editor.
+
+  **Publishing can't mint a dead link.** The dialog minted a link for a document with no approved version and the reader got "Link unavailable", because `/p` serves the approved snapshot and there was nothing behind it. `createPublish` refuses that case — covering the API and MCP callers too — and the dialog disables Publish with the reason. Where an approved version exists but the working copy is ahead, the dialog names which version readers get; in a stewardship-enabled nest, publishing a document that never went through review carries a warning.
+
+  **Tags describe one document one way.** A document carrying `#GTM` and `#gtm` showed both on its card while the editor, which keys tags case-insensitively, showed a single `gtm`; the nest's tag facet keyed its counts by the raw stored tag, so the chip labelled 2 returned 3 documents because clicking it filters case-insensitively. The node response every surface reads now normalizes and dedupes, and both facets key by the normalized tag, counted once per document. A tag the engine cannot store — `café` reached `TAG_PATTERN` deep in the write — is now a 400 that names the tag rather than a generic server error with the document unsaved in the editor, and the editor folds the offending characters out inline before Save.
+
+  **Workflow wire labels are readable.** A condition longer than the ~90px gap between two cards was cut at a fixed 34 characters with no ellipsis and centred on the wire, so it ran off both ends and under the cards, which paint after the wires. Labels are now their own pass drawn after the cards, sit in the empty row gap just above the cards' top edge on a background plate, ellipsize at 46 characters, carry the full rule on hover, and still select the wire on click.
+
+  **Bulk approve collects a comment.** Approving from the review queue confirmed with no way to say anything while approving the same document from its own page collected one, and the My Work inbox ran the same `bulkReview` call through a confirm-only dialog — so an identical batch approved with or without a note depending on where it came from. The server already accepted a shared note for the batch.
+
+  **Imports and names.** A second import of the same folder skipped the duplicate-slug guard `createNest` and `renameNest` run and surfaced `UNIQUE(user_id, slug)` as a 500; all three share one `assertSlugFree` helper now. Reserved vault filenames (`context.md`, `Readme.md`, `Index.MD`) match case-insensitively, since on a case-insensitive filesystem those are the same file. A nest name holding a run of whitespace rendered shorter than it was stored, so the name copied off the delete dialog never equalled it and Delete stayed disabled — both sides are compared with whitespace collapsed. Tag-shaped text in a nest name is refused with a message instead of being stripped, which had silently eaten "Roadmap <2026> plan" down to "Roadmap plan".
+
+  **Smaller things.** The hosted artifact preview URL named its `nodes/` segment twice and now emits it once, resolving either spelling so existing links keep working; resolving a hosted node id reads the nest's layout instead of a probe read that always failed on a structured nest. Creating an empty folder toasts on success, the way it already did on failure. The Collaborators tab's stewardship requirement is its own labelled line rather than an aside, and points at the Stewards tab.
+
 ## 1.20.0
 
 ### Minor Changes

@@ -64,6 +64,7 @@ import {
   type Schedule,
 } from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
+import { wireLabel } from "../lib/wire-label";
 import { Button } from "./ui/button";
 import { OverflowMenu, type OverflowAction } from "./ui/overflow-menu";
 import { Badge } from "./ui/badge";
@@ -1690,6 +1691,39 @@ function CanvasPanel({ nestId }: { nestId: string }) {
   const edgeColor = (e: WorkflowEdge) =>
     e.type.color || (e.type.is_flow ? "#34a853" : "#94a3b8");
 
+  /**
+   * Where each wire's label goes. Kept apart from the wires because it is
+   * DRAWN AFTER THE CARDS: the cards are painted over the wires, so a label
+   * long enough to reach past the ~90px gap between two of them disappeared
+   * underneath — clipped at both ends with no ellipsis and no way to read it.
+   * Above the cards' top edge (the row gap is empty by layout) and last in
+   * paint order, the label is always legible; the full rule is on hover.
+   */
+  const edgeLabels = edges
+    .filter((e) => placed.has(e.from_node) && placed.has(e.to_node))
+    .map((e) => {
+      let condText = "";
+      if (e.condition_mode === "nl" && e.condition) {
+        condText = `“${e.condition}”`;
+      } else if (e.condition_mode === "structured" && e.condition) {
+        try {
+          const c =
+            typeof e.condition === "string" ? JSON.parse(e.condition) : e.condition;
+          condText = c?.term ? `${c.term} ${c.op ?? ""} ${c.value ?? ""}` : "";
+        } catch {
+          /* label stays type-only */
+        }
+      }
+      const a = portOf(e.from_node, "out");
+      const b = portOf(e.to_node, "in");
+      return {
+        edge: e,
+        x: (a.x + b.x) / 2,
+        y: (a.y + b.y) / 2 + (bowOf.get(e.id) ?? 0) - CARD_H / 2 - 6,
+        ...wireLabel(e.type.name, condText),
+      };
+    });
+
   const selectEdge = (e: WorkflowEdge) => {
     setSelNode(null);
     setPreview(null);
@@ -1876,21 +1910,6 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                 const bow = bowOf.get(e.id) ?? 0;
                 const d = wirePath(e.from_node, e.to_node, bow);
                 const color = edgeColor(e);
-                const mid = {
-                  x: (portOf(e.from_node, "out").x + portOf(e.to_node, "in").x) / 2,
-                  y:
-                    (portOf(e.from_node, "out").y + portOf(e.to_node, "in").y) / 2 +
-                    bow -
-                    7,
-                };
-                let condText = "";
-                if (e.condition_mode === "nl" && e.condition) condText = `“${e.condition}”`;
-                else if (e.condition_mode === "structured" && e.condition) {
-                  try {
-                    const c = typeof e.condition === "string" ? JSON.parse(e.condition) : e.condition;
-                    condText = c?.term ? `${c.term} ${c.op ?? ""} ${c.value ?? ""}` : "";
-                  } catch { /* label stays type-only */ }
-                }
                 return (
                   <g key={e.id}>
                     <path
@@ -1914,16 +1933,6 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                         selectEdge(e);
                       }}
                     />
-                    <text
-                      x={mid.x}
-                      y={mid.y}
-                      textAnchor="middle"
-                      className="pointer-events-none"
-                      style={{ font: "10px ui-monospace, monospace", fill: "hsl(var(--muted-foreground))" }}
-                    >
-                      {e.type.name}
-                      {condText ? ` · ${condText.slice(0, 34)}` : ""}
-                    </text>
                   </g>
                 );
               })}
@@ -2012,6 +2021,40 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                   </g>
                 );
               })}
+
+              {/* Wire labels last, so a card can never paint over one. */}
+              {edgeLabels.map((l) => (
+                <g
+                  key={`label-${l.edge.id}`}
+                  style={{ cursor: "pointer" }}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    selectEdge(l.edge);
+                  }}
+                >
+                  <title>{l.full}</title>
+                  <rect
+                    x={l.x - l.width / 2}
+                    y={l.y - 9}
+                    width={l.width}
+                    height={13}
+                    rx={3}
+                    fill="hsl(var(--background))"
+                    opacity={0.92}
+                  />
+                  <text
+                    x={l.x}
+                    y={l.y}
+                    textAnchor="middle"
+                    style={{
+                      font: "10px ui-monospace, monospace",
+                      fill: "hsl(var(--muted-foreground))",
+                    }}
+                  >
+                    {l.short}
+                  </text>
+                </g>
+              ))}
             </svg>
           </div>
         )}

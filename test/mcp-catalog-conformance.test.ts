@@ -182,7 +182,16 @@ const CASES: Case[] = [
     args: { query: "deal" },
     catalog: "context_search",
     // No `score`: this is a term-containment filter, not a ranked search, and
-    // the catalog makes score optional. Conforms as-is.
+    // the catalog makes score optional.
+    allowed: {
+      "unknown_key at count":
+        "the total number of hits, of which `results` is the first `limit` " +
+        "(default 20). REST GET /search reports the same `count`; without it " +
+        "a capped page reads as the whole answer. The catalog input already " +
+        "takes `limit`, so the output needs the total — proposed upstream as " +
+        "PromptOwl/ContextNest#103; drop this entry once the pinned engine " +
+        "ships it.",
+    },
   },
   {
     tool: "context_query",

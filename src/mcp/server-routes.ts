@@ -85,12 +85,18 @@ async function resolveNestRef(
   userId: string,
 ): Promise<Nest | null> {
   const db = getDb();
-  const byId = (await db.get("SELECT * FROM nests WHERE id = ?", [ref])) as
-    | Nest
-    | undefined;
+  // Archived nests resolve to nothing here, by id or by name: they are absent
+  // from the agent index, so serving one to a caller who happens to know the
+  // reference would be the one way an archived nest could still feed an agent.
+  const byId = (await db.get(
+    "SELECT * FROM nests WHERE id = ? AND archived_at IS NULL",
+    [ref],
+  )) as Nest | undefined;
   if (byId) return byId;
   const byName = (await db.all(
-    "SELECT * FROM nests WHERE LOWER(name) = LOWER(?) OR LOWER(slug) = LOWER(?)",
+    `SELECT * FROM nests
+      WHERE archived_at IS NULL
+        AND (LOWER(name) = LOWER(?) OR LOWER(slug) = LOWER(?))`,
     [ref, ref],
   )) as Nest[];
   if (byName.length <= 1) return byName[0] ?? null;
@@ -234,12 +240,17 @@ export const SERVER_TOOL_DEFINITIONS = [
   },
   {
     name: "context_search",
-    description: "Full-text keyword search across one nest.",
+    description:
+      "Full-text keyword search across one nest — the same index-backed match as REST GET /search. Returns `count` (everything found) and the first `limit` hits.",
     inputSchema: {
       type: "object" as const,
       properties: {
         ...NEST_ARG,
         query: { type: "string", description: "Search terms" },
+        limit: {
+          type: "number",
+          description: "Max hits to return (default 20, max 200)",
+        },
       },
       required: ["nest", "query"],
     },
@@ -594,6 +605,26 @@ Claude Code / Cursor / VS Code connect natively via HTTP with the
 \`\`\`
 npx -y mcp-remote ${B}/mcp --header "Authorization: Bearer <api-key>"
 \`\`\`
+
+## From the ctx CLI
+
+The \`ctx\` CLI (\`@promptowl/contextnest-cli\` 2.2+) reads a hosted nest the
+same way it reads a local vault: register the MCP endpoint as a vault alias,
+then pass \`--vault <alias>\` to \`query\`, \`read\`, \`list\`, \`search\`. The key
+is read from the environment variable named by \`--bearer-env\` — never put it
+on the command line.
+
+\`\`\`
+export CONTEXTNEST_API_KEY=<api-key>
+# every nest these credentials can read, through the server-level endpoint
+ctx vault add contextnest --url ${B}/mcp --bearer-env CONTEXTNEST_API_KEY
+# or one nest
+ctx vault add mynest --url ${B}/nests/<nest-id>/mcp --bearer-env CONTEXTNEST_API_KEY
+ctx query "#gtm" --vault mynest
+\`\`\`
+
+Servers in "open" auth mode: drop \`--bearer-env\`. Pushing a local folder up
+is \`ctx push --server ${B} --nest <nest-id>\` with the same env var set.
 
 ## npm packages
 

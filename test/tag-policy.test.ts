@@ -26,10 +26,30 @@ describe("normalizeTagInput", () => {
     expect(normalizeTagInput("🚀rocket").tag).toBe("rocket");
   });
 
-  it("refuses a tag with no letters or digits", () => {
+  it("refuses a tag with nothing usable in it", () => {
     const { tag, note } = normalizeTagInput("!@#$%^&*");
     expect(tag).toBeNull();
-    expect(note).toContain("no letters or digits");
+    expect(note).toContain("no usable characters");
+  });
+
+  // The engine's TAG_PATTERN is ASCII and letter-initial. Anything wider was
+  // accepted here and then refused by the server, taking the whole save with it.
+  it("folds a tag to what the server will actually store", () => {
+    expect(normalizeTagInput("2024-plan").tag).toBe("plan");
+    expect(normalizeTagInput("dept:sales").tag).toBe("dept:sales");
+    expect(normalizeTagInput("v2.0").tag).toBe("v20");
+  });
+
+  // An accent has an ASCII base letter, so keep it — dropping the character
+  // whole turned "café" into a different word (CU-wdqcq01e79).
+  it("folds an accented letter to its base instead of dropping it", () => {
+    const { tag, note } = normalizeTagInput("café");
+    expect(tag).toBe("cafe");
+    expect(note).toContain("cafe");
+    expect(normalizeTagInput("Über-Sicherheit").tag).toBe("uber-sicherheit");
+    // No ASCII base to fall back to — still refused.
+    expect(normalizeTagInput("漢字").tag).toBeNull();
+    expect(tagKey("Café")).toBe(tagKey("cafe"));
   });
 
   it("ignores an empty token without complaining", () => {

@@ -477,6 +477,31 @@ export function parseSharedTeams(json: string | null | undefined): SharedTeamRef
   }
 }
 
+/**
+ * Members of the teams shared onto a nest, deduped by user id. Team rosters
+ * live as JSON on the team row, so parsing stays here rather than leaking the
+ * shape to callers that only want the people.
+ */
+export async function listSharedTeamMembers(
+  refs: SharedTeamRef[],
+): Promise<Array<{ userId: string; email: string; name: string | null }>> {
+  const ids = [...new Set(refs.map((r) => r.teamId).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const rows = (await getDb().all(
+    `SELECT members FROM teams WHERE id IN (${ids.map(() => "?").join(",")})`,
+    ids,
+  )) as Array<{ members?: string }>;
+  const byEmail = new Map<string, { userId: string; email: string; name: string | null }>();
+  for (const row of rows) {
+    for (const member of parseMembers(row.members)) {
+      const key = (member.email || "").toLowerCase();
+      if (!key || byEmail.has(key)) continue;
+      byEmail.set(key, { userId: member.userId, email: member.email, name: null });
+    }
+  }
+  return [...byEmail.values()];
+}
+
 /** Teams shared onto a nest (from nests.shared_teams). */
 export async function listNestTeams(nestId: string): Promise<SharedTeamRef[]> {
   const db = getDb();

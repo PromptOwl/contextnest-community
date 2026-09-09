@@ -35,6 +35,7 @@ import {
   indexedNodeIds,
 } from "../nodes/node-index.js";
 import { getDb } from "../db/client.js";
+import { isNestArchived } from "../shared/access.js";
 import { resolveNestPath } from "../shared/paths.js";
 
 /** Community-tier RBAC stub.
@@ -179,6 +180,18 @@ async function scanDocumentForDriftInternal(
     return null;
   }
 
+  // Same call, made where history can't answer it: a draft revision is not
+  // appended to the chain, so an author's unreviewed working copy matches NO
+  // version in history.yaml and would otherwise be staged as somebody else's
+  // out-of-band edit. An unsealed row on top says the divergence is a draft in
+  // progress — that is the app's own write, by definition.
+  // Imported the way recordApproval imports its siblings — version-service and
+  // this module reach for each other.
+  const { hasUnsealedDraft } = await import("./version-service.js");
+  if (await hasUnsealedDraft(nestId, documentId)) {
+    return null;
+  }
+
   // Match the chain head the engine will read on approveSuggestion.
   // The engine calls `reconstructVersion(latest)`, which returns the live
   // post-publish bytes (frontmatter with status:published, version, and
@@ -235,11 +248,18 @@ async function refreshSuggestionFlag(
   }
 }
 
-/** Scan every document in a nest. Returns count of newly-staged suggestions. */
+/** Scan every document in a nest. Returns count of newly-staged suggestions.
+ *
+ *  An archived nest is never scanned: staging a suggestion is a WRITE (a file
+ *  under `_suggestions/`, plus markIndexStale), and archived means the nest
+ *  stops working. The guard sits here rather than in each caller because the
+ *  scan is reached three ways — the timer, GET ?refresh=true and POST
+ *  /external-edits/scan — and the GET slips past the middleware's write cap. */
 export async function scanNestForDrift(
   nestId: string,
   actor: string = "system:scanner",
 ): Promise<{ scanned: number; staged: number }> {
+  if (await isNestArchived(nestId)) return { scanned: 0, staged: 0 };
   const { storage, dropDiscoveryCache } = await engineCache.get(nestId);
   // Edits made outside this process are the whole point of the scan, so it
   // reads disk directly rather than the cached document set — which by
@@ -665,7 +685,12 @@ let scannerTimer: NodeJS.Timeout | null = null;
 /** Iterate every nest on disk and scan for drift. */
 async function scanAllNests(): Promise<void> {
   const db = getDb();
-  const rows = await db.all("SELECT id FROM nests") as Array<{ id: string }>;
+  // Archived nests are skipped in the query, not just refused by
+  // scanNestForDrift — no reason to pay a disk crawl per tick for a nest that
+  // can't accept the result.
+  const rows = await db.all(
+    "SELECT id FROM nests WHERE archived_at IS NULL",
+  ) as Array<{ id: string }>;
   await Promise.all(
     rows.map(({ id }) =>
       scanNestForDrift(id).catch((err) =>
