@@ -120,10 +120,10 @@ describe("nestSetupPrompt", () => {
     expect(p).toContain("503");
     // /context is a POST and POSTs are license-gated; these GETs are not, so
     // they are the only reads that work on an unlicensed server.
-    // Enumerate, then read. Agents in testing could not list documents from
-    // /search alone (it needs a term) and 404'd on a bare slug, so the prompt
-    // spells out both the list call and the doubled-id read.
-    expect(p).toContain("/nests/gtm/nodes");
+    // /export is a GET (so the gate misses it) and returns every document WITH
+    // its body in ONE call — the cheapest unlicensed read. List-then-read
+    // survives as the escape hatch for a nest too large to take whole.
+    expect(p).toContain("/nests/gtm/export?format=markdown");
     expect(p).toContain("/nests/gtm/nodes/nodes/<slug>");
   });
 
@@ -133,6 +133,14 @@ describe("nestSetupPrompt", () => {
     // Egress-restricted environments (cloud sandboxes, CI, corporate proxies)
     // cannot reach the host at all — retrying never helps, so say so.
     expect(p).toMatch(/refused|blocked|cannot reach/i);
+  });
+
+  it("does not mistake an app-level 403 for a blocked network", () => {
+    // The server itself 403s a key scoped to another nest — fixable, and
+    // nothing to do with egress. Those carry a JSON error body; a gateway
+    // block generally does not, so the prompt splits on that.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toMatch(/403[\s\S]*scoped to a different nest/);
   });
 
   it("names where the key is expected instead of only asking for it", () => {

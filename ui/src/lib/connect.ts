@@ -195,24 +195,29 @@ export function nestSetupPrompt(
     // /context is a POST, and every non-GET is license-gated. These two reads
     // are GETs, so they are the only ones that answer on an unlicensed server
     // — which is the state of every trial and every fresh self-host.
-    "    503  the server has no PromptOwl license, which blocks that endpoint. Two GETs still",
-    "         work — list the nest, then read each document you want:",
+    // /export is a GET, so the license gate misses it, and with no selector it
+    // returns every accessible document's frontmatter AND body in ONE call —
+    // strictly better than list-then-read (1 call vs 1+N) and it sidesteps the
+    // doubled-id shape below entirely. The per-document path stays as the
+    // escape hatch for a nest too large to swallow whole.
+    "    503  the server has no PromptOwl license, which blocks that endpoint. This one is a",
+    "         GET, so it still works, and returns every document WITH its text in one call:",
+    `           curl -s "${base}/nests/${nestId}/export?format=markdown"${auth}`,
+    "         If the nest is too big to take in one go, list it and read what you need instead",
+    "         (the id the list returns already starts with `nodes/`, so the path doubles):",
     `           curl -s ${base}/nests/${nestId}/nodes${auth}`,
     `           curl -s ${base}/nests/${nestId}/nodes/nodes/<slug>${auth}`,
-    // The list returns ids and titles but EMPTY bodies, so the per-node read is
-    // required for text. And the id is `nodes/<slug>`, appended whole — the
-    // doubled path segment is correct and a bare slug 404s. Both were found by
-    // agents in testing, so both are spelled out rather than left to inference.
-    "         The list gives ids and titles with empty bodies; the second call — note the",
-    "         doubled `nodes/`, because the id the list returns is itself `nodes/<slug>` —",
-    "         returns the document text. Tell me the server is unlicensed.",
+    "         Either way, tell me the server is unlicensed.",
     openMode
       ? null
       : "    401  the key is missing or wrong. Ask me for it. Do not retry with a different one.",
-    // A blocked CONNECT never reaches the server, so no amount of retrying or
-    // re-authenticating changes it. Cloud sandboxes, CI runners and corporate
-    // proxies all land here.
-    "    000 / connection refused / a 403 from a proxy",
+    "    403  read the body. JSON with an `error` field is the server refusing you — usually a",
+    "         key scoped to a different nest. Tell me which; do not treat it as a network problem.",
+    "         A 403 with no JSON body is a gateway, not us — treat it as the next case.",
+    // A blocked CONNECT never reaches the server at all, so retrying and
+    // re-authenticating are both useless. Cloud sandboxes, CI runners and
+    // corporate egress proxies all land here.
+    "    no response / connection refused / a timeout",
     "         your environment cannot reach this host — a sandbox or network egress policy is blocking it.",
     "         Do not retry and do not tunnel around it. Tell me, and ask me to add ContextNest",
     "         under Settings → Connectors → Add custom connector instead, which is dialled",
