@@ -95,14 +95,78 @@ describe("nestSetupPrompt", () => {
     expect(p).toMatch(/settings . connectors/i); // no-shell handoff path
   });
 
-  it("uses npx (not a global install) and asks for the key", () => {
+  // Was: "uses npx (not a global install) and asks for the key". Both halves
+  // pinned the `push` line, which left this prompt with CU-wdqcq01kh8 (push is
+  // a write-a-folder-up job, and it taught agents the CLI is the only writer).
+  // The surviving intent — the key is LOCATED, not merely requested — is what
+  // this now asserts; the npx-not-global rule travels with push to wherever
+  // push is documented.
+  it("locates the key rather than only asking for it", () => {
     const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
-    expect(p).toContain("npx -y @promptowl/contextnest-cli");
-    expect(p).toMatch(/ask me only for the api key/i);
+    expect(p).toContain("CONTEXTNEST_API_KEY");
+    expect(p).toMatch(/ask me for it and stop/i);
   });
 
   it("never bakes in a key", () => {
     expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).not.toMatch(/cnst_/);
+  });
+
+  // The 10-run agent experiment (2026-09-09) found one thing that moved the
+  // needle: telling the agent what to do when the FIRST read fails. The
+  // variant with documented fallbacks connected 2/2 against a broken server;
+  // the variant that said "if it fails, stop" connected 0/2. These pin that.
+  it("says what to do when the first read is refused for a license", () => {
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toContain("503");
+    // /context is a POST and POSTs are license-gated; these GETs are not, so
+    // they are the only reads that work on an unlicensed server.
+    // Enumerate, then read. Agents in testing could not list documents from
+    // /search alone (it needs a term) and 404'd on a bare slug, so the prompt
+    // spells out both the list call and the doubled-id read.
+    expect(p).toContain("/nests/gtm/nodes");
+    expect(p).toContain("/nests/gtm/nodes/nodes/<slug>");
+  });
+
+  it("distinguishes a missing key from a blocked network", () => {
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toContain("401");
+    // Egress-restricted environments (cloud sandboxes, CI, corporate proxies)
+    // cannot reach the host at all — retrying never helps, so say so.
+    expect(p).toMatch(/refused|blocked|cannot reach/i);
+  });
+
+  it("names where the key is expected instead of only asking for it", () => {
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    // The old copy said "ask me for my API key" AND "never in our chat",
+    // naming no other channel. Four of ten runs stopped there.
+    expect(p).toContain("CONTEXTNEST_API_KEY");
+  });
+
+  it("does not promise self-setup of the key, which is impossible", () => {
+    // /auth/keys needs a signed-in session, so an agent cannot mint its own.
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).not.toMatch(
+      /set it up yourself/i,
+    );
+  });
+
+  it("names write tools rather than asserting write capability", () => {
+    // Prose assertion ("this connection reads AND writes") left 5 of 6 agents
+    // answering "unsure". A named mechanism is what they actually believed.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toContain("context_create");
+    expect(p).toContain("context_update");
+  });
+
+  it("keeps push out of the setup brief", () => {
+    // `push` uploads a local folder INTO the nest — a different job, and the
+    // direct cause of agents concluding the CLI is the only writer.
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).not.toContain("push");
+  });
+
+  it("shows the citation format with a real id shape", () => {
+    // Agents read a bare `nest:id` as a literal "nest:" prefix; real ids look
+    // like nodes/returns-policy.
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).toContain("nodes/");
   });
 });
 
@@ -172,7 +236,6 @@ describe("ctx CLI contract (CLI 2.2+: env-based key, remote vault alias)", () =>
   // (a comment claimed ctx read no env var, verified against 1.2.1 — stale).
   it("passes the key through CONTEXTNEST_API_KEY, never as a --key flag", () => {
     const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
-    expect(p).toContain("push --server https://x.ai --nest gtm");
     expect(p).toContain("CONTEXTNEST_API_KEY");
     expect(p).not.toContain("--key <key>");
     expect(p).not.toMatch(/--key\b/);
@@ -180,7 +243,6 @@ describe("ctx CLI contract (CLI 2.2+: env-based key, remote vault alias)", () =>
 
   it("omits both the env var and the key flag in open mode", () => {
     const p = nestSetupPrompt("GTM", "https://x.ai", "gtm", true);
-    expect(p).toContain("push --server https://x.ai --nest gtm");
     expect(p).not.toContain("CONTEXTNEST_API_KEY");
     expect(p).not.toContain("--key");
   });

@@ -145,10 +145,24 @@ export function ctxCliConnectSnippet(
 }
 
 /**
- * The one-shot bootstrap brief for wiring an agent to ONE nest. Self-provisioning:
- * a capable agent installs the CLI or adds the MCP server itself, ASKS the user
- * for the key, then connects, orients, and starts. Keyless in the text — the key
- * is handed over by the user when the agent asks.
+ * The one-shot bootstrap brief for wiring an agent to ONE nest.
+ *
+ * Shaped by a 10-run agent experiment (2026-09-09, CU-wdqcq01kh8) rather than
+ * judgement. Against an identical failing server, the variant that documented
+ * WHAT TO DO WHEN THE FIRST READ FAILS connected 2/2; the variant that said
+ * "if it fails, stop" connected 0/2. Hence the status-code branches — they are
+ * the load-bearing part of this text, not decoration.
+ *
+ * Three other findings are baked in. Agents trust MECHANISMS over CLAIMS: told
+ * in prose that a connection "reads and writes", 5 of 6 still answered "unsure"
+ * about writing, so the write tools are named instead. The key is located
+ * (CONTEXTNEST_API_KEY, what the .env download writes) rather than merely asked
+ * for — the old copy said "ask me for the key" AND "never in our chat" while
+ * offering no other channel, and four runs stopped there. And `push` is gone:
+ * it uploads a local folder INTO the nest, a different job, and it was the
+ * direct cause of agents concluding the CLI is the only thing that can write.
+ *
+ * Still keyless in the text — the key travels in the environment, never here.
  */
 export function nestSetupPrompt(
   nestName: string,
@@ -158,39 +172,64 @@ export function nestSetupPrompt(
 ): string {
   const base = serverUrl.replace(/\/+$/, "");
   const mcp = `${base}/nests/${nestId}/mcp`;
+  const auth = openMode ? "" : ' -H "Authorization: Bearer $CONTEXTNEST_API_KEY"';
   return [
-    `Connect to my ContextNest nest "${nestName}" and treat it as my source of truth. Set it up yourself where you can;${openMode ? " it needs no credential." : " ask me only for the API key."}`,
-    "",
-    "RULE — do NOT claim you're connected until you've pulled LIVE data: prove it by showing the nest's real node count and a few real node titles. If you can't retrieve anything, STOP — don't guess, don't summarise — and give me the manual steps below instead.",
-    "",
-    "WHAT IT IS — a governed, cited knowledge graph of my context. Read from it; never guess.",
-    "",
-    "CONNECT — pick what fits you:",
-    "• Shell / coding agent (Claude Code, Codex, Cursor): the fastest working read is a direct call —",
-    `    curl -s -X POST ${base}/nests/${nestId}/context \\`,
-    openMode
-      ? '      -H "Content-Type: application/json" \\'
-      : '      -H "Authorization: Bearer <key>" -H "Content-Type: application/json" \\',
-    "      -d '{\"selector\":\"type:document\",\"hops\":1,\"max_tokens\":2000}'",
-    `  You can also add an MCP server "contextnest" at ${mcp}${openMode ? "" : " (Bearer header)"} — but its tools don't load until you RESTART the session, so use the curl above to confirm now.`,
-    // The key travels in CONTEXTNEST_API_KEY, never on argv (the CLI README's
-    // rule; a --key flag also lands in shell history).
-    `  Push a local folder of notes up: ${openMode ? "" : "CONTEXTNEST_API_KEY=<key> "}npx -y @promptowl/contextnest-cli@latest push --server ${base} --nest ${nestId}`,
-    "  Or register the nest as a ctx vault (CLI 2.2+) and read it straight from the shell —",
-    ...ctxCliConnectSnippet(base, nestId, nestName, openMode)
-      .split("\n")
-      .map((line) => `    ${line}`),
-    "• Claude Desktop / claude.ai / ChatGPT (no shell): you can't connect yourself from chat. Tell me to do this: Settings → Connectors → Add custom connector →",
-    openMode
-      ? `    URL ${mcp}, then restart.`
-      : `    URL ${mcp}  ·  header "Authorization: Bearer <key>", then restart.`,
-    openMode ? null : "  Put the key in that config — never in our chat.",
+    `Connect to my ContextNest nest "${nestName}" and treat it as my source of truth.`,
     "",
     openMode
       ? null
-      : "KEY — ask me for my ContextNest API key. Put it in the env/config above; don't print it back.",
+      : "KEY — it is in the environment variable CONTEXTNEST_API_KEY. If that variable is empty, ask me for it and stop: you cannot mint one yourself (minting needs a signed-in session).",
     openMode ? null : "",
-    "THEN (only after the proof above) — search before answering, cite what you use as `nest:id`, remember durable learnings as small linked nodes, and always ask before publishing anything public.",
+    "RULE — do NOT claim you're connected until a call has returned real documents you can name. If nothing works, tell me which step failed and stop. Never guess, never summarise.",
+    "",
+    "STEP 1 — read the nest:",
+    `    curl -s -X POST ${base}/nests/${nestId}/context \\`,
+    openMode
+      ? '      -H "Content-Type: application/json" \\'
+      : '      -H "Authorization: Bearer $CONTEXTNEST_API_KEY" -H "Content-Type: application/json" \\',
+    "      -d '{\"selector\":\"type:document\",\"hops\":1,\"max_tokens\":2000}'",
+    "",
+    "  Documents back? You're connected. Name them, then read WHAT YOU CAN DO below.",
+    "",
+    "  Otherwise the status code tells you which problem you have:",
+    // /context is a POST, and every non-GET is license-gated. These two reads
+    // are GETs, so they are the only ones that answer on an unlicensed server
+    // — which is the state of every trial and every fresh self-host.
+    "    503  the server has no PromptOwl license, which blocks that endpoint. Two GETs still",
+    "         work — list the nest, then read each document you want:",
+    `           curl -s ${base}/nests/${nestId}/nodes${auth}`,
+    `           curl -s ${base}/nests/${nestId}/nodes/nodes/<slug>${auth}`,
+    // The list returns ids and titles but EMPTY bodies, so the per-node read is
+    // required for text. And the id is `nodes/<slug>`, appended whole — the
+    // doubled path segment is correct and a bare slug 404s. Both were found by
+    // agents in testing, so both are spelled out rather than left to inference.
+    "         The list gives ids and titles with empty bodies; the second call — note the",
+    "         doubled `nodes/`, because the id the list returns is itself `nodes/<slug>` —",
+    "         returns the document text. Tell me the server is unlicensed.",
+    openMode
+      ? null
+      : "    401  the key is missing or wrong. Ask me for it. Do not retry with a different one.",
+    // A blocked CONNECT never reaches the server, so no amount of retrying or
+    // re-authenticating changes it. Cloud sandboxes, CI runners and corporate
+    // proxies all land here.
+    "    000 / connection refused / a 403 from a proxy",
+    "         your environment cannot reach this host — a sandbox or network egress policy is blocking it.",
+    "         Do not retry and do not tunnel around it. Tell me, and ask me to add ContextNest",
+    "         under Settings → Connectors → Add custom connector instead, which is dialled",
+    "         server-side and is not subject to your egress rules.",
+    "",
+    "WHAT YOU CAN DO — this connection reads AND writes. Over MCP the write tools are",
+    "context_create, context_update, context_move and context_submit_review; over REST it is",
+    `POST and PATCH on ${base}/nests/${nestId}/nodes. Never write, publish or share without asking me first.`,
+    "",
+    `THEN — answer from the nest, cite what you use as \`${nestName}:nodes/<slug>\` (that is the id shape the server returns), and say plainly when something is not covered.`,
+    "",
+    "LATER, optional, persists across sessions — either of these, with the same credential:",
+    `    an MCP server "contextnest" at ${mcp}${openMode ? "" : " (Bearer header)"}`,
+    ...ctxCliConnectSnippet(base, nestId, nestName, openMode)
+      .split("\n")
+      .map((line) => `    ${line}`),
+    "  Both only take effect after you RESTART the session, so neither can prove anything now.",
   ]
     .filter((line): line is string => line !== null)
     .join("\n");
