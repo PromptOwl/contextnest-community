@@ -117,6 +117,19 @@ export async function resolveNestAccess(
   };
 }
 
+/**
+ * Is this nest archived? One indexed lookup, for the callers that must know
+ * without paying for the whole permission merge — open mode, which grants
+ * "owner" outright and never resolves access at all.
+ */
+export async function isNestArchived(nestId: string): Promise<boolean> {
+  const row = (await getDb().get(
+    "SELECT archived_at FROM nests WHERE id = ?",
+    [nestId],
+  )) as { archived_at: string | null } | undefined;
+  return !!row?.archived_at;
+}
+
 /** Archived nests are readable and nothing more, whoever is asking. */
 export function capForArchive(
   permission: NestPermission,

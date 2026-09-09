@@ -77,6 +77,7 @@ import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
   resolveNestAccess,
+  isNestArchived,
   permissionLevel,
   isServerAdminUserId,
   type NestPermission,
@@ -1647,6 +1648,17 @@ export function createApp(): Hono<AuthEnv> {
     // request id when parseable) so the client shows WHY the connection
     // failed — wrong key scope, missing license, no access.
     const isMcpTransport = parts.length === 2 && parts[1] === "mcp";
+    // Whole-nest lifecycle — delete, archive, restore. Gated in the route by
+    // requireNestCaretaker (owner, or the license admin as caretaker of the
+    // commons), which is strictly narrower than 'write'. Both the open-mode
+    // branch and the tier block below exempt it: an archived nest caps every
+    // caller at 'read', so requiring 'write' here would strand a nest that
+    // could never be restored or deleted.
+    const isNestLifecycleAction =
+      (parts.length === 1 && c.req.method === "DELETE") ||
+      (parts.length === 2 &&
+        c.req.method === "POST" &&
+        (parts[1] === "archive" || parts[1] === "restore"));
     const deny = async (
       status: 403 | 404 | 503,
       error: string,
@@ -1748,9 +1760,30 @@ export function createApp(): Hono<AuthEnv> {
       }
     }
 
-    // In open mode, everyone gets owner-level access
+    // In open mode, everyone gets owner-level access — but archiving is not an
+    // access rule, it is a property of the nest, so it binds here too. This
+    // branch returns before the permission merge below, so the cap that makes
+    // an archived nest read-only never reaches it; without this check, open
+    // mode (the local/LAN posture where an MCP agent is most likely to be
+    // pointed straight at a nest) could still write to a nest that was
+    // archived precisely to stop that.
+    //
+    // One indexed lookup on the hot path, and the full rule only for the rare
+    // archived nest: everything but a GET is refused, except the lifecycle
+    // actions that must survive archiving (restore, delete).
     if (config.AUTH_MODE === "open") {
-      c.set("nestPermission", "owner");
+      const archived = await isNestArchived(nestId);
+      if (archived) {
+        if (isMcpTransport) return deny(404, "Nest not found");
+        if (c.req.method !== "GET" && !isNestLifecycleAction) {
+          return deny(
+            403,
+            "This nest is archived, so it is read-only. Restore it to make changes.",
+            { archived: true },
+          );
+        }
+      }
+      c.set("nestPermission", archived ? "read" : "owner");
       return next();
     }
 
@@ -1901,11 +1934,8 @@ export function createApp(): Hono<AuthEnv> {
     // caretaker of the commons). It has to work this way: an archived nest caps
     // every caller at 'read' (see resolveNestAccess), so a 'write' requirement
     // on this line would leave a nest that can never be restored or deleted.
-    const isNestLifecycleAction =
-      (parts.length === 1 && c.req.method === "DELETE") ||
-      (parts.length === 2 &&
-        c.req.method === "POST" &&
-        (parts[1] === "archive" || parts[1] === "restore"));
+    // (Defined above, next to isMcpTransport — the open-mode branch needs it
+    // too, and that branch runs before this point.)
     // The steward roster — list, assign, remove, sync — is restricted to the
     // server (license) admin plus the nest owner/admin collaborators, so an
     // owner can delegate vault people-management by granting admin. All

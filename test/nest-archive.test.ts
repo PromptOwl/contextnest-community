@@ -320,3 +320,103 @@ describe("nest archive", () => {
     expect(read.status).toBe(200);
   });
 });
+
+// Open mode grants every caller "owner" outright and returns before the
+// permission merge, so the archived cap never reaches it. That is the posture
+// where a local agent is most likely pointed straight at a nest over MCP, so
+// "archived is read-only" has to hold here too — and it needs its own app,
+// because the suite above runs entirely in key mode.
+describe("nest archive — open mode", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let user: { apiKey: string };
+  let nestId: string;
+  let nodeId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("open");
+    user = await registerUser(app, "solo@acme.com", "Solo");
+
+    const { data: nest } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Local Vault" },
+      user.apiKey,
+    );
+    nestId = nest.nest.id;
+    const { data: node } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Local Doc", content: "# Local" },
+      user.apiKey,
+    );
+    nodeId = node.node.id;
+
+    await jsonRequest(app, "POST", `/nests/${nestId}/archive`, {}, user.apiKey);
+  }, 30000);
+
+  afterAll(() => env.cleanup());
+
+  it("still refuses writes even though everyone is 'owner' here", async () => {
+    const write = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/${nodeId}`,
+      { content: "# Edited while archived" },
+      user.apiKey,
+    );
+    expect(write.status).toBe(403);
+
+    const create = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "New While Archived", content: "# No" },
+      user.apiKey,
+    );
+    expect(create.status).toBe(403);
+  });
+
+  it("still reads, and still closes the MCP transport", async () => {
+    const read = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/${nodeId}`,
+      null,
+      user.apiKey,
+    );
+    expect(read.status).toBe(200);
+
+    const mcp = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/mcp`,
+      { jsonrpc: "2.0", id: 1, method: "tools/list" },
+      user.apiKey,
+    );
+    expect(mcp.status).toBe(404);
+  });
+
+  it("can still be restored — the cap must not strand the nest", async () => {
+    const restored = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/restore`,
+      {},
+      user.apiKey,
+    );
+    expect(restored.status).toBe(200);
+
+    const write = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/${nodeId}`,
+      { content: "# Edited after restore" },
+      user.apiKey,
+    );
+    expect(write.status).toBe(200);
+  });
+});

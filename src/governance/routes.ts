@@ -451,10 +451,11 @@ governanceRoutes.post("/deletion-requests/:id/delete", async (c) => {
   }
 
   if (request.targetType === "nest_archive") {
-    // The editor asked for the nest to be put away, not destroyed. Nothing
-    // cascades, so drop the row explicitly the way the folder branch does.
+    // The editor asked for the nest to be put away, not destroyed. archiveNest
+    // clears the pending nest_archive rows itself — it has to, since the owner
+    // may archive directly instead of coming through this queue — so this row
+    // is already gone and needs no explicit drop.
     await archiveNest(nestId);
-    await reviews.dropDeletionRequest(request.id);
   } else if (request.targetType === "nest") {
     // Nest rows cascade with the nest, so the request row goes with it.
     await deleteNest(nestId);

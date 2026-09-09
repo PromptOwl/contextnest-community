@@ -4,7 +4,7 @@
 
 **Archive a nest instead of deleting it.** Delete was the only way to get a finished nest off the dashboard, and it takes the documents and the whole version history with it — so people either kept the clutter or destroyed something they might still need.
 
-Archiving is the reversible middle ground. The nest keeps every document, version and steward assignment, and leaves every surface it used to appear on: the dashboard grid, cross-nest search, the work inbox, My Drafts, the MCP nest index — and MCP by id too, so a pinned nest id or a nest-scoped key stops answering rather than quietly feeding an agent from a nest you put away. Published `/p/` links stop resolving while it is archived. It stays readable in the web UI, so you can check what is in there before restoring or deleting, and nothing at all can be written to it — the owner included.
+Archiving is the reversible middle ground. The nest keeps every document, version and steward assignment, and leaves every surface it used to appear on: the dashboard grid, cross-nest search, the work inbox, My Drafts, the MCP nest index — and MCP by id too, so a pinned nest id or a nest-scoped key stops answering rather than quietly feeding an agent from a nest you put away. Published `/p/` links stop resolving, trigger hooks stop firing and schedules stop creating runs, so an archived nest genuinely stops working rather than only disappearing from view. It stays readable in the web UI, so you can check what is in there before restoring or deleting, and nothing at all can be written to it — the owner included, in both key and open auth modes.
 
 A new **Archived** tab on the dashboard lists them and restores them, after a confirmation. Restoring puts everything back exactly as it was, links included.
 
