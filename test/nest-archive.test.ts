@@ -268,6 +268,63 @@ describe("nest archive", () => {
     await jsonRequest(app, "POST", `/nests/${nestId}/restore`, {}, owner.apiKey);
   });
 
+  // The documented limitation, pinned so it cannot drift unnoticed. A pending
+  // DELETION request is not answered by archiving — the two ask for different
+  // outcomes — so it survives, and the honour route needs write tier, which an
+  // archived nest denies everyone. The owner is not stuck: DELETE never passes
+  // through the nest middleware, so deleting the nest outright still works and
+  // takes the request row with it. See API.md.
+  it("leaves a pending nest DELETION request unactionable while archived, but the nest still deletable", async () => {
+    const asked = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${otherNestId}/request-deletion`,
+      { targetType: "nest", target: otherNestId, reason: "superseded" },
+      owner.apiKey,
+    );
+    expect(asked.status).toBe(201);
+
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${otherNestId}/archive`,
+      {},
+      owner.apiKey,
+    );
+
+    // Survives the archive — it asked for deletion, which has not happened.
+    const queue = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${otherNestId}/deletion-requests?status=pending`,
+      null,
+      owner.apiKey,
+    );
+    expect(
+      queue.data.requests.some((r: any) => r.targetType === "nest"),
+    ).toBe(true);
+
+    // ...and cannot be honoured from the queue: write tier, which the cap denies.
+    const honour = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${otherNestId}/deletion-requests/${asked.data.request.id}/delete`,
+      {},
+      owner.apiKey,
+    );
+    expect(honour.status).toBe(403);
+
+    // The way out: delete the nest directly. Still open to its owner.
+    const deleted = await jsonRequest(
+      app,
+      "DELETE",
+      `/nests/${otherNestId}`,
+      null,
+      owner.apiKey,
+    );
+    expect(deleted.status).toBe(200);
+  });
+
   it("an editor can only REQUEST an archive; honouring it archives, not deletes", async () => {
     const asked = await jsonRequest(
       app,

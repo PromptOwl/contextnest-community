@@ -1648,17 +1648,20 @@ export function createApp(): Hono<AuthEnv> {
     // request id when parseable) so the client shows WHY the connection
     // failed — wrong key scope, missing license, no access.
     const isMcpTransport = parts.length === 2 && parts[1] === "mcp";
-    // Whole-nest lifecycle — delete, archive, restore. Gated in the route by
-    // requireNestCaretaker (owner, or the license admin as caretaker of the
-    // commons), which is strictly narrower than 'write'. Both the open-mode
-    // branch and the tier block below exempt it: an archived nest caps every
-    // caller at 'read', so requiring 'write' here would strand a nest that
-    // could never be restored or deleted.
+    // Archive and restore are gated in the route by requireNestCaretaker (the
+    // owner, or the license admin as caretaker of the commons) — strictly
+    // narrower than 'write'. Both the open-mode branch and the tier block below
+    // exempt them, because an archived nest caps every caller at 'read' and a
+    // 'write' requirement here would strand a nest that could never be
+    // restored.
+    //
+    // DELETE /nests/:id is NOT listed: it is `parts.length === 1`, which the
+    // guard above returns on, so it never reaches this middleware at all — its
+    // only gate is requireNestCaretaker, archived or not.
     const isNestLifecycleAction =
-      (parts.length === 1 && c.req.method === "DELETE") ||
-      (parts.length === 2 &&
-        c.req.method === "POST" &&
-        (parts[1] === "archive" || parts[1] === "restore"));
+      parts.length === 2 &&
+      c.req.method === "POST" &&
+      (parts[1] === "archive" || parts[1] === "restore");
     const deny = async (
       status: 403 | 404 | 503,
       error: string,
@@ -1928,14 +1931,9 @@ export function createApp(): Hono<AuthEnv> {
     const isDeletionRequestAction =
       /\/request-deletion$/.test(path) ||
       /\/deletion-requests\/[^/]+\/withdraw$/.test(path);
-    // Whole-nest lifecycle — delete, archive, restore — is admitted at
-    // read-tier HERE and gated in the route by requireNestCaretaker, which is
-    // strictly narrower than 'write' (the owner, or the license admin acting as
-    // caretaker of the commons). It has to work this way: an archived nest caps
-    // every caller at 'read' (see resolveNestAccess), so a 'write' requirement
-    // on this line would leave a nest that can never be restored or deleted.
-    // (Defined above, next to isMcpTransport — the open-mode branch needs it
-    // too, and that branch runs before this point.)
+    // isNestLifecycleAction (archive/restore) is defined above, next to
+    // isMcpTransport — the open-mode branch needs it too, and that branch runs
+    // before this point.
     // The steward roster — list, assign, remove, sync — is restricted to the
     // server (license) admin plus the nest owner/admin collaborators, so an
     // owner can delegate vault people-management by granting admin. All
