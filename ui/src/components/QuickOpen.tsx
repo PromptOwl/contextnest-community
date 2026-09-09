@@ -3,9 +3,9 @@
  * content (server full-text endpoint, debounced) and jumps straight to the
  * picked doc. Keyboard: ↑/↓ to move, Enter to open, Esc to close.
  *
- * Two modes: given a `nestId` it searches that nest (and lists its documents
- * on an empty query); without one it searches every nest the caller can see
- * and each row names the nest it came from.
+ * Two modes: given a `nestId` it searches that nest; without one it searches
+ * every nest the caller can see and each row names the nest it came from.
+ * Either way an empty query searches nothing and invites a term.
  *
  * The mode is stated in the header and switchable from inside a nest
  * (CU-wdqcq0042v) — the same palette silently changing scope with the page
@@ -136,14 +136,15 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Empty query → the current nest's documents (there is no equivalent for
-  // "every nest", so global mode simply waits for a term); otherwise debounced
-  // full-text search (title + tags + content).
+  // An empty query is not a search: both scopes wait for a term. Listing the
+  // nest's documents on open read as a result set that had already been
+  // filtered (CU-wdqcq01e6x). Otherwise debounced full-text search
+  // (title + tags + content).
   useEffect(() => {
     if (debounce.current) clearTimeout(debounce.current);
     debounce.current = setTimeout(async () => {
       const q = query.trim();
-      if (global && !q) {
+      if (!q) {
         setResults([]);
         setTotalDocs(0);
         return;
@@ -182,9 +183,7 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
           ]);
           setResults([...nests.slice(0, 4), ...docs.slice(0, DOC_ROWS)]);
         } else {
-          const data = q
-            ? await api.searchNodes(nestId!, q)
-            : await qc.fetchQuery(reads.nodes(nestId!));
+          const data = await api.searchNodes(nestId!, q);
           setTotalDocs(data.nodes.length);
           setResults(
             (data.nodes as QuickOpenResult[]).slice(0, DOC_ROWS).map((n) => ({
@@ -219,16 +218,15 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
 
   /**
    * What an empty list means here, which is rarely "no matches" (CU-wdqcq01e6x).
-   * The global scope searches nothing until a term is typed, so it invites one.
-   * The nest scope has ALREADY listed the nest's documents on an empty query,
-   * so an empty list there is an empty nest, not a search waiting to happen.
+   * Neither scope searches until a term is typed, so an empty query invites one
+   * rather than reporting a miss.
    */
   const emptyState = () => {
     if (searching) return "Searching…";
-    if (!query.trim()) {
-      if (global) return "Type to search nests and documents…";
-      return "This nest has no documents yet.";
-    }
+    if (!query.trim())
+      return global
+        ? "Type to search nests and documents…"
+        : `Type to search ${nestName ?? "this nest"}…`;
     // A scoped miss is not "it doesn't exist" — name the nest that was searched
     // and offer the wider one right here, where the dead end is (CU-wdqcq012ut).
     if (!global) {
