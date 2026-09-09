@@ -147,22 +147,23 @@ export function ctxCliConnectSnippet(
 /**
  * The one-shot bootstrap brief for wiring an agent to ONE nest.
  *
- * Shaped by a 10-run agent experiment (2026-09-09, CU-wdqcq01kh8) rather than
- * judgement. Against an identical failing server, the variant that documented
- * WHAT TO DO WHEN THE FIRST READ FAILS connected 2/2; the variant that said
- * "if it fails, stop" connected 0/2. Hence the status-code branches — they are
- * the load-bearing part of this text, not decoration.
+ * The status-code branches are the load-bearing part of this text. An agent
+ * whose first read fails and is told only to stop, stops; one told which
+ * endpoint still answers, recovers. Hence each branch names a concrete next
+ * call rather than a diagnosis.
  *
- * Three other findings are baked in. Agents trust MECHANISMS over CLAIMS: told
- * in prose that a connection "reads and writes", 5 of 6 still answered "unsure"
- * about writing, so the write tools are named instead. The key is located
- * (CONTEXTNEST_API_KEY, what the .env download writes) rather than merely asked
- * for — the old copy said "ask me for the key" AND "never in our chat" while
- * offering no other channel, and four runs stopped there. And `push` is gone:
- * it uploads a local folder INTO the nest, a different job, and it was the
- * direct cause of agents concluding the CLI is the only thing that can write.
+ * Three rules this text has to keep, all of them earned the hard way:
+ *   - Never claim a capability the caller's current state contradicts. On an
+ *     unlicensed server the gate is `method !== "GET"`, so writes, MCP and
+ *     /context are all blocked; saying otherwise makes an agent distrust the
+ *     rest of the brief, correctly.
+ *   - Any signal a branch dispatches on must be visible in the command that
+ *     produces it — hence -w on every curl, not just the first.
+ *   - Never tell the agent to add or strip a `nodes/` id prefix. It exists on
+ *     structured nests and not on imported ones (see storagePrefix), so the
+ *     only portable instruction is to reuse the id exactly as returned.
  *
- * Still keyless in the text — the key travels in the environment, never here.
+ * Keyless by construction: the key travels in the environment, never here.
  */
 export function nestSetupPrompt(
   nestName: string,
@@ -211,14 +212,20 @@ export function nestSetupPrompt(
     "         Append the id EXACTLY as the list returned it — for a nest created in the app that",
     "         id already starts with `nodes/`, so the path looks doubled and that is correct; a",
     "         nest imported from a folder has no such prefix. Do not add or strip one yourself:",
-    `           curl -s -w '\\nHTTP_STATUS:%{http_code}\\n' ${base}/nests/${nestId}/nodes${auth}`,
-    `           curl -s -w '\\nHTTP_STATUS:%{http_code}\\n' ${base}/nests/${nestId}/nodes/nodes/<slug>${auth}`,
+    `           curl -s -w '\\nHTTP_STATUS:%{http_code}\\n' "${base}/nests/${nestId}/nodes"${auth}`,
+    `           curl -s -w '\\nHTTP_STATUS:%{http_code}\\n' "${base}/nests/${nestId}/nodes/<id-from-the-list>"${auth}`,
     "         Documents back from either call counts as connected — the proof is real documents,",
     "         not which endpoint served them. Tell me the server is unlicensed, and note the same",
     "         gate covers every non-GET, so WRITES ARE ALSO UNAVAILABLE until a licence is installed.",
     openMode
       ? null
-      : "    401  the key is missing or wrong. Ask me for it. Do not retry with a different one.",
+      : "    401  the key is missing or wrong. Also check you did not send the literal text",
+    openMode
+      ? null
+      : "         `$CONTEXTNEST_API_KEY`: that happens when the command runs without a shell to",
+    openMode
+      ? null
+      : "         expand it, and you must substitute the value yourself. Otherwise ask me for the key.",
     "    403  read the body. JSON with an `error` field is the server refusing you — usually a",
     "         key scoped to a different nest. Tell me which; do not treat it as a network problem.",
     "         A 403 with NO JSON body came from something between you and the server, not from us.",

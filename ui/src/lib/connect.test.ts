@@ -124,15 +124,20 @@ describe("nestSetupPrompt", () => {
     // its body in ONE call — the cheapest unlicensed read. List-then-read
     // survives as the escape hatch for a nest too large to take whole.
     expect(p).toContain("/nests/gtm/export?format=markdown");
-    expect(p).toContain("/nests/gtm/nodes/nodes/<slug>");
+    // The placeholder names its source rather than showing one layout's shape:
+    // `nodes/<slug>` is the structured prefix and imported nests have none, so
+    // an example in either shape teaches the wrong thing to half of callers.
+    expect(p).toContain("/nests/gtm/nodes/<id-from-the-list>");
   });
 
   it("distinguishes a missing key from a blocked network", () => {
     const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
     expect(p).toContain("401");
     // Egress-restricted environments (cloud sandboxes, CI, corporate proxies)
-    // cannot reach the host at all — retrying never helps, so say so.
-    expect(p).toMatch(/refused|blocked|cannot reach/i);
+    // cannot reach the host at all — retrying never helps, so say so. Pin the
+    // branch itself; a `refused|blocked|cannot reach` alternation stayed green
+    // through substantial rewrites of it.
+    expect(p).toMatch(/no response at all \/ connection refused \/ a timeout/);
   });
 
   it("does not mistake an app-level 403 for a blocked network", () => {
@@ -224,6 +229,16 @@ describe("nestSetupPrompt", () => {
     );
   });
 
+  it("tells the agent an unexpanded env var also looks like a 401", () => {
+    // An exec that runs argv directly never expands $CONTEXTNEST_API_KEY, so
+    // the literal string goes out as the header and the server answers 401 —
+    // silent, and indistinguishable from a bad key without this note. Every
+    // agent in testing shelled out, so this path was never exercised there.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toMatch(/did not send the literal text/);
+    expect(p).toMatch(/without a shell to/);
+  });
+
   it("names write tools rather than asserting write capability", () => {
     // Prose assertion ("this connection reads AND writes") left 5 of 6 agents
     // answering "unsure". A named mechanism is what they actually believed.
@@ -240,8 +255,11 @@ describe("nestSetupPrompt", () => {
 
   it("shows the citation format with a real id shape", () => {
     // Agents read a bare `nest:id` as a literal "nest:" prefix; real ids look
-    // like nodes/returns-policy.
-    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).toContain("nodes/");
+    // like nodes/returns-policy. `toContain("nodes/")` passed trivially — the
+    // URLs elsewhere in the prompt contain it — so pin the whole citation.
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).toContain(
+      "`GTM:nodes/<slug>`",
+    );
   });
 });
 
