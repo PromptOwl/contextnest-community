@@ -224,8 +224,9 @@ export function nestSetupPrompt(
     "         under Settings → Connectors → Add custom connector instead, which is dialled",
     "         server-side and is not subject to your egress rules.",
     "",
-    "WHAT YOU CAN DO — on a licensed server this connection reads AND writes (if step 1 returned",
-    "503, reads still work as above but writes do not). Over MCP the write tools are",
+    "WHAT YOU CAN DO — if step 1 returned 503 this server is unlicensed: read it as above, and",
+    "do not attempt writes at all, they are blocked by the same gate. Otherwise this connection",
+    "reads AND writes. Over MCP the write tools are",
     "context_create, context_update, context_move and context_submit_review; over REST it is",
     `POST and PATCH on ${base}/nests/${nestId}/nodes. Never write, publish or share without asking me first.`,
     "",
@@ -236,7 +237,9 @@ export function nestSetupPrompt(
     ...ctxCliConnectSnippet(base, nestId, nestName, openMode)
       .split("\n")
       .map((line) => `    ${line}`),
-    "  Both only take effect after you RESTART the session, so neither can prove anything now.",
+    "  Both only take effect after you RESTART the session, so neither can prove anything now —",
+    "  and both go over MCP, which is POST, so on an unlicensed server (the 503 above) they are",
+    "  blocked by that same gate. On an unlicensed server the GET reads are all you have.",
   ]
     .filter((line): line is string => line !== null)
     .join("\n");

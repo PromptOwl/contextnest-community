@@ -163,7 +163,18 @@ describe("nestSetupPrompt", () => {
     // correctly disbelieved the write claim — so the prompt now scopes it.
     const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
     expect(p).toMatch(/WRITES ARE ALSO UNAVAILABLE/);
-    expect(p).toMatch(/on a licensed server this connection reads AND writes/);
+    // Leads with the state, not the capability: an agent that reads the first
+    // clause and stops has still read something true.
+    expect(p).toMatch(/if step 1 returned 503 this server is unlicensed/);
+    expect(p).toMatch(/do not attempt writes at all/);
+  });
+
+  it("says the MCP and ctx paths are blocked on an unlicensed server too", () => {
+    // MCP is transported over POST, so `method !== "GET"` 503s it — verified
+    // against a real unlicensed server (initialize returns a JSON-RPC
+    // "License required"). `ctx vault add` targets the same MCP URL.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toMatch(/both go over MCP, which is POST/);
   });
 
   it("names write tools rather than asserting write capability", () => {
