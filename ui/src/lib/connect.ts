@@ -181,7 +181,7 @@ export function nestSetupPrompt(
   const authHeader = openMode
     ? ""
     : '-H "Authorization: Bearer $CONTEXTNEST_API_KEY" ';
-  const auth = authHeader ? ` ${authHeader.trimEnd()}` : "";
+  const auth = openMode ? "" : ` ${authHeader.trimEnd()}`;
   return [
     `Connect to my ContextNest nest "${nestName}" and treat it as my source of truth.`,
     "",
