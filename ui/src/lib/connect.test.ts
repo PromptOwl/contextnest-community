@@ -177,6 +177,29 @@ describe("nestSetupPrompt", () => {
     expect(p).toMatch(/both go over MCP, which is POST/);
   });
 
+  it("prints the status code its own branches dispatch on", () => {
+    // Plain `curl -s` shows the body and nothing else, so a prompt that says
+    // "the status code tells you which problem you have" and then lists
+    // 503/401/403 was asking an agent to read a number never put on screen.
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).toContain("%{http_code}");
+  });
+
+  it("tells the agent to reuse the returned id rather than assume a prefix", () => {
+    // `nodes/` is the structured layout's prefix. An imported nest has flat
+    // ids, and assuming the prefix there reads a directory that does not
+    // exist — the nest looks empty. Reusing the id verbatim is right for both.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toMatch(/EXACTLY as the list returned it/);
+    expect(p).toMatch(/imported from a folder has no such prefix/);
+  });
+
+  it("puts the node id on the PATCH path, not just the collection", () => {
+    // POST is the collection; PATCH is mounted on /:nodeId.
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).toMatch(
+      /PATCH that same path with the document's\s*\n?\s*id appended/,
+    );
+  });
+
   it("names write tools rather than asserting write capability", () => {
     // Prose assertion ("this connection reads AND writes") left 5 of 6 agents
     // answering "unsure". A named mechanism is what they actually believed.
