@@ -5,8 +5,9 @@
  * same across products:
  *   - `[[Title]]`        — wiki link to a document in the same nest
  *   - `[ ]` / `[x]`      — toggleable task checkbox (plain-text round-trips)
- *   - `@email` / `@(Name)` — mention decoration (no autocomplete; the
- *                            text *is* the source of truth)
+ *   - `@email` / `@(Name)` — mention of a person on the nest, picked from
+ *                            the `@` autocomplete; unknown names style as
+ *                            unresolved rather than passing as a mention
  *
  * Imperative API:
  *   `ref.current?.insertWikiLink(title)` is used by the parent after a
@@ -137,6 +138,7 @@ import {
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ForwardedRef,
@@ -207,8 +209,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../../lib/queries";
+import {
+  detectTrigger,
+  matchMembers,
+  isMemberName,
+  type MentionMember,
+} from "./picker-match";
 import { WikiLink, clearWikiExistsCache } from "./extensions/WikiLink";
 import { CodeBlock } from "./extensions/CodeBlock";
 import { tableExtensions } from "./extensions/Table";
@@ -299,10 +307,11 @@ export const MarkdownEditor = forwardRef<
   const qc = useQueryClient();
   const effectiveEditable = editable && !previewing;
 
-  // `[[` autocomplete state. Opens when the user types an unclosed
-  // double-bracket; the dropdown searches nest docs so picks are
-  // exact-title matches by default — reduces broken-link cases.
-  const [wikiPopup, setWikiPopup] = useState<{
+  // Inline autocomplete state, shared by both triggers: `[[` searches the
+  // nest's documents, `@` searches its people. One popup, one keyboard
+  // handler, one set of placement math — the kind only changes what fills it.
+  const [pickerPopup, setPickerPopup] = useState<{
+    kind: "wiki" | "mention";
     query: string;
     from: number;
     to: number;
@@ -312,8 +321,10 @@ export const MarkdownEditor = forwardRef<
     coords: { left: number; top: number; bottom: number };
     selectedIdx: number;
   } | null>(null);
-  const [wikiResults, setWikiResults] = useState<
-    Array<{ id: string; title: string }>
+  // Rows normalized to one shape so the list render and the insert stay
+  // kind-agnostic: `insert` is the literal text that replaces the trigger.
+  const [pickerResults, setPickerResults] = useState<
+    Array<{ key: string; primary: string; secondary: string; insert: string }>
   >([]);
   // Full node list for the nest, fetched once per popup-open and filtered
   // client-side. Server search on every keystroke added 3-4s of latency;
@@ -325,14 +336,39 @@ export const MarkdownEditor = forwardRef<
   const [wikiLoading, setWikiLoading] = useState(false);
   // Refs mirror state so the editor's static `handleKeyDown` (captured
   // once at useEditor time) can see the latest values without a re-init.
-  const wikiPopupRef = useRef(wikiPopup);
-  const wikiResultsRef = useRef(wikiResults);
+  const pickerPopupRef = useRef(pickerPopup);
+  const pickerResultsRef = useRef(pickerResults);
   useEffect(() => {
-    wikiPopupRef.current = wikiPopup;
-  }, [wikiPopup]);
+    pickerPopupRef.current = pickerPopup;
+  }, [pickerPopup]);
   useEffect(() => {
-    wikiResultsRef.current = wikiResults;
-  }, [wikiResults]);
+    pickerResultsRef.current = pickerResults;
+  }, [pickerResults]);
+
+  // The nest's people, for the `@` picker AND for telling a real mention from
+  // a typo. `people` — not `collaborators` — because the owner, a shared
+  // team's members, stewards and grant holders all reach the nest without a
+  // collaborator row. Write-tier read (an editor already passes), so it's
+  // skipped for read-only surfaces where it would only 403.
+  const { data: rosterData } = useQuery({
+    ...reads.collaborators(nestId ?? ""),
+    enabled: !!nestId && effectiveEditable,
+  });
+  const members: MentionMember[] = useMemo(
+    () =>
+      ((rosterData?.people as Array<{
+        email?: string;
+        name?: string | null;
+      }>) || []
+      ).filter((p) => !!p.email)
+        .map((p) => ({ email: p.email as string, name: p.name })),
+    [rosterData],
+  );
+  // Read from the Mention extension's decorator, which is configured once.
+  const membersRef = useRef<MentionMember[]>(members);
+  useEffect(() => {
+    membersRef.current = members;
+  }, [members]);
 
   // In-doc find/replace (Cmd+F). Match state lives in the SearchReplace
   // plugin; these drive the bar UI + counter. openSearchRef lets the static
@@ -500,7 +536,14 @@ export const MarkdownEditor = forwardRef<
       }),
       TaskCheckbox,
       VideoPreview,
-      Mention.configure({ onMentionClick }),
+      Mention.configure({
+        onMentionClick,
+        // Optimistic while the roster is empty (still loading, or no read
+        // access) — same rule as the wiki-link existence check.
+        isMember: (name) =>
+          membersRef.current.length === 0 ||
+          isMemberName(membersRef.current, name),
+      }),
       SearchReplace,
       // html:true keeps legacy HTML docs loadable; output is markdown.
       Markdown.configure({
@@ -581,12 +624,12 @@ export const MarkdownEditor = forwardRef<
         return true;
       },
       handleKeyDown: (_view, event) => {
-        const popup = wikiPopupRef.current;
-        const results = wikiResultsRef.current;
+        const popup = pickerPopupRef.current;
+        const results = pickerResultsRef.current;
         if (popup && results.length > 0) {
           if (event.key === "ArrowDown") {
             event.preventDefault();
-            setWikiPopup((s) =>
+            setPickerPopup((s) =>
               s
                 ? { ...s, selectedIdx: (s.selectedIdx + 1) % results.length }
                 : s,
@@ -595,7 +638,7 @@ export const MarkdownEditor = forwardRef<
           }
           if (event.key === "ArrowUp") {
             event.preventDefault();
-            setWikiPopup((s) =>
+            setPickerPopup((s) =>
               s
                 ? {
                     ...s,
@@ -609,7 +652,7 @@ export const MarkdownEditor = forwardRef<
           if (event.key === "Enter" || event.key === "Tab") {
             event.preventDefault();
             const pick = results[popup.selectedIdx];
-            if (pick) insertWikiPickRef.current?.(pick);
+            if (pick) insertPickRef.current?.(pick);
             return true;
           }
         }
@@ -617,7 +660,7 @@ export const MarkdownEditor = forwardRef<
         // empty-state panel is dismissable the same way.
         if (popup && event.key === "Escape") {
           event.preventDefault();
-          setWikiPopup(null);
+          setPickerPopup(null);
           return true;
         }
         if (
@@ -649,44 +692,47 @@ export const MarkdownEditor = forwardRef<
   }, [editor, effectiveEditable]);
 
   // Insertion handler kept in a ref so the static `handleKeyDown`
-  // closure inside useEditor can call the latest version. Replaces
-  // the partial `[[query` with `[[Title]] ` and clears the popup.
-  const insertWikiPickRef = useRef<
-    ((doc: { id: string; title: string }) => void) | null
-  >(null);
+  // closure inside useEditor can call the latest version. Replaces the
+  // partial trigger (`[[query` / `@query`) with the row's text.
+  const insertPickRef = useRef<((row: { insert: string }) => void) | null>(
+    null,
+  );
   useEffect(() => {
-    insertWikiPickRef.current = (doc) => {
+    insertPickRef.current = (row) => {
       if (!editor) return;
-      const popup = wikiPopupRef.current;
+      const popup = pickerPopupRef.current;
       if (!popup) return;
-      const slug = slugFromNodeId(doc.id);
       editor
         .chain()
         .focus()
-        .insertContentAt(
-          { from: popup.from, to: popup.to },
-          formatWikiLink(slug, doc.title),
-        )
+        .insertContentAt({ from: popup.from, to: popup.to }, row.insert)
         .run();
-      setWikiPopup(null);
+      setPickerPopup(null);
     };
   }, [editor]);
 
-  // Detect `[[query` at the cursor on every selection / doc update.
-  // Trigger pattern: `[[` followed by 0+ non-`]` non-newline chars,
-  // anchored at the cursor. Closing `]]` cancels the popup so the
-  // user types past the bracket without it lingering.
+  // Repaint mention decorations once the roster arrives — an empty
+  // transaction is enough to re-run the decoration pass, and without it every
+  // mention keeps whatever styling it got before the members were known.
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return;
+    editor.view.dispatch(editor.state.tr);
+  }, [editor, members]);
+
+  // Detect a `[[query` or `@query` trigger at the cursor on every selection /
+  // doc update. Closing the trigger (`]]`, or a space after `@`) ends the
+  // match so the popup doesn't linger while the user types on.
   useEffect(() => {
     if (!editor) return;
     const update = () => {
       if (!effectiveEditable) {
-        setWikiPopup(null);
+        setPickerPopup(null);
         return;
       }
       const { state, view } = editor;
       const { selection } = state;
       if (!selection.empty) {
-        setWikiPopup(null);
+        setPickerPopup(null);
         return;
       }
       const $from = selection.$from;
@@ -697,20 +743,24 @@ export const MarkdownEditor = forwardRef<
         "\n",
         "￼",
       );
-      const m = /\[\[([^\]\n]*)$/.exec(before);
-      if (!m) {
-        setWikiPopup(null);
+      const trigger = detectTrigger(before);
+      if (!trigger) {
+        setPickerPopup(null);
         return;
       }
-      const query = m[1];
-      const matchStart = $from.pos - m[0].length;
+      const { kind, query } = trigger;
+      const matchStart = $from.pos - trigger.length;
       const coords = view.coordsAtPos($from.pos);
-      setWikiPopup((prev) => ({
+      setPickerPopup((prev) => ({
+        kind,
         query,
         from: matchStart,
         to: $from.pos,
         coords: { left: coords.left, top: coords.top, bottom: coords.bottom },
-        selectedIdx: prev && prev.query === query ? prev.selectedIdx : 0,
+        selectedIdx:
+          prev && prev.kind === kind && prev.query === query
+            ? prev.selectedIdx
+            : 0,
       }));
     };
     editor.on("selectionUpdate", update);
@@ -724,7 +774,7 @@ export const MarkdownEditor = forwardRef<
   // Load the nest's node list once each time the popup opens (not per
   // keystroke). Re-fetching on open keeps the list fresh (docs created
   // this session show up) while filtering stays local and instant.
-  const wikiPopupOpen = !!wikiPopup;
+  const wikiPopupOpen = pickerPopup?.kind === "wiki";
   useEffect(() => {
     if (!wikiPopupOpen || !nestId) return;
     let cancelled = false;
@@ -747,21 +797,47 @@ export const MarkdownEditor = forwardRef<
     };
   }, [wikiPopupOpen, nestId]);
 
-  // Filter the cached list client-side as the query changes. Empty query
-  // (just `[[`) lists everything so users can browse without typing.
+  // Filter client-side as the query changes. Empty query (just `[[` or `@`)
+  // lists everything so users can browse without typing.
   useEffect(() => {
-    if (!wikiPopup) {
-      setWikiResults([]);
+    if (!pickerPopup) {
+      setPickerResults([]);
       return;
     }
-    const q = wikiPopup.query.trim().toLowerCase();
-    const list = wikiNodesRef.current
-      // A doc can't link to itself — drop it from the suggestions.
-      .filter((n) => n.id !== currentNodeId)
-      .filter((n) => !q || n.title.toLowerCase().includes(q))
-      .slice(0, 8);
-    setWikiResults(list);
-  }, [wikiPopup?.query, currentNodeId, wikiNodesVersion]);
+    if (pickerPopup.kind === "mention") {
+      setPickerResults(
+        matchMembers(members, pickerPopup.query).map((m) => ({
+          key: m.email,
+          primary: m.name || m.email.split("@")[0],
+          secondary: m.email,
+          // Insert the email: unique, and what the mention decoration
+          // resolves against, so the token stays a real reference.
+          insert: `@${m.email} `,
+        })),
+      );
+      return;
+    }
+    const q = pickerPopup.query.trim().toLowerCase();
+    setPickerResults(
+      wikiNodesRef.current
+        // A doc can't link to itself — drop it from the suggestions.
+        .filter((n) => n.id !== currentNodeId)
+        .filter((n) => !q || n.title.toLowerCase().includes(q))
+        .slice(0, 8)
+        .map((n) => ({
+          key: n.id,
+          primary: n.title,
+          secondary: n.id,
+          insert: formatWikiLink(slugFromNodeId(n.id), n.title),
+        })),
+    );
+  }, [
+    pickerPopup?.kind,
+    pickerPopup?.query,
+    currentNodeId,
+    wikiNodesVersion,
+    members,
+  ]);
 
   // Sync external content only when not focused — avoids selection
   // loss + onUpdate loop on re-render.
@@ -1497,7 +1573,7 @@ export const MarkdownEditor = forwardRef<
 
       {/* Rendered even with no results: typing `[[` in an empty nest used to
           do nothing at all, which reads as a broken feature. */}
-      {wikiPopup && (() => {
+      {pickerPopup && (() => {
         // Panel is w-72 (288px) / max-h-64 (256px), fixed-positioned at the
         // caret. Near the bottom or right edge of the viewport it would clip
         // off-screen, so flip it above the caret when space below is short,
@@ -1508,7 +1584,8 @@ export const MarkdownEditor = forwardRef<
         const PANEL_H = 256;
         const GAP = 4;
         const MARGIN = 8;
-        const { left, top, bottom } = wikiPopup.coords;
+        const { left, top, bottom } = pickerPopup.coords;
+        const isMention = pickerPopup.kind === "mention";
         const spaceBelow = window.innerHeight - bottom;
         const spaceAbove = top;
         const flipUp = spaceBelow < PANEL_H + GAP && spaceAbove > spaceBelow;
@@ -1536,31 +1613,35 @@ export const MarkdownEditor = forwardRef<
           onMouseDown={(e) => e.preventDefault()}
         >
           <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-muted-foreground border-b">
-            Link a document
+            {isMention ? "Mention a person" : "Link a document"}
           </div>
-          {wikiResults.length === 0 ? (
+          {pickerResults.length === 0 ? (
             <div className="px-3 py-2 text-sm text-muted-foreground">
-              {wikiLoading
-                ? "Loading documents…"
-                : wikiPopup.query.trim()
-                  ? `No documents match “${wikiPopup.query.trim()}”.`
-                  : "No documents to link yet."}
+              {isMention
+                ? pickerPopup.query.trim()
+                  ? `Nobody on this nest matches “${pickerPopup.query.trim()}”.`
+                  : "Nobody to mention yet — share the nest to add people."
+                : wikiLoading
+                  ? "Loading documents…"
+                  : pickerPopup.query.trim()
+                    ? `No documents match “${pickerPopup.query.trim()}”.`
+                    : "No documents to link yet."}
             </div>
           ) : (
           <ul className="py-1">
-            {wikiResults.map((doc, idx) => (
-              <li key={doc.id}>
+            {pickerResults.map((row, idx) => (
+              <li key={row.key}>
                 <button
                   type="button"
                   className={cn(
                     "w-full text-left px-3 py-1.5 text-sm hover:bg-muted",
-                    idx === wikiPopup.selectedIdx && "bg-muted",
+                    idx === pickerPopup.selectedIdx && "bg-muted",
                   )}
-                  onClick={() => insertWikiPickRef.current?.(doc)}
+                  onClick={() => insertPickRef.current?.(row)}
                 >
-                  <div className="truncate font-medium">{doc.title}</div>
+                  <div className="truncate font-medium">{row.primary}</div>
                   <div className="truncate text-xs text-muted-foreground">
-                    {doc.id}
+                    {row.secondary}
                   </div>
                 </button>
               </li>

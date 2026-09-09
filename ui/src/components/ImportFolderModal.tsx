@@ -51,8 +51,8 @@ function isSkippedDir(name: string): boolean {
 // FlatNestStorage discovery so the modal's "will import" count matches what
 // the server actually registers.
 const META_FILES = new Set([
-  "INDEX.md", "CONTEXT.md", "CLAUDE.md", "GEMINI.md", "AGENTS.md", "QWEN.md",
-  "README.md",
+  "INDEX.MD", "CONTEXT.MD", "CLAUDE.MD", "GEMINI.MD", "AGENTS.MD", "QWEN.MD",
+  "README.MD",
 ]);
 
 /** How many collected files will actually become documents. The upload also
@@ -63,7 +63,9 @@ function countImportableDocs(files: ImportedFile[]): number {
     const segs = f.path.split("/");
     const name = segs[segs.length - 1];
     if (!name.endsWith(".md")) return false; // discovery keys off .md only
-    if (META_FILES.has(name)) return false;
+    // Case-insensitive, like the server's isMetaFile: `context.md` is the same
+    // derived file as `CONTEXT.md`, so the count must skip both.
+    if (META_FILES.has(name.toUpperCase())) return false;
     return !segs.some((s) => s.startsWith(".") || s === "node_modules");
   }).length;
 }

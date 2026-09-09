@@ -32,6 +32,9 @@ describe("derived vault files never list as documents", () => {
     expect(isMetaFile("gtm/CONTEXT")).toBe(true);
     expect(isMetaFile("nodes/gtm/README.md")).toBe(true);
     expect(isMetaFile("gtm\\INDEX.md")).toBe(true);
+    expect(isMetaFile("gtm/context.md")).toBe(true);
+    expect(isMetaFile("Readme.md")).toBe(true);
+    expect(isMetaFile("nodes/Index.MD")).toBe(true);
     expect(isMetaFile("gtm/context-nest-guide")).toBe(false);
     expect(isMetaFile("gtm/readme-driven-design.md")).toBe(false);
   });

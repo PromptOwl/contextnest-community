@@ -28,6 +28,9 @@ interface ReasonDialogProps {
   description?: string;
   /** Textarea label. Omit for a confirm-only dialog (no reason collected). */
   label?: string;
+  /** Collect the text, but let the action go ahead without it — an approval
+   *  note is worth offering and never worth blocking on. */
+  optionalReason?: boolean;
   placeholder?: string;
   confirmLabel: string;
   destructive?: boolean;
@@ -39,6 +42,12 @@ interface ReasonDialogProps {
     resolvedBy?: string;
     resolvedAt?: string;
   } | null;
+  /** A second, softer action on the same reason — the nest flag offers "request
+   *  archive" beside "request deletion" so an editor picks the outcome they
+   *  actually want without a dialog of its own. Both share the typed reason and
+   *  the same required/optional rule. */
+  secondaryLabel?: string;
+  onSecondary?: (reason: string) => Promise<void>;
   /** Rejecting surfaces the message inline and keeps the dialog open. */
   onConfirm: (reason: string) => Promise<void>;
 }
@@ -49,10 +58,13 @@ export function ReasonDialog({
   title,
   description,
   label,
+  optionalReason,
   placeholder,
   confirmLabel,
   destructive,
   priorDecline,
+  secondaryLabel,
+  onSecondary,
   onConfirm,
 }: ReasonDialogProps) {
   const [reason, setReason] = useState("");
@@ -68,11 +80,11 @@ export function ReasonDialog({
     onOpenChange(next);
   };
 
-  const confirm = async () => {
+  const run = async (action: (reason: string) => Promise<void>) => {
     setBusy(true);
     setError(null);
     try {
-      await onConfirm(reason.trim());
+      await action(reason.trim());
       setReason("");
       onOpenChange(false);
     } catch (err: any) {
@@ -81,6 +93,11 @@ export function ReasonDialog({
       setBusy(false);
     }
   };
+
+  const confirm = () => run(onConfirm);
+  // A required reason gates both actions — the whole point of the flow is that
+  // nothing is raised unexplained, whichever outcome is asked for.
+  const blocked = busy || (!!label && !optionalReason && !reason.trim());
 
   return (
     <Dialog open={open} onOpenChange={close}>
@@ -139,11 +156,19 @@ export function ReasonDialog({
           <Button variant="outline" onClick={() => close(false)} disabled={busy}>
             Cancel
           </Button>
+          {secondaryLabel && onSecondary && (
+            <Button
+              variant="outline"
+              onClick={() => run(onSecondary)}
+              disabled={blocked}
+              data-testid="reason-dialog-secondary"
+            >
+              {secondaryLabel}
+            </Button>
+          )}
           <Button
             onClick={confirm}
-            // A required reason is the whole point of the flow — no empty flags,
-            // no unexplained declines.
-            disabled={busy || (!!label && !reason.trim())}
+            disabled={blocked}
             variant={destructive ? "destructive" : "default"}
             data-testid="reason-dialog-confirm"
           >

@@ -89,6 +89,19 @@
   color: rgb(192, 132, 252);
 }
 
+/* An `@name` that matches nobody on the nest. Muted + dashed, matching the
+   broken wiki-link treatment, so it doesn't read as a live reference. */
+.mention-unresolved {
+  color: rgb(113, 113, 122);
+  background-color: rgba(113, 113, 122, 0.1);
+  text-decoration: underline dashed;
+  text-underline-offset: 2px;
+}
+
+.dark .mention-unresolved {
+  color: rgb(161, 161, 170);
+}
+
 .task-checkbox {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
     monospace;

@@ -1430,6 +1430,42 @@ export function runMigrations(db: Database.Database): void {
       db.exec("ALTER TABLE publish ADD COLUMN no_download INTEGER NOT NULL DEFAULT 0");
     }
   }
+
+  // 038: archive a nest instead of deleting it (CU-wdqcpzy80h). One nullable
+  //   timestamp — archiving is a date, not a state machine, and NULL is the
+  //   whole "not archived" story, so every existing row is correct as-is.
+  if (!hasMigration("038_nest_archive")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("archived_at")) {
+      db.exec("ALTER TABLE nests ADD COLUMN archived_at TEXT");
+    }
+    recordMigration("038_nest_archive");
+  }
+
+  // 039: pinned nests (CU-wdqcq00d63). A pin is per PERSON per nest, not a
+  //   property of the nest — two people sharing one nest pin different things —
+  //   so it is its own table rather than a column. The composite primary key is
+  //   the whole uniqueness rule (pinning twice is a no-op), and the nest FK
+  //   cascades so a deleted nest takes its pins with it.
+  if (!hasMigration("039_nest_pins")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS nest_pins (
+          -- BOTH sides cascade, as grants and nest_collaborators do. Without it
+          -- on user_id, deleting an account with a single pin fails the whole
+          -- transaction on a foreign-key violation (foreign_keys is ON).
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (user_id, nest_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_nest_pins_user ON nest_pins(user_id);
+      `);
+    })();
+    recordMigration("039_nest_pins");
+  }
 }
 
 /**

@@ -199,11 +199,19 @@ hookFireRoutes.post("/:token", async (c) => {
   }
 
   const db = getDb();
+  // The nest join is the archive gate. This route mounts outside the
+  // /nests/:nestId chain, so the permission cap that makes an archived nest
+  // read-only never reaches it — an enabled hook would otherwise keep firing
+  // agent runs against a nest that was deliberately put away, which is the one
+  // thing archiving is for. Same shape as getPublishBySlug, and it folds into
+  // the lookup that was already happening.
   const hook = (await db.get(
-    "SELECT * FROM trigger_hooks WHERE id = ? AND enabled = 1",
+    `SELECT h.* FROM trigger_hooks h
+       JOIN nests n ON n.id = h.nest_id
+      WHERE h.id = ? AND h.enabled = 1 AND n.archived_at IS NULL`,
     [token],
   )) as HookRow | undefined;
-  // Uniform 404 for unknown AND disabled — a prober learns nothing.
+  // Uniform 404 for unknown, disabled AND archived — a prober learns nothing.
   if (!hook) throw new NotFoundError("Not found");
   if (!tryConsume(`hook:${hook.id}`, { max: 30, windowMs: 60_000 })) {
     return c.json({ error: "rate limited" }, 429);

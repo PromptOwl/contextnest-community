@@ -871,9 +871,9 @@ describe("department auto-tagging on node create", () => {
     expect(dup.status).toBe(201);
     expect(dup.data.node.tags).toEqual(["#dept:customer-success", "#notes"]);
 
-    // Dedupe is case-INSENSITIVE: normalizeTag keeps the user's casing, so a
-    // cased variant must still suppress the all-lowercase auto tag rather
-    // than landing both on the node.
+    // Dedupe is case-INSENSITIVE: a cased variant must suppress the auto tag
+    // rather than landing both on the node. Tags store folded to lower case,
+    // so the cased spelling is the same tag, not a second one.
     const cased = await jsonRequest(
       app,
       "POST",
@@ -886,7 +886,7 @@ describe("department auto-tagging on node create", () => {
       user.apiKey,
     );
     expect(cased.status).toBe(201);
-    expect(cased.data.node.tags).toEqual(["#Dept:Customer-Success", "#notes"]);
+    expect(cased.data.node.tags).toEqual(["#dept:customer-success", "#notes"]);
 
     // Create-only: an update never adds the tag to a node created without it.
     process.env.OIDC_DEPARTMENT_TAGGING = "false";

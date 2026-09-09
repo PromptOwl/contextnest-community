@@ -11,7 +11,12 @@ export interface NestMatch {
 }
 
 export function matchNests(
-  nests: Array<{ id: string; name?: string; description?: string | null }>,
+  nests: Array<{
+    id: string;
+    name?: string;
+    description?: string | null;
+    pinned?: boolean;
+  }>,
   query: string,
 ): NestMatch[] {
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
@@ -22,6 +27,10 @@ export function matchNests(
         .toLowerCase();
       return terms.every((t) => haystack.includes(t));
     })
+    // Pinned nests lead among matches, so the palette and the dashboard agree
+    // about which nests matter to this person. It only breaks ties in relevance
+    // — a pin never promotes a nest that didn't match the query at all.
+    .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned))
     .map((n) => ({
       id: n.id,
       title: n.name ?? n.id,

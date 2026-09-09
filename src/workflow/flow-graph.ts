@@ -3,7 +3,34 @@
  * either importing the other (avoids an ESM import cycle).
  */
 import { getDb } from "../db/client.js";
+import type { Querier } from "../db/adapter.js";
 import { ConflictError } from "../shared/errors.js";
+
+/**
+ * A node trail written the way the canvas reads: `"Intake" → "Review"`. Raw
+ * ids ("nodes/3") named nothing the user could see (CU-wdqcq018r1). Titles come
+ * from the node index; an id the index doesn't carry stands in for itself, so a
+ * stale index costs clarity, never the error.
+ */
+export async function nodeTrail(
+  db: Querier,
+  nestId: string,
+  ids: string[],
+): Promise<string> {
+  const unique = [...new Set(ids)];
+  const titles = new Map<string, string>();
+  try {
+    const rows = (await db.all(
+      `SELECT node_id, title FROM node_index
+        WHERE nest_id = ? AND node_id IN (${unique.map(() => "?").join(",")})`,
+      [nestId, ...unique],
+    )) as Array<{ node_id: string; title: string }>;
+    for (const r of rows) if (r.title) titles.set(r.node_id, r.title);
+  } catch {
+    // No index yet (or it is mid-rebuild) — ids still describe the cycle.
+  }
+  return ids.map((id) => `"${titles.get(id) ?? id}"`).join(" → ");
+}
 
 /**
  * Assert the WOULD-BE flow graph of a nest is acyclic. Considers edges under
@@ -33,7 +60,7 @@ export async function assertFlowGraphAcyclic(
   for (const r of rows) {
     if (r.from_node === r.to_node) {
       throw new ConflictError(
-        `cycle: ["${r.from_node}"] — a flow edge cannot be a self-loop`,
+        `cycle: ${await nodeTrail(db, nestId, [r.from_node])} cannot flow into itself`,
       );
     }
     nodes.add(r.from_node);

@@ -109,6 +109,42 @@ export function nestChatPrompt(nestName: string, description?: string): string {
 }
 
 /**
+ * A `ctx` vault alias must be a plain token; nest names are free text. Same
+ * shape the Connect modal uses for file names: lowercase, dashes, nothing else.
+ */
+function ctxAlias(raw: string): string {
+  const alias = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return alias || "nest";
+}
+
+/**
+ * The `ctx` CLI (2.2+) can read a hosted nest directly: register it once as a
+ * vault alias, then `ctx query/read/list --vault <alias>`. The key is never in
+ * the command line — `--bearer-env` names the environment variable ctx reads
+ * it from (the same CONTEXTNEST_API_KEY the downloadable .env sets). In open
+ * mode there is no key, so no `--bearer-env` at all.
+ *
+ * Pure and key-free by construction: nothing here ever holds key material.
+ */
+export function ctxCliConnectSnippet(
+  serverUrl: string,
+  nestId: string,
+  alias: string,
+  openMode = false,
+): string {
+  const base = serverUrl.replace(/\/+$/, "");
+  const a = ctxAlias(alias);
+  const auth = openMode ? "" : " --bearer-env CONTEXTNEST_API_KEY";
+  return [
+    `ctx vault add ${a} --url ${base}/nests/${nestId}/mcp${auth}`,
+    `ctx query "#tag" --vault ${a}`,
+  ].join("\n");
+}
+
+/**
  * The one-shot bootstrap brief for wiring an agent to ONE nest. Self-provisioning:
  * a capable agent installs the CLI or adds the MCP server itself, ASKS the user
  * for the key, then connects, orients, and starts. Keyless in the text — the key
@@ -137,9 +173,13 @@ export function nestSetupPrompt(
       : '      -H "Authorization: Bearer <key>" -H "Content-Type: application/json" \\',
     "      -d '{\"selector\":\"type:document\",\"hops\":1,\"max_tokens\":2000}'",
     `  You can also add an MCP server "contextnest" at ${mcp}${openMode ? "" : " (Bearer header)"} — but its tools don't load until you RESTART the session, so use the curl above to confirm now.`,
-    // ctx reads no API-key env var (verified against CLI 1.2.1) — the key has
-    // to be passed with --key or the push 401s.
-    `  Push a local folder of notes up: npx -y @promptowl/contextnest-cli@latest push --server ${base} --nest ${nestId}${openMode ? "." : " --key <key>"}`,
+    // The key travels in CONTEXTNEST_API_KEY, never on argv (the CLI README's
+    // rule; a --key flag also lands in shell history).
+    `  Push a local folder of notes up: ${openMode ? "" : "CONTEXTNEST_API_KEY=<key> "}npx -y @promptowl/contextnest-cli@latest push --server ${base} --nest ${nestId}`,
+    "  Or register the nest as a ctx vault (CLI 2.2+) and read it straight from the shell —",
+    ...ctxCliConnectSnippet(base, nestId, nestName, openMode)
+      .split("\n")
+      .map((line) => `    ${line}`),
     "• Claude Desktop / claude.ai / ChatGPT (no shell): you can't connect yourself from chat. Tell me to do this: Settings → Connectors → Add custom connector →",
     openMode
       ? `    URL ${mcp}, then restart.`

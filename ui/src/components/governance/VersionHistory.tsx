@@ -3,7 +3,7 @@
  * Adapted: `versions` and callbacks passed as props (no server-action imports).
  */
 import React, { useState } from "react";
-import { History, RotateCcw, ArrowLeft, ChevronRight, Loader2, CheckCircle2, XCircle, Eye } from "lucide-react";
+import { History, RotateCcw, ArrowLeft, ChevronRight, Loader2, CheckCircle2, XCircle, Eye, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -72,6 +72,14 @@ interface VersionHistoryProps {
   externalEditVerdicts?: ExternalEditVerdict[];
   loading?: boolean;
   onRestore?: (versionNumber: number) => Promise<void>;
+  /**
+   * Throw away the unreviewed edits sitting on top of the approved version.
+   *
+   * Offered only when there IS an approved version to fall back to — the same
+   * action on a never-published document deletes it, and that decision belongs
+   * to the document's own Delete, not to a panel about its history.
+   */
+  onDiscard?: () => Promise<void>;
   /**
    * How the preview pane renders a version's full body. "markdown" (default)
    * renders through DocumentViewer; "source" shows the raw text in a <pre> —
@@ -165,6 +173,7 @@ export function VersionHistory({
   externalEditVerdicts,
   loading = false,
   onRestore,
+  onDiscard,
   previewAs = "markdown",
   onView,
   onLoadContent,
@@ -173,6 +182,8 @@ export function VersionHistory({
   const [previewVersion, setPreviewVersion] = useState<Version | null>(null);
   const [restoreVersion, setRestoreVersion] = useState<number | null>(null);
   const [restoring, setRestoring] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
   // Default to this version's own change log — what changed in it, the way a
   // commit reads. Full body and vs-current each cost a server reconstruction,
   // so they load only when asked for.
@@ -239,6 +250,17 @@ export function VersionHistory({
     }
   };
 
+  const handleDiscard = async () => {
+    if (!onDiscard) return;
+    setDiscarding(true);
+    try {
+      await onDiscard();
+      setConfirmDiscard(false);
+    } finally {
+      setDiscarding(false);
+    }
+  };
+
   if (loading) {
     return (
       <Card className={className}>
@@ -271,6 +293,16 @@ export function VersionHistory({
   // review is open. Disable the restore affordances so the user never hits
   // that error — they must resolve the review first.
   const restoreLocked = currentVersionStatus === "pending_review";
+  // Unreviewed edits are sitting on top of the approved version. Discarding is
+  // the cheap way back — it costs no version, because a draft never entered the
+  // history chain. Needs an approved version to return to; without one the
+  // server would delete the document instead, which is Delete's job, not this
+  // panel's. Locked under review for the same reason restore is.
+  const canDiscardDraft =
+    !!onDiscard &&
+    !restoreLocked &&
+    approvedVersion != null &&
+    currentVersion !== approvedVersion;
   const statusBadgeColor =
     currentVersionStatus === "approved" || currentVersionStatus === "published"
       ? "bg-green-100 text-green-800 border-green-200"
@@ -297,6 +329,19 @@ export function VersionHistory({
           <Badge variant="secondary" className="text-[10px] ml-auto">
             v{currentVersion}
           </Badge>
+          {canDiscardDraft && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive"
+              title={`Throw away the unreviewed edits and go back to v${approvedVersion}`}
+              onClick={() => setConfirmDiscard(true)}
+              data-testid="version-history-discard"
+            >
+              <Trash2 className="h-3.5 w-3.5 mr-1" />
+              Discard draft
+            </Button>
+          )}
         </CardTitle>
         {/* A draft with no approved version at all reads as an unexplained
             "Draft" badge — most visibly on an imported document the engine
@@ -680,6 +725,35 @@ export function VersionHistory({
             </Button>
             <Button onClick={handleRestore} disabled={restoring}>
               {restoring ? "Restoring..." : "Restore"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={confirmDiscard} onOpenChange={() => setConfirmDiscard(false)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Discard the draft?</DialogTitle>
+            <DialogDescription>
+              The document goes back to version {approvedVersion} — the last
+              approved one. Every edit made since is thrown away and can't be
+              recovered. Unlike Restore, this adds no version to the history.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setConfirmDiscard(false)}
+              disabled={discarding}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDiscard}
+              disabled={discarding}
+            >
+              {discarding ? "Discarding..." : "Discard draft"}
             </Button>
           </DialogFooter>
         </DialogContent>

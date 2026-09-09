@@ -36,6 +36,10 @@ interface VersionHistoryModalProps {
   versionData: VersionHistoryData | null;
   /** Restore a version. Omit to render the history read-only. */
   onRestore?: (version: number) => Promise<void>;
+  /** Throw away the unreviewed edits on top of the approved version. Omit to
+   *  hide the affordance; it also hides itself when there is nothing to fall
+   *  back to (see VersionHistory). */
+  onDiscard?: () => Promise<void>;
   /** Preview bodies as rendered markdown (default) or raw source (artifacts). */
   previewAs?: "markdown" | "source";
   /** "View rendered" hook — render a version in the caller's own surface. */
@@ -51,6 +55,7 @@ export function VersionHistoryModal({
   title,
   versionData,
   onRestore,
+  onDiscard,
   previewAs,
   onView,
   onLoadContent,
@@ -69,6 +74,7 @@ export function VersionHistoryModal({
             approvedVersion={versionData.approvedVersion}
             externalEditVerdicts={versionData.externalEditVerdicts}
             onRestore={onRestore}
+            onDiscard={onDiscard}
             previewAs={previewAs}
             onView={onView}
             onLoadContent={onLoadContent}

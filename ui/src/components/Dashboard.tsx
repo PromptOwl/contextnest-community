@@ -3,11 +3,11 @@
  */
 import React, { useState, useEffect, useMemo } from "react";
 import * as api from "../lib/api";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, useQuery } from "@tanstack/react-query";
 import { reads, useNests } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft, Archive, ArchiveRestore, Bookmark,
 } from "lucide-react";
 import { ANON_USER_ID, BULK_REVIEW_LIMIT } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
@@ -39,6 +39,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ReasonDialog, ReviewActions, SubmitForReviewModal } from "./governance";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { ImportFolderModal } from "./ImportFolderModal";
@@ -83,6 +93,16 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   // Draft awaiting the submit dialog (priority + note) — same modal the editor
   // uses, so submitting from here isn't a second, weaker path.
   const [submitTarget, setSubmitTarget] = useState<api.MyDraft | null>(null);
+  // Find/sort/select for the drafts list. Search and sort are server-side (the
+  // list spans pages, so filtering the page in hand would lie); `draftSearch`
+  // is the debounced value actually sent.
+  const [draftQuery, setDraftQuery] = useState("");
+  const [draftSearch, setDraftSearch] = useState("");
+  const [draftSort, setDraftSort] = useState<"updated" | "title">("updated");
+  const [draftsSelected, setDraftsSelected] = useState<Set<string>>(new Set());
+  const [draftsBusy, setDraftsBusy] = useState(false);
+  // Drafts awaiting the discard confirmation — one row, or a whole selection.
+  const [discardTargets, setDiscardTargets] = useState<api.MyDraft[] | null>(null);
   // Deletion flag being resolved from the inbox, and which dialog it opens.
   const [deletionTarget, setDeletionTarget] = useState<api.WorkItem | null>(null);
   const [deletionAction, setDeletionAction] = useState<"delete" | "decline">("delete");
@@ -103,6 +123,20 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
     refetch: refetchNests,
   } = useNests();
   const allNests = nestsData?.nests ?? [];
+  // Which top-level tab is open. Controlled (it used to be uncontrolled) so the
+  // Archived list can stay unfetched until someone actually asks for it —
+  // archived nests are a rare visit, not part of every dashboard load.
+  const [tab, setTab] = useState("nests");
+  const { data: archivedData, isLoading: archivedLoading } = useQuery({
+    ...reads.nestList(true),
+    enabled: tab === "archived",
+  });
+  const archivedNests: any[] = archivedData?.nests ?? [];
+  const [restoreTarget, setRestoreTarget] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+  const [restoring, setRestoring] = useState(false);
   // Grid controls — a long account is otherwise one unbroken scroll. Filtering
   // and sorting are client-side over the list already in hand; the page size
   // just bounds how many cards are mounted at once.
@@ -125,13 +159,20 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
         (n.description ?? "").toLowerCase().includes(q)
       );
     });
-    return [...matched].sort((a: any, b: any) =>
-      nestSort === "name"
+    // Pinned first, then the chosen sort. One extra term rather than a separate
+    // list: the search box and scope filter still decide WHICH nests appear —
+    // a pinned nest that doesn't match what you typed should stay hidden — and
+    // because the page-size slice happens after this, pins are always on the
+    // first page.
+    return [...matched].sort((a: any, b: any) => {
+      const pin = Number(!!b.pinned) - Number(!!a.pinned);
+      if (pin !== 0) return pin;
+      return nestSort === "name"
         ? String(a.name ?? "").localeCompare(String(b.name ?? ""))
         : String(b.last_activity ?? b.created_at ?? "").localeCompare(
             String(a.last_activity ?? a.created_at ?? ""),
-          ),
-    );
+          );
+    });
   }, [allNests, nestQuery, nestScope, nestSort]);
   const nests = filteredNests.slice(0, nestPageSize);
   // The Documents browser offers a clear affordance whenever a control is
@@ -157,6 +198,8 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
+  // Nest ids with a pin write in flight — one click at a time per card.
+  const [pinBusy, setPinBusy] = useState<Set<string>>(new Set());
   // Pending target sits in state so the modal can render the nest name in
   // the confirmation copy without prop-drilling through a separate child.
   const [deleteTarget, setDeleteTarget] = useState<
@@ -202,7 +245,15 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   const goToDraftsPage = async (offset: number) => {
     setDraftsLoading(true);
     try {
-      const next = await qc.fetchQuery(reads.myDrafts({ offset }));
+      const next = await qc.fetchQuery(
+        reads.myDrafts({ offset, q: draftSearch || undefined, sort: draftSort }),
+      );
+      // Clearing the last page of a list leaves the offset past the end, which
+      // paints "no drafts" while the badge still counts some. Fall back to the
+      // first page rather than stranding the reader on a blank one.
+      if (next.drafts.length === 0 && offset > 0 && next.pagination.total > 0) {
+        return void (await goToDraftsPage(0));
+      }
       setDrafts(next.drafts);
       setDraftsPage(next.pagination);
     } catch (e) {
@@ -481,6 +532,72 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
     void goToWorkPage(work.pagination?.offset ?? 0);
   };
 
+  const draftKey = (d: api.MyDraft) => `${d.nest_id}:${d.node_id}`;
+
+  // Debounced so a search is one request per pause, not one per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setDraftSearch(draftQuery.trim()), 250);
+    return () => clearTimeout(t);
+  }, [draftQuery]);
+
+  // A new search or sort replaces the list from page one. Skipped on the first
+  // run — loadDashboard already fetched that page.
+  const draftFiltersReady = React.useRef(false);
+  useEffect(() => {
+    if (!draftFiltersReady.current) {
+      draftFiltersReady.current = true;
+      return;
+    }
+    setDraftsSelected(new Set());
+    void goToDraftsPage(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftSearch, draftSort]);
+
+  /**
+   * Throw drafts away, once the dialog below has confirmed. What that means per
+   * document is the server's call — a document that was approved before goes
+   * back to that version, one that never was is deleted — so the dialog names
+   * both outcomes rather than promising the wrong one.
+   */
+  const discardDrafts = async (targets: api.MyDraft[]) => {
+    if (targets.length === 0) return;
+    setDiscardTargets(null);
+    setDraftsBusy(true);
+    let reverted = 0;
+    let deleted = 0;
+    const failed: string[] = [];
+    // Serial: these are writes against the same nests, and a handful of rows
+    // is the realistic batch. Each one stands alone, so a failure part-way
+    // leaves the ones before it discarded and is reported, not rolled back.
+    for (const d of targets) {
+      try {
+        const res = await api.discardDraft(d.nest_id, d.node_id);
+        if (res.deleted) deleted++;
+        else reverted++;
+      } catch (e) {
+        failed.push(d.title);
+        console.error("[Dashboard] discardDraft failed", d.node_id, e);
+      }
+    }
+    setDraftsBusy(false);
+    setDraftsSelected(new Set());
+
+    if (reverted || deleted) {
+      toast.success(
+        [
+          reverted ? `${reverted} restored to the approved version` : "",
+          deleted ? `${deleted} deleted` : "",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      );
+    }
+    if (failed.length) {
+      toast.error(`Couldn't discard: ${failed.join(", ")}`);
+    }
+    void goToDraftsPage(draftsPage?.offset ?? 0);
+  };
+
   // Optimistic drop + reconcile, same as approveReviewItem.
   const dropWorkItem = (w: api.WorkItem) => {
     setWork((prev) => ({
@@ -520,6 +637,46 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
       setCreateError(
         e instanceof Error ? e.message : "Failed to create nest",
       );
+    }
+  };
+
+  /**
+   * Pin or unpin, optimistically. A pin is a one-click reordering of the grid
+   * the user is looking at, so waiting a round trip to see the card move reads
+   * as a dropped click. The cached row is patched first and the write's own
+   * invalidation reconciles it; on failure the patch is rolled back and the
+   * error surfaces, since a silently-unpinned nest is worse than a toast.
+   */
+  const togglePin = async (nestId: string, pinned: boolean) => {
+    // Ignore a second click while the first is in flight. Both would read the
+    // same `pinned` off the current render and send the SAME request rather
+    // than a pin/unpin pair — the server is idempotent about that now, but
+    // firing it at all is just a wasted round trip.
+    if (pinBusy.has(nestId)) return;
+    setPinBusy((prev) => new Set(prev).add(nestId));
+    const patch = (value: boolean) =>
+      qc.setQueryData(reads.nestList().queryKey, (prev: any) =>
+        prev
+          ? {
+            ...prev,
+            nests: prev.nests.map((n: any) =>
+              n.id === nestId ? { ...n, pinned: value } : n,
+            ),
+          }
+          : prev,
+      );
+    patch(pinned);
+    try {
+      await api.setNestPinned(nestId, pinned);
+    } catch (err: any) {
+      patch(!pinned);
+      toast.error(err?.message ?? `Failed to ${pinned ? "pin" : "unpin"} this nest`);
+    } finally {
+      setPinBusy((prev) => {
+        const next = new Set(prev);
+        next.delete(nestId);
+        return next;
+      });
     }
   };
 
@@ -586,7 +743,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
       {/* Tabbed view: Nests (default) vs My Work. With 200+ work items the
           stacked layout pushed the nest grid below a huge scroll — tabs keep
           nests one click away without touching either section's internals. */}
-      <Tabs defaultValue="nests">
+      <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="h-12 p-1.5">
           <TabsTrigger value="nests" className="px-6 py-2 text-sm">
             <Database className="h-4 w-4 mr-1.5" />
@@ -610,7 +767,86 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
               </span>
             )}
           </TabsTrigger>
+          {/* Archived nests are put away, not gone — this is the one place they
+              appear, and the only place they can be restored from. */}
+          <TabsTrigger value="archived" className="px-6 py-2 text-sm gap-1.5">
+            <Archive className="h-4 w-4" />
+            Archived
+          </TabsTrigger>
         </TabsList>
+
+        <TabsContent value="archived" className="space-y-4">
+          {archivedLoading ? (
+            <div className="flex items-center gap-2 py-10 justify-center text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading archived nests…
+            </div>
+          ) : archivedNests.length === 0 ? (
+            <div className="rounded-lg border border-dashed py-12 text-center">
+              <Archive className="h-8 w-8 mx-auto mb-3 text-muted-foreground" />
+              <p className="text-sm font-medium">No archived nests</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                Archiving a nest puts it here instead of deleting it — the option
+                is in the delete dialog on any nest you own.
+              </p>
+            </div>
+          ) : (
+            <>
+              <p className="text-xs text-muted-foreground">
+                These nests are read-only. They don't appear on your dashboard,
+                answer agents over MCP, or serve published links until restored.
+              </p>
+              <div className="space-y-2">
+                {archivedNests.map((n: any) => (
+                  <div
+                    key={n.id}
+                    className="flex items-center gap-3 rounded-lg border px-4 py-3"
+                  >
+                    <Archive className="h-4 w-4 text-muted-foreground shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium">{n.name}</div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        {n.archived_at
+                          ? `Archived ${relTime(n.archived_at)}`
+                          : "Archived"}
+                        {n.description ? ` — ${n.description}` : ""}
+                      </div>
+                    </div>
+                    {n.is_owner && (
+                      <>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            setRestoreTarget({ id: n.id, name: n.name })
+                          }
+                          data-testid="restore-nest"
+                        >
+                          <ArchiveRestore className="h-3.5 w-3.5 mr-1.5" />
+                          Restore
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-red-700 hover:text-red-800"
+                          onClick={() =>
+                            setDeleteTarget({
+                              id: n.id,
+                              name: n.name,
+                              isImported: !!n.is_imported,
+                            })
+                          }
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </TabsContent>
 
         <TabsContent value="work">
           {/* My Work — cross-nest inbox. Slack/CRM-clean: two tight lists, every
@@ -991,6 +1227,55 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                 </span>
               )}
             </div>
+            {/* Find and order the list. Both run on the server: the list spans
+                pages, so filtering the page in hand would quietly search a
+                subset. */}
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <Input
+                value={draftQuery}
+                onChange={(e) => setDraftQuery(e.target.value)}
+                placeholder="Search drafts by title or nest…"
+                className="h-8 max-w-xs"
+                aria-label="Search your drafts"
+                data-testid="drafts-search"
+              />
+              {/* Segmented control, not three look-alike words. The label is
+                  muted and carries its colon; both options sit inside one
+                  bordered group so each reads as a control whether or not it is
+                  the selected one, and the selection is the filled pill. */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium text-muted-foreground">
+                  Sort:
+                </span>
+                <div
+                  className="inline-flex items-center rounded-md border bg-muted/40 p-0.5"
+                  role="group"
+                  aria-label="Sort drafts"
+                >
+                  {(
+                    [
+                      ["updated", "Recently edited"],
+                      ["title", "Title"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      aria-pressed={draftSort === value}
+                      onClick={() => setDraftSort(value)}
+                      className={`h-6 rounded px-2 text-xs transition-colors ${
+                        draftSort === value
+                          ? "bg-background font-medium text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                      data-testid={`drafts-sort-${value}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
             {draftsLoading ? (
               // Loader, not the empty state: "nothing here" while the request is
               // still in flight reads as an answer, and this list existing at
@@ -1001,10 +1286,69 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
               </div>
             ) : drafts.length === 0 ? (
               <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
-                No unsubmitted drafts — everything you've written is in review or approved.
+                {draftSearch
+                  ? `No drafts match "${draftSearch}".`
+                  : "No unsubmitted drafts — everything you've written is in review or approved."}
               </div>
             ) : (
               <div className="rounded-lg border divide-y overflow-hidden">
+                {/* Batch bar — the reason this tab was unusable at 66 drafts is
+                    that every one of them had to be opened to be cleaned up. */}
+                {drafts.length > 1 && (
+                  <div className="flex flex-wrap items-center gap-2 bg-muted/40 px-4 py-2 text-sm">
+                    <Checkbox
+                      // Partial selections read as "some", not "none".
+                      checked={
+                        draftsSelected.size === 0
+                          ? false
+                          : draftsSelected.size === drafts.length
+                            ? true
+                            : "indeterminate"
+                      }
+                      onCheckedChange={(next: boolean | "indeterminate") =>
+                        setDraftsSelected(
+                          next === true ? new Set(drafts.map(draftKey)) : new Set(),
+                        )
+                      }
+                      aria-label="Select every draft on this page"
+                      data-testid="drafts-select-all"
+                    />
+                    <span className="text-muted-foreground">
+                      {draftsSelected.size > 0
+                        ? `${draftsSelected.size} selected`
+                        : `Select all ${drafts.length} on this page`}
+                    </span>
+                    {draftsSelected.size > 0 && (
+                      <div className="ml-auto flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={draftsBusy}
+                          onClick={() =>
+                            setDiscardTargets(
+                              drafts.filter((d) => draftsSelected.has(draftKey(d))),
+                            )
+                          }
+                          data-testid="drafts-bulk-discard"
+                        >
+                          {draftsBusy ? (
+                            <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                          ) : (
+                            <Trash2 className="h-3.5 w-3.5 mr-1" />
+                          )}
+                          Discard {draftsSelected.size}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setDraftsSelected(new Set())}
+                        >
+                          Clear
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {drafts.map((d) => {
                   const key = `${d.nest_id}:${d.node_id}`;
                   return (
@@ -1012,6 +1356,19 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                       key={key}
                       className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 group"
                     >
+                      {drafts.length > 1 && (
+                        <Checkbox
+                          checked={draftsSelected.has(key)}
+                          onCheckedChange={() =>
+                            setDraftsSelected((prev) => {
+                              const next = new Set(prev);
+                              next.has(key) ? next.delete(key) : next.add(key);
+                              return next;
+                            })
+                          }
+                          aria-label={`Select ${d.title}`}
+                        />
+                      )}
                       <span
                         className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0 ${d.status === "rejected"
                             ? "bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300"
@@ -1047,6 +1404,19 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                       >
                         <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
                         Submit for review
+                      </Button>
+                      {/* The action the list was missing: cleaning one up took
+                          opening the document and finding Delete in its menu. */}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={draftsBusy}
+                        className="shrink-0 text-muted-foreground hover:text-destructive"
+                        title="Discard this draft — back to the last approved version, or delete it if there isn't one"
+                        onClick={() => setDiscardTargets([d])}
+                        data-testid="draft-discard"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
                       </Button>
                     </div>
                   );
@@ -1146,8 +1516,14 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                     aria-invalid={!!createError}
                     autoFocus
                   />
-                  {createError && (
-                    <p className="text-xs text-destructive">{createError}</p>
+                  {/* Say why the button is dead as it happens — a name over the
+                      length cap only disabled Create, with nothing to read
+                      (CU-wdqcq018qx). The submit error still wins. */}
+                  {(createError ??
+                    (newName ? nestNameProblem(newName) : null)) && (
+                    <p className="text-xs text-destructive">
+                      {createError ?? nestNameProblem(newName)}
+                    </p>
                   )}
                 </div>
                 <div className="space-y-1">
@@ -1474,45 +1850,83 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                       shared/reviewer/viewer nests don't show teasing icons.
                       Rename: owner or nest-admin (PATCH /nests/:nestId).
                       Delete: owner, or admin caretaker on the ungoverned
-                      commons in key mode. */}
-                      {(canRename || canDelete) && (
-                        <div className="absolute top-2 right-2 flex items-center gap-0.5">
-                          {canRename && (
-                            <button
-                              type="button"
-                              aria-label={`Rename nest ${nest.name}`}
-                              title="Rename nest"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setRenameTarget({
-                                  id: nest.id,
-                                  name: nest.name,
-                                  description: nest.description ?? null,
-                                });
-                              }}
-                              className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                            >
-                              <Pencil className="h-3.5 w-3.5" />
-                            </button>
+                      commons in key mode.
+                      Pin: NO gate — a pin is this person's own bookmark, so a
+                      viewer pins exactly as an owner does, and it is the one
+                      action here everybody gets.
+                      All three share ONE row: two absolutely-positioned groups
+                      drifted apart as the gated icons came and went. */}
+                      <div className="absolute top-2 right-2 flex items-center gap-0.5">
+                        {canRename && (
+                          <button
+                            type="button"
+                            aria-label={`Rename nest ${nest.name}`}
+                            title="Rename nest"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRenameTarget({
+                                id: nest.id,
+                                name: nest.name,
+                                description: nest.description ?? null,
+                              });
+                            }}
+                            className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
                           )}
                           {canDelete && (
-                            <button
-                              type="button"
-                              aria-label={`Delete nest ${nest.name}`}
-                              title="Delete nest"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                requestDelete(nest.id, nest.name, !!nest.is_imported);
-                              }}
-                              className="p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          )}
-                        </div>
-                      )}
+                          <button
+                            type="button"
+                            aria-label={`Delete nest ${nest.name}`}
+                            title="Delete nest"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              requestDelete(nest.id, nest.name, !!nest.is_imported);
+                            }}
+                            className="p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        {/* Bookmark, not a pushpin: the pin glyph sits at an
+                            angle and read as clutter beside the upright pencil
+                            and bin. Not a star either — that already means
+                            "prime document" elsewhere in the app. */}
+                        <button
+                          type="button"
+                          aria-label={
+                            nest.pinned
+                              ? `Unpin nest ${nest.name}`
+                              : `Pin nest ${nest.name}`
+                          }
+                          aria-pressed={!!nest.pinned}
+                          title={
+                            nest.pinned
+                              ? "Unpin — stop keeping this nest at the top"
+                              : "Pin — keep this nest at the top for you"
+                          }
+                          disabled={pinBusy.has(nest.id)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void togglePin(nest.id, !nest.pinned);
+                          }}
+                          className={`p-1.5 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60 ${
+                            nest.pinned
+                              ? "text-amber-500 hover:text-amber-600 hover:bg-amber-50"
+                              : "text-muted-foreground hover:text-foreground hover:bg-secondary"
+                          }`}
+                          data-testid="pin-nest"
+                        >
+                          <Bookmark
+                            className={`h-3.5 w-3.5 ${nest.pinned ? "fill-current" : ""}`}
+                          />
+                        </button>
+                      </div>
 
-                      <div className="flex items-start gap-3 pr-12">
+                      {/* Reserve room for up to three icons — a long nest name
+                          ran under them once pinning added a third. */}
+                      <div className="flex items-start gap-3 pr-20">
                         <div
                           className={`p-2 rounded-md ${isAnonymous ? "bg-amber-100" : "bg-primary/10"
                             }`}
@@ -1735,7 +2149,10 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
               : "Each author gets the same reason and the work goes back to them."
           }
           // Rejecting in bulk demands a reason exactly as one at a time does.
-          label={workBulkAction === "reject" ? "Why?" : undefined}
+          // Approving offers the same comment field, shared across the batch,
+          // without demanding one — as the review queue's bulk approve does.
+          label={workBulkAction === "reject" ? "Why?" : "Comment (optional)"}
+          optionalReason={workBulkAction === "approve"}
           placeholder="Shared with every author in this batch"
           confirmLabel={
             workBulkAction === "approve" ? "Approve all" : "Reject all"
@@ -1782,6 +2199,38 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
         />
       )}
 
+      {/* Discard confirmation — the app's own dialog, like every other
+          destructive action. It names both outcomes because only the server
+          knows which applies per document. */}
+      <AlertDialog
+        open={!!discardTargets}
+        onOpenChange={(open) => !open && setDiscardTargets(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {discardTargets?.length === 1
+                ? `Discard "${discardTargets[0].title}"?`
+                : `Discard ${discardTargets?.length ?? 0} drafts?`}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {discardTargets?.length === 1 ? "The document goes" : "Each document goes"}{" "}
+              back to its last approved version. A document that was never
+              approved is deleted instead. This can't be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => void discardDrafts(discardTargets ?? [])}
+              data-testid="drafts-discard-confirm"
+            >
+              Discard
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {deleteTarget && (
         <DeleteNestDialog
           nestId={deleteTarget.id}
@@ -1795,8 +2244,74 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
             setDeleteTarget(null);
             await fetchNests();
           }}
+          // Already archived: the card offers Restore, so the dialog it opens
+          // is delete-only.
+          onArchived={
+            tab === "archived"
+              ? undefined
+              : async () => {
+                  setDeleteTarget(null);
+                  toast.success(
+                    `"${deleteTarget.name}" archived — find it under Archived`,
+                  );
+                  await fetchNests();
+                }
+          }
         />
       )}
+
+      {/* Restoring is reversible and non-destructive, but it puts a nest back in
+          front of collaborators and re-opens its published links — worth one
+          deliberate click rather than an instant, silent change. */}
+      <AlertDialog
+        open={!!restoreTarget}
+        onOpenChange={(open) => {
+          if (!open && !restoring) setRestoreTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Restore “{restoreTarget?.name}”?</AlertDialogTitle>
+            <AlertDialogDescription>
+              It goes back exactly as it was — same documents, versions and
+              stewards. It returns to your dashboard, becomes writable again,
+              and its published links and MCP access start answering.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={restoring}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={restoring}
+              onClick={async (e) => {
+                // Keep the dialog up while the request is in flight; it closes
+                // on success below.
+                e.preventDefault();
+                if (!restoreTarget) return;
+                setRestoring(true);
+                try {
+                  await api.restoreNest(restoreTarget.id);
+                  toast.success(`"${restoreTarget.name}" restored`);
+                  setRestoreTarget(null);
+                  await fetchNests();
+                } catch (err: any) {
+                  toast.error(err?.message ?? "Failed to restore this nest");
+                } finally {
+                  setRestoring(false);
+                }
+              }}
+            >
+              {restoring ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
+                  Restoring...
+                </>
+              ) : (
+                "Restore nest"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Dialog
         open={!!discardTarget}

@@ -43,8 +43,16 @@ function isDue(s: ScheduleRow, now: number): boolean {
  */
 export async function schedulerTick(now: number = Date.now()): Promise<string[]> {
   const db = getDb();
+  // Archived nests are skipped, not disabled: the tick runs outside any request
+  // (so the read-only permission cap never applies to it), and a schedule left
+  // enabled on a nest someone put away would keep creating agent runs in it.
+  // Restoring the nest brings its schedules back with everything else.
   const due = (
-    (await db.all("SELECT * FROM schedules WHERE enabled = 1")) as ScheduleRow[]
+    (await db.all(
+      `SELECT s.* FROM schedules s
+         JOIN nests n ON n.id = s.nest_id
+        WHERE s.enabled = 1 AND n.archived_at IS NULL`,
+    )) as ScheduleRow[]
   ).filter((s) => isDue(s, now));
 
   const created: string[] = [];

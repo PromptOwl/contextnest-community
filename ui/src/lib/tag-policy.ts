@@ -10,8 +10,21 @@ export const MAX_TAG_LENGTH = 40;
  *  for a handful, narrow enough that a pasted paragraph is refused outright. */
 export const TAG_INPUT_MAX_LENGTH = 120;
 
-/** Everything outside this set is dropped (`a/b/c` → `abc`, `🚀rocket` → `rocket`). */
-const DISALLOWED = /[^\p{L}\p{N}._-]+/gu;
+/** Everything outside this set is dropped (`a/b/c` → `abc`, `🚀rocket` → `rocket`).
+ *  The alphabet is the ENGINE's TAG_PATTERN
+ *  (`^#?[a-zA-Z][a-zA-Z0-9_:-]*$`) — accepting more here only produced a tag the
+ *  server had to refuse, and the whole save failed with it. */
+const DISALLOWED = /[^a-zA-Z0-9_:-]+/g;
+
+/**
+ * An accented letter carries its base letter, so keep that instead of dropping
+ * the character whole: `café` is a tag the user meant to write, and losing the
+ * "é" turned it into `caf` (CU-wdqcq01e79). Decompose to base + combining mark
+ * and drop only the mark; scripts with no ASCII base (漢字, emoji) still fall
+ * to DISALLOWED above. The rewrite is still reported by the note below.
+ */
+const deaccent = (s: string) =>
+  s.normalize("NFD").replace(/\p{Diacritic}/gu, "");
 
 export interface TagCandidate {
   /** The tag to store, or null when nothing usable survived. */
@@ -53,14 +66,16 @@ export function normalizeTagInput(raw: string): TagCandidate {
 
   // Lowercased: tags are index keys, and folder paths and prime-tag matching
   // already canonicalise that way. Without it "Bug" and "bug" are two tags.
-  const cleaned = bare
+  // A tag has to OPEN with a letter (engine rule), so leading digits and
+  // punctuation go with the disallowed characters.
+  const cleaned = deaccent(bare)
     .replace(DISALLOWED, "")
-    .replace(/^[._-]+|[._-]+$/g, "")
+    .replace(/^[^a-zA-Z]+|[_:-]+$/g, "")
     .toLowerCase();
   if (!cleaned) {
     return {
       tag: null,
-      note: `"${bare}" has no letters or digits — tags are built from letters, digits, and . _ -`,
+      note: `"${bare}" has no usable characters — a tag starts with a letter and is built from letters a-z, digits, and _ : -`,
     };
   }
   if (cleaned.length > MAX_TAG_LENGTH) {
