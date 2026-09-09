@@ -449,17 +449,32 @@ export async function importNest(userId: string, name: string): Promise<Nest> {
  */
 export async function pinNest(userId: string, nestId: string): Promise<void> {
   const db = getDb();
-  // No INSERT OR IGNORE / ON CONFLICT: the two dialects spell it differently,
-  // and a pin is not hot enough to be worth the split. Check, then insert.
+  // No INSERT OR IGNORE / ON CONFLICT — the two dialects spell it differently.
+  // The check is the fast path; the catch is what makes it correct. Two clicks
+  // landing together both pass the SELECT, and the loser's INSERT trips the
+  // (user_id, nest_id) primary key — which would surface as a 409 on SQLite and
+  // a 500 on Postgres for an operation whose whole contract is idempotence. A
+  // double-click is the likeliest way to reach this, so it is not theoretical.
   const existing = await db.get(
     "SELECT 1 FROM nest_pins WHERE user_id = ? AND nest_id = ?",
     [userId, nestId],
   );
   if (existing) return;
-  await db.run(
-    "INSERT INTO nest_pins (user_id, nest_id) VALUES (?, ?)",
-    [userId, nestId],
-  );
+  try {
+    await db.run(
+      "INSERT INTO nest_pins (user_id, nest_id) VALUES (?, ?)",
+      [userId, nestId],
+    );
+  } catch (err) {
+    // Re-read rather than pattern-match the driver's error text: if the row is
+    // there now, someone else's insert won and the caller's intent is satisfied.
+    // Anything else (a real failure) still throws.
+    const now = await db.get(
+      "SELECT 1 FROM nest_pins WHERE user_id = ? AND nest_id = ?",
+      [userId, nestId],
+    );
+    if (!now) throw err;
+  }
 }
 
 /** Remove a pin. Idempotent — unpinning what isn't pinned is a no-op. */

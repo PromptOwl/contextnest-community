@@ -184,6 +184,8 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
+  // Nest ids with a pin write in flight — one click at a time per card.
+  const [pinBusy, setPinBusy] = useState<Set<string>>(new Set());
   // Pending target sits in state so the modal can render the nest name in
   // the confirmation copy without prop-drilling through a separate child.
   const [deleteTarget, setDeleteTarget] = useState<
@@ -632,6 +634,12 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
    * error surfaces, since a silently-unpinned nest is worse than a toast.
    */
   const togglePin = async (nestId: string, pinned: boolean) => {
+    // Ignore a second click while the first is in flight. Both would read the
+    // same `pinned` off the current render and send the SAME request rather
+    // than a pin/unpin pair — the server is idempotent about that now, but
+    // firing it at all is just a wasted round trip.
+    if (pinBusy.has(nestId)) return;
+    setPinBusy((prev) => new Set(prev).add(nestId));
     const patch = (value: boolean) =>
       qc.setQueryData(reads.nestList().queryKey, (prev: any) =>
         prev
@@ -649,6 +657,12 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
     } catch (err: any) {
       patch(!pinned);
       toast.error(err?.message ?? `Failed to ${pinned ? "pin" : "unpin"} this nest`);
+    } finally {
+      setPinBusy((prev) => {
+        const next = new Set(prev);
+        next.delete(nestId);
+        return next;
+      });
     }
   };
 
@@ -1799,11 +1813,12 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                               ? "Unpin — stop keeping this nest at the top"
                               : "Pin — keep this nest at the top for you"
                           }
+                          disabled={pinBusy.has(nest.id)}
                           onClick={(e) => {
                             e.stopPropagation();
                             void togglePin(nest.id, !nest.pinned);
                           }}
-                          className={`p-1.5 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                          className={`p-1.5 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60 ${
                             nest.pinned
                               ? "text-amber-500 hover:text-amber-600 hover:bg-amber-50"
                               : "text-muted-foreground hover:text-foreground hover:bg-secondary"

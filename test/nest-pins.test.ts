@@ -175,3 +175,131 @@ describe("nest pins", () => {
     ).toBe(false);
   });
 });
+
+// A person shared ONE document reaches the nest only through that grant. The
+// dashboard lists the nest for them, so it shows them its pin control — and a
+// control the UI offers must not 404. The nest middleware admits a grantee for
+// a specific set of routes; pinning was missing from that list (CU-wdqcq00d63
+// review), so the request died before reaching the handler that would allow it.
+describe("nest pins — a document grantee", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let guest: { apiKey: string; email: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@acme.com", "Owner");
+    guest = await registerUser(app, "guest@acme.com", "Guest");
+    const { data: nest } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Granted Vault" },
+      owner.apiKey,
+    );
+    nestId = nest.nest.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Shared One", content: "# shared" },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/grants`,
+      {
+        target_type: "document",
+        target: "nodes/shared-one",
+        email: guest.email,
+        role: "read",
+      },
+      owner.apiKey,
+    );
+  }, 30000);
+
+  afterAll(() => env.cleanup());
+
+  it("can pin the nest it was granted a document in", async () => {
+    const pin = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/pin`,
+      {},
+      guest.apiKey,
+    );
+    expect(pin.status).toBe(200);
+
+    const list = await jsonRequest(app, "GET", "/nests", null, guest.apiKey);
+    const row = list.data.nests.find((n: any) => n.id === nestId);
+    // The card the grantee sees is the one carrying the pin control.
+    expect(row).toBeTruthy();
+    expect(row.pinned).toBe(true);
+
+    const un = await jsonRequest(
+      app,
+      "DELETE",
+      `/nests/${nestId}/pin`,
+      null,
+      guest.apiKey,
+    );
+    expect(un.status).toBe(200);
+  });
+
+  it("pinning still grants no wider read", async () => {
+    await jsonRequest(app, "POST", `/nests/${nestId}/pin`, {}, guest.apiKey);
+    // The sibling document was never shared; a pin must not have changed that.
+    const sibling = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/nodes/sibling-secret`,
+      null,
+      guest.apiKey,
+    );
+    expect([403, 404]).toContain(sibling.status);
+  });
+});
+
+// Two clicks landing together both pass the existence check, so the loser's
+// INSERT trips the composite primary key — a 409 on SQLite, a 500 on Postgres,
+// for an operation whose whole contract is idempotence (CU-wdqcq00d63 review).
+describe("nest pins — concurrent pins of the same nest", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@acme.com", "Owner");
+    const { data: nest } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Racy Vault" },
+      owner.apiKey,
+    );
+    nestId = nest.nest.id;
+  }, 30000);
+
+  afterAll(() => env.cleanup());
+
+  it("both requests succeed and the nest ends up pinned once", async () => {
+    const [a, b] = await Promise.all([
+      jsonRequest(app, "POST", `/nests/${nestId}/pin`, {}, owner.apiKey),
+      jsonRequest(app, "POST", `/nests/${nestId}/pin`, {}, owner.apiKey),
+    ]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+
+    const list = await jsonRequest(app, "GET", "/nests", null, owner.apiKey);
+    expect(
+      list.data.nests.filter((n: any) => n.id === nestId && n.pinned).length,
+    ).toBe(1);
+  });
+});
