@@ -28,7 +28,9 @@ interface SubmitForReviewModalProps {
   isOpen: boolean;
   onClose: () => void;
   documentTitle: string;
-  currentVersion: number;
+  /** null when the dialog covers several documents at once — no single
+   *  version number describes them. */
+  currentVersion: number | null;
   onSubmit: (note: string, priority: ReviewRequestPriority) => Promise<void>;
 }
 
@@ -70,11 +72,26 @@ export function SubmitForReviewModal({
     <Dialog open={isOpen} onOpenChange={handleClose}>
       <DialogContent className="sm:max-w-[425px]">
         <DialogHeader>
-          <DialogTitle>Publish &ldquo;{documentTitle}&rdquo; (requires approval)</DialogTitle>
+          <DialogTitle>
+            {currentVersion == null
+              ? `Publish ${documentTitle} (requires approval)`
+              : `Publish “${documentTitle}” (requires approval)`}
+          </DialogTitle>
           <DialogDescription>
-            Publishing in this nest goes through stewardship. Version {currentVersion}{" "}
-            will move to <strong>pending review</strong>; once a steward approves it,
-            this version becomes the AI-readable copy.
+            {currentVersion == null ? (
+              <>
+                Publishing in this nest goes through stewardship. Each selected
+                draft moves to <strong>pending review</strong>; once a steward
+                approves one, that version becomes the AI-readable copy.
+              </>
+            ) : (
+              <>
+                Publishing in this nest goes through stewardship. Version{" "}
+                {currentVersion} will move to <strong>pending review</strong>;
+                once a steward approves it, this version becomes the AI-readable
+                copy.
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
 

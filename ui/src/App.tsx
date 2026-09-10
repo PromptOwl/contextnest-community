@@ -18,6 +18,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
 import { navigateGuarded } from "./lib/nav-guard";
+import { track } from "./lib/analytics";
 import {
   deriveNestCaps,
   isReaderHiddenView,
@@ -208,6 +209,11 @@ export default function App() {
     (next: View) => navigateGuarded(() => setViewNow(next)),
     [],
   );
+  // Route views for product analytics. The SPA keeps one URL, so the view is
+  // the event property; no-op unless the server configured a PostHog key.
+  useEffect(() => {
+    track("$pageview", { page: view.page });
+  }, [view.page]);
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   // ?nest=<id> deep-link probe; 200 → skip Login, mount NestView.
   // "missing" is "no ?nest to open"; "unreachable" is "there was one and it
@@ -893,47 +899,6 @@ export default function App() {
     );
   }
 
-  // A ?nest link that didn't resolve. Falling through to the dashboard made a
-  // stale bookmark look like it had simply opened the app, leaving no way to
-  // tell "deleted" from "no access" from "bad link" (CU-wdqcpzzzrm).
-  if (deepLinkProbe.status === "unreachable") {
-    return (
-      <>
-        <div className="min-h-screen flex items-center justify-center px-4">
-          <div className="text-center">
-            <p className="text-lg font-medium">
-              This nest doesn't exist or you don't have access.
-            </p>
-            <p className="text-sm text-muted-foreground mt-1">
-              It may have been deleted, the link may be out of date, or the
-              request may simply have failed.
-            </p>
-            <div className="mt-4 flex items-center justify-center gap-2">
-              {/* A dropped request looks the same as a deleted nest from here,
-                  so offer the re-probe rather than making a network blip a
-                  permanent verdict. */}
-              <Button
-                variant="outline"
-                onClick={() =>
-                  setDeepLinkProbe({
-                    status: "loading",
-                    nestId: deepLinkProbe.nestId,
-                  })
-                }
-              >
-                Try again
-              </Button>
-              <Button onClick={() => setDeepLinkProbe({ status: "missing" })}>
-                Back to dashboard
-              </Button>
-            </div>
-          </div>
-        </div>
-        {logoutChrome}
-      </>
-    );
-  }
-
   // Board columns are fixed-width and scroll sideways, so the 6xl shell forces
   // horizontal scrolling long before the viewport runs out. Widen the whole
   // shell (header, tabs, main, footer) on that page so they stay aligned.
@@ -1103,6 +1068,43 @@ export default function App() {
           percentage boxes resolve against the wider block. `clip` (not
           `hidden`) keeps sticky headers inside pages working. */}
       <main className={`${shellWidth} mx-auto px-4 py-4 min-w-0 overflow-x-clip`}>
+        {/* A ?nest link that didn't resolve. Falling through to the dashboard
+            made a stale bookmark look like it had simply opened the app, with
+            no way to tell "deleted" from "no access" from "bad link"
+            (CU-wdqcpzzzrm) — but rendered as a bare full-screen view it read
+            as a crash and took the navigation with it, so it sits inside the
+            shell like any other page (CU-wdqcq01pe6). */}
+        {deepLinkProbe.status === "unreachable" ? (
+        <div className="py-20 text-center">
+          <p className="text-lg font-medium">
+            This nest doesn't exist or you don't have access.
+          </p>
+          <p className="text-sm text-muted-foreground mt-1">
+            It may have been deleted, the link may be out of date, or the
+            request may simply have failed.
+          </p>
+          <div className="mt-4 flex items-center justify-center gap-2">
+            {/* A dropped request looks the same as a deleted nest from here,
+                so offer the re-probe rather than making a network blip a
+                permanent verdict. */}
+            <Button
+              variant="outline"
+              onClick={() =>
+                setDeepLinkProbe({
+                  status: "loading",
+                  nestId: deepLinkProbe.nestId,
+                })
+              }
+            >
+              Try again
+            </Button>
+            <Button onClick={() => setDeepLinkProbe({ status: "missing" })}>
+              Back to dashboard
+            </Button>
+          </div>
+        </div>
+        ) : (
+        <>
         {view.page === "dashboard" && (
           <Dashboard
             onManageKeys={() => setView({ page: "api-keys" })}
@@ -1399,6 +1401,8 @@ export default function App() {
             nestName={view.nestName}
             onBack={leaveNest}
           />
+        )}
+        </>
         )}
       </main>
 

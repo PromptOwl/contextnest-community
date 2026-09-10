@@ -350,8 +350,8 @@ export function VersionHistory({
             Say which state it is actually in and how to leave it. */}
         {currentVersionStatus === "draft" && approvedVersion == null && (
           <p className="text-xs text-muted-foreground pt-1">
-            Never published — no approved version exists yet. Saving this
-            document publishes it.
+            Never published — no approved version exists yet. Saving keeps this
+            document a draft; Submit for review to publish it.
           </p>
         )}
       </CardHeader>
