@@ -121,7 +121,9 @@ async function insertInboxRows(params: {
  *
  * The email goes to the person named, not the NOTIFY_EMAIL_TO team inbox: a
  * mention is addressed to one human. The connector message is the team-channel
- * half and carries no more than the queue row already does.
+ * half, so it is written in the third person and names its recipients (and,
+ * for a comment, quotes it) — a channel already receives document titles and
+ * actor emails for every review event, so this discloses nothing new in kind.
  */
 function deliverMentionMessages(params: {
   nestId: string;
