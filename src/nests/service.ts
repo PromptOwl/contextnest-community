@@ -193,8 +193,9 @@ export async function setAllowSelfApprove(
 }
 
 /**
- * Whether a ctx push (POST /nests/:id/publish) to this nest must be confirmed
- * in the web UI before it applies — the Push Confirmation Gate. Superadmin-set
+ * Whether an agent write (MCP context_create, POST /nodes, POST /publish) to
+ * this nest must be confirmed in the web UI before it applies — the Push
+ * Confirmation Gate. Superadmin-set
  * only; default off = today's immediate-apply behaviour. Mirrors
  * nestAllowsSelfApprove above.
  */

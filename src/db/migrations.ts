@@ -212,7 +212,7 @@ export function runMigrations(db: Database.Database): void {
     db.exec("ALTER TABLE nests ADD COLUMN index_synced_at TEXT");
   }
 
-  // Push Confirmation Gate (superadmin). When on, a ctx push (POST
+  // Push Confirmation Gate (superadmin). When on, an agent write (POST
   // /nests/:id/publish) is HELD as a pending_pushes row instead of applying —
   // it lands only after a reviewer confirms in the web UI. Default 0 keeps
   // today's immediate-apply behaviour. Superadmin-set only (isServerAdminUserId
@@ -1481,7 +1481,7 @@ export function runMigrations(db: Database.Database): void {
   //
   // pending_pushes carries the FULL staged push (payload_blob) so a confirm
   // applies it byte-for-byte later — the submitter is long gone by then.
-  // push_allowlist is PER-API-KEY (never keyed on nest alone): key_id NULL
+  // push_allowlist is PER-API-KEY (never keyed on nest alone): key_id ''
   // means "any of that user's keys". A confirm with always_allow whitelists
   // the exact (nest_id, submitter_user_id, submitter_key_id) that pushed.
   if (!hasMigration("040_push_confirmation")) {
@@ -1519,7 +1519,7 @@ export function runMigrations(db: Database.Database): void {
         );
       `);
     })();
-    recordMigration("037_push_confirmation");
+    recordMigration("040_push_confirmation");
   }
 }
 

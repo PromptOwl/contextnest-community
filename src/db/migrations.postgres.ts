@@ -119,7 +119,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       UNIQUE(user_id, slug)
     );
     CREATE INDEX IF NOT EXISTS idx_nests_user ON nests(user_id);
-    -- Push Confirmation Gate (migration 037): declared inline above; explicit
+    -- Push Confirmation Gate (migration 040): declared inline above; explicit
     -- ALTER for databases created before it shipped.
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS require_push_confirmation INTEGER NOT NULL DEFAULT 0;
 
@@ -715,10 +715,10 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
     CREATE INDEX IF NOT EXISTS idx_nest_pins_user ON nest_pins(user_id);
 
-    -- Push Confirmation Gate (migration 040). pending_pushes holds a gated ctx
+    -- Push Confirmation Gate (migration 040). pending_pushes holds a gated agent
     -- push in full (payload_blob) until a reviewer confirms; push_allowlist is
     -- PER-API-KEY (key_id '' = any of that user's keys), never keyed on nest
-    -- alone. SQLite parity in migrations.ts 037_push_confirmation.
+    -- alone. SQLite parity in migrations.ts 040_push_confirmation.
     CREATE TABLE IF NOT EXISTS pending_pushes (
       id TEXT PRIMARY KEY,
       nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,

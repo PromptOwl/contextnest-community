@@ -1755,15 +1755,23 @@ export function createApp(): Hono<AuthEnv> {
         path.includes("/can-access") ||
         path.includes("/can-approve") ||
         path.includes("/can-edit") ||
-        // Push Confirmation Gate — held-push review + per-key allowlist are
-        // governance surfaces, licensed like /review-queue (even on GET).
-        path.includes("/pending-pushes") ||
+        // Push Confirmation Gate — the per-key allowlist is a governance
+        // surface, licensed like /review-queue (even on GET). /pending-pushes
+        // is deliberately NOT here: see isPushRelease below.
         path.includes("/push-allowlist") ||
         isCommentPath ||
         isActivityPath ||
         isFeedPath ||
         isDeletionQueuePath;
-      const needsLicense = c.req.method !== "GET" || isGovernance;
+      // Releasing a held push is exempt from the license gate — listing,
+      // reading, confirming and rejecting alike. POST /publish is unlicensed,
+      // so on a gated nest a lapsed license would hold every push at 202 and
+      // then 503 the only routes that can let them through: the nest stops
+      // accepting writes with no in-product way back. The gate itself is what
+      // the license buys; draining what it already holds must never be.
+      const isPushRelease = path.includes("/pending-pushes");
+      const needsLicense =
+        !isPushRelease && (c.req.method !== "GET" || isGovernance);
       if (needsLicense) {
         const lic = getCurrentLicense();
         if (!lic?.valid) {

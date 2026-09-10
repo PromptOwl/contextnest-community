@@ -1,13 +1,16 @@
 /**
  * Push Confirmation Gate — service layer.
  *
- * When a nest has require_push_confirmation ON, a ctx push (POST
- * /nests/:id/publish) is HELD as a pending_pushes row instead of applying. It
- * applies only after a reviewer confirms it in the web UI (or a submitter's key
- * is whitelisted). This module owns:
+ * When a nest has require_push_confirmation ON, an agent write — the MCP
+ * context_create tool, POST /nests/:id/nodes from an API key, or a bulk POST
+ * /nests/:id/publish — is HELD as a pending_pushes row instead of applying. It
+ * applies only after a reviewer confirms it in the web UI (or the submitting
+ * key is whitelisted). A person working in this app is never held. This module
+ * owns:
  *   - the pending-push lifecycle (create / list / get / confirm / reject / expire)
  *   - the per-API-key allowlist (check / add / remove / list)
- *   - the confirm-authority check (submitter OR reviewer/owner/admin)
+ *   - the confirm-authority check (reviewer/owner/admin only; a submitter may
+ *     reject its own push but never confirm it)
  *
  * Confirm reuses the REAL apply path (applyPublish) so a held push lands exactly
  * as an immediate one would.
@@ -17,6 +20,9 @@ import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { ValidationError } from "../shared/errors.js";
 import { resolveNestAccess } from "../shared/access.js";
+import { resolveCallerEmail } from "../governance/access-guard.js";
+import { nestRequiresPushConfirmation } from "./service.js";
+import { notifyPendingPush } from "../governance/notify-service.js";
 import {
   applyPublish,
   buildManifest,
@@ -27,7 +33,7 @@ import {
 
 export type PendingPushStatus = "pending" | "applied" | "rejected" | "expired";
 
-/** '' key_id means "any of that user's keys" — see migration 037. */
+/** '' key_id means "any of that user's keys" — see migration 040. */
 const ALL_KEYS = "";
 
 export interface PendingPushRow {
@@ -138,17 +144,28 @@ export async function listPushAllowlist(nestId: string): Promise<
   Array<{
     user_id: string;
     key_id: string | null;
+    user_email: string | null;
+    key_label: string | null;
     created_by_user_id: string;
     created_at: string;
   }>
 > {
+  // Joined here rather than resolved row-by-row in the UI: a whitelist entry
+  // is unreadable as a pair of opaque ids, and "who can push, with which key"
+  // is the whole point of the screen.
   const rows = (await getDb().all(
-    `SELECT user_id, key_id, created_by_user_id, created_at
-       FROM push_allowlist WHERE nest_id = ? ORDER BY created_at DESC`,
+    `SELECT a.user_id, a.key_id, a.created_by_user_id, a.created_at,
+            u.email AS user_email, k.label AS key_label
+       FROM push_allowlist a
+       LEFT JOIN users u ON u.id = a.user_id
+       LEFT JOIN api_keys k ON k.id = a.key_id
+      WHERE a.nest_id = ? ORDER BY a.created_at DESC`,
     [nestId],
   )) as Array<{
     user_id: string;
     key_id: string;
+    user_email: string | null;
+    key_label: string | null;
     created_by_user_id: string;
     created_at: string;
   }>;
@@ -224,6 +241,68 @@ export async function createPendingPush(params: {
     id,
   ])) as PendingPushRow;
   return toView(row, name);
+}
+
+/**
+ * The one gate check every agent write goes through: `POST /publish`, the REST
+ * single create, and the MCP `context_create` tool. Returns the held record
+ * when this credential's write must wait for a reviewer, or null when it may
+ * apply immediately (gate off, or this key is whitelisted).
+ *
+ * Callers decide whether they are an agent surface before calling — a person
+ * clicking New Document in the web UI (cookie session, no API key) is never
+ * held; the gate exists for writes nobody watched being made.
+ */
+export async function holdWriteIfGated(params: {
+  nestId: string;
+  userId: string;
+  keyId: string | null;
+  keyLabel: string | null;
+  userEmail: string;
+  payload: PublishPayload;
+}): Promise<PendingPushView | null> {
+  const { nestId, userId, keyId, keyLabel, userEmail, payload } = params;
+
+  if (!(await nestRequiresPushConfirmation(nestId))) return null;
+  if (await isPushAllowlisted(nestId, userId, keyId)) return null;
+
+  const pending = await createPendingPush({
+    nestId,
+    submitterUserId: userId,
+    submitterKeyId: keyId,
+    submitterLabel: keyLabel ?? userEmail,
+    submitterEmail: userEmail,
+    payload,
+  });
+
+  // Best-effort: a notify failure must never fail the hold.
+  try {
+    await notifyPendingPush({
+      nestId,
+      pendingId: pending.id,
+      submitterEmail: userEmail,
+      submitterLabel: keyLabel ?? userEmail,
+      docCount: pending.doc_count,
+    });
+  } catch (err) {
+    console.error("[push] pending-push notify failed", nestId, err);
+  }
+
+  return pending;
+}
+
+/** The 202 body every held write returns, whatever surface it arrived on. */
+export function heldWriteResponse(nestId: string, pending: PendingPushView) {
+  return {
+    status: "pending_confirmation" as const,
+    pending_id: pending.id,
+    confirm_url: `/nests/${nestId}/pending-pushes/${pending.id}/confirm`,
+    poll_url: `/nests/${nestId}/pending-pushes/${pending.id}`,
+    message:
+      `This nest holds agent writes for review. Your write of ${pending.doc_count} document(s) is waiting — ` +
+      `it lands once a reviewer confirms it in ${pending.nest_name}.`,
+    expires_at: pending.expires_at,
+  };
 }
 
 /**
@@ -315,7 +394,26 @@ export async function confirmPendingPush(
   } catch {
     payload = {};
   }
-  const result = await applyPublish(nestId, payload);
+
+  // The documents belong to whoever pushed them, not to the reviewer who let
+  // them through: attribute the writes to the submitter.
+  const authorEmail =
+    row.submitter_email ?? (await resolveCallerEmail(row.submitter_user_id));
+
+  let result;
+  try {
+    result = await applyPublish(nestId, payload, authorEmail);
+  } catch (err) {
+    // The claim above already flipped the row to 'applied'. If the apply then
+    // throws (busy vault, disk, unusable payload) nothing landed, so hand the
+    // row back to 'pending' — otherwise it is permanently "applied" with no
+    // documents and every retry gets a 409.
+    await db.run(
+      "UPDATE pending_pushes SET status = 'pending', decided_at = NULL, decided_by_user_id = NULL WHERE id = ? AND nest_id = ? AND status = 'applied'",
+      [id, nestId],
+    );
+    throw err;
+  }
 
   await db.run(
     "UPDATE pending_pushes SET applied_node_count = ? WHERE id = ?",
@@ -363,10 +461,27 @@ export async function rejectPendingPush(
 // ── Authority ──────────────────────────────────────────────────────────────
 
 /**
- * Who may CONFIRM/REJECT a held push: a reviewer/owner/admin of the nest, or
- * the submitter of that specific push. Mirrors the canReview stamp.
+ * Who may CONFIRM a held push: a reviewer/owner/admin of the nest, and nobody
+ * else. The submitter is deliberately excluded — letting it confirm its own
+ * push turns the gate into one extra HTTP call with the same key (and, with
+ * always_allow, whitelists the very credential being gated). Confirmation is
+ * the human-in-the-loop; it cannot be the machine that pushed.
  */
 export async function canConfirmPush(params: {
+  nestId: string;
+  userId: string;
+  userEmail: string;
+}): Promise<boolean> {
+  const { nestId, userId, userEmail } = params;
+  return isNestReviewer(nestId, userId, userEmail);
+}
+
+/**
+ * Who may REJECT a held push: a reviewer, or the submitter cancelling its own.
+ * Rejecting never writes, so a submitter withdrawing a push it regrets is safe
+ * where confirming is not.
+ */
+export async function canRejectPush(params: {
   nestId: string;
   userId: string;
   userEmail: string;
