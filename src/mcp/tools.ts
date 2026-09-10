@@ -1349,15 +1349,16 @@ async function runTool(
     case "context_resolve_comment": {
       const body = String(args.body ?? "");
       const isResolve = toolName === "context_resolve_comment";
+      // Plain strings, like every other missing-argument answer in this file
+      // (`folder is required — …`, `reason is required — …`): a toolError
+      // envelope carries a machine-readable `code`, and every code in that
+      // union describes a state of the vault, not a malformed call.
       if (!isResolve && !body.trim()) {
-        return toolError("A comment body is required.", "INTERNAL");
+        return "body is required — the comment text.";
       }
       const threadId = args.thread ? String(args.thread) : "";
       if (isResolve && !threadId) {
-        return toolError(
-          "Which thread? Pass `thread` — the id from context_comments.",
-          "INTERNAL",
-        );
+        return "thread is required — the id from context_comments.";
       }
 
       const docs = await storage.discoverDocuments();
@@ -1412,12 +1413,17 @@ async function runTool(
         await syncAnnotationsNode(nestId, node.id, userEmail);
         return reopen
           ? `Reopened the thread on "${label}". It is back in the open list for whoever picks it up.`
-          : `Resolved the thread on "${label}", recorded against ${thread.resolvedBy || userEmail}.`;
+          : `Resolved the thread on "${label}", recorded against ${thread.resolvedBy}.`;
       }
 
       const thread = threadId
         ? await addComment(nestId, node.id, threadId, userEmail, body)
         : await createThread(nestId, node.id, { body, anchor: null }, userEmail);
+      // The confirmation deliberately doesn't report the thread's comment
+      // count: writing is admitted on a node whose threads the caller may not
+      // be allowed to READ (the approval gate applies to context_comments, not
+      // here), so the reply should tell them what THEY did and nothing about
+      // what is already in the thread.
       await notifyCommentMentions({
         nestId,
         nodeId: node.id,
@@ -1431,7 +1437,7 @@ async function runTool(
       });
       await syncAnnotationsNode(nestId, node.id, userEmail);
       return threadId
-        ? `Replied on "${label}" (thread ${thread.id}). The thread now has ${thread.comments.length} comment(s).`
+        ? `Replied on "${label}", in thread ${thread.id}.`
         : `Commented on "${label}" — opened thread ${thread.id}. Reply to it by passing that id as \`thread\`.`;
     }
 
