@@ -113,7 +113,7 @@ Super-admins administer **every** nest on the server without being added per-nes
 A super-admin can:
 
 - Read every document (bypasses the read gate, even with stewardship enabled)
-- Change a nest's visibility (public / private)
+- Change a nest's visibility (private / org / public)
 - Add, remove, and re-role collaborators
 - Add, remove, and re-role stewards
 - Approve and reject pending versions in any nest's review queue

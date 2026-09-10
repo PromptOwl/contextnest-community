@@ -260,15 +260,24 @@ async function resolveNestAccessRaw(
   // Stewards get nest-level read so they can reach what they govern without a
   // collaborator row. Edit/approve is still enforced per node.
   if (base.isSteward) best = higher(best, "read");
-  if (row.visibility === "public") best = higher(best, "read");
 
-  // Public reader = the nest is public and NOTHING else let them in. A share
-  // grant is deliberately not in this list: it scopes which nodes they reach,
-  // it doesn't change that their nest-level standing is public-only.
+  // Read conferred by visibility alone. 'public' is world-readable. 'org' is
+  // every authenticated user of THIS deployment: Community has no tenant
+  // model, and a self-hosted install already IS one organization, so
+  // deployment membership is the org boundary. Anonymous callers are not
+  // members — the public-path gate in app.ts hands unauthenticated GETs the
+  // anon user id, and that must not satisfy 'org'.
+  const visibilityRead =
+    row.visibility === "public" ||
+    (row.visibility === "org" && userId !== ANON_USER_ID);
+  if (visibilityRead) best = higher(best, "read");
+
+  // Visibility-only reader = the nest's visibility is the ONLY thing that let
+  // them in. A share grant is deliberately not in this list: it scopes which
+  // nodes they reach, it doesn't change that their nest-level standing came
+  // from visibility. These callers see approved content only.
   const isPublicReader =
-    row.visibility === "public" &&
-    !row.collab_permission &&
-    !base.isSteward;
+    visibilityRead && !row.collab_permission && !base.isSteward;
 
   return { ...base, permission: best, isPublicReader };
 }
@@ -285,10 +294,14 @@ export function permissionLevel(p: NestPermission): number {
 }
 
 /**
- * True when the caller's only access path is "nest is public" — i.e. not
- * the owner, not a direct collaborator, but reaches the nest because
- * visibility='public'. These callers see approved content only; drafts
- * and pending versions stay private to collaborators/stewards.
+ * True when the caller's only access path is the nest's visibility — i.e. not
+ * the owner, not a direct collaborator, but reaches the nest because it is
+ * visibility='public' (anyone) or visibility='org' (any authenticated user of
+ * this deployment). These callers see approved content only; drafts and
+ * pending versions stay private to collaborators/stewards.
+ *
+ * The name predates the 'org' tier and is kept so the ~6 call sites that gate
+ * on it stay untouched; read it as "visibility-only reader".
  */
 export async function isPublicReader(nestId: string, userId: string): Promise<boolean> {
   return (await resolveNestAccess(nestId, userId)).isPublicReader;

@@ -14,6 +14,7 @@ export type NestScope =
   | "all"
   | "owned"
   | "shared"
+  | "org"
   | "public"
   | "synced"
   | "unsynced";
