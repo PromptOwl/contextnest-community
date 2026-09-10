@@ -87,7 +87,7 @@ export function normalizeTagInput(raw: string): TagCandidate {
   // Compared lowercased so a pure case change stays silent — only real
   // rewrites (dropped characters) are worth a note.
   if (cleaned !== bare.toLowerCase()) {
-    return { tag: cleaned, note: `"${bare}" was simplified to "${cleaned}".` };
+    return { tag: cleaned, note: `"${bare}" was adjusted to "${cleaned}".` };
   }
   return { tag: cleaned, note: null };
 }
