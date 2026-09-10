@@ -156,7 +156,7 @@ function deliverMentionMessages(params: {
   const { nestId, nodeId, recipients, channelMessage, actorEmail, excerpt, ctx } =
     params;
   let throttled = 0;
-  if (canDeliver(nestId, actorEmail)) {
+  if (canDeliver("channel", nestId, actorEmail)) {
     void dispatchEvent({
       kind: "mention",
       nestId,
@@ -168,7 +168,7 @@ function deliverMentionMessages(params: {
     throttled++;
   }
   for (const r of recipients) {
-    if (!canDeliver(nestId, actorEmail)) {
+    if (!canDeliver("email", nestId, actorEmail)) {
       throttled++;
       continue;
     }
@@ -214,11 +214,35 @@ function deliverMentionMessages(params: {
  */
 export const MENTION_DELIVERY_BUDGET = { max: 50, windowMs: 5 * 60_000 };
 
-/** True while this actor still has outbound budget in this nest. */
-function canDeliver(nestId: string, actorEmail: string): boolean {
+/**
+ * The channel post draws on its OWN budget rather than the email one.
+ *
+ * They are different shapes of cost: emails scale with the number of people
+ * named, the channel post is one message per comment however many were named.
+ * Sharing a pool also made the email allowance depend on something invisible —
+ * dispatchEvent is a no-op on a nest with no connector configured, but the
+ * token was spent before it could say so, quietly halving the documented email
+ * budget on the deployments least likely to have a connector at all.
+ */
+const MENTION_CHANNEL_BUDGET = { max: 25, windowMs: 5 * 60_000 };
+
+/**
+ * True while this actor still has outbound budget of this kind in this nest.
+ *
+ * Keyed per NEST, not globally per actor: a nest is the unit of collaboration,
+ * and a heavy day in one shouldn't ration a mention in another. Spreading a
+ * burst across nests does multiply the total — but only across nests the actor
+ * already has access to, which is separately gated, and each nest's own
+ * audience stays bounded, which is what the budget is protecting.
+ */
+function canDeliver(
+  kind: "email" | "channel",
+  nestId: string,
+  actorEmail: string,
+): boolean {
   return tryConsume(
-    `mention-delivery:${nestId}:${actorEmail.toLowerCase()}`,
-    MENTION_DELIVERY_BUDGET,
+    `mention-${kind}:${nestId}:${actorEmail.toLowerCase()}`,
+    kind === "email" ? MENTION_DELIVERY_BUDGET : MENTION_CHANNEL_BUDGET,
   );
 }
 

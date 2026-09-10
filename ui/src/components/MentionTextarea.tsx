@@ -98,6 +98,13 @@ export const MentionTextarea = forwardRef<
         onKeyUp={(e) =>
           setCaret((e.target as HTMLTextAreaElement).selectionStart ?? 0)
         }
+        // A paste moves the caret without a keystroke, so `@name` pasted at
+        // the end would be read against a stale position until the next key or
+        // click. Deferred a frame: on paste the value hasn't been applied yet.
+        onPaste={(e) => {
+          const el = e.currentTarget;
+          requestAnimationFrame(() => setCaret(el.selectionStart ?? 0));
+        }}
         onClick={(e) =>
           setCaret((e.target as HTMLTextAreaElement).selectionStart ?? 0)
         }

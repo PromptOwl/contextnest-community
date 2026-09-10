@@ -1197,9 +1197,15 @@ notified per write (`MAX_MENTION_RECIPIENTS`) — commenting is read-tier and
 unthrottled, so a comment naming a large roster would otherwise be an
 amplifier; names are taken in order of appearance.
 
-The *stream* of them is bounded too: one person may cause 50 outbound mention
-deliveries per nest per 5 minutes (`MENTION_DELIVERY_BUDGET`, one token per
-email and one per connector post). Past that the comment still posts and the
+The *stream* of them is bounded too: per nest per 5 minutes, one person may
+cause 50 mention **emails** (`MENTION_DELIVERY_BUDGET`) and 25 mention
+**channel posts** (`MENTION_CHANNEL_BUDGET`) — separate pools, because emails
+scale with how many people were named while a channel post is one message per
+comment. Separate also so the email allowance doesn't depend on something
+invisible: the connector dispatch is a no-op on a nest with no connector
+configured, and a shared pool would have spent the token before it could say
+so, quietly halving the email budget on exactly the deployments least likely to
+have a connector. Past that the comment still posts and the
 inbox rows still land — the queue is the recipient's own record and costs one
 insert — and only the external fan-out is skipped, with a server-log warning.
 The budget sits on delivery rather than on comment creation deliberately: an

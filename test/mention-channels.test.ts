@@ -118,9 +118,11 @@ describe("mention delivery budget", () => {
       owner.apiKey,
     );
 
-    // Each comment spends one token on the connector post and one on the
-    // email, so this is comfortably past the budget.
-    const comments = MENTION_DELIVERY_BUDGET.max;
+    // One email per comment (each names one person), so the loop has to go
+    // PAST the budget to see it bite — at exactly the budget nothing is
+    // dropped, which is the point of the email pool being its own: 50
+    // deliveries means 50, not 25 shared with channel posts.
+    const comments = MENTION_DELIVERY_BUDGET.max + 5;
     for (let i = 0; i < comments; i++) {
       await jsonRequest(
         app,
@@ -138,19 +140,21 @@ describe("mention delivery budget", () => {
       .filter((m: any) => JSON.stringify(m.text || "").includes("burst "));
     expect(burstMail.length).toBeGreaterThan(0);
     expect(burstMail.length).toBeLessThan(comments);
+    // …and the cap is the documented one, not a fraction of it.
+    expect(burstMail.length).toBe(MENTION_DELIVERY_BUDGET.max);
 
     // …while every mention still reached the recipient's queue, which is the
-    // record they actually work from.
-    const { data } = await jsonRequest(
-      app,
-      "GET",
-      "/me/notifications?limit=200",
-      undefined,
-      editor.apiKey,
+    // record they actually work from. Read through the service with a real
+    // limit, not GET /me/notifications: that route ignores a `limit` param and
+    // always returns the newest 50, so asserting on it would have measured its
+    // page size rather than the inserts (which is exactly what it did first).
+    const { listNotifications } = await import(
+      "../src/governance/notify-service.js"
     );
-    const inBurstNest = (
-      data.notifications as Array<{ kind: string; nest_id: string }>
-    ).filter((n) => n.kind === "mention" && n.nest_id === burstNest);
+    const rows = await listNotifications(editor.email, { limit: 200 });
+    const inBurstNest = rows.filter(
+      (n) => n.kind === "mention" && n.nest_id === burstNest,
+    );
     expect(inBurstNest.length).toBe(comments);
   });
 });

@@ -267,7 +267,11 @@ export async function suggestPeopleForUser(
     }
   }
   if (teamEmails.size > 0) {
-    const list = [...teamEmails];
+    // Bounded like the nest query above (SUGGEST_FETCH): a caller on a very
+    // large team would otherwise build an IN (...) list of its whole roster
+    // just to look up display names. The merge is already narrowed by `q`
+    // where one was typed, and the result is capped at `cap` regardless.
+    const list = [...teamEmails].slice(0, SUGGEST_FETCH);
     const named = (await db.all(
       `SELECT email, name FROM users
         WHERE LOWER(email) IN (${list.map(() => "?").join(",")})`,
