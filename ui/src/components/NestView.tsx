@@ -1970,7 +1970,13 @@ export function NestView({
             visibility !== "private" && (
               <Badge
                 variant="outline"
-                className="shrink-0 gap-1 border-blue-200 bg-blue-50 text-blue-700"
+                // Green for public, blue for org — same pairing the dashboard
+                // card badge uses, so the two tiers never read as one colour.
+                className={`shrink-0 gap-1 ${
+                  visibility === "public"
+                    ? "border-green-200 bg-green-50 text-green-700"
+                    : "border-blue-200 bg-blue-50 text-blue-700"
+                }`}
                 title={
                   visibility === "public"
                     ? "Anyone with the URL can read this nest"
