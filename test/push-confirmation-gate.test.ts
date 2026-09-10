@@ -58,6 +58,43 @@ async function setGate(nestId: string, on: boolean, caller = root) {
   );
 }
 
+/** Call an MCP tool on a nest as `owner`, returning the raw tool result. */
+async function callTool(
+  nestId: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{ isError: boolean; text: string; data?: any }> {
+  const res = await app.request(`/nests/${nestId}/mcp`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      Authorization: `Bearer ${owner.apiKey}`,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name, arguments: args },
+    }),
+  });
+  const ct = res.headers.get("content-type") || "";
+  const payload = ct.includes("application/json")
+    ? await res.json()
+    : JSON.parse(
+        (await res.text())
+          .split("\n")
+          .find((l: string) => l.startsWith("data: "))!
+          .slice("data: ".length),
+      );
+  const result = payload.result;
+  return {
+    isError: !!result.isError,
+    text: (result.content || []).map((c: any) => c.text).join(""),
+    data: result.structuredContent ?? result.data,
+  };
+}
+
 /** Create a fresh nest owned by `owner`. */
 async function makeNest(name: string): Promise<string> {
   const { data } = await jsonRequest(
@@ -250,6 +287,143 @@ describe("reject → never applied", () => {
   });
 });
 
+describe("the gate covers every agent create surface, not just bulk publish", () => {
+  it("POST /nodes on an API key is held; MCP context_create is held; both apply on confirm", async () => {
+    const nestId = await makeNest("gate-surfaces");
+    await setGate(nestId, true);
+
+    // 1. REST single create on an API key → 202, nothing written.
+    const rest = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Rest Made", content: "# Rest Made" },
+      owner.apiKey,
+    );
+    expect(rest.status).toBe(202);
+    expect(rest.data.status).toBe("pending_confirmation");
+    expect(await nodeIds(owner, nestId)).not.toContain("nodes/rest-made");
+
+    // 2. MCP context_create → held, and it says so as an ERROR: an agent that
+    //    read this as success would go on to reference a document that is not
+    //    there.
+    const mcp = await callTool(nestId, "context_create", {
+      title: "Mcp Made",
+      content: "# Mcp Made",
+    });
+    expect(mcp.isError).toBe(true);
+    expect(mcp.data?.code).toBe("PENDING_CONFIRMATION");
+    expect(await nodeIds(owner, nestId)).not.toContain("nodes/mcp-made");
+
+    // Both are queued for the same reviewer.
+    const queue = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/pending-pushes?status=pending`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(queue.data.count).toBe(2);
+
+    // Confirming applies each one for real.
+    for (const p of queue.data.pending_pushes) {
+      const res = await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/pending-pushes/${p.id}/confirm`,
+        {},
+        owner.apiKey,
+      );
+      expect(res.status).toBe(200);
+    }
+    const ids = await nodeIds(owner, nestId);
+    expect(ids).toContain("nodes/rest-made");
+    expect(ids).toContain("nodes/mcp-made");
+  });
+
+  it("a person in the web UI is never held — a session-cookie create writes through", async () => {
+    const nestId = await makeNest("gate-session");
+    await setGate(nestId, true);
+
+    // A browser session, not a key — the distinguisher the gate keys on.
+    const login = await app.request("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: owner.email, password: "testpass" }),
+    });
+    const cookie = login.headers.get("set-cookie") || "";
+    expect(cookie).toBeTruthy();
+
+    const res = await app.request(`/nests/${nestId}/nodes`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({ title: "Hand Written", content: "# Hand Written" }),
+    });
+    expect(res.status).toBe(201);
+    expect(await nodeIds(owner, nestId)).toContain("nodes/hand-written");
+  });
+});
+
+describe("the submitter cannot confirm its own push", () => {
+  it("a writer's held push is 403 on confirm, but it may withdraw it", async () => {
+    const nestId = await makeNest("gate-self-confirm");
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: outsider.email, permission: "write" },
+      owner.apiKey,
+    );
+    await setGate(nestId, true);
+
+    const held = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publish`,
+      { documents: [{ title: "Self Confirmed", content: "x" }] },
+      outsider.apiKey,
+    );
+    expect(held.status).toBe(202);
+    const pid = held.data.pending_id;
+
+    // Confirming its own push would clear the gate with the very key the gate
+    // is holding — and with always_allow, whitelist it permanently.
+    const bypass = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/pending-pushes/${pid}/confirm`,
+      { always_allow: true },
+      outsider.apiKey,
+    );
+    expect(bypass.status).toBe(403);
+    expect(await nodeIds(owner, nestId)).not.toContain("nodes/self-confirmed");
+
+    // A second push from the same key is still held — no whitelist was written.
+    const again = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publish`,
+      { documents: [{ title: "Second Try", content: "x" }] },
+      outsider.apiKey,
+    );
+    expect(again.status).toBe(202);
+
+    // Withdrawing its own push is fine — a reject never writes.
+    const withdrawn = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/pending-pushes/${pid}/reject`,
+      {},
+      outsider.apiKey,
+    );
+    expect(withdrawn.status).toBe(200);
+    expect(withdrawn.data.status).toBe("rejected");
+  });
+});
+
 describe("always-allow whitelists the exact API key", () => {
   it("2nd push with the SAME key applies immediately; a DIFFERENT key still gates", async () => {
     const nestId = await makeNest("allowlist");
@@ -437,7 +611,7 @@ describe("activity feed surfaces the held push", () => {
   });
 });
 
-describe("license gate — pending-push routes are governance-gated (503)", () => {
+describe("license gate — the allowlist is licensed, releasing a held push is not", () => {
   let unlicensed: any;
   let uenv: ReturnType<typeof setupTestEnv>;
 
@@ -455,10 +629,20 @@ describe("license gate — pending-push routes are governance-gated (503)", () =
 
   afterAll(() => uenv.cleanup());
 
-  it("503s the pending-pushes list without a license", async () => {
-    const res = await unlicensed.request("/nests/some-nest/pending-pushes");
-    expect(res.status).toBe(503);
-    expect((await res.json()).error).toBe("License required");
+  // POST /publish is unlicensed, so a lapsed license on a gated nest holds
+  // every push at 202. If the release routes 503'd too, the nest would stop
+  // accepting writes with nothing able to drain the queue. They stay open;
+  // the caller still has to pass the ordinary access check.
+  it("does NOT 503 the pending-push routes without a license", async () => {
+    for (const path of [
+      "/nests/some-nest/pending-pushes",
+      "/nests/some-nest/pending-pushes/some-id",
+      "/nests/some-nest/pending-pushes/some-id/confirm",
+      "/nests/some-nest/pending-pushes/some-id/reject",
+    ]) {
+      const res = await unlicensed.request(path);
+      expect(res.status).not.toBe(503);
+    }
   });
 
   it("503s the push-allowlist without a license", async () => {
