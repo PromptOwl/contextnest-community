@@ -14,6 +14,10 @@
  *
  * The draft path now numbers through the engine's `nextVersion()`, which
  * outranks the recorded history as well as the caller's hint.
+ *
+ * Draft SAVES no longer append to the chain at all — only submitting for review
+ * and publishing seal a version — so the numbering rule is exercised here at the
+ * seal, which is where a reused number could still do the damage described above.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdirSync, writeFileSync } from "fs";
@@ -70,18 +74,40 @@ beforeAll(async () => {
     { title: "Chain Doc", content: "# base\n\nv1 body" },
     owner.apiKey,
   );
-  // A couple of editor drafts so the chain has diffs, not just a keyframe.
-  for (const n of [2, 3]) {
-    const r = await jsonRequest(
-      app,
-      "PATCH",
-      `/nests/${nestId}/nodes/${nodeId}`,
-      { content: `# base\n\nv${n} body` },
-      editor.apiKey,
-    );
-    expect(r.status).toBe(200);
-  }
+  // One editor draft taken all the way through review, so the chain has diffs
+  // and not just the create keyframe. A draft SAVE alone never reaches the
+  // chain — submitting it does (see submitForReview), and approving seals the
+  // published version on top: v1.md keyframe, then v2.diff, v3.diff.
+  await draftSubmitApprove("v2 body");
 });
+
+/** One full round trip: editor drafts, submits, reviewer approves. */
+async function draftSubmitApprove(body: string): Promise<void> {
+  const patch = await jsonRequest(
+    app,
+    "PATCH",
+    `/nests/${nestId}/nodes/${nodeId}`,
+    { content: `# base\n\n${body}` },
+    editor.apiKey,
+  );
+  expect(patch.status).toBe(200);
+  const submit = await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/nodes/${nodeId}/submit-review`,
+    {},
+    editor.apiKey,
+  );
+  expect(submit.status).toBe(201);
+  const approve = await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/nodes/${nodeId}/approve`,
+    {},
+    owner.apiKey,
+  );
+  expect(approve.status).toBe(200);
+}
 
 afterAll(() => env.cleanup());
 
@@ -91,6 +117,14 @@ async function chainHead(): Promise<number> {
   const { storage } = await engineCache.get(nestId);
   const history = await storage.readHistory(nodeId);
   return (history?.versions ?? []).reduce((max, e) => Math.max(max, e.version), 0);
+}
+
+/** Every version the chain holds, in order. Sealed versions only — a draft save
+ *  never appends, so these are the submitted and published ones. */
+async function chainVersions(): Promise<number[]> {
+  const { engineCache } = await import("../src/nodes/engine.js");
+  const { storage } = await engineCache.get(nestId);
+  return ((await storage.readHistory(nodeId))?.versions ?? []).map((e) => e.version);
 }
 
 /** Drop the top N version rows so SQLite lags the on-disk engine chain. */
@@ -118,12 +152,17 @@ describe("per-version change logs", () => {
     );
     const files = readdirSync(dir);
 
-    // v1 is the keyframe (full snapshot); everything after it is a change log.
-    expect(files).toContain("v1.md");
-    expect(files).toContain("v2.diff");
-    expect(files).toContain("v3.diff");
-    expect(files).not.toContain("v2.md");
-    expect(files).not.toContain("v3.md");
+    // The chain opens on a keyframe (full snapshot); everything sealed after it
+    // is a change log. Numbered off the chain rather than hardcoded — where the
+    // chain starts depends on how many drafts preceded the first submission,
+    // and those never enter it.
+    const sealed = await chainVersions();
+    expect(sealed.length).toBeGreaterThanOrEqual(2);
+    expect(files).toContain(`v${sealed[0]}.md`);
+    for (const v of sealed.slice(1)) {
+      expect(files).toContain(`v${v}.diff`);
+      expect(files).not.toContain(`v${v}.md`);
+    }
 
     // history.yaml holds metadata only — no patch bytes inline.
     const { engineCache } = await import("../src/nodes/engine.js");
@@ -141,17 +180,20 @@ describe("per-version change logs", () => {
       undefined,
       owner.apiKey,
     );
-    const v2 = list.data.versions.find((v: any) => v.version === 2);
+    // The first change-logged version — the one after the chain's opening
+    // keyframe.
+    const logged = (await chainVersions())[1];
+    const row = list.data.versions.find((v: any) => v.version === logged);
     // A real unified diff — hunk headers included, so DiffViewer renders it
     // with line numbers exactly like a commit.
-    expect(v2.diff).toContain("@@");
+    expect(row.diff).toContain("@@");
     // The list does NOT ship full bodies; that is the duplication being avoided.
     for (const v of list.data.versions) expect(v.content).toBeFalsy();
 
     const body = await jsonRequest(
       app,
       "GET",
-      `/nests/${nestId}/nodes/${nodeId}/versions/2`,
+      `/nests/${nestId}/nodes/${nodeId}/versions/${logged}`,
       undefined,
       owner.apiKey,
     );
@@ -162,29 +204,7 @@ describe("per-version change logs", () => {
   it("enriches rows with the steward who resolved the review", async () => {
     // Editor submits, reviewer approves — the resolver's email lives only in
     // review_requests, so the list endpoint has to join it in.
-    await jsonRequest(
-      app,
-      "PATCH",
-      `/nests/${nestId}/nodes/${nodeId}`,
-      { content: "# base\n\nfor review" },
-      editor.apiKey,
-    );
-    const submit = await jsonRequest(
-      app,
-      "POST",
-      `/nests/${nestId}/nodes/${nodeId}/submit-review`,
-      {},
-      editor.apiKey,
-    );
-    expect(submit.status).toBe(201);
-    const approve = await jsonRequest(
-      app,
-      "POST",
-      `/nests/${nestId}/nodes/${nodeId}/approve`,
-      {},
-      owner.apiKey,
-    );
-    expect(approve.status).toBe(200);
+    await draftSubmitApprove("for review");
 
     const list = await jsonRequest(
       app,
@@ -223,8 +243,19 @@ describe("draft version numbering vs the engine chain", () => {
       editor.apiKey,
     );
     expect(patch.status).toBe(200);
+    // Numbered past the chain head, not past the stale DB row. The draft save
+    // itself writes nothing to the chain, so the number it claimed is what has
+    // to clear the head — the append happens when the draft is submitted.
+    expect(patch.data.version).toBe(head + 1);
 
-    // Numbered past the chain head, not past the stale DB row.
+    const submit = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${nodeId}/submit-review`,
+      {},
+      editor.apiKey,
+    );
+    expect(submit.status).toBe(201);
     expect(await chainHead()).toBe(head + 1);
 
     // history.yaml holds no duplicate version numbers.

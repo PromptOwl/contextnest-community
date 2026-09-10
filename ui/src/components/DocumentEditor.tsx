@@ -1,12 +1,27 @@
 /** DocumentEditor — create/edit view; `nodeId === "new"` → POST, else PATCH. Server enforces 403. */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
-import { reads } from "../lib/queries";
+import { reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
+import { setNavGuard, bypassNavGuard } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
-import { normalizeTagInput } from "../lib/tag-policy";
+import {
+  clampTagInput,
+  newTags,
+  normalizeTagInput,
+  tagKey,
+  TAG_INPUT_MAX_LENGTH,
+} from "../lib/tag-policy";
+import { relTime, formatServerDate } from "../lib/dates";
 import { useRovingFocus } from "../lib/use-roving-focus";
 import { resolveEditorAccess } from "../lib/editor-access";
 import { Button } from "@/components/ui/button";
@@ -50,6 +65,7 @@ import {
   Check,
   Copy,
   Star,
+  Undo2,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
@@ -61,11 +77,13 @@ import {
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
 import { AuthorshipChips } from "./AuthorshipChips";
-import { TableViewer } from "./TableViewer";
+import { TableViewer, TableGrid } from "./TableViewer";
+import { tableDiffSides } from "../lib/csv-table";
 import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { CodeHighlight } from "./CodeHighlight";
 import { ShareNestDialog } from "./ShareNestDialog";
+import { PublishDialog } from "./PublishDialog";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { AnnotationsPanel } from "./AnnotationsPanel";
 import {
@@ -75,6 +93,16 @@ import {
   clearHighlight,
   caretAt,
 } from "../lib/anchor-highlight";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { SubmitForReviewModal, ReasonDialog, ReviewActions, ExternalEditBanner, VersionHistoryModal, DiffViewer } from "./governance";
 import { unifiedDiff } from "./governance/diff-util";
 import {
@@ -199,17 +227,32 @@ export function DocumentEditor({
   // looking at a real nest the caller can administer.
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
+  const [showPublish, setShowPublish] = useState(false);
   // Share THIS document with one person (a grant), as opposed to the whole
   // nest above. Same owner/admin gate the /grants routes enforce.
   const [showShareDoc, setShowShareDoc] = useState(false);
   const qc = useQueryClient();
-  // Caller's resolved steward role for this node (null = none / not a steward).
+  // Permissions are SUBSCRIBED, not snapshotted. Assigning a steward, changing
+  // a collaborator or toggling stewardship already invalidates these reads
+  // (invalidateForPath in lib/queries), but this screen used to copy them into
+  // state on mount — so an open editor kept the rights the caller had when they
+  // opened it, and only a page reload showed the change (CU-wdqcpzzmk0).
+  const nestMeta = useNestMeta(nestId);
+  const nestSettings = useNestSettings(nestId);
+  const nodeStewardsQuery = useNodeStewards(nestId, isNew ? undefined : nodeId);
+  // Caller's resolved steward role for this node (empty = none / not a steward).
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
-  const [myNodeRoles, setMyNodeRoles] = useState<string[]>([]);
-  // True once the steward-role fetch below has resolved (even to []) — lets
-  // the default-comment-mode effect wait for a real answer instead of racing
-  // the initial empty array.
-  const [rolesLoaded, setRolesLoaded] = useState(false);
+  const myNodeRoles = useMemo(
+    () =>
+      ((nodeStewardsQuery.data?.stewards ?? []) as any[])
+        .filter((s) => (s.email || "").toLowerCase() === currentEmail)
+        .map((s) => String(s.role)),
+    [nodeStewardsQuery.data, currentEmail],
+  );
+  // True once the steward-role read has resolved (even to []) — lets the
+  // default-comment-mode effect wait for a real answer instead of racing the
+  // initial empty array. A new document has no node to resolve against.
+  const rolesLoaded = isNew || !nodeStewardsQuery.isLoading;
   // Caller's share grant on THIS document (server-resolved on GET /nodes/:id).
   // A grant is access, not stewardship: it appears in neither `permission` (a
   // grantee always reads as "read" at nest level, whatever their grant says)
@@ -219,9 +262,10 @@ export function DocumentEditor({
   const grantCanWrite = myGrant === "write";
   // Caller's nest-wide scoped steward rows (from GET /nests/:id). Needed for
   // NEW docs, where there's no node yet to resolve a per-node role against.
-  const [myStewards, setMyStewards] = useState<
-    Array<{ role: string; scope: string }>
-  >([]);
+  const myStewards = ((nestMeta.data as any)?.myStewards ?? []) as Array<{
+    role: string;
+    scope: string;
+  }>;
 
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
   // Folder path under nodes/ for new docs (e.g. "gtm/deals"). Create-only:
@@ -237,7 +281,7 @@ export function DocumentEditor({
   // the server re-checks (assertMayFlagPrime).
   const [prime, setPrime] = useState<boolean | null>(null);
   const loadedPrimeRef = useRef<boolean | null>(null);
-  const [primeTags, setPrimeTags] = useState<string[]>([]);
+  const primeTags = ((nestSettings.data as any)?.prime_tags ?? []) as string[];
   // Node kind. An "artifact" node is rich HTML hosted + annotated, not edited
   // as markdown — once loaded we hand off to ArtifactViewer (see below).
   const [nodeType, setNodeType] = useState<string | null>(null);
@@ -269,14 +313,14 @@ export function DocumentEditor({
   // rule and 403s if you try, but hiding the affordance avoids the
   // user clicking through an error.
   const [pendingReviewBy, setPendingReviewBy] = useState<string | null>(null);
-  const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
+  const stewardshipEnabled = !!nestSettings.data?.stewardship_enabled;
   // When on, the submitter may approve their own pending review (per-nest
   // self-approve bypass). Off = separation of duties enforced for everyone.
-  const [allowSelfApprove, setAllowSelfApprove] = useState(false);
+  const allowSelfApprove = !!nestSettings.data?.allow_self_approve;
   // Caller's nest-level permission (GET /nests/:id). 'read' = no write access
   // (public reader OR a read-only collaborator); 'write'/'admin'/'owner' can
   // edit. null until loaded.
-  const [permission, setPermission] = useState<string | null>(null);
+  const permission = (nestMeta.data?.permission ?? null) as string | null;
   // Every edit/approve affordance below gates on these — see editor-access.ts
   // for the rules and ui/src/lib/editor-access.test.ts for the role matrix.
   const {
@@ -678,6 +722,24 @@ export function DocumentEditor({
   const [nestNodes, setNestNodes] = useState<
     Array<{ id: string; title: string; content?: string; tags?: string[] }>
   >([]);
+  // The nest's folders, including any holding no document. Same cached census
+  // the nest views read, so this costs no extra request in practice.
+  const [nestFolders, setNestFolders] = useState<string[]>([]);
+  useEffect(() => {
+    if (loading) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { census } = await qc.fetchQuery(reads.census(nestId));
+        if (!cancelled) setNestFolders(census.folders.map((f) => f.path));
+      } catch {
+        /* best-effort: the picker still offers document-derived folders */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loading, nestId, qc]);
   useEffect(() => {
     // New docs need the list too — the folder picker derives its
     // suggestions from existing node ids.
@@ -705,17 +767,18 @@ export function DocumentEditor({
     };
   }, [isNew, loading, nestId]);
 
-  // Every folder prefix in use (ids minus the nodes/ root and the leaf),
-  // so the folder picker suggests existing paths at each depth.
+  // Every folder the picker can offer: the prefixes documents sit under, plus
+  // the nest's folder list — a folder created empty holds no document to
+  // derive it from, so ids alone would hide it (CU-wdqcpzzzut).
   const folderOptions = useMemo(() => {
-    const opts = new Set<string>();
+    const opts = new Set<string>(nestFolders);
     for (const n of nestNodes) {
       const rel = n.id.startsWith("nodes/") ? n.id.slice(6) : n.id;
       const segs = rel.split("/").slice(0, -1);
       for (let i = 1; i <= segs.length; i++) opts.add(segs.slice(0, i).join("/"));
     }
     return [...opts].sort();
-  }, [nestNodes]);
+  }, [nestNodes, nestFolders]);
 
   // Folder path this doc lives under (id minus the "nodes/" root and the leaf
   // slug), prettified for the header breadcrumb so users see where a nested
@@ -796,65 +859,10 @@ export function DocumentEditor({
   const [justSaved, setJustSaved] = useState(false);
   // Local draft couldn't be stored (quota exhausted / storage blocked).
   const [draftUnbacked, setDraftUnbacked] = useState(false);
+  // When a parked local draft was put back on load — the restored body is not
+  // what the server holds, and that used to be invisible (CU-wdqcpzzgz9).
+  const [restoredDraftAt, setRestoredDraftAt] = useState<number | null>(null);
 
-  // Settings → Submit-for-Review visibility; permission → read-only gate.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [settings, meta] = await Promise.all([
-          qc.fetchQuery(reads.settings(nestId)).catch(() => ({
-            stewardship_enabled: false,
-            allow_self_approve: false,
-            prime_only_review: false,
-            prime_tags: [] as string[],
-          })),
-          qc.fetchQuery(reads.nest(nestId)).catch(() => null),
-        ]);
-        if (cancelled) return;
-        setStewardshipEnabled(!!settings.stewardship_enabled);
-        setAllowSelfApprove(!!settings.allow_self_approve);
-        setPrimeTags(((settings as any).prime_tags ?? []) as string[]);
-        setPermission(meta?.permission ?? null);
-        setMyStewards(((meta as any)?.myStewards ?? []) as Array<{
-          role: string;
-          scope: string;
-        }>);
-      } catch {
-        /* non-fatal */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [nestId]);
-
-  // Resolve per-node steward role; null = no special permissions.
-  useEffect(() => {
-    if (isNew || !nodeId || !currentEmail) {
-      setMyNodeRoles([]);
-      setRolesLoaded(true);
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      try {
-        const { stewards } = await qc.fetchQuery(reads.nodeStewards(nestId, nodeId));
-        if (cancelled) return;
-        const mine = (stewards as any[]).filter(
-          (s) => (s.email || "").toLowerCase() === currentEmail,
-        );
-        setMyNodeRoles(mine.map((s) => s.role));
-      } catch {
-        if (!cancelled) setMyNodeRoles([]);
-      } finally {
-        if (!cancelled) setRolesLoaded(true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [isNew, nestId, nodeId, currentEmail]);
 
   const loadNode = useCallback(async () => {
     if (isNew) return;
@@ -866,8 +874,12 @@ export function DocumentEditor({
       // number, and `title.trim()` later would throw "trim is not a function".
       const loadedTitle = node?.title == null ? "" : String(node.title);
       const loadedContent = node?.content == null ? "" : String(node.content);
+      // Legacy tags were stored raw (leading #, mixed case), so they render
+      // and compare differently from anything typed today. Canonicalise on load:
+      // chips read consistently, the duplicate guard sees one key per tag, and
+      // the next save migrates the document (CU-wdqcq00x8e).
       const loadedTags = Array.isArray(node?.tags)
-        ? node.tags.map((t: unknown) => String(t))
+        ? newTags([], node.tags.map((t: unknown) => tagKey(String(t))))
         : [];
       setTitle(loadedTitle);
       setContent(loadedContent);
@@ -904,6 +916,7 @@ export function DocumentEditor({
       // Restore unsaved edits parked in localStorage, but only if they were
       // taken from the version we just loaded — a newer server copy wins.
       const draft = readDraft(nestId, nodeId);
+      setRestoredDraftAt(null);
       if (draft) {
         if (draft.baseVersion !== node?.version) {
           clearDraft(nestId, nodeId);
@@ -913,6 +926,7 @@ export function DocumentEditor({
           setTags(draft.tags);
           setSchedule(draft.schedule);
           setTouched(true);
+          setRestoredDraftAt(draft.savedAt ?? Date.now());
         }
       }
     } catch (err: any) {
@@ -946,6 +960,36 @@ export function DocumentEditor({
     setShowVersions(true);
     await loadVersions();
   }, [loadVersions]);
+
+  // Throw away the unreviewed edits on this document.
+  //
+  // The outcome depends on the document and only the server can tell which:
+  // one that was published before goes back to that version, one that never
+  // was is deleted (there is nothing to fall back to). So the confirm names
+  // both, and a delete navigates out rather than leaving the editor pointed at
+  // a document that no longer exists.
+  const [discarding, setDiscarding] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const handleDiscardDraft = useCallback(async () => {
+    setConfirmDiscard(false);
+    setDiscarding(true);
+    try {
+      // api.discardDraft clears the parked localStorage draft itself, so every
+      // entry point gets that, not just this one.
+      const res = await api.discardDraft(nestId, nodeId);
+      if (res.deleted) {
+        toast.success("Never approved — document deleted");
+        onBack();
+        return;
+      }
+      toast.success(`Draft discarded — back to version ${res.version}`);
+      await Promise.all([loadNode(), loadVersions()]);
+    } catch (e: any) {
+      toast.error(e?.message || "Discard failed");
+    } finally {
+      setDiscarding(false);
+    }
+  }, [nestId, nodeId, title, onBack, loadNode, loadVersions]);
 
   // Load versions on demand when the Compare dropdown opens, so the list is
   // populated without forcing the user through the history modal first.
@@ -1027,13 +1071,65 @@ export function DocumentEditor({
   // dirty indicator, alongside the badge in the header.
   const canSave = hasSaveableFields && (isNew || isDirty);
 
+  // Set once the user has answered the leave dialog and the navigation is
+  // going through — the browser-level guards below must not ask a second time.
+  const leavingRef = useRef(false);
+
   // Reloading or closing the tab with unsaved edits loses them — the in-app
   // leave dialog can't see a browser-level navigation, so hook it here too.
   useEffect(() => {
     if (!isDirty || isReviewerOnly) return;
-    const onBeforeUnload = (e: BeforeUnloadEvent) => e.preventDefault();
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (leavingRef.current) return;
+      e.preventDefault();
+    };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [isDirty, isReviewerOnly]);
+
+  // Anything that leaves this editor from the app chrome — the header logo,
+  // the nav tabs, the account menu — asks first, the same way this component's
+  // own back arrow does.
+  useEffect(() => {
+    setNavGuard((proceed) => {
+      if (!isDirty || isReviewerOnly) return false;
+      setLeaveIntent({ label: "leave this document", run: proceed });
+      return true;
+    });
+    return () => setNavGuard(null);
+  }, [isDirty, isReviewerOnly]);
+
+  // Browser Back. The app keeps one history entry, so Back used to unload the
+  // page — and a real unload can only ever raise the browser's own alert.
+  // Parking a spare entry while the document is dirty turns Back into a
+  // popstate we can answer with the same dialog every other exit uses.
+  useEffect(() => {
+    if (!isDirty || isReviewerOnly) return;
+    leavingRef.current = false;
+    const park = () => window.history.pushState({ cnLeaveGuard: true }, "");
+    park();
+    const onPop = () => {
+      // The parked entry is spent; park another so a cancelled leave is still
+      // caught, then ask. Leaving for real is two entries back — the spare and
+      // the page's own.
+      park();
+      setLeaveIntent({
+        label: "leave this page",
+        run: () => {
+          leavingRef.current = true;
+          window.history.go(-2);
+        },
+      });
+    };
+    window.addEventListener("popstate", onPop);
+    return () => {
+      window.removeEventListener("popstate", onPop);
+      // Left by some other route (saved, discarded, navigated in-app): drop the
+      // spare entry so Back still means Back.
+      if (!leavingRef.current && (window.history.state as any)?.cnLeaveGuard) {
+        window.history.back();
+      }
+    };
   }, [isDirty, isReviewerOnly]);
 
   // Feedback only — the schedule is saved exactly as typed either way (it's
@@ -1050,27 +1146,48 @@ export function DocumentEditor({
     return () => clearTimeout(t);
   }, [content, isArtifactDraft]);
 
-  const addTag = useCallback(() => {
-    // Split on whitespace/comma, then hold each token to the tag policy
-    // (length cap, letters/digits/._- only) and say what it changed.
+  // What the current input would commit, under the same policy addTag applies
+  // (length cap, letters/digits/._- only, lowercased). Rendered under the
+  // field so a truncation or rewrite is visible BEFORE Enter — a transient
+  // toast after the fact is easy to miss, more so when several tags commit.
+  // The tool preview highlights with lowlight's auto-detection, which tries
+  // every grammar. Keyed on the live body that ran once per keystroke, on the
+  // typing path. Deferred, React keeps the textarea responsive and re-highlights
+  // when it has a spare frame — no debounce timer to tune or clean up.
+  const deferredContent = useDeferredValue(content);
+
+  const tagPreview = useMemo(() => {
     const candidates = tagInput.split(/[\s,]+/).map(normalizeTagInput);
-    const notes = candidates.map((c) => c.note).filter(Boolean) as string[];
     const accepted = candidates
       .map((c) => c.tag)
       .filter((t): t is string => !!t);
-    for (const note of notes) toast.warning(note);
+    return {
+      // Already-present tags are dropped here, not at commit, so the preview
+      // never promises to add something the commit would quietly discard.
+      tags: newTags(tags, accepted),
+      notes: candidates.map((c) => c.note).filter(Boolean) as string[],
+    };
+  }, [tagInput, tags]);
+
+  const addTag = useCallback(() => {
+    const { tags: accepted, notes } = tagPreview;
+    // A paste commits several tags at once, and one transient toast per
+    // rewrite is unreadable — stack them into a single summary and leave the
+    // per-tag detail to the persistent preview above (CU-wdqcq00x8h).
+    if (notes.length === 1) toast.warning(notes[0]);
+    else if (notes.length > 1)
+      toast.warning(`${notes.length} tags normalized`, {
+        description: notes.join(" "),
+        duration: 8000,
+      });
     if (accepted.length === 0) {
       setTagInput("");
       return;
     }
-    const next = [...tags];
-    for (const t of accepted) {
-      if (!next.includes(t)) next.push(t);
-    }
-    setTags(next);
+    setTags([...tags, ...accepted]);
     setTagInput("");
     setTouched(true);
-  }, [tagInput, tags]);
+  }, [tagPreview, tags]);
 
   const removeTag = (t: string) => {
     setTags(tags.filter((x) => x !== t));
@@ -1141,6 +1258,7 @@ export function DocumentEditor({
     // Edits are on the server now; the local draft is spent.
     if (!isNew) clearDraft(nestId, nodeId);
     setTouched(false);
+    setRestoredDraftAt(null);
     return { ok: true, savedId, ...(isNew ? { createdStatus } : {}) };
   };
 
@@ -1232,14 +1350,15 @@ export function DocumentEditor({
     runSave(() => {
       const intent = leaveIntent?.run;
       setLeaveIntent(null);
-      intent?.();
+      // The question has been answered — bypassNavGuard keeps the app-level
+      // guard from asking again about the very navigation it just asked about.
+      if (intent) bypassNavGuard(intent);
     });
 
-  const handleLeaveDiscard = () => {
-    if (!leaveIntent) return;
-    const intent = leaveIntent.run;
-    // Drop the parked draft AND revert the fields — the intent may navigate
-    // within this component (wiki link, breadcrumb) instead of unmounting it.
+  /** Drop the parked draft AND put the loaded server copy back in the fields —
+   *  a leave intent may navigate within this component (wiki link, breadcrumb)
+   *  instead of unmounting it, and the restored-draft banner discards in place. */
+  const revertToSaved = () => {
     if (!isNew) clearDraft(nestId, nodeId);
     const snap = initialSnapshotRef.current;
     setTitle(snap.title);
@@ -1247,8 +1366,15 @@ export function DocumentEditor({
     setTags([...snap.tags]);
     setSchedule(snap.schedule);
     setTouched(false);
+    setRestoredDraftAt(null);
+  };
+
+  const handleLeaveDiscard = () => {
+    if (!leaveIntent) return;
+    const intent = leaveIntent.run;
+    revertToSaved();
     setLeaveIntent(null);
-    intent();
+    bypassNavGuard(intent);
   };
 
   const handleSubmitForReview = async (note: string, priority: string) => {
@@ -1269,6 +1395,19 @@ export function DocumentEditor({
     if (isNew) return;
     await api.rejectNode(nestId, nodeId, note);
     await loadNode();
+  };
+  // Cancel your own pending review from the document itself — back to Draft,
+  // rather than Delete being the only exit (CU-wdqcq007pe).
+  const handleWithdrawSubmission = async () => {
+    if (isNew) return;
+    try {
+      await api.cancelReview(nestId, nodeId);
+      toast.success("Submission withdrawn — back to Draft");
+      await loadNode();
+    } catch (err: any) {
+      console.error("[DocumentEditor] cancelReview failed", nestId, nodeId, err);
+      toast.error(err?.message || "Failed to withdraw submission");
+    }
   };
   // Flag this doc for deletion — for callers without delete permission. Errors
   // stay inside the dialog (it keeps the typed reason); success closes it.
@@ -1501,14 +1640,10 @@ export function DocumentEditor({
                 </button>
               </Fragment>
             ))}
-            <span className="text-muted-foreground shrink-0">›</span>
-            <h3
-              className="text-sm font-bold text-foreground truncate max-w-[320px] mb-0 leading-none"
-              title={title || undefined}
-              data-testid="document-editor-header-title"
-            >
-              {title || (isNew ? "New document" : "Untitled")}
-            </h3>
+            {/* The document's own name is deliberately NOT repeated here: the
+                Title field sits directly below (an <h1> in view mode), so the
+                trail ended in the same string the next line already shows. The
+                crumbs answer "where am I", the field answers "what is this". */}
             {!isNew && status && <StatusBadge status={status} />}
             {/* Pending only. A DECLINED flag is a past event, not a state of
                 the document — badging it forever nags everyone who opens a doc
@@ -1533,30 +1668,16 @@ export function DocumentEditor({
                 Auto-published
               </span>
             )}
-            {isDirty && (
-              <span
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900"
-                title="These edits are parked locally and not yet saved to the nest."
-                data-testid="document-editor-dirty-badge"
-              >
-                <Pencil className="h-3 w-3" />
-                Unsaved changes
-              </span>
-            )}
+            {/* "Unsaved changes" moved to the sticky action bar at the bottom,
+                where it sits beside the Save button it is about. */}
           </div>
         </div>
+        {/* Save, Submit for review and Discard live in the sticky footer at the
+            bottom of this page — the write actions belong at the end of the
+            form the user is filling in, not above it. What stays here is what
+            is ABOUT the document rather than a change to it: the review verdict,
+            the comparison picker, and the secondary menu. */}
         <div className="flex items-center gap-2 shrink-0">
-          {!isViewOnly && canSubmitForReview && (
-            <Button
-              variant="outline"
-              onClick={() => setShowSubmitModal(true)}
-              data-testid="document-editor-submit"
-              title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
-            >
-              <Send className="h-4 w-4 mr-2" />
-              Submit for review
-            </Button>
-          )}
           {/* NOT gated on isViewOnly: that flag answers "may this caller
               author?", and a reviewer-only steward is view-only by definition
               yet is exactly the person meant to act here. Gating approval on it
@@ -1570,42 +1691,6 @@ export function DocumentEditor({
               onApprove={handleApprove}
               onReject={handleReject}
             />
-          )}
-          {!isViewOnly && !isReviewerOnly && !isLocked && (
-            mode === "edit" ? (
-              <Button
-                // Keep focus in the editor field so clicking Save doesn't fire
-                // the field's blur (which would trigger a second, concurrent
-                // save alongside this click). One save per click.
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={handleSave}
-                disabled={!canSave}
-                data-testid="document-editor-save"
-              >
-                {saving ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : justSaved && !isDirty ? (
-                  <Check className="h-4 w-4 mr-2 text-green-600" />
-                ) : (
-                  <Save className="h-4 w-4 mr-2" />
-                )}
-                {saving
-                  ? "Saving…"
-                  : justSaved && !isDirty
-                    ? "Saved"
-                    : isNew
-                      ? "Create"
-                      : "Save"}
-              </Button>
-            ) : (
-              <Button
-                onClick={() => setMode("edit")}
-                data-testid="document-editor-start-edit"
-              >
-                <Pencil className="h-4 w-4 mr-2" />
-                Start Editing
-              </Button>
-            )
           )}
           {/* Compare ▾ — pick a past version; the doc area renders an
               ever-present current↔vN diff inline (no modal). */}
@@ -1659,8 +1744,16 @@ export function DocumentEditor({
                           <span className="w-4 mr-2" />
                         )}
                         v{v.version}
-                        <span className="ml-auto text-xs text-muted-foreground">
-                          {v.editedBy?.split("@")[0] || ""}
+                        {/* Author AND when — "v3 · taimur" alone gives no way
+                            to tell which past version you are reaching for.
+                            Same editedAt Version History already renders. */}
+                        <span
+                          className="ml-auto text-xs text-muted-foreground"
+                          title={v.editedAt ? formatServerDate(v.editedAt) : undefined}
+                        >
+                          {[v.editedBy?.split("@")[0], relTime(v.editedAt)]
+                            .filter(Boolean)
+                            .join(" · ")}
                         </span>
                       </DropdownMenuItem>
                     ))
@@ -1669,8 +1762,8 @@ export function DocumentEditor({
             </DropdownMenu>
           )}
           {/* Secondary actions collapse into one ⋮ menu to keep the header
-              uncluttered. Grouped by use: version history + markdown-source
-              view toggle, then sharing (copy link, share nest). Compare stays
+              uncluttered. Grouped by use: version history, then sharing
+              (copy link, share nest). Compare stays
               a visible button because it carries active "Comparing vN" state
               the flat menu can't surface. */}
           {(() => {
@@ -1682,16 +1775,8 @@ export function DocumentEditor({
                 testId: "document-editor-history",
                 onSelect: openVersions,
               });
-            // Tool/table nodes ALWAYS edit as raw source (no rich editor
-            // exists for them), so there's nothing to toggle.
-            if (!isSourceOnly)
-              moreActions.push({
-                // Toggle: the label names the mode you switch TO.
-                label: rawMode ? "Rich editor" : "Markdown source",
-                icon: Code2,
-                testId: "document-editor-markdown-toggle",
-                onSelect: () => setRawMode((v) => !v),
-              });
+            // The markdown-source toggle lives on the Content label instead —
+            // it is a writing control, not a document action.
             if (!isNew)
               moreActions.push({
                 label: "Copy link",
@@ -1729,6 +1814,15 @@ export function DocumentEditor({
                 separatorBefore: !isNew ? false : true,
                 testId: "document-editor-share",
                 onSelect: () => setShowShare(true),
+              });
+            // Publishing hosts THIS document on the open web, so it sits with
+            // sharing rather than with the editing actions above.
+            if (canShare && !isNew)
+              moreActions.push({
+                label: "Publish",
+                icon: Share2,
+                testId: "document-editor-publish",
+                onSelect: () => setShowPublish(true),
               });
             // Below admin only: this opens the REQUEST dialog, not a delete.
             // Admins delete from the nest list — this page has never carried a
@@ -1791,6 +1885,29 @@ export function DocumentEditor({
         </Alert>
       )}
 
+      {restoredDraftAt !== null && (
+        <Alert className="mb-4 border-amber-300 bg-amber-50 text-amber-800">
+          <AlertCircle className="h-4 w-4 text-amber-600" />
+          <AlertDescription className="flex flex-wrap items-center gap-x-2 gap-y-1 text-amber-800">
+            <span>
+              Unsaved edits from this browser
+              {" ("}
+              {new Date(restoredDraftAt).toLocaleString()}
+              {") "}
+              were restored — the saved document still says something else.
+            </span>
+            <button
+              type="button"
+              onClick={revertToSaved}
+              className="font-medium underline underline-offset-2 hover:no-underline"
+              data-testid="discard-restored-draft"
+            >
+              Discard them
+            </button>
+          </AlertDescription>
+        </Alert>
+      )}
+
       {draftUnbacked && isDirty && (
         <Alert className="mb-4 border-amber-300 bg-amber-50 text-amber-800">
           <AlertCircle className="h-4 w-4 text-amber-600" />
@@ -1834,10 +1951,25 @@ export function DocumentEditor({
           {isOwnPendingReview && (
             <Alert>
               <AlertCircle className="h-4 w-4" />
-              <AlertDescription>
-                This is still under review. Your edits update the same pending
-                submission — no need to withdraw and resubmit — and the steward
-                reviews your latest version.
+              <AlertDescription className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <span className="flex-1 min-w-[16rem]">
+                  This is still under review. Your edits update the same pending
+                  submission — no need to withdraw and resubmit — and the steward
+                  reviews your latest version.
+                </span>
+                {/* Withdraw belongs with the sentence explaining the state, not
+                    in the header's action row (CU-wdqcq007pe). */}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="shrink-0"
+                  onClick={() => void handleWithdrawSubmission()}
+                  data-testid="document-editor-withdraw"
+                  title="Withdraw this submission and return the document to Draft"
+                >
+                  <Undo2 className="h-3.5 w-3.5 mr-1.5" />
+                  Withdraw
+                </Button>
               </AlertDescription>
             </Alert>
           )}
@@ -1849,7 +1981,7 @@ export function DocumentEditor({
                 className="text-3xl font-bold leading-tight text-foreground"
                 data-testid="document-editor-title"
               >
-                {title || "Untitled"}
+                {title || (loading ? "Loading…" : "Untitled")}
               </h1>
             ) : (
               // Labeled, outlined title field — required like Content, and
@@ -2071,7 +2203,7 @@ export function DocumentEditor({
                   <div className="flex items-center gap-2">
                     <Input
                       value={tagInput}
-                      onChange={(e) => setTagInput(e.target.value)}
+                      onChange={(e) => setTagInput(clampTagInput(e.target.value))}
                       onKeyDown={(e) => {
                         // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
                         if (e.key === "Enter" || e.key === "," || e.key === " ") {
@@ -2081,6 +2213,9 @@ export function DocumentEditor({
                       }}
                       placeholder='Press Enter or space. Try "#api #v2" or "api, v2"'
                       disabled={fieldsDisabled}
+                      // A hard stop the way Title has one — several tags fit,
+                      // a pasted paragraph does not.
+                      maxLength={TAG_INPUT_MAX_LENGTH}
                       data-testid="document-editor-tag-input"
                     />
                     <Button
@@ -2092,6 +2227,18 @@ export function DocumentEditor({
                       Add
                     </Button>
                   </div>
+                  {tagInput.trim() && (
+                    <p
+                      className="mt-1 text-xs text-muted-foreground"
+                      data-testid="document-editor-tag-preview"
+                    >
+                      {tagPreview.tags.length > 0
+                        ? `Will add: ${tagPreview.tags.join(", ")}`
+                        : "Nothing new to add"}
+                      {tagPreview.notes.length > 0 &&
+                        ` — ${tagPreview.notes.join(" ")}`}
+                    </p>
+                  )}
                 </>
               )}
               {tags.length > 0 && (
@@ -2484,16 +2631,41 @@ export function DocumentEditor({
                   }
                 }}
               >
-                <label className="block text-sm font-medium mb-1">
-                  {isArtifactDraft
-                    ? "Artifact HTML"
-                    : effectiveType === "tool"
-                      ? "Tool source (code)"
-                      : effectiveType === "table"
-                        ? "Table data (CSV)"
-                        : "Content"}
-                  {canEditContent && <span className="text-destructive"> *</span>}
-                </label>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="block text-sm font-medium">
+                    {isArtifactDraft
+                      ? "Artifact HTML"
+                      : effectiveType === "tool"
+                        ? "Tool source (code)"
+                        : effectiveType === "table"
+                          ? "Table data (CSV)"
+                          : "Content"}
+                    {canEditContent && <span className="text-destructive"> *</span>}
+                  </label>
+                  {/* Rich editor ↔ raw markdown. It belongs on the field it
+                      switches, not buried in the header's ⋮ menu — it is used
+                      while writing, and the label names the mode you get. The
+                      click must not reach the wrapper, which enters edit mode. */}
+                  {!isSourceOnly && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setRawMode((v) => !v);
+                      }}
+                      className="inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+                      title={
+                        rawMode
+                          ? "Back to the rich editor"
+                          : "Edit the raw markdown source"
+                      }
+                      data-testid="document-editor-markdown-toggle"
+                    >
+                      <Code2 className="h-3 w-3" />
+                      {rawMode ? "Rich editor" : "Markdown source"}
+                    </button>
+                  )}
+                </div>
                 {compareVersion != null ? (
                   /* Ever-present inline diff: current vs a chosen past version. */
                   <div data-testid="document-editor-inline-diff">
@@ -2550,22 +2722,46 @@ export function DocumentEditor({
                         );
                       }
                       if (diffRendered) {
+                        // A table's body is CSV: rendered as markdown it
+                        // collapses into one run-on paragraph, so each side
+                        // gets the same grid the reader sees, with the rows
+                        // the other version doesn't have tinted.
+                        const tableSides =
+                          effectiveType === "table"
+                            ? tableDiffSides(past.content || "", content)
+                            : null;
+                        const renderPane = (
+                          side: "past" | "current",
+                          body: string,
+                        ) =>
+                          tableSides ? (
+                            <TableGrid
+                              columns={tableSides[side].columns}
+                              rows={tableSides[side].rows}
+                              rowClassName={(i) =>
+                                tableSides[side].changed[i]
+                                  ? side === "past"
+                                    ? "bg-red-50 dark:bg-red-950/30"
+                                    : "bg-emerald-50 dark:bg-emerald-950/30"
+                                  : ""
+                              }
+                            />
+                          ) : (
+                            <DocumentViewer content={body} className="px-4 py-3" />
+                          );
                         return (
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div className="border rounded-lg overflow-hidden">
                               <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
                                 v{compareVersion}
                               </div>
-                              <DocumentViewer
-                                content={past.content || ""}
-                                className="px-4 py-3"
-                              />
+                              {renderPane("past", past.content || "")}
                             </div>
                             <div className="border rounded-lg overflow-hidden">
                               <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
                                 current (v{versionData?.currentVersion ?? baseVersion ?? "?"})
                               </div>
-                              <DocumentViewer content={content} className="px-4 py-3" />
+                              {renderPane("current", content)}
                             </div>
                           </div>
                         );
@@ -2594,22 +2790,45 @@ export function DocumentEditor({
                       readOnly={fieldsDisabled}
                     />
                   ) : (
-                    <textarea
-                      value={content}
-                      onChange={(e) => {
-                        if (fieldsDisabled) return;
-                        setContent(e.target.value);
-                        setTouched(true);
-                      }}
-                      onBlur={saveOnBlur}
-                      readOnly={fieldsDisabled}
-                      spellCheck={false}
-                      placeholder={
-                        "The body is code — paste or write the tool's source."
+                    /* Source beside a highlighted rendering of itself, reusing
+                       the read view's lowlight output — flat plain text is hard
+                       to scan while writing a tool.
+                       ponytail: a preview pane, not highlighting under the
+                       caret; swap in CodeMirror if tool authoring grows. */
+                    <div
+                      className={
+                        content.trim() ? "grid gap-3 lg:grid-cols-2" : ""
                       }
-                      className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
-                      data-testid="tool-source-editor"
-                    />
+                    >
+                      <textarea
+                        value={content}
+                        onChange={(e) => {
+                          if (fieldsDisabled) return;
+                          setContent(e.target.value);
+                          setTouched(true);
+                        }}
+                        onBlur={saveOnBlur}
+                        readOnly={fieldsDisabled}
+                        spellCheck={false}
+                        placeholder={
+                          "The body is code — paste or write the tool's source."
+                        }
+                        className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+                        data-testid="tool-source-editor"
+                      />
+                      {content.trim() && (
+                        <div className="min-w-0 flex flex-col min-h-[400px] rounded-lg border bg-background shadow-sm overflow-hidden">
+                          <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                            Preview
+                          </div>
+                          <CodeHighlight
+                            code={deferredContent}
+                            className="flex-1 text-sm"
+                            data-testid="tool-source-preview"
+                          />
+                        </div>
+                      )}
+                    </div>
                   )
                 ) : rawMode ? (
                   <textarea
@@ -2876,6 +3095,21 @@ export function DocumentEditor({
                 }
               }
           }
+          onDiscard={
+            // Same gate as revert — throwing the draft away rewrites the
+            // document, so it is the author's call, not a reviewer's.
+            !canEditContent
+              ? undefined
+              : async () => {
+                try {
+                  const { version } = await api.discardDraft(nestId, nodeId);
+                  toast.success(`Draft discarded — back to version ${version}`);
+                  await Promise.all([loadNode(), loadVersions()]);
+                } catch (e: any) {
+                  toast.error(e?.message || "Discard failed");
+                }
+              }
+          }
         />
       )}
 
@@ -3009,11 +3243,20 @@ export function DocumentEditor({
         <ShareNestDialog
           nestId={nestId}
           nestName={nestName}
+          stewardshipEnabled={stewardshipEnabled}
           onClose={() => setShowShare(false)}
           onChanged={() => {
             /* Sharing changes don't alter this document's content; nothing
                to reload here. The nest list re-reads on next visit. */
           }}
+        />
+      )}
+      {showPublish && (
+        <PublishDialog
+          nestId={nestId}
+          nodeId={nodeId}
+          nodeTitle={title || nodeId}
+          onClose={() => setShowPublish(false)}
         />
       )}
       {leaveIntent && (
@@ -3089,6 +3332,134 @@ export function DocumentEditor({
         </Dialog>
       )}
 
+      {/* Discard confirmation — the app's own dialog, like every other
+          destructive action. Names both outcomes: only the server knows whether
+          this document has an approved version to fall back to. */}
+      <AlertDialog open={confirmDiscard} onOpenChange={setConfirmDiscard}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Discard the draft of "{title || nodeId}"?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              The document goes back to its last approved version. If it was
+              never approved, it is deleted instead. This can't be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => void handleDiscardDraft()}
+              data-testid="document-editor-discard-confirm"
+            >
+              Discard draft
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Sticky action bar. The write actions sit at the END of the form the
+          user is filling in and stay reachable at any scroll depth — this
+          document is long, and Save used to scroll off the top of a page that
+          takes minutes to fill in. `-mx-4 px-4` spans the padding <main> owns
+          so the bar reads as a bar rather than an indented box. */}
+      {(() => {
+        const canWrite = !isViewOnly && !isReviewerOnly && !isLocked;
+        const showSubmit = !isViewOnly && canSubmitForReview;
+        // Discard only where there is unreviewed work to throw away — which is
+        // exactly what a draft or rejected status means.
+        const showDiscard =
+          canWrite &&
+          !isNew &&
+          canEditContent &&
+          (status === "draft" || status === "rejected");
+        if (!canWrite && !showSubmit) return null;
+        return (
+          <div
+            // -mb-4 cancels the py-4 <main> puts below every page, so at full
+            // scroll the bar ends flush with the window instead of floating
+            // above a strip of padding.
+            className="sticky bottom-0 z-20 -mx-4 -mb-4 mt-6 px-4 py-3 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 flex items-center gap-2"
+            data-testid="document-editor-actions"
+          >
+            {isDirty && (
+              <span
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900"
+                title="These edits are parked locally and not yet saved to the nest."
+                data-testid="document-editor-dirty-badge"
+              >
+                <Pencil className="h-3 w-3" />
+                Unsaved changes
+              </span>
+            )}
+            <div className="ml-auto flex items-center gap-2">
+              {showDiscard && (
+                <Button
+                  variant="ghost"
+                  onClick={() => setConfirmDiscard(true)}
+                  disabled={discarding}
+                  className="text-muted-foreground hover:text-destructive"
+                  title="Throw away the unreviewed edits and go back to the last approved version"
+                  data-testid="document-editor-discard"
+                >
+                  {discarding ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-4 w-4 mr-2" />
+                  )}
+                  Discard draft
+                </Button>
+              )}
+              {showSubmit && (
+                <Button
+                  variant="outline"
+                  onClick={() => setShowSubmitModal(true)}
+                  data-testid="document-editor-submit"
+                  title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
+                >
+                  <Send className="h-4 w-4 mr-2" />
+                  Submit for review
+                </Button>
+              )}
+              {canWrite &&
+                (mode === "edit" ? (
+                  <Button
+                    // Keep focus in the editor field so clicking Save doesn't
+                    // fire the field's blur (which would trigger a second,
+                    // concurrent save alongside this click). One save per click.
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={handleSave}
+                    disabled={!canSave}
+                    data-testid="document-editor-save"
+                  >
+                    {saving ? (
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : justSaved && !isDirty ? (
+                      <Check className="h-4 w-4 mr-2 text-green-600" />
+                    ) : (
+                      <Save className="h-4 w-4 mr-2" />
+                    )}
+                    {saving
+                      ? "Saving…"
+                      : justSaved && !isDirty
+                        ? "Saved"
+                        : isNew
+                          ? "Create"
+                          : "Save"}
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={() => setMode("edit")}
+                    data-testid="document-editor-start-edit"
+                  >
+                    <Pencil className="h-4 w-4 mr-2" />
+                    Start Editing
+                  </Button>
+                ))}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

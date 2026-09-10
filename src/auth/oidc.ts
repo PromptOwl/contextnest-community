@@ -73,7 +73,7 @@ const NONCE_COOKIE = "cnst_oidc_nonce";
 const VERIFIER_COOKIE = "cnst_oidc_verifier";
 const FLOW_COOKIE_TTL_SECS = 10 * 60; // 10 minutes
 
-interface DiscoveryDoc {
+export interface DiscoveryDoc {
   issuer: string;
   authorization_endpoint: string;
   token_endpoint: string;
@@ -88,13 +88,22 @@ interface DiscoveryDoc {
 // instead of per sign-in. The remote JWK set rides along (jose caches keys
 // internally too and re-fetches on unknown-kid). Keyed by issuer so a runtime
 // settings change invalidates naturally.
+//
+// One entry PER issuer, not one entry total: OIDC login, Entra token-exchange
+// and Google token-exchange all call discover() with different issuers, and a
+// single slot would evict on every alternating request — refetching metadata
+// AND building a fresh createRemoteJWKSet, which throws away jose's key cache
+// and its rate-limit cooldown, i.e. a live JWKS fetch per token verified.
+// Bounded by design: issuers come from config, never from request input.
 const DISCOVERY_TTL_MS = 5 * 60_000;
-let discoveryCache: {
-  issuer: string;
-  doc: DiscoveryDoc;
-  jwks: ReturnType<typeof createRemoteJWKSet>;
-  fetchedAt: number;
-} | null = null;
+const discoveryCache = new Map<
+  string,
+  {
+    doc: DiscoveryDoc;
+    jwks: ReturnType<typeof createRemoteJWKSet>;
+    fetchedAt: number;
+  }
+>();
 
 /** Enabled AND fully configured — the only state the login button is live. */
 export function isOidcReady(): boolean {
@@ -106,17 +115,14 @@ export function isOidcReady(): boolean {
   );
 }
 
-async function discover(issuer: string): Promise<{
+export async function discover(issuer: string): Promise<{
   doc: DiscoveryDoc;
   jwks: ReturnType<typeof createRemoteJWKSet>;
 }> {
   const now = Date.now();
-  if (
-    discoveryCache &&
-    discoveryCache.issuer === issuer &&
-    now - discoveryCache.fetchedAt < DISCOVERY_TTL_MS
-  ) {
-    return { doc: discoveryCache.doc, jwks: discoveryCache.jwks };
+  const cached = discoveryCache.get(issuer);
+  if (cached && now - cached.fetchedAt < DISCOVERY_TTL_MS) {
+    return { doc: cached.doc, jwks: cached.jwks };
   }
 
   const res = await fetch(`${issuer}/.well-known/openid-configuration`, {
@@ -143,12 +149,7 @@ async function discover(issuer: string): Promise<{
     );
   }
   const jwks = createRemoteJWKSet(new URL(doc.jwks_uri));
-  discoveryCache = {
-    issuer,
-    doc: doc as DiscoveryDoc,
-    jwks,
-    fetchedAt: now,
-  };
+  discoveryCache.set(issuer, { doc: doc as DiscoveryDoc, jwks, fetchedAt: now });
   return { doc: doc as DiscoveryDoc, jwks };
 }
 

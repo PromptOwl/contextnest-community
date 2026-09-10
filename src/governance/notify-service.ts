@@ -256,8 +256,13 @@ export async function notifyNestInvite(params: {
   inviteeEmail: string;
   permission: string;
   nestName: string;
+  /** Team the access came through, when it wasn't granted to the person directly. */
+  viaTeam?: string;
 }): Promise<void> {
-  const { nestId, inviteeEmail, permission, nestName } = params;
+  const { nestId, inviteeEmail, permission, nestName, viaTeam } = params;
+  const message = viaTeam
+    ? `Your team "${viaTeam}" was given access to "${nestName}" as ${permissionLabel(permission)}`
+    : `You were added to "${nestName}" as ${permissionLabel(permission)}`;
   try {
     await getDb().run(
       `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
@@ -267,7 +272,7 @@ export async function notifyNestInvite(params: {
         nestId,
         inviteeEmail.toLowerCase(),
         nestId,
-        `You were added to "${nestName}" as ${permissionLabel(permission)}`,
+        message,
         new Date().toISOString(),
       ],
     );
@@ -300,7 +305,9 @@ export async function listNotifications(
     `SELECT n.id, n.nest_id, n.kind, n.subject_id, n.message, n.created_at, n.read_at,
             COALESCE(
               rr.node_id,
-              CASE WHEN dr.target_type = 'document' THEN dr.node_id END
+              CASE WHEN dr.target_type = 'document' THEN dr.node_id END,
+              -- A mention names the document directly; there's no request row.
+              CASE WHEN n.kind = 'mention' THEN n.subject_id END
             ) AS node_id
        FROM notifications n
        LEFT JOIN review_requests rr ON rr.id = n.subject_id

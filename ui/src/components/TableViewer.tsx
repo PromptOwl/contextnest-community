@@ -151,10 +151,13 @@ export function TableGrid({
   columns,
   rows,
   limit = 500,
+  rowClassName,
 }: {
   columns: string[];
   rows: string[][];
   limit?: number;
+  /** Extra classes per row — used by the version diff to tint changed rows. */
+  rowClassName?: (index: number) => string;
 }) {
   return (
     <div className="overflow-x-auto rounded-lg border">
@@ -170,7 +173,10 @@ export function TableGrid({
         </thead>
         <tbody>
           {rows.slice(0, limit).map((r, i) => (
-            <tr key={i} className="border-t align-top hover:bg-muted/30">
+            <tr
+              key={i}
+              className={`border-t align-top hover:bg-muted/30 ${rowClassName?.(i) ?? ""}`}
+            >
               {r.map((cell, j) => (
                 <td key={j} className="px-3 py-1.5 whitespace-nowrap font-mono">
                   {cell}

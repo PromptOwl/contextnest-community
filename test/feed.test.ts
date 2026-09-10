@@ -324,7 +324,7 @@ describe("activity feed: comments are access-filtered", () => {
 
     await jsonRequest(
       app, "PATCH", `/nests/${nestId}/visibility`,
-      { visibility: "public" }, owner.apiKey,
+      { visibility: "public", acknowledge_public: true }, owner.apiKey,
     );
 
     // Owner comments on both docs.

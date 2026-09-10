@@ -6,8 +6,25 @@
 
 export const MAX_TAG_LENGTH = 40;
 
-/** Everything outside this set is dropped (`a/b/c` → `abc`, `🚀rocket` → `rocket`). */
-const DISALLOWED = /[^\p{L}\p{N}._-]+/gu;
+/** Hard cap on the tag FIELD, which holds several tags at once — wide enough
+ *  for a handful, narrow enough that a pasted paragraph is refused outright. */
+export const TAG_INPUT_MAX_LENGTH = 120;
+
+/** Everything outside this set is dropped (`a/b/c` → `abc`, `🚀rocket` → `rocket`).
+ *  The alphabet is the ENGINE's TAG_PATTERN
+ *  (`^#?[a-zA-Z][a-zA-Z0-9_:-]*$`) — accepting more here only produced a tag the
+ *  server had to refuse, and the whole save failed with it. */
+const DISALLOWED = /[^a-zA-Z0-9_:-]+/g;
+
+/**
+ * An accented letter carries its base letter, so keep that instead of dropping
+ * the character whole: `café` is a tag the user meant to write, and losing the
+ * "é" turned it into `caf` (CU-wdqcq01e79). Decompose to base + combining mark
+ * and drop only the mark; scripts with no ASCII base (漢字, emoji) still fall
+ * to DISALLOWED above. The rewrite is still reported by the note below.
+ */
+const deaccent = (s: string) =>
+  s.normalize("NFD").replace(/\p{Diacritic}/gu, "");
 
 export interface TagCandidate {
   /** The tag to store, or null when nothing usable survived. */
@@ -16,15 +33,49 @@ export interface TagCandidate {
   note: string | null;
 }
 
+/**
+ * Of `candidates`, the ones that would actually be added. Tags are
+ * case-insensitive, so a candidate matching an existing tag in any casing is a
+ * no-op — as is a repeat within the same batch. Both the "will add" preview and
+ * the commit read this, so what is promised is what lands.
+ */
+export function newTags(existing: string[], candidates: string[]): string[] {
+  const have = new Set(existing.map(tagKey));
+  const out: string[] = [];
+  for (const t of candidates) {
+    const key = tagKey(t);
+    if (have.has(key)) continue;
+    have.add(key);
+    out.push(t);
+  }
+  return out;
+}
+
+/**
+ * The value two tags are compared by. A legacy tag stored with its "#" (or in
+ * mixed case) has to key the same as the bare, lowercased form the normalizer
+ * produces — otherwise "#bug" and "bug" land on one document as two tags.
+ */
+export function tagKey(tag: string): string {
+  return normalizeTagInput(tag).tag ?? tag.trim().toLowerCase();
+}
+
 export function normalizeTagInput(raw: string): TagCandidate {
   const bare = raw.trim().replace(/^#+/, "");
   if (!bare) return { tag: null, note: null };
 
-  const cleaned = bare.replace(DISALLOWED, "").replace(/^[._-]+|[._-]+$/g, "");
+  // Lowercased: tags are index keys, and folder paths and prime-tag matching
+  // already canonicalise that way. Without it "Bug" and "bug" are two tags.
+  // A tag has to OPEN with a letter (engine rule), so leading digits and
+  // punctuation go with the disallowed characters.
+  const cleaned = deaccent(bare)
+    .replace(DISALLOWED, "")
+    .replace(/^[^a-zA-Z]+|[_:-]+$/g, "")
+    .toLowerCase();
   if (!cleaned) {
     return {
       tag: null,
-      note: `"${bare}" has no letters or digits — tags are built from letters, digits, and . _ -`,
+      note: `"${bare}" has no usable characters — a tag starts with a letter and is built from letters a-z, digits, and _ : -`,
     };
   }
   if (cleaned.length > MAX_TAG_LENGTH) {
@@ -33,8 +84,25 @@ export function normalizeTagInput(raw: string): TagCandidate {
       note: `Tags are capped at ${MAX_TAG_LENGTH} characters — "${bare}" was shortened.`,
     };
   }
-  if (cleaned !== bare) {
+  // Compared lowercased so a pure case change stays silent — only real
+  // rewrites (dropped characters) are worth a note.
+  if (cleaned !== bare.toLowerCase()) {
     return { tag: cleaned, note: `"${bare}" was simplified to "${cleaned}".` };
   }
   return { tag: cleaned, note: null };
+}
+
+/**
+ * Each whitespace/comma-separated token trimmed to the real tag limit. The
+ * field holds several tags at once, so a flat 40-char cap on the input itself
+ * would eat a pasted "api, v2, docs" — cap per token instead, so nothing typed
+ * past the limit survives to be silently discarded on commit.
+ */
+export function clampTagInput(raw: string): string {
+  return raw.replace(/[^\s,]+/g, (token) => {
+    // Leading #s are stripped before the length check, so they don't count
+    // against the tag limit.
+    const hashes = /^#*/.exec(token)![0];
+    return hashes + token.slice(hashes.length, hashes.length + MAX_TAG_LENGTH);
+  });
 }

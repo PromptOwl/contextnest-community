@@ -229,7 +229,7 @@ nest:
       gapp,
       "PATCH",
       `/nests/${gnestId}/visibility`,
-      { visibility: "public" },
+      { visibility: "public", acknowledge_public: true },
       admin.apiKey,
     );
   }, 30000);

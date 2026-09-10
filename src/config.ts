@@ -214,6 +214,58 @@ export const config = {
     return (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
   },
   /**
+   * Dedicated secret this deployment uses to SIGN the short-lived MCP tickets
+   * minted by the SSO token-exchange (POST /auth/token-exchange). Kept distinct
+   * from OFFICIAL_COMMUNITY_SSO_SECRET so a SELF-HOSTED server can issue its own
+   * MCP bearers without the official PromptOwl trust relationship. The MCP
+   * acceptor verifies a ticket signed with EITHER secret. Unset ⇒ token-exchange
+   * cannot mint (and the acceptor simply doesn't offer this key).
+   */
+  get MCP_SIGNING_SECRET(): string {
+    return process.env.MCP_SIGNING_SECRET || "";
+  },
+  /**
+   * Master switch for the SSO token-exchange endpoint. Default OFF — a
+   * deployment must deliberately enable it (and set MCP_SIGNING_SECRET + at
+   * least one provider) before /auth/token-exchange will mint anything.
+   */
+  get SSO_TOKEN_EXCHANGE_ENABLED(): boolean {
+    return process.env.SSO_TOKEN_EXCHANGE_ENABLED === "true";
+  },
+  get MS_TOKEN_EXCHANGE_ENABLED(): boolean {
+    return process.env.MS_TOKEN_EXCHANGE_ENABLED === "true";
+  },
+  get GOOGLE_TOKEN_EXCHANGE_ENABLED(): boolean {
+    return process.env.GOOGLE_TOKEN_EXCHANGE_ENABLED === "true";
+  },
+  /**
+   * Microsoft Entra: the app (client) id inbound tokens must be issued for
+   * (audience), and the tenant id used to build the expected issuer
+   * https://login.microsoftonline.com/<tenant>/v2.0.
+   */
+  get MS_CLIENT_ID(): string {
+    return (process.env.MS_CLIENT_ID || "").trim();
+  },
+  get MS_TENANT_ID(): string {
+    return (process.env.MS_TENANT_ID || "").trim();
+  },
+  /**
+   * Google: the OAuth client id inbound tokens must be issued for (audience).
+   * Issuer is fixed at https://accounts.google.com.
+   */
+  get GOOGLE_CLIENT_ID(): string {
+    return (process.env.GOOGLE_CLIENT_ID || "").trim();
+  },
+  /**
+   * Lifetime of a minted MCP ticket, in seconds. Clamped to [30, 3600]; short
+   * by design so a leaked exchange token expires quickly. Default 300.
+   */
+  get MCP_TOKEN_TTL_SECONDS(): number {
+    const raw = parseInt(process.env.MCP_TOKEN_TTL_SECONDS || "", 10);
+    if (!Number.isFinite(raw)) return 300;
+    return Math.max(30, Math.min(3600, raw));
+  },
+  /**
    * Restrict "Sign in with PromptOwl":
    *   "open"       — anyone may sign in with PromptOwl (default)
    *   "admin-only" — only the license owner (admin) may; everyone else

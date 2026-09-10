@@ -222,6 +222,15 @@ export function runMigrations(db: Database.Database): void {
       "ALTER TABLE nests ADD COLUMN require_push_confirmation INTEGER NOT NULL DEFAULT 0",
     );
   }
+  // Public Docs Reader Mode — a superadmin-enabled, read-only public docs view.
+  // `reader_mode` off by default; `reader_home_node` names the designated
+  // landing/hub node (nullable — resolved by convention when unset).
+  if (!nestCols.includes("reader_mode")) {
+    db.exec("ALTER TABLE nests ADD COLUMN reader_mode INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!nestCols.includes("reader_home_node")) {
+    db.exec("ALTER TABLE nests ADD COLUMN reader_home_node TEXT");
+  }
 
   // Admin flag on users (first PromptOwl-authed user becomes the server admin)
   const userCols = (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name);
@@ -1371,14 +1380,111 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("036_node_index");
   }
 
-  // 037: Push Confirmation Gate. Held pushes + the per-key allowlist.
+  // 037: Publish — gated public hosting of a single document (CU-wdqcpzzp7y).
+  //   `publish` holds one shareable /p/<slug> link per document with an access
+  //   mode; `access_grant` is the per-publish record store (invite allow-list,
+  //   one-time magic-link tokens, cookie sessions, and the view log), keyed by
+  //   `kind`. Not in the base DDL — additive feature tables.
+  if (!hasMigration("037_publish")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS publish (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          slug TEXT NOT NULL,
+          access_mode TEXT NOT NULL DEFAULT 'public'
+            CHECK(access_mode IN ('public','email','code','invite')),
+          code_hash TEXT,
+          comments_enabled INTEGER NOT NULL DEFAULT 0,
+          watermark INTEGER NOT NULL DEFAULT 0,
+          no_download INTEGER NOT NULL DEFAULT 0,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          expires_at TEXT,
+          revoked_at TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_publish_slug ON publish(slug);
+        CREATE INDEX IF NOT EXISTS idx_publish_nest ON publish(nest_id, node_id);
+
+        CREATE TABLE IF NOT EXISTS access_grant (
+          id TEXT PRIMARY KEY,
+          publish_id TEXT NOT NULL REFERENCES publish(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL
+            CHECK(kind IN ('invite','link','session','view')),
+          email TEXT,
+          token_hash TEXT,
+          expires_at TEXT,
+          used_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_access_grant_publish ON access_grant(publish_id, kind);
+        CREATE INDEX IF NOT EXISTS idx_access_grant_token ON access_grant(token_hash);
+      `);
+    })();
+    recordMigration("037_publish");
+  }
+
+  // 037b: the viewer overlays (watermark / no-download). Declared inline in the
+  // CREATE TABLE above, so this ALTER only fires for a database that ran an
+  // earlier build of 037 — same inline-plus-explicit-ALTER pattern the teams
+  // and prime columns use.
+  {
+    const publishCols = (
+      db.prepare("PRAGMA table_info(publish)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (publishCols.length && !publishCols.includes("watermark")) {
+      db.exec("ALTER TABLE publish ADD COLUMN watermark INTEGER NOT NULL DEFAULT 0");
+    }
+    if (publishCols.length && !publishCols.includes("no_download")) {
+      db.exec("ALTER TABLE publish ADD COLUMN no_download INTEGER NOT NULL DEFAULT 0");
+    }
+  }
+
+  // 038: archive a nest instead of deleting it (CU-wdqcpzy80h). One nullable
+  //   timestamp — archiving is a date, not a state machine, and NULL is the
+  //   whole "not archived" story, so every existing row is correct as-is.
+  if (!hasMigration("038_nest_archive")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("archived_at")) {
+      db.exec("ALTER TABLE nests ADD COLUMN archived_at TEXT");
+    }
+    recordMigration("038_nest_archive");
+  }
+
+  // 039: pinned nests (CU-wdqcq00d63). A pin is per PERSON per nest, not a
+  //   property of the nest — two people sharing one nest pin different things —
+  //   so it is its own table rather than a column. The composite primary key is
+  //   the whole uniqueness rule (pinning twice is a no-op), and the nest FK
+  //   cascades so a deleted nest takes its pins with it.
+  if (!hasMigration("039_nest_pins")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS nest_pins (
+          -- BOTH sides cascade, as grants and nest_collaborators do. Without it
+          -- on user_id, deleting an account with a single pin fails the whole
+          -- transaction on a foreign-key violation (foreign_keys is ON).
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (user_id, nest_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_nest_pins_user ON nest_pins(user_id);
+      `);
+    })();
+    recordMigration("039_nest_pins");
+  }
+
+  // 040: Push Confirmation Gate. Held pushes + the per-key allowlist.
   //
   // pending_pushes carries the FULL staged push (payload_blob) so a confirm
   // applies it byte-for-byte later — the submitter is long gone by then.
   // push_allowlist is PER-API-KEY (never keyed on nest alone): key_id NULL
   // means "any of that user's keys". A confirm with always_allow whitelists
   // the exact (nest_id, submitter_user_id, submitter_key_id) that pushed.
-  if (!hasMigration("037_push_confirmation")) {
+  if (!hasMigration("040_push_confirmation")) {
     db.transaction(() => {
       db.exec(`
         CREATE TABLE IF NOT EXISTS pending_pushes (

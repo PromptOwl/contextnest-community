@@ -12,6 +12,8 @@
  * /auth/keys and shown to the user once via the Connect modal.
  */
 
+import { clearDraft } from "./draft";
+
 const API_BASE = "";
 const STALE_LOCAL_STORAGE_KEY = "cnst_token";
 
@@ -207,6 +209,8 @@ export async function getHealth() {
     subagent_max_depth?: number;
     subagent_max_children?: number;
     runner_key_configured?: boolean;
+    /** Mail transport is set up — email/invite publish gates need it. */
+    email_configured?: boolean;
     suspended_reason?: string;
   }>("/health");
 }
@@ -247,6 +251,17 @@ export interface AdminSettings {
   oidc_ready?: boolean;
   /** Write-only: string sets/replaces, null clears; never returned. */
   oidc_client_secret?: string | null;
+  /** Agent SSO / token-exchange (POST /auth/token-exchange). Signing secret is
+   *  write-only — only its presence (mcp_signing_secret_set) comes back. */
+  sso_token_exchange_enabled: boolean;
+  mcp_signing_secret_set?: boolean;
+  mcp_signing_secret?: string | null;
+  mcp_token_ttl_seconds: number;
+  ms_token_exchange_enabled: boolean;
+  ms_client_id: string;
+  ms_tenant_id: string;
+  google_token_exchange_enabled: boolean;
+  google_client_id: string;
   anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   msteams_webhook_url: string;
@@ -658,8 +673,12 @@ export function isPrimeNode(
 
 // ─── Nests ──────────────────────────────────────────────────────────────
 
-export async function listNests() {
-  return request<{ nests: any[] }>("/nests");
+/** `archived` lists ONLY archived nests — the dashboard's Archived tab.
+ *  Without it archived nests are absent, as they are from every other surface. */
+export async function listNests(opts?: { archived?: boolean }) {
+  return request<{ nests: any[] }>(
+    opts?.archived ? "/nests?archived=1" : "/nests",
+  );
 }
 
 export async function createNest(name: string, description?: string) {
@@ -671,6 +690,27 @@ export async function createNest(name: string, description?: string) {
 
 export async function deleteNest(nestId: string) {
   return request("/nests/" + nestId, { method: "DELETE" });
+}
+
+/** Put the nest away: hidden and read-only, nothing deleted. */
+export async function archiveNest(nestId: string) {
+  return request<{ archived: true }>("/nests/" + nestId + "/archive", {
+    method: "POST",
+  });
+}
+
+/** Bring an archived nest back exactly as it was. */
+export async function restoreNest(nestId: string) {
+  return request<{ restored: true }>("/nests/" + nestId + "/restore", {
+    method: "POST",
+  });
+}
+/** Pin/unpin this nest for the signed-in user. A pin is personal — it changes
+ *  nothing about the nest and nobody else sees it. */
+export async function setNestPinned(nestId: string, pinned: boolean) {
+  return request<{ pinned: boolean }>("/nests/" + nestId + "/pin", {
+    method: pinned ? "POST" : "DELETE",
+  });
 }
 
 export async function updateNest(
@@ -693,6 +733,12 @@ export interface ImportedFile {
  *  request-size limits (and gave no usable error when it did); ~4MB chunks stay
  *  well under every hop's ceiling and each one reports its own HTTP status. */
 const IMPORT_CHUNK_BYTES = 4 * 1024 * 1024;
+
+/** Biggest single file an import request can carry. A file over the chunk
+ *  budget cannot be split, so it used to ship alone in one oversized body and
+ *  the server answered 413 — failing the WHOLE import, not just that file.
+ *  Under the server's MAX_BODY_BYTES (10MB) with room for JSON escaping. */
+const IMPORT_FILE_MAX_BYTES = 8 * 1024 * 1024;
 
 /** Import a folder the user picked in their browser. The browser reads the
  *  folder and uploads each file; the server writes them into the workspace.
@@ -719,10 +765,17 @@ export async function importNest(
   // batching exists to avoid.
   const encoder = new TextEncoder();
   const chunks: ImportedFile[][] = [];
+  const oversized: string[] = [];
   let cur: ImportedFile[] = [];
   let curBytes = 0;
   for (const f of files) {
     const size = encoder.encode(f.path).length + encoder.encode(f.content ?? "").length;
+    // Too big to travel in any request. Reported like a server-side rejection
+    // instead of sent, so one huge file no longer 413s the whole import.
+    if (size > IMPORT_FILE_MAX_BYTES) {
+      oversized.push(f.path);
+      continue;
+    }
     // A single file over budget still goes alone rather than being split.
     if (cur.length && curBytes + size > IMPORT_CHUNK_BYTES) {
       chunks.push(cur);
@@ -737,7 +790,7 @@ export async function importNest(
   onProgress?.(0, files.length);
   // Files the server refused (an unsafe path), gathered across every chunk so
   // the caller can report a partial import honestly instead of a clean one.
-  const rejected: string[] = [];
+  const rejected: string[] = [...oversized];
   const first = await request<{ nest: any; documents?: number; rejected?: string[] }>(
     "/nests/import",
     {
@@ -811,16 +864,47 @@ export async function deleteUnsyncedFolder(name: string) {
 export async function setNestVisibility(
   nestId: string,
   visibility: "private" | "public",
+  // Publishing (→ public) requires an explicit acknowledgement that the nest
+  // becomes readable by anyone on the internet, outside your organization.
+  // Without it the server returns 409 requires_acknowledgement. Going back to
+  // private needs no acknowledgement, so this is optional.
+  acknowledgePublic?: boolean,
 ) {
   return request<{ visibility: "private" | "public" }>(
     `/nests/${nestId}/visibility`,
-    { method: "PATCH", body: JSON.stringify({ visibility }) },
+    {
+      method: "PATCH",
+      body: JSON.stringify(
+        acknowledgePublic
+          ? { visibility, acknowledge_public: true }
+          : { visibility },
+      ),
+    },
+  );
+}
+
+// Configure Public Docs Reader Mode (superadmin-only). Either field may be sent
+// on its own; home_node: null clears the designated landing node.
+export async function setNestReaderMode(
+  nestId: string,
+  body: { enabled?: boolean; home_node?: string | null },
+) {
+  return request<{ reader_mode: number; reader_home_node: string | null }>(
+    `/nests/${nestId}/reader-mode`,
+    { method: "PATCH", body: JSON.stringify(body) },
   );
 }
 
 export async function getNest(nestId: string) {
   return request<{
-    nest: { id: string; name: string; visibility: "private" | "public" };
+    nest: {
+      id: string;
+      name: string;
+      visibility: "private" | "public";
+      // Public Docs Reader Mode fields — surfaced straight off the SELECT *.
+      reader_mode?: number;
+      reader_home_node?: string | null;
+    };
     permission: string;
     // Caller's merged effective roles (collaborator + steward), nest-wide.
     roles?: Array<"owner" | "admin" | "editor" | "reviewer" | "viewer">;
@@ -1178,7 +1262,7 @@ export interface DeletionRequest {
   id: string;
   /** Node id, folder path, or nest id — see targetType. */
   nodeId: string;
-  targetType?: "document" | "folder" | "nest";
+  targetType?: "document" | "folder" | "nest" | "nest_archive";
   title?: string;
   requestedBy: string;
   reason: string;
@@ -1207,10 +1291,12 @@ export async function deleteFolder(nestId: string, folder: string) {
   );
 }
 
-/** Flag a whole folder ("api/limits") or the nest itself for deletion. */
+/** Flag a whole folder ("api/limits") or the nest itself. "nest_archive" asks
+ *  for the nest to be archived rather than destroyed — same queue, same
+ *  reviewers, different outcome when it is honoured. */
 export async function requestTargetDeletion(
   nestId: string,
-  targetType: "folder" | "nest",
+  targetType: "folder" | "nest" | "nest_archive",
   target: string,
   reason: string,
 ) {
@@ -1252,6 +1338,22 @@ export async function declineDeletionRequest(
 export async function withdrawDeletionRequest(nestId: string, id: string) {
   return request<{ withdrawn: boolean; request: DeletionRequest }>(
     `/nests/${nestId}/deletion-requests/${id}/withdraw`,
+    { method: "POST" },
+  );
+}
+
+/** Create a folder with nothing in it — no placeholder document. */
+export async function createFolder(nestId: string, folder: string) {
+  return request<{ folder: string }>(`/nests/${nestId}/folders`, {
+    method: "POST",
+    body: JSON.stringify({ folder }),
+  });
+}
+
+/** Withdraw your own pending review — the document returns to draft. */
+export async function cancelReview(nestId: string, nodeId: string) {
+  return request<{ review: unknown }>(
+    `/nests/${nestId}/nodes/${nodeId}/cancel-review`,
     { method: "POST" },
   );
 }
@@ -1373,6 +1475,28 @@ export async function rejectNode(
   });
 }
 
+/**
+ * Approve or reject several pending documents in one request. One call, not N,
+ * so the batch is bounded server-side and reported as one outcome — items can
+ * fail individually (not a steward for it, already resolved) while the rest
+ * still land.
+ */
+export async function bulkReview(
+  nestId: string,
+  action: "approve" | "reject",
+  nodeIds: string[],
+  note?: string,
+): Promise<{
+  succeeded: number;
+  failed: number;
+  results: Array<{ nodeId: string; ok: boolean; error?: string }>;
+}> {
+  return request(`/nests/${nestId}/review-queue/bulk`, {
+    method: "POST",
+    body: JSON.stringify({ action, nodeIds, note }),
+  });
+}
+
 // Steward/editor reverts a node to an earlier version (writes its content as
 // a new version; history is preserved).
 export async function revertToVersion(
@@ -1469,7 +1593,11 @@ export function hostedArtifactUrl(
   if (version != null) params.set("v", String(version));
   if (cacheBust != null) params.set("_", String(cacheBust));
   const qs = params.toString();
-  return `${API_BASE}/nests/${nestId}/nodes/${nodeId}/hosted${qs ? `?${qs}` : ""}`;
+  // The route already lives under /nodes, and a node id carries its own
+  // `nodes/` prefix — emitting both produced …/nodes/nodes/<slug>/hosted. The
+  // server accepts either spelling; this one says the segment once.
+  const path = nodeId.replace(/^nodes\//, "");
+  return `${API_BASE}/nests/${nestId}/nodes/${path}/hosted${qs ? `?${qs}` : ""}`;
 }
 
 /**
@@ -1737,10 +1865,80 @@ export async function rejectExternalEdit(
   );
 }
 
+// ─── Publish (gated public hosting of one document at /p/<slug>) ─────────
+
+export type PublishMode = "public" | "email" | "code" | "invite";
+
+export interface Publication {
+  id: string;
+  slug: string;
+  node_id: string;
+  access_mode: PublishMode;
+  comments_enabled: boolean;
+  watermark: boolean;
+  no_download: boolean;
+  created_at: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  link?: string;
+}
+
+export interface PublicationView {
+  email: string | null;
+  created_at: string;
+}
+
+export async function listPublications(nestId: string) {
+  return request<{ count: number; publishes: Publication[] }>(
+    `/nests/${nestId}/publications`,
+  );
+}
+
+export async function createPublication(
+  nestId: string,
+  data: {
+    node_id: string;
+    access_mode: PublishMode;
+    comments_enabled?: boolean;
+    watermark?: boolean;
+    no_download?: boolean;
+    code?: string | null;
+    allowlist?: string[];
+    expires_at?: string | null;
+  },
+) {
+  return request<{ publish: Publication; link: string }>(
+    `/nests/${nestId}/publications`,
+    { method: "POST", body: JSON.stringify(data) },
+  );
+}
+
+export async function listPublicationViews(nestId: string, publishId: string) {
+  return request<{ count: number; views: PublicationView[] }>(
+    `/nests/${nestId}/publications/${publishId}/views`,
+  );
+}
+
+export async function revokePublication(nestId: string, publishId: string) {
+  return request<{ revoked: boolean }>(`/nests/${nestId}/publications/${publishId}`, {
+    method: "DELETE",
+  });
+}
+
 // ─── Sharing ────────────────────────────────────────────────────────────
 
 export async function listCollaborators(nestId: string) {
-  return request<{ collaborators: any[] }>(`/nests/${nestId}/collaborators`);
+  // `collaborators` is the manageable roster; `people` is everyone who can
+  // reach the nest (owner, shared teams, stewards, grant holders included) —
+  // what the editor's @mention picker offers and validates against.
+  return request<{
+    collaborators: any[];
+    people?: Array<{
+      email: string;
+      name: string | null;
+      source: "owner" | "collaborator" | "team" | "steward" | "grant";
+    }>;
+  }>(`/nests/${nestId}/collaborators`);
 }
 
 export async function addCollaborator(
@@ -2111,14 +2309,44 @@ export interface MyDraft {
   updated_at: string;
 }
 
-export async function getMyDrafts(opts?: { limit?: number; offset?: number }) {
+export async function getMyDrafts(opts?: {
+  limit?: number;
+  offset?: number;
+  /** Matched against title, nest name and node id. */
+  q?: string;
+  sort?: "updated" | "title";
+}) {
   const q = new URLSearchParams();
   if (opts?.limit != null) q.set("limit", String(opts.limit));
   if (opts?.offset != null) q.set("offset", String(opts.offset));
+  if (opts?.q) q.set("q", opts.q);
+  if (opts?.sort && opts.sort !== "updated") q.set("sort", opts.sort);
   const qs = q.toString();
   return request<{ drafts: MyDraft[]; pagination: WorkPagination }>(
     `/me/drafts${qs ? `?${qs}` : ""}`,
   );
+}
+
+/**
+ * Throw away the unreviewed work on a node. A document that was published
+ * before goes back to that version; one that never was is deleted outright —
+ * `deleted` says which happened.
+ *
+ * Clearing the locally parked draft is part of the operation, not something
+ * callers remember to do. Those edits describe a body the server no longer
+ * holds, and the editor re-applies a parked draft whenever its `baseVersion`
+ * matches the version it just loaded — which a discard can walk the document
+ * straight back onto, resurrecting the edits the user just threw away. Doing it
+ * here means every entry point (My Drafts, the version panel, the editor's own
+ * button) is covered by construction.
+ */
+export async function discardDraft(nestId: string, nodeId: string) {
+  const res = await request<{ ok: true; deleted: boolean; version: number | null }>(
+    `/nests/${nestId}/nodes/${nodeId}/discard`,
+    { method: "POST" },
+  );
+  clearDraft(nestId, nodeId);
+  return res;
 }
 
 export async function approveReview(nestId: string, nodeId: string, note?: string) {

@@ -182,7 +182,16 @@ const CASES: Case[] = [
     args: { query: "deal" },
     catalog: "context_search",
     // No `score`: this is a term-containment filter, not a ranked search, and
-    // the catalog makes score optional. Conforms as-is.
+    // the catalog makes score optional.
+    allowed: {
+      "unknown_key at count":
+        "the total number of hits, of which `results` is the first `limit` " +
+        "(default 20). REST GET /search reports the same `count`; without it " +
+        "a capped page reads as the whole answer. The catalog input already " +
+        "takes `limit`, so the output needs the total — proposed upstream as " +
+        "PromptOwl/ContextNest#103; drop this entry once the pinned engine " +
+        "ships it.",
+    },
   },
   {
     tool: "context_query",
@@ -197,28 +206,10 @@ const CASES: Case[] = [
     tool: "context_versions",
     args: { title: "Conformance Doc" },
     catalog: "context_versions",
-    allowed: {
-      "invalid_type(undefined) at keyframe_interval":
-        "there is no keyframe+diff model here — version bodies live on disk and " +
-        "in the DB, not as keyframes plus diffs. The catalog makes this REQUIRED. " +
-        "GENUINE DISAGREEMENT — either the catalog relaxes it or this server " +
-        "grows a keyframe model; a faked constant would be a lie.",
-      "invalid_type(undefined) at versions[].keyframe":
-        "same missing model — no version here is a keyframe.",
-      "invalid_type(undefined) at versions[].content_hash":
-        "the column exists but is conflict-detection state this tool has never " +
-        "served, and it is ungated. Required in the catalog.",
-      "invalid_type(undefined) at versions[].chain_hash":
-        "integrity here is server-side, not a per-version hash chain. Required " +
-        "in the catalog.",
-      "unknown_key at approved_version":
-        "which version AI traffic is actually served — the community equivalent " +
-        "of the catalog's publish state, and the same fact the prose reports.",
-      "unknown_key at versions[].status":
-        "per-version lifecycle state (draft/pending/published). The catalog " +
-        "models publication as `published_at`, which this server has no " +
-        "equivalent for; status is what it does have.",
-    },
+    // Was the one case with a long divergence list. Engine 2.4.0 closed all of
+    // it from the catalog side: `approved_version` and `versions[].status` are
+    // modelled now, and the keyframe/hash fields no longer read as required of
+    // a server without a keyframe+diff model. Conforms as-is.
   },
   {
     tool: "context_submit_review",

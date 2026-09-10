@@ -150,7 +150,7 @@ describe("public reader", () => {
     expect(edit.status).toBe(200);
 
     const vis = await jsonRequest(app, "PATCH", `/nests/${pubNest}/visibility`,
-      { visibility: "public" }, alice.apiKey);
+      { visibility: "public", acknowledge_public: true }, alice.apiKey);
     expect(vis.status).toBe(200);
 
     // Guard the setup: Bob must actually be a collaborator on this doc, or

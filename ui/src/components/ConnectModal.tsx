@@ -49,6 +49,7 @@ import {
   nestChatPrompt,
   nestSetupPrompt,
   envFileContents,
+  ctxCliConnectSnippet,
 } from "../lib/connect";
 import { useAuth } from "../auth/AuthContext";
 
@@ -170,6 +171,19 @@ export function ConnectModal({
   // into one markdown payload with a trace (hops_used, nodes_traversed).
   const curlContext = `curl -X POST ${serverUrl}/nests/${nestId}/context \\\n  -H "Content-Type: application/json"${authHeaderFlag} \\\n  -d '{"selector": "#gtm", "hops": 2, "max_tokens": 4000}'`;
   const curlNode = `curl "${serverUrl}/nests/${nestId}/nodes/nodes/<slug>?format=markdown"${authHeaderFlag}`;
+  // The ctx CLI (2.2+) reads a hosted nest through this same MCP endpoint once
+  // it is registered as a vault alias. Key-free: `--bearer-env` names the env
+  // var ctx reads the key from, the same one the downloadable .env sets.
+  const ctxAliasSnippet = ctxCliConnectSnippet(
+    serverUrl,
+    nestId,
+    nestName,
+    showOpenModeBanner,
+  );
+  // Same rule for push: the key travels in the environment, never on argv.
+  const ctxPush = showOpenModeBanner
+    ? `ctx push --server ${serverUrl} --nest ${nestId}`
+    : `CONTEXTNEST_API_KEY=${KEY_PLACEHOLDER} ctx push --server ${serverUrl} --nest ${nestId}`;
 
   return (
     <>
@@ -429,6 +443,11 @@ export function ConnectModal({
                       value={`Bearer ${KEY_PLACEHOLDER}`}
                     />
                   )}
+                  <Snippet
+                    label={`From the ctx CLI (2.2+)${showOpenModeBanner ? "" : " — export CONTEXTNEST_API_KEY first"}`}
+                    value={ctxAliasSnippet}
+                    multiline
+                  />
                 </div>
                 <div className="text-xs text-muted-foreground space-y-2">
                   <p className="font-medium">Available tools:</p>
@@ -537,31 +556,43 @@ export function ConnectModal({
               <TabsContent value="cli" className="space-y-4 pt-4">
                 <div>
                   <p className="text-sm mb-3">
-                    Push a local vault into this nest with the{" "}
+                    Read this nest from the shell, or push a local vault into
+                    it, with the{" "}
                     <code className="text-xs bg-muted px-1 py-0.5 rounded">
                       ctx
                     </code>{" "}
-                    CLI:
+                    CLI
+                    {!showOpenModeBanner && (
+                      <>
+                        {" "}
+                        (export{" "}
+                        <code className="text-[11px] bg-muted px-1 rounded">
+                          CONTEXTNEST_API_KEY
+                        </code>{" "}
+                        first — the key never goes on the command line)
+                      </>
+                    )}
+                    :
                   </p>
                   <Snippet
                     label="Install"
                     value="npm i -g @promptowl/contextnest-cli"
                   />
                   <Snippet
-                    label="Push this vault"
-                    value={
-                      showOpenModeBanner
-                        ? `ctx push --server ${serverUrl} --nest ${nestId}`
-                        : `ctx push --server ${serverUrl} --nest ${nestId} --key ${KEY_PLACEHOLDER}`
-                    }
+                    label="Register this nest as a vault alias, then query it"
+                    value={ctxAliasSnippet}
                     multiline
                   />
+                  <Snippet label="Push a local vault into this nest" value={ctxPush} multiline />
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Only <code className="text-[10px]">ctx push</code> talks to a
-                  remote server; other <code className="text-[10px]">ctx</code>{" "}
-                  commands operate on your local vault. Full CLI reference lives
-                  in the ContextNest docs.
+                  <code className="text-[10px]">query</code>,{" "}
+                  <code className="text-[10px]">read</code>,{" "}
+                  <code className="text-[10px]">list</code> and{" "}
+                  <code className="text-[10px]">search</code> accept{" "}
+                  <code className="text-[10px]">--vault &lt;alias&gt;</code>{" "}
+                  once the alias exists (ctx 2.2+). Full CLI reference lives in
+                  the ContextNest docs.
                 </p>
               </TabsContent>
 

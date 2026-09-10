@@ -11,7 +11,7 @@ import {
   createTestApp,
   jsonRequest,
 } from "./helpers";
-import { normalizeHops } from "../src/mcp/tools";
+import { normalizeHops, normalizeSearchLimit } from "../src/mcp/tools";
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -242,6 +242,29 @@ describe("normalizeHops", () => {
     expect(normalizeHops(1.9)).toBe(1);
     expect(normalizeHops(-3)).toBe(0);
     expect(normalizeHops(999999)).toBe(10); // MAX_HOPS
+  });
+});
+
+describe("normalizeSearchLimit", () => {
+  it("keeps a sane positive integer", () => {
+    expect(normalizeSearchLimit(1)).toBe(1);
+    expect(normalizeSearchLimit(50)).toBe(50);
+    expect(normalizeSearchLimit(200)).toBe(200);
+  });
+
+  it("defaults for missing, negative, zero or non-numeric input", () => {
+    expect(normalizeSearchLimit(undefined)).toBe(20);
+    expect(normalizeSearchLimit(null)).toBe(20);
+    expect(normalizeSearchLimit(-1)).toBe(20);
+    expect(normalizeSearchLimit(0)).toBe(20);
+    expect(normalizeSearchLimit("abc")).toBe(20);
+    expect(normalizeSearchLimit(NaN)).toBe(20);
+  });
+
+  it("floors fractions and caps at the maximum", () => {
+    expect(normalizeSearchLimit(1.7)).toBe(1);
+    expect(normalizeSearchLimit("7")).toBe(7);
+    expect(normalizeSearchLimit(9999)).toBe(200);
   });
 });
 
@@ -548,6 +571,7 @@ describe("MCP tools/call — structuredContent", () => {
       },
     ]);
     expect(r.structuredContent.results).toHaveLength(1);
+    expect(r.structuredContent.count).toBe(1);
     expect(r.structuredContent.results[0].id).toBe("nodes/pricing-sheet");
     expect(r.structuredContent.results[0].title).toBe("Pricing Sheet");
 
@@ -555,7 +579,7 @@ describe("MCP tools/call — structuredContent", () => {
     expect(miss.content).toEqual([
       { type: "text", text: 'No nodes matched search: "nonexistentxyz"' },
     ]);
-    expect(miss.structuredContent).toEqual({ results: [] });
+    expect(miss.structuredContent).toEqual({ results: [], count: 0 });
   });
 
   it("context_query: documents[] + traversal alongside the prose", async () => {

@@ -41,6 +41,7 @@ import { isServerAdminUserId } from "../shared/access.js";
 import { tryConsume, isLimited, recordFailure, clear } from "../shared/rate-limit.js";
 import { verifySsoTicket, isValidTicketSub } from "./sso-token.js";
 import { oidcRoutes } from "./oidc.js";
+import { handleTokenExchange } from "./token-exchange.js";
 import { clientIp } from "../shared/request-ip.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { sendEmailToRecipient } from "../notify/email.js";
@@ -268,6 +269,12 @@ export const authRoutes = new Hono<AuthEnv>();
 // GET /auth/oidc/login + GET /auth/oidc/callback. Separate from the PromptOwl
 // ticket flow at GET /auth/sso below. See src/auth/oidc.ts.
 authRoutes.route("/oidc", oidcRoutes);
+
+// POST /auth/token-exchange — RFC-8693-style: an IdP (Entra/Google) ID token for
+// an already-authenticated user → a short-lived scoped MCP bearer, no second
+// login. Unauthenticated (the subject_token IS the credential). Feature-flagged
+// OFF. See src/auth/token-exchange.ts.
+authRoutes.post("/token-exchange", handleTokenExchange);
 
 // POST /auth/register
 //
@@ -1108,6 +1115,15 @@ authRoutes.delete("/users/:userId", async (c) => {
       target.id,
     ]);
     await tx.run("DELETE FROM api_keys WHERE user_id = ?", [target.id]);
+    // Pins cascade on user_id, but stay explicit like the rows above — and a
+    // database created by an earlier build of migration 039 has the FK without
+    // the cascade, where this delete is the only thing standing between an
+    // admin and a failed account removal.
+    try {
+      await tx.run("DELETE FROM nest_pins WHERE user_id = ?", [target.id]);
+    } catch {
+      // Table not present on a DB predating the pins migration.
+    }
     await tx.run("DELETE FROM users WHERE id = ?", [target.id]);
   });
   await deleteAllSessionsForUser(target.id);

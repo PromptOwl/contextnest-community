@@ -34,7 +34,12 @@ export interface GrantRow {
 
 const rank = (r: GrantRole): number => (r === "write" ? 2 : 1);
 
-/** Highest grant role the user holds over `nodeId` in this nest, or null. */
+/** Highest grant role the user holds over `nodeId` in this nest, or null.
+ *  An archived nest is read-only for everyone, so a `write` grant reads back
+ *  as `read` there — the same cap resolveNestAccess puts on nest permission.
+ *  It has to land here: a grantee has no collaborator row for that cap to
+ *  clamp, and every grant path (middleware, canRequestDeletion, myGrant)
+ *  routes through this one resolver. */
 export async function resolveNodeGrant(
   nestId: string,
   userId: string,
@@ -42,15 +47,23 @@ export async function resolveNodeGrant(
 ): Promise<GrantRole | null> {
   if (!userId || !nodeId) return null;
   const rows = (await getDb().all(
-    "SELECT target, role FROM grants WHERE nest_id = ? AND user_id = ?",
+    `SELECT g.target, g.role, n.archived_at
+       FROM grants g
+       JOIN nests n ON n.id = g.nest_id
+      WHERE g.nest_id = ? AND g.user_id = ?`,
     [nestId, userId],
-  )) as Array<{ target: string; role: GrantRole }>;
+  )) as Array<{
+    target: string;
+    role: GrantRole;
+    archived_at: string | null;
+  }>;
   let best: GrantRole | null = null;
   for (const r of rows) {
     if (nodeId === r.target || nodeId.startsWith(r.target + "/")) {
       if (!best || rank(r.role) > rank(best)) best = r.role;
     }
   }
+  if (best === "write" && rows[0]?.archived_at) return "read";
   return best;
 }
 

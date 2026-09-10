@@ -9,11 +9,14 @@ import {
   isRejected,
   filterDocuments,
   DocumentNotFoundError,
+  NODE_TYPES,
+  TAG_PATTERN,
+  generateIndexMd,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
-import { rename, mkdir } from "node:fs/promises";
+import { rename, mkdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { safePublishDocument, serializeNodeSafe } from "../governance/safe-publish.js";
+import { serializeNodeSafe } from "../governance/safe-publish.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import {
@@ -23,6 +26,8 @@ import {
   ValidationError,
   ConflictError,
   ForbiddenError,
+  VaultBusyError,
+  isVaultLockTimeout,
 } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
@@ -35,6 +40,7 @@ import {
 } from "../nests/service.js";
 import { isPrimeDocument, documentPrimeFlag } from "../governance/prime-service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
+import { notifyMentions } from "../governance/mention-notify.js";
 import { resolveUserRoles } from "../governance/stewardship-service.js";
 import { canApproveWith } from "../governance/roles.js";
 import {
@@ -71,7 +77,39 @@ async function userIdFromEmail(email: string): Promise<string> {
   return row?.id ?? ANON_USER_ID;
 }
 
-const normalizeTag = (t: string) => (t.startsWith("#") ? t : `#${t}`);
+/** Tag as stored: "#" + bare + lowercased. Casing is folded here so the tag a
+ *  document carries keys the same as the one the tag index, facets and steward
+ *  scopes resolve by — "GTM" and "gtm" are one tag, not two. Named apart from
+ *  the tag index's `normalizeTag` (which yields the bare key) because the two
+ *  differ by exactly that "#" and a shared name invites the wrong one. */
+const storedTag = (t: string) =>
+  `#${String(t).trim().replace(/^#+/, "").toLowerCase()}`;
+
+/**
+ * The same, for caller-supplied tags: anything the ENGINE's TAG_PATTERN
+ * refuses is a 400 here. Otherwise it fails deep inside the engine write and
+ * reaches the user as "Something went wrong on the server", losing the
+ * unsaved document with it (a `café` tag did exactly that).
+ */
+function requireTag(raw: string): string {
+  const tag = storedTag(raw);
+  if (!TAG_PATTERN.test(tag)) {
+    throw new ValidationError(
+      `"${String(raw).trim()}" isn't a usable tag — a tag starts with a letter ` +
+        `and is built from letters a-z, digits, "_", ":" and "-".`,
+    );
+  }
+  return tag;
+}
+
+/** Caller-supplied tag list: blanks dropped, each validated, deduped. */
+function requireTags(raw: readonly unknown[] | undefined): string[] {
+  const tags = (raw || [])
+    .map((t) => String(t).trim())
+    .filter(Boolean)
+    .map(requireTag);
+  return [...new Set(tags)];
+}
 
 /** Result shape of the engine's `context_import` operation. A failed entry
  *  carries `id` (ids[] mode) or `title` (documents[] mode), never both. */
@@ -260,7 +298,7 @@ async function departmentTagFor(userEmail: string): Promise<string | null> {
       [userEmail],
     )) as { department?: string | null } | undefined;
     const slug = slugify(String(row?.department ?? ""));
-    return slug ? normalizeTag(`dept:${slug}`) : null;
+    return slug ? storedTag(`dept:${slug}`) : null;
   } catch (err) {
     console.error("[dept-tag] department lookup failed (tag skipped):", err);
     return null;
@@ -285,6 +323,12 @@ function toSafeError(err: unknown, context: string, message: string): AppError {
     return new ConflictError(
       "This document is rejected. Change its status before saving.",
     );
+  }
+  // Vault write-lock timeout is retryable state, not an internal fault —
+  // keep it as a 503 the caller can act on instead of a generic 500.
+  if (isVaultLockTimeout(err)) {
+    console.error(`${context}:`, err);
+    return new VaultBusyError();
   }
   console.error(`${context}:`, err);
   return new AppError(500, message);
@@ -332,6 +376,20 @@ export function isRunnableType(type: string | undefined): boolean {
   return (RUNNABLE_NODE_TYPES as readonly string[]).includes(type || "");
 }
 
+/**
+ * Node types this server accepts on create: the engine's core NODE_TYPES plus
+ * the community extensions (agent/skill runnables, artifact, table). Anything
+ * outside this set is rejected with a 400 at the create choke point below —
+ * previously an unknown type slipped past here and surfaced as an opaque 500
+ * from deeper in the write path.
+ */
+export const ACCEPTED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
+  ...NODE_TYPES,
+  ...RUNNABLE_NODE_TYPES,
+  "artifact",
+  "table",
+]);
+
 export function toNodeResponse(node: ContextNode): NodeResponse {
   const fm = node.frontmatter;
   // Coerce string-ish fields. YAML parses bare values by type, so a
@@ -340,7 +398,20 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
   // boundary so every surface (editor, list search, MCP) gets strings.
   const title =
     fm.title === undefined || fm.title === null ? "" : String(fm.title);
-  const tags = Array.isArray(fm.tags) ? fm.tags.map((t) => String(t)) : [];
+  // Normalized and deduped on the way out, so every surface sees one tag set:
+  // a card showing "#GTM" and "#gtm" while the editor (which keys tags
+  // case-insensitively) showed a single "gtm" was the same document described
+  // two ways.
+  const tags = Array.isArray(fm.tags)
+    ? [
+        ...new Set(
+          fm.tags
+            .map((t) => String(t).trim())
+            .filter(Boolean)
+            .map(storedTag),
+        ),
+      ]
+    : [];
   return {
     id: node.id,
     title,
@@ -470,10 +541,27 @@ function engineScopesFolders(): boolean {
   return folderScopeSupported;
 }
 
+/**
+ * A node the annotations projection maintains on the artifact's behalf, not one
+ * a user authored. It stays a real vault node (that is how an agent picks the
+ * feedback up on the next iteration), but every user-facing surface — listings,
+ * counts, board, graph, search, tag facets — leaves it out, so commenting on an
+ * artifact doesn't silently grow the nest's document count.
+ *
+ * Mirrors `derivedAnnotationsId` in annotations/service.ts; importing it would
+ * close the annotations→nodes import cycle.
+ */
+export function isDerivedAnnotationsNode(id: string): boolean {
+  return id.endsWith("--annotations");
+}
+
 export interface ListNodesFilters {
   /** One type, or several (e.g. runnable types) to keep. */
   type?: string | readonly string[];
   tag?: string;
+  /** Keep the derived `— Annotations` nodes in the result. Off for the UI,
+   *  which never asked for them; on for MCP, whose agents read them. */
+  includeDerived?: boolean;
   /** Lifecycle status; aliases normalized. Retired nodes stay hidden without it. */
   status?: string;
   /**
@@ -615,12 +703,18 @@ export async function listNodesForCaller(
   // retired node stays in this listing: here it is an unpublished document its
   // stewards may still need to act on, not one removed from retrieval. An
   // imported vault carrying `status: rejected` registers exactly that way.
-  const frontmatterFilters = {
+  //
+  // Split in two because the operation and `filterDocuments` spell the same
+  // flag differently: the op takes `include_retired`, the function takes
+  // `includeRetired`. Sending both used to be harmless (zod stripped the
+  // stranger); since engine 2.4.0 an unrecognized parameter is a hard error,
+  // so only `listFilters` may reach the op.
+  const listFilters = {
     ...(filters.type ? { type: filters.type } : {}),
     ...(filters.tag ? { tag: filters.tag } : {}),
     ...(filters.status ? { status: filters.status } : {}),
-    includeRetired: true,
   };
+  const frontmatterFilters = { ...listFilters, includeRetired: true };
 
   let documents: Array<{
     id: string;
@@ -645,7 +739,7 @@ export async function listNodesForCaller(
     }>(
       "context_list",
       {
-        ...frontmatterFilters,
+        ...listFilters,
         include_retired: true,
         ...(scopeInEngine
           ? {
@@ -665,7 +759,15 @@ export async function listNodesForCaller(
       nestId,
       filters.folder !== undefined ? { folder: filters.folder } : {},
     );
-    documents = filterDocuments(indexed, frontmatterFilters);
+    documents = filterDocuments(indexed, {
+      ...frontmatterFilters,
+      includeRetired: true,
+    });
+  }
+  // Derived annotation projections are machine-maintained, not documents the
+  // caller wrote — keep them out of every listing that isn't MCP's.
+  if (!filters.includeDerived) {
+    documents = documents.filter((d) => !isDerivedAnnotationsNode(d.id));
   }
   // Narrow BEFORE the access gate and enrichment below — that is the whole
   // saving, since both cost per surviving document. Still applied even when
@@ -842,12 +944,77 @@ function withSubtreeTotals(
 }
 
 /**
- * The nest's folders, WITHOUT touching the vault.
+ * Create a folder with nothing in it.
  *
- * A navigable tree only needs the folder each document sits in, which the DB
- * mirror stores as a column — so this is one GROUP BY rather than a directory
- * walk (`context_folders`) or a full crawl (the id-derived fallback it used
- * before), and it stays correct on a nest the process has never opened.
+ * A folder is a real directory in the vault, so making one means creating that
+ * directory — not seeding a placeholder document, which is what "New folder"
+ * used to do and which then counted as content everywhere (CU-wdqcpzzzut).
+ *
+ * The directory is created by writing the folder's INDEX.md, the same derived
+ * summary `regenerateIndex` maintains for every other folder: it mkdir -p's on
+ * the way in, discovery skips it (DERIVED_VAULT_FILES), and a regeneration
+ * only ever rewrites index files — it never prunes one. Returns the slugified
+ * path actually created.
+ */
+export async function createEmptyFolder(
+  nestId: string,
+  folder: string,
+): Promise<string> {
+  const segments = folderToSegments(folder);
+  if (segments.length === 0) {
+    throw new ValidationError("folder is required");
+  }
+  const path = segments.join("/");
+  const prefix = await storagePrefix(nestId);
+  const vaultPath = prefix ? `${prefix}/${path}` : path;
+  // Already a folder: writing the index again would replace a real summary
+  // with an empty one until the next regeneration. Creating what exists is a
+  // no-op, not an error — a retry of the same name should be harmless.
+  if (await vaultFolderExists(nestId, path)) return path;
+  const title = segments[segments.length - 1]!
+    .replace(/-/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+  const { storage } = await engineCache.get(nestId);
+  await storage.writeIndexMd(vaultPath, generateIndexMd(vaultPath, title, []));
+  return path;
+}
+
+/**
+ * Folder paths that exist in the vault as directories, community-dialect
+ * (no `nodes/` prefix). Directory entries only — no document is opened.
+ *
+ * The DB mirror derives folders from the documents in them, so a folder
+ * holding nothing is invisible to it. This is how an empty one is still a
+ * folder (CU-wdqcpzzzut): it is a real directory on disk either way.
+ */
+async function vaultFolderPaths(
+  nestId: string,
+  opts: { folder?: string; recursive?: boolean } = {},
+): Promise<string[]> {
+  const prefix = await storagePrefix(nestId);
+  const scope = [prefix, opts.folder].filter(Boolean).join("/");
+  const { storage } = await engineCache.get(nestId);
+  const entries = await storage.listFolders({
+    ...(scope ? { folder: scope } : {}),
+    ...(opts.recursive === false ? { recursive: false } : {}),
+  });
+  return entries
+    .map((e) =>
+      prefix && e.path.startsWith(`${prefix}/`)
+        ? e.path.slice(prefix.length + 1)
+        : e.path,
+    )
+    .filter(Boolean);
+}
+
+/**
+ * The nest's folders, from the DB mirror plus the vault's directory shape.
+ *
+ * Document counts come from the mirror, which stores each document's folder as
+ * a column — one GROUP BY rather than a full crawl (the id-derived fallback it
+ * used before), correct on a nest this process has never opened. Folders with
+ * no document of their own can only come from the vault, so a paths-only walk
+ * (no file is opened) fills those in at count 0.
  *
  * `folder` is a community folder path ("" = nest root), NOT an id prefix; the
  * `nodes/` storage root is added here so callers keep speaking one dialect.
@@ -863,6 +1030,9 @@ export async function listNestFolders(
   if (opts.folder !== undefined) assertSafeFolder(opts.folder);
   await ensureNodeIndex(nestId);
   const counts = new Map<string, number>();
+  // Directories first, so a folder holding nothing is still a folder; the
+  // mirror's counts below win wherever it knows the folder.
+  for (const path of await vaultFolderPaths(nestId, opts)) counts.set(path, 0);
   for (const { path, count } of await indexedFolderCounts(nestId)) {
     counts.set(path, count);
     // Ancestors with no document of their own still need a row — a level that
@@ -922,7 +1092,11 @@ export async function nestCensus(
   // nest on every mount — the single most expensive thing the page did, and
   // the one the lazy per-folder loading could not avoid.
   await ensureNodeIndex(nestId);
-  const documents = await readIndexedNodes(nestId);
+  // Same exclusion as the listing — the counts must describe the documents the
+  // Documents tab shows, not those plus the annotation projections.
+  const documents = (await readIndexedNodes(nestId)).filter(
+    (d) => !isDerivedAnnotationsNode(d.id),
+  );
 
   // Same gate as the listing, so the counts describe what this caller can
   // actually reach rather than what is on disk.
@@ -937,7 +1111,11 @@ export async function nestCensus(
   for (const d of visible) {
     const fm = d.frontmatter;
     types[fm.type || "document"] = (types[fm.type || "document"] || 0) + 1;
-    for (const t of fm.tags || []) tags[String(t)] = (tags[String(t)] || 0) + 1;
+    // Keyed by the normalized tag, because the filter a facet chip applies
+    // matches case-insensitively: counting "#GTM" and "#gtm" apart put a "2"
+    // on a chip that then returned 3 documents.
+    for (const t of new Set((fm.tags || []).map((t) => storedTag(String(t)))))
+      tags[t] = (tags[t] || 0) + 1;
     const folder = folderOfId(d.id);
     if (folder) direct.set(folder, (direct.get(folder) || 0) + 1);
     const edited = Date.parse(String(fm.updated_at || ""));
@@ -951,6 +1129,12 @@ export async function nestCensus(
     const segs = folder.split("/");
     for (let i = 1; i <= segs.length; i++) paths.add(segs.slice(0, i).join("/"));
   }
+  // Folders holding no document — same vault walk listNestFolders merges, and
+  // like that endpoint the tree itself is the whole nest's shape: counts stay
+  // caller-scoped, but a folder is listed whether or not this caller can reach
+  // a document in it (the nest middleware already withholds both routes from a
+  // share grantee, so the audience is the same either way).
+  for (const path of await vaultFolderPaths(nestId)) paths.add(path);
   // Same roll-up the folders endpoint uses — the two describe the same tree
   // and must not drift.
   const folders = withSubtreeTotals(
@@ -1011,7 +1195,12 @@ export async function listNodesForCallerByEmail(
   userEmail: string,
   filters: ListNodesFilters = {}
 ): Promise<NodeResponse[]> {
-  return listNodesForCaller(nestId, await userIdFromEmail(userEmail), filters);
+  // MCP is the agent surface the annotation projection exists for, so it keeps
+  // seeing those nodes unless a caller says otherwise.
+  return listNodesForCaller(nestId, await userIdFromEmail(userEmail), {
+    includeDerived: true,
+    ...filters,
+  });
 }
 
 export interface CreateNodeInput {
@@ -1154,7 +1343,7 @@ async function createNodeOnce(
   input: CreateNodeInput,
   userEmail: string
 ): Promise<NodeMutationResult> {
-  const { storage, versions: versionManager } = await engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
 
   assertTitleLength(input.title);
   assertTitleReadable(input.title);
@@ -1182,7 +1371,7 @@ async function createNodeOnce(
     // addresses. Generate one instead of refusing the title.
     id = `${prefix}${slug || (await generatedSlug(storage, prefix))}`;
   }
-  const tags = (input.tags || []).map(normalizeTag);
+  const tags = requireTags(input.tags);
 
   // Content-type toggles: creation of a disabled type is refused here — the
   // shared choke point for REST + MCP — so every surface gates identically.
@@ -1195,6 +1384,17 @@ async function createNodeOnce(
   }
   if (requestedType === "table" && !config.TYPE_TABLE_ENABLED) {
     throw new ValidationError("Table nodes are disabled on this server");
+  }
+
+  // Unknown types must fail as a clean 400 here — otherwise they slip through
+  // and throw an opaque 500 from deeper in the write path (the message gave a
+  // caller no idea the real problem was the `type` field).
+  if (!ACCEPTED_NODE_TYPES.has(requestedType)) {
+    throw new ValidationError(
+      `unknown node type "${requestedType}"; allowed: ${[...ACCEPTED_NODE_TYPES]
+        .sort()
+        .join(", ")}`,
+    );
   }
 
   if (input.schedule !== undefined && !isRunnableType(input.type)) {
@@ -1246,11 +1446,11 @@ async function createNodeOnce(
     }
 
     // Optional dept:<slug> auto-tag — after the validations above so a request
-    // that fails them never pays the DB lookup. Deduped case-insensitively
-    // against the user-supplied tags (normalizeTag keeps the user's casing, so
-    // "#Dept:Engineering" must still match the all-lowercase auto tag).
+    // that fails them never pays the DB lookup. Both sides are already folded
+    // to lower case by storedTag, so "#Dept:Engineering" and the auto tag are
+    // the same string and a plain match dedupes them.
     const deptTag = await departmentTagFor(userEmail);
-    if (deptTag && !tags.some((t) => t.toLowerCase() === deptTag)) {
+    if (deptTag && !tags.includes(deptTag)) {
       tags.push(deptTag);
     }
 
@@ -1331,16 +1531,9 @@ async function createNodeOnce(
       });
       await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
     } else {
-      // Seed the engine history only for a genuine draft. A publish that failed
-      // above already wrote history entries; re-seeding would graft a second
-      // chain onto them.
-      if (publishReason === null) {
-        try {
-          await versionManager.createVersion(node, userEmail);
-        } catch (err) {
-          console.error("VersionManager.createVersion failed (node create)", err);
-        }
-      }
+      // No history entry for a genuine draft — same rule as the draft branch of
+      // updateNode: the chain records releases, not unreviewed work. The first
+      // publish seals v1 of the chain from whatever the file says then.
       await versions.createVersion({
         nestId,
         nodeId: id,
@@ -1353,6 +1546,14 @@ async function createNodeOnce(
     }
 
     await trackEvent("node.create", { nestId, nodeId: id });
+    // Everything a new document mentions is new.
+    await notifyMentions({
+      nestId,
+      nodeId: id,
+      previousBody: "",
+      nextBody: node.body || "",
+      actorEmail: userEmail,
+    });
     return { node, version: savedVersion };
   });
 }
@@ -1511,7 +1712,7 @@ export async function registerImportedDocuments(
   // longer reconstructs) still registers — as a draft, at its own version, with
   // its history left untouched on disk. Losing the doc would be the worse loss.
   for (const d of docs) {
-    const tags = d.tags.map((t) => normalizeTag(String(t)));
+    const tags = d.tags.map((t) => storedTag(String(t)));
     await versions.createVersion({
       nestId,
       nodeId: d.id,
@@ -1570,6 +1771,9 @@ export async function updateNode(
       } catch {
         throw new NotFoundError(`Node not found: ${nodeId}`);
       }
+      // Kept for the mention fan-out at the end: only names this save ADDS
+      // notify, so the same @name surviving many saves is one event.
+      const previousBody = node.body || "";
 
       // Assemble the op's input alongside a local projection of the patched
       // node. The projection is what governance reads (auto-publish gate, tag
@@ -1588,7 +1792,7 @@ export async function updateNode(
         // save, so a union made removals impossible (CU: removed tag returns
         // after reopen). Callers wanting additive semantics (MCP
         // context_update) merge against the current tags themselves.
-        const nextTags = [...new Set(patch.tags.map(normalizeTag))];
+        const nextTags = requireTags(patch.tags);
         node = { ...node, frontmatter: { ...node.frontmatter, tags: nextTags } };
         // The engine performs the write, so the new set has to reach it — the
         // projection above only feeds the governance decisions below. It
@@ -1711,21 +1915,17 @@ export async function updateNode(
         node = await storage.readDocument(nodeId);
         await syncNodeTags(nestId, nodeId, currentTags);
 
-        // Persist to the engine history FIRST, then mirror into the DB. If the
-        // engine append fails (e.g. a broken diff chain), rethrow so we DON'T
-        // record a DB version the engine never stored — that silent swallow is
-        // what let node_versions drift ahead of history.yaml (DB v19 vs v15).
-        try {
-          await versionManager.createVersion(node, userEmail, {
-            note: patch.changeNote,
-          });
-        } catch (err) {
-          console.error(
-            "VersionManager.createVersion failed (node patch)",
-            err
-          );
-          throw err;
-        }
+        // A draft revision is NOT appended to the engine's history chain. That
+        // chain is append-only and hash-linked, so anything recorded in it can
+        // never be taken back — which is exactly why drafts used to be
+        // impossible to throw away, and why a drafting session left a keyframe
+        // or diff on disk per save. Unreviewed work now lives in the file (the
+        // working copy) plus the governance row below; only submitting or
+        // publishing seals a version. discardDraft is the other half.
+        //
+        // Only the newest draft row is kept: with no chain entry behind it, a
+        // superseded row describes bytes nothing can reconstruct.
+        await versions.deleteSupersededDrafts(nestId, nodeId, newVersion);
         await versions.createVersion({
           nestId,
           nodeId,
@@ -1788,6 +1988,16 @@ export async function updateNode(
         responseVersion = publishedVersion;
       }
 
+      // Awaited, like the other inbox fan-outs: it swallows its own failures,
+      // and a local insert is cheaper than a save that returns before it lands.
+      await notifyMentions({
+        nestId,
+        nodeId,
+        previousBody,
+        nextBody: node.body || "",
+        actorEmail: userEmail,
+      });
+
       return { node, version: responseVersion };
     } catch (err) {
       // One boundary: domain errors (NotFound/Locked/Validation) pass through
@@ -1813,7 +2023,7 @@ async function assertNotReviewLocked(
   nestId: string,
   nodeId: string,
   userEmail: string,
-  action: "moving" | "deleting",
+  action: "moving" | "deleting" | "discarding",
 ): Promise<void> {
   if (!(await isStewardshipEnabled(nestId))) return;
   if (!(await getPendingReview(nestId, nodeId))) return;
@@ -1853,6 +2063,10 @@ export const NODE_KEYED_TABLES = [
   // A live capability token bound to one agent node — deleting the agent must
   // revoke it, or a later node at that id answers the old webhook.
   ["trigger_hooks", "agent_node"],
+  // A live public link pinned to one node. Deleting the document must kill the
+  // link, and moving it must carry the link along — otherwise /p/<slug> serves
+  // whatever node next takes that id.
+  ["publish", "node_id"],
   ["edges", "from_node"],
   ["edges", "to_node"],
 ] as const;
@@ -1977,7 +2191,7 @@ export async function moveNode(
     // serializeNodeSafe, not serializeDocument: `moved` came from
     // readDocument, so an empty `tags: []` on disk is back as
     // `tags: undefined` and the YAML dumper throws on it. Only published docs
-    // are already clean (approve rewrites them through safePublishDocument),
+    // are already clean (approve rewrites them through serializeNodeSafe),
     // which is why drafts and pending-review docs were the ones failing.
     await storage.writeDocument(newId, serializeNodeSafe(moved));
 
@@ -2074,6 +2288,73 @@ export async function moveNode(
  * app.ts; MCP: the per-tool canUserEdit check). This function enforces only
  * the stewardship lock and does the cleanup.
  */
+/**
+ * Throw away the unreviewed work on a node and put the file back to its last
+ * sealed version.
+ *
+ * This is the other half of drafts staying out of the hash chain (see the draft
+ * branch of updateNode): nothing was appended, so nothing has to be unwound —
+ * restoring is a plain write of bytes the chain still holds, and the governance
+ * rows above the seal are simply dropped. `ctx verify` is unaffected either way.
+ *
+ * A node that was never published has no earlier state to fall back to, so
+ * discarding its draft means deleting the document — the same thing the "…" →
+ * Delete menu already did, one step instead of two.
+ */
+export async function discardDraft(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+): Promise<{ deleted: boolean; version: number | null }> {
+  return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
+    await assertNotReviewLocked(nestId, nodeId, userEmail, "discarding");
+
+    const sealed = await versions.getSealedVersion(nestId, nodeId);
+    if (sealed == null) {
+      await deleteNode(nestId, nodeId, userEmail);
+      return { deleted: true, version: null };
+    }
+
+    const { storage, versions: versionManager } = await engineCache.get(nestId);
+    let raw: string;
+    try {
+      raw = await versionManager.reconstructVersion(nodeId, sealed);
+    } catch (err) {
+      console.error(
+        "reconstructVersion failed (discard draft)",
+        nestId,
+        nodeId,
+        sealed,
+        err,
+      );
+      throw new ValidationError(
+        `Can't restore version ${sealed} of this document — its history no longer replays. Delete the document instead.`,
+      );
+    }
+
+    // Written back verbatim rather than patched through context_update: the
+    // reconstructed bytes carry the checksum they were published with, so the
+    // file matches its own frontmatter again and the drift scanner stays quiet.
+    // Same move rejectSuggestion makes, and for the same reason — a discard
+    // must not cost a version.
+    await storage.writeDocument(nodeId, raw);
+    await storage.regenerateIndex();
+
+    // Tags travel in frontmatter, so a draft that added or removed one has to
+    // be undone in the tag index too — steward resolution reads it.
+    const restored = parseDocument(`${nodeId}.md`, raw, nodeId);
+    await syncNodeTags(
+      nestId,
+      nodeId,
+      ((restored.frontmatter.tags as string[]) || []).map(storedTag),
+    );
+
+    await versions.deleteUnsealedVersions(nestId, nodeId, sealed);
+    await trackEvent("node.discard_draft", { nestId, nodeId, version: sealed });
+    return { deleted: false, version: sealed };
+  });
+}
+
 export async function deleteNode(
   nestId: string,
   nodeId: string,
@@ -2163,6 +2444,10 @@ export async function deleteFolder(
   const docs = await storage.discoverDocuments();
   const targets = docs.map((d) => d.id).filter((id) => isIdUnderFolder(id, rel));
   if (targets.length === 0) {
+    // A folder holding no document is still a directory in the vault (an
+    // explicitly created one, or the remains of a folder whose documents have
+    // all gone), so deleting it is removing that directory.
+    if (await removeVaultFolder(nestId, rel)) return [];
     throw new NotFoundError(`No documents found under folder: ${folder}`);
   }
 
@@ -2184,5 +2469,42 @@ export async function deleteFolder(
       );
     }
   }
+  // The documents are gone but the directory (and its generated INDEX.md) is
+  // not — and a directory is a folder now, so leaving it would keep the folder
+  // in the tree after the user deleted it.
+  await removeVaultFolder(nestId, rel);
   return deleted;
+}
+
+/**
+ * A folder's directory in the vault. `rel` is community-dialect and always
+ * slugified segments, so it cannot climb out of the nest.
+ */
+async function vaultFolderDir(nestId: string, rel: string): Promise<string> {
+  const prefix = await storagePrefix(nestId);
+  return join(
+    resolveNestPath(nestId),
+    ...(prefix ? [prefix] : []),
+    ...rel.split("/"),
+  );
+}
+
+/** Is this folder already a directory in the vault? */
+async function vaultFolderExists(nestId: string, rel: string): Promise<boolean> {
+  if (!rel) return false;
+  try {
+    return (await stat(await vaultFolderDir(nestId, rel))).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove a folder's directory from the vault. Returns false when there was no
+ * such directory.
+ */
+async function removeVaultFolder(nestId: string, rel: string): Promise<boolean> {
+  if (!(await vaultFolderExists(nestId, rel))) return false;
+  await rm(await vaultFolderDir(nestId, rel), { recursive: true, force: true });
+  return true;
 }

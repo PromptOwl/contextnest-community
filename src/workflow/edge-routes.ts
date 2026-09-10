@@ -22,6 +22,7 @@ import { ValidationError, NotFoundError, ConflictError } from "../shared/errors.
 import { safeJson } from "../shared/json.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
+import { nodeTrail } from "./flow-graph.js";
 import {
   requireWorkflowPlane,
   seedDefaultEdgeTypes,
@@ -129,7 +130,7 @@ export async function assertNoFlowCycle(
 ): Promise<void> {
   if (fromNode === toNode) {
     throw new ConflictError(
-      `cycle: ["${fromNode}","${toNode}"] — flow edges must form a DAG`,
+      `cycle: ${await nodeTrail(db, nestId, [fromNode])} cannot flow into itself`,
     );
   }
   const rows = (await db.all(
@@ -161,7 +162,7 @@ export async function assertNoFlowCycle(
       // then close the loop with the new edge fromNode→toNode.
       path.reverse().push(toNode);
       throw new ConflictError(
-        `cycle: ${JSON.stringify(path)} — flow edges must form a DAG`,
+        `cycle: ${await nodeTrail(db, nestId, path)} — flow edges must form a DAG`,
       );
     }
     for (const nb of adj.get(cur) ?? []) {

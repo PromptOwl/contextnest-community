@@ -7,6 +7,7 @@
 
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import { engineCache } from "./engine.js";
+import { isDerivedAnnotationsNode } from "./service.js";
 import { filterAccessible } from "../governance/access-guard.js";
 import { listStewards } from "../governance/stewardship-service.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
@@ -121,7 +122,11 @@ export async function buildNestGraph(
   canSeeIdentities: boolean,
 ): Promise<NestGraph> {
   const { storage } = await engineCache.get(nestId);
-  const docs: ContextNode[] = await storage.discoverDocuments();
+  // Derived annotation projections are machine-maintained, so they are not
+  // nodes of the ontology the graph draws.
+  const docs: ContextNode[] = (await storage.discoverDocuments()).filter(
+    (d) => !isDerivedAnnotationsNode(d.id),
+  );
   const accessible = await filterAccessible(nestId, userId, userEmail, docs);
 
   const idSet = new Set(accessible.map((d) => d.id));

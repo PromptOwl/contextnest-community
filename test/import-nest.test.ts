@@ -288,6 +288,27 @@ describe("import folder as nest (upload model)", () => {
     expect(second.data.nest.id).not.toBe(first.data.nest.id);
   });
 
+  it("refuses a re-import under a name already taken, with a name error", async () => {
+    const files = [mdFile("doc.md", "title: Doc\ntype: document", "body")];
+    const first = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Same Folder", files },
+      alice.apiKey,
+    );
+    const again = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Same Folder", files },
+      alice.apiKey,
+    );
+    expect(first.status).toBe(201);
+    expect(again.status).toBe(400);
+    expect(String(again.data.error)).toContain("already exists");
+  });
+
   it("ignores unsafe paths (traversal / absolute), keeps safe ones", async () => {
     const files = [
       { path: "../escape.md", content: "x" },
@@ -338,6 +359,11 @@ describe("imported vault: discovery + registration", () => {
     mdFile("CLAUDE.md", "title: Claude", "agent config"),
     mdFile("CONTEXT.md", "title: Context", "vault identity"),
     mdFile("INDEX.md", "title: Root Index", "root index"),
+    // Nested derived copies + a README: the engine excludes CONTEXT.md at the
+    // vault root only, and README.md nowhere, so these used to list as docs.
+    mdFile("engineering/CONTEXT.md", "title: Eng Context", "folder preamble"),
+    mdFile("engineering/GEMINI.md", "title: Eng Gemini", "agent config"),
+    mdFile("README.md", "title: Readme", "repo readme"),
     // Engine history — copied through, but skipped by discovery.
     mdFile(".versions/checking-approval-history/v1.md", "title: v1", "old version"),
   ];

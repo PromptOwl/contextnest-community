@@ -24,6 +24,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Checkbox } from "@/components/ui/checkbox";
 import { cn } from "@/lib/utils";
 import { parseServerDate } from "@/lib/dates";
 
@@ -71,6 +72,12 @@ interface ReviewQueueProps {
    *  rows. Omit entirely for the legacy changes-only queue rendering. */
   comments?: FeedComment[];
   onSelectComment?: (comment: FeedComment) => void;
+  /** Bulk mode. Pass both to put a checkbox on every reviewable change row;
+   *  omit them and the queue renders exactly as it did before. Only rows the
+   *  caller can actually review are selectable — the server refuses the rest
+   *  anyway, and offering them would promise an action that fails. */
+  selectedNodeIds?: Set<string>;
+  onToggleSelect?: (nodeId: string) => void;
 }
 
 const priorityConfig: Record<
@@ -107,6 +114,8 @@ export function ReviewQueue({
   onSelect,
   comments,
   onSelectComment,
+  selectedNodeIds,
+  onToggleSelect,
 }: ReviewQueueProps) {
   // Feed mode (comments provided, even if empty): interleave change rows and
   // comment rows newest-first. Legacy mode keeps the server's priority order
@@ -288,7 +297,18 @@ export function ReviewQueue({
                   key={request.id}
                   className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors group"
                   onClick={() => onSelect?.(request)}
+                  data-testid="review-queue-row"
                 >
+                  {onToggleSelect && request.canReview !== false && (
+                    <Checkbox
+                      checked={selectedNodeIds?.has(request.nodeId) ?? false}
+                      onCheckedChange={() => onToggleSelect(request.nodeId)}
+                      // The row opens the document; the box only selects it.
+                      onClick={(e) => e.stopPropagation()}
+                      aria-label={`Select ${request.title || request.nodeId}`}
+                      data-testid="review-queue-select"
+                    />
+                  )}
                   <FileText className="h-5 w-5 text-blue-500 flex-shrink-0" />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">

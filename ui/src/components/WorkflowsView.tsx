@@ -64,7 +64,9 @@ import {
   type Schedule,
 } from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
+import { wireLabel } from "../lib/wire-label";
 import { Button } from "./ui/button";
+import { OverflowMenu, type OverflowAction } from "./ui/overflow-menu";
 import { Badge } from "./ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { Input } from "./ui/input";
@@ -93,6 +95,18 @@ const statusVariant = (
   if (s === "queued") return "outline";
   return "secondary"; // running
 };
+
+/**
+ * Left pad for a run row at `level`. The step stops compounding past a few
+ * levels: a deep sub-agent chain otherwise pushed the run id clean out of the
+ * row on a narrow panel, and the nesting is still legible from the arrow and
+ * the `sub · dN` badge, which carries the true depth either way.
+ */
+const INDENT_STEP_REM = 0.85;
+const MAX_INDENT_LEVELS = 6;
+function indentFor(level: number): string {
+  return `${0.75 + Math.min(level, MAX_INDENT_LEVELS) * INDENT_STEP_REM}rem`;
+}
 
 // The wire status is "running" from creation; a run is only really executing
 // once a runner has claimed it, so show the unclaimed stretch as "queued".
@@ -931,7 +945,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
 
   const renderRun = (r: RunSummary, level: number): React.ReactNode => {
     const kids = childrenOf.get(r.id) ?? [];
-    const indent = level ? `${0.75 + level * 1.1}rem` : undefined;
+    const indent = level ? indentFor(level) : undefined;
     // Depth badges below prefer the server's `r.depth` and fall back to render
     // `level` only if it's missing. These can differ when a run's parent is
     // outside the loaded window (rendered as a root at level 0 though its true
@@ -946,17 +960,34 @@ function RunsPanel({ nestId }: { nestId: string }) {
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") void open(r.id);
           }}
-          className={`group w-full cursor-pointer px-3 py-2 hover:bg-muted/40 ${selected?.id === r.id ? "bg-muted/60" : ""
+          className={`group w-full overflow-hidden cursor-pointer px-3 py-2 hover:bg-muted/40 ${selected?.id === r.id ? "bg-muted/60" : ""
             }`}
           style={{ paddingLeft: indent }}
         >
-          <div className="flex items-center gap-2">
+          {/* min-w-0 lets the row shrink below its content's natural width, so
+              a deep row narrows instead of pushing the actions past the card. */}
+          <div className="flex items-center gap-2 min-w-0">
             {level > 0 && (
-              <CornerDownRight className="h-3 w-3 text-muted-foreground/50 shrink-0" />
+              <CornerDownRight
+                className="h-3 w-3 text-muted-foreground/50 shrink-0"
+                // Depth used to ride the title line as a badge. The indent and
+                // this arrow already say "nested"; the exact number is a detail,
+                // so it moves to a tooltip rather than costing a badge's width.
+                aria-label={`Sub-agent at depth ${r.depth ?? level}`}
+              >
+                <title>{`Sub-agent at depth ${r.depth ?? level}`}</title>
+              </CornerDownRight>
             )}
             <NodeTypeIcon type={runType(r.agent_node)} className="h-3.5 w-3.5" />
-            <span className="font-mono text-xs truncate">
-              {r.id.slice(0, 12)}
+            {/* Ellipsis + full id on hover: the list showed a bare head slice
+                that read as a complete, different id from the detail view's. */}
+            {/* min-w keeps the id readable instead of letting it collapse to
+                nothing between the indent and the shrink-0 badges. */}
+            <span
+              className="font-mono text-xs truncate min-w-[6rem]"
+              title={r.id}
+            >
+              {r.id.length > 12 ? `${r.id.slice(0, 12)}…` : r.id}
             </span>
             <Badge
               variant={statusVariant(runStatus(r))}
@@ -965,69 +996,63 @@ function RunsPanel({ nestId }: { nestId: string }) {
             >
               {runStatus(r)}
             </Badge>
-            {level > 0 && (
-              <Badge
-                variant="outline"
-                className="text-[10px] shrink-0"
-                title={`Sub-agent at depth ${r.depth ?? level}`}
-              >
-                sub · d{r.depth ?? level}
-              </Badge>
-            )}
-            {kids.length > 0 && (
-              <span className="text-[10px] text-muted-foreground shrink-0" title="Sub-agents spawned">
-                {kids.length} child{kids.length === 1 ? "" : "ren"}
-              </span>
-            )}
-            {/* Row actions — one right-aligned group, revealed on hover.
+            {/* Row actions collapse into one ⋮ button. As labelled buttons they
+                were the widest thing in the row, and a deeply nested run pushed
+                them past the card's edge.
                 Sub-agent: only running runs can parent one; hidden when the
                 feature is off or this run is at the depth / fan-out cap (a
                 deeper/wider child would be rejected server-side).
                 Cancel: the only way out of a run no runner ever claims. */}
-            {r.status === "running" && (
-              <div className="ml-auto flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100">
-                {subagentRunsEnabled &&
+            {r.status === "running" &&
+              (() => {
+                const actions: OverflowAction[] = [];
+                if (
+                  subagentRunsEnabled &&
                   (r.depth ?? 0) < maxDepth &&
-                  childCount(r.id) < maxChildren && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 px-2 text-[11px] text-muted-foreground"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSpawnParent(spawnParent === r.id ? "" : r.id);
-                        setSpawnAgent("");
-                        setSpawnInputs("");
-                        setSpawnError(null);
-                      }}
-                      title="Spawn a sub-agent nested under this run"
-                    >
-                      <Plus className="h-3 w-3 mr-1" /> sub-agent
-                    </Button>
-                  )}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 px-2 text-[11px] text-muted-foreground hover:text-destructive"
-                  disabled={cancelling === r.id}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void cancel(r.id);
-                  }}
-                  title="Cancel this run"
-                >
-                  {cancelling === r.id ? (
-                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                  ) : (
-                    <X className="h-3 w-3 mr-1" />
-                  )}
-                  cancel
-                </Button>
-              </div>
-            )}
+                  childCount(r.id) < maxChildren
+                ) {
+                  actions.push({
+                    label:
+                      spawnParent === r.id ? "Close sub-agent form" : "Spawn sub-agent",
+                    icon: Plus,
+                    testId: "run-action-spawn",
+                    onSelect: () => {
+                      setSpawnParent(spawnParent === r.id ? "" : r.id);
+                      setSpawnAgent("");
+                      setSpawnInputs("");
+                      setSpawnError(null);
+                    },
+                  });
+                }
+                actions.push({
+                  label: cancelling === r.id ? "Cancelling…" : "Cancel run",
+                  icon: cancelling === r.id ? Loader2 : X,
+                  iconClassName: cancelling === r.id ? "animate-spin" : undefined,
+                  destructive: true,
+                  disabled: cancelling === r.id,
+                  separatorBefore: true,
+                  testId: "run-action-cancel",
+                  onSelect: () => void cancel(r.id),
+                });
+                return (
+                  <div className="ml-auto shrink-0">
+                    <OverflowMenu
+                      actions={actions}
+                      className="h-6 w-6 text-muted-foreground"
+                      triggerTitle="Run actions"
+                      testId="run-actions"
+                    />
+                  </div>
+                );
+              })()}
           </div>
+          {/* Child count lives here rather than on the title line: it is
+              context, not identity, and the title line has to hold the id and
+              the actions inside the card at every nesting depth. */}
           <div className="text-[11px] text-muted-foreground truncate">
             {runLabel(r.agent_node)} · {timeOf(r.started_at)}
+            {kids.length > 0 &&
+              ` · ${kids.length} child${kids.length === 1 ? "" : "ren"}`}
           </div>
           {r.status === "failed" && r.trace?.error && (
             <div
@@ -1043,7 +1068,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
         {subagentRunsEnabled && spawnParent === r.id && (
           <div
             className="border-t bg-muted/20 px-3 py-2.5 space-y-2"
-            style={{ paddingLeft: `${0.75 + (level + 1) * 1.1}rem` }}
+            style={{ paddingLeft: indentFor(level + 1) }}
           >
             <div className="text-[11px] font-medium text-muted-foreground">
               New sub-agent under{" "}
@@ -1666,6 +1691,39 @@ function CanvasPanel({ nestId }: { nestId: string }) {
   const edgeColor = (e: WorkflowEdge) =>
     e.type.color || (e.type.is_flow ? "#34a853" : "#94a3b8");
 
+  /**
+   * Where each wire's label goes. Kept apart from the wires because it is
+   * DRAWN AFTER THE CARDS: the cards are painted over the wires, so a label
+   * long enough to reach past the ~90px gap between two of them disappeared
+   * underneath — clipped at both ends with no ellipsis and no way to read it.
+   * Above the cards' top edge (the row gap is empty by layout) and last in
+   * paint order, the label is always legible; the full rule is on hover.
+   */
+  const edgeLabels = edges
+    .filter((e) => placed.has(e.from_node) && placed.has(e.to_node))
+    .map((e) => {
+      let condText = "";
+      if (e.condition_mode === "nl" && e.condition) {
+        condText = `“${e.condition}”`;
+      } else if (e.condition_mode === "structured" && e.condition) {
+        try {
+          const c =
+            typeof e.condition === "string" ? JSON.parse(e.condition) : e.condition;
+          condText = c?.term ? `${c.term} ${c.op ?? ""} ${c.value ?? ""}` : "";
+        } catch {
+          /* label stays type-only */
+        }
+      }
+      const a = portOf(e.from_node, "out");
+      const b = portOf(e.to_node, "in");
+      return {
+        edge: e,
+        x: (a.x + b.x) / 2,
+        y: (a.y + b.y) / 2 + (bowOf.get(e.id) ?? 0) - CARD_H / 2 - 6,
+        ...wireLabel(e.type.name, condText),
+      };
+    });
+
   const selectEdge = (e: WorkflowEdge) => {
     setSelNode(null);
     setPreview(null);
@@ -1852,21 +1910,6 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                 const bow = bowOf.get(e.id) ?? 0;
                 const d = wirePath(e.from_node, e.to_node, bow);
                 const color = edgeColor(e);
-                const mid = {
-                  x: (portOf(e.from_node, "out").x + portOf(e.to_node, "in").x) / 2,
-                  y:
-                    (portOf(e.from_node, "out").y + portOf(e.to_node, "in").y) / 2 +
-                    bow -
-                    7,
-                };
-                let condText = "";
-                if (e.condition_mode === "nl" && e.condition) condText = `“${e.condition}”`;
-                else if (e.condition_mode === "structured" && e.condition) {
-                  try {
-                    const c = typeof e.condition === "string" ? JSON.parse(e.condition) : e.condition;
-                    condText = c?.term ? `${c.term} ${c.op ?? ""} ${c.value ?? ""}` : "";
-                  } catch { /* label stays type-only */ }
-                }
                 return (
                   <g key={e.id}>
                     <path
@@ -1890,16 +1933,6 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                         selectEdge(e);
                       }}
                     />
-                    <text
-                      x={mid.x}
-                      y={mid.y}
-                      textAnchor="middle"
-                      className="pointer-events-none"
-                      style={{ font: "10px ui-monospace, monospace", fill: "hsl(var(--muted-foreground))" }}
-                    >
-                      {e.type.name}
-                      {condText ? ` · ${condText.slice(0, 34)}` : ""}
-                    </text>
                   </g>
                 );
               })}
@@ -1988,6 +2021,40 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                   </g>
                 );
               })}
+
+              {/* Wire labels last, so a card can never paint over one. */}
+              {edgeLabels.map((l) => (
+                <g
+                  key={`label-${l.edge.id}`}
+                  style={{ cursor: "pointer" }}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    selectEdge(l.edge);
+                  }}
+                >
+                  <title>{l.full}</title>
+                  <rect
+                    x={l.x - l.width / 2}
+                    y={l.y - 9}
+                    width={l.width}
+                    height={13}
+                    rx={3}
+                    fill="hsl(var(--background))"
+                    opacity={0.92}
+                  />
+                  <text
+                    x={l.x}
+                    y={l.y}
+                    textAnchor="middle"
+                    style={{
+                      font: "10px ui-monospace, monospace",
+                      fill: "hsl(var(--muted-foreground))",
+                    }}
+                  >
+                    {l.short}
+                  </text>
+                </g>
+              ))}
             </svg>
           </div>
         )}

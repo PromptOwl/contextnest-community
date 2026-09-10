@@ -9,6 +9,7 @@
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { ValidationError, ConflictError } from "../shared/errors.js";
+import { assertSafeNodeId } from "../shared/node-id.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { getDb } from "../db/client.js";
 import * as stewardship from "./stewardship-service.js";
@@ -26,7 +27,7 @@ import {
   deleteFolder,
   isIdUnderFolder,
 } from "../nodes/service.js";
-import { deleteNest } from "../nests/service.js";
+import { deleteNest, archiveNest } from "../nests/service.js";
 import {
   canReadNode,
   resolveCallerEmail,
@@ -208,6 +209,87 @@ governanceRoutes.get("/review-queue", async (c) => {
   return c.json({ ...result, requests });
 });
 
+/**
+ * POST /nests/:nestId/review-queue/bulk — approve or reject several pending
+ * documents in one call.
+ *
+ * A wrapper over the single-document operations, never a parallel one: each
+ * item runs through the same `approve`/`reject` the one-at-a-time flow uses,
+ * so permission resolution, state validation, history and notifications are
+ * identical per document. Partial success is the normal outcome — one item's
+ * refusal (not a steward for it, already resolved, changed since the queue was
+ * loaded) must not roll back or block the rest, so every item is reported.
+ *
+ * Sequential on purpose: these writes land in one vault, and firing them
+ * together would just contend for the same write lock.
+ */
+const BULK_REVIEW_LIMIT = 50;
+
+governanceRoutes.post("/review-queue/bulk", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const body = await c.req.json<{
+    nodeIds?: string[];
+    action?: "approve" | "reject";
+    note?: string;
+  }>();
+  // Every route that turns a caller-supplied id into a storage read goes
+  // through this chokepoint. The pending-review row lookup would refuse a
+  // traversal id anyway, but that is an implicit guard the next refactor could
+  // lose — the explicit one costs nothing here.
+  const nodeIds = [...new Set(body.nodeIds ?? [])].map(assertSafeNodeId);
+  if (nodeIds.length === 0) {
+    throw new ValidationError("Select at least one document to review");
+  }
+  if (nodeIds.length > BULK_REVIEW_LIMIT) {
+    throw new ValidationError(
+      `Up to ${BULK_REVIEW_LIMIT} documents at a time — you selected ${nodeIds.length}.`,
+    );
+  }
+  if (body.action !== "approve" && body.action !== "reject") {
+    throw new ValidationError("action must be approve or reject");
+  }
+  // Same rule as the single-document route: a rejection says why.
+  if (body.action === "reject" && !body.note) {
+    throw new ValidationError("Rejection note is required");
+  }
+
+  const userEmail = await getUserEmail(c);
+  const baseUrl = requestBaseUrl(c.req.url);
+  const results: Array<{ nodeId: string; ok: boolean; error?: string }> = [];
+  for (const nodeId of nodeIds) {
+    try {
+      if (body.action === "approve") {
+        await reviews.approve({
+          nestId,
+          nodeId,
+          approvedBy: userEmail,
+          note: body.note,
+          override: false,
+          baseUrl,
+        });
+      } else {
+        await reviews.reject({
+          nestId,
+          nodeId,
+          rejectedBy: userEmail,
+          note: body.note!,
+          baseUrl,
+        });
+      }
+      results.push({ nodeId, ok: true });
+    } catch (err: any) {
+      results.push({ nodeId, ok: false, error: err?.message || "Failed" });
+    }
+  }
+  // No override path here: forcing past a refusal is a per-document decision.
+  return c.json({
+    action: body.action,
+    succeeded: results.filter((r) => r.ok).length,
+    failed: results.filter((r) => !r.ok).length,
+    results,
+  });
+});
+
 // ─── Deletion requests ──────────────────────────────────────────────────
 
 /**
@@ -296,18 +378,21 @@ governanceRoutes.post("/request-deletion", async (c) => {
   if (!reason) {
     throw new ValidationError("A reason for the deletion request is required");
   }
-  if (body.targetType !== "folder" && body.targetType !== "nest") {
+  if (
+    body.targetType !== "folder" &&
+    body.targetType !== "nest" &&
+    body.targetType !== "nest_archive"
+  ) {
     throw new ValidationError(
-      'targetType must be "folder" or "nest" — flag a single document via POST /nests/:nestId/nodes/:nodeId/request-deletion',
+      'targetType must be "folder", "nest" or "nest_archive" — flag a single document via POST /nests/:nestId/nodes/:nodeId/request-deletion',
     );
   }
 
   // Normalize the target so two people flagging "api/limits" and "/api/limits/"
   // collide on the pending index instead of raising two requests.
-  const target =
-    body.targetType === "nest"
-      ? nestId
-      : (body.target || "").trim().replace(/^\/+|\/+$/g, "").replace(/^nodes\//, "");
+  const target = reviews.isNestTarget(body.targetType)
+    ? nestId
+    : (body.target || "").trim().replace(/^\/+|\/+$/g, "").replace(/^nodes\//, "");
   if (body.targetType === "folder" && !target) {
     throw new ValidationError("target (the folder path) is required");
   }
@@ -357,15 +442,21 @@ governanceRoutes.post("/deletion-requests/:id/delete", async (c) => {
 
   // Honouring must clear the SAME bar as deleting the thing directly — a
   // request is not a side door around /delete-folder or DELETE /nests/:id.
-  if (request.targetType === "nest" || request.targetType === "folder") {
+  if (reviews.isNestTarget(request.targetType) || request.targetType === "folder") {
     const denied = denyUnlessNestManager(
       c,
-      request.targetType === "nest" ? "a nest" : "a folder",
+      request.targetType === "folder" ? "a folder" : "a nest",
     );
     if (denied) return denied;
   }
 
-  if (request.targetType === "nest") {
+  if (request.targetType === "nest_archive") {
+    // The editor asked for the nest to be put away, not destroyed. archiveNest
+    // clears the pending nest_archive rows itself — it has to, since the owner
+    // may archive directly instead of coming through this queue — so this row
+    // is already gone and needs no explicit drop.
+    await archiveNest(nestId);
+  } else if (request.targetType === "nest") {
     // Nest rows cascade with the nest, so the request row goes with it.
     await deleteNest(nestId);
   } else if (request.targetType === "folder") {
@@ -631,11 +722,22 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions/:version{[0-9]+}", async (c) => 
     );
   }
 
-  const { versions: versionManager } = await engineCache.get(nestId);
+  const { storage, versions: versionManager } = await engineCache.get(nestId);
   try {
     const raw = await versionManager.reconstructVersion(nodeId, version);
     return c.json({ version, content: bodyOnly(nodeId, raw) });
   } catch (err) {
+    // The unreviewed draft on top is never in the chain (see the draft branch
+    // of updateNode) — its bytes are the live file, so serve those. This is the
+    // one version reconstruct can't answer for that still has content.
+    try {
+      const node = await storage.readDocument(nodeId);
+      if ((node.frontmatter.version ?? 1) === version) {
+        return c.json({ version, content: node.body ?? "" });
+      }
+    } catch {
+      /* fall through to the no-content answer below */
+    }
     // A version whose chain no longer replays is a real state, not a 500 —
     // the panel renders "(no content)" for it and Restore stays disabled.
     console.error("reconstructVersion failed", nestId, nodeId, version, err);
@@ -1022,13 +1124,16 @@ governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {
   const nodeId = c.req.param("nodeId")!;
 
   const userEmail = await getUserEmail(c);
-  const request = await reviews.cancelReview({
-    nestId,
-    nodeId,
-    cancelledBy: userEmail,
-  });
-
-  return c.json({ review: request });
+  try {
+    const request = await reviews.cancelReview({
+      nestId,
+      nodeId,
+      cancelledBy: userEmail,
+    });
+    return c.json({ review: request });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 403);
+  }
 });
 
 // ─── Helpers ────────────────────────────────────────────────────────────

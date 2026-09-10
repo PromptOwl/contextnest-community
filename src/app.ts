@@ -7,6 +7,8 @@ import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
+import { publishRoutes } from "./nests/publish-routes.js";
+import { publishRenderRoutes } from "./nests/publish-render-routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
 import { listVisibleNests, nestAllowsSelfApprove } from "./nests/service.js";
@@ -76,13 +78,19 @@ import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
   resolveNestAccess,
+  isNestArchived,
   permissionLevel,
   isServerAdminUserId,
   type NestPermission,
 } from "./shared/access.js";
-import { AppError, ValidationError } from "./shared/errors.js";
+import {
+  AppError,
+  ValidationError,
+  VaultBusyError,
+  isVaultLockTimeout,
+} from "./shared/errors.js";
 import { config, isEmailish, isEmailListish } from "./config.js";
-import { verifySmtp } from "./notify/email.js";
+import { verifySmtp, isEmailConfigured } from "./notify/email.js";
 import { getDb } from "./db/client.js";
 import { ensureAnonymousUser } from "./auth/anonymous.js";
 import {
@@ -174,10 +182,11 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   return c.json({ error: "Missing or invalid credentials" }, 401);
 });
 
-// PromptOwl native integration — /index and /mcp additionally accept a
-// short-lived HS256 service ticket minted by the official PromptOwl
-// deployment (the same shared OFFICIAL_COMMUNITY_SSO_SECRET the /auth/sso
-// login flow trusts). Distinctions from a login ticket: `scope: "mcp"` is
+// MCP bearer tickets — /index and /mcp additionally accept a short-lived HS256
+// service ticket, minted either by the official PromptOwl deployment (the
+// shared OFFICIAL_COMMUNITY_SSO_SECRET the /auth/sso login flow trusts) or by
+// this server's own SSO token-exchange (MCP_SIGNING_SECRET). Either secret
+// verifies — see the constant-time loop below. Distinctions from a login ticket: `scope: "mcp"` is
 // REQUIRED here (a leaked one-time SSO login ticket can't double as a bearer
 // credential) and there's no jti (this ticket can't be redeemed for a login
 // session). The user is resolved by email and must ALREADY exist — native
@@ -198,15 +207,32 @@ const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
     const token = header.startsWith("Bearer ")
       ? header.slice("Bearer ".length)
       : "";
-    const secret = config.OFFICIAL_COMMUNITY_SSO_SECRET;
+    // An MCP bearer may be signed by PromptOwl (the shared official secret) OR,
+    // on a self-hosted deployment, by this server's own MCP_SIGNING_SECRET (the
+    // key the SSO token-exchange mints with). Accept a ticket that verifies
+    // under EITHER — each attempt is an independent constant-time HMAC check,
+    // and a ticket matching neither is rejected. Order is irrelevant: a forged
+    // token fails both; a genuine one matches exactly the secret that signed it.
+    const secrets = [
+      config.OFFICIAL_COMMUNITY_SSO_SECRET,
+      config.MCP_SIGNING_SECRET,
+    ].filter(Boolean);
     const looksLikeJwt =
       !!token && !token.startsWith("cnst_") && token.split(".").length === 3;
-    if (!looksLikeJwt || !secret) return flexAuthMiddleware(c, next);
+    if (!looksLikeJwt || secrets.length === 0) {
+      return flexAuthMiddleware(c, next);
+    }
 
-    let claims: SsoTicketClaims;
-    try {
-      claims = verifySsoTicket(token, secret);
-    } catch {
+    let claims: SsoTicketClaims | null = null;
+    for (const secret of secrets) {
+      try {
+        claims = verifySsoTicket(token, secret);
+        break;
+      } catch {
+        // Wrong secret (or malformed/expired) — try the next candidate.
+      }
+    }
+    if (!claims) {
       return c.json({ error: "Invalid service ticket" }, 401);
     }
     // Require the MCP scope AND reject a present jti. A one-time-use jti is the
@@ -386,6 +412,9 @@ export function createApp(): Hono<AuthEnv> {
       // Presence only, never the value: lets the UI stop prompting for a
       // runner key once the server-wide one exists.
       runner_key_configured: !!process.env.ANTHROPIC_API_KEY,
+      // Presence only: the publish dialog hides the email/invite gates when
+      // this server cannot send mail, because their only way in is a mailed link.
+      email_configured: isEmailConfigured(),
       promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
       // Manual (email/password) sign-in mode (open | invite-only | disabled).
       // The login page reads this to show/hide the credential form, and to
@@ -557,6 +586,16 @@ export function createApp(): Hono<AuthEnv> {
     oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
     oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
+    // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
+    // presence is reported, never the value (same discipline as the OIDC secret).
+    sso_token_exchange_enabled: config.SSO_TOKEN_EXCHANGE_ENABLED,
+    mcp_signing_secret_set: !!config.MCP_SIGNING_SECRET,
+    mcp_token_ttl_seconds: config.MCP_TOKEN_TTL_SECONDS,
+    ms_token_exchange_enabled: config.MS_TOKEN_EXCHANGE_ENABLED,
+    ms_client_id: config.MS_CLIENT_ID,
+    ms_tenant_id: config.MS_TENANT_ID,
+    google_token_exchange_enabled: config.GOOGLE_TOKEN_EXCHANGE_ENABLED,
+    google_client_id: config.GOOGLE_CLIENT_ID,
     // Live readiness (enabled AND issuer+id+secret present) — the SAVED state,
     // i.e. whether the login button is currently live. The Settings UI derives
     // its own "enabled but not configured" warning from the unsaved draft
@@ -806,6 +845,86 @@ export function createApp(): Hono<AuthEnv> {
         name: "OIDC_DEPARTMENT_TAGGING",
         value: body.oidc_department_tagging ? "true" : null,
       });
+    }
+    // ── Agent SSO / token-exchange (POST /auth/token-exchange) ────────────
+    // Default-off toggles persist "false" as null (unset already = off). The
+    // MCP signing secret is write-only, same discipline as oidc_client_secret.
+    if ("sso_token_exchange_enabled" in body) {
+      pending.push({
+        name: "SSO_TOKEN_EXCHANGE_ENABLED",
+        value: body.sso_token_exchange_enabled ? "true" : null,
+      });
+    }
+    if ("mcp_signing_secret" in body) {
+      const v = body.mcp_signing_secret;
+      if (v === null || v === "") {
+        pending.push({ name: "MCP_SIGNING_SECRET", value: null });
+      } else if (typeof v !== "string") {
+        addError("mcp_signing_secret", "MCP signing secret must be a string (or empty to clear it).");
+      } else if (v.trim().length < 16) {
+        addError("mcp_signing_secret", "MCP signing secret should be a long random string (16+ characters).");
+      } else {
+        pending.push({ name: "MCP_SIGNING_SECRET", value: v.trim() });
+      }
+    }
+    if ("mcp_token_ttl_seconds" in body) {
+      const n = Number(body.mcp_token_ttl_seconds);
+      if (!Number.isFinite(n) || n < 30 || n > 3600) {
+        addError("mcp_token_ttl_seconds", "Token lifetime must be between 30 and 3600 seconds.");
+      } else {
+        pending.push({ name: "MCP_TOKEN_TTL_SECONDS", value: String(Math.floor(n)) });
+      }
+    }
+    if ("ms_token_exchange_enabled" in body) {
+      pending.push({
+        name: "MS_TOKEN_EXCHANGE_ENABLED",
+        value: body.ms_token_exchange_enabled ? "true" : null,
+      });
+    }
+    if ("ms_client_id" in body) {
+      pending.push({ name: "MS_CLIENT_ID", value: String(body.ms_client_id ?? "").trim() || null });
+    }
+    if ("ms_tenant_id" in body) {
+      pending.push({ name: "MS_TENANT_ID", value: String(body.ms_tenant_id ?? "").trim() || null });
+    }
+    if ("google_token_exchange_enabled" in body) {
+      pending.push({
+        name: "GOOGLE_TOKEN_EXCHANGE_ENABLED",
+        value: body.google_token_exchange_enabled ? "true" : null,
+      });
+    }
+    if ("google_client_id" in body) {
+      pending.push({ name: "GOOGLE_CLIENT_ID", value: String(body.google_client_id ?? "").trim() || null });
+    }
+    // Fail-closed guard on the combination, not on either field alone: a
+    // provider enabled while unknown emails may JIT-provision AND no domain
+    // allowlist bounds them means any account at that IdP (Google = the whole
+    // internet) can exchange a token for a bearer on an account it just made.
+    // Effective post-PATCH values, so setting the allowlist in the SAME request
+    // that flips the toggle is accepted. The endpoint refuses that combination
+    // at mint time too — this only stops an admin from saving it blind.
+    const effAllowedDomains =
+      "oidc_allowed_domains" in body
+        ? String(body.oidc_allowed_domains ?? "")
+            .split(",")
+            .map((d) => d.trim())
+            .filter(Boolean)
+        : config.OIDC_ALLOWED_DOMAINS;
+    const effAutoProvision =
+      "oidc_auto_provision" in body
+        ? !!body.oidc_auto_provision
+        : config.OIDC_AUTO_PROVISION;
+    if (effAutoProvision && effAllowedDomains.length === 0) {
+      for (const field of [
+        "ms_token_exchange_enabled",
+        "google_token_exchange_enabled",
+      ] as const) {
+        if (body[field])
+          addError(
+            field,
+            "Set allowed email domains (or turn auto-provision off) before enabling token exchange — otherwise anyone with an account at that provider can sign themselves up and mint a token.",
+          );
+      }
     }
     // Effective post-PATCH OIDC state: what this request sets, falling back
     // to current config for fields it doesn't touch. Shared by the enable
@@ -1318,11 +1437,15 @@ export function createApp(): Hono<AuthEnv> {
       nestName.set(n.id, n.name ?? n.id);
     const limit = Math.min(Math.max(Number(c.req.query("limit")) || 25, 1), 100);
     const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
+    const sort = c.req.query("sort") === "title" ? "title" : "updated";
     const { drafts, total } = await listMyDrafts({
       authorEmail: me,
       nestIds: [...nestName.keys()],
       limit,
       offset,
+      q: c.req.query("q") ?? undefined,
+      sort,
+      nestNames: nestName,
     });
     return c.json({
       drafts: drafts.map((d) => ({
@@ -1336,8 +1459,8 @@ export function createApp(): Hono<AuthEnv> {
         version: d.version,
         updated_at: d.updatedAt,
       })),
-      // has_more off the REQUESTED page size, not the returned row count: the
-      // existence filter can shorten a page, and that must not read as "last".
+      // `total` counts drafts whose document still exists — the same set the
+      // page is sliced from — so this is exact in every sort and search mode.
       pagination: { total, limit, offset, has_more: offset + limit < total },
     });
   });
@@ -1470,6 +1593,10 @@ export function createApp(): Hono<AuthEnv> {
   // === Agent entry point: /llms.txt (public manual), /index (person nest
   // index), /mcp (server-level MCP). See src/mcp/server-routes.ts. ===
   app.route("/llms.txt", llmsTxtRoutes);
+  // Public published-document surface. Mounted BEFORE the SPA catch-all and
+  // OUTSIDE the /nests auth chain so /p/<slug> is reachable with no account
+  // (public mode) or behind its own gate (email/code/invite).
+  app.route("/p", publishRenderRoutes);
   app.use("/index", flexAuthWithPromptowlTicket);
   app.route("/index", nestIndexRoutes);
   app.use("/mcp", flexAuthWithPromptowlTicket);
@@ -1522,6 +1649,28 @@ export function createApp(): Hono<AuthEnv> {
     // request id when parseable) so the client shows WHY the connection
     // failed — wrong key scope, missing license, no access.
     const isMcpTransport = parts.length === 2 && parts[1] === "mcp";
+    // Archive and restore are gated in the route by requireNestCaretaker (the
+    // owner, or the license admin as caretaker of the commons) — strictly
+    // narrower than 'write'. Both the open-mode branch and the tier block below
+    // exempt them, because an archived nest caps every caller at 'read' and a
+    // 'write' requirement here would strand a nest that could never be
+    // restored.
+    //
+    // DELETE /nests/:id is NOT listed: it is `parts.length === 1`, which the
+    // guard above returns on, so it never reaches this middleware at all — its
+    // only gate is requireNestCaretaker, archived or not.
+    const isNestLifecycleAction =
+      parts.length === 2 &&
+      c.req.method === "POST" &&
+      (parts[1] === "archive" || parts[1] === "restore");
+    // Pinning is read-tier: a pin is the caller's own bookmark, changes nothing
+    // about the nest and is visible to nobody else, so anyone who can open the
+    // nest may pin it — a viewer most of all, since they are the likeliest to
+    // be watching a handful of nests they cannot edit. The handler still
+    // refuses a caller with no access at all, so this is not an existence
+    // oracle for nest ids. Declared up here because the grant-only branch below
+    // needs it too, and that runs before the tier block.
+    const isPinAction = parts.length === 2 && parts[1] === "pin";
     const deny = async (
       status: 403 | 404 | 503,
       error: string,
@@ -1627,9 +1776,30 @@ export function createApp(): Hono<AuthEnv> {
       }
     }
 
-    // In open mode, everyone gets owner-level access
+    // In open mode, everyone gets owner-level access — but archiving is not an
+    // access rule, it is a property of the nest, so it binds here too. This
+    // branch returns before the permission merge below, so the cap that makes
+    // an archived nest read-only never reaches it; without this check, open
+    // mode (the local/LAN posture where an MCP agent is most likely to be
+    // pointed straight at a nest) could still write to a nest that was
+    // archived precisely to stop that.
+    //
+    // One indexed lookup on the hot path, and the full rule only for the rare
+    // archived nest: everything but a GET is refused, except the lifecycle
+    // actions that must survive archiving (restore, delete).
     if (config.AUTH_MODE === "open") {
-      c.set("nestPermission", "owner");
+      const archived = await isNestArchived(nestId);
+      if (archived) {
+        if (isMcpTransport) return deny(404, "Nest not found");
+        if (c.req.method !== "GET" && !isNestLifecycleAction) {
+          return deny(
+            403,
+            "This nest is archived, so it is read-only. Restore it to make changes.",
+            { archived: true },
+          );
+        }
+      }
+      c.set("nestPermission", archived ? "read" : "owner");
       return next();
     }
 
@@ -1638,6 +1808,15 @@ export function createApp(): Hono<AuthEnv> {
     // re-querying once per branch.
     const access = await resolveNestAccess(nestId, userId);
     const permission = access.permission;
+
+    // An archived nest does not exist as far as agents are concerned. It is
+    // already absent from every MCP listing (the list helpers skip archived
+    // rows), and this closes the by-id path: a pinned nest id or a nest-scoped
+    // API key goes dead until the nest is restored. Humans still read it in the
+    // web UI — this is the MCP transport only.
+    if (access.archived && isMcpTransport) {
+      return deny(404, "Nest not found");
+    }
 
     // Document/folder share grant: a caller BELOW nest access may still reach
     // a specific granted node (or a bare nest read, so a shared-doc deep link
@@ -1691,6 +1870,16 @@ export function createApp(): Hono<AuthEnv> {
         // handler's filterAccessible scopes every result to their grants, so
         // they can never read past what they were shared (same as the list).
         grantNestVisible = access.hasGrant;
+      } else if (isPinAction) {
+        // Pinning, for someone who reaches this nest only through a document or
+        // folder grant. They see the nest on their dashboard, so they see its
+        // pin control — and a control that 404s is worse than no control. The
+        // pin touches nothing they can't already reach: it is their own
+        // bookmark on a nest already listed for them, and it grants no wider
+        // read. effectiveAccess in nests/routes.ts already resolves a grantee
+        // to "read" for exactly this class of route; this is the middleware
+        // half of that same rule.
+        grantNestVisible = access.hasGrant;
       } else if (
         parts[1] === "definitions" &&
         parts.length === 2 &&
@@ -1721,11 +1910,15 @@ export function createApp(): Hono<AuthEnv> {
     // plus a reviewer steward row — before their handler can even
     // decide. Let read-permission users through for these paths and
     // trust the handler.
+    // The batch approve/reject belongs here for the same reason: it is a
+    // wrapper over those per-document decisions and re-checks every item
+    // through them. Exact trailing segment, so a node slug can't reach it.
     const isStewardActionPath =
       path.includes("/approve") ||
       path.includes("/reject") ||
       path.includes("/submit-review") ||
-      path.includes("/cancel-review");
+      path.includes("/cancel-review") ||
+      /\/review-queue\/bulk$/.test(path);
     // Confirm/reject a held push (Push Confirmation Gate) is admitted at
     // read-tier so a read-only reviewer steward can decide it; the handler's
     // own canConfirmPush is the real gate (submitter OR reviewer/owner/admin).
@@ -1767,6 +1960,9 @@ export function createApp(): Hono<AuthEnv> {
     const isDeletionRequestAction =
       /\/request-deletion$/.test(path) ||
       /\/deletion-requests\/[^/]+\/withdraw$/.test(path);
+    // isNestLifecycleAction (archive/restore) is defined above, next to
+    // isMcpTransport — the open-mode branch needs it too, and that branch runs
+    // before this point.
     // The steward roster — list, assign, remove, sync — is restricted to the
     // server (license) admin plus the nest owner/admin collaborators, so an
     // owner can delegate vault people-management by granting admin. All
@@ -1794,7 +1990,11 @@ export function createApp(): Hono<AuthEnv> {
     // would wrongly gate `…/nodes/collaborators-guide` as a collaborators route
     // and 403 a write user editing that doc. parts[1] is the resource segment.
     const resource = parts[1];
-    if (resource === "visibility") {
+    if (resource === "visibility" || resource === "reader-mode") {
+      // reader-mode is a superadmin-only surface, but the admin tier is as far
+      // as this middleware goes (resolveNestPermission maps the server/super
+      // admin to "admin"); its handler hard-gates on isServerAdminUserId so a
+      // plain nest-admin collaborator can't reach it.
       required = "admin";
     } else if (resource === "collaborators") {
       // Viewing the roster (GET) and inviting (POST) are open to write+
@@ -1823,6 +2023,8 @@ export function createApp(): Hono<AuthEnv> {
       !isPushDecisionPath &&
       !isCommentAction &&
       !isDeletionRequestAction &&
+      !isNestLifecycleAction &&
+      !isPinAction &&
       !isAnnotationAction &&
       !isReadQuery &&
       !isMcpTransport
@@ -1840,7 +2042,15 @@ export function createApp(): Hono<AuthEnv> {
       (parts[parts.length - 1] === "revert" ||
         parts[parts.length - 1] === "move");
     let stewardEditorBypass = false;
-    if (required === "write" && permission === "read" && parts[1] === "nodes") {
+    // `!access.archived`: the cap leaves every caller at "read", which is
+    // exactly the shape this bypass fires on — without it, archiving would
+    // ARM the bypass for write collaborators who also hold an editor row.
+    if (
+      required === "write" &&
+      permission === "read" &&
+      !access.archived &&
+      parts[1] === "nodes"
+    ) {
       const userEmail = await resolveCallerEmail(userId);
       if (
         parts.length >= 3 &&
@@ -1984,6 +2194,10 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);
+  // "publications" (not "/publish") — POST /:nestId/publish is already taken by
+  // the nest-snapshot endpoint in query-routes. These manage per-document
+  // public links; the public render surface is the top-level /p route above.
+  nestsApp.route("/:nestId/publications", publishRoutes);
   nestsApp.route("/:nestId/teams", nestTeamRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);
@@ -2059,6 +2273,15 @@ export function createApp(): Hono<AuthEnv> {
   // disk/path errors). Anything truly unexpected still falls through
   // to the 500.
   app.onError((err, c) => {
+    // Vault write-lock timeout: retryable, so it carries Retry-After — the
+    // one AppError with a header. Raw engine errors are converted here too,
+    // for any route that throws them without passing through toSafeError.
+    if (isVaultLockTimeout(err) || err instanceof VaultBusyError) {
+      const busy = err instanceof VaultBusyError ? err : new VaultBusyError();
+      return c.json({ error: busy.message }, 503, {
+        "Retry-After": String(busy.retryAfterSeconds),
+      });
+    }
     if (err instanceof AppError) {
       return c.json({ error: err.message }, err.statusCode as any);
     }
