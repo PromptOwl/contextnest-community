@@ -1195,7 +1195,16 @@ Unlike a document body, where only names a save *adds* notify, every name in a
 comment notifies: the comment itself is the new event. At most 25 people are
 notified per write (`MAX_MENTION_RECIPIENTS`) — commenting is read-tier and
 unthrottled, so a comment naming a large roster would otherwise be an
-amplifier; names are taken in order of appearance. The same applies to the
+amplifier; names are taken in order of appearance.
+
+The *stream* of them is bounded too: one person may cause 50 outbound mention
+deliveries per nest per 5 minutes (`MENTION_DELIVERY_BUDGET`, one token per
+email and one per connector post). Past that the comment still posts and the
+inbox rows still land — the queue is the recipient's own record and costs one
+insert — and only the external fan-out is skipped, with a server-log warning.
+The budget sits on delivery rather than on comment creation deliberately: an
+agent working through a review posts a comment per finding, which is exactly
+what `context_comment` is for, and throttling the write would break it. The same applies to the
 annotation thread endpoints (§ Hosted artifacts), which are what the UI's
 comments panel posts.
 

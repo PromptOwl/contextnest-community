@@ -30,6 +30,7 @@ import { resolveNestAccess } from "../shared/access.js";
 import { resolveNodeGrant } from "./grants-service.js";
 import { dispatchEvent } from "../notify/dispatch.js";
 import { sendEmailToRecipient } from "../notify/email.js";
+import { tryConsume } from "../shared/rate-limit.js";
 
 /**
  * Can this person open this document at all?
@@ -154,14 +155,23 @@ function deliverMentionMessages(params: {
 }): void {
   const { nestId, nodeId, recipients, channelMessage, actorEmail, excerpt, ctx } =
     params;
-  void dispatchEvent({
-    kind: "mention",
-    nestId,
-    subjectId: nodeId,
-    actor: actorEmail,
-    message: channelMessage,
-  });
+  let throttled = 0;
+  if (canDeliver(nestId, actorEmail)) {
+    void dispatchEvent({
+      kind: "mention",
+      nestId,
+      subjectId: nodeId,
+      actor: actorEmail,
+      message: channelMessage,
+    });
+  } else {
+    throttled++;
+  }
   for (const r of recipients) {
+    if (!canDeliver(nestId, actorEmail)) {
+      throttled++;
+      continue;
+    }
     void sendEmailToRecipient(r.email, {
       status: "mention",
       docTitle: ctx.docTitle,
@@ -171,6 +181,45 @@ function deliverMentionMessages(params: {
       note: excerpt || null,
     });
   }
+  if (throttled > 0) {
+    // Logged, not silent: the inbox rows landed, so nobody lost the mention —
+    // but an operator seeing this repeatedly is looking at someone hammering
+    // the fan-out, which is worth knowing.
+    console.warn(
+      `[notify] mention delivery budget exhausted for ${actorEmail} in ${nestId} — ${throttled} outbound message(s) skipped; inbox rows unaffected`,
+    );
+  }
+}
+
+/**
+ * Outbound mention deliveries one person may cause in one nest per window.
+ *
+ * MAX_MENTION_RECIPIENTS bounds a single comment; this bounds the stream of
+ * them. Commenting is read-tier and unthrottled — deliberately, so a reviewer
+ * can comment freely — which before this feature cost nothing, because a
+ * comment had no side effects worth abusing. Now each one can send mail and
+ * post to a team channel, so a read-tier caller looping comments is an
+ * amplifier with no ceiling.
+ *
+ * Budgeted here rather than on comment creation, and that placement is the
+ * whole design: throttling the WRITE would break a legitimate agent working
+ * through a review, posting a comment per finding (which context_comment now
+ * makes ordinary). So the comment always lands, and the inbox row always
+ * lands — the queue is the recipient's own record, it is local, and it costs
+ * one insert. Only the EXTERNAL fan-out is rationed: one token per email and
+ * one per connector post, the parts that leave the server.
+ *
+ * A budget this size is invisible to a person tagging colleagues all day and
+ * caps a loop at tens of messages instead of thousands.
+ */
+export const MENTION_DELIVERY_BUDGET = { max: 50, windowMs: 5 * 60_000 };
+
+/** True while this actor still has outbound budget in this nest. */
+function canDeliver(nestId: string, actorEmail: string): boolean {
+  return tryConsume(
+    `mention-delivery:${nestId}:${actorEmail.toLowerCase()}`,
+    MENTION_DELIVERY_BUDGET,
+  );
 }
 
 /** "X mentioned A and B in *Doc*" — the channel's third-person form of the

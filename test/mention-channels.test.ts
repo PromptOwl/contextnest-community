@@ -86,6 +86,75 @@ afterAll(async () => {
   await env.cleanup();
 });
 
+describe("mention delivery budget", () => {
+  it("stops the outbound stream but never the inbox rows", async () => {
+    const { MENTION_DELIVERY_BUDGET } = await import(
+      "../src/governance/mention-notify.js"
+    );
+    // Its OWN nest, and no mockClear: the budget is keyed per actor per nest,
+    // and the spies are shared with the tests below — burning the budget or
+    // resetting the calls they assert on would break them (which it did, the
+    // first time this test was written).
+    const nest = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Burst" },
+      owner.apiKey,
+    );
+    const burstNest = nest.data.nest.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${burstNest}/collaborators`,
+      { email: editor.email, permission: "write" },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${burstNest}/nodes`,
+      { title: "Burst Doc", content: "body" },
+      owner.apiKey,
+    );
+
+    // Each comment spends one token on the connector post and one on the
+    // email, so this is comfortably past the budget.
+    const comments = MENTION_DELIVERY_BUDGET.max;
+    for (let i = 0; i < comments; i++) {
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${burstNest}/nodes/nodes/burst-doc/annotations`,
+        { body: `burst ${i} for @${editor.email}` },
+        owner.apiKey,
+      );
+    }
+    await new Promise((r) => setTimeout(r, 150));
+
+    // The mail that leaves the server is capped…
+    const burstMail = sendMail.mock.calls
+      .map((c: any[]) => c[0])
+      .filter((m: any) => JSON.stringify(m.text || "").includes("burst "));
+    expect(burstMail.length).toBeGreaterThan(0);
+    expect(burstMail.length).toBeLessThan(comments);
+
+    // …while every mention still reached the recipient's queue, which is the
+    // record they actually work from.
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      "/me/notifications?limit=200",
+      undefined,
+      editor.apiKey,
+    );
+    const inBurstNest = (
+      data.notifications as Array<{ kind: string; nest_id: string }>
+    ).filter((n) => n.kind === "mention" && n.nest_id === burstNest);
+    expect(inBurstNest.length).toBe(comments);
+  });
+});
+
 describe("mention channels", () => {
   it("delivers a document-body mention to the channel and the person too", async () => {
     // The changeset advertises this as new (document mentions used to be
