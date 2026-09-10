@@ -451,6 +451,13 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
     void goToWorkPage(work.pagination?.offset ?? 0);
   };
 
+  // An archive ask rides the deletion queue, but it is reversible and it
+  // targets the nest — everything the inbox shows for it has to say archive,
+  // not delete (CU-wdqcq01pe5).
+  const isArchiveAsk = (w: api.WorkItem) => w.target_type === "nest_archive";
+  const workItemKind = (w: api.WorkItem) =>
+    w.type !== "deletion" ? "Review" : isArchiveAsk(w) ? "Archive" : "Deletion";
+
   // Resolve a deletion flag straight from the inbox. Delete needs a confirm and
   // decline needs a note, so both go through ReasonDialog; the handlers throw
   // on failure so the error lands in the dialog, not a swallowed console line.
@@ -1034,12 +1041,12 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                           />
                         )}
                         <span
-                          className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0 ${w.type === "deletion"
+                          className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0 ${w.type === "deletion" && !isArchiveAsk(w)
                               ? "bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300"
                               : "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
                             }`}
                         >
-                          {w.type === "deletion" ? "Deletion" : "Review"}
+                          {workItemKind(w)}
                         </span>
                         <button
                           onClick={() => openWorkItem(w)}
@@ -1054,17 +1061,27 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                         <div className="flex items-center gap-1 shrink-0">
                           {w.type === "deletion" ? (
                             <>
+                              {/* Honouring an archive ask archives — it is an
+                                  approval, not a destruction, so it says so. */}
                               <Button
                                 size="sm"
                                 variant="outline"
-                                className="text-destructive hover:text-destructive"
+                                className={
+                                  isArchiveAsk(w)
+                                    ? ""
+                                    : "text-destructive hover:text-destructive"
+                                }
                                 onClick={() => {
                                   setDeletionAction("delete");
                                   setDeletionTarget(w);
                                 }}
                               >
-                                <Trash2 className="h-3.5 w-3.5 mr-1" />
-                                Delete
+                                {isArchiveAsk(w) ? (
+                                  <Archive className="h-3.5 w-3.5 mr-1" />
+                                ) : (
+                                  <Trash2 className="h-3.5 w-3.5 mr-1" />
+                                )}
+                                {isArchiveAsk(w) ? "Approve" : "Delete"}
                               </Button>
                               <Button
                                 size="sm"
@@ -1122,9 +1139,11 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                         </span>
                         <span className="flex-1" />
                         <span className="text-xs text-muted-foreground">
-                          {w.type === "deletion"
-                            ? "Deletion Requested"
-                            : "Pending Review"}
+                          {w.type !== "deletion"
+                            ? "Pending Review"
+                            : isArchiveAsk(w)
+                              ? "Archive Requested"
+                              : "Deletion Requested"}
                         </span>
                       </button>
                       {w.type === "deletion" && w.request_id && (
@@ -1136,7 +1155,11 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                             e.stopPropagation();
                             try {
                               await handleWithdrawDeletion(w);
-                              toast.success("Deletion request withdrawn");
+                              toast.success(
+                                isArchiveAsk(w)
+                                  ? "Archive request withdrawn"
+                                  : "Deletion request withdrawn",
+                              );
                             } catch (err: any) {
                               // Same feedback the nest view and the editor give
                               // for this action — a silent no-op left the row
@@ -2167,22 +2190,34 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
           open
           onOpenChange={(o) => !o && setDeletionTarget(null)}
           title={
-            deletionAction === "delete"
-              ? `Delete "${deletionTarget.title}"?`
-              : "Reject this deletion request"
+            deletionAction !== "delete"
+              ? `Reject this ${isArchiveAsk(deletionTarget) ? "archive" : "deletion"} request`
+              : isArchiveAsk(deletionTarget)
+                ? `Archive "${deletionTarget.title}"?`
+                : `Delete "${deletionTarget.title}"?`
           }
-          description={`${deletionTarget.requested_by} asked for this: "${deletionTarget.reason ?? ""}". ${deletionAction === "delete"
-              ? "Deleting removes the document, its history, comments and annotations. It cannot be undone."
-              : "The document stays; your note is the record, and the requester is notified."
+          description={`${deletionTarget.requested_by} asked for this: "${deletionTarget.reason ?? ""}". ${deletionAction !== "delete"
+              ? isArchiveAsk(deletionTarget)
+                ? "The nest stays where it is; your note is the record, and the requester is notified."
+                : "The document stays; your note is the record, and the requester is notified."
+              : isArchiveAsk(deletionTarget)
+                ? "The nest goes read-only and leaves the dashboard; nothing is deleted and you can restore it."
+                : "Deleting removes the document, its history, comments and annotations. It cannot be undone."
             }`}
           label={
             deletionAction === "decline" ? "Why are you rejecting?" : undefined
           }
           placeholder="e.g. still referenced by onboarding"
           confirmLabel={
-            deletionAction === "delete" ? "Delete document" : "Reject"
+            deletionAction !== "delete"
+              ? "Reject"
+              : isArchiveAsk(deletionTarget)
+                ? "Archive nest"
+                : "Delete document"
           }
-          destructive={deletionAction === "delete"}
+          destructive={
+            deletionAction === "delete" && !isArchiveAsk(deletionTarget)
+          }
           onConfirm={
             deletionAction === "delete" ? handleInboxDelete : handleInboxDecline
           }

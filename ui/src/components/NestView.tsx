@@ -3754,15 +3754,21 @@ export function NestView({
                       >
                         Reject
                       </Button>
+                      {/* Honouring an archive ask archives — reversible, so it
+                          is an approval, not a destructive action. */}
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                        className={
+                          r.targetType === "nest_archive"
+                            ? ""
+                            : "text-destructive hover:text-destructive hover:bg-destructive/10"
+                        }
                         onClick={() =>
                           setResolveTarget({ request: r, action: "delete" })
                         }
                       >
-                        Delete
+                        {r.targetType === "nest_archive" ? "Approve" : "Delete"}
                       </Button>
                     </div>
                   ))}
