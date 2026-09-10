@@ -152,8 +152,10 @@ export function CollaboratorManager({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nestId]);
 
-  const handleAdd = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // The add itself, callable without a form event: the person field submits on
+  // Enter through the combobox (which owns that key while its list is open) and
+  // the Add button submits the form. Both land here.
+  const addPerson = async () => {
     const email = inviteEmail.trim();
     if (!email) return;
     // Reject malformed input before it hits the server — a bad address would
@@ -176,6 +178,11 @@ export function CollaboratorManager({
     } finally {
       setAdding(false);
     }
+  };
+
+  const handleAdd = (e: React.FormEvent) => {
+    e.preventDefault();
+    void addPerson();
   };
 
   const shareableTeams = myTeams.filter(
@@ -352,6 +359,7 @@ export function CollaboratorManager({
               <PersonCombobox
                 value={inviteEmail}
                 onChange={setInviteEmail}
+                onSubmit={addPerson}
                 placeholder="teammate@example.com"
                 disabled={adding}
                 className="flex-1"

@@ -138,6 +138,8 @@ export function PersonCombobox({
               e.preventDefault();
               onSubmit();
             }
+            // No onSubmit: Enter is left alone, so a surrounding <form>
+            // submits natively — see the note on the Enter branch below.
             return;
           }
           if (e.key === "ArrowDown") {
@@ -147,14 +149,23 @@ export function PersonCombobox({
             e.preventDefault();
             setHighlight((i) => (i <= 0 ? options.length - 1 : i - 1));
           } else if (e.key === "Enter") {
-            e.preventDefault();
             // Enter takes the highlighted person; with nothing highlighted it
             // submits what was typed, so a full address never needs the list.
             // Indexed defensively: the reset effect runs after the render that
             // shrank `options`, so for one commit the index can point past it.
             const chosen = highlight >= 0 ? options[highlight] : undefined;
-            if (chosen) pick(chosen.email);
-            else onSubmit?.();
+            if (chosen) {
+              e.preventDefault();
+              pick(chosen.email);
+            } else if (onSubmit) {
+              e.preventDefault();
+              onSubmit();
+            }
+            // Otherwise the key is NOT consumed. Swallowing it whenever the
+            // list happened to be open — which it is on focus, before a
+            // character is typed — silently broke Enter-to-add in a form whose
+            // caller hadn't wired onSubmit, where the plain <input> this
+            // replaced had submitted natively.
           } else if (e.key === "Tab" && highlight >= 0) {
             const chosen = options[highlight];
             if (chosen) {
