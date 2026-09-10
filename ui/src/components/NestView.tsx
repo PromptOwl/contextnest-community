@@ -364,7 +364,7 @@ export function NestView({
   const [primeTags, setPrimeTags] = useState<string[]>([]);
   // Push Confirmation Gate (superadmin-set). Held-push count drives the badge.
   const [requirePushConfirmation, setRequirePushConfirmation] = useState(false);
-  // Held ctx pushes awaiting confirmation (reviewer view). Empty when the
+  // Held agent writes awaiting confirmation (reviewer view). Empty when the
   // caller can't review or nothing is held.
   const [pendingPushes, setPendingPushes] = useState<api.PendingPush[]>([]);
   // The held push whose confirm modal is open, if any.
@@ -406,7 +406,7 @@ export function NestView({
     (isAdmin && (isOwner || isAnonOwned)) ||
     (!isAdmin && (isOwner || permission === "owner" || permission === "admin"));
 
-  // Held ctx pushes awaiting confirmation. Best-effort: the endpoint is
+  // Held agent writes awaiting confirmation. Best-effort: the endpoint is
   // reviewer-only (403 for anyone else) — swallow it and show nothing.
   const refetchPendingPushes = useCallback(async () => {
     try {
@@ -1902,13 +1902,13 @@ export function NestView({
         </div>
       )}
 
-      {/* Held pushes banner — surfaces ctx pushes waiting on confirmation
+      {/* Held-write banner — surfaces agent writes waiting on confirmation
           (Push Confirmation Gate). Each card opens the confirm modal. */}
       {pendingPushes.length > 0 && (
         <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-950/30 p-3 space-y-2">
           <div className="flex items-center gap-2 text-sm font-medium text-amber-800 dark:text-amber-300">
             <Upload className="h-4 w-4" />
-            <span>Pushes awaiting confirmation</span>
+            <span>Agent writes awaiting confirmation</span>
             <Badge variant="secondary">{pendingPushes.length}</Badge>
           </div>
           <div className="space-y-1.5">

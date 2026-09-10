@@ -568,7 +568,8 @@ export type PendingPushStatus = "pending" | "applied" | "rejected" | "expired";
 
 /** One staged document in a held push, as the modal renders it. */
 export interface PushManifestEntry {
-  id: string;
+  /** null when the title has no ASCII slug: the id is generated on apply. */
+  id: string | null;
   title: string;
   type: string;
   tags: string[];
@@ -593,6 +594,9 @@ export interface PendingPush {
 export interface PushAllowlistEntry {
   user_id: string;
   key_id: string | null;
+  /** Resolved for display; null if the user or key has since been deleted. */
+  user_email: string | null;
+  key_label: string | null;
   created_by_user_id: string;
   created_at: string;
 }
@@ -1399,7 +1403,7 @@ export interface FeedCommentItem {
   isReply: boolean;
 }
 
-/** A held ctx push awaiting confirmation (Push Confirmation Gate). */
+/** A held agent write awaiting confirmation (Push Confirmation Gate). */
 export interface FeedPendingPushItem {
   type: "pending_push";
   id: string;

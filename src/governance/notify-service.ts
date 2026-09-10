@@ -123,7 +123,7 @@ export async function notifyReviewRequested(params: {
 }
 
 /**
- * Fan a HELD PUSH (Push Confirmation Gate) out to the people who can confirm
+ * Fan a HELD AGENT WRITE (Push Confirmation Gate) out to the people who can confirm
  * it: the nest owner and every active reviewer steward. Best-effort by
  * contract — a notify failure must never fail the hold.
  */
@@ -153,7 +153,7 @@ export async function notifyPendingPush(params: {
 
     const recipients = new Set<string>(reviewers.map((r) => r.email));
     if (nest?.owner_email) recipients.add(nest.owner_email.toLowerCase());
-    // The submitter already knows they pushed.
+    // The submitter already knows what it wrote.
     recipients.delete(submitterEmail.toLowerCase());
 
     const now = new Date().toISOString();
@@ -168,7 +168,7 @@ export async function notifyPendingPush(params: {
           nestId,
           email,
           pendingId,
-          `${submitterLabel} pushed ${docCount} document(s) to "${nestName}" — awaiting your confirmation`,
+          `${submitterLabel} wrote ${docCount} document(s) to "${nestName}" — awaiting your confirmation`,
           now,
         ],
       );
@@ -178,7 +178,7 @@ export async function notifyPendingPush(params: {
     // Slack/Teams/email connector line (best-effort, debounced).
     await notifyNestEvent(
       nestId,
-      `📥 Push held for confirmation on "${nestName}": ${docCount} document(s) from ${submitterLabel} (${submitterEmail}).`,
+      `📥 Agent write held for confirmation on "${nestName}": ${docCount} document(s) from ${submitterLabel} (${submitterEmail}).`,
     );
 
     return created;

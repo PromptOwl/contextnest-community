@@ -1,12 +1,12 @@
 /**
- * PushConfirmationModal — the reviewer's decision surface for a held ctx push
+ * PushConfirmationModal — the reviewer's decision surface for a held agent write
  * (Push Confirmation Gate).
  *
  * Loud confirmation: it names EXACTLY which nest (name + id verbatim, copyable),
  * how many documents, the per-doc manifest (title · type · tags, with a
- * new-vs-update badge derived from the current node index), and who pushed
+ * new-vs-update badge derived from the current node index), and who wrote it
  * (label + email + timestamp). "Always allow" whitelists the submitter's exact
- * key for future pushes. Confirm / Reject / Cancel.
+ * key for future writes. Confirm / Reject / Cancel.
  */
 import { useEffect, useState } from "react";
 import {
@@ -103,11 +103,11 @@ export function PushConfirmationModal({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <UploadCloud className="h-5 w-5 text-amber-600" />
-            Confirm push to {pending?.nest_name ?? "this nest"}
+            Confirm write to {pending?.nest_name ?? "this nest"}
           </DialogTitle>
           <DialogDescription>
-            This nest requires confirmation before a <code>ctx push</code>{" "}
-            applies. Review exactly what is about to be written.
+            This nest holds agent writes for review before they apply. Review
+            exactly what is about to be written.
           </DialogDescription>
         </DialogHeader>
 
@@ -121,7 +121,7 @@ export function PushConfirmationModal({
 
           {loading && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" /> Loading push…
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading…
             </div>
           )}
 
@@ -148,7 +148,7 @@ export function PushConfirmationModal({
               {/* Who + when. */}
               <div className="text-sm">
                 <span className="font-medium">{pending.doc_count}</span>{" "}
-                document{pending.doc_count === 1 ? "" : "s"} · pushed by{" "}
+                document{pending.doc_count === 1 ? "" : "s"} · written by{" "}
                 <span className="font-medium">{label}</span>
                 {pending.submitter_email ? ` (${pending.submitter_email})` : ""}{" "}
                 ·{" "}
@@ -164,11 +164,15 @@ export function PushConfirmationModal({
                     No document rows (context.md only).
                   </div>
                 )}
-                {pending.manifest.map((m) => {
-                  const isUpdate = existingNodeIds?.has(m.id) ?? false;
+                {pending.manifest.map((m, i) => {
+                  // A null id means the server will generate one on apply, so
+                  // it cannot collide with an existing doc: always New.
+                  const isUpdate = m.id
+                    ? (existingNodeIds?.has(m.id) ?? false)
+                    : false;
                   return (
                     <div
-                      key={m.id}
+                      key={`${m.id ?? m.title}:${i}`}
                       className="p-2.5 flex items-start justify-between gap-3"
                     >
                       <div className="min-w-0">
@@ -194,7 +198,7 @@ export function PushConfirmationModal({
                 <Alert>
                   <AlertCircle className="h-4 w-4" />
                   <AlertDescription>
-                    This push is no longer pending (status:{" "}
+                    This write is no longer pending (status:{" "}
                     <strong>{pending.status}</strong>).
                   </AlertDescription>
                 </Alert>
@@ -211,10 +215,10 @@ export function PushConfirmationModal({
                   />
                   <span>
                     <span className="font-medium">
-                      Always allow automated pushes from {label} to this nest
+                      Always allow automated writes from {label} to this nest
                     </span>
                     <span className="block text-xs text-muted-foreground">
-                      Whitelists this exact API key. Future pushes on it apply
+                      Whitelists this exact API key. Future writes on it apply
                       immediately without holding for confirmation.
                     </span>
                   </span>
@@ -251,7 +255,7 @@ export function PushConfirmationModal({
                   <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
                   <>
-                    <Check className="h-4 w-4 mr-1" /> Confirm push
+                    <Check className="h-4 w-4 mr-1" /> Confirm write
                   </>
                 )}
               </Button>

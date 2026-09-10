@@ -249,14 +249,27 @@ Turning stewardship **off** wipes stewards and pending reviews and is owner-only
 
 ## Push Confirmation Gate
 
-When a nest has `require_push_confirmation` on, a `ctx push` (`POST /nests/:id/publish`) from a non-whitelisted API key is **held** as a pending record instead of applying — it lands only after a reviewer confirms it in the web UI. Superadmin-set; default off (immediate-apply, as before).
+When a nest has `require_push_confirmation` on, a document written by an agent or script — through the MCP `context_create` tool, `POST /nests/:id/nodes` with an API key, or a bulk `POST /nests/:id/publish` — is **held** as a pending record instead of applying. It lands only after a reviewer confirms it in the web UI. Superadmin-set; default off (immediate-apply, as before).
+
+**What the gate covers.**
+
+| Surface | Gated? |
+|---|---|
+| MCP `context_create` | Yes — always; MCP is an agent surface whatever it authenticated with. Returns a `PENDING_CONFIRMATION` tool error, because nothing was created. |
+| `POST /nests/:id/nodes` with `Authorization: Bearer cnst_…` | Yes → `202`. |
+| `POST /nests/:id/nodes` from a session cookie (a person in the web UI) | **No** — the gate holds writes nobody watched being made; the person creating a document is the one who would confirm it. |
+| `POST /nests/:id/publish` (bulk) | Yes — on any credential → `202`. |
+| Edits to existing documents (`context_update`, `PATCH /nodes/:id`) | **No** — use stewardship review, which is built for changes to documents that already exist. |
+| `context_delete`, `context_move` | **No.** |
+
+So the gate is a checkpoint on documents an agent *creates*, not a general write lock on the nest. Pair it with stewardship if every change needs review.
 
 ### POST `/nests/:nestId/publish`
 
-The real ctx-push endpoint. Body: `{ documents?: [{ title, content, type?, tags?, scope? }], context_md? }`.
+The bulk write endpoint. Body: `{ documents?: [{ title, content, type?, tags?, scope? }], context_md? }`.
 
-- **Ungated nest, or a whitelisted key** → applies immediately: `201 { published, context_md_updated, node_ids }` (unchanged).
-- **Gated nest, non-whitelisted key** → held: `202`
+- **Ungated nest, or a whitelisted key** → applies immediately: `201 { published, context_md_updated, node_ids, skipped, failed }` (unchanged — see §8b for the full contract).
+- **Gated nest, non-whitelisted credential** → held: `202` (identical body from `POST /nests/:id/nodes` when that is held)
   ```json
   {
     "status": "pending_confirmation",
@@ -287,19 +300,25 @@ The poll endpoint. **Readable by the submitter (same key/user that pushed) OR a 
 }
 ```
 
+`manifest[].id` is the id each title will publish to — `null` when the title carries no ASCII slug, because the id is generated at apply time. It is a preview for the confirm screen's new-vs-update badge, not a promise: an id occupied by then is skipped, not overwritten.
+
 ### POST `/nests/:nestId/pending-pushes/:pid/confirm`  `{ always_allow?: boolean }`
 
-Confirm rights: the **submitter OR a reviewer/owner/admin**. Applies the stored payload through the real apply path and returns the updated record. Confirming a push that is no longer pending (already applied/rejected/expired) → `409`. `always_allow: true` whitelists the submitter's exact API key for future pushes to this nest.
+Confirm rights: a **reviewer/owner/admin of the nest — never the submitter**. A submitter that could confirm its own push would clear the gate with one extra call using the very key being held (and `always_allow` would whitelist it permanently); `403` otherwise.
+
+Applies the stored payload through the same apply path an immediate push uses, attributed to the **submitter**, and returns the updated record. Confirming a push that is no longer pending (already applied/rejected/expired) → `409`. `always_allow: true` whitelists the submitter's exact API key for future pushes to this nest — revoke it from nest settings or `DELETE /push-allowlist`.
+
+If applying throws (a busy vault, an unusable payload), the record goes back to `pending` rather than being stranded as applied-with-nothing-written; retry the confirm.
 
 ### POST `/nests/:nestId/pending-pushes/:pid/reject`
 
-Same rights as confirm. Marks the push `rejected`; nothing is ever written. `409` if not pending.
+A reviewer/owner/admin, **or the submitter withdrawing its own push** — rejecting never writes. Marks the push `rejected`. `409` if not pending.
 
 ### GET / DELETE `/nests/:nestId/push-allowlist`
 
-Reviewer-only. `GET` → `{ allowlist: [{ user_id, key_id, created_by_user_id, created_at }], count }` (`key_id: null` = all of that user's keys). `DELETE { user_id, key_id? }` removes one entry → `{ removed }`.
+Reviewer-only. `GET` → `{ allowlist: [{ user_id, key_id, user_email, key_label, created_by_user_id, created_at }], count }` (`key_id: null` = all of that user's keys; `user_email`/`key_label` are resolved for display and null if the user or key is gone). `DELETE { user_id, key_id? }` removes one entry → `{ removed }`.
 
-These routes are governance-licensed (`503` without a valid license).
+`/push-allowlist` is governance-licensed (`503` without a valid license). The `/pending-pushes` routes are **not**: `POST /publish` is unlicensed, so a lapsed license on a gated nest would otherwise hold every push at `202` with nothing able to confirm it, and the nest would stop accepting writes with no way back.
 
 ### PATCH `/nests/:nestId/visibility` (admin)
 ```json
@@ -670,6 +689,8 @@ Optional query params, applied before the per-node enrichment:
 - Auto-syncs tag index for steward resolution.
 
 Response (201): `{ "node": { ... }, "stewards": [...] }`.
+
+**`202` on a gated nest.** If the nest has `require_push_confirmation` on and this call arrived on a **non-whitelisted API key**, nothing is created: the document is held and the response is the `202 pending_confirmation` body documented under [Push Confirmation Gate](#push-confirmation-gate). A session-cookie caller (a person in the web UI) is never held. Poll `poll_url` for the outcome; the document exists only once `status` reads `applied`.
 
 ### GET `/nests/:nestId/nodes/:nodeId`
 Full node content. 403 if no steward access (when stewardship on).
