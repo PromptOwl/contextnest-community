@@ -90,9 +90,10 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   const [drafts, setDrafts] = useState<api.MyDraft[]>([]);
   const [draftsPage, setDraftsPage] = useState<api.WorkPagination | null>(null);
   const [draftsLoading, setDraftsLoading] = useState(true);
-  // Draft awaiting the submit dialog (priority + note) — same modal the editor
-  // uses, so submitting from here isn't a second, weaker path.
-  const [submitTarget, setSubmitTarget] = useState<api.MyDraft | null>(null);
+  // Drafts awaiting the submit dialog (priority + note) — same modal the editor
+  // uses, so submitting from here isn't a second, weaker path. A list: one row's
+  // button and the bulk bar hand it the same shape (CU-wdqcq01pe7).
+  const [submitTargets, setSubmitTargets] = useState<api.MyDraft[] | null>(null);
   // Find/sort/select for the drafts list. Search and sort are server-side (the
   // list spans pages, so filtering the page in hand would lie); `draftSearch`
   // is the debounced value actually sent.
@@ -523,20 +524,37 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   // It leaves the drafts list and shows up under "Waiting on others". Throws on
   // failure so the error surfaces in the dialog instead of a swallowed console
   // line; the dialog also owns the busy state.
-  const submitDraft = async (
-    d: api.MyDraft,
+  const submitDrafts = async (
+    targets: api.MyDraft[],
     note: string,
     priority: string,
   ) => {
-    await api.submitForReview(d.nest_id, d.node_id, note, priority);
+    // Serial, like the bulk discard beneath: writes against the same nests, a
+    // handful of rows, and each one stands alone — a failure part-way leaves
+    // the ones before it submitted and is reported, not rolled back.
+    const done: api.MyDraft[] = [];
+    const failed: string[] = [];
+    for (const d of targets) {
+      try {
+        await api.submitForReview(d.nest_id, d.node_id, note, priority);
+        done.push(d);
+      } catch (e) {
+        failed.push(d.title);
+        console.error("[Dashboard] submitForReview failed", d.node_id, e);
+      }
+    }
     // Optimistic drop, then reload the page the user is on — a row leaving
     // pulls one up from the next page, and the total shifts.
-    setDrafts((prev) =>
-      prev.filter((x) => !(x.nest_id === d.nest_id && x.node_id === d.node_id)),
-    );
-    setSubmitTarget(null);
+    setDrafts((prev) => prev.filter((x) => !done.some((d) => draftKey(d) === draftKey(x))));
+    setDraftsSelected(new Set());
     void goToDraftsPage(draftsPage?.offset ?? 0);
     void goToWorkPage(work.pagination?.offset ?? 0);
+    if (failed.length) {
+      // Thrown so the dialog shows it and stays open; the ones that landed are
+      // already gone from the list.
+      throw new Error(`Couldn't submit ${failed.length}: ${failed.join(", ")}`);
+    }
+    if (done.length > 1) toast.success(`${done.length} submitted for review`);
   };
 
   const draftKey = (d: api.MyDraft) => `${d.nest_id}:${d.node_id}`;
@@ -1348,6 +1366,20 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                           variant="outline"
                           disabled={draftsBusy}
                           onClick={() =>
+                            setSubmitTargets(
+                              drafts.filter((d) => draftsSelected.has(draftKey(d))),
+                            )
+                          }
+                          data-testid="drafts-bulk-submit"
+                        >
+                          <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
+                          Submit {draftsSelected.size} for review
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={draftsBusy}
+                          onClick={() =>
                             setDiscardTargets(
                               drafts.filter((d) => draftsSelected.has(draftKey(d))),
                             )
@@ -1423,7 +1455,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                         size="sm"
                         variant="outline"
                         className="shrink-0"
-                        onClick={() => setSubmitTarget(d)}
+                        onClick={() => setSubmitTargets([d])}
                       >
                         <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
                         Submit for review
@@ -2224,13 +2256,23 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
         />
       )}
 
-      {submitTarget && (
+      {/* One version number only describes one draft — a bulk submit names
+          none, and the modal drops the version line. */}
+      {submitTargets && submitTargets.length > 0 && (
         <SubmitForReviewModal
           isOpen
-          onClose={() => setSubmitTarget(null)}
-          documentTitle={submitTarget.title}
-          currentVersion={submitTarget.version}
-          onSubmit={(note, priority) => submitDraft(submitTarget, note, priority)}
+          onClose={() => setSubmitTargets(null)}
+          documentTitle={
+            submitTargets.length === 1
+              ? submitTargets[0].title
+              : `${submitTargets.length} drafts`
+          }
+          currentVersion={
+            submitTargets.length === 1 ? submitTargets[0].version : null
+          }
+          onSubmit={(note, priority) =>
+            submitDrafts(submitTargets, note, priority)
+          }
         />
       )}
 
