@@ -10,7 +10,7 @@
  *    controls autocomplete against. /auth/teammates can't serve this: it is
  *    server-admin only, so a plain nest admin inviting someone would get a 403.
  */
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   setupTestEnv,
   createTestApp,
@@ -286,9 +286,84 @@ describe("people suggestions", () => {
     expect(emails).not.toContain(stranger.email);
   });
 
+  it("does not offer the whole user table by default", async () => {
+    // The default matters more than the feature: this server may hold several
+    // unrelated customers (the PromptOwl-hosted deployment does), where
+    // "every registered account" is one customer's staff being handed
+    // another's addresses. Off unless an operator turns it on.
+    const { config } = await import("../src/config.js");
+    expect(config.PEOPLE_SUGGEST_ALL_USERS).toBe(false);
+    expect((await suggest(owner)).emails).not.toContain(stranger.email);
+  });
+
   it("suggests nobody to a caller who shares nothing", async () => {
     const { status, emails } = await suggest(stranger);
     expect(status).toBe(200);
     expect(emails).toEqual([]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The directory toggle — for a server whose user table IS one company
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("people suggestions with the directory toggle on", () => {
+  let app: any;
+  let owner: { apiKey: string; email: string };
+  let stranger: { apiKey: string; email: string };
+
+  beforeAll(async () => {
+    process.env.PEOPLE_SUGGEST_ALL_USERS = "true";
+    setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@acme.com", "Olive Owner");
+    await resetAuthRateLimit();
+    // Shares no nest and no team with the owner — invisible by default.
+    stranger = await registerUser(app, "stranger@other.com", "Stranger");
+    await resetAuthRateLimit();
+  });
+
+  afterAll(() => {
+    delete process.env.PEOPLE_SUGGEST_ALL_USERS;
+  });
+
+  it("offers every registered account, not only shared ones", async () => {
+    const { status, data } = await jsonRequest(
+      app,
+      "GET",
+      "/people/suggest",
+      undefined,
+      owner.apiKey,
+    );
+    expect(status).toBe(200);
+    const people = data.people as Array<{ email: string; source: string }>;
+    expect(people.map((p) => p.email.toLowerCase())).toContain(stranger.email);
+    // Labelled as coming from the directory, not from a shared nest or team,
+    // so a caller can tell why someone is being offered.
+    expect(
+      people.find((p) => p.email.toLowerCase() === stranger.email)?.source,
+    ).toBe("directory");
+  });
+
+  it("still excludes the caller, and still filters on the query", async () => {
+    const all = (await jsonRequest(
+      app,
+      "GET",
+      "/people/suggest",
+      undefined,
+      owner.apiKey,
+    )).data.people as Array<{ email: string }>;
+    expect(all.map((p) => p.email.toLowerCase())).not.toContain(owner.email);
+
+    const filtered = (await jsonRequest(
+      app,
+      "GET",
+      "/people/suggest?q=stranger",
+      undefined,
+      owner.apiKey,
+    )).data.people as Array<{ email: string }>;
+    expect(filtered.map((p) => p.email.toLowerCase())).toEqual([
+      stranger.email,
+    ]);
   });
 });

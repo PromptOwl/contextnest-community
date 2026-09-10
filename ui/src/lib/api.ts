@@ -262,6 +262,10 @@ export interface AdminSettings {
   oidc_auto_provision: boolean;
   /** Tag new documents with the creator's directory department (dept:<slug>). */
   oidc_department_tagging: boolean;
+  /** Offer every registered account in the add-a-person pickers. Default OFF:
+   *  a server holding several unrelated customers would otherwise hand one
+   *  customer's staff another customer's email addresses. */
+  people_suggest_all_users: boolean;
   /** Server-computed readiness: enabled AND issuer+client id+secret present. */
   oidc_ready?: boolean;
   /** Write-only: string sets/replaces, null clears; never returned. */

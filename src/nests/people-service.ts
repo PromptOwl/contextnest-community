@@ -13,6 +13,7 @@ import {
 } from "../governance/teams-service.js";
 import { isServerAdminUserId } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
+import { config } from "../config.js";
 
 /** Someone who can reach a nest, and the path that lets them. */
 export interface NestPerson {
@@ -181,9 +182,15 @@ export async function suggestPeopleForUser(
   const callerEmail = (caller?.email || "").toLowerCase();
   const filter = queryFilter(q);
 
-  const isAdmin = await isServerAdminUserId(callerUserId);
+  // The whole user table is offered to a server admin (they administer the
+  // accounts), and to everyone when an operator has said this server's users
+  // are one company — see config.PEOPLE_SUGGEST_ALL_USERS, which is off by
+  // default precisely because a multi-tenant server's user table is several
+  // companies.
+  const wholeDirectory =
+    config.PEOPLE_SUGGEST_ALL_USERS || (await isServerAdminUserId(callerUserId));
   const rows = (await (async () => {
-    if (isAdmin) {
+    if (wholeDirectory) {
       return (await db.all(
         `SELECT u.id AS user_id, u.email AS email, u.name AS name, 'directory' AS source
            FROM users u
@@ -250,10 +257,10 @@ export async function suggestPeopleForUser(
   // the caller's own teams covers every team path (owned or joined). A stored
   // roster carries no display name, so the names come from one users lookup
   // rather than a query per member — the picker shows a person, not an address.
-  // Skipped for a server admin: the directory read above already returned
-  // every account, so the merge could only re-add what is there.
+  // Skipped when the directory read above already returned every account —
+  // the merge could only re-add what is there.
   const teamEmails = new Set<string>();
-  for (const team of isAdmin ? [] : await listTeamsForUser(callerUserId)) {
+  for (const team of wholeDirectory ? [] : await listTeamsForUser(callerUserId)) {
     for (const member of team.members ?? []) {
       const key = (member.email || "").trim().toLowerCase();
       if (key && key !== callerEmail && !byEmail.has(key)) teamEmails.add(key);

@@ -593,6 +593,7 @@ export function createApp(): Hono<AuthEnv> {
     oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
     oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
+    people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
     // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
     // presence is reported, never the value (same discipline as the OIDC secret).
     sso_token_exchange_enabled: config.SSO_TOKEN_EXCHANGE_ENABLED,
@@ -863,6 +864,16 @@ export function createApp(): Hono<AuthEnv> {
       pending.push({
         name: "OIDC_DEPARTMENT_TAGGING",
         value: body.oidc_department_tagging ? "true" : null,
+      });
+    }
+    // Add-a-person suggestions over the whole user table. Default off because
+    // this server may be multi-tenant (the PromptOwl-hosted deployment holds
+    // many customers), where "every registered account" means another
+    // customer's staff. false persists as null — unset already means off.
+    if ("people_suggest_all_users" in body) {
+      pending.push({
+        name: "PEOPLE_SUGGEST_ALL_USERS",
+        value: body.people_suggest_all_users ? "true" : null,
       });
     }
     // ── Agent SSO / token-exchange (POST /auth/token-exchange) ────────────
