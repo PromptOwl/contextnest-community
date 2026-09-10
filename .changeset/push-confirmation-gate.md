@@ -32,24 +32,35 @@ them.
   `POST …/:pid/reject`, `GET/DELETE push-allowlist`. **Confirming is
   reviewer/owner/admin only — never the submitter**, or the gate would be one
   extra call away from being cleared by the key it is holding; a submitter may
-  reject (withdraw) its own push. Confirm/reject on a no-longer-pending push →
-  `409`, and a confirm whose apply throws returns the record to `pending`
-  instead of stranding it. Doc/folder grantees are denied `/publish`.
+  reject (withdraw) its own write. Confirm/reject on a no-longer-pending record
+  → `409`, and a confirm whose apply throws returns the record to `pending`
+  instead of stranding it as applied-with-nothing-written. Doc/folder grantees
+  are denied `/publish`.
 - The allowlist is governance-licensed (`503` without a license); the
-  `/pending-pushes` routes deliberately are **not** — `/publish` is unlicensed,
-  so licensing the release path would let a lapsed license hold every push with
-  nothing able to confirm it.
+  `/pending-pushes` routes deliberately are **not** — the write endpoints are
+  unlicensed, so licensing the release path would let a lapsed license hold
+  every write with nothing able to confirm it, and the nest would stop
+  accepting writes with no in-product way back.
 - Held payloads are bounded by `MAX_PENDING_PUSH_BYTES` (default 5 MB) and
   expire after `PENDING_PUSH_TTL_MS` (default 7 days), reported lazily as
   `expired`.
-- Web UI: a loud `PushConfirmationModal` (which nest — name + id verbatim, how
-  many docs + a title·type·tags manifest with new-vs-update badges, who pushed,
-  and an "Always allow automated pushes" checkbox that whitelists the key), a
-  held-push banner + count badge in the nest view, an activity-feed
-  `pending_push` item with `canConfirm`, and — in nest settings — the
-  superadmin-gated `require_push_confirmation` switch plus the list of
-  whitelisted keys with a Revoke action, so "Always allow" is not a one-way
-  door. Reviewers are notified when a push is held.
+- Web UI: a loud confirm modal (which nest — name + id verbatim, how many
+  documents + a title·type·tags manifest with new-vs-update badges, who wrote
+  them, and an "Always allow automated writes" checkbox that whitelists that
+  exact key), a held-write banner + count badge in the nest view, and — in nest
+  settings — the superadmin-gated `require_push_confirmation` switch plus the
+  list of whitelisted keys with a Revoke action, so "Always allow" is not a
+  one-way door. Reviewers are notified when a write is held.
+- The nest feed API also emits a `pending_push` item carrying the manifest and
+  a per-caller `canConfirm`, for clients that want held writes inline with the
+  rest of the activity. The nest view surfaces them through the banner instead,
+  so nothing renders that item yet.
+- A held write's manifest entry carries the id the title will publish to, or
+  `null` when the title has no ASCII slug and the id can only be generated at
+  apply time. It is a preview for the new-vs-update badge, not a promise: an id
+  that is occupied by the time a reviewer confirms is skipped, never
+  overwritten.
 
 Shares one wire contract with the paired `ctx push` change in
-`PromptOwl/ContextNest` (the CLI polls the gate and prints the confirm URL).
+`PromptOwl/ContextNest` (the CLI polls the gate and prints the confirm URL) —
+the CLI pushes through `POST /nests/:id/publish`, one of the gated surfaces.
