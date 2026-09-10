@@ -125,12 +125,16 @@ export async function getNestFeed(params: {
   let changes: ChangeFeedItem[] = [];
   let changesTotal = 0;
   {
-    changesTotal = (
-      (await db.get(
-        "SELECT COUNT(*) AS c FROM review_requests WHERE nest_id = ? AND status = 'pending'",
-        [params.nestId],
-      )) as { c: number }
-    ).c;
+    // Number(): Postgres returns COUNT(*) as a bigint, which `pg` hands back
+    // as a string — the totals below are summed, and "12" + "3" is "123".
+    changesTotal = Number(
+      (
+        (await db.get(
+          "SELECT COUNT(*) AS c FROM review_requests WHERE nest_id = ? AND status = 'pending'",
+          [params.nestId],
+        )) as { c: number | string }
+      ).c,
+    );
     if (filter !== "comments" && changesTotal > 0) {
       const rows = (await db.all(
         `SELECT * FROM review_requests
@@ -199,15 +203,17 @@ export async function getNestFeed(params: {
     if (accessible.length > 0) {
       const placeholders = accessible.map(() => "?").join(",");
       const ids = accessible.map((n) => n.id);
-      commentsTotal = (
-        (await db.get(
-          `SELECT COUNT(*) AS c
-             FROM annotation_comments c
-             JOIN annotation_threads t ON t.id = c.thread_id
-            WHERE t.nest_id = ? AND t.node_id IN (${placeholders})`,
-          [params.nestId, ...ids],
-        )) as { c: number }
-      ).c;
+      commentsTotal = Number(
+        (
+          (await db.get(
+            `SELECT COUNT(*) AS c
+               FROM annotation_comments c
+               JOIN annotation_threads t ON t.id = c.thread_id
+              WHERE t.nest_id = ? AND t.node_id IN (${placeholders})`,
+            [params.nestId, ...ids],
+          )) as { c: number | string }
+        ).c,
+      );
 
       if (filter !== "changes" && commentsTotal > 0) {
         const rows = (await db.all(
@@ -243,18 +249,20 @@ export async function getNestFeed(params: {
   }
 
   // ── Pending pushes (Push Confirmation Gate) ─────────────────────────────
-  // Held ctx pushes awaiting confirmation. They ride the "changes" lane (a
+  // Held agent writes awaiting confirmation. They ride the "changes" lane (a
   // pending write, like a review request), never the comments lane.
   let pendingPushes: PendingPushFeedItem[] = [];
   let pendingPushesTotal = 0;
   {
     await expirePendingPushes(params.nestId);
-    pendingPushesTotal = (
-      (await db.get(
-        "SELECT COUNT(*) AS c FROM pending_pushes WHERE nest_id = ? AND status = 'pending'",
-        [params.nestId],
-      )) as { c: number }
-    ).c;
+    pendingPushesTotal = Number(
+      (
+        (await db.get(
+          "SELECT COUNT(*) AS c FROM pending_pushes WHERE nest_id = ? AND status = 'pending'",
+          [params.nestId],
+        )) as { c: number | string }
+      ).c,
+    );
     if (filter !== "comments" && pendingPushesTotal > 0) {
       const rows = (await db.all(
         `SELECT * FROM pending_pushes
