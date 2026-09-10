@@ -87,10 +87,41 @@ afterAll(async () => {
 });
 
 describe("mention channels", () => {
+  it("delivers a document-body mention to the channel and the person too", async () => {
+    // The changeset advertises this as new (document mentions used to be
+    // inbox-only), and it rides the same deliverMentionMessages as a comment —
+    // but "very likely fine because it shares a helper" is not a test.
+    // Deliberately NOT clearing the spies: the sibling tests assert on the
+    // comment fired in beforeAll, so each test filters by its own document
+    // title instead of resetting shared state out from under the others.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Q4 Brief", content: `owner needs @${editor.email} on this` },
+      owner.apiKey,
+    );
+    await new Promise((r) => setTimeout(r, 100));
+
+    const posted = postWebhook.mock.calls
+      .map((c: any[]) => JSON.stringify(c[1]))
+      .find((b) => b.includes("Q4 Brief"));
+    expect(posted).toBeTruthy();
+    expect(posted).toContain("mentioned");
+    expect(posted).toContain(editor.email);
+
+    const mailed = sendMail.mock.calls
+      .map((c: any[]) => c[0])
+      .filter((m: any) => JSON.stringify(m.subject || "").includes("Q4 Brief"));
+    expect(mailed).toHaveLength(1);
+    expect(JSON.stringify(mailed[0].to)).toContain(editor.email);
+  });
+
+
   it("posts the mention to the configured connector", async () => {
     expect(postWebhook).toHaveBeenCalled();
     const bodies = postWebhook.mock.calls.map((c: any[]) => JSON.stringify(c[1]));
-    const mention = bodies.find((b) => b.includes("mentioned"));
+    const mention = bodies.find((b) => b.includes("Launch Plan"));
     expect(mention).toBeTruthy();
     expect(mention).toContain("Launch Plan");
     expect(mention).toContain(owner.email);
@@ -107,7 +138,7 @@ describe("mention channels", () => {
     expect(sendMail).toHaveBeenCalled();
     const to = sendMail.mock.calls
       .map((c: any[]) => c[0])
-      .filter((m: any) => JSON.stringify(m.subject || "").toLowerCase().includes("mention"));
+      .filter((m: any) => JSON.stringify(m.subject || "").includes("Launch Plan"));
     expect(to).toHaveLength(1);
     expect(JSON.stringify(to[0].to)).toContain(editor.email);
     expect(JSON.stringify(to[0].text)).toContain("Launch Plan");

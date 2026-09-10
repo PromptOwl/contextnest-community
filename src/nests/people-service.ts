@@ -5,6 +5,7 @@
  * notify-service import chain.
  */
 import { getDb } from "../db/client.js";
+import type { SqlParam } from "../db/adapter.js";
 import {
   parseSharedTeams,
   listSharedTeamMembers,
@@ -195,33 +196,38 @@ export async function suggestPeopleForUser(
     // The nests the caller can reach as owner or collaborator. Reused three
     // times below, so it stays a subquery rather than three round trips —
     // `IN (SELECT … UNION SELECT …)` is portable across SQLite and Postgres.
-    const myNests = `SELECT id FROM nests WHERE user_id = ?
-                     UNION SELECT nest_id FROM nest_collaborators WHERE user_id = ?`;
-    return (await db.all(
-      `SELECT u.id AS user_id, u.email AS email, u.name AS name, 'nest' AS source
+    //
+    // Each use appends its OWN two bindings as the fragment is emitted, rather
+    // than the call site counting how many copies it interpolated: a
+    // placeholder array assembled by hand goes wrong the moment someone adds
+    // or drops a use, and the only thing that catches it is a binding-count
+    // error at runtime.
+    const args: SqlParam[] = [callerUserId, ANON_USER_ID];
+    const myNests = () => {
+      args.push(callerUserId, callerUserId);
+      return `SELECT id FROM nests WHERE user_id = ?
+              UNION SELECT nest_id FROM nest_collaborators WHERE user_id = ?`;
+    };
+    // Built before the template so the pushes land in the order the `?`s
+    // appear — template literals evaluate their expressions left to right,
+    // which is that order, but naming the fragments makes it independent of
+    // that subtlety.
+    const ownedNests = myNests();
+    const collabNests = myNests();
+    const stewardNests = myNests();
+    const sql = `SELECT u.id AS user_id, u.email AS email, u.name AS name, 'nest' AS source
          FROM users u
         WHERE u.id != ? AND u.id != ?
-          AND (u.id IN (SELECT user_id FROM nests WHERE id IN (${myNests}))
+          AND (u.id IN (SELECT user_id FROM nests WHERE id IN (${ownedNests}))
                OR u.id IN (SELECT user_id FROM nest_collaborators
-                            WHERE nest_id IN (${myNests}))
+                            WHERE nest_id IN (${collabNests}))
                OR LOWER(u.email) IN (SELECT LOWER(user_email) FROM stewards
                                       WHERE is_active = 1
-                                        AND nest_id IN (${myNests})))${filter.sql}
+                                        AND nest_id IN (${stewardNests})))${filter.sql}
         ORDER BY u.email
-        LIMIT ?`,
-      [
-        callerUserId,
-        ANON_USER_ID,
-        callerUserId,
-        callerUserId,
-        callerUserId,
-        callerUserId,
-        callerUserId,
-        callerUserId,
-        ...filter.args,
-        SUGGEST_FETCH,
-      ],
-    )) as SuggestionRow[];
+        LIMIT ?`;
+    args.push(...filter.args, SUGGEST_FETCH);
+    return (await db.all(sql, args)) as SuggestionRow[];
   })()) as SuggestionRow[];
 
   const byEmail = new Map<string, PersonSuggestion>();

@@ -85,6 +85,74 @@ describe("mentionable roster", () => {
     expect(status).toBe(403);
   });
 
+  it("refuses someone whose only access is a grant on one document", async () => {
+    // A grant is a guest pass to one document, not membership, and
+    // listNestPeople lists every grant holder in the nest — so if this
+    // endpoint answered them, one shared document would unlock every member's
+    // address. It doesn't: a grant-only caller resolves to permission "none",
+    // and app.ts only admits those on an explicit allowlist of grant-visible
+    // routes (the bare nest read, the node list, retrieval queries, pins,
+    // definitions). `mentionable` is not on it, so they are refused as
+    // "Nest not found" — the existence oracle, hence 404 rather than 403.
+    //
+    // Pinned because the refusal comes from that allowlist, not from anything
+    // in this endpoint: adding `mentionable` to it later has to answer the
+    // roster question deliberately instead of inheriting a 200.
+    const guest = await registerUser(app, "guest@acme.com", "Guest");
+    await resetAuthRateLimit();
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Shared Doc", content: "for the guest" },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/grants`,
+      {
+        target_type: "document",
+        target: "nodes/shared-doc",
+        email: guest.email,
+        role: "read",
+      },
+      owner.apiKey,
+    );
+
+    const { status } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/mentionable`,
+      undefined,
+      guest.apiKey,
+    );
+    expect(status).toBe(404);
+
+    // A member who ALSO holds a grant is still a member: listNestPeople keeps
+    // their strongest path, so the grant doesn't demote them.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/grants`,
+      {
+        target_type: "document",
+        target: "nodes/shared-doc",
+        email: viewer.email,
+        role: "read",
+      },
+      owner.apiKey,
+    );
+    const asViewer = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/mentionable`,
+      undefined,
+      viewer.apiKey,
+    );
+    expect(asViewer.status).toBe(200);
+  });
+
   it("refuses a signed-in non-member reading an org-visible nest", async () => {
     await jsonRequest(
       app,
