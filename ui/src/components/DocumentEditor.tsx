@@ -1297,7 +1297,12 @@ export function DocumentEditor({
             : `"${title.trim() || "Untitled"}" saved as a draft.`,
         );
       }
-      afterSave(savedId ?? "");
+      // The document is clean now, but React has not re-rendered yet: the
+      // app-level nav guard registered by the effect below still closes over
+      // isDirty === true. Without this, saving — which for a create navigates
+      // straight back to the nest — reopened the "Unsaved changes" dialog for
+      // the edits it had just written. A save is the answer to that question.
+      bypassNavGuard(() => afterSave(savedId ?? ""));
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -1350,9 +1355,10 @@ export function DocumentEditor({
     runSave(() => {
       const intent = leaveIntent?.run;
       setLeaveIntent(null);
-      // The question has been answered — bypassNavGuard keeps the app-level
-      // guard from asking again about the very navigation it just asked about.
-      if (intent) bypassNavGuard(intent);
+      // runSave already runs this continuation inside bypassNavGuard, so the
+      // app-level guard cannot ask again about the navigation it just asked
+      // about.
+      intent?.();
     });
 
   /** Drop the parked draft AND put the loaded server copy back in the fields —
