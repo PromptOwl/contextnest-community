@@ -1423,6 +1423,11 @@ async function runTool(
         nodeId: node.id,
         body,
         actorEmail: userEmail,
+        // Without this the notification still reaches the person, but its
+        // "Open document" link falls back to PUBLIC_BASE_URL and comes out
+        // empty when that isn't configured — every other notifying tool in
+        // this file passes it, and the REST route passes requestBaseUrl.
+        baseUrl: ctx.baseUrl,
       });
       await syncAnnotationsNode(nestId, node.id, userEmail);
       return threadId

@@ -133,11 +133,48 @@ describe("mention channels", () => {
     expect(mention).not.toContain("confirm the date");
   });
 
+  it("gives an agent's comment the same working link as a human's", async () => {
+    // A mention left through MCP goes through the same fan-out, but the tool
+    // has to hand it a base URL: without one, docLink falls back to
+    // PUBLIC_BASE_URL and the email's "Open document" button points at "".
+    const res = await app.request(`/nests/${nestId}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        Authorization: `Bearer ${owner.apiKey}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "context_comment",
+          arguments: {
+            id: "nodes/launch-plan",
+            body: `handled — @${editor.email} please confirm`,
+          },
+        },
+      }),
+    });
+    expect(res.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const mailed = sendMail.mock.calls
+      .map((c: any[]) => c[0])
+      .filter((m: any) => JSON.stringify(m.text || "").includes("please confirm"));
+    expect(mailed).toHaveLength(1);
+    // The link is present and absolute — the shape docLink builds.
+    expect(String(mailed[0].text)).toMatch(/https?:\/\/[^\s]+\?nest=/);
+  });
+
   it("emails the person who was named, not the team inbox", async () => {
     expect(sendMail).toHaveBeenCalled();
+    // Filtered on this comment's own words, not its document title: a sibling
+    // test comments on the same document, and a title filter would count both.
     const to = sendMail.mock.calls
       .map((c: any[]) => c[0])
-      .filter((m: any) => JSON.stringify(m.subject || "").includes("Launch Plan"));
+      .filter((m: any) => JSON.stringify(m.text || "").includes("confirm the date"));
     expect(to).toHaveLength(1);
     expect(JSON.stringify(to[0].to)).toContain(editor.email);
     expect(JSON.stringify(to[0].text)).toContain("Launch Plan");
