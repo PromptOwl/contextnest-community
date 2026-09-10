@@ -94,6 +94,10 @@ describe("mention channels", () => {
     expect(mention).toBeTruthy();
     expect(mention).toContain("Launch Plan");
     expect(mention).toContain(owner.email);
+    // A channel is not a person: the message names who was mentioned rather
+    // than saying "mentioned you" to a room.
+    expect(mention).toContain(editor.email);
+    expect(mention).not.toContain("mentioned you");
   });
 
   it("emails the person who was named, not the team inbox", async () => {

@@ -127,18 +127,21 @@ function deliverMentionMessages(params: {
   nestId: string;
   nodeId: string;
   recipients: Recipient[];
-  message: string;
+  /** What the event is, in the third person — a connector posts to a channel,
+   *  where the inbox row's "mentioned you" would address the wrong reader. */
+  channelMessage: string;
   actorEmail: string;
   excerpt: string;
   ctx: { docTitle: string; path: string; link: string };
 }): void {
-  const { nestId, nodeId, recipients, message, actorEmail, excerpt, ctx } = params;
+  const { nestId, nodeId, recipients, channelMessage, actorEmail, excerpt, ctx } =
+    params;
   void dispatchEvent({
     kind: "mention",
     nestId,
     subjectId: nodeId,
     actor: actorEmail,
-    message,
+    message: channelMessage,
   });
   for (const r of recipients) {
     void sendEmailToRecipient(r.email, {
@@ -150,6 +153,19 @@ function deliverMentionMessages(params: {
       note: excerpt || null,
     });
   }
+}
+
+/** "X mentioned A and B in *Doc*" — the channel's third-person form of the
+ *  same event each recipient reads as "X mentioned you in …". */
+function channelSentence(
+  actorEmail: string,
+  recipients: Recipient[],
+  /** Where it happened, as the rest of the sentence: `in *Doc*`, or
+   *  `in a comment on *Doc*`. */
+  where: string,
+): string {
+  const names = recipients.map((r) => r.email).join(", ");
+  return `${actorEmail} mentioned ${names} ${where}`;
 }
 
 /** A comment trimmed to a line that fits a notification. */
@@ -194,7 +210,11 @@ export async function notifyMentions(params: {
       nestId,
       nodeId,
       recipients,
-      message,
+      channelMessage: channelSentence(
+        actorEmail,
+        recipients,
+        `in *${ctx.label}*`,
+      ),
       actorEmail,
       excerpt: "",
       ctx,
@@ -235,7 +255,11 @@ export async function notifyCommentMentions(params: {
       nestId,
       nodeId,
       recipients,
-      message,
+      channelMessage: `${channelSentence(
+        actorEmail,
+        recipients,
+        `in a comment on *${ctx.label}*`,
+      )}${excerpt ? ` — "${excerpt}"` : ""}`,
       actorEmail,
       excerpt,
       ctx,

@@ -1184,7 +1184,9 @@ Leave a comment. Body: `{ body, version?, anchor?{start,end,text?}, parentId? }`
 (`GET /nests/:nestId/mentionable`) and each person named gets a `mention` row
 in `GET /me/notifications` linking the document, plus a message on the
 configured connector and an email to their own address when SMTP is set up.
-The author is never notified about their own mention, a name matching nobody
+A channel message names who was mentioned (a room is not a person); the inbox
+row and the email address the recipient directly. The author is never notified
+about their own mention, a name matching nobody
 (or matching two people ambiguously) notifies nobody, and a recipient who
 can't open the document is skipped — so a mention can't disclose a title.
 Unlike a document body, where only names a save *adds* notify, every name in a
