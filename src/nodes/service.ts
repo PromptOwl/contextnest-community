@@ -550,6 +550,12 @@ function engineScopesFolders(): boolean {
  *
  * Mirrors `derivedAnnotationsId` in annotations/service.ts; importing it would
  * close the annotations→nodes import cycle.
+ *
+ * The guarantee is convention, not structure: each surface filters for itself,
+ * so a NEW listing or count can forget to. test/document-count-parity.test.ts
+ * is what catches that — it pins every "how many documents" answer against the
+ * document list, so a surface that starts counting these nodes fails there
+ * rather than in someone's dashboard.
  */
 export const DERIVED_ANNOTATIONS_SUFFIX = "--annotations";
 
