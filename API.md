@@ -1190,7 +1190,10 @@ about their own mention, a name matching nobody
 (or matching two people ambiguously) notifies nobody, and a recipient who
 can't open the document is skipped — so a mention can't disclose a title.
 Unlike a document body, where only names a save *adds* notify, every name in a
-comment notifies: the comment itself is the new event. The same applies to the
+comment notifies: the comment itself is the new event. At most 25 people are
+notified per write (`MAX_MENTION_RECIPIENTS`) — commenting is read-tier and
+unthrottled, so a comment naming a large roster would otherwise be an
+amplifier; names are taken in order of appearance. The same applies to the
 annotation thread endpoints (§ Hosted artifacts), which are what the UI's
 comments panel posts.
 

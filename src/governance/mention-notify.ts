@@ -18,7 +18,12 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { listNestPeople } from "../nests/people-service.js";
-import { extractMentions, newMentions, resolveMention } from "../shared/mentions.js";
+import {
+  MAX_MENTION_RECIPIENTS,
+  extractMentions,
+  newMentions,
+  resolveMention,
+} from "../shared/mentions.js";
 import { buildDocContext } from "./title-resolver.js";
 import { canReadNode } from "./access-guard.js";
 import { resolveNestAccess } from "../shared/access.js";
@@ -57,8 +62,8 @@ interface Recipient {
 /**
  * The people a list of written `@names` actually reaches: resolved against the
  * nest's roster, deduped, minus the author, minus anyone who can't open the
- * document. A name that matches nobody reaches nobody — the editor already
- * draws it as unresolved.
+ * document, and capped at MAX_MENTION_RECIPIENTS. A name that matches nobody
+ * reaches nobody — the editor already draws it as unresolved.
  */
 async function resolveRecipients(params: {
   nestId: string;
@@ -80,6 +85,11 @@ async function resolveRecipients(params: {
     const key = person.email.toLowerCase();
     if (key === actor || candidates.has(key)) continue;
     candidates.set(key, { email: person.email, userId: person.userId });
+    // Capped here rather than after the loop: everything past this point —
+    // one access check, one row, one email per candidate — is work this write
+    // causes, and the point of the cap is to bound it. Names are visited in
+    // order of appearance, so the first people named are the ones notified.
+    if (candidates.size >= MAX_MENTION_RECIPIENTS) break;
   }
 
   // Access-checked in parallel: each check is a couple of independent reads,

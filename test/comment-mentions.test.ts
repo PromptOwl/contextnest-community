@@ -16,6 +16,7 @@ import {
   jsonRequest,
   resetAuthRateLimit,
 } from "./helpers.js";
+import { MAX_MENTION_RECIPIENTS } from "../src/shared/mentions.js";
 
 describe("comment mentions", () => {
   let app: any;
@@ -227,6 +228,39 @@ describe("comment mentions", () => {
     await comment(owner, "nodes/kickoff", `cc @${johnB.email}`);
     expect(await mentions(johnA)).toHaveLength(0);
     expect(await mentions(johnB)).toHaveLength(1);
+  });
+
+  it("caps how many people one comment can notify", async () => {
+    // One comment naming the whole roster would otherwise fan out unbounded:
+    // a row, an access check, an email and a connector post per name, from a
+    // READ-tier action with no rate limit, repeatable by reposting the same
+    // text. The cap bounds the work a single write can cause; nobody
+    // legitimately tags this many people in one comment.
+    const crowd: Array<{ apiKey: string; email: string }> = [];
+    for (let i = 0; i < MAX_MENTION_RECIPIENTS + 3; i++) {
+      const person = await registerUser(app, `crowd${i}@acme.com`, `Crowd ${i}`);
+      await resetAuthRateLimit();
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/collaborators`,
+        { email: person.email, permission: "read" },
+        owner.apiKey,
+      );
+      crowd.push(person);
+    }
+
+    await comment(
+      owner,
+      "nodes/kickoff",
+      crowd.map((p) => `@${p.email}`).join(" "),
+    );
+
+    let notified = 0;
+    for (const person of crowd) {
+      if ((await mentions(person)).length > 0) notified++;
+    }
+    expect(notified).toBe(MAX_MENTION_RECIPIENTS);
   });
 
   it("stays quiet for someone granted a different document", async () => {

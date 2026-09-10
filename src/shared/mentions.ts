@@ -43,6 +43,21 @@ export function newMentions(previous: string, next: string): string[] {
   return extractMentions(next).filter((n) => !before.has(n.toLowerCase()));
 }
 
+/**
+ * Most people one write may notify.
+ *
+ * A mention costs an access check, an inbox row, an email and a slice of a
+ * connector post per recipient, and commenting is a READ-tier action with no
+ * per-actor rate limit — so one comment naming a large nest's whole roster,
+ * reposted, is an amplifier. Nobody tags this many people in one comment on
+ * purpose; a write that names more notifies the first few and stops.
+ *
+ * Applied to resolved candidates, not to the parsed names: capping the parse
+ * would corrupt `newMentions`, whose diff needs the FULL set of names on both
+ * sides to tell an added name from one that was already there.
+ */
+export const MAX_MENTION_RECIPIENTS = 25;
+
 export interface MentionablePerson {
   email: string;
   name?: string | null;

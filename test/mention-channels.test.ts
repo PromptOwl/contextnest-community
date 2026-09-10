@@ -117,7 +117,6 @@ describe("mention channels", () => {
     expect(JSON.stringify(mailed[0].to)).toContain(editor.email);
   });
 
-
   it("posts the mention to the configured connector", async () => {
     expect(postWebhook).toHaveBeenCalled();
     const bodies = postWebhook.mock.calls.map((c: any[]) => JSON.stringify(c[1]));

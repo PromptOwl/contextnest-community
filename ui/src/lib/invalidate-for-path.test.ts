@@ -47,7 +47,6 @@ describe("invalidateForPath — nest sharing", () => {
     }
   });
 
-
   // The bug this pins: `people` (the @mention roster) rides on the
   // collaborators read, but sharing a nest with a team writes to /teams. That
   // scope dropped only the team keys, so a team removed from the nest kept
