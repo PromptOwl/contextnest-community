@@ -1760,6 +1760,15 @@ Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually;
 - `context_deletion_queue` — pending (or `declined`) requests with their reasons and request ids.
 - `context_resolve_deletion` — `delete` or `decline` (note required) by request id. **Owner/admin only** — the transport is read-tier, so this per-tool check is the only thing between a viewer and a deleted nest.
 
+**Comments read AND write.** `context_comments` reads a document's threads (anchored quotes, replies, open/resolved) — the same annotation store the web UI's comments panel shows. Two write tools close the loop so an agent handed feedback can answer it rather than only read it:
+
+- `context_comment` — leave a comment. Omit `thread` to open a new whole-document thread; pass a `thread` id from `context_comments` to reply into it. One tool for both, because they differ only by that argument.
+- `context_resolve_comment` — resolve a thread, or `reopen: true` to put it back. The caller is recorded as the resolver, exactly as in the UI.
+
+Both are **read-tier**, matching REST (`isAnnotationAction` in `app.ts`): a reviewer who can see the document may comment on it. The transport is read-tier too, so each tool re-checks `canReadNode` itself — that check is the real gate. Deliberately *not* gated on an approved version: a reviewer comments on drafts, and writing a comment discloses nothing (the caller supplies the text), whereas *reading* threads stays gated because anchors quote draft body text. Both run the same side effects the REST routes do — the `@mention` fan-out (so tagging a human notifies them) and the derived `— Annotations` re-projection for artifacts, so an agent's comment doesn't leave that node stale. A `thread` that belongs to another document is refused by name rather than silently opening a new thread.
+
+`context_comments` is also available on the **server-level** endpoint (nest-parameterised, read-only) — without it, a cross-nest client asking for comments got `Tool context_comments not found`, for every node type. Comment *writes* stay per-nest with the other write tools.
+
 **`context_my_drafts`** mirrors `GET /me/drafts`, nest-scoped: the caller's own unsubmitted (or rejected) documents in this nest, with their path and version. Capped at the 100 most recent; the reply says so explicitly when there are more, so an agent can't read a capped page as the whole set. Self-scoped by construction — it only ever returns rows the caller authored, in a nest they already hold read on, so it needs no permission check of its own. It exists because an agent otherwise cannot see its own unsubmitted work: a draft has no review request, so `context_review_queue` never lists it, and `context_query` skips it (only approved versions are AI-readable). The response names `context_submit_review` as the next step.
 
 Server-admin-only tools (gated by `isLicenseAdminUserId` in non-open mode, same as their REST counterparts):
@@ -1793,7 +1802,7 @@ email — native access never auto-provisions.
 
 Accepted as a `Bearer` on exactly these paths (everything else still requires a
 real credential):
-- `GET /index` and the server-level `ALL /mcp` — cross-nest index + read tools.
+- `GET /index` and the server-level `ALL /mcp` — cross-nest index + read tools (including `context_comments`).
 - `POST /nests/:id/context` and `GET /nests/:id/nodes` — retrieval + doc listing.
 - `ALL /nests/:id/mcp` — the per-nest MCP transport, so a block granted read &
   write on one nest reaches that nest's write tools. Per-nest permission,

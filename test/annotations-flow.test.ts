@@ -56,4 +56,24 @@ describe("annotations: comment flow", () => {
     const reopened = await jsonRequest(app, "POST", `${base}/${threadId}/reopen`, {}, user.apiKey);
     expect(reopened.data.thread.status).toBe("open");
   });
+
+  it("keeps replies in the order they were posted", async () => {
+    // created_at is text at second resolution and the tiebreaker is a UUID
+    // primary key, so three replies inside one second used to come back in
+    // arbitrary order — in the thread AND in the derived projection an agent
+    // reads. Millisecond timestamps (nowMsExpr) are what make this hold.
+    const created = await jsonRequest(app, "POST", base, { body: "one" }, user.apiKey);
+    const threadId = created.data.thread.id;
+    for (const body of ["two", "three", "four"]) {
+      await jsonRequest(app, "POST", `${base}/${threadId}/comments`, { body }, user.apiKey);
+    }
+    const listed = await jsonRequest(app, "GET", base, undefined, user.apiKey);
+    const thread = listed.data.threads.find((t: any) => t.id === threadId);
+    expect(thread.comments.map((c: any) => c.body)).toEqual([
+      "one",
+      "two",
+      "three",
+      "four",
+    ]);
+  });
 });
