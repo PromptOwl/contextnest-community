@@ -140,13 +140,72 @@ describe("document counts", () => {
     // The exclusion is a suffix rule on the id, so a document a person
     // actually wrote with that shape of title is the one thing it could
     // wrongly hide. It is a real file: it counts, and it lists.
+    const before = await counts();
     await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
       title: "Meeting Annotations",
       content: "# notes",
     });
     const c = await counts();
-    expect(c.list).toBe(3);
-    expect(c.tile).toBe(3);
-    expect(c.mcp).toBe(3);
+    // Relative to what was there: a sibling above adds a file, and a test that
+    // hardcodes a running total breaks on the next one added anywhere.
+    expect(c.list).toBe(before.list + 1);
+    expect(c.tile).toBe(before.tile + 1);
+    expect(c.mcp).toBe(before.mcp! + 1);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Imported nests keep a file's case in its node id — the one place a REAL
+// document can carry the derived suffix in a different case.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("document counts on an imported nest", () => {
+  let importedNest: string;
+
+  beforeAll(async () => {
+    setupTestEnv();
+    app = await createTestApp("open");
+    // An import takes each node id straight from the file path — no slugify,
+    // no lowercasing (flat-storage's crawl: `ids.push(rel.replace(/\.md$/, ""))`),
+    // unlike REST/MCP creation which slugifies the title. So this is how a
+    // document a person wrote can end up with an id ending in the derived
+    // suffix in another case.
+    const created = await jsonRequest(app, "POST", "/nests/import", {
+      name: "Imported",
+      files: [
+        {
+          path: "Notes.md",
+          content: "---\ntitle: Notes\ntype: document\nstatus: published\n---\n\nbody\n",
+        },
+        {
+          path: "Deck--Annotations.md",
+          content:
+            "---\ntitle: Deck Annotations\ntype: document\nstatus: published\n---\n\nbody\n",
+        },
+      ],
+    });
+    expect(created.status).toBe(201);
+    importedNest = created.data.nest.id;
+    nestId = importedNest;
+  });
+
+  it("counts a real document whose id ends in the suffix in another case", async () => {
+    // The JS check is `endsWith("--annotations")` — case-sensitive — so
+    // `Deck--Annotations` is NOT a projection, and every listing counts it.
+    // SQLite's LIKE folds ASCII case and ignores COLLATE, so a LIKE-based
+    // exclusion dropped this file from the card while every other surface
+    // counted it — the same drift, from the other direction — and behaved
+    // differently again on Postgres, whose LIKE is case-sensitive.
+    const ids = await jsonRequest(app, "GET", `/nests/${importedNest}/nodes`);
+    expect((ids.data.nodes as any[]).map((n) => n.id)).toContain(
+      "Deck--Annotations",
+    );
+
+    const c = await counts();
+    expect(c.list).toBe(2);
+    expect(c.tile).toBe(2);
+    expect(c.overview).toBe(2);
+    expect(c.stats).toBe(2);
+    expect(c.mcp).toBe(2);
   });
 });

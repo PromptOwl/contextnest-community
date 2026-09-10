@@ -50,6 +50,7 @@ import {
   resolveGrantRoles,
 } from "../governance/stewardship-service.js";
 import { getDb } from "../db/client.js";
+import { suffixOf } from "../db/sql.js";
 import { config } from "../config.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
 import { ANON_USER_ID } from "../shared/constants.js";
@@ -257,10 +258,12 @@ nestRoutes.get("/", async (c) => {
   // nest: dropping those rows would make a just-discussed nest look untouched.
   const docRows = (await db.all(
     `SELECT nest_id,
-            COUNT(DISTINCT CASE WHEN node_id NOT LIKE '%${DERIVED_ANNOTATIONS_SUFFIX}'
-                                THEN node_id END) AS c,
+            COUNT(DISTINCT CASE
+              WHEN ${suffixOf(db, "node_id", DERIVED_ANNOTATIONS_SUFFIX.length)} <> ?
+              THEN node_id END) AS c,
             MAX(created_at) AS last_activity
        FROM node_versions GROUP BY nest_id`,
+    [DERIVED_ANNOTATIONS_SUFFIX],
   )) as Array<{ nest_id: string; c: number; last_activity: string | null }>;
   const docByNest = new Map(docRows.map((r) => [r.nest_id, Number(r.c)]));
   const activityByNest = new Map(docRows.map((r) => [r.nest_id, r.last_activity]));

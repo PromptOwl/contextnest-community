@@ -24,6 +24,33 @@ export function nowExpr(db: DatabaseAdapter): string {
 }
 
 /**
+ * The last `length` characters of `column`, for comparing a suffix with `= ?`.
+ *
+ * Deliberately NOT `LIKE '%suffix'`, which is unusable for this on two counts.
+ * SQLite's LIKE folds ASCII case and ignores collation entirely — `COLLATE
+ * BINARY` does not make it case-sensitive, it is the `like()` function's own
+ * behaviour — so `'x--Annotations' LIKE '%--annotations'` is TRUE there and
+ * FALSE on Postgres, whose LIKE is case-sensitive. Identical data would count
+ * differently on the two backends this repo supports.
+ *
+ * It also keeps the suffix a bound parameter rather than string-spliced SQL, so
+ * a suffix that ever contained `%` or `_` can't quietly become a wildcard.
+ *
+ * `substr(x, -n)` and `right(x, n)` both return the whole string when it is
+ * shorter than `n`, which compares unequal to the suffix — the answer a caller
+ * wants for a short id.
+ */
+export function suffixOf(
+  db: DatabaseAdapter,
+  column: string,
+  length: number,
+): string {
+  return db.dialect === "sqlite"
+    ? `substr(${column}, -${length})`
+    : `right(${column}, ${length})`;
+}
+
+/**
  * Turn a plain `INSERT INTO …` into insert-or-ignore for the dialect.
  *   SQLite:   `INSERT OR IGNORE INTO …`
  *   Postgres: `… ON CONFLICT DO NOTHING` (target-less — ignores any
