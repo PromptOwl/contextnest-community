@@ -167,6 +167,17 @@ const slugify = (s: string) =>
     .replace(/^-|-$/g, "");
 
 /**
+ * The id `createNode` will derive for a title at the nest root, or null when
+ * the title slugifies to nothing (createNode generates an id at write time,
+ * so it cannot be known in advance). Preview-only — the confirm modal uses it
+ * to label a staged document New vs Update.
+ */
+export function derivedNodeId(title: string): string | null {
+  const slug = slugify(title).slice(0, 100).replace(/-+$/, "");
+  return slug ? `nodes/${slug}` : null;
+}
+
+/**
  * The id for a title that carries no ASCII at all: document-1, document-2, …,
  * the first one free in this folder. The title stays exactly what the author
  * typed; only the path is ASCII.
