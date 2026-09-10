@@ -28,7 +28,7 @@ import { buildDocContext } from "./title-resolver.js";
 import { canReadNode } from "./access-guard.js";
 import { resolveNestAccess } from "../shared/access.js";
 import { resolveNodeGrant } from "./grants-service.js";
-import { dispatchEvent } from "../notify/dispatch.js";
+import { dispatchEvent, hasAnyConnector } from "../notify/dispatch.js";
 import { sendEmailToRecipient } from "../notify/email.js";
 import { tryConsume } from "../shared/rate-limit.js";
 
@@ -142,7 +142,7 @@ async function insertInboxRows(params: {
  * it already receives for every review event; arbitrary comment prose it does
  * not, and a mention is a poor place to start.
  */
-function deliverMentionMessages(params: {
+async function deliverMentionMessages(params: {
   nestId: string;
   nodeId: string;
   recipients: Recipient[];
@@ -152,11 +152,15 @@ function deliverMentionMessages(params: {
   actorEmail: string;
   excerpt: string;
   ctx: { docTitle: string; path: string; link: string };
-}): void {
+}): Promise<void> {
   const { nestId, nodeId, recipients, channelMessage, actorEmail, excerpt, ctx } =
     params;
   let throttled = 0;
-  if (canDeliver("channel", nestId, actorEmail)) {
+  // Asked before the token is spent: on a nest with no connector there is
+  // nothing to post, so charging the channel budget would bill a no-op and
+  // then warn about "skipped" messages that had nowhere to go.
+  const channelReachable = await hasAnyConnector(nestId);
+  if (channelReachable && canDeliver("channel", nestId, actorEmail)) {
     void dispatchEvent({
       kind: "mention",
       nestId,
@@ -164,7 +168,7 @@ function deliverMentionMessages(params: {
       actor: actorEmail,
       message: channelMessage,
     });
-  } else {
+  } else if (channelReachable) {
     throttled++;
   }
   for (const r of recipients) {
@@ -290,7 +294,7 @@ export async function notifyMentions(params: {
     const ctx = await buildDocContext(nestId, nodeId, baseUrl);
     const message = `${actorEmail} mentioned you in "${ctx.label}"`;
     const created = await insertInboxRows({ nestId, nodeId, recipients, message });
-    deliverMentionMessages({
+    await deliverMentionMessages({
       nestId,
       nodeId,
       recipients,
@@ -335,7 +339,7 @@ export async function notifyCommentMentions(params: {
     const excerpt = excerptOf(body);
     const message = `${actorEmail} mentioned you in a comment on "${ctx.label}"`;
     const created = await insertInboxRows({ nestId, nodeId, recipients, message });
-    deliverMentionMessages({
+    await deliverMentionMessages({
       nestId,
       nodeId,
       recipients,

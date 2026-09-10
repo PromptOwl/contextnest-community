@@ -138,6 +138,29 @@ async function resolveUrl(nestId: string, raw: string): Promise<string | null> {
 }
 
 /**
+ * Could an event posted for this nest reach anything at all?
+ *
+ * Cheap by construction: the server-wide webhooks are a config read, and only
+ * when neither is set does this touch the connectors table (one indexed row
+ * lookup, tolerant of the table being absent mid-migration exactly as
+ * dispatchEvent is). Callers that RATION dispatches need this — spending a
+ * rate-limit token on a fan-out that has nowhere to go charges for a no-op and
+ * makes the budget depend on invisible configuration.
+ */
+export async function hasAnyConnector(nestId: string): Promise<boolean> {
+  if (config.SLACK_WEBHOOK_URL || config.MSTEAMS_WEBHOOK_URL) return true;
+  try {
+    const row = await getDb().get(
+      "SELECT 1 AS present FROM connectors WHERE nest_id = ? AND enabled = 1 LIMIT 1",
+      [nestId],
+    );
+    return !!row;
+  } catch {
+    return false; // table missing (mid-migration) — nothing to deliver to
+  }
+}
+
+/**
  * Fire an event at every matching connector. Callers use `void dispatch(…)`
  * — never await in a request path beyond the row lookups; delivery is
  * backgrounded and failure-proof by construction.

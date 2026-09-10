@@ -286,6 +286,17 @@ describe("people suggestions", () => {
     expect(emails).not.toContain(stranger.email);
   });
 
+  it("is unreachable without credentials — the route trusts its middleware", async () => {
+    // The handler reads c.get("userId") with no guard of its own, which is
+    // safe because flexAuthMiddleware either sets it or 401s: the only
+    // unauthenticated path it admits is a public nest read, and that
+    // eligibility check requires a /nests/:id/... path. Pinned here rather
+    // than guarded in the handler, so a future change to that predicate has
+    // to fail a test instead of quietly admitting anonymous callers.
+    const res = await app.request("/people/suggest");
+    expect(res.status).toBe(401);
+  });
+
   it("does not offer the whole user table by default", async () => {
     // The default matters more than the feature: this server may hold several
     // unrelated customers (the PromptOwl-hosted deployment does), where

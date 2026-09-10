@@ -86,6 +86,29 @@ afterAll(async () => {
   await env.cleanup();
 });
 
+describe("connector reachability", () => {
+  it("reports whether an event has anywhere to go", async () => {
+    // The channel budget is only charged when this says yes — otherwise a
+    // nest with no connector pays a token for a dispatch that no-ops, and
+    // then reports messages "skipped" that were never sendable.
+    const { hasAnyConnector } = await import("../src/notify/dispatch.js");
+    // This suite configures a server-wide Slack webhook, so any nest is
+    // reachable — including one that has no connector row of its own.
+    expect(await hasAnyConnector(nestId)).toBe(true);
+    expect(await hasAnyConnector("no-such-nest")).toBe(true);
+
+    const saved = process.env.SLACK_WEBHOOK_URL;
+    delete process.env.SLACK_WEBHOOK_URL;
+    try {
+      // With the server-wide webhooks gone and no per-nest row, nothing can
+      // be delivered — which is the case that must not spend a token.
+      expect(await hasAnyConnector(nestId)).toBe(false);
+    } finally {
+      process.env.SLACK_WEBHOOK_URL = saved;
+    }
+  });
+});
+
 describe("mention delivery budget", () => {
   it("stops the outbound stream but never the inbox rows", async () => {
     const { MENTION_DELIVERY_BUDGET } = await import(
