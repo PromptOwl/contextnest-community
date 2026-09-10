@@ -17,6 +17,10 @@ import {
   canReadNode,
 } from "../governance/access-guard.js";
 import { isPublicReader } from "../shared/access.js";
+import {
+  holdWriteIfGated,
+  heldWriteResponse,
+} from "../nests/push-confirmation-service.js";
 import { resolveNodeGrant } from "../governance/grants-service.js";
 import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
 import {
@@ -153,6 +157,37 @@ nodeRoutes.post("/", async (c) => {
 
   const nestId = c.req.param("nestId")!;
   const authorEmail = await getUserEmail(c);
+
+  // Agent-write gate. Only an API-key caller is held: a person creating a
+  // document in the web UI authenticates with a session cookie and is exactly
+  // who would be confirming it. Same hold, same 202 contract as bulk publish.
+  const keyId = c.get("apiKeyId") ?? null;
+  if (keyId) {
+    const pending = await holdWriteIfGated({
+      nestId,
+      userId: c.get("userId"),
+      keyId,
+      keyLabel: c.get("apiKeyLabel"),
+      userEmail: authorEmail,
+      payload: {
+        documents: [
+          {
+            title: body.title,
+            content: body.content,
+            type: body.type,
+            tags: body.tags,
+            scope: body.scope,
+            status: body.status,
+            schedule: body.schedule,
+            folder: body.folder,
+            prime: body.prime,
+          },
+        ],
+      },
+    });
+    if (pending) return c.json(heldWriteResponse(nestId, pending), 202);
+  }
+
   const { node } = await createNode(
     nestId,
     {

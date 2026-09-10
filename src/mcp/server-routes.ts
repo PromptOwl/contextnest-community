@@ -358,6 +358,8 @@ async function handleServerToolCall(
   userEmail: string,
   nestScope: string | null,
   baseUrl: string,
+  apiKeyId: string | null,
+  apiKeyLabel: string | null,
 ): Promise<ToolResult> {
   if (toolName === "nest_index") {
     const nests = await buildNestIndex(userId, nestScope);
@@ -420,6 +422,8 @@ async function handleServerToolCall(
     userId,
     userEmail,
     baseUrl,
+    apiKeyId,
+    apiKeyLabel,
   });
 }
 
@@ -428,6 +432,8 @@ function createServerMcp(
   userEmail: string,
   nestScope: string | null,
   baseUrl: string,
+  apiKeyId: string | null,
+  apiKeyLabel: string | null,
 ): McpServer {
   const server = new McpServer(
     { name: "contextnest-server", version: "1.0.0" },
@@ -455,6 +461,8 @@ function createServerMcp(
         userEmail,
         nestScope,
         baseUrl,
+        apiKeyId,
+        apiKeyLabel,
       );
       return toCallToolResult(out);
     });
@@ -474,6 +482,8 @@ serverMcpRoutes.all("/", async (c) => {
     userEmail,
     c.get("nestScope"),
     requestBaseUrl(c.req.url),
+    c.get("apiKeyId") ?? null,
+    c.get("apiKeyLabel") ?? null,
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({

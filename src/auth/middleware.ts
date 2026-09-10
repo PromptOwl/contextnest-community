@@ -14,7 +14,7 @@ export type AuthEnv = {
     // The API key the request authenticated with, when it used a Bearer key
     // (null for cookie/session requests and open mode). Lets pending-push rows
     // and the push allowlist attribute to — and key on — the exact credential
-    // that pushed, so `ctx push` from one key can be whitelisted without
+    // that wrote, so an agent write from one key can be whitelisted without
     // whitelisting every other key the same user holds.
     apiKeyId: string | null;
     apiKeyLabel: string | null;

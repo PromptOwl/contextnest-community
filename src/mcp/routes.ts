@@ -24,6 +24,8 @@ function createMcpServerForNest(
   userId: string,
   userEmail: string,
   baseUrl: string,
+  apiKeyId: string | null,
+  apiKeyLabel: string | null,
 ): McpServer {
   const server = new McpServer(
     { name: `contextnest-${nestId}`, version: "1.0.0" },
@@ -68,6 +70,8 @@ function createMcpServerForNest(
         userId,
         userEmail,
         baseUrl,
+        apiKeyId,
+        apiKeyLabel,
       });
       return toCallToolResult(out);
     });
@@ -87,6 +91,8 @@ mcpRoutes.all("/", async (c) => {
     userId,
     userEmail,
     requestBaseUrl(c.req.url),
+    c.get("apiKeyId") ?? null,
+    c.get("apiKeyLabel") ?? null,
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({
