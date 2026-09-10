@@ -11,6 +11,11 @@ import { ConflictError } from "../shared/errors.js";
  * ids ("nodes/3") named nothing the user could see (CU-wdqcq018r1). Titles come
  * from the node index; an id the index doesn't carry stands in for itself, so a
  * stale index costs clarity, never the error.
+ *
+ * Two cards may carry the same title, and then the titles alone name no card in
+ * particular ("Draft" → "Draft"). A repeated title is written with its node id
+ * — `"Draft" (nodes/draft-2)` — so every step in the trail addresses one card
+ * (CU-wdqcq01k29).
  */
 export async function nodeTrail(
   db: Querier,
@@ -29,7 +34,20 @@ export async function nodeTrail(
   } catch {
     // No index yet (or it is mid-rebuild) — ids still describe the cycle.
   }
-  return ids.map((id) => `"${titles.get(id) ?? id}"`).join(" → ");
+  const label = (id: string) => titles.get(id) ?? id;
+  // A label shared by two ids in this trail can't identify either one.
+  const idsPerLabel = new Map<string, Set<string>>();
+  for (const id of unique) {
+    const l = label(id);
+    (idsPerLabel.get(l) ?? idsPerLabel.set(l, new Set()).get(l)!).add(id);
+  }
+  return ids
+    .map((id) => {
+      const l = label(id);
+      const ambiguous = (idsPerLabel.get(l)?.size ?? 0) > 1;
+      return ambiguous && l !== id ? `"${l}" (${id})` : `"${l}"`;
+    })
+    .join(" → ");
 }
 
 /**
@@ -60,7 +78,7 @@ export async function assertFlowGraphAcyclic(
   for (const r of rows) {
     if (r.from_node === r.to_node) {
       throw new ConflictError(
-        `cycle: ${await nodeTrail(db, nestId, [r.from_node])} cannot flow into itself`,
+        `This step loops back on itself: ${await nodeTrail(db, nestId, [r.from_node])}. A flow can't return to a step it already ran.`,
       );
     }
     nodes.add(r.from_node);
@@ -84,7 +102,7 @@ export async function assertFlowGraphAcyclic(
   }
   if (removed < nodes.size) {
     throw new ConflictError(
-      "cycle: enabling flow on this edge type would create a cycle in the flow graph — flow edges must form a DAG",
+      "Making this connection type a flow would loop these steps back on each other. A flow can't return to a step it already ran.",
     );
   }
 }

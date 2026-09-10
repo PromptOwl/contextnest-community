@@ -39,6 +39,9 @@ const SETTING_ENV = [
   "MAX_BODY_BYTES",
   "FEATURE_WORKFLOW_PLANE",
   "FEATURE_SUBAGENT_RUNS",
+  "POSTHOG_KEY",
+  "POSTHOG_HOST",
+  "TELEMETRY_ENABLED",
 ];
 
 beforeEach(() => {
@@ -137,6 +140,36 @@ describe("/admin/settings — validation", () => {
     expect(res.status).toBe(400);
     expect(res.data.error).toMatch(/PromptOwl sign-in/i);
     expect(res.data.fieldErrors).toHaveProperty("promptowl_sign_in_gate");
+  });
+
+  it("saves a PostHog key and rejects a non-URL host", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const ok = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { posthog_key: "phc_test", posthog_host: "https://eu.i.posthog.com/" },
+      admin.apiKey,
+    );
+    expect(ok.status).toBe(200);
+    // Trailing slash stripped, same as public_base_url.
+    expect(ok.data.settings.posthog_host).toBe("https://eu.i.posthog.com");
+    expect(await persistedSetting("POSTHOG_KEY")).toBe("phc_test");
+
+    // The browser gets the key from /health — but only while telemetry is on.
+    const health = await jsonRequest(app, "GET", "/health");
+    expect(health.data.posthog_key).toBe("phc_test");
+    await jsonRequest(app, "PATCH", "/admin/settings", { telemetry_enabled: false }, admin.apiKey);
+    const healthOff = await jsonRequest(app, "GET", "/health");
+    expect(healthOff.data.posthog_key).toBeNull();
+
+    const bad = await jsonRequest(
+      app, "PATCH", "/admin/settings", { posthog_host: "not-a-url" }, admin.apiKey,
+    );
+    expect(bad.status).toBe(400);
+    expect(bad.data.fieldErrors).toHaveProperty("posthog_host");
   });
 
   it("rejects an out-of-range max_body_bytes", async () => {

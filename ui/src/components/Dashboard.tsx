@@ -90,9 +90,10 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   const [drafts, setDrafts] = useState<api.MyDraft[]>([]);
   const [draftsPage, setDraftsPage] = useState<api.WorkPagination | null>(null);
   const [draftsLoading, setDraftsLoading] = useState(true);
-  // Draft awaiting the submit dialog (priority + note) — same modal the editor
-  // uses, so submitting from here isn't a second, weaker path.
-  const [submitTarget, setSubmitTarget] = useState<api.MyDraft | null>(null);
+  // Drafts awaiting the submit dialog (priority + note) — same modal the editor
+  // uses, so submitting from here isn't a second, weaker path. A list: one row's
+  // button and the bulk bar hand it the same shape (CU-wdqcq01pe7).
+  const [submitTargets, setSubmitTargets] = useState<api.MyDraft[] | null>(null);
   // Find/sort/select for the drafts list. Search and sort are server-side (the
   // list spans pages, so filtering the page in hand would lie); `draftSearch`
   // is the debounced value actually sent.
@@ -451,6 +452,13 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
     void goToWorkPage(work.pagination?.offset ?? 0);
   };
 
+  // An archive ask rides the deletion queue, but it is reversible and it
+  // targets the nest — everything the inbox shows for it has to say archive,
+  // not delete (CU-wdqcq01pe5).
+  const isArchiveAsk = (w: api.WorkItem) => w.target_type === "nest_archive";
+  const workItemKind = (w: api.WorkItem) =>
+    w.type !== "deletion" ? "Review" : isArchiveAsk(w) ? "Archive" : "Deletion";
+
   // Resolve a deletion flag straight from the inbox. Delete needs a confirm and
   // decline needs a note, so both go through ReasonDialog; the handlers throw
   // on failure so the error lands in the dialog, not a swallowed console line.
@@ -516,20 +524,48 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   // It leaves the drafts list and shows up under "Waiting on others". Throws on
   // failure so the error surfaces in the dialog instead of a swallowed console
   // line; the dialog also owns the busy state.
-  const submitDraft = async (
-    d: api.MyDraft,
+  const submitDrafts = async (
+    targets: api.MyDraft[],
     note: string,
     priority: string,
   ) => {
-    await api.submitForReview(d.nest_id, d.node_id, note, priority);
+    // Serial, like the bulk discard beneath: writes against the same nests, a
+    // handful of rows, and each one stands alone — a failure part-way leaves
+    // the ones before it submitted and is reported, not rolled back.
+    const done: api.MyDraft[] = [];
+    const failed: api.MyDraft[] = [];
+    for (const d of targets) {
+      try {
+        await api.submitForReview(d.nest_id, d.node_id, note, priority);
+        done.push(d);
+      } catch (e) {
+        failed.push(d);
+        console.error("[Dashboard] submitForReview failed", d.node_id, e);
+      }
+    }
     // Optimistic drop, then reload the page the user is on — a row leaving
     // pulls one up from the next page, and the total shifts.
-    setDrafts((prev) =>
-      prev.filter((x) => !(x.nest_id === d.nest_id && x.node_id === d.node_id)),
-    );
-    setSubmitTarget(null);
+    setDrafts((prev) => prev.filter((x) => !done.some((d) => draftKey(d) === draftKey(x))));
+    setDraftsSelected(new Set());
     void goToDraftsPage(draftsPage?.offset ?? 0);
     void goToWorkPage(work.pagination?.offset ?? 0);
+    if (failed.length) {
+      // Narrow the dialog to what is left to do: retrying the original list
+      // would resubmit the drafts that already went to review, and they would
+      // fail the second time for being pending — reporting titles that in fact
+      // succeeded.
+      setSubmitTargets(failed);
+      // Thrown so the dialog shows it and stays open. The ones that landed are
+      // already gone from the list, so the message counts them too — a batch
+      // where 9 of 10 went through is not an unqualified failure.
+      const landed = done.length ? `${done.length} submitted. ` : "";
+      throw new Error(
+        `${landed}Couldn't submit ${failed.length}: ${failed
+          .map((d) => d.title)
+          .join(", ")}`,
+      );
+    }
+    if (done.length > 1) toast.success(`${done.length} submitted for review`);
   };
 
   const draftKey = (d: api.MyDraft) => `${d.nest_id}:${d.node_id}`;
@@ -1034,12 +1070,12 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                           />
                         )}
                         <span
-                          className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0 ${w.type === "deletion"
+                          className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0 ${w.type === "deletion" && !isArchiveAsk(w)
                               ? "bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300"
                               : "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
                             }`}
                         >
-                          {w.type === "deletion" ? "Deletion" : "Review"}
+                          {workItemKind(w)}
                         </span>
                         <button
                           onClick={() => openWorkItem(w)}
@@ -1054,17 +1090,27 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                         <div className="flex items-center gap-1 shrink-0">
                           {w.type === "deletion" ? (
                             <>
+                              {/* Honouring an archive ask archives — it is an
+                                  approval, not a destruction, so it says so. */}
                               <Button
                                 size="sm"
                                 variant="outline"
-                                className="text-destructive hover:text-destructive"
+                                className={
+                                  isArchiveAsk(w)
+                                    ? ""
+                                    : "text-destructive hover:text-destructive"
+                                }
                                 onClick={() => {
                                   setDeletionAction("delete");
                                   setDeletionTarget(w);
                                 }}
                               >
-                                <Trash2 className="h-3.5 w-3.5 mr-1" />
-                                Delete
+                                {isArchiveAsk(w) ? (
+                                  <Archive className="h-3.5 w-3.5 mr-1" />
+                                ) : (
+                                  <Trash2 className="h-3.5 w-3.5 mr-1" />
+                                )}
+                                {isArchiveAsk(w) ? "Approve" : "Delete"}
                               </Button>
                               <Button
                                 size="sm"
@@ -1122,9 +1168,11 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                         </span>
                         <span className="flex-1" />
                         <span className="text-xs text-muted-foreground">
-                          {w.type === "deletion"
-                            ? "Deletion Requested"
-                            : "Pending Review"}
+                          {w.type !== "deletion"
+                            ? "Pending Review"
+                            : isArchiveAsk(w)
+                              ? "Archive Requested"
+                              : "Deletion Requested"}
                         </span>
                       </button>
                       {w.type === "deletion" && w.request_id && (
@@ -1136,7 +1184,11 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                             e.stopPropagation();
                             try {
                               await handleWithdrawDeletion(w);
-                              toast.success("Deletion request withdrawn");
+                              toast.success(
+                                isArchiveAsk(w)
+                                  ? "Archive request withdrawn"
+                                  : "Deletion request withdrawn",
+                              );
                             } catch (err: any) {
                               // Same feedback the nest view and the editor give
                               // for this action — a silent no-op left the row
@@ -1325,6 +1377,20 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                           variant="outline"
                           disabled={draftsBusy}
                           onClick={() =>
+                            setSubmitTargets(
+                              drafts.filter((d) => draftsSelected.has(draftKey(d))),
+                            )
+                          }
+                          data-testid="drafts-bulk-submit"
+                        >
+                          <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
+                          Submit {draftsSelected.size} for review
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={draftsBusy}
+                          onClick={() =>
                             setDiscardTargets(
                               drafts.filter((d) => draftsSelected.has(draftKey(d))),
                             )
@@ -1400,7 +1466,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                         size="sm"
                         variant="outline"
                         className="shrink-0"
-                        onClick={() => setSubmitTarget(d)}
+                        onClick={() => setSubmitTargets([d])}
                       >
                         <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
                         Submit for review
@@ -2167,35 +2233,57 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
           open
           onOpenChange={(o) => !o && setDeletionTarget(null)}
           title={
-            deletionAction === "delete"
-              ? `Delete "${deletionTarget.title}"?`
-              : "Reject this deletion request"
+            deletionAction !== "delete"
+              ? `Reject this ${isArchiveAsk(deletionTarget) ? "archive" : "deletion"} request`
+              : isArchiveAsk(deletionTarget)
+                ? `Archive "${deletionTarget.title}"?`
+                : `Delete "${deletionTarget.title}"?`
           }
-          description={`${deletionTarget.requested_by} asked for this: "${deletionTarget.reason ?? ""}". ${deletionAction === "delete"
-              ? "Deleting removes the document, its history, comments and annotations. It cannot be undone."
-              : "The document stays; your note is the record, and the requester is notified."
+          description={`${deletionTarget.requested_by} asked for this: "${deletionTarget.reason ?? ""}". ${deletionAction !== "delete"
+              ? isArchiveAsk(deletionTarget)
+                ? "The nest stays where it is; your note is the record, and the requester is notified."
+                : "The document stays; your note is the record, and the requester is notified."
+              : isArchiveAsk(deletionTarget)
+                ? "The nest goes read-only and leaves the dashboard; nothing is deleted and you can restore it."
+                : "Deleting removes the document, its history, comments and annotations. It cannot be undone."
             }`}
           label={
             deletionAction === "decline" ? "Why are you rejecting?" : undefined
           }
           placeholder="e.g. still referenced by onboarding"
           confirmLabel={
-            deletionAction === "delete" ? "Delete document" : "Reject"
+            deletionAction !== "delete"
+              ? "Reject"
+              : isArchiveAsk(deletionTarget)
+                ? "Archive nest"
+                : "Delete document"
           }
-          destructive={deletionAction === "delete"}
+          destructive={
+            deletionAction === "delete" && !isArchiveAsk(deletionTarget)
+          }
           onConfirm={
             deletionAction === "delete" ? handleInboxDelete : handleInboxDecline
           }
         />
       )}
 
-      {submitTarget && (
+      {/* One version number only describes one draft — a bulk submit names
+          none, and the modal drops the version line. */}
+      {submitTargets && submitTargets.length > 0 && (
         <SubmitForReviewModal
           isOpen
-          onClose={() => setSubmitTarget(null)}
-          documentTitle={submitTarget.title}
-          currentVersion={submitTarget.version}
-          onSubmit={(note, priority) => submitDraft(submitTarget, note, priority)}
+          onClose={() => setSubmitTargets(null)}
+          documentTitle={
+            submitTargets.length === 1
+              ? submitTargets[0].title
+              : `${submitTargets.length} drafts`
+          }
+          currentVersion={
+            submitTargets.length === 1 ? submitTargets[0].version : null
+          }
+          onSubmit={(note, priority) =>
+            submitDrafts(submitTargets, note, priority)
+          }
         />
       )}
 

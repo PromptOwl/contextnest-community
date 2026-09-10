@@ -532,7 +532,9 @@ export function NestView({
       setShowNewFolder(false);
       // An empty folder barely changes the tree, so say it landed
       // (CU-wdqcq01caq) — the failure path already speaks.
-      toast.success(`Folder "${folder}" created`);
+      // Named the way the tree will show it — quoting the raw path made the
+      // toast look like it created a different folder (CU-wdqcq01pe8).
+      toast.success(`Folder "${prettyFolderPath(folder)}" created`);
       fetchData();
     } catch (e: any) {
       console.error("[NestView] createFolder failed", e);
@@ -3754,15 +3756,21 @@ export function NestView({
                       >
                         Reject
                       </Button>
+                      {/* Honouring an archive ask archives — reversible, so it
+                          is an approval, not a destructive action. */}
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                        className={
+                          r.targetType === "nest_archive"
+                            ? ""
+                            : "text-destructive hover:text-destructive hover:bg-destructive/10"
+                        }
                         onClick={() =>
                           setResolveTarget({ request: r, action: "delete" })
                         }
                       >
-                        Delete
+                        {r.targetType === "nest_archive" ? "Approve" : "Delete"}
                       </Button>
                     </div>
                   ))}

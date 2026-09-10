@@ -1074,6 +1074,10 @@ export function DocumentEditor({
   // Set once the user has answered the leave dialog and the navigation is
   // going through — the browser-level guards below must not ask a second time.
   const leavingRef = useRef(false);
+  // How many guard entries are parked in history right now. Back spends one
+  // per press, and each press parks a replacement, so "leave for real" has to
+  // walk back over all of them.
+  const parkedRef = useRef(0);
 
   // Reloading or closing the tab with unsaved edits loses them — the in-app
   // leave dialog can't see a browser-level navigation, so hook it here too.
@@ -1106,28 +1110,45 @@ export function DocumentEditor({
   useEffect(() => {
     if (!isDirty || isReviewerOnly) return;
     leavingRef.current = false;
-    const park = () => window.history.pushState({ cnLeaveGuard: true }, "");
+    parkedRef.current = 0;
+    const park = () => {
+      window.history.pushState({ cnLeaveGuard: true }, "");
+      parkedRef.current++;
+    };
     park();
     const onPop = () => {
       // The parked entry is spent; park another so a cancelled leave is still
-      // caught, then ask. Leaving for real is two entries back — the spare and
-      // the page's own.
+      // caught, then ask. Back pressed again while the dialog is open spends
+      // that one too, which is why the count is tracked rather than assumed —
+      // leaving for real is every spare plus the page's own entry
+      // (CU-wdqcq01k1u).
+      parkedRef.current = Math.max(0, parkedRef.current - 1);
       park();
-      setLeaveIntent({
-        label: "leave this page",
-        run: () => {
-          leavingRef.current = true;
-          window.history.go(-2);
-        },
-      });
+      // Keep the pending question: a second Back must not replace the dialog
+      // the user is already answering, or its Save/Discard would resolve a
+      // navigation that no longer exists.
+      setLeaveIntent(
+        (prev) =>
+          prev ?? {
+            label: "leave this page",
+            run: () => {
+              leavingRef.current = true;
+              window.history.go(-(parkedRef.current + 1));
+            },
+          },
+      );
     };
     window.addEventListener("popstate", onPop);
     return () => {
       window.removeEventListener("popstate", onPop);
       // Left by some other route (saved, discarded, navigated in-app): drop the
-      // spare entry so Back still means Back.
-      if (!leavingRef.current && (window.history.state as any)?.cnLeaveGuard) {
-        window.history.back();
+      // spare entries so Back still means Back.
+      if (
+        !leavingRef.current &&
+        parkedRef.current > 0 &&
+        (window.history.state as any)?.cnLeaveGuard
+      ) {
+        window.history.go(-parkedRef.current);
       }
     };
   }, [isDirty, isReviewerOnly]);
@@ -1297,7 +1318,12 @@ export function DocumentEditor({
             : `"${title.trim() || "Untitled"}" saved as a draft.`,
         );
       }
-      afterSave(savedId ?? "");
+      // The document is clean now, but React has not re-rendered yet: the
+      // app-level nav guard registered by the effect below still closes over
+      // isDirty === true. Without this, saving — which for a create navigates
+      // straight back to the nest — reopened the "Unsaved changes" dialog for
+      // the edits it had just written. A save is the answer to that question.
+      bypassNavGuard(() => afterSave(savedId ?? ""));
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -1350,9 +1376,10 @@ export function DocumentEditor({
     runSave(() => {
       const intent = leaveIntent?.run;
       setLeaveIntent(null);
-      // The question has been answered — bypassNavGuard keeps the app-level
-      // guard from asking again about the very navigation it just asked about.
-      if (intent) bypassNavGuard(intent);
+      // runSave already runs this continuation inside bypassNavGuard, so the
+      // app-level guard cannot ask again about the navigation it just asked
+      // about.
+      intent?.();
     });
 
   /** Drop the parked draft AND put the loaded server copy back in the fields —

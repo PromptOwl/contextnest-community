@@ -133,7 +133,8 @@ describe("build the graph via MCP", () => {
       to_node: "nodes/digest-agent",
       type: "next",
     });
-    expect(msg.toLowerCase()).toContain("cycle");
+    // Plain language, not "DAG" or "cycle" jargon (CU-wdqcq01k1y).
+    expect(msg).toContain("loop back on each other");
   });
 });
 
