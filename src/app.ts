@@ -53,6 +53,7 @@ import {
   markNotificationsRead,
 } from "./governance/notify-service.js";
 import { definitionRoutes } from "./definitions/routes.js";
+import { isDerivedAnnotationsNode } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
 import {
@@ -1515,7 +1516,12 @@ export function createApp(): Hono<AuthEnv> {
     for (const nest of visibleNests) {
       try {
         const { storage } = await engineCache.get(nest.id);
-        const docs = await storage.discoverDocuments();
+        // Derived `— Annotations` projections are machine-maintained nodes
+        // that no listing shows, so they must not be counted as documents
+        // either — see isDerivedAnnotationsNode.
+        const docs = (await storage.discoverDocuments()).filter(
+          (d) => !isDerivedAnnotationsNode(d.id),
+        );
         documents += (await filterAccessible(nest.id, userId, userEmail, docs)).length;
       } catch {
         // Nest with filesystem issue — skip; don't break the whole count.

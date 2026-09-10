@@ -551,8 +551,10 @@ function engineScopesFolders(): boolean {
  * Mirrors `derivedAnnotationsId` in annotations/service.ts; importing it would
  * close the annotations→nodes import cycle.
  */
+export const DERIVED_ANNOTATIONS_SUFFIX = "--annotations";
+
 export function isDerivedAnnotationsNode(id: string): boolean {
-  return id.endsWith("--annotations");
+  return id.endsWith(DERIVED_ANNOTATIONS_SUFFIX);
 }
 
 export interface ListNodesFilters {
