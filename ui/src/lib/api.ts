@@ -209,6 +209,10 @@ export async function getHealth() {
     subagent_max_depth?: number;
     subagent_max_children?: number;
     runner_key_configured?: boolean;
+    /** PostHog project key, or null when analytics is unconfigured or usage
+     *  telemetry is switched off. The browser needs it to send events. */
+    posthog_key?: string | null;
+    posthog_host?: string;
     /** Mail transport is set up — email/invite publish gates need it. */
     email_configured?: boolean;
     suspended_reason?: string;
@@ -224,6 +228,9 @@ export interface AdminSettings {
   manual_sign_in: ManualSignIn;
   logo_url: string | null;
   telemetry_enabled: boolean;
+  /** PostHog project key ("" = analytics off) and ingestion host. */
+  posthog_key: string;
+  posthog_host: string;
   public_base_url: string;
   max_body_bytes: number;
   workflow_plane_enabled: boolean;

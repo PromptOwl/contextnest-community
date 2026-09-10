@@ -414,6 +414,11 @@ export function createApp(): Hono<AuthEnv> {
       // Presence only: the publish dialog hides the email/invite gates when
       // this server cannot send mail, because their only way in is a mailed link.
       email_configured: isEmailConfigured(),
+      // Product analytics for the SPA. The PostHog project key is a public
+      // client key, but it only ships while usage telemetry is on — one switch
+      // covers everything this server sends outward.
+      posthog_key: config.TELEMETRY_ENABLED ? config.POSTHOG_KEY || null : null,
+      posthog_host: config.POSTHOG_HOST,
       promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
       // Manual (email/password) sign-in mode (open | invite-only | disabled).
       // The login page reads this to show/hide the credential form, and to
@@ -566,6 +571,8 @@ export function createApp(): Hono<AuthEnv> {
     manual_sign_in: config.MANUAL_SIGN_IN,
     logo_url: config.LOGO_URL,
     telemetry_enabled: config.TELEMETRY_ENABLED,
+    posthog_key: config.POSTHOG_KEY,
+    posthog_host: config.POSTHOG_HOST,
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
     workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
@@ -678,6 +685,18 @@ export function createApp(): Hono<AuthEnv> {
     }
     if ("telemetry_enabled" in body) {
       pending.push({ name: "TELEMETRY_ENABLED", value: body.telemetry_enabled ? "true" : "false" });
+    }
+    // PostHog: empty key clears the row and turns analytics off. The host is
+    // checked here because a typo'd one fails silently in the browser.
+    if ("posthog_key" in body) {
+      const v = String(body.posthog_key ?? "").trim();
+      pending.push({ name: "POSTHOG_KEY", value: v || null });
+    }
+    if ("posthog_host" in body) {
+      const v = String(body.posthog_host ?? "").trim().replace(/\/$/, "");
+      if (v && !/^https?:\/\/[^\s]+$/i.test(v))
+        addError("posthog_host", "PostHog host must be a http(s) URL, e.g. https://us.i.posthog.com");
+      else pending.push({ name: "POSTHOG_HOST", value: v || null });
     }
     if ("workflow_plane_enabled" in body) {
       pending.push({

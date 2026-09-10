@@ -18,6 +18,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
 import { navigateGuarded } from "./lib/nav-guard";
+import { track } from "./lib/analytics";
 import {
   deriveNestCaps,
   isReaderHiddenView,
@@ -208,6 +209,11 @@ export default function App() {
     (next: View) => navigateGuarded(() => setViewNow(next)),
     [],
   );
+  // Route views for product analytics. The SPA keeps one URL, so the view is
+  // the event property; no-op unless the server configured a PostHog key.
+  useEffect(() => {
+    track("$pageview", { page: view.page });
+  }, [view.page]);
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   // ?nest=<id> deep-link probe; 200 → skip Login, mount NestView.
   // "missing" is "no ?nest to open"; "unreachable" is "there was one and it
