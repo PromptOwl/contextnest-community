@@ -533,13 +533,13 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
     // handful of rows, and each one stands alone — a failure part-way leaves
     // the ones before it submitted and is reported, not rolled back.
     const done: api.MyDraft[] = [];
-    const failed: string[] = [];
+    const failed: api.MyDraft[] = [];
     for (const d of targets) {
       try {
         await api.submitForReview(d.nest_id, d.node_id, note, priority);
         done.push(d);
       } catch (e) {
-        failed.push(d.title);
+        failed.push(d);
         console.error("[Dashboard] submitForReview failed", d.node_id, e);
       }
     }
@@ -550,12 +550,19 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
     void goToDraftsPage(draftsPage?.offset ?? 0);
     void goToWorkPage(work.pagination?.offset ?? 0);
     if (failed.length) {
+      // Narrow the dialog to what is left to do: retrying the original list
+      // would resubmit the drafts that already went to review, and they would
+      // fail the second time for being pending — reporting titles that in fact
+      // succeeded.
+      setSubmitTargets(failed);
       // Thrown so the dialog shows it and stays open. The ones that landed are
       // already gone from the list, so the message counts them too — a batch
       // where 9 of 10 went through is not an unqualified failure.
       const landed = done.length ? `${done.length} submitted. ` : "";
       throw new Error(
-        `${landed}Couldn't submit ${failed.length}: ${failed.join(", ")}`,
+        `${landed}Couldn't submit ${failed.length}: ${failed
+          .map((d) => d.title)
+          .join(", ")}`,
       );
     }
     if (done.length > 1) toast.success(`${done.length} submitted for review`);
