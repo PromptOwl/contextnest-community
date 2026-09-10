@@ -1467,8 +1467,12 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("039_nest_pins");
   }
 
-  // 041: widen nests.visibility to accept 'org'. See widenNestVisibilityCheck
-  // for why this is a table rebuild and why the pragma is toggled out here —
+  // 041: widen nests.visibility to accept 'org'. 040 is skipped on purpose —
+  // 040_push_confirmation is in flight on another branch, and ids are matched
+  // by string, so the gap costs nothing and reusing 040 would collide.
+  //
+  // See widenNestVisibilityCheck for why this is a table rebuild and why the
+  // pragma is toggled out here —
   // PRAGMA foreign_keys is a no-op inside a transaction, so doing it any other
   // way silently leaves enforcement ON and cascades the database away.
   if (!hasMigration("041_nest_visibility_org")) {
