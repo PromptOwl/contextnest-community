@@ -13,6 +13,8 @@ import {
   resolveHostedNodeId,
 } from "./service.js";
 import { ARTIFACT_NODE_TYPE, type AnnotationAnchor } from "./types.js";
+import { notifyCommentMentions } from "../governance/mention-notify.js";
+import { requestBaseUrl } from "../shared/base-url.js";
 
 /**
  * Routes for hosted-artifact annotations + sandboxed serving.
@@ -74,6 +76,13 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
     },
     userEmail,
   );
+  await notifyCommentMentions({
+    nestId,
+    nodeId,
+    body: input.body,
+    actorEmail: userEmail,
+    baseUrl: requestBaseUrl(c.req.url),
+  });
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread }, 201);
 });
@@ -102,6 +111,13 @@ export async function handleAnnotationReply(
   }
 
   const thread = await addComment(nestId, nodeId, threadId, userEmail, input.body);
+  await notifyCommentMentions({
+    nestId,
+    nodeId,
+    body: input.body,
+    actorEmail: userEmail,
+    baseUrl: requestBaseUrl(c.req.url),
+  });
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread });
 }

@@ -1842,6 +1842,29 @@ export async function listCollaborators(nestId: string) {
   }>(`/nests/${nestId}/collaborators`);
 }
 
+/** The nest's people, for the `@mention` pickers. Read tier (see the route),
+ *  so a read-only reviewer's comment box can offer the roster too — unlike
+ *  listCollaborators, which needs write. */
+export async function listMentionablePeople(nestId: string) {
+  return request<{ people: Array<{ email: string; name: string | null }> }>(
+    `/nests/${nestId}/mentionable`,
+  );
+}
+
+/** People the caller already works with — what the add-a-person controls
+ *  autocomplete against. An address that appears nowhere here is still valid
+ *  to type: that's how you add someone who has no account yet. */
+export async function suggestPeople(q = "") {
+  const query = q.trim() ? `?q=${encodeURIComponent(q.trim())}` : "";
+  return request<{
+    people: Array<{
+      email: string;
+      name: string | null;
+      source: "nest" | "team" | "directory";
+    }>;
+  }>(`/people/suggest${query}`);
+}
+
 export async function addCollaborator(
   nestId: string,
   data: { email?: string; user_id?: string; permission: string },

@@ -6,14 +6,16 @@
  * projects these into a derived markdown node so the feedback flows into the
  * context/MCP path; plain documents keep their comments in SQLite only.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MessageSquare, Check, RotateCcw, Loader2, Quote, X, CornerDownRight, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "./ui/button";
 import { Switch } from "./ui/switch";
 import * as api from "../lib/api";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
+import { MentionTextarea, CommentBody } from "./MentionTextarea";
+import type { MentionMember } from "./MarkdownEditor/picker-match";
 import { formatServerDate } from "../lib/dates";
 
 interface Props {
@@ -69,6 +71,19 @@ export function AnnotationsPanel({
   const [busy, setBusy] = useState(false);
   const qc = useQueryClient();
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // The nest's people, for the `@` picker and for telling a real mention from
+  // a typo. The read-tier roster, not /collaborators: a read-only reviewer is
+  // the person most likely to tag someone, and that read would 403 for them.
+  // Skipped for public read-only viewers, who have no composer at all.
+  const { data: roster } = useQuery({
+    ...reads.mentionable(nestId),
+    enabled: !!nestId && !readOnly,
+  });
+  const members: MentionMember[] = useMemo(
+    () => (roster?.people ?? []).filter((p) => !!p.email),
+    [roster],
+  );
   const itemRefs = useRef<Record<string, HTMLLIElement | null>>({});
 
   const load = async () => {
@@ -209,10 +224,11 @@ export function AnnotationsPanel({
                 Tip: select text in the document to pin a comment to it.
               </p>
             ))}
-          <textarea
+          <MentionTextarea
             ref={composerRef}
+            members={members}
             value={commenting ? draft : ""}
-            onChange={(e) => setDraft(e.target.value)}
+            onValueChange={setDraft}
             // When comment mode is off, the box is a greyed affordance: clicking
             // (or focusing) it flips the toggle on instead of typing.
             readOnly={!commenting}
@@ -232,7 +248,7 @@ export function AnnotationsPanel({
               commenting
                 ? pendingAnchor
                   ? "Comment on the highlighted text…"
-                  : "Add a comment…"
+                  : "Add a comment… use @ to tag someone"
                 : "Click here to start commenting…"
             }
             title={commenting ? undefined : "Click to turn on comment mode"}
@@ -312,7 +328,7 @@ export function AnnotationsPanel({
                       </span>{" "}
                       · {when(t.comments[0].createdAt)}
                     </div>
-                    <div className="whitespace-pre-wrap">{t.comments[0].body}</div>
+                    <CommentBody body={t.comments[0].body} members={members} />
                   </div>
                 )}
                 {t.comments.length > 1 && (
@@ -323,7 +339,7 @@ export function AnnotationsPanel({
                           <span className="font-medium text-foreground">{c.author}</span>{" "}
                           replied · {when(c.createdAt)}
                         </div>
-                        <div className="whitespace-pre-wrap">{c.body}</div>
+                        <CommentBody body={c.body} members={members} />
                       </li>
                     ))}
                   </ul>
@@ -344,10 +360,11 @@ export function AnnotationsPanel({
                 {!readOnly &&
                   (replyFor === t.id ? (
                     <div className="mt-2">
-                      <textarea
+                      <MentionTextarea
+                        members={members}
                         value={replyText}
-                        onChange={(e) => setReplyText(e.target.value)}
-                        placeholder="Reply…"
+                        onValueChange={setReplyText}
+                        placeholder="Reply… use @ to tag someone"
                         rows={2}
                         className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-y"
                         autoFocus

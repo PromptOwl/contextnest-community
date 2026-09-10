@@ -44,6 +44,7 @@ export function renderText(message: string): string {
 export interface EmailEventDetails {
   status:
     | "approved"
+    | "mention"
     | "rejected"
     | "pending_review"
     | "shared"
@@ -79,6 +80,7 @@ const STATUS_META: Record<
   { subjectWord: string; label: string; color: string }
 > = {
   approved: { subjectWord: "approved", label: "Approved", color: "#16a34a" },
+  mention: { subjectWord: "mentioned you", label: "Mention", color: "#7c3aed" },
   rejected: { subjectWord: "rejected", label: "Rejected", color: "#dc2626" },
   pending_review: {
     subjectWord: "awaiting review",
@@ -184,6 +186,17 @@ const TEMPLATES: Record<EmailEventDetails["status"], EmailTemplate> = {
     lineT: (x) => `${x.title}${x.vT} has been approved${x.byT}${x.noteT}.`,
     lineH: (x) => `${x.doc}${x.vH} has been approved${x.byH}${x.noteH}.`,
     rows: governanceRows,
+  },
+  // A mention names one person, so this is the one template addressed to
+  // "you". `note` carries the comment's own words when there are any — a
+  // mention with no context reads as a summons.
+  mention: {
+    heading: (x) => `${x.d.actor || "Someone"} mentioned you in ${x.title}`,
+    detailsHeader: "Document details",
+    linkLabel: "Open document",
+    lineT: (x) => `You were mentioned in ${x.title}${x.byT}${x.noteT}.`,
+    lineH: (x) => `You were mentioned in ${x.doc}${x.byH}${x.noteH}.`,
+    rows: (x) => [plainRow("Nest", x.d.path)],
   },
   rejected: {
     heading: (x) => `${x.title} is ${x.meta.subjectWord}`,

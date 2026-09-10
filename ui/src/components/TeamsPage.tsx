@@ -11,6 +11,7 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PersonCombobox } from "./PersonCombobox";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -370,10 +371,13 @@ function AddMemberRow({
   onAdd,
   busy,
   maxRank = OWNER_RANK,
+  members = [],
 }: {
   onAdd: (email: string, role: TeamRole) => void | Promise<void>;
   busy?: boolean;
   maxRank?: number;
+  /** Addresses already on the roster — kept out of the suggestions. */
+  members?: string[];
 }) {
   const grantable = TEAM_ROLES.filter((r) => ROLE_RANK[r.value] <= maxRank);
   const [email, setEmail] = useState("");
@@ -398,17 +402,19 @@ function AddMemberRow({
   return (
     <div className="space-y-1">
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-        <Input
-          type="email"
-          placeholder="person@company.com"
+        <PersonCombobox
           value={email}
-          onChange={(e) => {
-            setEmail(e.target.value);
+          onChange={(next) => {
+            setEmail(next);
             if (error) setError(null);
           }}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-          aria-invalid={!!error}
-          className="h-8 flex-1"
+          onSubmit={submit}
+          placeholder="person@company.com"
+          // Current members aren't adds; offering them would only re-set the
+          // role of someone the list below already manages.
+          exclude={members}
+          className="flex-1"
+          testId="team-member-input"
         />
         <Select value={role} onValueChange={(v) => setRole(v as TeamRole)}>
           <SelectTrigger className="w-full sm:w-[130px] h-8">
@@ -514,7 +520,7 @@ function CreateTeamModal({
                 ))}
               </div>
             )}
-            <AddMemberRow onAdd={stage} />
+            <AddMemberRow onAdd={stage} members={staged.map((m) => m.email)} />
           </div>
         </div>
         <DialogFooter>
@@ -650,6 +656,7 @@ function EditTeamModal({
                   <AddMemberRow
                     busy={busy}
                     maxRank={rank}
+                    members={team.members.map((m) => m.email)}
                     onAdd={(email, role) =>
                       guard(
                         () => api.addTeamMember(team.id, { email, role }),

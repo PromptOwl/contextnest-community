@@ -40,6 +40,7 @@ interface ConnectorRow {
 }
 
 const EVENT_EMOJI: Record<string, string> = {
+  mention: ":speech_balloon:",
   review_requested: ":memo:",
   review_approved: ":white_check_mark:",
   review_rejected: ":x:",

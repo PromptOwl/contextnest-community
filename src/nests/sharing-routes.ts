@@ -10,10 +10,15 @@ import {
   resolveUserRoles,
   getStewardRolesForUser,
 } from "../governance/stewardship-service.js";
+import { resolveCallerEmail } from "../governance/access-guard.js";
 import { addCollaborator } from "./sharing-service.js";
 import { listNestPeople } from "./people-service.js";
 import { setReaderMode } from "./service.js";
-import { isServerAdminUserId } from "../shared/access.js";
+import {
+  isServerAdminUserId,
+  resolveNestAccess,
+  permissionLevel,
+} from "../shared/access.js";
 import { config } from "../config.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import type { NestCollaborator } from "../shared/types.js";
@@ -116,6 +121,38 @@ sharingRoutes.delete("/collaborators/:collabId", async (c) => {
     throw new NotFoundError("Collaborator not found");
   }
   return c.json({ removed: true });
+});
+
+// GET /nests/:nestId/mentionable — the roster the @mention pickers need.
+//
+// READ tier, unlike GET /collaborators (write tier, so a public nest's read
+// tier can't enumerate member emails). Commenting is a read-tier action, and a
+// read-only reviewer is the person most likely to tag someone — so the picker
+// has to work for them. The property the write tier was protecting is kept by
+// a narrower rule: you may see the roster if you are ON it. A caller who
+// reaches this nest only through its visibility ('public' to anyone, 'org' to
+// any signed-in user) is not on the roster and is refused.
+sharingRoutes.get("/mentionable", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const people = await listNestPeople(nestId);
+  const callerEmail = (await resolveCallerEmail(userId)).toLowerCase();
+  const onRoster = people.some((p) => p.email.toLowerCase() === callerEmail);
+  if (!onRoster) {
+    // A server admin (and any write-tier caller, who can read the fuller
+    // roster anyway) is not necessarily a listed person — don't lock them out
+    // of their own nest's picker.
+    const access = await resolveNestAccess(nestId, userId);
+    if (permissionLevel(access.permission) < permissionLevel("write")) {
+      throw new ForbiddenError("Only people on this nest can see its roster");
+    }
+  }
+  // Name + email only: the picker shows a person and inserts their address.
+  // `source` (owner/collaborator/team/steward/grant) stays out — how someone
+  // got access is not the mention picker's business.
+  return c.json({
+    people: people.map((p) => ({ email: p.email, name: p.name })),
+  });
 });
 
 // PATCH /nests/:nestId/visibility

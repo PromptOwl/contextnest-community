@@ -63,3 +63,16 @@ export function folderOfId(id: string): string {
   const slash = rel.lastIndexOf("/");
   return slash > 0 ? rel.slice(0, slash) : "";
 }
+
+/**
+ * Suffix marking an artifact's derived annotations node — the projection of its
+ * comment threads (see annotations/service.ts). Lives here so the mention
+ * fan-out can recognise a derived node without importing the annotation
+ * service, which imports the node service, which imports the fan-out.
+ */
+export const DERIVED_ANNOTATIONS_SUFFIX = "--annotations";
+
+/** True for the derived annotations projection of some other node. */
+export function isDerivedAnnotationsId(nodeId: string): boolean {
+  return nodeId.endsWith(DERIVED_ANNOTATIONS_SUFFIX);
+}

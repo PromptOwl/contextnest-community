@@ -48,6 +48,11 @@ export const keys = {
   stewards: (nestId: string) => [...keys.nest(nestId), "stewards"] as const,
   collaborators: (nestId: string) =>
     [...keys.nest(nestId), "collaborators"] as const,
+  // The read-tier mention roster. Its own entry, not a slice of
+  // `collaborators`: that read needs write permission, and this one exists
+  // precisely for the callers who don't have it.
+  mentionable: (nestId: string) =>
+    [...keys.nest(nestId), "mentionable"] as const,
   definitions: (nestId: string) => [...keys.nest(nestId), "definitions"] as const,
   commentCounts: (nestId: string) =>
     [...keys.nest(nestId), "comment-counts"] as const,
@@ -91,6 +96,9 @@ export const keys = {
     [...keys.node(nestId, nodeId), "comments", status] as const,
   nodeActivity: (nestId: string, nodeId: string, limit: number) =>
     [...keys.node(nestId, nodeId), "activity", limit] as const,
+
+  people: ["people"] as const,
+  peopleSuggest: (q: string) => [...keys.people, "suggest", q] as const,
 
   teams: ["teams"] as const,
   teamList: () => [...keys.teams, "list"] as const,
@@ -263,13 +271,17 @@ const NEST_WRITE_SCOPES: Array<{
   },
   // Roles change what the caller may see, so the nest's own permission payload
   // goes with them.
+  // keys.mentionable rides along with all three rosters below (stewards,
+  // collaborators, team shares): each of them changes WHO can be mentioned, and
+  // a stale picker offers someone who no longer has access — or misses someone
+  // who just got it.
   {
     match: /^\/stewards/,
-    affects: (n) => [keys.stewards(n), keys.nest(n)],
+    affects: (n) => [keys.stewards(n), keys.mentionable(n), keys.nest(n)],
   },
   {
     match: /^\/collaborators/,
-    affects: (n) => [keys.collaborators(n), keys.nest(n)],
+    affects: (n) => [keys.collaborators(n), keys.mentionable(n), keys.nest(n)],
   },
   // Sharing a nest with a team, or revoking that share, changes WHO CAN REACH
   // the nest — so it has to drop the collaborators read too. That response
@@ -285,6 +297,7 @@ const NEST_WRITE_SCOPES: Array<{
       keys.nestTeams(n),
       keys.teams,
       keys.collaborators(n),
+      keys.mentionable(n),
       keys.nest(n),
     ],
   },
@@ -480,6 +493,18 @@ export const reads = {
     queryOptions({
       queryKey: keys.collaborators(nestId),
       queryFn: () => api.listCollaborators(nestId),
+      staleTime: STALE.reference,
+    }),
+  mentionable: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.mentionable(nestId),
+      queryFn: () => api.listMentionablePeople(nestId),
+      staleTime: STALE.reference,
+    }),
+  peopleSuggest: (q: string) =>
+    queryOptions({
+      queryKey: keys.peopleSuggest(q),
+      queryFn: () => api.suggestPeople(q),
       staleTime: STALE.reference,
     }),
   definitions: (nestId: string) =>

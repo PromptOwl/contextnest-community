@@ -12,6 +12,7 @@ import * as versions from "../governance/version-service.js";
 import { engineCache } from "../nodes/engine.js";
 import { createNode, updateNode, bodyOnly } from "../nodes/service.js";
 import { NotFoundError } from "../shared/errors.js";
+import { DERIVED_ANNOTATIONS_SUFFIX } from "../shared/node-id.js";
 import { clampAnchor, projectThreadsToMarkdown } from "./projection.js";
 import type {
   AnnotationAnchor,
@@ -329,7 +330,7 @@ export async function readArtifact(
  */
 export function derivedAnnotationsId(sourceNodeId: string): string {
   const base = sourceNodeId.replace(/^nodes\//, "");
-  return `nodes/${base}--annotations`;
+  return `nodes/${base}${DERIVED_ANNOTATIONS_SUFFIX}`;
 }
 
 /**

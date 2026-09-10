@@ -389,6 +389,22 @@ Changing an existing collaborator's level stays admin-only.
 ### DELETE `/nests/:nestId/collaborators/:collabId` (admin)
 Removing a collaborator stays admin-only.
 
+### GET `/nests/:nestId/mentionable` (read+, members only)
+```json
+{ "people": [{ "email": "owner@x.com", "name": "Olive Owner" }] }
+```
+Everyone who can reach the nest (owner, collaborators, shared-team members, stewards, grant holders) — the roster the `@mention` pickers offer and validate against.
+
+Read-tier, because commenting is read-tier and a read-only reviewer is the person most likely to tag someone. The property `GET /collaborators` protects with its write tier is kept by a narrower rule: **you may see the roster if you are on it.** A caller who reaches the nest only through its visibility (`public`, or `org`) is not on the roster → `403`. Write+ callers pass regardless (they can read the fuller roster anyway).
+
+### GET `/people/suggest?q=&limit=` (auth required)
+```json
+{ "people": [{ "email": "c@x.com", "name": "Carl Colleague", "source": "nest" }] }
+```
+Server-wide, not nest-scoped: the people the caller **already works with** — anyone on a nest they own or collaborate on (its owner, collaborators, active stewards) and anyone on a team they own or belong to. `source` ∈ `nest` / `team` / `directory`. For a server admin the directory is every user; `GET /auth/teammates` remains the admin-only full roster.
+
+`q` filters on name or address (substring, case-insensitive); `limit` caps the list (default and max 20). Suggestions are a convenience for the add-a-person pickers — an address that appears nowhere here is still valid to submit (that is how you invite someone with no account yet), and the add itself re-checks permission and the escalation cap.
+
 ---
 
 ## 3a. Share grants (one document / one folder)
@@ -1162,6 +1178,19 @@ List comments on a node. Optional `status` = `open` | `resolved`.
 ### POST `/nests/:nestId/nodes/:nodeId/comments`
 Leave a comment. Body: `{ body, version?, anchor?{start,end,text?}, parentId? }`.
 `parentId` threads a reply. Returns `201 { comment }`. Empty body → `400`.
+
+**`@mentions` notify.** Every name in the comment body — `@user@host`,
+`@localpart`, or `@(Display Name)` — is resolved against the nest's people
+(`GET /nests/:nestId/mentionable`) and each person named gets a `mention` row
+in `GET /me/notifications` linking the document, plus a message on the
+configured connector and an email to their own address when SMTP is set up.
+The author is never notified about their own mention, a name matching nobody
+(or matching two people ambiguously) notifies nobody, and a recipient who
+can't open the document is skipped — so a mention can't disclose a title.
+Unlike a document body, where only names a save *adds* notify, every name in a
+comment notifies: the comment itself is the new event. The same applies to the
+annotation thread endpoints (§ Hosted artifacts), which are what the UI's
+comments panel posts.
 
 ### POST `/nests/:nestId/nodes/:nodeId/comments/:commentId/resolve`
 Mark a comment resolved. Records `resolvedBy` + `resolvedAt`. Returns `{ comment }`.

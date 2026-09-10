@@ -10,6 +10,7 @@ import { grantRoutes } from "./nests/grant-routes.js";
 import { publishRoutes } from "./nests/publish-routes.js";
 import { publishRenderRoutes } from "./nests/publish-render-routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
+import { peopleRoutes } from "./nests/people-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
 import { listVisibleNests, nestAllowsSelfApprove } from "./nests/service.js";
 import {
@@ -1317,6 +1318,13 @@ export function createApp(): Hono<AuthEnv> {
   app.use("/teams/*", flexAuthMiddleware);
   app.use("/teams", flexAuthMiddleware);
   app.route("/teams", teamRoutes);
+
+  // People directory — the suggestions the add-a-person pickers autocomplete
+  // against. Global like /teams (the answer spans every nest and team the
+  // caller reaches), and scoped to what the caller already works with inside
+  // suggestPeopleForUser — never the deployment's whole member list.
+  app.use("/people/*", flexAuthMiddleware);
+  app.route("/people", peopleRoutes);
 
   app.use("/me/*", flexAuthMiddleware);
   app.get("/me/work", async (c) => {
