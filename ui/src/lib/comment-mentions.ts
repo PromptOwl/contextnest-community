@@ -45,13 +45,14 @@ export type MentionSegment =
   | { kind: "text"; text: string }
   | { kind: "mention"; text: string; name: string; resolved: boolean };
 
-// One pass, two alternatives: an inline-code span (emitted as plain text — an
-// `@name` there is source, which is also why the server's extractMentions
-// blanks code before parsing) or a mention in one of its three written forms.
-// The mention half mirrors src/shared/mentions.ts; if one moves, so does the
-// other.
+// One pass, two alternatives: a code span — fenced block or inline, emitted as
+// plain text because an `@name` there is source — or a mention in one of its
+// three written forms. Both halves mirror src/shared/mentions.ts, whose
+// `stripCode` blanks fenced blocks first and then inline spans, so what the
+// server declines to notify for is exactly what this declines to decorate; if
+// one moves, so does the other.
 const SEGMENT =
-  /(`[^`\n]*`)|(?:(^|\s)@(?:\(([^)]+)\)|([a-zA-Z0-9._@-]+)))/g;
+  /((?:```[\s\S]*?```)|(?:`[^`\n]*`))|(?:(^|\s)@(?:\(([^)]+)\)|([a-zA-Z0-9._@-]+)))/g;
 
 /**
  * A comment body split into text and mention runs, in order, concatenating

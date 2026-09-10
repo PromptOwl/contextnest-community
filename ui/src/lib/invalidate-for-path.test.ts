@@ -31,6 +31,23 @@ function recorder() {
 const NEST = "nest-1";
 
 describe("invalidateForPath — nest sharing", () => {
+  // A share grant puts someone on `listNestPeople`, so it changes who can be
+  // mentioned. No /grants scope matches, so this rides the deliberate broad
+  // fallback (drop everything under the nest) rather than a rule of its own —
+  // pinned here because the invariant is "a grant write drops the roster", and
+  // adding a narrow /grants rule later must not quietly stop honouring it.
+  it("drops the mention roster when a share grant changes", () => {
+    for (const path of [
+      `/nests/${NEST}/grants`,
+      `/nests/${NEST}/grants/g-1`,
+    ]) {
+      const r = recorder();
+      invalidateForPath(r.qc, path);
+      expect(r.drops(keys.mentionable(NEST))).toBe(true);
+    }
+  });
+
+
   // The bug this pins: `people` (the @mention roster) rides on the
   // collaborators read, but sharing a nest with a team writes to /teams. That
   // scope dropped only the team keys, so a team removed from the nest kept

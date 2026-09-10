@@ -67,6 +67,23 @@ describe("mentionSegments", () => {
     expect(segs.map((s) => s.text).join("")).toBe("run `npm i @acme/pkg` first");
   });
 
+  it("leaves an @ inside a fenced block alone, like the server does", () => {
+    // extractMentions blanks fenced blocks before parsing, so the server never
+    // notifies for one — decorating it as an unresolved mention would tell the
+    // reader a delivery failed that was never attempted.
+    const body = "see\n```\nnpm i @acme/pkg\n```\nthanks @ada@acme.com";
+    const segs = mentionSegments(body, members);
+    expect(segs.map((s) => s.text).join("")).toBe(body);
+    expect(segs.filter((s) => s.kind === "mention")).toEqual([
+      {
+        kind: "mention",
+        text: "@ada@acme.com",
+        name: "ada@acme.com",
+        resolved: true,
+      },
+    ]);
+  });
+
   it("reads mentions as resolved when there is no roster to check", () => {
     // A public reader gets no roster, and the roster arrives a tick late for
     // everyone else — striking every mention through would be a lie about a
