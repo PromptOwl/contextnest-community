@@ -12,7 +12,6 @@ import * as versions from "../governance/version-service.js";
 import { engineCache } from "../nodes/engine.js";
 import { createNode, updateNode, bodyOnly } from "../nodes/service.js";
 import { NotFoundError } from "../shared/errors.js";
-import { DERIVED_ANNOTATIONS_SUFFIX } from "../shared/node-id.js";
 import { clampAnchor, projectThreadsToMarkdown } from "./projection.js";
 import type {
   AnnotationAnchor,
@@ -330,7 +329,7 @@ export async function readArtifact(
  */
 export function derivedAnnotationsId(sourceNodeId: string): string {
   const base = sourceNodeId.replace(/^nodes\//, "");
-  return `nodes/${base}${DERIVED_ANNOTATIONS_SUFFIX}`;
+  return `nodes/${base}--annotations`;
 }
 
 /**
@@ -376,7 +375,15 @@ export async function syncAnnotationsNode(
     const derivedId = derivedAnnotationsId(nodeId);
 
     try {
-      await updateNode(nestId, derivedId, { content: markdown }, userEmail);
+      // A projection, not a person's writing: its `@names` were already
+      // notified where they were typed (see WriteOptions).
+      await updateNode(
+        nestId,
+        derivedId,
+        { content: markdown },
+        userEmail,
+        { notifyMentions: false },
+      );
     } catch (err) {
       if (err instanceof NotFoundError) {
         await createNode(
@@ -389,6 +396,7 @@ export async function syncAnnotationsNode(
             tags: ["annotations"],
           },
           userEmail,
+          { notifyMentions: false },
         );
       } else {
         throw err;

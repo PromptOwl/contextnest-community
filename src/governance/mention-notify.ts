@@ -19,7 +19,6 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { listNestPeople } from "../nests/people-service.js";
 import { extractMentions, newMentions, resolveMention } from "../shared/mentions.js";
-import { isDerivedAnnotationsId } from "../shared/node-id.js";
 import { buildDocContext } from "./title-resolver.js";
 import { canReadNode } from "./access-guard.js";
 import { resolveNestAccess } from "../shared/access.js";
@@ -83,11 +82,15 @@ async function resolveRecipients(params: {
     candidates.set(key, { email: person.email, userId: person.userId });
   }
 
-  const recipients: Recipient[] = [];
-  for (const r of candidates.values()) {
-    if (await canOpenNode(nestId, nodeId, r.userId, r.email)) recipients.push(r);
-  }
-  return recipients;
+  // Access-checked in parallel: each check is a couple of independent reads,
+  // and a comment naming a handful of people shouldn't serialise all of them.
+  const checked = await Promise.all(
+    [...candidates.values()].map(async (r) => ({
+      r,
+      allowed: await canOpenNode(nestId, nodeId, r.userId, r.email),
+    })),
+  );
+  return checked.filter((c) => c.allowed).map((c) => c.r);
 }
 
 /** Inbox row per recipient. `subject_id` is the node id: listNotifications
@@ -120,10 +123,13 @@ async function insertInboxRows(params: {
  * awaited, so a mention never waits on a mail server.
  *
  * The email goes to the person named, not the NOTIFY_EMAIL_TO team inbox: a
- * mention is addressed to one human. The connector message is the team-channel
- * half, so it is written in the third person and names its recipients (and,
- * for a comment, quotes it) — a channel already receives document titles and
- * actor emails for every review event, so this discloses nothing new in kind.
+ * mention is addressed to one human, and only someone who can open the document
+ * gets one. The connector message is the team-channel half, so it is written in
+ * the third person and names its recipients — but carries no comment text: a
+ * channel's audience is configured per nest, not derived from who can read the
+ * document, and commenting is deliberately read-tier. Titles and actor emails
+ * it already receives for every review event; arbitrary comment prose it does
+ * not, and a mention is a poor place to start.
  */
 function deliverMentionMessages(params: {
   nestId: string;
@@ -194,13 +200,6 @@ export async function notifyMentions(params: {
 }): Promise<number> {
   const { nestId, nodeId, previousBody, nextBody, actorEmail, baseUrl } = params;
   try {
-    // An artifact's comment threads are re-projected into a derived
-    // `— Annotations` document on every comment, and that projection is an
-    // ordinary save. Notifying on it would fire a SECOND mention for a comment
-    // notifyCommentMentions has already delivered, pointing the reader at the
-    // projection instead of the artifact they were named in.
-    if (isDerivedAnnotationsId(nodeId)) return 0;
-
     const names = newMentions(previousBody, nextBody);
     const recipients = await resolveRecipients({ nestId, nodeId, names, actorEmail });
     if (recipients.length === 0) return 0;
@@ -257,11 +256,11 @@ export async function notifyCommentMentions(params: {
       nestId,
       nodeId,
       recipients,
-      channelMessage: `${channelSentence(
+      channelMessage: channelSentence(
         actorEmail,
         recipients,
         `in a comment on *${ctx.label}*`,
-      )}${excerpt ? ` — "${excerpt}"` : ""}`,
+      ),
       actorEmail,
       excerpt,
       ctx,

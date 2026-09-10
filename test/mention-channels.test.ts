@@ -98,6 +98,9 @@ describe("mention channels", () => {
     // than saying "mentioned you" to a room.
     expect(mention).toContain(editor.email);
     expect(mention).not.toContain("mentioned you");
+    // And no comment prose: a channel's audience is configured per nest, not
+    // derived from who can read the document.
+    expect(mention).not.toContain("confirm the date");
   });
 
   it("emails the person who was named, not the team inbox", async () => {

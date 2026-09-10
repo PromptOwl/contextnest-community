@@ -180,8 +180,9 @@ export async function suggestPeopleForUser(
   const callerEmail = (caller?.email || "").toLowerCase();
   const filter = queryFilter(q);
 
+  const isAdmin = await isServerAdminUserId(callerUserId);
   const rows = (await (async () => {
-    if (await isServerAdminUserId(callerUserId)) {
+    if (isAdmin) {
       return (await db.all(
         `SELECT u.id AS user_id, u.email AS email, u.name AS name, 'directory' AS source
            FROM users u
@@ -243,8 +244,10 @@ export async function suggestPeopleForUser(
   // the caller's own teams covers every team path (owned or joined). A stored
   // roster carries no display name, so the names come from one users lookup
   // rather than a query per member — the picker shows a person, not an address.
+  // Skipped for a server admin: the directory read above already returned
+  // every account, so the merge could only re-add what is there.
   const teamEmails = new Set<string>();
-  for (const team of await listTeamsForUser(callerUserId)) {
+  for (const team of isAdmin ? [] : await listTeamsForUser(callerUserId)) {
     for (const member of team.members ?? []) {
       const key = (member.email || "").trim().toLowerCase();
       if (key && key !== callerEmail && !byEmail.has(key)) teamEmails.add(key);

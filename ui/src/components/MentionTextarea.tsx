@@ -116,9 +116,13 @@ export const MentionTextarea = forwardRef<
             }
             if (e.key === "Enter" || e.key === "Tab") {
               // Enter picks the highlighted person instead of adding a newline
-              // — the same trade the editor's picker makes.
+              // — the same trade the editor's picker makes. Indexed
+              // defensively: the reset effect runs after the render that
+              // shrank `results`, so for one commit the index can point past
+              // the end.
               e.preventDefault();
-              pick(results[highlight].email);
+              const chosen = results[highlight] ?? results[0];
+              if (chosen) pick(chosen.email);
               return;
             }
             if (e.key === "Escape") {

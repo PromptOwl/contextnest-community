@@ -201,6 +201,34 @@ describe("comment mentions", () => {
     expect(rows.filter((r) => r.node_id === "nodes/q3-deck")).toHaveLength(1);
   });
 
+  it("stays quiet for a bare name two people on the nest answer to", async () => {
+    // Guessing one of them would notify the wrong John with nothing to show
+    // for it, so an ambiguous name resolves to nobody — the guarantee the
+    // whole disclosure story rests on, checked through the comment path.
+    const johnA = await registerUser(app, "john@acme.com", "John A");
+    await resetAuthRateLimit();
+    const johnB = await registerUser(app, "john@other.com", "John B");
+    await resetAuthRateLimit();
+    for (const j of [johnA, johnB]) {
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/collaborators`,
+        { email: j.email, permission: "write" },
+        owner.apiKey,
+      );
+    }
+
+    await comment(owner, "nodes/kickoff", "cc @john");
+    expect(await mentions(johnA)).toHaveLength(0);
+    expect(await mentions(johnB)).toHaveLength(0);
+
+    // The full address is unambiguous and still lands.
+    await comment(owner, "nodes/kickoff", `cc @${johnB.email}`);
+    expect(await mentions(johnA)).toHaveLength(0);
+    expect(await mentions(johnB)).toHaveLength(1);
+  });
+
   it("stays quiet for someone granted a different document", async () => {
     const guest = await registerUser(app, "guest@acme.com", "Guest");
     await resetAuthRateLimit();

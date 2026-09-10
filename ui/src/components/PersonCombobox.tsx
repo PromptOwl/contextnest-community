@@ -18,6 +18,9 @@ import { Input } from "@/components/ui/input";
 import { reads } from "../lib/queries";
 import { cn } from "@/lib/utils";
 
+/** Keystroke-to-request delay. See the debounce note in the component. */
+const DEBOUNCE_MS = 200;
+
 export interface PersonComboboxProps {
   value: string;
   onChange: (next: string) => void;
@@ -49,11 +52,25 @@ export function PersonCombobox({
   const [highlight, setHighlight] = useState(-1);
   const wrapRef = useRef<HTMLDivElement>(null);
 
-  // One query per typed prefix, cached: the server does the filtering, so a
+  // Debounced like the other search-box-to-server reads in the app (QuickOpen,
+  // ActivityTracePage): the query key is the typed prefix, so firing it raw
+  // would put a request on the wire per keystroke, each running a LIKE over the
+  // caller's rosters. 200ms is under the gap between keystrokes and above the
+  // cost of a wasted round trip.
+  const [debounced, setDebounced] = useState(value.trim().toLowerCase());
+  useEffect(() => {
+    const t = setTimeout(
+      () => setDebounced(value.trim().toLowerCase()),
+      DEBOUNCE_MS,
+    );
+    return () => clearTimeout(t);
+  }, [value]);
+
+  // One query per settled prefix, cached: the server does the filtering, so a
   // roster too large to ship whole still narrows as you type. The empty-query
   // read is the "just focused, show me who I work with" case.
   const { data } = useQuery({
-    ...reads.peopleSuggest(value.trim().toLowerCase()),
+    ...reads.peopleSuggest(debounced),
     enabled: open && !disabled,
   });
 
@@ -133,11 +150,17 @@ export function PersonCombobox({
             e.preventDefault();
             // Enter takes the highlighted person; with nothing highlighted it
             // submits what was typed, so a full address never needs the list.
-            if (highlight >= 0) pick(options[highlight].email);
+            // Indexed defensively: the reset effect runs after the render that
+            // shrank `options`, so for one commit the index can point past it.
+            const chosen = highlight >= 0 ? options[highlight] : undefined;
+            if (chosen) pick(chosen.email);
             else onSubmit?.();
           } else if (e.key === "Tab" && highlight >= 0) {
-            e.preventDefault();
-            pick(options[highlight].email);
+            const chosen = options[highlight];
+            if (chosen) {
+              e.preventDefault();
+              pick(chosen.email);
+            }
           }
         }}
       />
