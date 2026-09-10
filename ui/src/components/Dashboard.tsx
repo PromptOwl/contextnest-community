@@ -550,9 +550,13 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
     void goToDraftsPage(draftsPage?.offset ?? 0);
     void goToWorkPage(work.pagination?.offset ?? 0);
     if (failed.length) {
-      // Thrown so the dialog shows it and stays open; the ones that landed are
-      // already gone from the list.
-      throw new Error(`Couldn't submit ${failed.length}: ${failed.join(", ")}`);
+      // Thrown so the dialog shows it and stays open. The ones that landed are
+      // already gone from the list, so the message counts them too — a batch
+      // where 9 of 10 went through is not an unqualified failure.
+      const landed = done.length ? `${done.length} submitted. ` : "";
+      throw new Error(
+        `${landed}Couldn't submit ${failed.length}: ${failed.join(", ")}`,
+      );
     }
     if (done.length > 1) toast.success(`${done.length} submitted for review`);
   };
