@@ -77,6 +77,7 @@ import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
   resolveNestAccess,
+  isNestArchived,
   permissionLevel,
   isServerAdminUserId,
   type NestPermission,
@@ -413,6 +414,11 @@ export function createApp(): Hono<AuthEnv> {
       // Presence only: the publish dialog hides the email/invite gates when
       // this server cannot send mail, because their only way in is a mailed link.
       email_configured: isEmailConfigured(),
+      // Product analytics for the SPA. The PostHog project key is a public
+      // client key, but it only ships while usage telemetry is on — one switch
+      // covers everything this server sends outward.
+      posthog_key: config.TELEMETRY_ENABLED ? config.POSTHOG_KEY || null : null,
+      posthog_host: config.POSTHOG_HOST,
       promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
       // Manual (email/password) sign-in mode (open | invite-only | disabled).
       // The login page reads this to show/hide the credential form, and to
@@ -565,6 +571,8 @@ export function createApp(): Hono<AuthEnv> {
     manual_sign_in: config.MANUAL_SIGN_IN,
     logo_url: config.LOGO_URL,
     telemetry_enabled: config.TELEMETRY_ENABLED,
+    posthog_key: config.POSTHOG_KEY,
+    posthog_host: config.POSTHOG_HOST,
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
     workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
@@ -677,6 +685,18 @@ export function createApp(): Hono<AuthEnv> {
     }
     if ("telemetry_enabled" in body) {
       pending.push({ name: "TELEMETRY_ENABLED", value: body.telemetry_enabled ? "true" : "false" });
+    }
+    // PostHog: empty key clears the row and turns analytics off. The host is
+    // checked here because a typo'd one fails silently in the browser.
+    if ("posthog_key" in body) {
+      const v = String(body.posthog_key ?? "").trim();
+      pending.push({ name: "POSTHOG_KEY", value: v || null });
+    }
+    if ("posthog_host" in body) {
+      const v = String(body.posthog_host ?? "").trim().replace(/\/$/, "");
+      if (v && !/^https?:\/\/[^\s]+$/i.test(v))
+        addError("posthog_host", "PostHog host must be a http(s) URL, e.g. https://us.i.posthog.com");
+      else pending.push({ name: "POSTHOG_HOST", value: v || null });
     }
     if ("workflow_plane_enabled" in body) {
       pending.push({
@@ -1647,6 +1667,28 @@ export function createApp(): Hono<AuthEnv> {
     // request id when parseable) so the client shows WHY the connection
     // failed — wrong key scope, missing license, no access.
     const isMcpTransport = parts.length === 2 && parts[1] === "mcp";
+    // Archive and restore are gated in the route by requireNestCaretaker (the
+    // owner, or the license admin as caretaker of the commons) — strictly
+    // narrower than 'write'. Both the open-mode branch and the tier block below
+    // exempt them, because an archived nest caps every caller at 'read' and a
+    // 'write' requirement here would strand a nest that could never be
+    // restored.
+    //
+    // DELETE /nests/:id is NOT listed: it is `parts.length === 1`, which the
+    // guard above returns on, so it never reaches this middleware at all — its
+    // only gate is requireNestCaretaker, archived or not.
+    const isNestLifecycleAction =
+      parts.length === 2 &&
+      c.req.method === "POST" &&
+      (parts[1] === "archive" || parts[1] === "restore");
+    // Pinning is read-tier: a pin is the caller's own bookmark, changes nothing
+    // about the nest and is visible to nobody else, so anyone who can open the
+    // nest may pin it — a viewer most of all, since they are the likeliest to
+    // be watching a handful of nests they cannot edit. The handler still
+    // refuses a caller with no access at all, so this is not an existence
+    // oracle for nest ids. Declared up here because the grant-only branch below
+    // needs it too, and that runs before the tier block.
+    const isPinAction = parts.length === 2 && parts[1] === "pin";
     const deny = async (
       status: 403 | 404 | 503,
       error: string,
@@ -1748,9 +1790,30 @@ export function createApp(): Hono<AuthEnv> {
       }
     }
 
-    // In open mode, everyone gets owner-level access
+    // In open mode, everyone gets owner-level access — but archiving is not an
+    // access rule, it is a property of the nest, so it binds here too. This
+    // branch returns before the permission merge below, so the cap that makes
+    // an archived nest read-only never reaches it; without this check, open
+    // mode (the local/LAN posture where an MCP agent is most likely to be
+    // pointed straight at a nest) could still write to a nest that was
+    // archived precisely to stop that.
+    //
+    // One indexed lookup on the hot path, and the full rule only for the rare
+    // archived nest: everything but a GET is refused, except the lifecycle
+    // actions that must survive archiving (restore, delete).
     if (config.AUTH_MODE === "open") {
-      c.set("nestPermission", "owner");
+      const archived = await isNestArchived(nestId);
+      if (archived) {
+        if (isMcpTransport) return deny(404, "Nest not found");
+        if (c.req.method !== "GET" && !isNestLifecycleAction) {
+          return deny(
+            403,
+            "This nest is archived, so it is read-only. Restore it to make changes.",
+            { archived: true },
+          );
+        }
+      }
+      c.set("nestPermission", archived ? "read" : "owner");
       return next();
     }
 
@@ -1759,6 +1822,15 @@ export function createApp(): Hono<AuthEnv> {
     // re-querying once per branch.
     const access = await resolveNestAccess(nestId, userId);
     const permission = access.permission;
+
+    // An archived nest does not exist as far as agents are concerned. It is
+    // already absent from every MCP listing (the list helpers skip archived
+    // rows), and this closes the by-id path: a pinned nest id or a nest-scoped
+    // API key goes dead until the nest is restored. Humans still read it in the
+    // web UI — this is the MCP transport only.
+    if (access.archived && isMcpTransport) {
+      return deny(404, "Nest not found");
+    }
 
     // Document/folder share grant: a caller BELOW nest access may still reach
     // a specific granted node (or a bare nest read, so a shared-doc deep link
@@ -1811,6 +1883,16 @@ export function createApp(): Hono<AuthEnv> {
         // Retrieval routes — a grantee may query/search/context/export; the
         // handler's filterAccessible scopes every result to their grants, so
         // they can never read past what they were shared (same as the list).
+        grantNestVisible = access.hasGrant;
+      } else if (isPinAction) {
+        // Pinning, for someone who reaches this nest only through a document or
+        // folder grant. They see the nest on their dashboard, so they see its
+        // pin control — and a control that 404s is worse than no control. The
+        // pin touches nothing they can't already reach: it is their own
+        // bookmark on a nest already listed for them, and it grants no wider
+        // read. effectiveAccess in nests/routes.ts already resolves a grantee
+        // to "read" for exactly this class of route; this is the middleware
+        // half of that same rule.
         grantNestVisible = access.hasGrant;
       } else if (
         parts[1] === "definitions" &&
@@ -1886,6 +1968,9 @@ export function createApp(): Hono<AuthEnv> {
     const isDeletionRequestAction =
       /\/request-deletion$/.test(path) ||
       /\/deletion-requests\/[^/]+\/withdraw$/.test(path);
+    // isNestLifecycleAction (archive/restore) is defined above, next to
+    // isMcpTransport — the open-mode branch needs it too, and that branch runs
+    // before this point.
     // The steward roster — list, assign, remove, sync — is restricted to the
     // server (license) admin plus the nest owner/admin collaborators, so an
     // owner can delegate vault people-management by granting admin. All
@@ -1945,6 +2030,8 @@ export function createApp(): Hono<AuthEnv> {
       !isStewardActionPath &&
       !isCommentAction &&
       !isDeletionRequestAction &&
+      !isNestLifecycleAction &&
+      !isPinAction &&
       !isAnnotationAction &&
       !isReadQuery &&
       !isMcpTransport
@@ -1962,7 +2049,15 @@ export function createApp(): Hono<AuthEnv> {
       (parts[parts.length - 1] === "revert" ||
         parts[parts.length - 1] === "move");
     let stewardEditorBypass = false;
-    if (required === "write" && permission === "read" && parts[1] === "nodes") {
+    // `!access.archived`: the cap leaves every caller at "read", which is
+    // exactly the shape this bypass fires on — without it, archiving would
+    // ARM the bypass for write collaborators who also hold an editor row.
+    if (
+      required === "write" &&
+      permission === "read" &&
+      !access.archived &&
+      parts[1] === "nodes"
+    ) {
       const userEmail = await resolveCallerEmail(userId);
       if (
         parts.length >= 3 &&

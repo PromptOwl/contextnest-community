@@ -398,6 +398,19 @@ export const config = {
     return parseInt(process.env.TELEMETRY_INTERVAL_MS || "3600000", 10);
   },
   /**
+   * PostHog product analytics. Empty key = off, which is the default: a
+   * self-hosted operator brings their own project. The key is a public client
+   * key by design (the browser sends it), so /health may hand it out — but
+   * only while TELEMETRY_ENABLED is on, so one switch stops all outbound
+   * usage data. Editable at runtime from the admin Settings page.
+   */
+  get POSTHOG_KEY(): string {
+    return (process.env.POSTHOG_KEY || "").trim();
+  },
+  get POSTHOG_HOST(): string {
+    return (process.env.POSTHOG_HOST || "").trim() || "https://us.i.posthog.com";
+  },
+  /**
    * Activity-trace retention window in days (the api_events table behind
    * GET /admin/trace and GET /nests/:id/trace). 0 = keep forever (pruning is
    * skipped entirely). Invalid / negative → default 14; capped at 3650 (ten

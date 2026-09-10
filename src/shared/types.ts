@@ -35,6 +35,10 @@ export interface Nest {
   reader_mode?: number;
   // Designated reader-mode landing/hub node id; null resolves by convention.
   reader_home_node?: string | null;
+  // When set, the nest is archived: hidden from every listing that isn't
+  // explicitly asking for archived nests, invisible to MCP, and read-only
+  // (see resolveNestAccess). null/undefined = a live nest.
+  archived_at?: string | null;
 }
 
 export interface ApiKey {

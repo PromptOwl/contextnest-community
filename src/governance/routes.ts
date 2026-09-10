@@ -27,7 +27,7 @@ import {
   deleteFolder,
   isIdUnderFolder,
 } from "../nodes/service.js";
-import { deleteNest } from "../nests/service.js";
+import { deleteNest, archiveNest } from "../nests/service.js";
 import {
   canReadNode,
   resolveCallerEmail,
@@ -378,18 +378,21 @@ governanceRoutes.post("/request-deletion", async (c) => {
   if (!reason) {
     throw new ValidationError("A reason for the deletion request is required");
   }
-  if (body.targetType !== "folder" && body.targetType !== "nest") {
+  if (
+    body.targetType !== "folder" &&
+    body.targetType !== "nest" &&
+    body.targetType !== "nest_archive"
+  ) {
     throw new ValidationError(
-      'targetType must be "folder" or "nest" — flag a single document via POST /nests/:nestId/nodes/:nodeId/request-deletion',
+      'targetType must be "folder", "nest" or "nest_archive" — flag a single document via POST /nests/:nestId/nodes/:nodeId/request-deletion',
     );
   }
 
   // Normalize the target so two people flagging "api/limits" and "/api/limits/"
   // collide on the pending index instead of raising two requests.
-  const target =
-    body.targetType === "nest"
-      ? nestId
-      : (body.target || "").trim().replace(/^\/+|\/+$/g, "").replace(/^nodes\//, "");
+  const target = reviews.isNestTarget(body.targetType)
+    ? nestId
+    : (body.target || "").trim().replace(/^\/+|\/+$/g, "").replace(/^nodes\//, "");
   if (body.targetType === "folder" && !target) {
     throw new ValidationError("target (the folder path) is required");
   }
@@ -439,15 +442,21 @@ governanceRoutes.post("/deletion-requests/:id/delete", async (c) => {
 
   // Honouring must clear the SAME bar as deleting the thing directly — a
   // request is not a side door around /delete-folder or DELETE /nests/:id.
-  if (request.targetType === "nest" || request.targetType === "folder") {
+  if (reviews.isNestTarget(request.targetType) || request.targetType === "folder") {
     const denied = denyUnlessNestManager(
       c,
-      request.targetType === "nest" ? "a nest" : "a folder",
+      request.targetType === "folder" ? "a folder" : "a nest",
     );
     if (denied) return denied;
   }
 
-  if (request.targetType === "nest") {
+  if (request.targetType === "nest_archive") {
+    // The editor asked for the nest to be put away, not destroyed. archiveNest
+    // clears the pending nest_archive rows itself — it has to, since the owner
+    // may archive directly instead of coming through this queue — so this row
+    // is already gone and needs no explicit drop.
+    await archiveNest(nestId);
+  } else if (request.targetType === "nest") {
     // Nest rows cascade with the nest, so the request row goes with it.
     await deleteNest(nestId);
   } else if (request.targetType === "folder") {

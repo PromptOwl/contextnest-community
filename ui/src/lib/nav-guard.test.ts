@@ -36,6 +36,24 @@ describe("navigateGuarded", () => {
     expect(went).toBe(true);
   });
 
+  it("restores the guard when the bypassed navigation throws", () => {
+    // A save's continuation runs inside bypassNavGuard. If onSaved throws and
+    // the flag stuck, every later navigation would skip the guard and unsaved
+    // edits would be dropped silently.
+    let asked = 0;
+    setNavGuard(() => {
+      asked++;
+      return true;
+    });
+    expect(() =>
+      bypassNavGuard(() => {
+        throw new Error("navigation failed");
+      }),
+    ).toThrow("navigation failed");
+    navigateGuarded(() => {});
+    expect(asked).toBe(1);
+  });
+
   it("does not re-ask a guard about the navigation it already answered", () => {
     let asked = 0;
     let went = false;

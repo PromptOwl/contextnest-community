@@ -175,10 +175,12 @@ Related `/admin/settings` fields (GET/PATCH, superadmin only): `sso_token_exchan
 A nest = a context vault (folder of markdown documents + governance state).
 
 ### GET `/nests`
-Returns owned + shared nests.
+Returns owned + shared nests. Archived nests are **absent** — as they are from every other listing, the work inbox, cross-nest search and the MCP index. Each row carries `pinned` — the calling user's own bookmark (see `POST /nests/:nestId/pin`).
 ```json
 { "nests": [{ "id": "...", "user_id": "...", "name": "...", "slug": "...", "visibility": "private", "created_at": "..." }] }
 ```
+
+`?archived=1` inverts it: **only** archived nests, and only ones the caller owns (archive, restore and delete are the owner's, so nobody else has an action to take on one). Each row carries `archived_at`.
 
 ### POST `/nests`
 ```json
@@ -193,7 +195,32 @@ Response (201): `{ "nest": { ... } }`
 404 if caller has no permission.
 
 ### DELETE `/nests/:nestId`
-Owner only.
+Owner only. Permanent — documents, versions and governance state all go.
+
+### POST `/nests/:nestId/archive`
+Owner only (same gate as delete, license-admin caretaker branch included). Puts the nest away without deleting anything: `{ "archived": true }`.
+
+An archived nest is capped at `read` for **everyone**, the owner included — one guard in `resolveNestAccess`, so every REST route, MCP tool and workflow gate refuses writes. It also disappears from `GET /nests`, `/me/work`, `/me/drafts`, `GET /search`, the MCP nest index, and `GET /nests/:nestId/mcp` (404 — a pinned nest id or a nest-scoped key stops answering). Its published `/p/:slug` links return the standard not-found page. Nothing is unpublished or deleted.
+
+**Open mode is included.** `AUTH_MODE=open` grants every caller `owner` without resolving access at all, so the cap cannot reach it either; the nest middleware checks `archived_at` directly on that path — an archived nest answers `403` to anything but a `GET` (bar the lifecycle routes, which must stay open or the nest could never be restored) and `404` on its MCP transport, exactly as in key mode.
+
+Three surfaces sit outside the `/nests/:nestId` auth chain, so the permission cap cannot reach them and each carries its own `archived_at` check: `/p/:slug` (via `getPublishBySlug`), `POST /hooks/:token` (404 while archived — a trigger hook must not keep creating agent runs in a nest that was put away), and `schedulerTick`, which skips archived nests. All three are suspended, not disabled: restoring the nest brings its links, hooks and schedules back with no re-wiring.
+
+Archiving also drops any pending `nest_archive` deletion request for the nest — the ask has been granted, and a row left pending could not be actioned afterwards (the honour route needs write tier, which an archived nest denies everyone). A pending `nest` **deletion** request does survive archiving and cannot be honoured from the queue while archived; the owner deletes the nest directly (`DELETE /nests/:nestId` stays open to them) or restores it first.
+
+### POST `/nests/:nestId/restore`
+Owner only. `{ "restored": true }`. Puts everything back exactly as it was — same documents, versions, stewards, links.
+
+Editors, who cannot archive directly, ask via `POST /nests/:nestId/request-deletion` with `targetType: "nest_archive"` (see *Deletion requests*). Honouring that request archives instead of deleting.
+
+### POST / DELETE `/nests/:nestId/pin`
+The caller's own bookmark on this nest: `{ "pinned": true }` / `{ "pinned": false }`. Idempotent in both directions.
+
+**Read-tier, deliberately.** A pin changes nothing about the nest and is visible to nobody else, so any caller who can see the nest may pin it — a read-only collaborator, and someone who reaches the nest only through a single document or folder share grant, both included. It is not ungated: a caller with no access at all gets `404` (not `403`), so the endpoint can't be used to probe which nest ids exist.
+
+Idempotent under concurrency, not just in sequence: two simultaneous pins of the same nest both answer `200` rather than one tripping the composite primary key.
+
+Pins are per `(user, nest)` in the `nest_pins` table and cascade with the nest. Each row of `GET /nests` carries `pinned` for the calling user, and the dashboard floats pinned nests to the top of the grid under either sort.
 
 ### GET `/nests/:nestId/settings`
 ```json
@@ -873,7 +900,9 @@ A flagged node is **not** locked or under review; it stays editable and never ap
 `GET /nests/:nestId/nodes/:nodeId` carries `deletionRequest` — the node's latest flag (`{ status, requestedBy, reason, resolvedBy?, resolutionNote?, resolvedAt? }`) or `null`. `pending` lets a client badge the document and drop its request affordance rather than discovering the `409`; `declined` carries the resolver's note, which is how the person who asked learns the verdict.
 
 ### POST `/nests/:nestId/request-deletion`
-Body: `{ "targetType": "folder" | "nest", "target": "api/limits", "reason": "..." }` (`target` ignored for `nest`).
+Body: `{ "targetType": "folder" | "nest" | "nest_archive", "target": "api/limits", "reason": "..." }` (`target` ignored for both nest targets).
+
+`nest_archive` asks for the nest to be **archived** rather than destroyed — same table, same queue, same reviewers and the same decline/withdraw paths as any other request; only what honouring it does differs. The two nest targets are independent pending rows, so one of each can be open at once.
 
 Editor permission, same as the per-document route — with one difference: a steward editor needs **nest** scope here, since a row scoped to one document is no mandate over a folder or the whole nest. A folder target is normalized (`/nodes/api/limits/` → `api/limits`) so two people flagging the same folder collide on one pending request rather than raising two; `404` if no documents live under it. One pending flag per (nest, target type, target).
 
@@ -901,9 +930,9 @@ Query: `?status=pending|declined|all` (defaults to `pending`). `all` returns bot
 ```
 
 ### POST `/nests/:nestId/deletion-requests/:id/delete`
-Honours the request — write permission, the same tier `DELETE /nodes/:nodeId` requires (including its `423` review lock). Branches on the request's `targetType`: a document goes through `deleteNode`, a folder through the bulk delete above, a nest through `deleteNest`.
+Honours the request — write permission, the same tier `DELETE /nodes/:nodeId` requires (including its `423` review lock). Branches on the request's `targetType`: a document goes through `deleteNode`, a folder through the bulk delete above, a nest through `deleteNest`, and `nest_archive` through `archiveNest` (nothing is deleted; the nest can be restored).
 
-A **nest** target additionally requires owner/admin: deleting a whole nest is the owner's call (`DELETE /nests/:id` enforces that), and honouring a request must not be a way around it — a write-tier collaborator gets `403`.
+Both **nest** targets additionally require owner/admin: acting on a whole nest is the owner's call (`DELETE /nests/:id` and `POST /nests/:id/archive` enforce that), and honouring a request must not be a way around it — a write-tier collaborator gets `403`.
 
 An honoured request always leaves the queue: a document's row is purged with its other node-keyed rows, a nest's cascades with the nest, and a folder's — which is neither — is dropped explicitly.
 

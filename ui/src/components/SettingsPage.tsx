@@ -98,6 +98,8 @@ const TABS: {
     label: "Advanced",
     keys: [
       "telemetry_enabled",
+      "posthog_key",
+      "posthog_host",
       "max_body_bytes",
       "trace_retention_days",
       "type_artifact_enabled",
@@ -1232,6 +1234,29 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                     onCheckedChange={(v) => set({ telemetry_enabled: v })}
                   />
                 </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Product analytics</CardTitle>
+                <CardDescription>
+                  Send usage events to your own PostHog project. Leave the key
+                  empty to keep analytics off. Also off whenever usage telemetry
+                  above is off.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <TextField
+                  value={draft.posthog_key ?? ""}
+                  placeholder="Project API key — phc_..."
+                  onChange={(v) => set({ posthog_key: v })}
+                />
+                <TextField
+                  value={draft.posthog_host ?? ""}
+                  placeholder="Host — https://us.i.posthog.com"
+                  onChange={(v) => set({ posthog_host: v })}
+                />
               </CardContent>
             </Card>
 

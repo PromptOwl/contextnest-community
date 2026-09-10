@@ -441,13 +441,91 @@ export async function importNest(userId: string, name: string): Promise<Nest> {
   return (await db.get("SELECT * FROM nests WHERE id = ?", [id])) as Nest;
 }
 
-export async function listNests(userId: string): Promise<Nest[]> {
+/**
+ * Pin a nest for one person. Pinning is a personal bookmark, not a change to
+ * the nest — two people sharing one nest keep different pins — so there is no
+ * permission tier beyond being able to see it (the route gate handles that).
+ * Idempotent: pinning an already-pinned nest is a no-op, not a constraint error.
+ */
+export async function pinNest(userId: string, nestId: string): Promise<void> {
   const db = getDb();
+  // No INSERT OR IGNORE / ON CONFLICT — the two dialects spell it differently.
+  // The check is the fast path; the catch is what makes it correct. Two clicks
+  // landing together both pass the SELECT, and the loser's INSERT trips the
+  // (user_id, nest_id) primary key — which would surface as a 409 on SQLite and
+  // a 500 on Postgres for an operation whose whole contract is idempotence. A
+  // double-click is the likeliest way to reach this, so it is not theoretical.
+  const existing = await db.get(
+    "SELECT 1 FROM nest_pins WHERE user_id = ? AND nest_id = ?",
+    [userId, nestId],
+  );
+  if (existing) return;
+  try {
+    await db.run(
+      "INSERT INTO nest_pins (user_id, nest_id) VALUES (?, ?)",
+      [userId, nestId],
+    );
+  } catch (err) {
+    // Re-read rather than pattern-match the driver's error text: if the row is
+    // there now, someone else's insert won and the caller's intent is satisfied.
+    // Anything else (a real failure) still throws.
+    const now = await db.get(
+      "SELECT 1 FROM nest_pins WHERE user_id = ? AND nest_id = ?",
+      [userId, nestId],
+    );
+    if (!now) throw err;
+  }
+}
+
+/** Remove a pin. Idempotent — unpinning what isn't pinned is a no-op. */
+export async function unpinNest(userId: string, nestId: string): Promise<void> {
+  await getDb().run(
+    "DELETE FROM nest_pins WHERE user_id = ? AND nest_id = ?",
+    [userId, nestId],
+  );
+}
+
+/**
+ * Every nest this person has pinned, as a Set. ONE query for the whole
+ * dashboard: the card annotation runs per nest, and asking per card would add a
+ * round trip to each one for a boolean.
+ */
+export async function pinnedNestIds(userId: string): Promise<Set<string>> {
+  const rows = (await getDb().all(
+    "SELECT nest_id FROM nest_pins WHERE user_id = ?",
+    [userId],
+  )) as Array<{ nest_id: string }>;
+  return new Set(rows.map((r) => r.nest_id));
+}
+
+/**
+* Archived nests are absent from every listing unless one explicitly asks for
+* them. Kept as SQL fragments rather than a post-filter so a nest that is put
+* away stops costing a row, a discovery walk and a title map everywhere it used
+* to appear — the work inbox, drafts, global search and the MCP index all read
+* through these helpers.
+*/
+const LIVE_ONLY = "archived_at IS NULL";
+const LIVE_ONLY_N = "n.archived_at IS NULL";
+
+/**
+* Owned nests. `archived: true` flips the list to ONLY archived rows — the
+* dashboard's Archived tab. It is deliberately the only helper that can show
+* them: archive, restore and delete are the owner's, so nobody else has an
+* action to take on an archived nest, and surfacing it to a collaborator would
+* be a card they can only look at.
+*/
+export async function listNests(
+ userId: string,
+ opts: { archived?: boolean } = {},
+): Promise<Nest[]> {
+  const db = getDb();
+  const scope = opts.archived ? "archived_at IS NOT NULL" : LIVE_ONLY;
   // Own rows + (for admin/open) all anon-owned. Public discovery is
   // listPublicNests; route layer dedupes by id.
   if (userId === ANON_USER_ID) {
     return (await db.all(
-      "SELECT * FROM nests WHERE user_id = ? ORDER BY created_at DESC",
+      `SELECT * FROM nests WHERE user_id = ? AND ${scope} ORDER BY created_at DESC`,
       [ANON_USER_ID],
     )) as Nest[];
   }
@@ -455,14 +533,46 @@ export async function listNests(userId: string): Promise<Nest[]> {
     config.AUTH_MODE === "open" || (await isLicenseAdminUserId(userId));
   if (!includeAnon) {
     return (await db.all(
-      "SELECT * FROM nests WHERE user_id = ? ORDER BY created_at DESC",
+      `SELECT * FROM nests WHERE user_id = ? AND ${scope} ORDER BY created_at DESC`,
       [userId],
     )) as Nest[];
   }
   return (await db.all(
-    "SELECT * FROM nests WHERE user_id = ? OR user_id = ? ORDER BY created_at DESC",
+    `SELECT * FROM nests WHERE (user_id = ? OR user_id = ?) AND ${scope}
+      ORDER BY created_at DESC`,
     [userId, ANON_USER_ID],
   )) as Nest[];
+}
+
+/**
+ * Put a nest away: hidden and read-only, nothing deleted. Idempotent.
+ *
+ * Both statements run in ONE transaction, for the reason deleteNest gives: the
+ * flag and the queue cleanup have to land together. An editor's "please archive
+ * this nest" is answered by the nest being archived, however that happened — the
+ * owner may well have done it directly rather than through the queue — and a
+ * request row that outlived the flag is stranded for good, since an archived
+ * nest caps everyone at read and the honour route can never action it again.
+ * Crashing between the two would produce exactly the state this cleanup exists
+ * to prevent.
+ */
+export async function archiveNest(nestId: string): Promise<void> {
+  await getDb().transaction(async (tx) => {
+    await tx.run(
+      "UPDATE nests SET archived_at = ? WHERE id = ? AND archived_at IS NULL",
+      [new Date().toISOString(), nestId],
+    );
+    await tx.run(
+      `DELETE FROM deletion_requests
+        WHERE nest_id = ? AND target_type = 'nest_archive' AND status = 'pending'`,
+      [nestId],
+    );
+  });
+}
+
+/** Bring it back exactly as it was — same documents, versions, stewards. */
+export async function restoreNest(nestId: string): Promise<void> {
+  await getDb().run("UPDATE nests SET archived_at = NULL WHERE id = ?", [nestId]);
 }
 
 export function isAnonymousNest(nest: Pick<Nest, "user_id">): boolean {
@@ -503,6 +613,7 @@ async function nestsSharedViaTeams(userId: string): Promise<Nest[]> {
   const candidates = (await db.all(
     `SELECT * FROM nests
        WHERE user_id != ?
+         AND ${LIVE_ONLY}
          AND (${ids.map(() => "shared_teams LIKE ?").join(" OR ")})`,
     [userId, ...ids.map((id) => `%${id}%`)],
   )) as Array<Nest & { shared_teams?: string }>;
@@ -545,6 +656,7 @@ export async function listSharedNests(userId: string): Promise<Nest[]> {
        LEFT JOIN grants g
          ON g.nest_id = n.id AND g.user_id = ?
        WHERE n.user_id != ?
+         AND ${LIVE_ONLY_N}
          AND (nc.user_id IS NOT NULL OR s.id IS NOT NULL OR g.id IS NOT NULL)
        ORDER BY n.created_at DESC`,
     [userId, userId, userId, userId],
@@ -566,7 +678,8 @@ export async function listSharedNests(userId: string): Promise<Nest[]> {
   // is shown: another real user's private nest still stays hidden.
   if (await isServerAdminUserId(userId)) {
     const anon = (await db.all(
-      "SELECT * FROM nests WHERE user_id = ? ORDER BY created_at DESC",
+      `SELECT * FROM nests WHERE user_id = ? AND ${LIVE_ONLY}
+        ORDER BY created_at DESC`,
       [ANON_USER_ID],
     )) as Nest[];
     for (const n of anon) {
@@ -648,11 +761,12 @@ export async function listVisibleNests(
          ON s.nest_id = n.id AND s.is_active = 1
         AND LOWER(s.user_email) = LOWER(u.email)
        ${opts.readable ? "LEFT JOIN grants g ON g.nest_id = n.id AND g.user_id = ?" : ""}
-      WHERE n.user_id = ?
+      WHERE ${LIVE_ONLY_N}
+        AND (n.user_id = ?
          OR nc.user_id IS NOT NULL
          OR s.id IS NOT NULL
          ${opts.readable ? `OR g.id IS NOT NULL OR n.visibility IN (${visibleByVisibility.map(() => "?").join(", ")})` : ""}
-         ${includeAnon ? "OR n.user_id = ?" : ""}
+         ${includeAnon ? "OR n.user_id = ?" : ""})
       ORDER BY n.created_at DESC`,
     params,
   )) as Nest[];
@@ -685,6 +799,7 @@ export async function listPublicNests(userId: string): Promise<Nest[]> {
   return (await db.all(
     `SELECT n.* FROM nests n
        WHERE n.visibility IN (${visibilities.map(() => "?").join(", ")})
+         AND ${LIVE_ONLY_N}
          AND n.user_id != ?
          AND NOT EXISTS (
            SELECT 1 FROM nest_collaborators nc
@@ -728,6 +843,13 @@ export async function deleteNest(nestId: string): Promise<void> {
       // Table not present on legacy DBs — fine, nothing to clean.
     }
     await tx.run("DELETE FROM api_keys WHERE nest_id = ?", [id]);
+    // Pins are FK-cascaded too; explicit for the same reason as the rows above,
+    // and wrapped because a DB predating the pins migration has no such table.
+    try {
+      await tx.run("DELETE FROM nest_pins WHERE nest_id = ?", [id]);
+    } catch {
+      // Table not present on legacy DBs — nothing to clean.
+    }
     await tx.run("DELETE FROM nests WHERE id = ?", [id]);
   });
 

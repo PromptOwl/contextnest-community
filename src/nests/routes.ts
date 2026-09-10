@@ -3,6 +3,7 @@ import type { AuthEnv } from "../auth/middleware.js";
 import {
   resolveNestPermission,
   resolveNestAccess,
+  capForArchive,
   isServerAdminUserId,
 } from "../shared/access.js";
 import {
@@ -13,6 +14,11 @@ import {
   listPublicNests,
   getNest,
   deleteNest,
+  archiveNest,
+  restoreNest,
+  pinNest,
+  unpinNest,
+  pinnedNestIds,
   renameNest,
   isStewardshipEnabled,
   setStewardshipEnabled,
@@ -67,7 +73,13 @@ async function effectiveAccess(nestId: string, userId: string) {
   // the grant check below — all three used to be separate round trips.
   const access = await resolveNestAccess(nestId, userId);
   if (config.AUTH_MODE === "open" && access.ownerId === ANON_USER_ID) {
-    return { permission: "owner" as const, access };
+    // The commons promotion is an access rule, not an exemption from archiving
+    // — an archived nest is read-only here too. `rawPermission` still says
+    // "owner", which is what archive/restore/delete gate on.
+    return {
+      permission: capForArchive("owner", access.archived),
+      access: { ...access, rawPermission: "owner" as const },
+    };
   }
   const permission = access.permission;
   // Someone shared a single document or folder holds no nest-wide permission,
@@ -100,15 +112,20 @@ function isGrantOnly(access: { permission: string; hasGrant: boolean }) {
 
 export const nestRoutes = new Hono<AuthEnv>();
 
-// GET /nests
+// GET /nests[?archived=1]
 nestRoutes.get("/", async (c) => {
   const userId = c.get("userId");
-  const owned = await listNests(userId);
+  // ?archived=1 is the dashboard's Archived tab: ONLY archived nests, and only
+  // owned ones. Archive, restore and delete are the owner's, so a collaborator
+  // has nothing to do with an archived nest — shared and public discovery skip
+  // archived rows entirely rather than showing cards with no action on them.
+  const archivedOnly = c.req.query("archived") === "1";
+  const owned = await listNests(userId, { archived: archivedOnly });
   // Collaborator/steward grants are independent of stewardship — a shared
   // nest stays visible whether or not governed mode is on.
-  const shared = await listSharedNests(userId);
+  const shared = archivedOnly ? [] : await listSharedNests(userId);
   // Public-but-not-mine; surfaces them in dashboard list.
-  const publicExtras = await listPublicNests(userId);
+  const publicExtras = archivedOnly ? [] : await listPublicNests(userId);
 
   // Annotate each row with the caller's effective permission so the UI
   // can render an accurate share line and gate destructive actions
@@ -124,6 +141,10 @@ nestRoutes.get("/", async (c) => {
   // resolves to permission='read' (see resolveNestPermission), so the card
   // would mislabel them "Viewer" unless we surface their steward roles too.
   const callerEmail = await resolveCallerEmail(userId);
+  // The caller's pins, in one query for the whole grid rather than a boolean
+  // lookup per card. Stamped onto every row below so the dashboard can float
+  // them to the top without a second round-trip.
+  const pinned = await pinnedNestIds(userId);
   // Nests the caller reaches ONLY through a share grant (one document or one
   // folder). resolveNestPermission returns "none" for them by design — a grant
   // is not nest-wide access — so the card is labelled from these rows instead,
@@ -161,9 +182,12 @@ nestRoutes.get("/", async (c) => {
         roles: ["viewer"],
         grant_only: true,
         stewardship_enabled: !!n.stewardship_enabled,
+        pinned: pinned.has(n.id),
       };
     }
-    const is_owner = permission === "owner";
+    // Ownership, not the effective permission: an archived nest caps everyone
+    // at 'read', and the card still has to offer its owner Restore and Delete.
+    const is_owner = access.rawPermission === "owner";
     const needOwnerEmail = !is_owner && n.user_id !== ANON_USER_ID;
     // Role badge on shared cards. resolveGrantRoles merges the caller's RAW
     // grants (collaborator + steward + team) in parallel — NOT resolveUserRoles,
@@ -191,6 +215,7 @@ nestRoutes.get("/", async (c) => {
       roles,
       grant_only: false,
       stewardship_enabled: !!n.stewardship_enabled,
+      pinned: pinned.has(n.id),
     };
   };
   // Dedupe by id (owner/shared rows win over public discovery row), then
@@ -534,36 +559,90 @@ nestRoutes.patch("/:nestId", async (c) => {
   return c.json({ nest });
 });
 
-// DELETE /nests/:nestId
-nestRoutes.delete("/:nestId", async (c) => {
+
+/**
+ * POST/DELETE /nests/:nestId/pin — the caller's own bookmark on this nest.
+ *
+ * No permission tier beyond seeing the nest: a pin changes nothing about the
+ * nest and is visible to nobody else, so a viewer may pin exactly as an owner
+ * does. It is NOT ungated, though — the read check below is what stops the
+ * endpoint being used to find out whether a nest id exists.
+ */
+nestRoutes.post("/:nestId/pin", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
+  if ((await effectivePermission(nestId, userId)) === "none") {
+    throw new NotFoundError("Nest not found");
+  }
+  await pinNest(userId, nestId);
+  return c.json({ pinned: true });
+});
 
-  // Real-owner nests are deletable only by that owner. The ungoverned
-  // commons (anon-owned nests) are the exception:
-  //   - open mode: effectivePermission promotes anon nests to "owner" for
-  //     every caller, so anyone in the workspace can delete them.
-  //   - key mode (closed/single): the server license-admin acts as
-  //     caretaker for the commons; without this branch their real user-id
-  //     resolves to "none" and the delete 404s.
+nestRoutes.delete("/:nestId/pin", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  if ((await effectivePermission(nestId, userId)) === "none") {
+    throw new NotFoundError("Nest not found");
+  }
+  await unpinNest(userId, nestId);
+  return c.json({ pinned: false });
+});
+
+/**
+ * The gate for the three whole-nest actions: delete, archive, restore. Real-owner
+ * nests are the owner's alone. The ungoverned commons (anon-owned nests) are the
+ * exception:
+ *   - open mode: effectiveAccess promotes anon nests to "owner" for every
+ *     caller, so anyone in the workspace can act on them.
+ *   - key mode (closed/single): the server license-admin acts as caretaker for
+ *     the commons; without this branch their real user-id resolves to "none"
+ *     and the call 404s.
+ *
+ * Gates on `rawPermission`, not the effective one: an archived nest caps
+ * everybody at 'read', and restoring or deleting it has to stay possible.
+ */
+async function requireNestCaretaker(nestId: string, userId: string, verb: string) {
   const nest = await getNest(nestId);
   if (!nest) {
     throw new NotFoundError("Nest not found");
   }
-  const permission = await effectivePermission(nestId, userId);
-  const isAnonOwned = nest.user_id === ANON_USER_ID;
+  const { access } = await effectiveAccess(nestId, userId);
   const adminCaretaker =
     config.AUTH_MODE !== "open" &&
-    isAnonOwned &&
+    nest.user_id === ANON_USER_ID &&
     (await isLicenseAdminUserId(userId));
-  if (permission !== "owner" && !adminCaretaker) {
+  if (access.rawPermission !== "owner" && !adminCaretaker) {
     throw new ForbiddenError(
-      "You don't have permission to delete this nest. Only the nest owner can delete it.",
+      `You don't have permission to ${verb} this nest. Only the nest owner can ${verb} it.`,
     );
   }
+  return nest;
+}
 
+// DELETE /nests/:nestId
+nestRoutes.delete("/:nestId", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  await requireNestCaretaker(nestId, c.get("userId"), "delete");
   await deleteNest(nestId);
   return c.json({ deleted: true });
+});
+
+// POST /nests/:nestId/archive — put the nest away, reversibly. Nothing is
+// deleted: it leaves every listing, goes read-only (see resolveNestAccess) and
+// its published links stop resolving until it is restored.
+nestRoutes.post("/:nestId/archive", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  await requireNestCaretaker(nestId, c.get("userId"), "archive");
+  await archiveNest(nestId);
+  return c.json({ archived: true });
+});
+
+// POST /nests/:nestId/restore — bring it back exactly as it was.
+nestRoutes.post("/:nestId/restore", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  await requireNestCaretaker(nestId, c.get("userId"), "restore");
+  await restoreNest(nestId);
+  return c.json({ restored: true });
 });
 
 // GET /nests/:nestId/settings — read nest settings (stewardship enabled, etc.)

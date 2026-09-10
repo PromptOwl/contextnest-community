@@ -217,6 +217,10 @@ export async function getHealth() {
     subagent_max_depth?: number;
     subagent_max_children?: number;
     runner_key_configured?: boolean;
+    /** PostHog project key, or null when analytics is unconfigured or usage
+     *  telemetry is switched off. The browser needs it to send events. */
+    posthog_key?: string | null;
+    posthog_host?: string;
     /** Mail transport is set up — email/invite publish gates need it. */
     email_configured?: boolean;
     suspended_reason?: string;
@@ -232,6 +236,9 @@ export interface AdminSettings {
   manual_sign_in: ManualSignIn;
   logo_url: string | null;
   telemetry_enabled: boolean;
+  /** PostHog project key ("" = analytics off) and ingestion host. */
+  posthog_key: string;
+  posthog_host: string;
   public_base_url: string;
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
@@ -585,8 +592,12 @@ export function isPrimeNode(
 
 // ─── Nests ──────────────────────────────────────────────────────────────
 
-export async function listNests() {
-  return request<{ nests: any[] }>("/nests");
+/** `archived` lists ONLY archived nests — the dashboard's Archived tab.
+ *  Without it archived nests are absent, as they are from every other surface. */
+export async function listNests(opts?: { archived?: boolean }) {
+  return request<{ nests: any[] }>(
+    opts?.archived ? "/nests?archived=1" : "/nests",
+  );
 }
 
 export async function createNest(name: string, description?: string) {
@@ -598,6 +609,27 @@ export async function createNest(name: string, description?: string) {
 
 export async function deleteNest(nestId: string) {
   return request("/nests/" + nestId, { method: "DELETE" });
+}
+
+/** Put the nest away: hidden and read-only, nothing deleted. */
+export async function archiveNest(nestId: string) {
+  return request<{ archived: true }>("/nests/" + nestId + "/archive", {
+    method: "POST",
+  });
+}
+
+/** Bring an archived nest back exactly as it was. */
+export async function restoreNest(nestId: string) {
+  return request<{ restored: true }>("/nests/" + nestId + "/restore", {
+    method: "POST",
+  });
+}
+/** Pin/unpin this nest for the signed-in user. A pin is personal — it changes
+ *  nothing about the nest and nobody else sees it. */
+export async function setNestPinned(nestId: string, pinned: boolean) {
+  return request<{ pinned: boolean }>("/nests/" + nestId + "/pin", {
+    method: pinned ? "POST" : "DELETE",
+  });
 }
 
 export async function updateNest(
@@ -1149,7 +1181,7 @@ export interface DeletionRequest {
   id: string;
   /** Node id, folder path, or nest id — see targetType. */
   nodeId: string;
-  targetType?: "document" | "folder" | "nest";
+  targetType?: "document" | "folder" | "nest" | "nest_archive";
   title?: string;
   requestedBy: string;
   reason: string;
@@ -1178,10 +1210,12 @@ export async function deleteFolder(nestId: string, folder: string) {
   );
 }
 
-/** Flag a whole folder ("api/limits") or the nest itself for deletion. */
+/** Flag a whole folder ("api/limits") or the nest itself. "nest_archive" asks
+ *  for the nest to be archived rather than destroyed — same queue, same
+ *  reviewers, different outcome when it is honoured. */
 export async function requestTargetDeletion(
   nestId: string,
-  targetType: "folder" | "nest",
+  targetType: "folder" | "nest" | "nest_archive",
   target: string,
   reason: string,
 ) {
@@ -2125,9 +2159,10 @@ export interface WorkItem {
   /** Deletion items only: why it was flagged, and the row to resolve. */
   reason?: string;
   request_id?: string;
-  /** Deletion items only. For "folder"/"nest", node_id is a folder path or the
-   *  nest id — NOT a document id, so don't open the editor on it. */
-  target_type?: "document" | "folder" | "nest";
+  /** Deletion items only. For "folder"/"nest"/"nest_archive", node_id is a
+   *  folder path or the nest id — NOT a document id, so don't open the editor
+   *  on it. "nest_archive" is the reversible ask: honouring it archives. */
+  target_type?: "document" | "folder" | "nest" | "nest_archive";
 }
 
 export interface WatcherNotification {

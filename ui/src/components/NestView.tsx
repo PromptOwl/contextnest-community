@@ -26,7 +26,7 @@ import {
   Pencil, Trash2, FileWarning, Globe, Lock, Building2, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
   FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus, Wrench, Table2,
-  Activity, Share2, BookOpen,
+  Activity, Share2, BookOpen, Archive,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { FolderTree, prettyFolder, prettyFolderPath } from "./FolderTree";
@@ -327,8 +327,13 @@ export function NestView({
         map.set(r.nodeId, r);
     return map;
   }, [deletionRequests]);
+  // Either whole-nest ask counts as "already flagged" — the affordance is one
+  // dialog offering both outcomes, so a pending archive request should not sit
+  // beside a fresh "request removal" button.
   const nestFlag = deletionRequests.find(
-    (r) => r.targetType === "nest" && r.status === "pending",
+    (r) =>
+      (r.targetType === "nest" || r.targetType === "nest_archive") &&
+      r.status === "pending",
   );
   const nestFlagPending = !!nestFlag;
   const pendingDeletions = useMemo(
@@ -527,7 +532,9 @@ export function NestView({
       setShowNewFolder(false);
       // An empty folder barely changes the tree, so say it landed
       // (CU-wdqcq01caq) — the failure path already speaks.
-      toast.success(`Folder "${folder}" created`);
+      // Named the way the tree will show it — quoting the raw path made the
+      // toast look like it created a different folder (CU-wdqcq01pe8).
+      toast.success(`Folder "${prettyFolderPath(folder)}" created`);
       fetchData();
     } catch (e: any) {
       console.error("[NestView] createFolder failed", e);
@@ -2006,24 +2013,36 @@ export function NestView({
               Imported
             </Badge>
           )}
-          {/* Same red flag a doc/folder row gets — the requester's only sign
-              their nest deletion request is still waiting on an admin. */}
+          {/* Same flag a doc/folder row gets — the requester's only sign their
+              request is still waiting on an admin. An ARCHIVE ask is reversible,
+              so it says so and drops the red: telling every viewer the nest is
+              up for permanent deletion would be plainly wrong. */}
           {nestFlag && (() => {
             const isOwn = nestFlag.requestedBy.toLowerCase() === currentEmail;
+            const isArchiveAsk = nestFlag.targetType === "nest_archive";
+            const verb = isArchiveAsk ? "archived" : "deleted";
             return (
               <Badge
                 variant="outline"
-                className={`shrink-0 gap-1 border-red-200 bg-red-50 text-red-700 ${isOwn ? "cursor-pointer hover:bg-red-100" : ""}`}
+                className={`shrink-0 gap-1 ${
+                  isArchiveAsk
+                    ? "border-amber-200 bg-amber-50 text-amber-700"
+                    : "border-red-200 bg-red-50 text-red-700"
+                } ${isOwn ? "cursor-pointer hover:opacity-80" : ""}`}
                 title={
                   isOwn
-                    ? "Click to withdraw your deletion request"
-                    : `${nestFlag.requestedBy} asked for this nest to be deleted: "${nestFlag.reason}". A nest owner or admin decides.`
+                    ? `Click to withdraw your ${isArchiveAsk ? "archive" : "deletion"} request`
+                    : `${nestFlag.requestedBy} asked for this nest to be ${verb}: "${nestFlag.reason}". A nest owner or admin decides.`
                 }
                 data-testid="nest-deletion-flag"
                 onClick={isOwn ? () => handleWithdrawDeletion(nestFlag) : undefined}
               >
-                <Trash2 className="h-3 w-3" />
-                Deletion requested
+                {isArchiveAsk ? (
+                  <Archive className="h-3 w-3" />
+                ) : (
+                  <Trash2 className="h-3 w-3" />
+                )}
+                {isArchiveAsk ? "Archive requested" : "Deletion requested"}
                 {isOwn && <X className="h-3 w-3 ml-0.5" />}
               </Badge>
             );
@@ -3730,7 +3749,11 @@ export function NestView({
                           {r.title || r.nodeId}
                           {r.targetType && r.targetType !== "document" && (
                             <span className="ml-2 rounded bg-muted px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                              {r.targetType === "folder" ? "Folder" : "Nest"}
+                              {r.targetType === "folder"
+                                ? "Folder"
+                                : r.targetType === "nest_archive"
+                                  ? "Archive nest"
+                                  : "Nest"}
                             </span>
                           )}
                         </span>
@@ -3747,15 +3770,21 @@ export function NestView({
                       >
                         Reject
                       </Button>
+                      {/* Honouring an archive ask archives — reversible, so it
+                          is an approval, not a destructive action. */}
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                        className={
+                          r.targetType === "nest_archive"
+                            ? ""
+                            : "text-destructive hover:text-destructive hover:bg-destructive/10"
+                        }
                         onClick={() =>
                           setResolveTarget({ request: r, action: "delete" })
                         }
                       >
-                        Delete
+                        {r.targetType === "nest_archive" ? "Approve" : "Delete"}
                       </Button>
                     </div>
                   ))}
@@ -4279,6 +4308,13 @@ export function NestView({
           open
           onOpenChange={setShowDelete}
           onDeleted={() => { setShowDelete(false); onBack(); }}
+          // Same dialog, softer option: archiving leaves the nest intact, so
+          // land back on the dashboard rather than in a nest gone read-only.
+          onArchived={() => {
+            setShowDelete(false);
+            toast.success(`"${nestName}" archived — find it under Archived`);
+            onBack();
+          }}
         />
       )}
 
@@ -4734,11 +4770,17 @@ export function NestView({
         <ReasonDialog
           open
           onOpenChange={setNestFlagOpen}
-          title={`Request deletion of "${nestName}"`}
-          description="A nest owner or admin reviews this. Honouring it deletes the whole nest and every document in it. Nothing is removed yet."
-          label="Why should it be deleted?"
+          title={`Request removal of "${nestName}"`}
+          description="A nest owner or admin reviews this. Nothing is removed yet — ask for the nest to be archived (reversible, nothing deleted) or deleted outright."
+          label="Why should it be removed?"
           placeholder="e.g. project wound down, superseded by another nest"
           confirmLabel="Request deletion"
+          secondaryLabel="Request archive"
+          onSecondary={async (reason) => {
+            await api.requestTargetDeletion(nestId, "nest_archive", nestId, reason);
+            toast.success("Archive requested — a nest admin will review it");
+            fetchData();
+          }}
           onConfirm={async (reason) => {
             await api.requestTargetDeletion(nestId, "nest", nestId, reason);
             toast.success("Deletion requested — a nest admin will review it");
@@ -4804,15 +4846,21 @@ export function NestView({
         <ReasonDialog
           open
           onOpenChange={(o) => !o && setResolveTarget(null)}
+          // Honouring an archive request archives — the confirm has to say so,
+          // or the reviewer reads "cannot be undone" about a reversible action.
           title={
-            resolveTarget.action === "delete"
-              ? `Delete "${resolveTarget.request.title || resolveTarget.request.nodeId}"?`
-              : "Reject this deletion request"
+            resolveTarget.action !== "delete"
+              ? "Reject this request"
+              : resolveTarget.request.targetType === "nest_archive"
+                ? `Archive "${resolveTarget.request.title || resolveTarget.request.nodeId}"?`
+                : `Delete "${resolveTarget.request.title || resolveTarget.request.nodeId}"?`
           }
           description={
-            resolveTarget.action === "delete"
-              ? `${resolveTarget.request.requestedBy} asked for this: "${resolveTarget.request.reason}". Deleting cannot be undone.`
-              : `${resolveTarget.request.requestedBy} asked for this: "${resolveTarget.request.reason}". The document stays; your note is the record.`
+            resolveTarget.action !== "delete"
+              ? `${resolveTarget.request.requestedBy} asked for this: "${resolveTarget.request.reason}". The document stays; your note is the record.`
+              : resolveTarget.request.targetType === "nest_archive"
+                ? `${resolveTarget.request.requestedBy} asked for this: "${resolveTarget.request.reason}". The nest goes read-only and leaves the dashboard; nothing is deleted and you can restore it.`
+                : `${resolveTarget.request.requestedBy} asked for this: "${resolveTarget.request.reason}". Deleting cannot be undone.`
           }
           // No label on the delete branch — that dialog is a plain confirm.
           label={
@@ -4822,9 +4870,16 @@ export function NestView({
           }
           placeholder="e.g. still referenced by onboarding"
           confirmLabel={
-            resolveTarget.action === "delete" ? "Delete document" : "Reject"
+            resolveTarget.action !== "delete"
+              ? "Reject"
+              : resolveTarget.request.targetType === "nest_archive"
+                ? "Archive nest"
+                : "Delete document"
           }
-          destructive={resolveTarget.action === "delete"}
+          destructive={
+            resolveTarget.action === "delete" &&
+            resolveTarget.request.targetType !== "nest_archive"
+          }
           onConfirm={
             resolveTarget.action === "delete"
               ? handleHonourDeletion

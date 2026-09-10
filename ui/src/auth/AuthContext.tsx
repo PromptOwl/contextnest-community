@@ -21,6 +21,7 @@ import {
   type PropsWithChildren,
 } from "react";
 import * as api from "../lib/api";
+import { initAnalytics } from "../lib/analytics";
 
 type AuthMode = "open" | "key" | null;
 type Me = {
@@ -163,6 +164,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setTypeArtifactEnabled(h.type_artifact_enabled !== false);
         setTypeTableEnabled(h.type_table_enabled !== false);
         setSubagentRunsEnabled(!!h.subagent_runs_enabled);
+        // Product analytics, if the operator configured a PostHog project.
+        // No-op when the server sends no key (unset, or telemetry switched off).
+        initAnalytics(h.posthog_key, h.posthog_host);
         if (typeof h.subagent_max_depth === "number") setSubagentMaxDepth(h.subagent_max_depth);
         if (typeof h.subagent_max_children === "number") setSubagentMaxChildren(h.subagent_max_children);
 

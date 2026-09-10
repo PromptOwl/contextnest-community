@@ -71,7 +71,9 @@ const HISTORICAL_MIGRATIONS = [
   "035_multiple_api_keys_per_user",
   "036_node_index",
   "037_publish",
-  "038_nest_visibility_org",
+  "038_nest_archive",
+  "039_nest_pins",
+  "041_nest_visibility_org",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -110,6 +112,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       index_synced_at TEXT,
       reader_mode INTEGER NOT NULL DEFAULT 0,
       reader_home_node TEXT,
+      -- Set = archived (migration 038): off the dashboard, out of MCP, read
+      -- only, nothing deleted. NULL is the whole "not archived" story.
+      archived_at TEXT,
       UNIQUE(user_id, slug)
     );
     CREATE INDEX IF NOT EXISTS idx_nests_user ON nests(user_id);
@@ -448,6 +453,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- upgrade. reader_mode is off by default; reader_home_node is nullable.
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS reader_mode INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS reader_home_node TEXT;
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS archived_at TEXT;
 
     CREATE TABLE IF NOT EXISTS schedules (
       id TEXT PRIMARY KEY,
@@ -691,6 +697,19 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       ON deletion_requests(nest_id, target_type, node_id) WHERE status = 'pending';
     CREATE INDEX IF NOT EXISTS idx_deletion_requests_nest
       ON deletion_requests(nest_id, status);
+
+    -- Pinned nests (migration 039). Per PERSON per nest, not a property of the
+    -- nest: two people sharing one nest pin different things. The composite key
+    -- is the whole uniqueness rule; the nest FK cascades.
+    CREATE TABLE IF NOT EXISTS nest_pins (
+      -- Both sides cascade, as grants and nest_collaborators do: without it on
+      -- user_id, deleting an account holding a single pin fails on the FK.
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      PRIMARY KEY (user_id, nest_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_nest_pins_user ON nest_pins(user_id);
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,

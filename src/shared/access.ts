@@ -76,8 +76,15 @@ export interface NestAccess {
   isSteward: boolean;
   /** The caller holds at least one document/folder share grant here. */
   hasGrant: boolean;
-  /** Merged, highest-wins nest permission — what routes gate on. */
+  /** Merged, highest-wins nest permission — what routes gate on. Already
+   *  capped at 'read' when the nest is archived. */
   permission: NestPermission;
+  /** The same merge BEFORE the archived cap — i.e. what this caller would hold
+   *  if the nest were live. Owner-only actions that must survive archiving
+   *  (restore, delete, honouring an archive request) gate on this. */
+  rawPermission: NestPermission;
+  /** The nest is archived: readable, but nothing may be written to it. */
+  archived: boolean;
   /** Reaches the nest ONLY because it is public (approved content only). */
   isPublicReader: boolean;
 }
@@ -88,13 +95,62 @@ const higher = (
 ): NestPermission => (b && PERMISSION_LEVELS[b] > PERMISSION_LEVELS[a] ? b : a);
 
 /** One round trip for the whole picture. See NestAccess. */
+/**
+ * Archiving caps what anyone may do here at 'read' — the owner included.
+ * Enforcing it in this one wrapper is the whole read-only story: every REST
+ * route, MCP tool and workflow gate resolves through resolveNestAccess or
+ * resolveNestPermission, so none of them needs its own archived check.
+ *
+ * `ownerId` is deliberately left raw, so the routes that must still work on an
+ * archived nest — restore, delete, honouring an archive request — gate on
+ * ownership rather than on the capped permission (see nests/routes.ts).
+ */
 export async function resolveNestAccess(
   nestId: string,
   userId: string,
 ): Promise<NestAccess> {
+  const access = await resolveNestAccessRaw(nestId, userId);
+  return {
+    ...access,
+    rawPermission: access.permission,
+    permission: capForArchive(access.permission, access.archived),
+  };
+}
+
+/**
+ * Is this nest archived? One indexed lookup, for the callers that must know
+ * without paying for the whole permission merge — open mode, which grants
+ * "owner" outright and never resolves access at all.
+ */
+export async function isNestArchived(nestId: string): Promise<boolean> {
+  const row = (await getDb().get(
+    "SELECT archived_at FROM nests WHERE id = ?",
+    [nestId],
+  )) as { archived_at: string | null } | undefined;
+  return !!row?.archived_at;
+}
+
+/** Archived nests are readable and nothing more, whoever is asking. */
+export function capForArchive(
+  permission: NestPermission,
+  archived: boolean,
+): NestPermission {
+  if (!archived) return permission;
+  return PERMISSION_LEVELS[permission] > PERMISSION_LEVELS.read
+    ? "read"
+    : permission;
+}
+
+/** The merge itself. `rawPermission` is the wrapper's to add — it is the same
+ *  value as `permission` here, before any cap. */
+async function resolveNestAccessRaw(
+  nestId: string,
+  userId: string,
+): Promise<Omit<NestAccess, "rawPermission">> {
   const row = (await getDb().get(
     `SELECT n.user_id      AS owner_id,
             n.visibility   AS visibility,
+            n.archived_at  AS archived_at,
             n.shared_teams AS shared_teams,
             u.email        AS caller_email,
             nc.permission  AS collab_permission,
@@ -115,6 +171,7 @@ export async function resolveNestAccess(
     | {
         owner_id: string;
         visibility: string | null;
+        archived_at: string | null;
         shared_teams: string | null;
         caller_email: string | null;
         collab_permission: NestPermission | null;
@@ -132,7 +189,9 @@ export async function resolveNestAccess(
     isSteward: false,
     hasGrant: false,
     permission: "none",
+    rawPermission: "none",
     isPublicReader: false,
+    archived: false,
   };
   if (!row) return absent;
 
@@ -146,6 +205,7 @@ export async function resolveNestAccess(
     // boolean, so normalize rather than leaking the driver's shape.
     isSteward: !!row.steward_hit,
     hasGrant: !!row.grant_hit,
+    archived: !!row.archived_at,
   };
 
   // 1. The owner.
