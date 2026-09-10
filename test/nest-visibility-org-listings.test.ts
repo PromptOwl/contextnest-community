@@ -109,3 +109,47 @@ describe("listVisibleNests({ readable: true })", () => {
     ]);
   });
 });
+
+/**
+ * The server-admin path is the one that appends an extra `?` AFTER the
+ * visibility list (the anon-owned OR), so it is where a param-count mismatch
+ * would actually surface.
+ */
+describe("listVisibleNests({ readable: true }) as a server admin", () => {
+  let loadGrantedSuperAdmins: () => Promise<void>;
+
+  beforeAll(async () => {
+    const client = await import("../src/db/client.js");
+    const db = client.getDb();
+    ({ loadGrantedSuperAdmins } = await import(
+      "../src/governance/access-service.js"
+    ));
+    await db.run(
+      "INSERT OR IGNORE INTO users (id, email, name, password_hash) VALUES (?,?,?,?)",
+      [ANON, "anon@local", "anon", "x"],
+    );
+    await db.run(
+      "INSERT INTO nests (id, user_id, name, slug, visibility) VALUES (?,?,?,?,?)",
+      ["nest-anon", ANON, "anon", "anon", "private"],
+    );
+    await db.run(
+      "INSERT INTO super_admins (email, granted_by) VALUES (?, ?)",
+      ["stranger@acme.test", "owner@acme.test"],
+    );
+    await loadGrantedSuperAdmins();
+  });
+
+  afterAll(async () => {
+    const client = await import("../src/db/client.js");
+    await client.getDb().run("DELETE FROM super_admins");
+    await loadGrantedSuperAdmins();
+  });
+
+  it("sees org + public by visibility AND the anon-owned commons", async () => {
+    expect(ids(await listVisibleNests(STRANGER, { readable: true }))).toEqual([
+      "nest-anon",
+      "nest-org",
+      "nest-public",
+    ]);
+  });
+});

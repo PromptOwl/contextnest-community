@@ -1,13 +1,11 @@
 /**
- * NestVisibilityControl — private ↔ public for a whole nest
+ * NestVisibilityControl — private / organization / public for a whole nest
  * (PATCH /nests/:id/visibility, admin-gated server-side).
  *
- * The switch is deliberately still two-state. The API also accepts 'org'
- * (readable by every authenticated user of this deployment), but nothing in
- * the UI sets it yet — so this control only has to REPORT that state
- * honestly, not offer it. Saying "Private" for an org nest would tell an
- * owner the opposite of the truth, which is why the label reads off the
- * visibility string rather than a boolean.
+ * A select rather than a switch because visibility is three-valued: 'org'
+ * (readable by every authenticated user of this deployment) sits between the
+ * other two, and a boolean control could report it but never set it — an org
+ * nest's only move would be escalate-to-public.
  *
  * Lives on its own so the Collaborators tab and the Share dialog show the
  * same control instead of the tab deferring visibility to the dialog
@@ -20,7 +18,13 @@
  */
 import { useEffect, useState } from "react";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -42,7 +46,7 @@ interface Props {
 }
 
 export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
-  const [visibility, setVisibility] = useState<string>("private");
+  const [visibility, setVisibility] = useState<api.NestVisibility>("private");
   const isPublic = visibility === "public";
   const isOrg = visibility === "org";
   const [saving, setSaving] = useState(false);
@@ -55,21 +59,17 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
     // reflects truth without the parent having to thread it through.
     api
       .getNest(nestId)
-      .then((res) => setVisibility(res.nest?.visibility || "private"))
+      .then((res) => setVisibility(res.nest?.visibility ?? "private"))
       .catch(() => {
         /* leave default; the roster below surfaces any real error */
       });
   }, [nestId]);
 
-  const apply = async (next: boolean, acknowledgePublic?: boolean) => {
-    // Optimistic flip, reverting to the PREVIOUS value on failure — not to
-    // the opposite of `next`. Those are the same thing only while visibility
-    // is binary: "Make private" on an org nest is apply(false), and inverting
-    // `next` would revert a failed call to "public", showing a green Globe
-    // for a nest that was never public. Capture and restore instead, the way
-    // NestView's applyVisibility already does.
+  const apply = async (target: api.NestVisibility, acknowledgePublic?: boolean) => {
+    // Optimistic change, reverting to the PREVIOUS value on failure — never
+    // to a value derived from the target, which would show a green Globe for
+    // a nest that was never public. Same as NestView's applyVisibility.
     const prev = visibility;
-    const target: api.NestVisibility = next ? "public" : "private";
     setVisibility(target);
     setSaving(true);
     onError?.(null);
@@ -93,14 +93,15 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
     }
   };
 
-  const toggle = async (next: boolean) => {
-    // Confirm before going public — the switch only moves once acknowledged.
-    // Going back to private needs no acknowledgement.
-    if (next) {
+  const choose = async (next: api.NestVisibility) => {
+    if (next === visibility) return;
+    // Confirm before going public — the value only changes once acknowledged.
+    // Private and org cross no org boundary, so neither needs one.
+    if (next === "public") {
       setConfirmPublic(true);
       return;
     }
-    await apply(false);
+    await apply(next);
   };
 
   return (
@@ -129,22 +130,20 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
           {saving && (
             <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
           )}
-          {isOrg && (
-            <button
-              type="button"
-              className="text-xs underline text-muted-foreground hover:text-foreground"
-              disabled={saving}
-              onClick={() => void apply(false)}
-            >
-              Make private
-            </button>
-          )}
-          <Switch
-            checked={isPublic}
-            onCheckedChange={toggle}
+          <Select
+            value={visibility}
+            onValueChange={(v) => void choose(v as api.NestVisibility)}
             disabled={saving}
-            aria-label="Toggle public visibility"
-          />
+          >
+            <SelectTrigger className="h-8 w-[150px]" aria-label="Nest visibility">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="private">Private</SelectItem>
+              <SelectItem value="org">Organization</SelectItem>
+              <SelectItem value="public">Public</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
 
@@ -162,7 +161,7 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
             <AlertDialogAction
               onClick={() => {
                 setConfirmPublic(false);
-                void apply(true, true);
+                void apply("public", true);
               }}
             >
               Make public

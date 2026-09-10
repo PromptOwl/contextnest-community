@@ -725,7 +725,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
   }
 
-  // Migration 038 parity: widen the visibility CHECK to accept 'org' on a
+  // Migration 041 parity: widen the visibility CHECK to accept 'org' on a
   // database created before it existed. Postgres has no ADD CONSTRAINT IF NOT
   // EXISTS, so this is a drop-then-add by the constraint's generated name.
   //

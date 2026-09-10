@@ -1,5 +1,5 @@
 /**
- * Migration 038 — widening the nests.visibility CHECK.
+ * Migration 041 — widening the nests.visibility CHECK.
  *
  * Tested against a raw SQLite database rather than the app: SQLite cannot
  * alter a CHECK constraint in place, so widening `visibility` means rebuilding
@@ -73,7 +73,7 @@ function runWiden(db: Database.Database): void {
   }
 }
 
-describe("migration 038 — widening the nests.visibility CHECK", () => {
+describe("migration 041 — widening the nests.visibility CHECK", () => {
   it("does not cascade-delete child rows when the table is rebuilt", () => {
     const db = oldSchemaDb();
     runWiden(db);

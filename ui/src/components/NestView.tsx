@@ -1929,12 +1929,11 @@ export function NestView({
               private switch isn't buried in the Share dialog), a read-only
               badge for everyone else. */}
           {canManage ? (
-            // Two-state on purpose: this button offers private <-> public,
-            // and for an org nest its only move is escalate-to-public (the
-            // tooltip says so). Walking an org nest back to private lives in
-            // NestVisibilityControl (Collaborators tab / Share dialog), which
-            // is also the only place the org tier is explained. Revisit when
-            // the UI can actually SET org rather than only report it.
+            // Two-state on purpose: a header shortcut for the common flip,
+            // private <-> public, and for an org nest its only move is
+            // escalate-to-public (the tooltip says so). Choosing among all
+            // three tiers lives in NestVisibilityControl (Collaborators tab /
+            // Share dialog), which is also where each tier is explained.
             <Button
               variant="outline"
               size="sm"
@@ -1968,14 +1967,22 @@ export function NestView({
                   : "Private"}
             </Button>
           ) : (
-            visibility === "public" && (
+            visibility !== "private" && (
               <Badge
                 variant="outline"
                 className="shrink-0 gap-1 border-blue-200 bg-blue-50 text-blue-700"
-                title="Anyone with the URL can read this nest"
+                title={
+                  visibility === "public"
+                    ? "Anyone with the URL can read this nest"
+                    : "Everyone signed in to this deployment can read this nest"
+                }
               >
-                <Globe className="h-3 w-3" />
-                Public
+                {visibility === "public" ? (
+                  <Globe className="h-3 w-3" />
+                ) : (
+                  <Building2 className="h-3 w-3" />
+                )}
+                {visibility === "public" ? "Public" : "Organization"}
               </Badge>
             )
           )}

@@ -1531,7 +1531,7 @@ export function widenNestVisibilityWithGuard(db: Database.Database): void {
     );
     if (introduced.length > 0) {
       throw new Error(
-        `038_nest_visibility_org introduced foreign-key violations: ${introduced
+        `041_nest_visibility_org introduced foreign-key violations: ${introduced
           .map(([key]) => key)
           .join(", ")}`,
       );
@@ -1584,12 +1584,22 @@ export function widenNestVisibilityCheck(db: Database.Database): void {
     .map((c) => `"${c.name}"`)
     .join(", ");
 
+  // Indexes die with the DROP, so replay the live ones for the same reason the
+  // columns are derived rather than hardcoded: other branches add them.
+  const indexes = (
+    db
+      .prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'nests' AND sql IS NOT NULL",
+      )
+      .all() as Array<{ sql: string }>
+  ).map((r) => `${r.sql};`);
+
   db.exec(`
     ${newDdl};
     INSERT INTO nests_new (${cols}) SELECT ${cols} FROM nests;
     DROP TABLE nests;
     ALTER TABLE nests_new RENAME TO nests;
-    CREATE INDEX IF NOT EXISTS idx_nests_user ON nests(user_id);
+    ${indexes.join("\n    ")}
   `);
 }
 
