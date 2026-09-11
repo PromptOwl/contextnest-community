@@ -1248,6 +1248,21 @@ export interface UpdateNodePatch {
   prime?: boolean | null;
 }
 
+/**
+ * Per-write switches for a machine-generated save.
+ *
+ * `notifyMentions: false` is for a body this server composed rather than a
+ * person wrote — today the derived `— Annotations` projection of an artifact's
+ * comment threads. Those `@names` are copies of names already notified where
+ * they were typed, so notifying again would fire twice and point the reader at
+ * the projection instead of the document they were named in. Kept as a call-site
+ * decision rather than a guess about the node id, so a person editing that
+ * document by hand still notifies normally.
+ */
+export interface WriteOptions {
+  notifyMentions?: boolean;
+}
+
 export interface NodeMutationResult {
   node: ContextNode;
   version: number;
@@ -1333,11 +1348,12 @@ export async function createNode(
   nestId: string,
   input: CreateNodeInput,
   userEmail: string,
+  opts: WriteOptions = {},
 ): Promise<NodeMutationResult> {
   const generatedId = !input.id && !slugify(input.title);
   for (let attempt = 0; ; attempt++) {
     try {
-      return await createNodeOnce(nestId, input, userEmail);
+      return await createNodeOnce(nestId, input, userEmail, opts);
     } catch (err) {
       if (!generatedId || attempt >= 3 || !(err instanceof ConflictError)) {
         throw err;
@@ -1349,7 +1365,8 @@ export async function createNode(
 async function createNodeOnce(
   nestId: string,
   input: CreateNodeInput,
-  userEmail: string
+  userEmail: string,
+  opts: WriteOptions = {},
 ): Promise<NodeMutationResult> {
   const { storage } = await engineCache.get(nestId);
 
@@ -1555,13 +1572,15 @@ async function createNodeOnce(
 
     await trackEvent("node.create", { nestId, nodeId: id });
     // Everything a new document mentions is new.
-    await notifyMentions({
-      nestId,
-      nodeId: id,
-      previousBody: "",
-      nextBody: node.body || "",
-      actorEmail: userEmail,
-    });
+    if (opts.notifyMentions !== false) {
+      await notifyMentions({
+        nestId,
+        nodeId: id,
+        previousBody: "",
+        nextBody: node.body || "",
+        actorEmail: userEmail,
+      });
+    }
     return { node, version: savedVersion };
   });
 }
@@ -1765,7 +1784,8 @@ export async function updateNode(
   nestId: string,
   nodeId: string,
   patch: UpdateNodePatch,
-  userEmail: string
+  userEmail: string,
+  opts: WriteOptions = {},
 ): Promise<NodeMutationResult> {
   return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
     try {
@@ -1998,13 +2018,15 @@ export async function updateNode(
 
       // Awaited, like the other inbox fan-outs: it swallows its own failures,
       // and a local insert is cheaper than a save that returns before it lands.
-      await notifyMentions({
-        nestId,
-        nodeId,
-        previousBody,
-        nextBody: node.body || "",
-        actorEmail: userEmail,
-      });
+      if (opts.notifyMentions !== false) {
+        await notifyMentions({
+          nestId,
+          nodeId,
+          previousBody,
+          nextBody: node.body || "",
+          actorEmail: userEmail,
+        });
+      }
 
       return { node, version: responseVersion };
     } catch (err) {

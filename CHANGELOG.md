@@ -1,5 +1,38 @@
 # @promptowl/contextnest-community
 
+## 1.22.0
+
+### Minor Changes
+
+- 2bc8689: My Drafts can submit a selection for review in bulk, alongside the existing bulk Discard. The submit dialog covers one draft or many, and a batch where some submissions fail reports both what landed and what didn't.
+- 1c1071e: Add the `org` nest visibility tier — readable by everyone signed in to this deployment.
+
+  **The missing middle.** Nest visibility was `private` or `public`, so sharing a nest company-wide meant adding every person as a collaborator or opening it to the internet. `org` is the tier in between: any authenticated user of this deployment can read it; anonymous callers still get nothing. Community has no tenant model and teams are a group you _attach_ to a nest rather than an org boundary — a self-hosted install already IS one organization, so deployment membership is the boundary. `PATCH /nests/:id/visibility` accepts `org`, and unlike `public` it needs no `acknowledge_public`: it crosses no organizational boundary. Like public readers, org readers see approved content only.
+
+  **Discovery follows access.** An org nest joins the readable union and the discovery listing for an authenticated caller, and neither for anon — an org nest nobody could find would be reachable only by a passed-around link, which is not what "available to the organization" means.
+
+  **The migration rebuilds `nests`, carefully.** SQLite cannot alter a CHECK constraint in place, and `nests` is the most-referenced table in the schema: 27 tables point at `nests(id)`, every one `ON DELETE CASCADE`, on a connection that runs `foreign_keys = ON`. A plain `DROP TABLE` would take every node-index row, version, steward, grant and run with it — verified, not theorised: with the pragma left on, a control run deleted every child row. So `041_nest_visibility_org` toggles `foreign_keys` **outside** the transaction (the pragma is a no-op inside one), derives the replacement table from the live schema rather than a hardcoded column list (other branches add columns to `nests`, and a stale list drops them silently), and refuses to record itself unless `PRAGMA foreign_key_check` comes back clean. Postgres needs none of it — its constraint swap is catalogue-only.
+
+  **The UI can set the tier, not just report it.** The visibility control (Collaborators tab and Share dialog) is now a three-way select — Private / Organization / Public — with the acknowledgement dialog still guarding the `public` choice alone. The nest header keeps its two-state shortcut for the common private ↔ public flip, and every surface that showed a visibility label — header badge for viewers, dashboard card badge, dashboard access filter — now knows the third value. Previously anything that was not literally `public` rendered as "Private — only people added below can see this nest," which for an org nest told the owner the opposite of the truth.
+
+- 2bc8689: Optional PostHog product analytics, off by default. Set `POSTHOG_KEY` / `POSTHOG_HOST` by environment or from Settings → Advanced to point an instance at your own project; the browser only receives the key while `TELEMETRY_ENABLED` is on, so that switch still governs everything the server sends outward. posthog-js loads only when a key is configured.
+
+### Patch Changes
+
+- 1105713: Fix archive request copy: an archive request no longer reads as a deletion in My Work — it shows an ARCHIVE badge, an Approve action, and an archive confirmation instead of "Delete document".
+- c857fe1: A partly-failed bulk submit for review now retries only the drafts that failed. The dialog previously kept the full original selection, so a retry resubmitted documents already in review and reported them as failures.
+- 2bc8689: Clearer document and folder messaging: Version History no longer says saving publishes a draft (Submit for review does), the tag input says a tag was "adjusted" rather than "simplified", and the folder-creation toast names the folder the way the Contents tree does. An unresolvable `?nest=` link now renders inside the app shell, with the header and navigation still in reach, instead of a bare full-page error.
+- 2fb9242: Give the agent setup prompt failure branches, so a first read that fails is recoverable instead of terminal.
+
+  Copy the "Set up an agent" prompt into a coding agent and, if anything goes wrong, it used to have one instruction: stop. That is the wrong answer on an unlicensed server, where the documented first call is blocked but the nest is still perfectly readable — and it is the wrong answer in a sandbox whose network policy blocks the host, where retrying can never help.
+
+  The prompt now branches on what actually came back. **503** means the server has no licence, so it points at `GET /export?format=markdown`, which is not gated and returns every document with its text in one call. **401** means the key is wrong or was never expanded from the environment. **403** distinguishes the server refusing you — usually a key scoped to another nest, which you can fix — from a gateway refusing on your behalf, which you cannot. **No response at all** means the environment cannot reach the host, so the answer is a connector your client dials server-side rather than another attempt.
+
+  Three smaller corrections come with it. The key is now located (`CONTEXTNEST_API_KEY`) rather than merely requested, since the old copy asked the agent to ask for it while forbidding it in chat and naming no other channel. Write capability is stated only where it is true — on an unlicensed server writes are blocked along with everything else non-GET, and claiming otherwise made agents distrust the rest of the brief. And the prompt no longer tells agents to assume a `nodes/` id prefix, which exists on nests created in the app and not on imported ones; it says to reuse the id exactly as the server returned it.
+
+- 2bc8689: Browser Back can no longer slip past the editor's unsaved-changes prompt: repeated presses are matched by the guard, and a second Back keeps the dialog already being answered instead of replacing it.
+- 2bc8689: Workflow cycle errors read in plain language instead of "flow edges must form a DAG", and when two cards share a title the trail writes each one with its node id so every step names a single card.
+
 ## 1.21.1
 
 ### Patch Changes

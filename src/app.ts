@@ -10,6 +10,7 @@ import { grantRoutes } from "./nests/grant-routes.js";
 import { publishRoutes } from "./nests/publish-routes.js";
 import { publishRenderRoutes } from "./nests/publish-render-routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
+import { peopleRoutes } from "./nests/people-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
 import { listVisibleNests, nestAllowsSelfApprove } from "./nests/service.js";
 import {
@@ -593,6 +594,7 @@ export function createApp(): Hono<AuthEnv> {
     oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
     oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
+    people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
     // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
     // presence is reported, never the value (same discipline as the OIDC secret).
     sso_token_exchange_enabled: config.SSO_TOKEN_EXCHANGE_ENABLED,
@@ -863,6 +865,16 @@ export function createApp(): Hono<AuthEnv> {
       pending.push({
         name: "OIDC_DEPARTMENT_TAGGING",
         value: body.oidc_department_tagging ? "true" : null,
+      });
+    }
+    // Add-a-person suggestions over the whole user table. Default off because
+    // this server may be multi-tenant (the PromptOwl-hosted deployment holds
+    // many customers), where "every registered account" means another
+    // customer's staff. false persists as null — unset already means off.
+    if ("people_suggest_all_users" in body) {
+      pending.push({
+        name: "PEOPLE_SUGGEST_ALL_USERS",
+        value: body.people_suggest_all_users ? "true" : null,
       });
     }
     // ── Agent SSO / token-exchange (POST /auth/token-exchange) ────────────
@@ -1318,6 +1330,13 @@ export function createApp(): Hono<AuthEnv> {
   app.use("/teams/*", flexAuthMiddleware);
   app.use("/teams", flexAuthMiddleware);
   app.route("/teams", teamRoutes);
+
+  // People directory — the suggestions the add-a-person pickers autocomplete
+  // against. Global like /teams (the answer spans every nest and team the
+  // caller reaches), and scoped to what the caller already works with inside
+  // suggestPeopleForUser — never the deployment's whole member list.
+  app.use("/people/*", flexAuthMiddleware);
+  app.route("/people", peopleRoutes);
 
   app.use("/me/*", flexAuthMiddleware);
   app.get("/me/work", async (c) => {

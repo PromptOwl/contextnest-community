@@ -1,0 +1,17 @@
+---
+"@promptowl/contextnest-community": minor
+---
+
+Tag people in comments, and stop retyping addresses to add them.
+
+**`@mentions` work in comments.** The comment box gets the same `@` autocomplete the document editor has, listing everyone who can reach the nest, and a posted comment's mentions are styled — resolved names as live references, a name matching nobody drawn as unresolved, so a typo can't pass for a delivered mention. The roster read behind it is read-tier (commenting is), so a read-only reviewer's picker works too; it stays members-only, so a nest that is public or org-visible still doesn't hand its member list to a passing reader.
+
+**A tagged person actually hears about it.** Tagging someone in a comment now drops a row in their queue that links to the document, posts to the configured Slack/Teams/webhook connector, and emails them directly when SMTP is set up. Previously a comment mention notified nobody: the fan-out was wired to document saves only. Mentions in a document body reach the same channels — they used to be inbox-only. One write notifies at most 25 people, and one person can cause at most 50 outbound deliveries per nest per five minutes, so neither a comment naming a whole roster nor a stream of them can be used as an amplifier. Past the limit the comment still posts and the queue row still lands — only the email and channel message are skipped. The author is never notified about their own mention, an unresolvable name notifies nobody, and someone who can't open the document is skipped — a mention can't disclose a title. A mention in a comment on a hosted artifact now points at the artifact rather than at its derived annotations projection, and fires once instead of twice.
+
+**The suggestions are scoped, with a toggle for servers that are one company.** By default the add-a-person fields only suggest people the inviter already shares a nest or team with — a server can host several unrelated organisations, and a full directory would show them each other's email addresses. An operator whose user table is their own staff can turn on **Settings → General → People directory → "Suggest everyone on this server"** (`PEOPLE_SUGGEST_ALL_USERS`) and get the whole directory. Neither setting changes who can be invited: an address that appears in no list is still valid to type.
+
+**Adding people and teams autocompletes.** The add-a-person fields (nest collaborators, stewards, team members) suggest people you already work with — anyone on a nest or team you share — while still accepting a brand-new address, so inviting someone without an account works exactly as before. Team pickers (share a team onto a nest, add a team from the collaborator panel) are searchable instead of a flat dropdown.
+
+With that toggle on, the `@` pickers (comment box and document editor) offer the whole directory too, and tagging someone who isn't on the nest adds them as a **read** collaborator before notifying — so the mention is an invite, not a dead tag. Only a write+ author can invite this way: a read-only reviewer's mention of an outsider still reaches nobody.
+
+Per-nest connectors can now subscribe to the `mention` event (alongside the review and run events), and the channel delivery budget is only charged when a connector would actually post that kind.

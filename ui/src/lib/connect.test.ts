@@ -95,14 +95,198 @@ describe("nestSetupPrompt", () => {
     expect(p).toMatch(/settings . connectors/i); // no-shell handoff path
   });
 
-  it("uses npx (not a global install) and asks for the key", () => {
+  // Was: "uses npx (not a global install) and asks for the key". Both halves
+  // pinned the `push` line, which left this prompt with CU-wdqcq01kh8 (push is
+  // a write-a-folder-up job, and it taught agents the CLI is the only writer).
+  // The surviving intent — the key is LOCATED, not merely requested — is what
+  // this now asserts; the npx-not-global rule travels with push to wherever
+  // push is documented.
+  it("locates the key rather than only asking for it", () => {
     const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
-    expect(p).toContain("npx -y @promptowl/contextnest-cli");
-    expect(p).toMatch(/ask me only for the api key/i);
+    expect(p).toContain("CONTEXTNEST_API_KEY");
+    expect(p).toMatch(/ask me for it and stop/i);
   });
 
   it("never bakes in a key", () => {
     expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).not.toMatch(/cnst_/);
+  });
+
+  // The 10-run agent experiment (2026-09-09) found one thing that moved the
+  // needle: telling the agent what to do when the FIRST read fails. The
+  // variant with documented fallbacks connected 2/2 against a broken server;
+  // the variant that said "if it fails, stop" connected 0/2. These pin that.
+  it("says what to do when the first read is refused for a license", () => {
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toContain("503");
+    // /context is a POST and POSTs are license-gated; these particular GETs
+    // are not, so they are the reads that work on an unlicensed server. Not
+    // every GET is exempt — see `isGovernance` in app.ts.
+    // /export is a GET (so the gate misses it) and returns every document WITH
+    // its body in ONE call — the cheapest unlicensed read. List-then-read
+    // survives as the escape hatch for a nest too large to take whole.
+    expect(p).toContain("/nests/gtm/export?format=markdown");
+    // The placeholder names its source rather than showing one layout's shape:
+    // `nodes/<slug>` is the structured prefix and imported nests have none, so
+    // an example in either shape teaches the wrong thing to half of callers.
+    expect(p).toContain("/nests/gtm/nodes/<id-from-the-list>");
+  });
+
+  it("distinguishes a missing key from a blocked network", () => {
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toContain("401");
+    // Egress-restricted environments (cloud sandboxes, CI, corporate proxies)
+    // cannot reach the host at all — retrying never helps, so say so. Pin the
+    // branch itself; a `refused|blocked|cannot reach` alternation stayed green
+    // through substantial rewrites of it.
+    expect(p).toMatch(/no response at all \/ connection refused \/ a timeout/);
+  });
+
+  it("does not mistake an app-level 403 for a blocked network", () => {
+    // The server itself 403s a key scoped to another nest — fixable, and
+    // nothing to do with egress. Those carry a JSON error body; a gateway
+    // block generally does not, so the prompt splits on that.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toMatch(/403[\s\S]*belongs to\s*\n?\s*a different nest/);
+  });
+
+  it("names where the key is expected instead of only asking for it", () => {
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    // The old copy said "ask me for my API key" AND "never in our chat",
+    // naming no other channel. Four of ten runs stopped there.
+    expect(p).toContain("CONTEXTNEST_API_KEY");
+  });
+
+  it("does not promise self-setup of the key, which is impossible", () => {
+    // /auth/keys needs a signed-in session, so an agent cannot mint its own.
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).not.toMatch(
+      /set it up yourself/i,
+    );
+  });
+
+  it("does not claim writes work on a server it just said is unlicensed", () => {
+    // The gate is `method !== "GET"`, so a 503 on /context means every write is
+    // blocked too. Both agents in testing spotted the contradiction and
+    // correctly disbelieved the write claim — so the prompt now scopes it.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toMatch(/WRITES ARE ALSO UNAVAILABLE/);
+    // Leads with the state, not the capability: an agent that reads the first
+    // clause and stops has still read something true.
+    expect(p).toMatch(/if step 1 returned 503 this server is unlicensed/);
+    expect(p).toMatch(/do not attempt writes at all/);
+  });
+
+  it("says the MCP and ctx paths are blocked on an unlicensed server too", () => {
+    // MCP is transported over POST, so `method !== "GET"` 503s it — verified
+    // against a real unlicensed server (initialize returns a JSON-RPC
+    // "License required"). `ctx vault add` targets the same MCP URL.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toMatch(/both go over MCP, which is POST/);
+  });
+
+  it("prints the status code its own branches dispatch on", () => {
+    // Plain `curl -s` shows the body and nothing else, so a prompt that says
+    // "the status code tells you which problem you have" and then lists
+    // 503/401/403 was asking an agent to read a number never put on screen.
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).toContain("%{http_code}");
+  });
+
+  it("tells the agent to reuse the returned id rather than assume a prefix", () => {
+    // `nodes/` is the structured layout's prefix. An imported nest has flat
+    // ids, and assuming the prefix there reads a directory that does not
+    // exist — the nest looks empty. Reusing the id verbatim is right for both.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toMatch(/EXACTLY as the list returned it/);
+    expect(p).toMatch(/imported from a folder has no such prefix/);
+  });
+
+  it("puts the node id on the PATCH path, not just the collection", () => {
+    // POST is the collection; PATCH is mounted on /:nodeId.
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).toMatch(
+      /PATCH that same path with the document's\s*\n?\s*id appended/,
+    );
+  });
+
+  it("does not tell an agent it cannot reach a host that just answered 403", () => {
+    // A bodyless 403 and a dead socket share a remedy but not their evidence:
+    // a 403 proves something answered. Routing it into "cannot reach this
+    // host" was self-contradictory, which testing caught.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).not.toMatch(/cannot reach this host/);
+    expect(p).toMatch(/something between you and the server is blocking this/);
+  });
+
+  it("surfaces the status code on the fallback calls too, not just step 1", () => {
+    // An agent whose fallback also fails is otherwise back to inferring the
+    // code from prose — the same defect this round fixed in step 1.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect((p.match(/%\{http_code\}/g) || []).length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("says the fallback read still counts as connected", () => {
+    // STEP 1 defines connected as documents back from /context; both test runs
+    // asked whether reading everything via the 503 fallback qualified. It does.
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).toMatch(
+      /count as connected/,
+    );
+  });
+
+  it("tells the agent an unexpanded env var also looks like a 401", () => {
+    // An exec that runs argv directly never expands $CONTEXTNEST_API_KEY, so
+    // the literal string goes out as the header and the server answers 401 —
+    // silent, and indistinguishable from a bad key without this note. Every
+    // agent in testing shelled out, so this path was never exercised there.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toMatch(/did not send the literal text/);
+    expect(p).toMatch(/without a shell to/);
+  });
+
+  it("makes writing the key into a config file the user's call", () => {
+    // A released-prompt run wrote the key into ~/.claude.json unprompted,
+    // following "add an MCP server" literally. Same invitation here, so the
+    // same guard: a credential landing on disk is a decision, not a step.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toMatch(/ASK ME FIRST if setting either of these means/);
+    expect(p).toMatch(/writing my key into a config file/);
+  });
+
+  it("conditions writes on the key's tier, not only on the licence", () => {
+    // Verified: a read-only collaborator key on a LICENSED server gets 200
+    // from /context and 403 from a create. Claiming "reads AND writes" off a
+    // 200 repeats the false-capability problem one layer down.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toMatch(/writes IF my key carries write access/);
+    expect(p).toMatch(/read-only key reads perfectly well/);
+  });
+
+  it("tells a permission-tier 403 apart from a wrong-nest 403", () => {
+    // Both are JSON-bodied refusals with different remedies; the body names
+    // which via required_permission.
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).toMatch(
+      /`required_permission` field means my key lacks the tier/,
+    );
+  });
+
+  it("names write tools rather than asserting write capability", () => {
+    // Prose assertion ("this connection reads AND writes") left 5 of 6 agents
+    // answering "unsure". A named mechanism is what they actually believed.
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toContain("context_create");
+    expect(p).toContain("context_update");
+  });
+
+  it("keeps push out of the setup brief", () => {
+    // `push` uploads a local folder INTO the nest — a different job, and the
+    // direct cause of agents concluding the CLI is the only writer.
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).not.toContain("push");
+  });
+
+  it("shows the citation format with a real id shape", () => {
+    // Agents read a bare `nest:id` as a literal "nest:" prefix; real ids look
+    // like nodes/returns-policy. `toContain("nodes/")` passed trivially — the
+    // URLs elsewhere in the prompt contain it — so pin the whole citation.
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).toContain(
+      "`GTM:nodes/<slug>`",
+    );
   });
 });
 
@@ -172,7 +356,6 @@ describe("ctx CLI contract (CLI 2.2+: env-based key, remote vault alias)", () =>
   // (a comment claimed ctx read no env var, verified against 1.2.1 — stale).
   it("passes the key through CONTEXTNEST_API_KEY, never as a --key flag", () => {
     const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
-    expect(p).toContain("push --server https://x.ai --nest gtm");
     expect(p).toContain("CONTEXTNEST_API_KEY");
     expect(p).not.toContain("--key <key>");
     expect(p).not.toMatch(/--key\b/);
@@ -180,7 +363,6 @@ describe("ctx CLI contract (CLI 2.2+: env-based key, remote vault alias)", () =>
 
   it("omits both the env var and the key flag in open mode", () => {
     const p = nestSetupPrompt("GTM", "https://x.ai", "gtm", true);
-    expect(p).toContain("push --server https://x.ai --nest gtm");
     expect(p).not.toContain("CONTEXTNEST_API_KEY");
     expect(p).not.toContain("--key");
   });
