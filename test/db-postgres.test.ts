@@ -55,6 +55,29 @@ d("PostgresAdapter conformance", () => {
     expect(row?.email).toBe("a@example.com");
   });
 
+  it("evaluates suffixOf the same way SQLite does", async () => {
+    // The helper exists for cross-backend parity, and its SQLite half is
+    // proven in db-adapter.test.ts. This is the other half: `right()` must
+    // agree with `substr(x, -n)`, including being case-SENSITIVE (Postgres's
+    // LIKE already is, SQLite's is not — which is the bug that motivated it)
+    // and returning the whole string when it is shorter than the suffix.
+    const { suffixOf } = await import("../src/db/sql.js");
+    // `?::text`, not a bare `?`: in production the argument is a column with a
+    // known type, but a bound parameter standing in for one leaves Postgres
+    // unable to infer it ("could not determine data type of parameter $1").
+    const expr = suffixOf(adapter, "?::text", 13);
+    const check = async (id: string) =>
+      (
+        await adapter.get<{ m: boolean }>(
+          `SELECT (${expr} = ?) AS m`,
+          [id, "--annotations"],
+        )
+      )?.m;
+    expect(await check("x--annotations")).toBe(true);
+    expect(await check("x--Annotations")).toBe(false);
+    expect(await check("short")).toBe(false);
+  });
+
   it("reports changes from run()", async () => {
     const res = await adapter.run(
       "UPDATE users SET name = ? WHERE id = ?",

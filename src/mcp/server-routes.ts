@@ -47,6 +47,7 @@ import {
   getCurrentLicense,
 } from "../auth/license.js";
 import { handleToolCall, toCallToolResult, type ToolResult } from "./tools.js";
+import { isDerivedAnnotationsNode } from "../nodes/service.js";
 import type { Nest } from "../shared/types.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
@@ -157,7 +158,13 @@ export async function buildNestIndex(
       let document_count: number | null = null;
       try {
         const { storage } = await engineCache.get(n.id);
-        document_count = (await storage.discoverDocuments()).length;
+        // Excludes the derived `— Annotations` projections, like every
+        // listing does: this number is what an agent is told a nest holds
+        // before it decides what to read, so it has to match what
+        // context_list will actually return.
+        document_count = (await storage.discoverDocuments()).filter(
+          (d) => !isDerivedAnnotationsNode(d.id),
+        ).length;
       } catch {
         /* count unavailable */
       }
