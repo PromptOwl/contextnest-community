@@ -120,7 +120,7 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
           </Label>
           <p className="text-xs text-muted-foreground">
             {isPublic
-              ? "Anyone on this server can read this nest. Editing still requires being added below."
+              ? "Anyone on the internet with the URL can read this nest. Editing still requires being added below."
               : isOrg
                 ? "Everyone signed in to this deployment can read this nest. Editing still requires being added below."
                 : "Only people added below (and the owner) can see this nest."}
