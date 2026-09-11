@@ -31,7 +31,7 @@ import { config } from "../config.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
   attributeRequest,
-  clientField,
+  clientToolField,
   type ClientMetadata,
 } from "../shared/client-metadata.js";
 import {
@@ -455,8 +455,8 @@ function createServerMcp(
       if (!required.includes(key)) field = field.optional();
       shape[key] = field;
     }
-    // Same §9.4 field the per-nest surface advertises — see mcp/routes.ts.
-    shape.client = clientField;
+    // Same §9.4 field the per-nest surface advertises.
+    Object.assign(shape, clientToolField);
     server.tool(tool.name, tool.description, shape, async (args) => {
       const out = await handleServerToolCall(
         tool.name,

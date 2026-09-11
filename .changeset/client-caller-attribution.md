@@ -35,6 +35,13 @@ consent has to be available before the first write, not after. Nothing is
 synthesized where the transport knows nothing: a placeholder session id would be
 indistinguishable from a real one.
 
+The field itself is the engine's: `clientField`, `clientMetadataSchema` and its
+bounds are imported from `@promptowl/contextnest-engine/api` and never restated
+here, so the CLI, the upstream MCP server and this edition all accept exactly
+the same `client`. This release therefore requires engine ≥2.6.0. Only the
+binding lives in this repo: what this server's transport can report about its
+caller, and how the block is stored on version rows and the activity trace.
+
 `client` is a label, not an identity claim: never authenticated, never used to
 authorize, and deliberately not an input to any hash chain, so histories
 recorded before the field existed keep verifying byte for byte. It is bounded

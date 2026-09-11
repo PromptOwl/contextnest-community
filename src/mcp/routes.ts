@@ -9,7 +9,7 @@ import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
   attributeRequest,
-  clientField,
+  clientToolField,
   type ClientMetadata,
 } from "../shared/client-metadata.js";
 import { config } from "../config.js";
@@ -61,10 +61,11 @@ function createMcpServerForNest(
       if (!required.includes(key)) field = field.optional();
       shape[key] = field;
     }
-    // Caller attribution rides on EVERY tool (spec §9.4) — advertised here
-    // rather than written into each tool's inputSchema, so no tool can be
-    // added without it and the divergence guard sees no new inline schema.
-    shape.client = clientField;
+    // Caller attribution rides on EVERY tool (spec §9.4) — declared here
+    // rather than in each tool's inputSchema, so no tool can be added without
+    // it and the divergence guard sees no new inline schema. Validated against
+    // the engine's own schema inside handleToolCall.
+    Object.assign(shape, clientToolField);
 
     server.tool(tool.name, tool.description, shape, async (args) => {
       const engine = await engineCache.get(nestId);
