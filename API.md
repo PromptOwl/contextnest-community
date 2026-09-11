@@ -14,6 +14,43 @@ Anonymous open mode (`AUTH_MODE=open`) bypasses auth on most read endpoints.
 
 All bodies are JSON unless noted. All errors return `{ "error": "msg" }` with appropriate HTTP status.
 
+## Caller attribution (`client`)
+
+`edited_by` names a person and a read names nobody, so neither answers *which
+agent, in which session*. Every write body below, and every MCP tool call, takes
+an optional `client` object that does ([spec §9.4](https://github.com/PromptOwl/ContextNest/blob/main/CONTEXT_NEST_SPEC.md)):
+
+```json
+{ "title": "API Design", "content": "…",
+  "client": { "agent": "claude-code", "session_id": "s-9f2", "run": 7 } }
+```
+
+- `agent` and `session_id` are reserved; any other key is custom and is recorded
+  verbatim. Values are scalars (string / number / boolean).
+- A write that creates a version records it **on that version** — it comes back
+  on `GET .../versions` and on MCP `context_versions`. Every MCP tool call and
+  every traced REST request records it on the activity trace (`GET /admin/trace`,
+  `GET /nests/:nestId/trace`), which is where a **read** is attributed.
+- **Entirely optional.** No endpoint requires it and an unattributed call is a
+  valid call. A call that carries none stores nothing rather than an empty
+  object — "not attributed" and "attributed to nobody" are different claims.
+- **A label, not an identity.** It is never authenticated, never used to
+  authorize, and never an input to a hash chain, so histories written before the
+  field existed keep verifying byte for byte. `editedBy` remains the
+  authoritative authoring record.
+- **Bounded**, because an untrusted caller writes it into an append-only audit
+  trail: values ≤512 chars, ≤16 custom keys, scalars only → `400` otherwise. A
+  near-miss on a reserved key (`sessionId`, `Agent`) is refused rather than
+  filed as a custom key, which would look attributed and not be.
+- The server fills what the transport already knows, **per key, under** anything
+  the caller sent: `agent` from the API key's label, `session_id` from an
+  `Mcp-Session-Id` header. `CONTEXTNEST_AGENT` / `CONTEXTNEST_SESSION_ID`
+  override those; `CONTEXTNEST_NO_ATTRIBUTION=1` derives nothing (a `client` the
+  caller sent explicitly is still honoured). See `CONFIGURATION.md`.
+
+Distinct from `metadata`, which is frontmatter: `metadata` describes the
+document, `client` describes the call that touched it.
+
 ---
 
 ## 1. Auth
@@ -602,7 +639,8 @@ Optional query params, applied before the per-node enrichment:
   "scope": "team",
   "status": "draft",
   "folder": "gtm/deals",
-  "schedule": "0 6 * * *"
+  "schedule": "0 6 * * *",
+  "client": { "agent": "claude-code", "session_id": "s-9f2" }
 }
 ```
 - Slug derived from title → `nodes/<slug>`.
@@ -611,6 +649,7 @@ Optional query params, applied before the per-node enrichment:
 - Optional `schedule` (free-form cron/interval string, opaque to the server) — **only valid when `type` is `agent` or `skill`**; sent on any other type → `400`. Stored in frontmatter metadata and echoed back on every node response. See [§9 `GET /runnables`](#get-nestsnestidrunnables-read).
 - Optional `prime` (boolean) flags the document as **prime** — it then always requires steward approval, whoever writes it. Owner/admin only; any other caller sending the field gets `403`. Omit to inherit from the nest's `prime_tags`; `false` exempts this document from an otherwise-prime tag. Echoed back on every node response as `prime` (absent when inherited). See `STEWARDSHIP.md → Prime documents`.
 - If stewardship enabled → status defaults `draft`. Else `approved`.
+- Optional `client` — caller attribution, recorded on the version this create seals. See [Caller attribution](#caller-attribution-client).
 - Auto-syncs tag index for steward resolution.
 
 Response (201): `{ "node": { ... }, "stewards": [...] }`.
@@ -672,10 +711,12 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
   "content": "...",
   "tags": ["..."],
   "changeNote": "fixed typo",
-  "schedule": "0 7 * * *"
+  "schedule": "0 7 * * *",
+  "client": { "agent": "claude-code", "session_id": "s-9f2" }
 }
 ```
 Requires nest write permission.
+- `client` — caller attribution, recorded on the version this edit seals. See [Caller attribution](#caller-attribution-client).
 - `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
 - `prime` — owner/admin only (`403` otherwise). `true`/`false` set the document-scope flag, `null` clears it back to tag/nest inheritance. An edit that makes the document prime is itself gated, so it lands as a draft awaiting approval.
 
@@ -1054,6 +1095,11 @@ Each version may also include `resolvedBy` + `resolutionStatus`, the steward who
 approved or rejected it, joined from `review_requests` (`node_versions` stores
 the status but not the resolver's email).
 
+`client` is the caller attribution the write carried — which agent, in which
+session (see [Caller attribution](#caller-attribution-client)). Absent on every
+version whose write sent none, which includes every version written before the
+field existed.
+
 `externalEditVerdicts` carries the verdicts on out-of-band (direct filesystem)
 edits, oldest first, read from the engine's append-only chain-event log. They sit
 beside the version list rather than inside it because a **rejection commits no
@@ -1078,6 +1124,7 @@ approved version.
       "status": "pending_review",
       "changeNote": "...",
       "content": "",
+      "client": { "agent": "claude-code", "session_id": "s-9f2" },
       "diff": "Index: v2\n===...\n--- v2\tv2\n+++ v2\tv3\n@@ -1,4 +1,5 @@\n title: doc\n-old line\n+new line\n"
     },
     {
@@ -1708,6 +1755,8 @@ Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually;
 **Transport is read-tier.** MCP Streamable HTTP is always POST (even `initialize` / `tools/list`), so the per-nest gate admits any credential with read access; every mutating tool re-checks its own permission inside the tool handler (create/edit via stewardship, approve/reject via reviewer rights, stewards/sharing/sync via their own admin checks).
 
 **Denials are JSON-RPC.** Gate rejections on the MCP transport path return a JSON-RPC error envelope — `{ "jsonrpc": "2.0", "id": <echoed>, "error": { "code": -32000, "message": "<what failed — actionable reason>" } }` — instead of plain `{error}` JSON, so external clients (PromptOwl, Claude Desktop, Cursor) surface *why* a connection failed: key scoped to a different nest, server suspended, license required, or nest not found / no access.
+
+**Every tool takes `client`.** The `{ agent, session_id, …custom }` block described in [Caller attribution](#caller-attribution-client) is advertised on every tool's input schema, reads included — a write that seals a version records it there (`context_versions` serves it back), and every call records it on the activity trace. It is never authenticated and never used to authorize. Omitted, the server fills what the connection reports (the API key's label, an `Mcp-Session-Id` header) under anything the caller sent, per key.
 
 **Titles are unique on this surface.** `context_get`, `context_update`, `context_versions`, `context_delete`, and `context_move` each resolve a document by title or by id (an id wins when both are sent, and an ambiguous title refuses rather than guessing). Title addressing is what makes uniqueness matter, so `context_create` refuses a title already used anywhere in the nest — including in another folder — and answers with the existing node's id plus what to do instead (`context_update` to change it, `context_move` to refile it). A duplicate would otherwise be unreachable by every tool here. REST `POST /nodes` keeps the looser rule (same title in a different folder is fine); both surfaces refuse a create whose id is already taken.
 

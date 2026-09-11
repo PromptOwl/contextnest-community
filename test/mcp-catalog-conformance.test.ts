@@ -140,7 +140,13 @@ const CASES: Case[] = [
   {
     // Create must run first — later cases address the node it makes.
     tool: "context_create",
-    args: { title: "Conformance Doc", content: "# Conformance\n\nfirst body." },
+    args: {
+      title: "Conformance Doc",
+      content: "# Conformance\n\nfirst body.",
+      // Attributed on purpose: `client` (§9.4) is what makes the
+      // context_versions divergence below real rather than theoretical.
+      client: { agent: "conformance-suite", session_id: "conf-1" },
+    },
     catalog: "context_create",
     // Clean since engine 2.1.0: the catalog now declares `status` and
     // `checkpoint`, which this server had been emitting as documented
@@ -206,6 +212,14 @@ const CASES: Case[] = [
     tool: "context_versions",
     args: { title: "Conformance Doc" },
     catalog: "context_versions",
+    allowed: {
+      "unknown_key at versions[].client":
+        "caller attribution (spec §9.4) — which agent wrote this version, in " +
+        "which session. The engine models it on VersionEntry as of " +
+        "PromptOwl/ContextNest#107, which the pinned engine (2.4.0) predates. " +
+        "Drop this entry when the engine pin catches up; it failing is the " +
+        "signal to bump.",
+    },
     // Was the one case with a long divergence list. Engine 2.4.0 closed all of
     // it from the catalog side: `approved_version` and `versions[].status` are
     // modelled now, and the keyframe/hash fields no longer read as required of

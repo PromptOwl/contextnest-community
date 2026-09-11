@@ -30,6 +30,11 @@ import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
+  attributeRequest,
+  clientField,
+  type ClientMetadata,
+} from "../shared/client-metadata.js";
+import {
   resolveNestPermission,
   permissionLevel,
   type NestPermission,
@@ -358,6 +363,7 @@ async function handleServerToolCall(
   userEmail: string,
   nestScope: string | null,
   baseUrl: string,
+  client?: ClientMetadata,
 ): Promise<ToolResult> {
   if (toolName === "nest_index") {
     const nests = await buildNestIndex(userId, nestScope);
@@ -420,6 +426,7 @@ async function handleServerToolCall(
     userId,
     userEmail,
     baseUrl,
+    client,
   });
 }
 
@@ -428,6 +435,7 @@ function createServerMcp(
   userEmail: string,
   nestScope: string | null,
   baseUrl: string,
+  client: ClientMetadata | undefined,
 ): McpServer {
   const server = new McpServer(
     { name: "contextnest-server", version: "1.0.0" },
@@ -447,6 +455,8 @@ function createServerMcp(
       if (!required.includes(key)) field = field.optional();
       shape[key] = field;
     }
+    // Same §9.4 field the per-nest surface advertises — see mcp/routes.ts.
+    shape.client = clientField;
     server.tool(tool.name, tool.description, shape, async (args) => {
       const out = await handleServerToolCall(
         tool.name,
@@ -455,6 +465,7 @@ function createServerMcp(
         userEmail,
         nestScope,
         baseUrl,
+        client,
       );
       return toCallToolResult(out);
     });
@@ -474,6 +485,7 @@ serverMcpRoutes.all("/", async (c) => {
     userEmail,
     c.get("nestScope"),
     requestBaseUrl(c.req.url),
+    attributeRequest(c, undefined),
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({
@@ -579,6 +591,20 @@ Write endpoints (need write permission):
 - \`PATCH /nodes/<node-id>\` — \`{ "content"? , "append"?, "tags"?, "title"? }\`
 - \`DELETE /nodes/<node-id>\`
 - Governance: \`POST /nodes/<id>/submit-review\`, \`/approve\`, \`/reject\`
+
+## Say who you are: \`client\`
+
+Every write body and every MCP tool call takes an optional
+\`client\` object — \`{ "agent": "claude-code", "session_id": "s-9f2" }\`, plus any
+custom scalar keys. A write that seals a version records it on that version
+(\`GET /nodes/<id>/versions\` and \`context_versions\` serve it back); every call
+records it on this server's activity trace, which is how a READ gets attributed.
+
+Send it. Nothing requires it and no call is refused for omitting it, but a vault
+serving several agents cannot otherwise tell which of you wrote what. It is a
+label, never an identity claim: it is not authenticated, grants nothing, and is
+never part of a hash. Bounded — scalar values up to 512 chars, at most 16 custom
+keys beyond \`agent\` and \`session_id\`.
 
 ## MCP (Model Context Protocol)
 

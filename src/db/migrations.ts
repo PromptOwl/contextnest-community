@@ -1466,6 +1466,26 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("039_nest_pins");
   }
+
+  // 040: caller attribution (spec §9.4). One nullable JSON column per audit
+  //   surface — the version a write sealed, and the activity trace every call
+  //   lands on. Nullable and unindexed on purpose: `client` is an annotation
+  //   nobody queries by, and NULL is the whole "not attributed" story, so every
+  //   existing row is already correct. Never part of any hash.
+  if (!hasMigration("040_client_attribution")) {
+    for (const [table, col] of [
+      ["node_versions", "client_json"],
+      ["api_events", "client_json"],
+    ] as const) {
+      const cols = (
+        db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (cols.length && !cols.includes(col)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
+      }
+    }
+    recordMigration("040_client_attribution");
+  }
 }
 
 /**

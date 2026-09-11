@@ -7,6 +7,11 @@ import { getDb } from "../db/client.js";
 import { TOOL_DEFINITIONS, handleToolCall, toCallToolResult } from "./tools.js";
 import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
 import { requestBaseUrl } from "../shared/base-url.js";
+import {
+  attributeRequest,
+  clientField,
+  type ClientMetadata,
+} from "../shared/client-metadata.js";
 import { config } from "../config.js";
 import { z } from "zod";
 
@@ -24,6 +29,7 @@ function createMcpServerForNest(
   userId: string,
   userEmail: string,
   baseUrl: string,
+  client: ClientMetadata | undefined,
 ): McpServer {
   const server = new McpServer(
     { name: `contextnest-${nestId}`, version: "1.0.0" },
@@ -55,6 +61,10 @@ function createMcpServerForNest(
       if (!required.includes(key)) field = field.optional();
       shape[key] = field;
     }
+    // Caller attribution rides on EVERY tool (spec §9.4) — advertised here
+    // rather than written into each tool's inputSchema, so no tool can be
+    // added without it and the divergence guard sees no new inline schema.
+    shape.client = clientField;
 
     server.tool(tool.name, tool.description, shape, async (args) => {
       const engine = await engineCache.get(nestId);
@@ -68,6 +78,7 @@ function createMcpServerForNest(
         userId,
         userEmail,
         baseUrl,
+        client,
       });
       return toCallToolResult(out);
     });
@@ -87,6 +98,9 @@ mcpRoutes.all("/", async (c) => {
     userId,
     userEmail,
     requestBaseUrl(c.req.url),
+    // What the transport knows about the caller. A `client` sent with the tool
+    // call itself wins, per key, inside handleToolCall.
+    attributeRequest(c, undefined),
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({

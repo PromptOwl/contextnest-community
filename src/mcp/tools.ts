@@ -48,6 +48,11 @@ import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
+import {
+  mergeClient,
+  parseClientMetadata,
+  type ClientMetadata,
+} from "../shared/client-metadata.js";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 
 /** Upper bound on caller-set traversal depth — real graphs terminate long
@@ -113,6 +118,7 @@ function toolError(
     | "DOCUMENT_ALREADY_EXISTS"
     | "UNAUTHORIZED_ACTION"
     | "VERSION_NOT_FOUND"
+    | "VALIDATION_FAILED"
     | "VAULT_BUSY"
     | "INTERNAL",
 ): ToolResult {
@@ -167,6 +173,14 @@ export interface McpToolContext {
   /** Request origin, so review actions taken via MCP produce notification
    *  emails with a working "Open document" link (no PUBLIC_BASE_URL needed). */
   baseUrl?: string;
+  /**
+   * Caller attribution for this call (spec §9.4) — what the TRANSPORT could
+   * derive, already merged with whatever the tool call itself sent (caller
+   * wins, per key). Set by handleToolCall; a tool never reads `args.client`.
+   *
+   * A label, never an identity: no gate below may branch on it.
+   */
+  client?: ClientMetadata;
 }
 
 export const TOOL_DEFINITIONS = [
@@ -781,8 +795,29 @@ export async function handleToolCall(
 ): Promise<ToolResult> {
   const started = Date.now();
   let status = 200;
+  // Caller attribution, resolved once for the whole call: what the caller sent
+  // wins per KEY over what the transport derived, so a call naming its agent
+  // but no session still gains a session id (§9.4.2). Validated here rather
+  // than in each tool — an out-of-bounds `client` is a refusal, not a 500, and
+  // never a partial write.
+  let client: ClientMetadata | undefined;
   try {
-    return await runTool(toolName, args, ctx);
+    client = mergeClient(ctx.client, parseClientMetadata(args.client));
+  } catch (err) {
+    void logTraceEvent({
+      kind: "mcp",
+      tool: toolName,
+      nestId: ctx.nestId,
+      userId: ctx.userId,
+      userEmail: ctx.userEmail,
+      status: 400,
+      durationMs: Date.now() - started,
+    });
+    return toolError((err as Error).message, "VALIDATION_FAILED");
+  }
+  const attributed: McpToolContext = { ...ctx, client };
+  try {
+    return await runTool(toolName, args, attributed);
   } catch (err) {
     // Vault write-lock timeout: map to a typed, retryable tool error HERE —
     // one seam covering both MCP surfaces — before the SDK flattens the throw
@@ -805,6 +840,9 @@ export async function handleToolCall(
       userEmail: ctx.userEmail,
       status,
       durationMs: Date.now() - started,
+      // Reads record attribution HERE — the activity trace is this edition's
+      // §9.2 access trace, and a read seals no version to carry it.
+      client,
     });
   }
 }
@@ -1334,6 +1372,7 @@ async function runTool(
             tags: args.tags,
             scope: args.scope,
             folder: args.folder,
+            client: ctx.client,
           },
           userEmail,
         );
@@ -1383,6 +1422,7 @@ async function runTool(
           tags: mergedTags,
           status: args.status,
           changeNote: args.changeNote,
+          client: ctx.client,
         },
         userEmail,
       );
@@ -1818,6 +1858,7 @@ async function runTool(
           approvedBy: ctx.userEmail,
           note: args.note,
           baseUrl: ctx.baseUrl,
+          client: ctx.client,
         });
 
         return `Approved "${args.title}" v${request.version}. This version is now live for AI queries.${args.note ? `\nNote: ${args.note}` : ""}`;
@@ -1891,6 +1932,10 @@ async function runTool(
             edited_by: v.editedBy,
             edited_at: v.editedAt,
             note: v.changeNote,
+            // §9.4: which agent wrote this version, in which session. Omitted
+            // (not `{}`) when the write carried no attribution — "not
+            // attributed" and "attributed to nobody" are different claims.
+            ...(v.client ? { client: v.client } : {}),
           })),
         },
       };

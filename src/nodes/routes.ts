@@ -7,6 +7,7 @@ import { ValidationError, NotFoundError } from "../shared/errors.js";
 // id is rejected up front by the assertSafeNodeId chokepoint mounted on
 // /nests/:nestId/nodes/:nodeId{.+} in app.ts — covers every node route across
 // this + the annotations + governance routers, so handlers here can trust nodeId.
+import { attributeRequest } from "../shared/client-metadata.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { getDb } from "../db/client.js";
 import * as versions from "../governance/version-service.js";
@@ -142,6 +143,7 @@ nodeRoutes.post("/", async (c) => {
     schedule?: string;
     folder?: string;
     prime?: boolean;
+    client?: unknown;
   }>();
 
   if (!body.title || !body.content) {
@@ -165,6 +167,7 @@ nodeRoutes.post("/", async (c) => {
       schedule: body.schedule,
       folder: body.folder,
       prime: body.prime,
+      client: attributeRequest(c, body.client),
     },
     authorEmail,
   );
@@ -519,6 +522,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     changeNote?: string;
     schedule?: string;
     prime?: boolean | null;
+    client?: unknown;
   }>();
 
   // Conflict detection via X-Base-Version header — REST-only contract.
@@ -554,6 +558,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       changeNote: body.changeNote,
       schedule: body.schedule,
       prime: body.prime,
+      client: attributeRequest(c, body.client),
     },
     authorEmail,
   );

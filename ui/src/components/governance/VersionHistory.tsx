@@ -42,6 +42,29 @@ export interface Version {
   /** The reviewer's own note on that verdict — the rejection reason, or an
    *  approver's comment. Rendered in the row so it isn't buried behind a click. */
   resolutionNote?: string;
+  /**
+   * Caller attribution for the write that sealed this version (spec §9.4):
+   * which agent, in which session, plus any custom keys. Absent when the write
+   * carried none — most human saves through this UI do.
+   *
+   * Rendered NEXT TO "By:", never instead of it: `editedBy` is the authoring
+   * identity the server authenticated, this is what the caller said about
+   * itself.
+   */
+  client?: Record<string, string | number | boolean>;
+}
+
+/** "claude-code · s-9f2 · run=7" — the agent first, then the session, then any
+ *  custom keys in the order the caller sent them. */
+function formatClient(client: Record<string, string | number | boolean>): string {
+  const { agent, session_id, ...custom } = client;
+  return [
+    agent,
+    session_id,
+    ...Object.entries(custom).map(([k, v]) => `${k}=${v}`),
+  ]
+    .filter((part) => part !== undefined && part !== "")
+    .join(" · ");
 }
 
 /**
@@ -647,6 +670,14 @@ export function VersionHistory({
                       <div className="text-xs text-muted-foreground">
                         {formatDate(version.editedAt)}
                       </div>
+                      {version.client && (
+                        <div className="text-xs text-muted-foreground break-words">
+                          Client:{" "}
+                          <span className="font-mono text-foreground/70">
+                            {formatClient(version.client)}
+                          </span>
+                        </div>
+                      )}
                       {version.resolvedBy && (
                         <div className="text-xs text-muted-foreground break-words">
                           {version.resolutionStatus === "rejected"

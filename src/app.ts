@@ -396,6 +396,9 @@ export function createApp(): Hono<AuthEnv> {
       userId: c.get("userId") ?? null,
       status: c.res.status,
       durationMs: Date.now() - started,
+      // Set by whichever handler validated the request's `client` block
+      // (§9.4). Absent on a request that sent none.
+      client: c.get("clientMetadata"),
     });
   });
 

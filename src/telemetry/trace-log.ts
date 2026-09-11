@@ -12,6 +12,10 @@
  */
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
+import {
+  serializeClient,
+  type ClientMetadata,
+} from "../shared/client-metadata.js";
 
 const PRUNE_EVERY = 500;
 let insertsSincePrune = 0;
@@ -26,6 +30,15 @@ export interface TraceEvent {
   userEmail?: string | null;
   status?: number;
   durationMs?: number;
+  /**
+   * Caller attribution for this call (spec §9.4) — which agent, in which
+   * session. This is the row a READ lands on: a read seals no version, so the
+   * activity trace is where its attribution lives.
+   *
+   * Self-reported and unauthenticated. `userId` / `userEmail` remain the
+   * authenticated facts; never read this to decide anything.
+   */
+  client?: ClientMetadata;
 }
 
 export async function logTraceEvent(e: TraceEvent): Promise<void> {
@@ -33,8 +46,8 @@ export async function logTraceEvent(e: TraceEvent): Promise<void> {
     const db = getDb();
     await db.run(
       `INSERT INTO api_events
-         (ts, kind, method, path, tool, nest_id, user_id, user_email, status, duration_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (ts, kind, method, path, tool, nest_id, user_id, user_email, status, duration_ms, client_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         new Date().toISOString(),
         e.kind,
@@ -46,6 +59,7 @@ export async function logTraceEvent(e: TraceEvent): Promise<void> {
         e.userEmail ?? null,
         e.status ?? null,
         e.durationMs ?? null,
+        serializeClient(e.client),
       ],
     );
     if (++insertsSincePrune >= PRUNE_EVERY) {

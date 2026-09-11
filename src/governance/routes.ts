@@ -11,6 +11,7 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { ValidationError, ConflictError } from "../shared/errors.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requestBaseUrl } from "../shared/base-url.js";
+import { attributeRequest } from "../shared/client-metadata.js";
 import { getDb } from "../db/client.js";
 import * as stewardship from "./stewardship-service.js";
 import * as reviews from "./review-service.js";
@@ -1021,7 +1022,11 @@ governanceNodeRoutes.post(
 governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const body = await c.req.json<{ note?: string; override?: boolean }>();
+  const body = await c.req.json<{
+    note?: string;
+    override?: boolean;
+    client?: unknown;
+  }>();
 
   const userEmail = await getUserEmail(c);
   const isAdmin = isSuperAdmin(userEmail);
@@ -1034,6 +1039,7 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
       note: body.note,
       override: body.override && isAdmin,
       baseUrl: requestBaseUrl(c.req.url),
+      client: attributeRequest(c, body.client),
     });
     return c.json({ review: request });
   } catch (err: any) {
