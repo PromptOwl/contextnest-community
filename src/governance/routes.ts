@@ -34,6 +34,7 @@ import {
   canRequestDeletion,
 } from "./access-guard.js";
 import { handleAnnotationReply } from "../annotations/routes.js";
+import { notifyCommentMentions } from "./mention-notify.js";
 
 // ═════════════════════════════════════════════════════════════════════════
 // Nest-level routes (mounted at /:nestId)
@@ -787,8 +788,9 @@ governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
     parentId?: string;
   }>();
   const author = await getUserEmail(c);
+  let comment;
   try {
-    const comment = await comments.createComment({
+    comment = await comments.createComment({
       nestId,
       nodeId,
       author,
@@ -797,13 +799,25 @@ governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
       anchor: body.anchor,
       parentId: body.parentId,
     });
-    return c.json({ comment }, 201);
   } catch (err) {
     // Empty body / dangling parent are user errors, not 500s.
     throw new ValidationError(
       err instanceof Error ? err.message : String(err),
     );
   }
+  // Tagging someone in a comment reaches them: inbox row + configured
+  // channels. Outside the try above, whose catch turns anything thrown into a
+  // 400 — the fan-out swallows its own failures, and a notification problem is
+  // not a bad request. Awaited like the document-save fan-out: a local insert
+  // is cheaper than returning before it lands.
+  await notifyCommentMentions({
+    nestId,
+    nodeId,
+    body: comment.body,
+    actorEmail: author,
+    baseUrl: requestBaseUrl(c.req.url),
+  });
+  return c.json({ comment }, 201);
 });
 
 // POST /nests/:nestId/nodes/:nodeId/comments/:commentId/resolve

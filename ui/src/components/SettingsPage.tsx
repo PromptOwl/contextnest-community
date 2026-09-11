@@ -7,7 +7,7 @@
  * list and to that tab's `keys` (so the unsaved-changes dot tracks it).
  */
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff } from "lucide-react";
+import { ArrowLeft, Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -65,6 +65,7 @@ const TABS: {
       "public_base_url",
       "logo_url",
       "anthropic_api_key",
+      "people_suggest_all_users",
     ],
   },
   {
@@ -621,6 +622,44 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                     Keep current key
                   </button>
                 )}
+              </CardContent>
+            </Card>
+
+            {/* Who the add-a-person pickers may offer. Default OFF, and the
+                copy says why in the admin's own terms: on a server shared by
+                unrelated customers this hands one customer's staff another
+                customer's addresses. */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Users className="h-4 w-4 text-muted-foreground" />
+                  People directory
+                </CardTitle>
+                <CardDescription>
+                  What the "add a person" fields suggest when inviting someone
+                  to a nest, a team, or a stewardship role.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <div className="pr-4">
+                    <div className="text-sm font-medium">
+                      Suggest everyone on this server
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Off, the pickers only suggest people the inviter already
+                      shares a nest or team with. On, they suggest every
+                      registered account — right when this server is one
+                      organisation, wrong when it hosts several, because it
+                      shows them each other's email addresses. Either way
+                      anyone can still be invited by typing their address.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={draft.people_suggest_all_users}
+                    onCheckedChange={(v) => set({ people_suggest_all_users: v })}
+                  />
+                </div>
               </CardContent>
             </Card>
           </TabsContent>

@@ -1,21 +1,36 @@
 /**
- * Mention notifications — tell someone their name came up in a document.
+ * Mention notifications — tell someone their name came up.
+ *
+ * Two entry points over one resolver: `notifyMentions` for a document body
+ * (only what a save ADDS notifies) and `notifyCommentMentions` for a comment
+ * (every name in the new comment, since the text is new). Both land an inbox
+ * row and, when channels are configured, a message — the queue and the ping
+ * are the same event delivered twice.
  *
  * Its own module rather than part of notify-service: resolving a mention needs
  * the nest's people, and that lookup sits on the teams-service →
  * notify-service import chain.
  *
  * Best-effort by the same contract the rest of the fan-outs keep: a
- * notification failure must never fail the save that triggered it.
+ * notification failure must never fail the save or the comment that triggered
+ * it.
  */
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
-import { listNestPeople } from "../nests/people-service.js";
-import { newMentions, resolveMention } from "../shared/mentions.js";
-import { describeNode } from "./title-resolver.js";
+import { listNestPeople, findDirectoryPerson } from "../nests/people-service.js";
+import {
+  MAX_MENTION_RECIPIENTS,
+  extractMentions,
+  newMentions,
+  resolveMention,
+} from "../shared/mentions.js";
+import { buildDocContext } from "./title-resolver.js";
 import { canReadNode } from "./access-guard.js";
-import { resolveNestAccess } from "../shared/access.js";
+import { resolveNestAccess, permissionLevel } from "../shared/access.js";
 import { resolveNodeGrant } from "./grants-service.js";
+import { dispatchEvent, hasAnyConnector } from "../notify/dispatch.js";
+import { isEmailConfigured, sendEmailToRecipient } from "../notify/email.js";
+import { tryConsume } from "../shared/rate-limit.js";
 
 /**
  * Can this person open this document at all?
@@ -40,15 +55,266 @@ async function canOpenNode(
   return canReadNode(nestId, nodeId, userId, email);
 }
 
+interface Recipient {
+  email: string;
+  userId: string;
+}
+
 /**
- * Drop an inbox row for everyone newly mentioned in a document body.
+ * The people a list of written `@names` actually reaches: resolved against the
+ * nest's roster, deduped, minus the author, minus anyone who can't open the
+ * document, and capped at MAX_MENTION_RECIPIENTS. A name that matches nobody
+ * reaches nobody — the editor already draws it as unresolved.
+ */
+async function resolveRecipients(params: {
+  nestId: string;
+  nodeId: string;
+  names: string[];
+  actorEmail: string;
+}): Promise<Recipient[]> {
+  const { nestId, nodeId, names, actorEmail } = params;
+  if (names.length === 0) return [];
+
+  const roster = await listNestPeople(nestId);
+  const actor = actorEmail.toLowerCase();
+  const candidates = new Map<string, Recipient>();
+  const outsiders: Recipient[] = [];
+  for (const name of names) {
+    // Roster first so a directory namesake can't make a member's name ambiguous.
+    const member = resolveMention(roster, name);
+    const person = member ?? (await findDirectoryPerson(name));
+    // No account means no inbox to read — a steward invited by email who
+    // never signed up hears about it when they're actually a user.
+    if (!person?.userId) continue;
+    const key = person.email.toLowerCase();
+    if (key === actor || candidates.has(key)) continue;
+    const r = { email: person.email, userId: person.userId };
+    candidates.set(key, r);
+    if (!member) outsiders.push(r);
+    // Capped here rather than after the loop: everything past this point —
+    // one access check, one row, one email per candidate — is work this write
+    // causes, and the point of the cap is to bound it. Names are visited in
+    // order of appearance, so the first people named are the ones notified.
+    if (candidates.size >= MAX_MENTION_RECIPIENTS) break;
+  }
+  if (outsiders.length) await inviteMentioned(nestId, actorEmail, outsiders);
+
+  // Access-checked in parallel: each check is a couple of independent reads,
+  // and a comment naming a handful of people shouldn't serialise all of them.
+  const checked = await Promise.all(
+    [...candidates.values()].map(async (r) => ({
+      r,
+      allowed: await canOpenNode(nestId, nodeId, r.userId, r.email),
+    })),
+  );
+  return checked.filter((c) => c.allowed).map((c) => c.r);
+}
+
+/**
+ * A mention of someone off the nest (PEOPLE_SUGGEST_ALL_USERS) doubles as a
+ * read invite — but only from a write+ author: commenting is read-tier, and a
+ * read-only reviewer must not be able to grant access by tagging. Otherwise
+ * the outsider stays off the nest and canOpenNode drops them as before.
+ *
+ * A raw insert, not addCollaborator: that path also emails and channel-posts
+ * "added as read", and the mention is about to notify the same person itself.
+ */
+async function inviteMentioned(
+  nestId: string,
+  actorEmail: string,
+  outsiders: Recipient[],
+): Promise<void> {
+  const db = getDb();
+  const actor = (await db.get("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", [
+    actorEmail,
+  ])) as { id: string } | undefined;
+  if (!actor) return;
+  const access = await resolveNestAccess(nestId, actor.id);
+  if (permissionLevel(access.permission) < permissionLevel("write")) return;
+  // No unique index on (nest_id, user_id): the NOT EXISTS keeps two mentions
+  // racing on the same outsider from leaving two rows, which DELETE by row id
+  // would then only half-remove.
+  for (const r of outsiders) {
+    await db.run(
+      `INSERT INTO nest_collaborators (id, nest_id, user_id, permission, granted_by)
+       SELECT ?, ?, ?, 'read', ?
+        WHERE NOT EXISTS (SELECT 1 FROM nest_collaborators WHERE nest_id = ? AND user_id = ?)`,
+      [uuid(), nestId, r.userId, actor.id, nestId, r.userId],
+    );
+  }
+}
+
+/** Inbox row per recipient. `subject_id` is the node id: listNotifications
+ *  resolves a 'mention' row's document straight from it (there is no request
+ *  row to join), so the queue entry links to the document. */
+async function insertInboxRows(params: {
+  nestId: string;
+  nodeId: string;
+  recipients: Recipient[];
+  message: string;
+}): Promise<number> {
+  const db = getDb();
+  const now = new Date().toISOString();
+  let created = 0;
+  for (const r of params.recipients) {
+    await db.run(
+      `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
+       VALUES (?, ?, ?, 'mention', ?, ?, ?)`,
+      [uuid(), params.nestId, r.email.toLowerCase(), params.nodeId, params.message, now],
+    );
+    created++;
+  }
+  return created;
+}
+
+/**
+ * The outbound half: the configured connectors (server-wide Slack/Teams webhook
+ * or a per-nest connector row) plus a direct email to each person named, when
+ * SMTP is set up. Both are fire-and-forget by their own contract — `void`, not
+ * awaited, so a mention never waits on a mail server.
+ *
+ * The email goes to the person named, not the NOTIFY_EMAIL_TO team inbox: a
+ * mention is addressed to one human, and only someone who can open the document
+ * gets one. The connector message is the team-channel half, so it is written in
+ * the third person and names its recipients — but carries no comment text: a
+ * channel's audience is configured per nest, not derived from who can read the
+ * document, and commenting is deliberately read-tier. Titles and actor emails
+ * it already receives for every review event; arbitrary comment prose it does
+ * not, and a mention is a poor place to start.
+ */
+async function deliverMentionMessages(params: {
+  nestId: string;
+  nodeId: string;
+  recipients: Recipient[];
+  /** What the event is, in the third person — a connector posts to a channel,
+   *  where the inbox row's "mentioned you" would address the wrong reader. */
+  channelMessage: string;
+  actorEmail: string;
+  excerpt: string;
+  ctx: { docTitle: string; path: string; link: string };
+}): Promise<void> {
+  const { nestId, nodeId, recipients, channelMessage, actorEmail, excerpt, ctx } =
+    params;
+  let throttled = 0;
+  // Asked before the token is spent: on a nest with no connector there is
+  // nothing to post, so charging the channel budget would bill a no-op and
+  // then warn about "skipped" messages that had nowhere to go.
+  const channelReachable = await hasAnyConnector(nestId, "mention");
+  if (channelReachable && canDeliver("channel", nestId, actorEmail)) {
+    void dispatchEvent({
+      kind: "mention",
+      nestId,
+      subjectId: nodeId,
+      actor: actorEmail,
+      message: channelMessage,
+    });
+  } else if (channelReachable) {
+    throttled++;
+  }
+  // Same rule as the channel: no SMTP means no email to ration.
+  for (const r of isEmailConfigured() ? recipients : []) {
+    if (!canDeliver("email", nestId, actorEmail)) {
+      throttled++;
+      continue;
+    }
+    void sendEmailToRecipient(r.email, {
+      status: "mention",
+      docTitle: ctx.docTitle,
+      path: ctx.path,
+      link: ctx.link,
+      actor: actorEmail,
+      note: excerpt || null,
+    });
+  }
+  if (throttled > 0) {
+    // Logged, not silent: the inbox rows landed, so nobody lost the mention —
+    // but an operator seeing this repeatedly is looking at someone hammering
+    // the fan-out, which is worth knowing.
+    console.warn(
+      `[notify] mention delivery budget exhausted for ${actorEmail} in ${nestId} — ${throttled} outbound message(s) skipped; inbox rows unaffected`,
+    );
+  }
+}
+
+/**
+ * Outbound mention deliveries one person may cause in one nest per window.
+ *
+ * MAX_MENTION_RECIPIENTS bounds a single comment; this bounds the stream of
+ * them. Commenting is read-tier and unthrottled — deliberately, so a reviewer
+ * can comment freely — which before this feature cost nothing, because a
+ * comment had no side effects worth abusing. Now each one can send mail and
+ * post to a team channel, so a read-tier caller looping comments is an
+ * amplifier with no ceiling.
+ *
+ * Budgeted here rather than on comment creation, and that placement is the
+ * whole design: throttling the WRITE would break a legitimate agent working
+ * through a review, posting a comment per finding (which context_comment now
+ * makes ordinary). So the comment always lands, and the inbox row always
+ * lands — the queue is the recipient's own record, it is local, and it costs
+ * one insert. Only the EXTERNAL fan-out is rationed: one token per email and
+ * one per connector post, the parts that leave the server.
+ *
+ * A budget this size is invisible to a person tagging colleagues all day and
+ * caps a loop at tens of messages instead of thousands.
+ */
+export const MENTION_DELIVERY_BUDGET = { max: 50, windowMs: 5 * 60_000 };
+
+/**
+ * The channel post draws on its OWN budget rather than the email one.
+ *
+ * They are different shapes of cost: emails scale with the number of people
+ * named, the channel post is one message per comment however many were named.
+ * Sharing a pool also made the email allowance depend on something invisible —
+ * dispatchEvent is a no-op on a nest with no connector configured, but the
+ * token was spent before it could say so, quietly halving the documented email
+ * budget on the deployments least likely to have a connector at all.
+ */
+const MENTION_CHANNEL_BUDGET = { max: 25, windowMs: 5 * 60_000 };
+
+/**
+ * True while this actor still has outbound budget of this kind in this nest.
+ *
+ * Keyed per NEST, not globally per actor: a nest is the unit of collaboration,
+ * and a heavy day in one shouldn't ration a mention in another. Spreading a
+ * burst across nests does multiply the total — but only across nests the actor
+ * already has access to, which is separately gated, and each nest's own
+ * audience stays bounded, which is what the budget is protecting.
+ */
+function canDeliver(
+  kind: "email" | "channel",
+  nestId: string,
+  actorEmail: string,
+): boolean {
+  return tryConsume(
+    `mention-${kind}:${nestId}:${actorEmail.toLowerCase()}`,
+    kind === "email" ? MENTION_DELIVERY_BUDGET : MENTION_CHANNEL_BUDGET,
+  );
+}
+
+/** "X mentioned A and B in *Doc*" — the channel's third-person form of the
+ *  same event each recipient reads as "X mentioned you in …". */
+function channelSentence(
+  actorEmail: string,
+  recipients: Recipient[],
+  /** Where it happened, as the rest of the sentence: `in *Doc*`, or
+   *  `in a comment on *Doc*`. */
+  where: string,
+): string {
+  const names = recipients.map((r) => r.email).join(", ");
+  return `${actorEmail} mentioned ${names} ${where}`;
+}
+
+/** A comment trimmed to a line that fits a notification. */
+function excerptOf(body: string, max = 140): string {
+  const s = (body || "").replace(/\s+/g, " ").trim();
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
+
+/**
+ * Drop a notification for everyone newly mentioned in a document body.
  *
  * Only NEW mentions notify: the same `@name` surviving a dozen saves is one
- * event, not a dozen. Recipients are resolved against the nest's people, so a
- * name that matches nobody notifies nobody — the editor already draws it as
- * unresolved. The author never hears about their own mention, and a mention
- * only reaches someone who can actually open the document, so a notification
- * can't tell a reader about a document (or a title) they have no access to.
+ * event, not a dozen. The author never hears about their own mention.
  */
 export async function notifyMentions(params: {
   nestId: string;
@@ -58,49 +324,78 @@ export async function notifyMentions(params: {
   nextBody: string;
   /** Who wrote the mention. */
   actorEmail: string;
+  baseUrl?: string;
 }): Promise<number> {
-  const { nestId, nodeId, previousBody, nextBody, actorEmail } = params;
+  const { nestId, nodeId, previousBody, nextBody, actorEmail, baseUrl } = params;
   try {
     const names = newMentions(previousBody, nextBody);
-    if (names.length === 0) return 0;
+    const recipients = await resolveRecipients({ nestId, nodeId, names, actorEmail });
+    if (recipients.length === 0) return 0;
 
-    const people = await listNestPeople(nestId);
-    const actor = actorEmail.toLowerCase();
-    const recipients = new Map<string, { email: string; userId: string }>();
-    for (const name of names) {
-      const person = resolveMention(people, name);
-      // No account means no inbox to read — a steward invited by email who
-      // never signed up hears about it when they're actually a user.
-      if (!person?.userId) continue;
-      const key = person.email.toLowerCase();
-      if (key === actor || recipients.has(key)) continue;
-      recipients.set(key, { email: person.email, userId: person.userId });
-    }
-    if (recipients.size === 0) return 0;
-
-    const label = await describeNode(nestId, nodeId);
-    const now = new Date().toISOString();
-    const db = getDb();
-    let created = 0;
-    for (const { email, userId } of recipients.values()) {
-      if (!(await canOpenNode(nestId, nodeId, userId, email))) continue;
-      await db.run(
-        `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
-         VALUES (?, ?, ?, 'mention', ?, ?, ?)`,
-        [
-          uuid(),
-          nestId,
-          email.toLowerCase(),
-          nodeId,
-          `${actorEmail} mentioned you in "${label}"`,
-          now,
-        ],
-      );
-      created++;
-    }
+    const ctx = await buildDocContext(nestId, nodeId, baseUrl);
+    const message = `${actorEmail} mentioned you in "${ctx.label}"`;
+    const created = await insertInboxRows({ nestId, nodeId, recipients, message });
+    await deliverMentionMessages({
+      nestId,
+      nodeId,
+      recipients,
+      channelMessage: channelSentence(
+        actorEmail,
+        recipients,
+        `in *${ctx.label}*`,
+      ),
+      actorEmail,
+      excerpt: "",
+      ctx,
+    });
     return created;
   } catch (err) {
     console.error("[notify] mention fan-out failed", nestId, nodeId, err);
+    return 0;
+  }
+}
+
+/**
+ * Drop a notification for everyone named in a comment.
+ *
+ * Unlike a document save there is no "previous" text to diff against: the
+ * comment itself is the new thing, so every name in it notifies — including
+ * one already named upthread. A reply that adds no name adds no notification.
+ */
+export async function notifyCommentMentions(params: {
+  nestId: string;
+  nodeId: string;
+  body: string;
+  /** Who wrote the comment. */
+  actorEmail: string;
+  baseUrl?: string;
+}): Promise<number> {
+  const { nestId, nodeId, body, actorEmail, baseUrl } = params;
+  try {
+    const names = extractMentions(body || "");
+    const recipients = await resolveRecipients({ nestId, nodeId, names, actorEmail });
+    if (recipients.length === 0) return 0;
+
+    const ctx = await buildDocContext(nestId, nodeId, baseUrl);
+    const excerpt = excerptOf(body);
+    const message = `${actorEmail} mentioned you in a comment on "${ctx.label}"`;
+    const created = await insertInboxRows({ nestId, nodeId, recipients, message });
+    await deliverMentionMessages({
+      nestId,
+      nodeId,
+      recipients,
+      channelMessage: channelSentence(
+        actorEmail,
+        recipients,
+        `in a comment on *${ctx.label}*`,
+      ),
+      actorEmail,
+      excerpt,
+      ctx,
+    });
+    return created;
+  } catch (err) {
+    console.error("[notify] comment mention fan-out failed", nestId, nodeId, err);
     return 0;
   }
 }

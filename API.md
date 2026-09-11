@@ -389,6 +389,24 @@ Changing an existing collaborator's level stays admin-only.
 ### DELETE `/nests/:nestId/collaborators/:collabId` (admin)
 Removing a collaborator stays admin-only.
 
+### GET `/nests/:nestId/mentionable` (read+, members only)
+```json
+{ "people": [{ "email": "owner@x.com", "name": "Olive Owner" }] }
+```
+Everyone who can reach the nest (owner, collaborators, shared-team members, stewards, grant holders) — the roster the `@mention` pickers offer and validate against. With `PEOPLE_SUGGEST_ALL_USERS` on, every registered account follows the roster; mentioning one of them from a write+ account adds them to the nest as a `read` collaborator (see `POST /comments`).
+
+Read-tier, because commenting is read-tier and a read-only reviewer is the person most likely to tag someone. The property `GET /collaborators` protects with its write tier is kept by a narrower rule: **you may see the roster if you are on it.** A caller who reaches the nest only through its visibility (`public`, or `org`) is not on the roster → `403`. Write+ callers pass regardless (they can read the fuller roster anyway).
+
+### GET `/people/suggest?q=&limit=` (auth required)
+```json
+{ "people": [{ "email": "c@x.com", "name": "Carl Colleague", "source": "nest" }] }
+```
+Server-wide, not nest-scoped: the people the caller **already works with** — anyone on a nest they own or collaborate on (its owner, collaborators, active stewards) and anyone on a team they own or belong to. `source` ∈ `nest` / `team` / `directory`. For a server admin the directory is every user; `GET /auth/teammates` remains the admin-only full roster.
+
+Scope is deliberately narrow by default, because a single server may hold several unrelated organisations: `PEOPLE_SUGGEST_ALL_USERS` (off by default, Settings → General → People directory) widens it to every registered account, which is right for a single-company deployment and wrong for a shared one. A server admin always sees every account.
+
+`q` filters on name or address (substring, case-insensitive); `limit` caps the list (default and max 20). Suggestions are a convenience for the add-a-person pickers — an address that appears nowhere here is still valid to submit (that is how you invite someone with no account yet), and the add itself re-checks permission and the escalation cap.
+
 ---
 
 ## 3a. Share grants (one document / one folder)
@@ -1162,6 +1180,42 @@ List comments on a node. Optional `status` = `open` | `resolved`.
 ### POST `/nests/:nestId/nodes/:nodeId/comments`
 Leave a comment. Body: `{ body, version?, anchor?{start,end,text?}, parentId? }`.
 `parentId` threads a reply. Returns `201 { comment }`. Empty body → `400`.
+
+**`@mentions` notify.** Every name in the comment body — `@user@host`,
+`@localpart`, or `@(Display Name)` — is resolved against the nest's people
+(`GET /nests/:nestId/mentionable`) and each person named gets a `mention` row
+in `GET /me/notifications` linking the document, plus a message on the
+configured connector and an email to their own address when SMTP is set up.
+A channel message names who was mentioned (a room is not a person); the inbox
+row and the email address the recipient directly. The author is never notified
+about their own mention, a name matching nobody
+(or matching two people ambiguously) notifies nobody, and a recipient who
+can't open the document is skipped — so a mention can't disclose a title.
+Unlike a document body, where only names a save *adds* notify, every name in a
+comment notifies: the comment itself is the new event. At most 25 people are
+notified per write (`MAX_MENTION_RECIPIENTS`) — commenting is read-tier and
+unthrottled, so a comment naming a large roster would otherwise be an
+amplifier; names are taken in order of appearance. With `PEOPLE_SUGGEST_ALL_USERS`
+on, a name that matches a registered account off the nest is an invite: a
+write+ author's mention adds them as a `read` collaborator and then notifies;
+a read-only author's mention of an outsider still reaches nobody.
+
+The *stream* of them is bounded too: per nest per 5 minutes, one person may
+cause 50 mention **emails** (`MENTION_DELIVERY_BUDGET`) and 25 mention
+**channel posts** (`MENTION_CHANNEL_BUDGET`) — separate pools, because emails
+scale with how many people were named while a channel post is one message per
+comment. Separate also so the email allowance doesn't depend on something
+invisible: the connector dispatch is a no-op on a nest with no connector
+configured, and a shared pool would have spent the token before it could say
+so, quietly halving the email budget on exactly the deployments least likely to
+have a connector. Past that the comment still posts and the
+inbox rows still land — the queue is the recipient's own record and costs one
+insert — and only the external fan-out is skipped, with a server-log warning.
+The budget sits on delivery rather than on comment creation deliberately: an
+agent working through a review posts a comment per finding, which is exactly
+what `context_comment` is for, and throttling the write would break it. The same applies to the
+annotation thread endpoints (§ Hosted artifacts), which are what the UI's
+comments panel posts.
 
 ### POST `/nests/:nestId/nodes/:nodeId/comments/:commentId/resolve`
 Mark a comment resolved. Records `resolvedBy` + `resolvedAt`. Returns `{ comment }`.

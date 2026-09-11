@@ -375,7 +375,15 @@ export async function syncAnnotationsNode(
     const derivedId = derivedAnnotationsId(nodeId);
 
     try {
-      await updateNode(nestId, derivedId, { content: markdown }, userEmail);
+      // A projection, not a person's writing: its `@names` were already
+      // notified where they were typed (see WriteOptions).
+      await updateNode(
+        nestId,
+        derivedId,
+        { content: markdown },
+        userEmail,
+        { notifyMentions: false },
+      );
     } catch (err) {
       if (err instanceof NotFoundError) {
         await createNode(
@@ -388,6 +396,7 @@ export async function syncAnnotationsNode(
             tags: ["annotations"],
           },
           userEmail,
+          { notifyMentions: false },
         );
       } else {
         throw err;

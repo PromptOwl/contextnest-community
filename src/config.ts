@@ -381,6 +381,28 @@ export const config = {
     return process.env.OIDC_DEPARTMENT_TAGGING === "true";
   },
   /**
+   * Widen the add-a-person suggestions (GET /people/suggest) from "people you
+   * already work with" to every registered account on this server.
+   *
+   * OFF BY DEFAULT, and the default is the point. On a single-company
+   * self-hosted server every account is a colleague, so the whole directory is
+   * the useful answer and this saves asking someone for their address. On the
+   * PromptOwl-hosted deployment, one server holds many unrelated customers —
+   * so the same list is one customer's staff being offered another customer's
+   * email addresses. The hosted deployment leaves this unset; a self-hosted
+   * operator who knows their user table is their own staff turns it on.
+   *
+   * Narrows nothing when off: the default scoping (shared nests and teams,
+   * plus everything for a server admin, who administers the accounts anyway)
+   * is unchanged. Suggestions never gate the add either way — an address that
+   * appears in no list is still valid to type, so this only ever affects what
+   * is *offered*, never who can be invited. Superadmin-togglable at runtime
+   * via /admin/settings.
+   */
+  get PEOPLE_SUGGEST_ALL_USERS(): boolean {
+    return process.env.PEOPLE_SUGGEST_ALL_USERS === "true";
+  },
+  /**
    * Path to the .env file the server reads its config from and the license
    * install flow persists PROMPTOWL_KEY into. Defaults UNDER DATA_ROOT (not
    * $cwd) so it lands on the writable, volume-mounted, restart-surviving path

@@ -2982,6 +2982,7 @@ const CONNECTOR_EVENTS = [
   ["review_approved", "approved"],
   ["review_rejected", "rejected"],
   ["run_failed", "run failed"],
+  ["mention", "mentioned"],
 ] as const;
 
 function ConnectorsPanel({ nestId }: { nestId: string }) {

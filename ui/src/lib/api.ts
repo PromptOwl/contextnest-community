@@ -262,6 +262,10 @@ export interface AdminSettings {
   oidc_auto_provision: boolean;
   /** Tag new documents with the creator's directory department (dept:<slug>). */
   oidc_department_tagging: boolean;
+  /** Offer every registered account in the add-a-person pickers. Default OFF:
+   *  a server holding several unrelated customers would otherwise hand one
+   *  customer's staff another customer's email addresses. */
+  people_suggest_all_users: boolean;
   /** Server-computed readiness: enabled AND issuer+client id+secret present. */
   oidc_ready?: boolean;
   /** Write-only: string sets/replaces, null clears; never returned. */
@@ -1840,6 +1844,29 @@ export async function listCollaborators(nestId: string) {
       source: "owner" | "collaborator" | "team" | "steward" | "grant";
     }>;
   }>(`/nests/${nestId}/collaborators`);
+}
+
+/** The nest's people, for the `@mention` pickers. Read tier (see the route),
+ *  so a read-only reviewer's comment box can offer the roster too — unlike
+ *  listCollaborators, which needs write. */
+export async function listMentionablePeople(nestId: string) {
+  return request<{ people: Array<{ email: string; name: string | null }> }>(
+    `/nests/${nestId}/mentionable`,
+  );
+}
+
+/** People the caller already works with — what the add-a-person controls
+ *  autocomplete against. An address that appears nowhere here is still valid
+ *  to type: that's how you add someone who has no account yet. */
+export async function suggestPeople(q = "") {
+  const query = q.trim() ? `?q=${encodeURIComponent(q.trim())}` : "";
+  return request<{
+    people: Array<{
+      email: string;
+      name: string | null;
+      source: "nest" | "team" | "directory";
+    }>;
+  }>(`/people/suggest${query}`);
 }
 
 export async function addCollaborator(

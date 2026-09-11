@@ -238,6 +238,7 @@ import {
 } from "./extensions/SearchReplace";
 import { DocumentViewer } from "../DocumentViewer";
 import "./editor-styles.css";
+import { useAuth } from "../../auth/AuthContext";
 
 export interface MarkdownEditorHandle {
   /** Insert `[[nodes/<slug>|Title]]` at cursor. */
@@ -797,6 +798,9 @@ export const MarkdownEditor = forwardRef<
     };
   }, [wikiPopupOpen, nestId]);
 
+  // Never offer the author to themselves (the server skips a self-mention;
+  // `members` stays whole so others' mentions of them still resolve).
+  const me = useAuth().adminStatus?.me?.email?.toLowerCase();
   // Filter client-side as the query changes. Empty query (just `[[` or `@`)
   // lists everything so users can browse without typing.
   useEffect(() => {
@@ -806,7 +810,10 @@ export const MarkdownEditor = forwardRef<
     }
     if (pickerPopup.kind === "mention") {
       setPickerResults(
-        matchMembers(members, pickerPopup.query).map((m) => ({
+        matchMembers(
+          members.filter((m) => m.email.toLowerCase() !== me),
+          pickerPopup.query,
+        ).map((m) => ({
           key: m.email,
           primary: m.name || m.email.split("@")[0],
           secondary: m.email,
@@ -837,6 +844,7 @@ export const MarkdownEditor = forwardRef<
     currentNodeId,
     wikiNodesVersion,
     members,
+    me,
   ]);
 
   // Sync external content only when not focused — avoids selection
