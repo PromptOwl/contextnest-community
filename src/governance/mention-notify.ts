@@ -17,7 +17,7 @@
  */
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
-import { listNestPeople } from "../nests/people-service.js";
+import { listNestPeople, withDirectory } from "../nests/people-service.js";
 import {
   MAX_MENTION_RECIPIENTS,
   extractMentions,
@@ -26,7 +26,7 @@ import {
 } from "../shared/mentions.js";
 import { buildDocContext } from "./title-resolver.js";
 import { canReadNode } from "./access-guard.js";
-import { resolveNestAccess } from "../shared/access.js";
+import { resolveNestAccess, permissionLevel } from "../shared/access.js";
 import { resolveNodeGrant } from "./grants-service.js";
 import { dispatchEvent, hasAnyConnector } from "../notify/dispatch.js";
 import { sendEmailToRecipient } from "../notify/email.js";
@@ -75,23 +75,30 @@ async function resolveRecipients(params: {
   const { nestId, nodeId, names, actorEmail } = params;
   if (names.length === 0) return [];
 
-  const people = await listNestPeople(nestId);
+  const roster = await listNestPeople(nestId);
+  // Roster first so a directory namesake can't make a member's name ambiguous.
+  const directory = (await withDirectory(roster)).filter((p) => p.source === "directory");
   const actor = actorEmail.toLowerCase();
   const candidates = new Map<string, Recipient>();
+  const outsiders: Recipient[] = [];
   for (const name of names) {
-    const person = resolveMention(people, name);
+    const member = resolveMention(roster, name);
+    const person = member ?? resolveMention(directory, name);
     // No account means no inbox to read — a steward invited by email who
     // never signed up hears about it when they're actually a user.
     if (!person?.userId) continue;
     const key = person.email.toLowerCase();
     if (key === actor || candidates.has(key)) continue;
-    candidates.set(key, { email: person.email, userId: person.userId });
+    const r = { email: person.email, userId: person.userId };
+    candidates.set(key, r);
+    if (!member) outsiders.push(r);
     // Capped here rather than after the loop: everything past this point —
     // one access check, one row, one email per candidate — is work this write
     // causes, and the point of the cap is to bound it. Names are visited in
     // order of appearance, so the first people named are the ones notified.
     if (candidates.size >= MAX_MENTION_RECIPIENTS) break;
   }
+  if (outsiders.length) await inviteMentioned(nestId, actorEmail, outsiders);
 
   // Access-checked in parallel: each check is a couple of independent reads,
   // and a comment naming a handful of people shouldn't serialise all of them.
@@ -102,6 +109,32 @@ async function resolveRecipients(params: {
     })),
   );
   return checked.filter((c) => c.allowed).map((c) => c.r);
+}
+
+/**
+ * A mention of someone off the nest (PEOPLE_SUGGEST_ALL_USERS) doubles as a
+ * read invite — but only from a write+ author: commenting is read-tier, and a
+ * read-only reviewer must not be able to grant access by tagging. Otherwise
+ * the outsider stays off the nest and canOpenNode drops them as before.
+ */
+async function inviteMentioned(
+  nestId: string,
+  actorEmail: string,
+  outsiders: Recipient[],
+): Promise<void> {
+  const db = getDb();
+  const actor = (await db.get("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", [
+    actorEmail,
+  ])) as { id: string } | undefined;
+  if (!actor) return;
+  const access = await resolveNestAccess(nestId, actor.id);
+  if (permissionLevel(access.permission) < permissionLevel("write")) return;
+  for (const r of outsiders) {
+    await db.run(
+      "INSERT INTO nest_collaborators (id, nest_id, user_id, permission, granted_by) VALUES (?, ?, ?, 'read', ?)",
+      [uuid(), nestId, r.userId, actor.id],
+    );
+  }
 }
 
 /** Inbox row per recipient. `subject_id` is the node id: listNotifications

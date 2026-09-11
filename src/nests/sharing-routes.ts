@@ -12,7 +12,7 @@ import {
 } from "../governance/stewardship-service.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { addCollaborator } from "./sharing-service.js";
-import { listNestPeople } from "./people-service.js";
+import { listNestPeople, withDirectory } from "./people-service.js";
 import { setReaderMode } from "./service.js";
 import {
   isServerAdminUserId,
@@ -57,7 +57,7 @@ sharingRoutes.get("/collaborators", async (c) => {
   // a collaborator row. Same read, same write-tier gate, one round trip.
   return c.json({
     collaborators: enriched,
-    people: await listNestPeople(nestId),
+    people: await withDirectory(await listNestPeople(nestId)),
   });
 });
 
@@ -149,9 +149,10 @@ sharingRoutes.get("/mentionable", async (c) => {
   }
   // Name + email only: the picker shows a person and inserts their address.
   // `source` (owner/collaborator/team/steward/grant) stays out — how someone
-  // got access is not the mention picker's business.
+  // got access is not the mention picker's business. Gate above is on the
+  // roster; the directory widening applies only after it.
   return c.json({
-    people: people.map((p) => ({ email: p.email, name: p.name })),
+    people: (await withDirectory(people)).map((p) => ({ email: p.email, name: p.name })),
   });
 });
 

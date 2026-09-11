@@ -393,7 +393,7 @@ Removing a collaborator stays admin-only.
 ```json
 { "people": [{ "email": "owner@x.com", "name": "Olive Owner" }] }
 ```
-Everyone who can reach the nest (owner, collaborators, shared-team members, stewards, grant holders) — the roster the `@mention` pickers offer and validate against.
+Everyone who can reach the nest (owner, collaborators, shared-team members, stewards, grant holders) — the roster the `@mention` pickers offer and validate against. With `PEOPLE_SUGGEST_ALL_USERS` on, every registered account follows the roster; mentioning one of them from a write+ account adds them to the nest as a `read` collaborator (see `POST /comments`).
 
 Read-tier, because commenting is read-tier and a read-only reviewer is the person most likely to tag someone. The property `GET /collaborators` protects with its write tier is kept by a narrower rule: **you may see the roster if you are on it.** A caller who reaches the nest only through its visibility (`public`, or `org`) is not on the roster → `403`. Write+ callers pass regardless (they can read the fuller roster anyway).
 
@@ -1195,7 +1195,10 @@ Unlike a document body, where only names a save *adds* notify, every name in a
 comment notifies: the comment itself is the new event. At most 25 people are
 notified per write (`MAX_MENTION_RECIPIENTS`) — commenting is read-tier and
 unthrottled, so a comment naming a large roster would otherwise be an
-amplifier; names are taken in order of appearance.
+amplifier; names are taken in order of appearance. With `PEOPLE_SUGGEST_ALL_USERS`
+on, a name that matches a registered account off the nest is an invite: a
+write+ author's mention adds them as a `read` collaborator and then notifies;
+a read-only author's mention of an outsider still reaches nobody.
 
 The *stream* of them is bounded too: per nest per 5 minutes, one person may
 cause 50 mention **emails** (`MENTION_DELIVERY_BUDGET`) and 25 mention

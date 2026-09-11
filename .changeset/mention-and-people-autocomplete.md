@@ -12,4 +12,6 @@ Tag people in comments, and stop retyping addresses to add them.
 
 **Adding people and teams autocompletes.** The add-a-person fields (nest collaborators, stewards, team members) suggest people you already work with — anyone on a nest or team you share — while still accepting a brand-new address, so inviting someone without an account works exactly as before. Team pickers (share a team onto a nest, add a team from the collaborator panel) are searchable instead of a flat dropdown.
 
+With that toggle on, the `@` pickers (comment box and document editor) offer the whole directory too, and tagging someone who isn't on the nest adds them as a **read** collaborator before notifying — so the mention is an invite, not a dead tag. Only a write+ author can invite this way: a read-only reviewer's mention of an outsider still reaches nobody.
+
 Per-nest connectors can now subscribe to the `mention` event (alongside the review and run events), and the channel delivery budget is only charged when a connector would actually post that kind.

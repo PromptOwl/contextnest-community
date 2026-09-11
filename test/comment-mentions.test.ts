@@ -8,7 +8,7 @@
  * path). Commenting is a READ-tier action, so a read-only reviewer mentioning
  * someone has to notify too.
  */
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   setupTestEnv,
   createTestApp,
@@ -288,5 +288,101 @@ describe("comment mentions", () => {
     const rows = await mentions(guest);
     expect(rows).toHaveLength(1);
     expect(rows[0].node_id).toBe("nodes/roadmap");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PEOPLE_SUGGEST_ALL_USERS — a mention of someone off the nest is an invite
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("comment mentions with the directory toggle on", () => {
+  let app: any;
+  let owner: { apiKey: string; email: string };
+  let reviewer: { apiKey: string; email: string };
+  let outsider: { apiKey: string; email: string };
+  let nestId: string;
+
+  const mentions = async (caller: { apiKey: string }) => {
+    const { data } = await jsonRequest(app, "GET", "/me/notifications", undefined, caller.apiKey);
+    return (data.notifications as Array<{ kind: string }>).filter((n) => n.kind === "mention");
+  };
+
+  beforeAll(async () => {
+    process.env.PEOPLE_SUGGEST_ALL_USERS = "true";
+    setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@acme.com", "Owner");
+    await resetAuthRateLimit();
+    reviewer = await registerUser(app, "rev@acme.com", "Reviewer");
+    await resetAuthRateLimit();
+    outsider = await registerUser(app, "new@acme.com", "Newcomer");
+    await resetAuthRateLimit();
+
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Directory" }, owner.apiKey);
+    nestId = data.nest.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: reviewer.email, permission: "read" },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Kickoff", content: "the plan" },
+      owner.apiKey,
+    );
+  });
+
+  afterAll(() => {
+    delete process.env.PEOPLE_SUGGEST_ALL_USERS;
+  });
+
+  it("offers the whole directory in the mention picker", async () => {
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/mentionable`,
+      undefined,
+      reviewer.apiKey,
+    );
+    expect(data.people.map((p: { email: string }) => p.email)).toContain(outsider.email);
+  });
+
+  it("a read-only reviewer's mention does not grant access", async () => {
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/kickoff/annotations`,
+      { body: `cc @${outsider.email}` },
+      reviewer.apiKey,
+    );
+    expect(await mentions(outsider)).toHaveLength(0);
+    const { status } = await jsonRequest(app, "GET", `/nests/${nestId}`, undefined, outsider.apiKey);
+    expect(status).toBe(404);
+  });
+
+  it("a write+ author's mention adds the person as a reader and notifies them", async () => {
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/kickoff/annotations`,
+      { body: `welcome @${outsider.email}` },
+      owner.apiKey,
+    );
+    expect(await mentions(outsider)).toHaveLength(1);
+    const { status } = await jsonRequest(app, "GET", `/nests/${nestId}`, undefined, outsider.apiKey);
+    expect(status).toBe(200);
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/collaborators`,
+      undefined,
+      owner.apiKey,
+    );
+    const row = data.collaborators.find((c: { email: string }) => c.email === outsider.email);
+    expect(row?.permission).toBe("read");
   });
 });
