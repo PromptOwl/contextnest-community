@@ -73,6 +73,7 @@ const HISTORICAL_MIGRATIONS = [
   "037_publish",
   "038_nest_archive",
   "039_nest_pins",
+  "041_nest_visibility_org",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -100,7 +101,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       slug TEXT NOT NULL,
       description TEXT,
       visibility TEXT NOT NULL DEFAULT 'private'
-        CHECK(visibility IN ('private', 'public')),
+        CHECK(visibility IN ('private', 'org', 'public')),
       created_at TEXT NOT NULL DEFAULT ${NOW},
       stewardship_enabled INTEGER NOT NULL DEFAULT 0,
       is_imported INTEGER NOT NULL DEFAULT 0,
@@ -721,6 +722,34 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     await db.run(
       "INSERT INTO schema_migrations (id) VALUES (?) ON CONFLICT DO NOTHING",
       [id],
+    );
+  }
+
+  // Migration 041 parity: widen the visibility CHECK to accept 'org' on a
+  // database created before it existed. Postgres has no ADD CONSTRAINT IF NOT
+  // EXISTS, so this is a drop-then-add by the constraint's generated name.
+  //
+  // Read the current definition first rather than swapping unconditionally:
+  // ADD CONSTRAINT re-validates every existing row and takes a lock to do it,
+  // so an unguarded swap would pay that cost on every server start and grow
+  // with the table. Every other statement in this file is a true no-op on an
+  // up-to-date database (IF NOT EXISTS / ADD COLUMN IF NOT EXISTS); this one
+  // has to be as well.
+  //
+  // Unlike SQLite this is catalogue-only — no table rebuild, so none of the
+  // ON DELETE CASCADE hazard that makes the SQLite side delicate.
+  const visibilityCheck = (await db.get(
+    `SELECT pg_get_constraintdef(oid) AS def
+       FROM pg_constraint
+      WHERE conrelid = 'nests'::regclass
+        AND conname = 'nests_visibility_check'`,
+  )) as { def?: string } | undefined;
+  if (!visibilityCheck?.def?.includes("'org'")) {
+    await db.run(
+      "ALTER TABLE nests DROP CONSTRAINT IF EXISTS nests_visibility_check",
+    );
+    await db.run(
+      "ALTER TABLE nests ADD CONSTRAINT nests_visibility_check CHECK (visibility IN ('private', 'org', 'public'))",
     );
   }
 

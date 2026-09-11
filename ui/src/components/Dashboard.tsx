@@ -154,6 +154,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
       if (nestScope === "owned" && !nestOwned(n)) return false;
       if (nestScope === "shared" && nestOwned(n)) return false;
       if (nestScope === "public" && n.visibility !== "public") return false;
+      if (nestScope === "org" && n.visibility !== "org") return false;
       if (!q) return true;
       return (
         (n.name ?? "").toLowerCase().includes(q) ||
@@ -1648,6 +1649,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                 <option value="all">All nests</option>
                 <option value="owned">Owned by me</option>
                 <option value="shared">Shared with me</option>
+                <option value="org">Organization</option>
                 <option value="public">Public</option>
                 {/* Sync scopes are only meaningful while a folder is actually
                     waiting to sync — otherwise "Synced only" just restates
@@ -2125,12 +2127,18 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                               </span>
                             )}
                             <span
-                              className={`px-1.5 py-0.5 rounded capitalize ${nest.visibility === "public"
+                              className={`px-1.5 py-0.5 rounded ${nest.visibility === "public"
                                   ? "bg-green-100 text-green-700"
-                                  : "bg-secondary text-secondary-foreground"
+                                  : nest.visibility === "org"
+                                    ? "bg-blue-100 text-blue-700"
+                                    : "bg-secondary text-secondary-foreground"
                                 }`}
                             >
-                              {nest.visibility}
+                              {nest.visibility === "org"
+                                ? "Organization"
+                                : nest.visibility === "public"
+                                  ? "Public"
+                                  : "Private"}
                             </span>
                             {nest.is_imported ? (
                               <span
