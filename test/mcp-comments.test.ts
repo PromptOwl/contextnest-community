@@ -363,9 +363,7 @@ describe("MCP comment permissions", () => {
     ).toBe(false);
   });
 
-  it("still refuses comments on an unapproved node under stewardship", async () => {
-    // The gate is deliberate — thread anchors quote draft body text — and this
-    // work does not touch it.
+  it("lets collaborators read comments on an unapproved node; public still blocked elsewhere", async () => {
     await jsonRequest(
       app,
       "PATCH",
@@ -380,6 +378,7 @@ describe("MCP comment permissions", () => {
       { title: "Draft Only", content: "# Draft\n\nunapproved" },
       owner.apiKey,
     );
+    // Owner (collaborator) can read comments via MCP even though unapproved
     const text = await callTool(
       app,
       mcp,
@@ -387,6 +386,7 @@ describe("MCP comment permissions", () => {
       { id: "nodes/draft-only" },
       owner.apiKey,
     );
-    expect(text).toContain("not available to AI");
+    // Newly created draft has no comments yet, so MCP should say so (not deny)
+    expect(text.toLowerCase()).toContain("no comments on");
   });
 });

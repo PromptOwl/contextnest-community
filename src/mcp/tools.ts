@@ -1304,12 +1304,13 @@ async function runTool(
         node = docs.find((n) => n.id === args.id);
       }
       if (!node) return `Node not found: ${args.title || args.id}`;
-      // Gate the same way context_get/context_export do: under stewardship a
-      // node with no approved version is invisible to AI. Its threads embed
-      // draft body text (anchor.quote) and paraphrases in comment bodies, so
-      // serving them would leak unapproved content through the side door.
-      if ((await resolveLlmBody(ctx, node)) === null) {
-        return `Node "${node.frontmatter.title}" has no approved version yet — not available to AI.`;
+      // Gate by per-node read access. Collaborators/stewards who can read the
+      // node in the UI may also read its comment threads over MCP even when the
+      // document is not yet approved. Public readers remain blocked by
+      // canReadNode until approval. This preserves privacy while letting
+      // collaborators address feedback and resubmit.
+      if (!(await canReadNode(nestId, node.id, ctx.userId, userEmail))) {
+        return `Node not found: ${args.title || args.id}`;
       }
       const threads = await listThreads(nestId, node.id);
       if (!threads.length)
