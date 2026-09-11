@@ -171,6 +171,16 @@ describe("comment mentions", () => {
     expect(await mentions(owner)).toHaveLength(before);
   });
 
+  it("spends no email budget when SMTP is not configured", async () => {
+    // Mirrors the channel rule: a token spent on a send that was never going
+    // to happen bills a no-op and later warns about "skipped" mail.
+    const { tryConsume } = await import("../src/shared/rate-limit.js");
+    await comment(owner, "nodes/kickoff", `ping @${editor.email}`);
+    const key = `mention-email:${nestId}:${owner.email}`;
+    // max 1: passes only if the mention above left the bucket empty.
+    expect(tryConsume(key, { max: 1, windowMs: 60_000 })).toBe(true);
+  });
+
   it("notifies a person named twice in one comment once", async () => {
     const before = (await mentions(editor)).length;
     await comment(
@@ -384,5 +394,47 @@ describe("comment mentions with the directory toggle on", () => {
     );
     const row = data.collaborators.find((c: { email: string }) => c.email === outsider.email);
     expect(row?.permission).toBe("read");
+  });
+
+  // The sequential case; the concurrent one (two mentions racing before either
+  // insert lands) is what the NOT EXISTS in inviteMentioned is for.
+  it("mentioning them again leaves one collaborator row, not two", async () => {
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/kickoff/annotations`,
+      { body: `again @${outsider.email}` },
+      owner.apiKey,
+    );
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/collaborators`,
+      undefined,
+      owner.apiKey,
+    );
+    const rows = data.collaborators.filter((c: { email: string }) => c.email === outsider.email);
+    expect(rows).toHaveLength(1);
+  });
+
+  // The sequential case; the concurrent one (two mentions racing before either
+  // insert lands) is what the NOT EXISTS in inviteMentioned is for.
+  it("mentioning them again leaves one collaborator row, not two", async () => {
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/kickoff/annotations`,
+      { body: `again @${outsider.email}` },
+      owner.apiKey,
+    );
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/collaborators`,
+      undefined,
+      owner.apiKey,
+    );
+    const rows = data.collaborators.filter((c: { email: string }) => c.email === outsider.email);
+    expect(rows).toHaveLength(1);
   });
 });

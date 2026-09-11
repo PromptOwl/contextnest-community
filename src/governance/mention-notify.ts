@@ -29,7 +29,7 @@ import { canReadNode } from "./access-guard.js";
 import { resolveNestAccess, permissionLevel } from "../shared/access.js";
 import { resolveNodeGrant } from "./grants-service.js";
 import { dispatchEvent, hasAnyConnector } from "../notify/dispatch.js";
-import { sendEmailToRecipient } from "../notify/email.js";
+import { isEmailConfigured, sendEmailToRecipient } from "../notify/email.js";
 import { tryConsume } from "../shared/rate-limit.js";
 
 /**
@@ -129,10 +129,15 @@ async function inviteMentioned(
   if (!actor) return;
   const access = await resolveNestAccess(nestId, actor.id);
   if (permissionLevel(access.permission) < permissionLevel("write")) return;
+  // No unique index on (nest_id, user_id): the NOT EXISTS keeps two mentions
+  // racing on the same outsider from leaving two rows, which DELETE by row id
+  // would then only half-remove.
   for (const r of outsiders) {
     await db.run(
-      "INSERT INTO nest_collaborators (id, nest_id, user_id, permission, granted_by) VALUES (?, ?, ?, 'read', ?)",
-      [uuid(), nestId, r.userId, actor.id],
+      `INSERT INTO nest_collaborators (id, nest_id, user_id, permission, granted_by)
+       SELECT ?, ?, ?, 'read', ?
+        WHERE NOT EXISTS (SELECT 1 FROM nest_collaborators WHERE nest_id = ? AND user_id = ?)`,
+      [uuid(), nestId, r.userId, actor.id, nestId, r.userId],
     );
   }
 }
@@ -204,7 +209,8 @@ async function deliverMentionMessages(params: {
   } else if (channelReachable) {
     throttled++;
   }
-  for (const r of recipients) {
+  // Same rule as the channel: no SMTP means no email to ration.
+  for (const r of isEmailConfigured() ? recipients : []) {
     if (!canDeliver("email", nestId, actorEmail)) {
       throttled++;
       continue;
