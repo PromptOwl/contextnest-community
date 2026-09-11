@@ -315,6 +315,23 @@ export const SERVER_TOOL_DEFINITIONS = [
     },
   },
   {
+    // Read-only, so it belongs on this endpoint: an agent reading a nest's
+    // documents across nests also needs the feedback left on them. Writing a
+    // comment stays on the per-nest endpoint with the other write tools.
+    name: "context_comments",
+    description:
+      "Get the review comments/annotations on a document in a nest — anchored quotes, threaded replies, and open/resolved status. Use to pull human feedback into context before acting on a document.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        nest: { type: "string", description: "Nest name or id (see nest_index)" },
+        title: { type: "string", description: "Title of the node" },
+        id: { type: "string", description: "ID of the node" },
+      },
+      required: ["nest"],
+    },
+  },
+  {
     name: "nest_create",
     description:
       "Create a new nest owned by the caller. Returns the new nest's id — target it with the other tools afterwards.",
