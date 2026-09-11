@@ -1692,6 +1692,13 @@ export function NestView({
     // Going public makes the nest readable by anyone on the internet, outside
     // your organization — confirm first (and send acknowledge_public). Going
     // back to private is unguarded.
+    // Minimal UX improvement: when the nest is Organization-visible, route to
+    // the full three-tier control on the Collaborators tab so callers discover
+    // the Private option too (org → private path). (Bugfix)
+    if (visibility === "org") {
+      setActiveTab("collaborators");
+      return;
+    }
     if (visibility !== "public") {
       setConfirmPublic(true);
       return;
