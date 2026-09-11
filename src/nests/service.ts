@@ -737,12 +737,19 @@ export async function listVisibleNests(
   // category an admin sees; another user's private nest still stays hidden.
   const includeAnon =
     config.AUTH_MODE === "open" || (await isServerAdminUserId(userId));
-  // Param order follows the `?`s in the SQL below: nc, u, [g], n.user_id, [anon].
+  // Which visibilities alone confer read, mirroring resolveNestAccess: 'public'
+  // to anyone, 'org' only to an authenticated member of this deployment. Anon
+  // must not pick up org nests through the readable union.
+  const visibleByVisibility =
+    userId === ANON_USER_ID ? ["public"] : ["public", "org"];
+  // Param order follows the `?`s in the SQL below: nc, u, [g], n.user_id,
+  // [visibility…], [anon].
   const params = [
     userId,
     userId,
     ...(opts.readable ? [userId] : []),
     userId,
+    ...(opts.readable ? visibleByVisibility : []),
     ...(includeAnon ? [ANON_USER_ID] : []),
   ];
   const rows = (await db.all(
@@ -758,7 +765,7 @@ export async function listVisibleNests(
         AND (n.user_id = ?
          OR nc.user_id IS NOT NULL
          OR s.id IS NOT NULL
-         ${opts.readable ? "OR g.id IS NOT NULL OR n.visibility = 'public'" : ""}
+         ${opts.readable ? `OR g.id IS NOT NULL OR n.visibility IN (${visibleByVisibility.map(() => "?").join(", ")})` : ""}
          ${includeAnon ? "OR n.user_id = ?" : ""})
       ORDER BY n.created_at DESC`,
     params,
@@ -776,12 +783,22 @@ export async function listVisibleNests(
   return rows;
 }
 
-/** Public nests not owned/shared by caller. Route dedupes vs listNests. */
+/**
+ * Nests a caller can read WITHOUT membership, and doesn't already own or
+ * collaborate on. Route dedupes vs listNests.
+ *
+ * 'org' joins 'public' here for an authenticated caller: an org nest that
+ * couldn't be discovered would be reachable only by someone passing you the
+ * link, which is not what "available to the organization" means. Anonymous
+ * callers stay on 'public' alone.
+ */
 export async function listPublicNests(userId: string): Promise<Nest[]> {
   const db = getDb();
+  const visibilities =
+    userId === ANON_USER_ID ? ["public"] : ["public", "org"];
   return (await db.all(
     `SELECT n.* FROM nests n
-       WHERE n.visibility = 'public'
+       WHERE n.visibility IN (${visibilities.map(() => "?").join(", ")})
          AND ${LIVE_ONLY_N}
          AND n.user_id != ?
          AND NOT EXISTS (
@@ -789,7 +806,7 @@ export async function listPublicNests(userId: string): Promise<Nest[]> {
            WHERE nc.nest_id = n.id AND nc.user_id = ?
          )
        ORDER BY n.created_at DESC`,
-    [userId, userId],
+    [...visibilities, userId, userId],
   )) as Nest[];
 }
 
