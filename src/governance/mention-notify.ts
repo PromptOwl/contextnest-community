@@ -159,7 +159,7 @@ async function deliverMentionMessages(params: {
   // Asked before the token is spent: on a nest with no connector there is
   // nothing to post, so charging the channel budget would bill a no-op and
   // then warn about "skipped" messages that had nowhere to go.
-  const channelReachable = await hasAnyConnector(nestId);
+  const channelReachable = await hasAnyConnector(nestId, "mention");
   if (channelReachable && canDeliver("channel", nestId, actorEmail)) {
     void dispatchEvent({
       kind: "mention",

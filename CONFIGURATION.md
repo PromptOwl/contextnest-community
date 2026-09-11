@@ -153,7 +153,8 @@ plain-text `fallbackText` for clients that cannot render cards.
 Per-nest connector rows post the same Adaptive Card format to a nest-specific
 webhook, with per-event filtering: `POST /nests/:id/connectors` with a JSON
 body like `{"channel": "teams", "url": "https://…", "events":
-["review_requested", "review_rejected"]}` (`events` may also be `["*"]`; the
+["review_requested", "review_rejected"]}` (`events` is any of `review_requested`,
+`review_approved`, `review_rejected`, `run_failed`, `mention`, or `["*"]`; the
 `url` may be an `env:KEY` reference into the nest's env store). Manage rows
 with `GET`/`PATCH`/`DELETE` on the same path.
 

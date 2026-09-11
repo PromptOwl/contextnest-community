@@ -138,23 +138,32 @@ async function resolveUrl(nestId: string, raw: string): Promise<string | null> {
 }
 
 /**
- * Could an event posted for this nest reach anything at all?
- *
- * Cheap by construction: the server-wide webhooks are a config read, and only
- * when neither is set does this touch the connectors table (one indexed row
- * lookup, tolerant of the table being absent mid-migration exactly as
- * dispatchEvent is). Callers that RATION dispatches need this — spending a
- * rate-limit token on a fan-out that has nowhere to go charges for a no-op and
- * makes the budget depend on invisible configuration.
+ * Could an event of this kind posted for this nest reach anything at all?
+ * Callers that RATION dispatches ask first — a rate-limit token spent on a
+ * fan-out with nowhere to go bills a no-op. Mirrors dispatchEvent's filters:
+ * server-wide webhooks skip digest-delivered kinds, per-nest rows must
+ * subscribe to the kind (or "*").
  */
-export async function hasAnyConnector(nestId: string): Promise<boolean> {
-  if (config.SLACK_WEBHOOK_URL || config.MSTEAMS_WEBHOOK_URL) return true;
+export async function hasAnyConnector(nestId: string, kind: string): Promise<boolean> {
+  if (
+    (config.SLACK_WEBHOOK_URL || config.MSTEAMS_WEBHOOK_URL) &&
+    !DIGEST_DELIVERED_KINDS.has(kind)
+  ) {
+    return true;
+  }
   try {
-    const row = await getDb().get(
-      "SELECT 1 AS present FROM connectors WHERE nest_id = ? AND enabled = 1 LIMIT 1",
+    const rows = (await getDb().all(
+      "SELECT events FROM connectors WHERE nest_id = ? AND enabled = 1",
       [nestId],
-    );
-    return !!row;
+    )) as Pick<ConnectorRow, "events">[];
+    return rows.some((r) => {
+      try {
+        const kinds = JSON.parse(r.events) as string[];
+        return kinds.includes("*") || kinds.includes(kind);
+      } catch {
+        return false;
+      }
+    });
   } catch {
     return false; // table missing (mid-migration) — nothing to deliver to
   }

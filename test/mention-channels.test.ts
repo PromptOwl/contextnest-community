@@ -94,18 +94,77 @@ describe("connector reachability", () => {
     const { hasAnyConnector } = await import("../src/notify/dispatch.js");
     // This suite configures a server-wide Slack webhook, so any nest is
     // reachable — including one that has no connector row of its own.
-    expect(await hasAnyConnector(nestId)).toBe(true);
-    expect(await hasAnyConnector("no-such-nest")).toBe(true);
+    expect(await hasAnyConnector(nestId, "mention")).toBe(true);
+    expect(await hasAnyConnector("no-such-nest", "mention")).toBe(true);
+    // …but not for kinds the digest path delivers instead (dispatchEvent
+    // skips them on the server-wide webhook, so this must too).
+    expect(await hasAnyConnector(nestId, "review_requested")).toBe(false);
 
     const saved = process.env.SLACK_WEBHOOK_URL;
     delete process.env.SLACK_WEBHOOK_URL;
     try {
       // With the server-wide webhooks gone and no per-nest row, nothing can
       // be delivered — which is the case that must not spend a token.
-      expect(await hasAnyConnector(nestId)).toBe(false);
+      expect(await hasAnyConnector(nestId, "mention")).toBe(false);
+
+      // A per-nest row counts only for the kinds it subscribed to: a
+      // review-only connector won't post a mention, so no token for it.
+      const nest = await jsonRequest(app, "POST", "/nests", { name: "Rows" }, owner.apiKey);
+      const rowsNest = nest.data.nest.id;
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${rowsNest}/connectors`,
+        { channel: "slack", url: "https://hooks.slack.com/services/T/B/R", events: ["review_requested"] },
+        owner.apiKey,
+      );
+      expect(await hasAnyConnector(rowsNest, "mention")).toBe(false);
+      expect(await hasAnyConnector(rowsNest, "review_requested")).toBe(true);
     } finally {
       process.env.SLACK_WEBHOOK_URL = saved;
     }
+  });
+
+  it("a per-nest connector can subscribe to mention and receives it", async () => {
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Sub" }, owner.apiKey);
+    const subNest = nest.data.nest.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${subNest}/collaborators`,
+      { email: editor.email, permission: "write" },
+      owner.apiKey,
+    );
+    const rowUrl = "https://hooks.slack.com/services/T/B/SUB";
+    const create = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${subNest}/connectors`,
+      { channel: "slack", url: rowUrl, events: ["mention"] },
+      owner.apiKey,
+    );
+    expect(create.status).toBe(201);
+
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${subNest}/nodes`,
+      { title: "Sub Doc", content: "body" },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${subNest}/nodes/nodes/sub-doc/annotations`,
+      { body: `@${editor.email} subscribed?` },
+      owner.apiKey,
+    );
+    await new Promise((r) => setTimeout(r, 150));
+
+    const toRow = postWebhook.mock.calls.filter(
+      (c: any[]) => c[0] === rowUrl && JSON.stringify(c[1]).includes("Sub Doc"),
+    );
+    expect(toRow).toHaveLength(1);
   });
 });
 
