@@ -19,6 +19,7 @@ import {
 } from "./MarkdownEditor/picker-match";
 import { applyMentionPick, mentionSegments } from "../lib/comment-mentions";
 import { cn } from "@/lib/utils";
+import { useAuth } from "../auth/AuthContext";
 
 export interface MentionTextareaProps
   extends Omit<
@@ -58,9 +59,19 @@ export const MentionTextarea = forwardRef<
     return t?.kind === "mention" ? t : null;
   }, [open, value, caret]);
 
+  // Never offer the author to themselves — the server skips a self-mention,
+  // so picking it would only look delivered. `members` stays whole: someone
+  // else's mention of the author still has to render as resolved.
+  const me = useAuth().adminStatus?.me?.email?.toLowerCase();
   const results = useMemo(
-    () => (trigger ? matchMembers(members, trigger.query) : []),
-    [trigger, members],
+    () =>
+      trigger
+        ? matchMembers(
+            members.filter((m) => m.email.toLowerCase() !== me),
+            trigger.query,
+          )
+        : [],
+    [trigger, members, me],
   );
 
   useEffect(() => setHighlight(0), [trigger?.query, results.length]);
