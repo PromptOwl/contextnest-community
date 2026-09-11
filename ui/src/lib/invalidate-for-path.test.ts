@@ -76,3 +76,16 @@ describe("invalidateForPath — nest sharing", () => {
     }
   });
 });
+
+describe("invalidateForPath — admin settings", () => {
+  // PEOPLE_SUGGEST_ALL_USERS is saved through /admin/settings and changes who
+  // the add-a-person suggestions and every nest's @ roster offer — without
+  // this the toggle only took effect after a reload.
+  it("drops the people directory and nest rosters", () => {
+    const r = recorder();
+    invalidateForPath(r.qc, "/admin/settings");
+    expect(r.drops(keys.peopleSuggest(""))).toBe(true);
+    expect(r.drops(keys.mentionable(NEST))).toBe(true);
+    expect(r.drops(keys.collaborators(NEST))).toBe(true);
+  });
+});

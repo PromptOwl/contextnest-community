@@ -392,6 +392,10 @@ export function invalidateForPath(qc: QueryClient, path: string): void {
   if (path.startsWith("/admin")) {
     drop(keys.admin);
     drop(keys.auth);
+    // Settings can widen the people directory (PEOPLE_SUGGEST_ALL_USERS),
+    // which feeds the add-a-person suggestions and every nest's @ roster.
+    drop(keys.people);
+    drop(keys.nests);
     return;
   }
   if (path.startsWith("/auth")) {
