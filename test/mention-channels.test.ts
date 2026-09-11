@@ -298,3 +298,40 @@ describe("mention channels", () => {
     expect(JSON.stringify(to[0].text)).toContain("Launch Plan");
   });
 });
+
+describe("mention invite (directory toggle on)", () => {
+  it("adds the outsider without the 'added as read' channel post", async () => {
+    // The mention notifies the person itself; a second "X added as read"
+    // post on top would announce the same event twice. Pinned so the raw
+    // insert in inviteMentioned stays deliberate rather than an omission.
+    process.env.PEOPLE_SUGGEST_ALL_USERS = "true";
+    try {
+      const outsider = await registerUser(app, "new@acme.com", "Newcomer");
+      await resetAuthRateLimit();
+      const nest = await jsonRequest(app, "POST", "/nests", { name: "Invite" }, owner.apiKey);
+      const inviteNest = nest.data.nest.id;
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${inviteNest}/nodes`,
+        { title: "Invite Doc", content: "body" },
+        owner.apiKey,
+      );
+      postWebhook.mockClear();
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${inviteNest}/nodes/nodes/invite-doc/annotations`,
+        { body: `welcome @${outsider.email}` },
+        owner.apiKey,
+      );
+      await new Promise((r) => setTimeout(r, 150));
+
+      const bodies = postWebhook.mock.calls.map((c: any[]) => JSON.stringify(c[1]));
+      expect(bodies.some((b) => b.includes("Invite Doc") && b.includes(outsider.email))).toBe(true);
+      expect(bodies.some((b) => b.includes("added as"))).toBe(false);
+    } finally {
+      delete process.env.PEOPLE_SUGGEST_ALL_USERS;
+    }
+  });
+});

@@ -14,6 +14,7 @@ import {
 import { isServerAdminUserId } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { config } from "../config.js";
+import { resolveMention } from "../shared/mentions.js";
 
 /** Someone who can reach a nest, and the path that lets them. */
 export interface NestPerson {
@@ -117,9 +118,11 @@ export async function listNestPeople(nestId: string): Promise<NestPerson[]> {
 export async function withDirectory(roster: NestPerson[]): Promise<NestPerson[]> {
   if (!config.PEOPLE_SUGGEST_ALL_USERS) return roster;
   const seen = new Set(roster.map((p) => p.email.toLowerCase()));
+  // ponytail: capped like /people/suggest; past the cap a typed email still
+  // resolves via findDirectoryPerson. Server-side ?q= if a picker needs more.
   const rows = (await getDb().all(
-    "SELECT id, email, name FROM users WHERE id != ? ORDER BY email",
-    [ANON_USER_ID],
+    "SELECT id, email, name FROM users WHERE id != ? ORDER BY email LIMIT ?",
+    [ANON_USER_ID, SUGGEST_FETCH],
   )) as Array<{ id: string; email: string; name: string | null }>;
   const extra: NestPerson[] = [];
   for (const r of rows) {
@@ -128,6 +131,29 @@ export async function withDirectory(roster: NestPerson[]): Promise<NestPerson[]>
     extra.push({ email, name: r.name ?? null, userId: r.id, source: "directory" });
   }
   return [...roster, ...extra];
+}
+
+/**
+ * The one account a written `@name` reaches outside the roster — exact email,
+ * else a unique local part or display name, the same rule resolveMention
+ * applies to the roster. A per-name lookup rather than a directory load, so
+ * it runs on every mention and still finds an account the capped picker
+ * didn't offer. Undefined when the toggle is off or the name is ambiguous.
+ */
+export async function findDirectoryPerson(name: string): Promise<NestPerson | undefined> {
+  if (!config.PEOPLE_SUGGEST_ALL_USERS) return undefined;
+  const n = name.trim().toLowerCase();
+  if (!n) return undefined;
+  const rows = (await getDb().all(
+    `SELECT id, email, name FROM users
+      WHERE id != ?
+        AND (LOWER(email) = ? OR LOWER(email) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(name, '')) = ?)`,
+    [ANON_USER_ID, n, `${escapeLike(n)}@%`, n],
+  )) as Array<{ id: string; email: string; name: string | null }>;
+  return resolveMention(
+    rows.map((r) => ({ email: r.email, name: r.name ?? null, userId: r.id, source: "directory" as const })),
+    name,
+  );
 }
 
 /** Someone the caller could plausibly add, and why they're suggested. */
@@ -164,9 +190,12 @@ function matchesQuery(
  * candidate and filtering in memory. `%` and `_` in what the user typed are
  * literal characters, not wildcards, hence the escape.
  */
+/** Literal text for a LIKE … ESCAPE '\' pattern. */
+const escapeLike = (s: string) => s.replace(/([\\%_])/g, "\\$1");
+
 function queryFilter(q: string): { sql: string; args: string[] } {
   if (!q) return { sql: "", args: [] };
-  const pattern = `%${q.replace(/([\\%_])/g, "\\$1")}%`;
+  const pattern = `%${escapeLike(q)}%`;
   return {
     sql:
       " AND (LOWER(u.email) LIKE ? ESCAPE '\\'" +

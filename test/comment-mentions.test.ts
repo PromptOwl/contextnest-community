@@ -437,4 +437,30 @@ describe("comment mentions with the directory toggle on", () => {
     const rows = data.collaborators.filter((c: { email: string }) => c.email === outsider.email);
     expect(rows).toHaveLength(1);
   });
+
+  it("resolves an outsider by local part or display name, and neither when two share it", async () => {
+    await registerUser(app, "zed@acme.com", "Zed Zero");
+    await resetAuthRateLimit();
+    const amy1 = await registerUser(app, "amy@acme.com", "Amy");
+    await resetAuthRateLimit();
+    await registerUser(app, "amy@other.com", "Amy");
+    await resetAuthRateLimit();
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/kickoff/annotations`,
+      { body: "hi @zed and @(Amy)" },
+      owner.apiKey,
+    );
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/collaborators`,
+      undefined,
+      owner.apiKey,
+    );
+    const emails = data.collaborators.map((c: { email: string }) => c.email);
+    expect(emails).toContain("zed@acme.com");
+    expect(emails).not.toContain(amy1.email);
+  });
 });

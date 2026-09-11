@@ -17,7 +17,7 @@
  */
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
-import { listNestPeople, withDirectory } from "../nests/people-service.js";
+import { listNestPeople, findDirectoryPerson } from "../nests/people-service.js";
 import {
   MAX_MENTION_RECIPIENTS,
   extractMentions,
@@ -76,14 +76,13 @@ async function resolveRecipients(params: {
   if (names.length === 0) return [];
 
   const roster = await listNestPeople(nestId);
-  // Roster first so a directory namesake can't make a member's name ambiguous.
-  const directory = (await withDirectory(roster)).filter((p) => p.source === "directory");
   const actor = actorEmail.toLowerCase();
   const candidates = new Map<string, Recipient>();
   const outsiders: Recipient[] = [];
   for (const name of names) {
+    // Roster first so a directory namesake can't make a member's name ambiguous.
     const member = resolveMention(roster, name);
-    const person = member ?? resolveMention(directory, name);
+    const person = member ?? (await findDirectoryPerson(name));
     // No account means no inbox to read — a steward invited by email who
     // never signed up hears about it when they're actually a user.
     if (!person?.userId) continue;
@@ -116,6 +115,9 @@ async function resolveRecipients(params: {
  * read invite — but only from a write+ author: commenting is read-tier, and a
  * read-only reviewer must not be able to grant access by tagging. Otherwise
  * the outsider stays off the nest and canOpenNode drops them as before.
+ *
+ * A raw insert, not addCollaborator: that path also emails and channel-posts
+ * "added as read", and the mention is about to notify the same person itself.
  */
 async function inviteMentioned(
   nestId: string,
