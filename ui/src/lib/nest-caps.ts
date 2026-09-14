@@ -111,6 +111,20 @@ export function deriveNestCaps({
 }
 
 
+/**
+ * Reader Mode has no tab strip whose click triggers a folder fetch, so a nest
+ * whose docs all live one level down (the common docs-site shape) opens with
+ * only the empty root level loaded — ReaderView would render nothing until a
+ * folder row is clicked. Picks the first top-level folder (no "/" in its
+ * path) so NestView can eagerly fetch it alongside root, giving Reader Mode
+ * something to show without a click.
+ */
+export function firstTopLevelFolder<T extends { path: string }>(
+  knownFolders: T[],
+): T | undefined {
+  return knownFolders.find((f) => !f.path.includes("/"));
+}
+
 /** Lowercased leaf of a node id — "nodes/guides/Welcome" → "welcome". */
 function leafOf(id: string): string {
   const path = id.startsWith("nodes/") ? id.slice(6) : id;

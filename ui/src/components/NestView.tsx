@@ -82,7 +82,11 @@ import { PublishDialog } from "./PublishDialog";
 import { NestVisibilityControl } from "./NestVisibilityControl";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { NestPageHeader } from "./NestPageHeader";
-import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
+import {
+  deriveNestCaps,
+  firstTopLevelFolder,
+  isNestArchived,
+} from "../lib/nest-caps";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { Button } from "@/components/ui/button";
@@ -1283,7 +1287,7 @@ export function NestView({
   // without a click; ReaderView's onExpandFolder (below) covers the rest.
   useEffect(() => {
     if (!isReaderView) return;
-    const first = knownFolders.find((f) => !f.path.includes("/"));
+    const first = firstTopLevelFolder(knownFolders);
     if (first) void fetchLevel(first.path);
   }, [isReaderView, knownFolders, fetchLevel]);
 
