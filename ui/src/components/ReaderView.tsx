@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FileText, FolderOpen, BookOpen } from "lucide-react";
+import {
+  FileText,
+  FolderOpen,
+  BookOpen,
+  ChevronRight,
+  ChevronDown,
+  ArrowLeft,
+} from "lucide-react";
 import { FolderTree } from "./FolderTree";
 import { DocumentViewer } from "./DocumentViewer";
 import * as api from "../lib/api";
@@ -15,20 +22,26 @@ import { conventionKey, isHomeNode } from "@/lib/nest-caps";
  *   left   — a read-only FolderTree for navigation (reuses tocGroups /
  *            knownFolders from NestView). Docs are loaded lazily one folder
  *            level at a time, same as the Documents tab: clicking a folder
- *            row fetches its documents via onExpandFolder.
- *   center — the DocumentViewer for the selected document
+ *            row fetches its documents via onExpandFolder. Folders default
+ *            open but can be collapsed back (and re-expanded) via the same
+ *            row click, so a folder with many docs doesn't permanently eat
+ *            the pane's height once opened.
+ *   center — the DocumentViewer for the selected document. Shows a "Back to
+ *            Overview" link whenever the reader has navigated away from the
+ *            home node, so there's always a way back to it.
  *   right  — the persistent resolved home/overview node, shown whenever the
  *            reader is looking at something OTHER than the home node itself
  *            (otherwise it would just duplicate the center pane); falls back
  *            to a synthesized Contents table when no home node resolves, or
  *            when the home node IS the selected/center document.
  *
- * All three panes cap at the same height (matching DocumentViewer's own
- * min/max-h-[60vh]) and scroll internally, so a long folder/contents list
- * never forces the whole page to grow past the viewport.
+ * All three panes share PANE_BODY_CLASS (min/max-h-[60vh] + overflow-y-auto,
+ * matching DocumentViewer's own sizing) so they line up at the same height
+ * regardless of content, and scroll internally instead of growing the page.
  */
 
 const HOME_NODE_CONVENTION = ["welcome", "index", "readme", "home", "overview"];
+const PANE_BODY_CLASS = "min-h-[60vh] max-h-[60vh] overflow-y-auto";
 
 export interface ReaderViewProps {
   nestId: string;
@@ -118,6 +131,25 @@ export function ReaderView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [homeNode?.id, nestId]);
 
+  // Folders default to expanded (matching the prior always-expanded tree) but
+  // can be collapsed back after opening, so reading through a large folder
+  // doesn't permanently consume the pane's height. Collapsing is purely a
+  // display toggle; expanding re-fetches via onExpandFolder, which NestView
+  // already treats as a no-op once a level is loaded.
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const toggleFolder = (path: string) => {
+    const opening = collapsedFolders.has(path);
+    setCollapsedFolders((prev) => {
+      const next = new Set(prev);
+      if (opening) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+    if (opening) onExpandFolder(path);
+  };
+
   const selectByTitle = (title: string) => {
     const hit = nodes.find(
       (n) => String(n.title || "").toLowerCase() === title.toLowerCase(),
@@ -136,13 +168,19 @@ export function ReaderView({
   const centerBody = () => {
     if (!selectedId) {
       return (
-        <p className="text-sm text-muted-foreground">
-          Select a document from the list to start reading.
-        </p>
+        <div className={`${PANE_BODY_CLASS} flex items-center`}>
+          <p className="text-sm text-muted-foreground">
+            Select a document from the list to start reading.
+          </p>
+        </div>
       );
     }
     if (content[selectedId] === undefined && loadingId === selectedId) {
-      return <p className="text-sm text-muted-foreground">Loading…</p>;
+      return (
+        <div className={PANE_BODY_CLASS}>
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        </div>
+      );
     }
     return (
       <DocumentViewer
@@ -160,17 +198,23 @@ export function ReaderView({
           <BookOpen className="h-4 w-4 text-muted-foreground" />
           <span className="truncate">{nestName}</span>
         </div>
-        <div className="max-h-[60vh] overflow-y-auto">
+        <div className={PANE_BODY_CLASS}>
           <FolderTree
             className="space-y-0.5"
             groups={tocGroups}
             known={knownFolders}
-            renderFolder={(node) => (
+            isCollapsed={(path) => collapsedFolders.has(path)}
+            renderFolder={(node, { collapsed }) => (
               <button
                 type="button"
-                onClick={() => onExpandFolder(node.path)}
+                onClick={() => toggleFolder(node.path)}
                 className="flex items-center gap-2 py-1 px-1 -mx-1 w-full text-left rounded-md hover:bg-muted/50"
               >
+                {collapsed ? (
+                  <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                ) : (
+                  <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                )}
                 <FolderOpen className="h-4 w-4 text-muted-foreground shrink-0" />
                 <span className="text-sm font-medium truncate flex-1">
                   {node.label}
@@ -203,6 +247,16 @@ export function ReaderView({
 
       {/* CENTER — selected document */}
       <section className="min-w-0 border rounded-lg p-5 bg-card">
+        {homeNode && selectedId !== homeNode.id && (
+          <button
+            type="button"
+            onClick={() => setSelectedId(homeNode.id)}
+            className="mb-3 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground hover:underline"
+          >
+            <ArrowLeft className="h-3 w-3" />
+            Back to Overview
+          </button>
+        )}
         {selectedNode && (
           <h1 className="text-2xl font-bold mb-4">
             {selectedNode.title || selectedNode.id}
@@ -220,7 +274,9 @@ export function ReaderView({
         </div>
         {showHomeContent ? (
           content[homeNode!.id] === undefined ? (
-            <p className="text-sm text-muted-foreground">Loading…</p>
+            <div className={PANE_BODY_CLASS}>
+              <p className="text-sm text-muted-foreground">Loading…</p>
+            </div>
           ) : (
             <DocumentViewer
               content={content[homeNode!.id] ?? ""}
@@ -230,7 +286,7 @@ export function ReaderView({
         ) : (
           // No home node resolves, or it's already the center document →
           // the synthesized Contents table of contents.
-          <nav className="space-y-3 max-h-[60vh] overflow-y-auto">
+          <nav className={`space-y-3 ${PANE_BODY_CLASS}`}>
             {tocGroups.map((g) => (
               <div key={g.folder}>
                 <div className="text-xs font-semibold text-muted-foreground mb-1">
