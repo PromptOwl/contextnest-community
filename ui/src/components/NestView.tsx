@@ -1276,6 +1276,17 @@ export function NestView({
   const { canManage, collabCanWrite, canEditDocs, isReadOnly, isReaderView } =
     caps;
 
+  // Reader Mode has no tab strip to trigger a folder fetch, so a nest whose
+  // docs all live one level down (the common docs-site shape) opens with
+  // only the empty root level loaded — ReaderView renders nothing. Load the
+  // nest's first top-level folder by default so there's something to read
+  // without a click; ReaderView's onExpandFolder (below) covers the rest.
+  useEffect(() => {
+    if (!isReaderView) return;
+    const first = knownFolders.find((f) => !f.path.includes("/"));
+    if (first) void fetchLevel(first.path);
+  }, [isReaderView, knownFolders, fetchLevel]);
+
   // Map nodeId → submitter so the per-row Review button can hide on
   // docs the current user submitted (separation-of-duties: authors must
   // not approve their own work). The server already rejects the call,
@@ -1849,6 +1860,8 @@ export function NestView({
           tocGroups={tocGroups}
           knownFolders={knownFolders}
           readerHomeNode={readerHomeNode}
+          onExpandFolder={fetchLevel}
+          loadingFolders={loadingFolders}
         />
       </div>
     );

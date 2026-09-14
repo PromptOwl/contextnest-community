@@ -13,7 +13,9 @@ import { conventionKey, isHomeNode } from "@/lib/nest-caps";
  * There are NO write / edit / comment / review affordances here:
  *
  *   left   — a read-only FolderTree for navigation (reuses tocGroups /
- *            knownFolders from NestView)
+ *            knownFolders from NestView). Docs are loaded lazily one folder
+ *            level at a time, same as the Documents tab: clicking a folder
+ *            row fetches its documents via onExpandFolder.
  *   center — the DocumentViewer for the selected document
  *   right  — the persistent resolved home/overview node (always visible),
  *            or a synthesized Contents table when no home node resolves.
@@ -32,6 +34,11 @@ export interface ReaderViewProps {
   knownFolders: any[];
   /** Designated home/hub node id (nest.reader_home_node), or null. */
   readerHomeNode: string | null;
+  /** Fetch a folder's documents on demand (mirrors the Documents tab's lazy
+   *  per-level loading — NestView owns the actual fetch + `nodes` merge). */
+  onExpandFolder: (path: string) => void;
+  /** Folder paths currently being fetched, for a lightweight row indicator. */
+  loadingFolders?: Set<string>;
 }
 
 export function ReaderView({
@@ -41,6 +48,8 @@ export function ReaderView({
   tocGroups,
   knownFolders,
   readerHomeNode,
+  onExpandFolder,
+  loadingFolders,
 }: ReaderViewProps) {
   // Resolve the home node: explicit designation wins; else first node whose
   // id-leaf or title matches the welcome|index|readme|home|overview convention;
@@ -145,10 +154,21 @@ export function ReaderView({
           groups={tocGroups}
           known={knownFolders}
           renderFolder={(node) => (
-            <div className="flex items-center gap-2 py-1 px-1 -mx-1">
+            <button
+              type="button"
+              onClick={() => onExpandFolder(node.path)}
+              className="flex items-center gap-2 py-1 px-1 -mx-1 w-full text-left rounded-md hover:bg-muted/50"
+            >
               <FolderOpen className="h-4 w-4 text-muted-foreground shrink-0" />
-              <span className="text-sm font-medium truncate">{node.label}</span>
-            </div>
+              <span className="text-sm font-medium truncate flex-1">
+                {node.label}
+              </span>
+              {loadingFolders?.has(node.path) && (
+                <span className="text-xs text-muted-foreground shrink-0">
+                  Loading…
+                </span>
+              )}
+            </button>
           )}
           renderDoc={(n) => (
             <button
