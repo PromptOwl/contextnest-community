@@ -836,7 +836,14 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
               </p>
               <div className="space-y-2">
                 {archivedNests.map((n: any) => {
-                  const openNest = () => onSelectNest(n.id, n.name, n.is_owner ?? false, false, true);
+                  const openNest = () =>
+                    onSelectNest(
+                      n.id,
+                      n.name,
+                      n.is_owner ?? false,
+                      n.user_id === ANON_USER_ID,
+                      true,
+                    );
                   return (
                     <div
                       key={n.id}
@@ -844,7 +851,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                       tabIndex={0}
                       onClick={openNest}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
+                        if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
                           e.preventDefault();
                           openNest();
                         }

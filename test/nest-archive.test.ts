@@ -828,3 +828,55 @@ describe("nest archive — drift scanner", () => {
     expect(after.data.entries.length).toBe(1);
   });
 });
+
+// The Archived tab sorts by archived_at, not created_at — so a nest archived
+// long after it was created still surfaces at the top when it's the one most
+// recently put away.
+describe("nest archive — archived list ordering", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let firstId: string;
+  let secondId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@acme.com", "Owner");
+
+    // Created out of archive order: "First" predates "Second" but is
+    // archived after it, so created_at DESC and archived_at DESC disagree.
+    const { data: first } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "First" },
+      owner.apiKey,
+    );
+    firstId = first.nest.id;
+    const { data: second } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Second" },
+      owner.apiKey,
+    );
+    secondId = second.nest.id;
+
+    await jsonRequest(app, "POST", `/nests/${secondId}/archive`, {}, owner.apiKey);
+    await jsonRequest(app, "POST", `/nests/${firstId}/archive`, {}, owner.apiKey);
+  }, 30000);
+
+  afterAll(() => env.cleanup());
+
+  it("orders the archived list by archived_at DESC, not created_at DESC", async () => {
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      "/nests?archived=1",
+      null,
+      owner.apiKey,
+    );
+    expect(data.nests.map((n: any) => n.id)).toEqual([firstId, secondId]);
+  });
+});

@@ -1947,10 +1947,12 @@ export function NestView({
               badge for everyone else. */}
           {canManage ? (
             // Two-state on purpose: a header shortcut for the common flip,
-            // private <-> public, and for an org nest its only move is
-            // escalate-to-public (the tooltip says so). Choosing among all
-            // three tiers lives in NestVisibilityControl (Collaborators tab /
-            // Share dialog), which is also where each tier is explained.
+            // private <-> public. An org nest routes to the full three-tier
+            // control on the Collaborators tab instead (see
+            // handleVisibilityToggle), since it can move either direction.
+            // Choosing among all three tiers lives in NestVisibilityControl
+            // (Collaborators tab / Share dialog), which is also where each
+            // tier is explained.
             <Button
               variant="outline"
               size="sm"
@@ -1964,7 +1966,7 @@ export function NestView({
                 visibility === "public"
                   ? "Public — anyone with the URL can read. Click to make private."
                   : visibility === "org"
-                    ? "Organization — everyone signed in to this deployment can read. Click to make public (anyone with the URL can read)."
+                    ? "Organization — everyone signed in to this deployment can read. Click to manage sharing (Collaborators tab)."
                     : "Private. Click to make public (anyone with the URL can read)."
               }
             >
