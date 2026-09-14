@@ -28,6 +28,7 @@ export interface NestCapsInput {
    * keep the full authoring UI.
    */
   readerMode?: boolean;
+  isArchived?: boolean;
 }
 
 export interface NestCaps {
@@ -56,7 +57,20 @@ export function deriveNestCaps({
   isOwner,
   isAdmin,
   readerMode,
+  isArchived,
 }: NestCapsInput): NestCaps {
+  // If the nest is archived, enforce read-only
+  if (isArchived) {
+    return {
+      canManage: false,
+      collabCanWrite: false,
+      canReviewDocs: false,
+      canEditDocs: false,
+      isReadOnly: true,
+      isReaderView: !!readerMode,
+    };
+  }
+
   const hasRole = (...r: string[]) => roles.some((x) => r.includes(x));
   const canManage = isOwner || isAdmin || hasRole("owner", "admin");
   const collabCanWrite =
@@ -69,6 +83,7 @@ export function deriveNestCaps({
     myStewards.some((s) => s.role === "editor" && s.scope === "nest");
   const isReadOnly = !canEditDocs && !canReviewDocs && !canManage;
   const isReaderView = !!readerMode && isReadOnly;
+
   return {
     canManage,
     collabCanWrite,

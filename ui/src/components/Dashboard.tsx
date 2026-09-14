@@ -66,6 +66,7 @@ interface DashboardProps {
     name: string,
     isOwner: boolean,
     isAnonOwned: boolean,
+    isArchived?: boolean,
   ) => void;
   onOpenReview: (nestId: string, nestName: string, nodeId: string) => void;
   /** Opens the API keys page — keys are minted and rotated there, never
@@ -834,52 +835,66 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                 answer agents over MCP, or serve published links until restored.
               </p>
               <div className="space-y-2">
-                {archivedNests.map((n: any) => (
-                  <div
-                    key={n.id}
-                    className="flex items-center gap-3 rounded-lg border px-4 py-3"
-                  >
-                    <Archive className="h-4 w-4 text-muted-foreground shrink-0" />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium">{n.name}</div>
-                      <div className="truncate text-xs text-muted-foreground">
-                        {n.archived_at
-                          ? `Archived ${relTime(n.archived_at)}`
-                          : "Archived"}
-                        {n.description ? ` — ${n.description}` : ""}
+                {archivedNests.map((n: any) => {
+                  const openNest = () => onSelectNest(n.id, n.name, n.is_owner ?? false, false, true);
+                  return (
+                    <div
+                      key={n.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={openNest}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          openNest();
+                        }
+                      }}
+                      className="flex items-center gap-3 rounded-lg border px-4 py-3 hover:bg-secondary/50 cursor-pointer"
+                    >
+                      <Archive className="h-4 w-4 text-muted-foreground shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium">{n.name}</div>
+                        <div className="truncate text-xs text-muted-foreground">
+                          {n.archived_at
+                            ? `Archived ${relTime(n.archived_at)}`
+                            : "Archived"}
+                          {n.description ? ` — ${n.description}` : ""}
+                        </div>
                       </div>
+                      {n.is_owner && (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRestoreTarget({ id: n.id, name: n.name });
+                            }}
+                            data-testid="restore-nest"
+                          >
+                            <ArchiveRestore className="h-3.5 w-3.5 mr-1.5" />
+                            Restore
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-red-700 hover:text-red-800"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDeleteTarget({
+                                id: n.id,
+                                name: n.name,
+                                isImported: !!n.is_imported,
+                              });
+                            }}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </>
+                      )}
                     </div>
-                    {n.is_owner && (
-                      <>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() =>
-                            setRestoreTarget({ id: n.id, name: n.name })
-                          }
-                          data-testid="restore-nest"
-                        >
-                          <ArchiveRestore className="h-3.5 w-3.5 mr-1.5" />
-                          Restore
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-red-700 hover:text-red-800"
-                          onClick={() =>
-                            setDeleteTarget({
-                              id: n.id,
-                              name: n.name,
-                              isImported: !!n.is_imported,
-                            })
-                          }
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
-                      </>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </>
           )}

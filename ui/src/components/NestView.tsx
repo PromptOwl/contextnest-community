@@ -152,6 +152,8 @@ interface NestViewProps {
   nestName: string;
   isOwner: boolean;
   isAnonOwned: boolean;
+  /** Nest is archived — opened from the Archived section, forces read-only. */
+  isArchived?: boolean;
   onBack: () => void;
   onOpenDocument: (
     nodeId: string | "new",
@@ -184,6 +186,7 @@ export function NestView({
   nestName,
   isOwner,
   isAnonOwned,
+  isArchived,
   onBack,
   onOpenDocument,
   onOpenTrace,
@@ -1260,6 +1263,7 @@ export function NestView({
     isOwner,
     isAdmin,
     readerMode: readerModeEnabled,
+    isArchived
   });
   // canReviewDocs is folded into isReadOnly inside caps; per-row review uses
   // canReviewNode for scope resolution, so it isn't destructured here.
