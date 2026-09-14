@@ -28,6 +28,7 @@ export interface NestCapsInput {
    * keep the full authoring UI.
    */
   readerMode?: boolean;
+  isArchived?: boolean;
 }
 
 export interface NestCaps {
@@ -49,6 +50,22 @@ export interface NestCaps {
   isReaderView: boolean;
 }
 
+/**
+ * Whether a fetched nest carries an archive timestamp. Every screen that
+ * needs archived-read-only gating (board, definitions, document editor, nest
+ * view) already fetches the nest via GET /nests/:id for other reasons — read
+ * `archived_at` off that same response here instead of trusting a boolean
+ * threaded by hand through navigation, which is how the document editor and
+ * (before this) the board/definitions pages ended up out of sync with a
+ * caller who reached them by a route that didn't happen to forward the flag
+ * (wiki-link nav, a board card click, a deep link, a page refresh).
+ */
+export function isNestArchived(
+  nest: { archived_at?: string | null } | null | undefined,
+): boolean {
+  return !!nest?.archived_at;
+}
+
 export function deriveNestCaps({
   roles,
   permission,
@@ -56,7 +73,20 @@ export function deriveNestCaps({
   isOwner,
   isAdmin,
   readerMode,
+  isArchived,
 }: NestCapsInput): NestCaps {
+  // If the nest is archived, enforce read-only
+  if (isArchived) {
+    return {
+      canManage: false,
+      collabCanWrite: false,
+      canReviewDocs: false,
+      canEditDocs: false,
+      isReadOnly: true,
+      isReaderView: !!readerMode,
+    };
+  }
+
   const hasRole = (...r: string[]) => roles.some((x) => r.includes(x));
   const canManage = isOwner || isAdmin || hasRole("owner", "admin");
   const collabCanWrite =
@@ -69,6 +99,7 @@ export function deriveNestCaps({
     myStewards.some((s) => s.role === "editor" && s.scope === "nest");
   const isReadOnly = !canEditDocs && !canReviewDocs && !canManage;
   const isReaderView = !!readerMode && isReadOnly;
+
   return {
     canManage,
     collabCanWrite,
@@ -79,6 +110,36 @@ export function deriveNestCaps({
   };
 }
 
+
+/**
+ * Reader Mode has no tab strip whose click triggers a folder fetch, so a nest
+ * whose docs all live one level down (the common docs-site shape) opens with
+ * only the empty root level loaded — ReaderView would render nothing until a
+ * folder row is clicked. Picks the first top-level folder (no "/" in its
+ * path) so NestView can eagerly fetch it alongside root, giving Reader Mode
+ * something to show without a click.
+ */
+export function firstTopLevelFolder<T extends { path: string }>(
+  knownFolders: T[],
+): T | undefined {
+  return knownFolders.find((f) => !f.path.includes("/"));
+}
+
+/**
+ * Whether a non-deleting caller may ask for a nest to be archived or deleted
+ * (Dashboard's card-grid bin icon, and NestView's overflow-menu "Delete"
+ * entry once canDeleteNest is false, share this same rule). Mirrors the
+ * server's editor gate on POST /nests/:id/request-deletion — a nest-admin
+ * collaborator or an editor may raise the request; a reviewer or viewer may
+ * not, and a caller who can already delete outright does the real thing
+ * instead of asking.
+ */
+export function canRequestNestRemoval(
+  effRole: string | null,
+  canDelete: boolean,
+): boolean {
+  return !canDelete && (effRole === "editor" || effRole === "admin");
+}
 
 /** Lowercased leaf of a node id — "nodes/guides/Welcome" → "welcome". */
 function leafOf(id: string): string {

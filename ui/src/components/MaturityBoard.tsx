@@ -30,7 +30,7 @@ import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
-import { deriveNestCaps } from "../lib/nest-caps";
+import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { slugifyFolderPath } from "../lib/folder-target";
 import { Button } from "@/components/ui/button";
@@ -53,6 +53,8 @@ interface Props {
   nestId: string;
   nestName: string;
   isOwner: boolean;
+  /** Nest is archived — opened from the Archived section, forces read-only. */
+  isArchived?: boolean;
   onBack: () => void;
   onOpenDocument: (nodeId: string) => void;
 }
@@ -121,6 +123,7 @@ export function MaturityBoard({
   nestId,
   nestName,
   isOwner,
+  isArchived,
   onBack,
   onOpenDocument,
 }: Props) {
@@ -153,6 +156,12 @@ export function MaturityBoard({
             myStewards: meta?.myStewards ?? [],
             isOwner,
             isAdmin,
+            // OR'd with the fetched nest itself, not just the isArchived prop
+            // threaded down from App's View state — this page is also
+            // reachable by a route that doesn't forward it (a deep link, a
+            // refresh while already here), and the fetch this effect already
+            // makes is the authoritative answer regardless of how we got here.
+            isArchived: isArchived || isNestArchived(meta?.nest),
           }).canEditDocs,
         );
       })
@@ -163,7 +172,7 @@ export function MaturityBoard({
     return () => {
       cancelled = true;
     };
-  }, [nestId, isOwner, isAdmin]);
+  }, [nestId, isOwner, isAdmin, isArchived]);
 
   const load = useCallback(async () => {
     setLoading(true);

@@ -25,6 +25,9 @@ export interface EditorAccessInput {
   nodeRoles: string[];
   /** Caller's share grant on this document, if any. */
   grant: "read" | "write" | null;
+  /** Nest is archived — forces read-only regardless of role, mirroring
+   *  deriveNestCaps' early return in lib/nest-caps. */
+  isArchived?: boolean;
 }
 
 export interface EditorAccess {
@@ -36,8 +39,16 @@ export interface EditorAccess {
 }
 
 export function resolveEditorAccess(input: EditorAccessInput): EditorAccess {
-  const { isNew, isOwner, isAdmin, permission, nestStewards, nodeRoles, grant } =
-    input;
+  const {
+    isNew,
+    isOwner,
+    isAdmin,
+    permission,
+    nestStewards,
+    nodeRoles,
+    grant,
+    isArchived,
+  } = input;
 
   // A NEW doc has no node to resolve a per-node role against, so this gates on
   // nest-wide capability only. Mirrors NestView's "New Document" gate.
@@ -59,9 +70,14 @@ export function resolveEditorAccess(input: EditorAccessInput): EditorAccess {
   // Stated as "who may edit", not "who is read-only". Keyed the other way
   // round — off permission === 'read' — an unresolved (or "none") permission
   // opened the authoring UI to someone the server would 403.
-  const isViewOnly = isNew
-    ? !canAuthorNew
-    : !(canAuthorNew || grant === "write" || hasNodeEditRole);
+  // Archived overrides every other signal, same as deriveNestCaps: an owner
+  // or admin caretaker reopening an archived nest to consider restoring it
+  // still can't save, so the editor must not offer to.
+  const isViewOnly = isArchived
+    ? true
+    : isNew
+      ? !canAuthorNew
+      : !(canAuthorNew || grant === "write" || hasNodeEditRole);
 
   // Read-only when the caller's only steward rows are reviewer/viewer: editors
   // author, reviewers approve, viewers read. Editor + reviewer is NOT

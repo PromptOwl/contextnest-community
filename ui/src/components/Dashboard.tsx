@@ -2,7 +2,13 @@
  * Dashboard — landing page with server info + nest list.
  */
 import React, { useState, useEffect, useMemo } from "react";
+import { cn } from "@/lib/utils";
 import * as api from "../lib/api";
+import {
+  NOTIFICATIONS_PREVIEW_COUNT,
+  dismissNotification,
+  visibleNotifications,
+} from "../lib/notifications-preview";
 import { useQueryClient, useQuery } from "@tanstack/react-query";
 import { reads, useNests } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
@@ -20,6 +26,7 @@ import {
   visibleUnsynced,
   type NestScope,
 } from "../lib/dashboard-scope";
+import { canRequestNestRemoval } from "../lib/nest-caps";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
@@ -66,6 +73,7 @@ interface DashboardProps {
     name: string,
     isOwner: boolean,
     isAnonOwned: boolean,
+    isArchived?: boolean,
   ) => void;
   onOpenReview: (nestId: string, nestName: string, nodeId: string) => void;
   /** Opens the API keys page — keys are minted and rotated there, never
@@ -114,6 +122,11 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   const [workBulkAction, setWorkBulkAction] = useState<
     "approve" | "reject" | null
   >(null);
+  // The notifications strip defaults to a compact 8-row preview (matches the
+  // panel's original design); "Show all" reveals the rest of what the server
+  // already fetched (up to 50, see /me/work) in a scrollable list instead of
+  // discarding them.
+  const [notificationsExpanded, setNotificationsExpanded] = useState(false);
   // Served from the shared read cache: coming back to the dashboard paints the
   // previous list immediately and revalidates behind it. `isLoading` is true
   // only on a genuine first load with nothing cached, so the loader below still
@@ -206,6 +219,12 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   // the confirmation copy without prop-drilling through a separate child.
   const [deleteTarget, setDeleteTarget] = useState<
     { id: string; name: string; isImported: boolean } | null
+  >(null);
+  // Non-owner asking for the whole nest to be archived/deleted — same flow
+  // NestView's overflow menu offers an editor, just reachable from the card
+  // grid too (CU-wdqcq01wb1).
+  const [nestRemovalTarget, setNestRemovalTarget] = useState<
+    { id: string; name: string } | null
   >(null);
   const [renameTarget, setRenameTarget] = useState<
     { id: string; name: string; description: string | null } | null
@@ -507,9 +526,18 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
 
   // A notification names a document or a nest — clicking it goes there. The
   // document is the target when the row resolves to one; otherwise the nest.
+  // Opening it also marks it read, same as the per-row dismiss button, so it
+  // doesn't keep sitting in the (unread-only) list — the mutation's own
+  // invalidatePath("/me") refreshes the cached /me/work read for everyone
+  // else subscribed to it.
   const openNotification = (n: api.WatcherNotification) => {
     const nest = allNests.find((x) => x.id === n.nest_id);
     const name = nest?.name ?? "";
+    api.markNotificationsRead([n.id]).catch(() => {});
+    setWork((prev) => ({
+      ...prev,
+      notifications: dismissNotification(prev.notifications ?? [], n.id),
+    }));
     if (n.node_id) onOpenReview(n.nest_id, name, n.node_id);
     else if (nest)
       onSelectNest(
@@ -721,6 +749,10 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
     setDeleteTarget({ id: nestId, name: nestName, isImported });
   };
 
+  const requestNestRemoval = (nestId: string, nestName: string) => {
+    setNestRemovalTarget({ id: nestId, name: nestName });
+  };
+
   return (
     <div className="space-y-4">
       {/* Server info banner */}
@@ -834,52 +866,73 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                 answer agents over MCP, or serve published links until restored.
               </p>
               <div className="space-y-2">
-                {archivedNests.map((n: any) => (
-                  <div
-                    key={n.id}
-                    className="flex items-center gap-3 rounded-lg border px-4 py-3"
-                  >
-                    <Archive className="h-4 w-4 text-muted-foreground shrink-0" />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium">{n.name}</div>
-                      <div className="truncate text-xs text-muted-foreground">
-                        {n.archived_at
-                          ? `Archived ${relTime(n.archived_at)}`
-                          : "Archived"}
-                        {n.description ? ` — ${n.description}` : ""}
+                {archivedNests.map((n: any) => {
+                  const openNest = () =>
+                    onSelectNest(
+                      n.id,
+                      n.name,
+                      n.is_owner ?? false,
+                      n.user_id === ANON_USER_ID,
+                      true,
+                    );
+                  return (
+                    <div
+                      key={n.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={openNest}
+                      onKeyDown={(e) => {
+                        if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
+                          e.preventDefault();
+                          openNest();
+                        }
+                      }}
+                      className="flex items-center gap-3 rounded-lg border px-4 py-3 hover:bg-secondary/50 cursor-pointer"
+                    >
+                      <Archive className="h-4 w-4 text-muted-foreground shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium">{n.name}</div>
+                        <div className="truncate text-xs text-muted-foreground">
+                          {n.archived_at
+                            ? `Archived ${relTime(n.archived_at)}`
+                            : "Archived"}
+                          {n.description ? ` — ${n.description}` : ""}
+                        </div>
                       </div>
+                      {n.is_owner && (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRestoreTarget({ id: n.id, name: n.name });
+                            }}
+                            data-testid="restore-nest"
+                          >
+                            <ArchiveRestore className="h-3.5 w-3.5 mr-1.5" />
+                            Restore
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-red-700 hover:text-red-800"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDeleteTarget({
+                                id: n.id,
+                                name: n.name,
+                                isImported: !!n.is_imported,
+                              });
+                            }}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </>
+                      )}
                     </div>
-                    {n.is_owner && (
-                      <>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() =>
-                            setRestoreTarget({ id: n.id, name: n.name })
-                          }
-                          data-testid="restore-nest"
-                        >
-                          <ArchiveRestore className="h-3.5 w-3.5 mr-1.5" />
-                          Restore
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-red-700 hover:text-red-800"
-                          onClick={() =>
-                            setDeleteTarget({
-                              id: n.id,
-                              name: n.name,
-                              isImported: !!n.is_imported,
-                            })
-                          }
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
-                      </>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </>
           )}
@@ -910,8 +963,16 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                       Mark all read
                     </button>
                   </div>
-                  <div className="divide-y border-t">
-                    {work.notifications!.slice(0, 8).map((n) => (
+                  <div
+                    className={cn(
+                      "divide-y border-t",
+                      notificationsExpanded && "max-h-80 overflow-y-auto",
+                    )}
+                  >
+                    {visibleNotifications(
+                      work.notifications!,
+                      notificationsExpanded,
+                    ).map((n) => (
                       <div
                         key={n.id}
                         className="flex items-center gap-2 px-4 py-2 text-xs hover:bg-amber-500/10"
@@ -938,9 +999,10 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                               await api.markNotificationsRead([n.id]);
                               setWork((prev) => ({
                                 ...prev,
-                                notifications: (
-                                  prev.notifications ?? []
-                                ).filter((x) => x.id !== n.id),
+                                notifications: dismissNotification(
+                                  prev.notifications ?? [],
+                                  n.id,
+                                ),
                               }));
                             } catch (err: any) {
                               // Same feedback the row's siblings give — a
@@ -957,6 +1019,21 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                       </div>
                     ))}
                   </div>
+                  {work.notifications!.length > NOTIFICATIONS_PREVIEW_COUNT && (
+                    <div className="border-t px-4 py-1.5 text-center">
+                      <button
+                        type="button"
+                        className="text-xs text-primary hover:underline"
+                        onClick={() =>
+                          setNotificationsExpanded((expanded) => !expanded)
+                        }
+                      >
+                        {notificationsExpanded
+                          ? "Show less"
+                          : `Show all (${work.notifications!.length})`}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
               <div className="flex items-center gap-2 mb-2">
@@ -1867,6 +1944,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                               : permission === "read"
                                 ? "viewer"
                                 : null;
+                  const canRequestRemoval = canRequestNestRemoval(effRole, canDelete);
                   const roleBadge = effRole
                     ? ({
                       admin: {
@@ -1918,7 +1996,10 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                       shared/reviewer/viewer nests don't show teasing icons.
                       Rename: owner or nest-admin (PATCH /nests/:nestId).
                       Delete: owner, or admin caretaker on the ungoverned
-                      commons in key mode.
+                      commons in key mode. An editor (or a non-owner nest
+                      admin) gets the same bin icon, but it opens the
+                      request-removal flow instead — same as NestView's
+                      overflow menu, just reachable from the card too.
                       Pin: NO gate — a pin is this person's own bookmark, so a
                       viewer pins exactly as an owner does, and it is the one
                       action here everybody gets.
@@ -1943,14 +2024,20 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                             <Pencil className="h-3.5 w-3.5" />
                           </button>
                           )}
-                          {canDelete && (
+                          {(canDelete || canRequestRemoval) && (
                           <button
                             type="button"
-                            aria-label={`Delete nest ${nest.name}`}
-                            title="Delete nest"
+                            aria-label={
+                              canDelete
+                                ? `Delete nest ${nest.name}`
+                                : `Request removal of nest ${nest.name}`
+                            }
+                            title={canDelete ? "Delete nest" : "Request nest removal"}
                             onClick={(e) => {
                               e.stopPropagation();
-                              requestDelete(nest.id, nest.name, !!nest.is_imported);
+                              canDelete
+                                ? requestDelete(nest.id, nest.name, !!nest.is_imported)
+                                : requestNestRemoval(nest.id, nest.name);
                             }}
                             className="p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                           >
@@ -2353,6 +2440,41 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                   await fetchNests();
                 }
           }
+        />
+      )}
+
+      {/* Editor (or non-owner nest admin) asking for the nest to be archived
+          or deleted — the card-grid equivalent of NestView's overflow-menu
+          "Delete" entry once canDeleteNest is false. Same copy, same two
+          outcomes, same endpoint. */}
+      {nestRemovalTarget && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setNestRemovalTarget(null)}
+          title={`Request removal of "${nestRemovalTarget.name}"`}
+          description="A nest owner or admin reviews this. Nothing is removed yet — ask for the nest to be archived (reversible, nothing deleted) or deleted outright."
+          label="Why should it be removed?"
+          placeholder="e.g. project wound down, superseded by another nest"
+          confirmLabel="Request deletion"
+          secondaryLabel="Request archive"
+          onSecondary={async (reason) => {
+            await api.requestTargetDeletion(
+              nestRemovalTarget.id,
+              "nest_archive",
+              nestRemovalTarget.id,
+              reason,
+            );
+            toast.success("Archive requested — a nest admin will review it");
+          }}
+          onConfirm={async (reason) => {
+            await api.requestTargetDeletion(
+              nestRemovalTarget.id,
+              "nest",
+              nestRemovalTarget.id,
+              reason,
+            );
+            toast.success("Deletion requested — a nest admin will review it");
+          }}
         />
       )}
 

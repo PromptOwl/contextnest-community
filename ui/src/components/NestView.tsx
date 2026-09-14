@@ -9,6 +9,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
 import { visibleDocuments, documentsTabIsEmpty } from "../lib/visible-documents";
+import { documentFacets } from "../lib/document-facets";
 import { resolveWikiTarget } from "../lib/wiki-preview";
 import { activityTimestamp } from "../lib/node-sort";
 import { linkHealth } from "../lib/link-health";
@@ -82,7 +83,11 @@ import { PublishDialog } from "./PublishDialog";
 import { NestVisibilityControl } from "./NestVisibilityControl";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { NestPageHeader } from "./NestPageHeader";
-import { deriveNestCaps } from "../lib/nest-caps";
+import {
+  deriveNestCaps,
+  firstTopLevelFolder,
+  isNestArchived,
+} from "../lib/nest-caps";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { Button } from "@/components/ui/button";
@@ -152,6 +157,8 @@ interface NestViewProps {
   nestName: string;
   isOwner: boolean;
   isAnonOwned: boolean;
+  /** Nest is archived — opened from the Archived section, forces read-only. */
+  isArchived?: boolean;
   onBack: () => void;
   onOpenDocument: (
     nodeId: string | "new",
@@ -184,6 +191,7 @@ export function NestView({
   nestName,
   isOwner,
   isAnonOwned,
+  isArchived,
   onBack,
   onOpenDocument,
   onOpenTrace,
@@ -379,6 +387,11 @@ export function NestView({
   // picker has usually already cached.
   const [readerHomeTitle, setReaderHomeTitle] = useState<string | null>(null);
   const [isImported, setIsImported] = useState(false);
+  // Fetched straight off GET /nests/:id, independent of the isArchived prop
+  // threaded down from App's View state — a deep link or a page refresh
+  // lands here without that prop ever being set, so the caps below fall back
+  // to whichever of the two actually has the answer.
+  const [nestArchivedAt, setNestArchivedAt] = useState<string | null>(null);
   // Caller's nest-level permission (from GET /nests/:id).
   const [permission, setPermission] = useState<string | null>(null);
   // Stewardship is governance of the commons / one's own nests, not a tool
@@ -397,6 +410,13 @@ export function NestView({
   const canManageGovernance =
     (isAdmin && (isOwner || isAnonOwned)) ||
     (!isAdmin && (isOwner || permission === "owner" || permission === "admin"));
+  // Public Docs Reader Mode: unlike governance above, the server admin keeps
+  // access on EVERY nest here (matches the handler's own gate in
+  // sharing-routes.ts — isServerAdminUserId is never narrowed to "your own
+  // nests"), on top of which the nest's own owner/admin collaborator can now
+  // also configure it without needing server-admin rights.
+  const canManageReaderMode =
+    isAdmin || isOwner || permission === "owner" || permission === "admin";
   // Caller's merged effective roles (collaborator + steward), nest-wide.
   const [roles, setRoles] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
@@ -587,6 +607,13 @@ export function NestView({
   // Folder levels loaded so far, so a refetch after a mutation restores
   // exactly what is on screen. A ref, not state: it must not re-run fetchData.
   const loadedFolders = useRef<Set<string>>(new Set());
+  // Reactive mirror of the ref above, for Reader Mode only: it needs to know
+  // WHICH known folders already have their docs fetched so an unfetched
+  // folder can default to a collapsed row instead of showing an "expanded"
+  // chevron over nothing.
+  const [loadedFolderPaths, setLoadedFolderPaths] = useState<Set<string>>(
+    new Set(),
+  );
 
   /**
    * Fetch ONE folder level and fold it into `nodes`, replacing whatever was
@@ -602,6 +629,7 @@ export function NestView({
       try {
         const res = await qc.fetchQuery(reads.folderNodes(nestId, folder));
         loadedFolders.current.add(folder);
+        setLoadedFolderPaths((prev) => new Set(prev).add(folder));
         setNodes((prev) => [
           ...prev.filter((n) => folderOfNode(n.id || "") !== folder),
           ...res.nodes,
@@ -900,6 +928,7 @@ export function NestView({
       setNestDescription((nestMeta.nest as any).description ?? null);
       setReaderModeEnabled(!!(nestMeta.nest as any).reader_mode);
       setReaderHomeNode((nestMeta.nest as any).reader_home_node ?? null);
+      setNestArchivedAt((nestMeta.nest as any).archived_at ?? null);
     }
     if (nestMeta?.permission) {
       setPermission(nestMeta.permission);
@@ -1222,16 +1251,20 @@ export function NestView({
       clear: () => setDateFilter("any"),
     });
 
-  // All tags in the nest with usage counts — the always-visible filter bar.
-  const allTags = useMemo(
-    () =>
-      Object.entries(census?.tags ?? {})
-        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-        .map(([tag, count]) => ({ tag, count })),
-    [census],
+  // Tag counts + "recently edited" for the Documents tab's own facet bar,
+  // derived from the FILTERED list (not the nest-wide census) so an active
+  // status/type/author/date/search/tag filter narrows both the same way it
+  // narrows the document list below them — down to empty when nothing matches.
+  const documentFacetsForFilter = useMemo(
+    () => documentFacets(filtered),
+    [filtered],
   );
+  const allTags = documentFacetsForFilter.tags;
+  const documentsRecentlyEdited = documentFacetsForFilter.recent;
 
   // Quick-access strip; shown on the Overview tab as recently-edited rows.
+  // Nest-wide on purpose — the Overview tab has no document filter of its
+  // own, so this reflects the whole nest, unlike documentsRecentlyEdited above.
   const recentlyEdited = census?.recent ?? [];
 
   // Genuine, non-capped metric for the Overview stat tile: how many documents
@@ -1260,11 +1293,23 @@ export function NestView({
     isOwner,
     isAdmin,
     readerMode: readerModeEnabled,
+    isArchived: isArchived || isNestArchived({ archived_at: nestArchivedAt }),
   });
   // canReviewDocs is folded into isReadOnly inside caps; per-row review uses
   // canReviewNode for scope resolution, so it isn't destructured here.
   const { canManage, collabCanWrite, canEditDocs, isReadOnly, isReaderView } =
     caps;
+
+  // Reader Mode has no tab strip to trigger a folder fetch, so a nest whose
+  // docs all live one level down (the common docs-site shape) opens with
+  // only the empty root level loaded — ReaderView renders nothing. Load the
+  // nest's first top-level folder by default so there's something to read
+  // without a click; ReaderView's onExpandFolder (below) covers the rest.
+  useEffect(() => {
+    if (!isReaderView) return;
+    const first = firstTopLevelFolder(knownFolders);
+    if (first) void fetchLevel(first.path);
+  }, [isReaderView, knownFolders, fetchLevel]);
 
   // Map nodeId → submitter so the per-row Review button can hide on
   // docs the current user submitted (separation-of-duties: authors must
@@ -1692,6 +1737,13 @@ export function NestView({
     // Going public makes the nest readable by anyone on the internet, outside
     // your organization — confirm first (and send acknowledge_public). Going
     // back to private is unguarded.
+    // Minimal UX improvement: when the nest is Organization-visible, route to
+    // the full three-tier control on the Collaborators tab so callers discover
+    // the Private option too (org → private path). (Bugfix)
+    if (visibility === "org") {
+      setActiveTab("collaborators");
+      return;
+    }
     if (visibility !== "public") {
       setConfirmPublic(true);
       return;
@@ -1699,8 +1751,9 @@ export function NestView({
     await applyVisibility("private");
   };
 
-  // Public Docs Reader Mode config (superadmin-only; the server hard-gates on
-  // isServerAdminUserId). Optimistic flip with revert on failure.
+  // Public Docs Reader Mode config (server admin, or this nest's own
+  // owner/admin — see canManageReaderMode below). Optimistic flip with
+  // revert on failure.
   const handleReaderModeToggle = async () => {
     const next = !readerModeEnabled;
     setReaderModeEnabled(next);
@@ -1832,6 +1885,9 @@ export function NestView({
           tocGroups={tocGroups}
           knownFolders={knownFolders}
           readerHomeNode={readerHomeNode}
+          onExpandFolder={fetchLevel}
+          loadingFolders={loadingFolders}
+          loadedFolders={loadedFolderPaths}
         />
       </div>
     );
@@ -1930,10 +1986,12 @@ export function NestView({
               badge for everyone else. */}
           {canManage ? (
             // Two-state on purpose: a header shortcut for the common flip,
-            // private <-> public, and for an org nest its only move is
-            // escalate-to-public (the tooltip says so). Choosing among all
-            // three tiers lives in NestVisibilityControl (Collaborators tab /
-            // Share dialog), which is also where each tier is explained.
+            // private <-> public. An org nest routes to the full three-tier
+            // control on the Collaborators tab instead (see
+            // handleVisibilityToggle), since it can move either direction.
+            // Choosing among all three tiers lives in NestVisibilityControl
+            // (Collaborators tab / Share dialog), which is also where each
+            // tier is explained.
             <Button
               variant="outline"
               size="sm"
@@ -1947,7 +2005,7 @@ export function NestView({
                 visibility === "public"
                   ? "Public — anyone with the URL can read. Click to make private."
                   : visibility === "org"
-                    ? "Organization — everyone signed in to this deployment can read. Click to make public (anyone with the URL can read)."
+                    ? "Organization — everyone signed in to this deployment can read. Click to manage sharing (Collaborators tab)."
                     : "Private. Click to make public (anyone with the URL can read)."
               }
             >
@@ -1992,11 +2050,12 @@ export function NestView({
               </Badge>
             )
           )}
-          {/* Public Docs Reader Mode — superadmin-only config (isAdmin ==
-              server/super admin). A menu rather than a toggle: the landing
-              document is part of the same setting, and changing it must not
-              mean switching reader mode off and on again. */}
-          {isAdmin && (
+          {/* Public Docs Reader Mode config — server admin, or this nest's own
+              owner/admin (see canManageReaderMode). A menu rather than a
+              toggle: the landing document is part of the same setting, and
+              changing it must not mean switching reader mode off and on
+              again. */}
+          {canManageReaderMode && (
             <Button
               variant="outline"
               size="sm"
@@ -2190,8 +2249,11 @@ export function NestView({
             // outright, an editor raises a request an owner/admin actions.
             // Hidden below owner once a nest flag is already pending, and
             // withheld from viewers and reviewer-only stewards — neither may
-            // ask for a nest to be destroyed (canRequestDeletion).
+            // ask for a nest to be destroyed (canRequestDeletion). Also
+            // withheld outright when read-only (e.g. an archived nest) —
+            // canDeleteNest/canEditDocs don't fold in isArchived themselves.
             if (
+              !isReadOnly &&
               (canDeleteNest || canEditDocs) &&
               (canDeleteNest || !nestFlagPending)
             )
@@ -2909,10 +2971,10 @@ export function NestView({
                   )}
                 </div>
               )}
-              {recentlyEdited.length > 0 && (
+              {documentsRecentlyEdited.length > 0 && (
                 <div className="flex items-center flex-wrap gap-1.5 mb-3 text-xs">
                   <span className="text-muted-foreground">Recently edited:</span>
-                  {recentlyEdited.map((n) => (
+                  {documentsRecentlyEdited.map((n) => (
                     <button
                       key={n.id}
                       type="button"
@@ -3004,8 +3066,12 @@ export function NestView({
                   // hidden outright for viewers of any kind: proposing a
                   // deletion is an editor's act, and the server refuses them
                   // (canRequestDeletion), so the affordance would only lead to
-                  // a 403.
+                  // a 403. Also hidden outright when read-only (e.g. an
+                  // archived nest) — canDelete's authoredByMe branch and
+                  // canEditNode's per-document write-grant branch don't fold
+                  // in isReadOnly themselves.
                   const showDeleteAction =
+                    !isReadOnly &&
                     (canDelete || canEditNode(node)) && (canDelete || !flagPending);
                   const openDeleteFlow = () =>
                     canDelete ? setDeleteNodeTarget(node) : setDeletionTarget(node);

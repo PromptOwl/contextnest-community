@@ -73,6 +73,8 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
       /** Seed the nest list's search filter when arriving via a tag
        *  click on a document detail page. */
       initialSearch?: string;
@@ -120,6 +122,8 @@ type View =
       isOwner: boolean;
       isAnonOwned: boolean;
       readerMode?: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
     }
   | {
       page: "workflows";
@@ -128,6 +132,8 @@ type View =
       isOwner: boolean;
       isAnonOwned: boolean;
       readerMode?: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
     }
   | {
       page: "definitions";
@@ -136,6 +142,8 @@ type View =
       isOwner: boolean;
       isAnonOwned: boolean;
       readerMode?: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
     }
   | {
       page: "board";
@@ -144,6 +152,8 @@ type View =
       isOwner: boolean;
       isAnonOwned: boolean;
       readerMode?: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
     }
   | {
       /** Nest-scoped activity trace (owner/nest-admin) — ActivityTracePage
@@ -1030,6 +1040,7 @@ export default function App() {
                   isOwner: view.isOwner,
                   isAnonOwned: view.isAnonOwned,
                   readerMode,
+                  isArchived: view.isArchived,
                 } as View)
               }
             >
@@ -1108,13 +1119,14 @@ export default function App() {
         {view.page === "dashboard" && (
           <Dashboard
             onManageKeys={() => setView({ page: "api-keys" })}
-            onSelectNest={(id, name, isOwner, isAnonOwned) =>
+            onSelectNest={(id, name, isOwner, isAnonOwned, isArchived) =>
               setView({
                 page: "nest",
                 nestId: id,
                 nestName: name,
                 isOwner,
                 isAnonOwned,
+                isArchived,
               })
             }
             onOpenReview={(nestId, nestName, nodeId) =>
@@ -1135,6 +1147,7 @@ export default function App() {
             nestName={view.nestName}
             isOwner={view.isOwner}
             isAnonOwned={view.isAnonOwned}
+            isArchived={view.isArchived}
             initialSearch={view.initialSearch}
             initialTags={view.initialTags}
             initialFolder={view.initialFolder}
@@ -1317,6 +1330,7 @@ export default function App() {
           <DefinitionsPage
             nestId={view.nestId}
             nestName={view.nestName}
+            isArchived={view.isArchived}
             onBack={leaveNest}
           />
         )}
@@ -1326,6 +1340,7 @@ export default function App() {
             nestId={view.nestId}
             nestName={view.nestName}
             isOwner={view.isOwner}
+            isArchived={view.isArchived}
             onBack={leaveNest}
             onOpenDocument={(nodeId) =>
               setView({
