@@ -125,6 +125,22 @@ export function firstTopLevelFolder<T extends { path: string }>(
   return knownFolders.find((f) => !f.path.includes("/"));
 }
 
+/**
+ * Whether a non-deleting caller may ask for a nest to be archived or deleted
+ * (Dashboard's card-grid bin icon, and NestView's overflow-menu "Delete"
+ * entry once canDeleteNest is false, share this same rule). Mirrors the
+ * server's editor gate on POST /nests/:id/request-deletion — a nest-admin
+ * collaborator or an editor may raise the request; a reviewer or viewer may
+ * not, and a caller who can already delete outright does the real thing
+ * instead of asking.
+ */
+export function canRequestNestRemoval(
+  effRole: string | null,
+  canDelete: boolean,
+): boolean {
+  return !canDelete && (effRole === "editor" || effRole === "admin");
+}
+
 /** Lowercased leaf of a node id — "nodes/guides/Welcome" → "welcome". */
 function leafOf(id: string): string {
   const path = id.startsWith("nodes/") ? id.slice(6) : id;

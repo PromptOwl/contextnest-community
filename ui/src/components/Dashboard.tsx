@@ -26,6 +26,7 @@ import {
   visibleUnsynced,
   type NestScope,
 } from "../lib/dashboard-scope";
+import { canRequestNestRemoval } from "../lib/nest-caps";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
@@ -218,6 +219,12 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   // the confirmation copy without prop-drilling through a separate child.
   const [deleteTarget, setDeleteTarget] = useState<
     { id: string; name: string; isImported: boolean } | null
+  >(null);
+  // Non-owner asking for the whole nest to be archived/deleted — same flow
+  // NestView's overflow menu offers an editor, just reachable from the card
+  // grid too (CU-wdqcq01wb1).
+  const [nestRemovalTarget, setNestRemovalTarget] = useState<
+    { id: string; name: string } | null
   >(null);
   const [renameTarget, setRenameTarget] = useState<
     { id: string; name: string; description: string | null } | null
@@ -740,6 +747,10 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
 
   const requestDelete = (nestId: string, nestName: string, isImported = false) => {
     setDeleteTarget({ id: nestId, name: nestName, isImported });
+  };
+
+  const requestNestRemoval = (nestId: string, nestName: string) => {
+    setNestRemovalTarget({ id: nestId, name: nestName });
   };
 
   return (
@@ -1933,6 +1944,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                               : permission === "read"
                                 ? "viewer"
                                 : null;
+                  const canRequestRemoval = canRequestNestRemoval(effRole, canDelete);
                   const roleBadge = effRole
                     ? ({
                       admin: {
@@ -1984,7 +1996,10 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                       shared/reviewer/viewer nests don't show teasing icons.
                       Rename: owner or nest-admin (PATCH /nests/:nestId).
                       Delete: owner, or admin caretaker on the ungoverned
-                      commons in key mode.
+                      commons in key mode. An editor (or a non-owner nest
+                      admin) gets the same bin icon, but it opens the
+                      request-removal flow instead — same as NestView's
+                      overflow menu, just reachable from the card too.
                       Pin: NO gate — a pin is this person's own bookmark, so a
                       viewer pins exactly as an owner does, and it is the one
                       action here everybody gets.
@@ -2009,14 +2024,20 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                             <Pencil className="h-3.5 w-3.5" />
                           </button>
                           )}
-                          {canDelete && (
+                          {(canDelete || canRequestRemoval) && (
                           <button
                             type="button"
-                            aria-label={`Delete nest ${nest.name}`}
-                            title="Delete nest"
+                            aria-label={
+                              canDelete
+                                ? `Delete nest ${nest.name}`
+                                : `Request removal of nest ${nest.name}`
+                            }
+                            title={canDelete ? "Delete nest" : "Request nest removal"}
                             onClick={(e) => {
                               e.stopPropagation();
-                              requestDelete(nest.id, nest.name, !!nest.is_imported);
+                              canDelete
+                                ? requestDelete(nest.id, nest.name, !!nest.is_imported)
+                                : requestNestRemoval(nest.id, nest.name);
                             }}
                             className="p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                           >
@@ -2419,6 +2440,41 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                   await fetchNests();
                 }
           }
+        />
+      )}
+
+      {/* Editor (or non-owner nest admin) asking for the nest to be archived
+          or deleted — the card-grid equivalent of NestView's overflow-menu
+          "Delete" entry once canDeleteNest is false. Same copy, same two
+          outcomes, same endpoint. */}
+      {nestRemovalTarget && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setNestRemovalTarget(null)}
+          title={`Request removal of "${nestRemovalTarget.name}"`}
+          description="A nest owner or admin reviews this. Nothing is removed yet — ask for the nest to be archived (reversible, nothing deleted) or deleted outright."
+          label="Why should it be removed?"
+          placeholder="e.g. project wound down, superseded by another nest"
+          confirmLabel="Request deletion"
+          secondaryLabel="Request archive"
+          onSecondary={async (reason) => {
+            await api.requestTargetDeletion(
+              nestRemovalTarget.id,
+              "nest_archive",
+              nestRemovalTarget.id,
+              reason,
+            );
+            toast.success("Archive requested — a nest admin will review it");
+          }}
+          onConfirm={async (reason) => {
+            await api.requestTargetDeletion(
+              nestRemovalTarget.id,
+              "nest",
+              nestRemovalTarget.id,
+              reason,
+            );
+            toast.success("Deletion requested — a nest admin will review it");
+          }}
         />
       )}
 
