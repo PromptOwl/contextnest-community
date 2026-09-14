@@ -4,9 +4,10 @@
 
 `client` — caller attribution on every read and write.
 
-Every node write (`POST /nests/:id/nodes`, `PATCH /nests/:id/nodes/:nodeId`,
-`POST .../approve`) and every MCP tool call now accepts an optional `client`
-object naming the calling agent and its session, plus any custom scalar keys:
+Every node write and every MCP tool call now accepts an optional `client` object
+naming the calling agent and its session, plus any custom scalar keys — create,
+edit, approve, revert, and import (`POST /nests/import`,
+`POST /nests/unsynced/sync`) on the REST side, every tool on the MCP side:
 
 ```jsonc
 { "title": "API Design", "content": "…",
@@ -14,11 +15,12 @@ object naming the calling agent and its session, plus any custom scalar keys:
 ```
 
 A write that seals a version records it on that version, so version history —
-the REST list, `context_versions`, and the history panel in the UI — answers
-"which agent wrote v7, in which session". Every MCP tool call and every traced
-REST request records it on the activity trace, which is where a READ is
-attributed: a read seals no version to carry it. `editedBy` is untouched and
-remains the authoritative authoring record.
+the REST list, `context_versions` (prose and structured payload alike), and the
+history panel in the UI — answers "which agent wrote v7, in which session".
+Every MCP tool call and every traced REST request records it on the activity
+trace, which is where a READ is attributed: a read seals no version to carry it.
+The admin Activity Trace shows it under the caller it belongs to. `editedBy` is
+untouched and remains the authoritative authoring record.
 
 Everything about it is optional — the object and each field within it. No
 endpoint requires it, an unattributed call is a valid call, and a call carrying

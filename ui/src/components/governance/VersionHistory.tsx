@@ -21,6 +21,7 @@ import { unifiedDiff } from "./diff-util";
 import { resolveBody } from "./version-body";
 import { DocumentViewer } from "../DocumentViewer";
 import { parseServerDate } from "@/lib/dates";
+import { formatClient, type ClientAttribution } from "@/lib/client-attribution";
 
 export interface Version {
   version: number;
@@ -51,20 +52,7 @@ export interface Version {
    * identity the server authenticated, this is what the caller said about
    * itself.
    */
-  client?: Record<string, string | number | boolean>;
-}
-
-/** "claude-code · s-9f2 · run=7" — the agent first, then the session, then any
- *  custom keys in the order the caller sent them. */
-function formatClient(client: Record<string, string | number | boolean>): string {
-  const { agent, session_id, ...custom } = client;
-  return [
-    agent,
-    session_id,
-    ...Object.entries(custom).map(([k, v]) => `${k}=${v}`),
-  ]
-    .filter((part) => part !== undefined && part !== "")
-    .join(" · ");
+  client?: ClientAttribution;
 }
 
 /**

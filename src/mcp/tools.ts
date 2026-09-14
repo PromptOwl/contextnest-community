@@ -1908,7 +1908,11 @@ async function runTool(
       const list = allVersions
         .map(
           (v) =>
-            `- **v${v.version}** ${v.status}${v.version === approved ? " (AI-active)" : ""} — by ${v.editedBy} at ${v.editedAt}${v.changeNote ? ` "${v.changeNote}"` : ""}`,
+            `- **v${v.version}** ${v.status}${v.version === approved ? " (AI-active)" : ""} — by ${v.editedBy} at ${v.editedAt}${v.changeNote ? ` "${v.changeNote}"` : ""}${
+              // §9.4: which agent wrote it. In the prose as well as the
+              // structured payload — a chat client reads only this half.
+              v.client?.agent ? ` [via ${v.client.agent}]` : ""
+            }`,
         )
         .join("\n");
 
@@ -2085,6 +2089,7 @@ async function runTool(
           userId,
           args.name,
           userEmail,
+          ctx.client,
         );
         return `Synced folder "${args.name}" → nest **${nest.name}** (${nest.id}) with ${documents} document(s).`;
       } catch (err: any) {

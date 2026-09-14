@@ -48,6 +48,7 @@ import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
 import { ANON_USER_ID } from "../shared/constants.js";
+import { attributeRequest } from "../shared/client-metadata.js";
 
 /**
  * Effective permission for a nest, honoring open-mode + anon-owned nests.
@@ -377,7 +378,14 @@ nestRoutes.post("/:nestId", async (c) => {
     }
     const email = await resolveCallerEmail(userId);
     if (body.finalize) {
-      return c.json({ nest, documents: await registerImportedDocuments(target, email) });
+      return c.json({
+        nest,
+        documents: await registerImportedDocuments(
+          target,
+          email,
+          attributeRequest(c, (body as { client?: unknown }).client),
+        ),
+      });
     }
     // Staging writes files straight into vault storage, skipping the node
     // creation path and its title/id validation and write locks. That is the
@@ -417,7 +425,11 @@ nestRoutes.post("/:nestId", async (c) => {
     }
     // Seed governance rows for the documents already in the folder so they
     // list as published and edit from their real version (not from scratch).
-    const documents = await registerImportedDocuments(nest.id, email);
+    const documents = await registerImportedDocuments(
+      nest.id,
+      email,
+      attributeRequest(c, (body as { client?: unknown }).client),
+    );
     return c.json({ nest, documents, rejected }, 201);
   } catch (err) {
     // The nest row exists before its content does, so a failed first chunk
@@ -461,7 +473,7 @@ nestRoutes.post("/:nestId/sync", async (c) => {
   if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
     throw new ForbiddenError("Only the server admin can sync folders");
   }
-  const body = await c.req.json<{ name?: string }>();
+  const body = await c.req.json<{ name?: string; client?: unknown }>();
   if (!body?.name) {
     throw new ValidationError("name is required");
   }
@@ -469,6 +481,7 @@ nestRoutes.post("/:nestId/sync", async (c) => {
     userId,
     body.name,
     await resolveCallerEmail(userId),
+    attributeRequest(c, body.client),
   );
   return c.json(result, 201);
 });

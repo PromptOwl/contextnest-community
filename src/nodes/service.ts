@@ -1685,7 +1685,10 @@ export async function alignOnDiskStatus(
 
 export async function registerImportedDocuments(
   nestId: string,
-  userEmail: string
+  userEmail: string,
+  /** Caller attribution for the import (§9.4) — recorded on every version row
+   *  this registration seeds, so a folder an agent imported says so. */
+  client?: ClientMetadata,
 ): Promise<number> {
   const startedAt = Date.now();
   const tracked = await versions.getTrackedNodeIds(nestId);
@@ -1733,6 +1736,7 @@ export async function registerImportedDocuments(
           ? "Imported from existing folder"
           : "Imported from existing folder — could not be published, kept as a draft",
       tags,
+      client,
     });
     if (d.status === "published") {
       await versions.setApprovedVersion(nestId, d.id, d.version, userEmail);

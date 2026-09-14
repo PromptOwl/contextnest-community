@@ -28,9 +28,13 @@ an optional `client` object that does ([spec §9.4](https://github.com/PromptOwl
 - `agent` and `session_id` are reserved; any other key is custom and is recorded
   verbatim. Values are scalars (string / number / boolean).
 - A write that creates a version records it **on that version** — it comes back
-  on `GET .../versions` and on MCP `context_versions`. Every MCP tool call and
-  every traced REST request records it on the activity trace (`GET /admin/trace`,
-  `GET /nests/:nestId/trace`), which is where a **read** is attributed.
+  on `GET .../versions` and on MCP `context_versions` (in the prose and the
+  structured payload). Every path that seals a version takes it: create, edit,
+  approve, revert, and import (`POST /nests/import`, `POST /nests/unsynced/sync`,
+  which stamp every row they seed). Every MCP tool call and every traced REST
+  request records it on the activity trace (`GET /admin/trace`,
+  `GET /nests/:nestId/trace`, where it comes back as a parsed `client` object),
+  which is where a **read** is attributed.
 - **Entirely optional.** No endpoint requires it and an unattributed call is a
   valid call. A call that carries none stores nothing rather than an empty
   object — "not attributed" and "attributed to nobody" are different claims.

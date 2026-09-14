@@ -14,6 +14,7 @@ import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import {
   serializeClient,
+  deserializeClient,
   type ClientMetadata,
 } from "../shared/client-metadata.js";
 
@@ -137,7 +138,16 @@ export async function listTraceEvents(
         LIMIT ? OFFSET ?`,
       [...args, limit, offset],
     );
-    return { events, total };
+    // `client_json` is storage; callers read `client` (§9.4). Parsed here so the
+    // admin trace shows which agent made a call — for a READ that row is the
+    // only place attribution lives, since a read seals no version.
+    return {
+      events: (events as any[]).map(({ client_json, ...e }) => {
+        const client = deserializeClient(client_json);
+        return client ? { ...e, client } : e;
+      }),
+      total,
+    };
   } catch {
     // Missing table (e.g. a Postgres DB provisioned before migration 014) or
     // any read error degrades to empty rather than 500-ing the admin page.

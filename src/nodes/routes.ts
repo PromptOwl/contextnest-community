@@ -272,8 +272,8 @@ nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
   }
 
   const body = await c.req
-    .json<{ targetVersion?: number }>()
-    .catch(() => ({}) as { targetVersion?: number });
+    .json<{ targetVersion?: number; client?: unknown }>()
+    .catch(() => ({}) as { targetVersion?: number; client?: unknown });
   const targetVersion = Number(body.targetVersion);
   if (!Number.isInteger(targetVersion) || targetVersion < 1) {
     throw new ValidationError("targetVersion (a positive integer) is required");
@@ -291,7 +291,11 @@ nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
   const { node, version } = await updateNode(
     nestId,
     nodeId,
-    { content, changeNote: `Restored from version ${targetVersion}` },
+    {
+      content,
+      changeNote: `Restored from version ${targetVersion}`,
+      client: attributeRequest(c, body.client),
+    },
     userEmail,
   );
   await trackEvent("node.revert", { nestId, nodeId, targetVersion });
