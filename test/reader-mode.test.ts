@@ -1,12 +1,13 @@
 /**
- * Public Docs Reader Mode — PATCH /nests/:id/reader-mode (superadmin-gated).
+ * Public Docs Reader Mode — PATCH /nests/:id/reader-mode (owner/admin-gated).
  *
- * Reader mode is a superadmin-enabled, read-only public docs view of a nest.
- * Only the server admin (license admin OR access.yaml `super_admins` ∪ the
- * DB-granted set) may configure it — the same gate as /nests/unsynced and
- * /admin/*. A nest OWNER who is not a superadmin is refused even though they
- * clear the "admin" tier the access middleware requires, and a read
- * collaborator / anonymous caller never reaches the handler at all.
+ * Reader mode is a read-only public docs view of a nest. It may be configured
+ * by the server admin (license admin OR access.yaml `super_admins` ∪ the
+ * DB-granted set — the same gate as /nests/unsynced and /admin/*, and unlike
+ * that gate, not narrowed to nests the admin owns) OR by the nest's own
+ * owner/admin collaborator, matching the "admin" tier the access middleware
+ * already requires for this resource. A write/read collaborator or an
+ * anonymous caller stays refused.
  *
  * The two additive columns (`reader_mode`, `reader_home_node`) ride on the
  * `SELECT *` getNest, so GET /nests/:id reflects them straight off the row.
@@ -20,11 +21,13 @@ import {
   resetAuthRateLimit,
 } from "./helpers";
 
-describe("PATCH /nests/:id/reader-mode (superadmin-gated)", () => {
+describe("PATCH /nests/:id/reader-mode (owner/admin-gated)", () => {
   let env: ReturnType<typeof setupTestEnv>;
   let app: any;
   let admin: { apiKey: string; userId: string; email: string };
   let owner: { apiKey: string; userId: string; email: string };
+  let nestAdmin: { apiKey: string; userId: string; email: string };
+  let writer: { apiKey: string; userId: string; email: string };
   let reader: { apiKey: string; userId: string; email: string };
   let nestId: string;
 
@@ -34,6 +37,10 @@ describe("PATCH /nests/:id/reader-mode (superadmin-gated)", () => {
     admin = await registerUser(app, "admin@acme.com", "Admin");
     await resetAuthRateLimit();
     owner = await registerUser(app, "owner@acme.com", "Owner");
+    await resetAuthRateLimit();
+    nestAdmin = await registerUser(app, "nest-admin@acme.com", "Nest Admin");
+    await resetAuthRateLimit();
+    writer = await registerUser(app, "writer@acme.com", "Writer");
     await resetAuthRateLimit();
     reader = await registerUser(app, "reader@acme.com", "Reader");
 
@@ -47,7 +54,22 @@ describe("PATCH /nests/:id/reader-mode (superadmin-gated)", () => {
     );
     nestId = data.nest.id;
 
-    // Grant the reader a read-only collaborator row.
+    // Grant an admin collaborator, a write collaborator, and a read-only
+    // collaborator, to cover every rung of the permission ladder.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: nestAdmin.email, permission: "admin" },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: writer.email, permission: "write" },
+      owner.apiKey,
+    );
     await jsonRequest(
       app,
       "POST",
@@ -117,7 +139,7 @@ describe("PATCH /nests/:id/reader-mode (superadmin-gated)", () => {
     expect(cleared.data.reader_home_node ?? null).toBe(null);
   });
 
-  it("an owner who is NOT a superadmin is refused (403)", async () => {
+  it("an owner who is NOT a superadmin can enable reader mode on their own nest", async () => {
     const res = await jsonRequest(
       app,
       "PATCH",
@@ -125,8 +147,32 @@ describe("PATCH /nests/:id/reader-mode (superadmin-gated)", () => {
       { enabled: true },
       owner.apiKey,
     );
+    expect(res.status).toBe(200);
+    expect(res.data.reader_mode).toBe(1);
+  });
+
+  it("an admin collaborator (not the owner, not a superadmin) can configure reader mode", async () => {
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/reader-mode`,
+      { enabled: true },
+      nestAdmin.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.reader_mode).toBe(1);
+  });
+
+  it("a write collaborator is refused (403) — write clears 'write' but not 'admin'", async () => {
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/reader-mode`,
+      { enabled: false },
+      writer.apiKey,
+    );
     expect(res.status).toBe(403);
-    // …and the value was not changed as a side effect (still 1 from earlier).
+    // …and the value was not changed as a side effect.
     const got = await jsonRequest(
       app,
       "GET",

@@ -208,16 +208,22 @@ sharingRoutes.patch("/visibility", async (c) => {
 
 // PATCH /nests/:nestId/reader-mode — configure Public Docs Reader Mode.
 //
-// Superadmin-only. The access middleware already requires the "admin" tier for
-// the reader-mode resource (which folds in the server/super admin), but a plain
-// nest-admin collaborator also clears that tier — so hard-gate here on
-// isServerAdminUserId, the same gate as /nests/unsynced and /admin/*.
+// The server admin can configure reader mode on ANY nest (same gate as
+// /nests/unsynced and /admin/*), and — same rule as the steward roster above
+// — so can the nest's own owner/admin: the access middleware already
+// requires the "admin" tier for this resource, so this just stops short of
+// widening past what that tier already grants instead of hard-gating past it
+// to superadmin-only.
 sharingRoutes.patch("/reader-mode", async (c) => {
   const userId = c.get("userId");
+  const nestId = c.req.param("nestId")!;
   if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
-    throw new ForbiddenError(
-      "Only the server admin can configure reader mode",
-    );
+    const access = await resolveNestAccess(nestId, userId);
+    if (permissionLevel(access.permission) < permissionLevel("admin")) {
+      throw new ForbiddenError(
+        "Only the nest owner, a nest admin, or the server admin can configure reader mode",
+      );
+    }
   }
 
   const body = await c.req.json<{
@@ -251,7 +257,6 @@ sharingRoutes.patch("/reader-mode", async (c) => {
   }
 
   const db = getDb();
-  const nestId = c.req.param("nestId")!;
   const exists = (await db.get("SELECT id FROM nests WHERE id = ?", [
     nestId,
   ])) as { id: string } | undefined;

@@ -2024,10 +2024,10 @@ export function createApp(): Hono<AuthEnv> {
     // and 403 a write user editing that doc. parts[1] is the resource segment.
     const resource = parts[1];
     if (resource === "visibility" || resource === "reader-mode") {
-      // reader-mode is a superadmin-only surface, but the admin tier is as far
-      // as this middleware goes (resolveNestPermission maps the server/super
-      // admin to "admin"); its handler hard-gates on isServerAdminUserId so a
-      // plain nest-admin collaborator can't reach it.
+      // reader-mode: the nest owner/admin collaborator AND the server admin
+      // may configure it — this "admin" tier already covers both
+      // (resolveNestPermission maps the server/super admin to "admin" too),
+      // so the handler needs no further hard-gating past this middleware.
       required = "admin";
     } else if (resource === "collaborators") {
       // Viewing the roster (GET) and inviting (POST) are open to write+

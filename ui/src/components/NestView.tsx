@@ -409,6 +409,13 @@ export function NestView({
   const canManageGovernance =
     (isAdmin && (isOwner || isAnonOwned)) ||
     (!isAdmin && (isOwner || permission === "owner" || permission === "admin"));
+  // Public Docs Reader Mode: unlike governance above, the server admin keeps
+  // access on EVERY nest here (matches the handler's own gate in
+  // sharing-routes.ts — isServerAdminUserId is never narrowed to "your own
+  // nests"), on top of which the nest's own owner/admin collaborator can now
+  // also configure it without needing server-admin rights.
+  const canManageReaderMode =
+    isAdmin || isOwner || permission === "owner" || permission === "admin";
   // Caller's merged effective roles (collaborator + steward), nest-wide.
   const [roles, setRoles] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
@@ -1739,8 +1746,9 @@ export function NestView({
     await applyVisibility("private");
   };
 
-  // Public Docs Reader Mode config (superadmin-only; the server hard-gates on
-  // isServerAdminUserId). Optimistic flip with revert on failure.
+  // Public Docs Reader Mode config (server admin, or this nest's own
+  // owner/admin — see canManageReaderMode below). Optimistic flip with
+  // revert on failure.
   const handleReaderModeToggle = async () => {
     const next = !readerModeEnabled;
     setReaderModeEnabled(next);
@@ -2037,11 +2045,12 @@ export function NestView({
               </Badge>
             )
           )}
-          {/* Public Docs Reader Mode — superadmin-only config (isAdmin ==
-              server/super admin). A menu rather than a toggle: the landing
-              document is part of the same setting, and changing it must not
-              mean switching reader mode off and on again. */}
-          {isAdmin && (
+          {/* Public Docs Reader Mode config — server admin, or this nest's own
+              owner/admin (see canManageReaderMode). A menu rather than a
+              toggle: the landing document is part of the same setting, and
+              changing it must not mean switching reader mode off and on
+              again. */}
+          {canManageReaderMode && (
             <Button
               variant="outline"
               size="sm"
