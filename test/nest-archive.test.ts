@@ -250,6 +250,23 @@ describe("nest archive", () => {
     );
     expect(asked.status).toBe(201);
 
+    // The owner's notification must use archive terminology, not the deletion
+    // wording the same code path uses for a real delete request — QA caught it
+    // still saying "flagged for deletion" for an archive ask.
+    const { data: ownerWork } = await jsonRequest(
+      app,
+      "GET",
+      "/me/work",
+      undefined,
+      owner.apiKey,
+    );
+    const notification = ownerWork.notifications.find(
+      (n: any) => n.kind === "deletion_requested",
+    );
+    expect(notification).toBeTruthy();
+    expect(notification.message).toContain("was requested to be archived by");
+    expect(notification.message).not.toContain("flagged for deletion");
+
     // The owner archives directly rather than through the queue — nothing stops
     // them, and it grants exactly what was asked for.
     await jsonRequest(app, "POST", `/nests/${nestId}/archive`, {}, owner.apiKey);

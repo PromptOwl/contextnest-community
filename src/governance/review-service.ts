@@ -847,7 +847,13 @@ async function notifyDeletionRequested(
 ): Promise<void> {
   try {
     const ctx = await deletionTargetContext(request, baseUrl);
-    const line = `Deletion requested for ${ctx.noun} *${ctx.label}* by ${request.requestedBy} — "${request.reason}"`;
+    // A nest_archive request is an ask to ARCHIVE, not delete (CU-wdqcpzy80h) —
+    // the notification has to say so, mirroring the "archived" vs "deleted"
+    // verb split notifyDeletionResolved already makes for the verdict.
+    const isArchiveRequest = request.targetType === "nest_archive";
+    const line = isArchiveRequest
+      ? `Archive requested for ${ctx.noun} *${ctx.label}* by ${request.requestedBy} — "${request.reason}"`
+      : `Deletion requested for ${ctx.noun} *${ctx.label}* by ${request.requestedBy} — "${request.reason}"`;
     const admins = (await nestAdminEmails(request.nestId)).filter(
       (e) => e !== request.requestedBy.toLowerCase(),
     );
@@ -857,7 +863,9 @@ async function notifyDeletionRequested(
       admins,
       "deletion_requested",
       request.id,
-      `${ctx.noun === "document" ? "" : `${ctx.noun} `}"${ctx.docTitle}" was flagged for deletion by ${request.requestedBy} — "${request.reason}"`,
+      isArchiveRequest
+        ? `${ctx.noun} "${ctx.docTitle}" was requested to be archived by ${request.requestedBy} — "${request.reason}"`
+        : `${ctx.noun === "document" ? "" : `${ctx.noun} `}"${ctx.docTitle}" was flagged for deletion by ${request.requestedBy} — "${request.reason}"`,
     );
 
     void dispatchEvent({
