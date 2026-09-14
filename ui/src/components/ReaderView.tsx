@@ -17,8 +17,15 @@ import { conventionKey, isHomeNode } from "@/lib/nest-caps";
  *            level at a time, same as the Documents tab: clicking a folder
  *            row fetches its documents via onExpandFolder.
  *   center — the DocumentViewer for the selected document
- *   right  — the persistent resolved home/overview node (always visible),
- *            or a synthesized Contents table when no home node resolves.
+ *   right  — the persistent resolved home/overview node, shown whenever the
+ *            reader is looking at something OTHER than the home node itself
+ *            (otherwise it would just duplicate the center pane); falls back
+ *            to a synthesized Contents table when no home node resolves, or
+ *            when the home node IS the selected/center document.
+ *
+ * All three panes cap at the same height (matching DocumentViewer's own
+ * min/max-h-[60vh]) and scroll internally, so a long folder/contents list
+ * never forces the whole page to grow past the viewport.
  */
 
 const HOME_NODE_CONVENTION = ["welcome", "index", "readme", "home", "overview"];
@@ -122,6 +129,10 @@ export function ReaderView({
     ? nodes.find((n) => n.id === selectedId)
     : null;
 
+  // The home/overview pane duplicates the center pane when the reader is
+  // already looking at the home node itself — fall back to Contents then.
+  const showHomeContent = !!homeNode && selectedId !== homeNode.id;
+
   const centerBody = () => {
     if (!selectedId) {
       return (
@@ -149,43 +160,45 @@ export function ReaderView({
           <BookOpen className="h-4 w-4 text-muted-foreground" />
           <span className="truncate">{nestName}</span>
         </div>
-        <FolderTree
-          className="space-y-0.5"
-          groups={tocGroups}
-          known={knownFolders}
-          renderFolder={(node) => (
-            <button
-              type="button"
-              onClick={() => onExpandFolder(node.path)}
-              className="flex items-center gap-2 py-1 px-1 -mx-1 w-full text-left rounded-md hover:bg-muted/50"
-            >
-              <FolderOpen className="h-4 w-4 text-muted-foreground shrink-0" />
-              <span className="text-sm font-medium truncate flex-1">
-                {node.label}
-              </span>
-              {loadingFolders?.has(node.path) && (
-                <span className="text-xs text-muted-foreground shrink-0">
-                  Loading…
+        <div className="max-h-[60vh] overflow-y-auto">
+          <FolderTree
+            className="space-y-0.5"
+            groups={tocGroups}
+            known={knownFolders}
+            renderFolder={(node) => (
+              <button
+                type="button"
+                onClick={() => onExpandFolder(node.path)}
+                className="flex items-center gap-2 py-1 px-1 -mx-1 w-full text-left rounded-md hover:bg-muted/50"
+              >
+                <FolderOpen className="h-4 w-4 text-muted-foreground shrink-0" />
+                <span className="text-sm font-medium truncate flex-1">
+                  {node.label}
                 </span>
-              )}
-            </button>
-          )}
-          renderDoc={(n) => (
-            <button
-              type="button"
-              onClick={() => setSelectedId(n.id)}
-              className={`flex items-center gap-2 py-1 px-2 rounded-md w-full text-left min-w-0 hover:bg-muted/50 ${
-                selectedId === n.id ? "bg-muted font-medium" : ""
-              }`}
-              title={n.title || n.id}
-            >
-              <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-              <span className="text-sm truncate flex-1">
-                {n.title || n.id}
-              </span>
-            </button>
-          )}
-        />
+                {loadingFolders?.has(node.path) && (
+                  <span className="text-xs text-muted-foreground shrink-0">
+                    Loading…
+                  </span>
+                )}
+              </button>
+            )}
+            renderDoc={(n) => (
+              <button
+                type="button"
+                onClick={() => setSelectedId(n.id)}
+                className={`flex items-center gap-2 py-1 px-2 rounded-md w-full text-left min-w-0 hover:bg-muted/50 ${
+                  selectedId === n.id ? "bg-muted font-medium" : ""
+                }`}
+                title={n.title || n.id}
+              >
+                <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span className="text-sm truncate flex-1">
+                  {n.title || n.id}
+                </span>
+              </button>
+            )}
+          />
+        </div>
       </aside>
 
       {/* CENTER — selected document */}
@@ -198,23 +211,26 @@ export function ReaderView({
         {centerBody()}
       </section>
 
-      {/* RIGHT — persistent home / overview (or Contents fallback) */}
+      {/* RIGHT — persistent home / overview (or Contents fallback). Only
+          shown when it wouldn't just duplicate the center pane — i.e. the
+          reader is looking at something other than the home node itself. */}
       <aside className="lg:sticky lg:top-4 self-start min-w-0 border rounded-lg p-4 bg-muted/30">
         <div className="flex items-center gap-2 mb-3 text-sm font-semibold text-muted-foreground uppercase tracking-wide">
-          {homeNode ? (homeNode.title || "Overview") : "Contents"}
+          {showHomeContent ? (homeNode!.title || "Overview") : "Contents"}
         </div>
-        {homeNode ? (
-          content[homeNode.id] === undefined ? (
+        {showHomeContent ? (
+          content[homeNode!.id] === undefined ? (
             <p className="text-sm text-muted-foreground">Loading…</p>
           ) : (
             <DocumentViewer
-              content={content[homeNode.id] ?? ""}
+              content={content[homeNode!.id] ?? ""}
               onWikiLinkClick={selectByTitle}
             />
           )
         ) : (
-          // No home node resolves → the synthesized Contents table of contents.
-          <nav className="space-y-3">
+          // No home node resolves, or it's already the center document →
+          // the synthesized Contents table of contents.
+          <nav className="space-y-3 max-h-[60vh] overflow-y-auto">
             {tocGroups.map((g) => (
               <div key={g.folder}>
                 <div className="text-xs font-semibold text-muted-foreground mb-1">
