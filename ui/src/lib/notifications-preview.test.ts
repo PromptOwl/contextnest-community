@@ -6,6 +6,7 @@
 import { describe, it, expect } from "vitest";
 import {
   NOTIFICATIONS_PREVIEW_COUNT,
+  dismissNotification,
   visibleNotifications,
 } from "./notifications-preview";
 
@@ -30,5 +31,17 @@ describe("visibleNotifications", () => {
 
   it("honors a custom preview count", () => {
     expect(visibleNotifications(notifications, false, 3)).toHaveLength(3);
+  });
+});
+
+describe("dismissNotification", () => {
+  it("removes only the matching id", () => {
+    const result = dismissNotification(notifications.slice(0, 5), "n2");
+    expect(result.map((n) => n.id)).toEqual(["n0", "n1", "n3", "n4"]);
+  });
+
+  it("is a no-op when the id isn't present", () => {
+    const short = notifications.slice(0, 3);
+    expect(dismissNotification(short, "missing")).toEqual(short);
   });
 });

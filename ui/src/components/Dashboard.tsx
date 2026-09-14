@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import * as api from "../lib/api";
 import {
   NOTIFICATIONS_PREVIEW_COUNT,
+  dismissNotification,
   visibleNotifications,
 } from "../lib/notifications-preview";
 import { useQueryClient, useQuery } from "@tanstack/react-query";
@@ -518,9 +519,18 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
 
   // A notification names a document or a nest — clicking it goes there. The
   // document is the target when the row resolves to one; otherwise the nest.
+  // Opening it also marks it read, same as the per-row dismiss button, so it
+  // doesn't keep sitting in the (unread-only) list — the mutation's own
+  // invalidatePath("/me") refreshes the cached /me/work read for everyone
+  // else subscribed to it.
   const openNotification = (n: api.WatcherNotification) => {
     const nest = allNests.find((x) => x.id === n.nest_id);
     const name = nest?.name ?? "";
+    api.markNotificationsRead([n.id]).catch(() => {});
+    setWork((prev) => ({
+      ...prev,
+      notifications: dismissNotification(prev.notifications ?? [], n.id),
+    }));
     if (n.node_id) onOpenReview(n.nest_id, name, n.node_id);
     else if (nest)
       onSelectNest(
@@ -978,9 +988,10 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                               await api.markNotificationsRead([n.id]);
                               setWork((prev) => ({
                                 ...prev,
-                                notifications: (
-                                  prev.notifications ?? []
-                                ).filter((x) => x.id !== n.id),
+                                notifications: dismissNotification(
+                                  prev.notifications ?? [],
+                                  n.id,
+                                ),
                               }));
                             } catch (err: any) {
                               // Same feedback the row's siblings give — a

@@ -18,3 +18,15 @@ export function visibleNotifications<T>(
 ): T[] {
   return expanded ? notifications : notifications.slice(0, previewCount);
 }
+
+/**
+ * Drop a notification from the (unread-only) local list once it's been read —
+ * shared by the per-row dismiss button and opening a notification, so both
+ * paths agree on what "read" removes.
+ */
+export function dismissNotification<T extends { id: string }>(
+  notifications: T[],
+  id: string,
+): T[] {
+  return notifications.filter((x) => x.id !== id);
+}
