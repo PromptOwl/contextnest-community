@@ -9,6 +9,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
 import { visibleDocuments, documentsTabIsEmpty } from "../lib/visible-documents";
+import { documentFacets } from "../lib/document-facets";
 import { resolveWikiTarget } from "../lib/wiki-preview";
 import { activityTimestamp } from "../lib/node-sort";
 import { linkHealth } from "../lib/link-health";
@@ -1250,16 +1251,20 @@ export function NestView({
       clear: () => setDateFilter("any"),
     });
 
-  // All tags in the nest with usage counts — the always-visible filter bar.
-  const allTags = useMemo(
-    () =>
-      Object.entries(census?.tags ?? {})
-        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-        .map(([tag, count]) => ({ tag, count })),
-    [census],
+  // Tag counts + "recently edited" for the Documents tab's own facet bar,
+  // derived from the FILTERED list (not the nest-wide census) so an active
+  // status/type/author/date/search/tag filter narrows both the same way it
+  // narrows the document list below them — down to empty when nothing matches.
+  const documentFacetsForFilter = useMemo(
+    () => documentFacets(filtered),
+    [filtered],
   );
+  const allTags = documentFacetsForFilter.tags;
+  const documentsRecentlyEdited = documentFacetsForFilter.recent;
 
   // Quick-access strip; shown on the Overview tab as recently-edited rows.
+  // Nest-wide on purpose — the Overview tab has no document filter of its
+  // own, so this reflects the whole nest, unlike documentsRecentlyEdited above.
   const recentlyEdited = census?.recent ?? [];
 
   // Genuine, non-capped metric for the Overview stat tile: how many documents
@@ -2966,10 +2971,10 @@ export function NestView({
                   )}
                 </div>
               )}
-              {recentlyEdited.length > 0 && (
+              {documentsRecentlyEdited.length > 0 && (
                 <div className="flex items-center flex-wrap gap-1.5 mb-3 text-xs">
                   <span className="text-muted-foreground">Recently edited:</span>
-                  {recentlyEdited.map((n) => (
+                  {documentsRecentlyEdited.map((n) => (
                     <button
                       key={n.id}
                       type="button"
