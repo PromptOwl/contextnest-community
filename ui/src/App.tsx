@@ -122,6 +122,8 @@ type View =
       isOwner: boolean;
       isAnonOwned: boolean;
       readerMode?: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
     }
   | {
       page: "workflows";
@@ -130,6 +132,8 @@ type View =
       isOwner: boolean;
       isAnonOwned: boolean;
       readerMode?: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
     }
   | {
       page: "definitions";
@@ -138,6 +142,8 @@ type View =
       isOwner: boolean;
       isAnonOwned: boolean;
       readerMode?: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
     }
   | {
       page: "board";
@@ -146,6 +152,8 @@ type View =
       isOwner: boolean;
       isAnonOwned: boolean;
       readerMode?: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
     }
   | {
       /** Nest-scoped activity trace (owner/nest-admin) — ActivityTracePage
@@ -1032,6 +1040,7 @@ export default function App() {
                   isOwner: view.isOwner,
                   isAnonOwned: view.isAnonOwned,
                   readerMode,
+                  isArchived: view.isArchived,
                 } as View)
               }
             >
@@ -1321,6 +1330,7 @@ export default function App() {
           <DefinitionsPage
             nestId={view.nestId}
             nestName={view.nestName}
+            isArchived={view.isArchived}
             onBack={leaveNest}
           />
         )}
@@ -1330,6 +1340,7 @@ export default function App() {
             nestId={view.nestId}
             nestName={view.nestName}
             isOwner={view.isOwner}
+            isArchived={view.isArchived}
             onBack={leaveNest}
             onOpenDocument={(nodeId) =>
               setView({

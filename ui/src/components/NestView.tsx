@@ -2201,8 +2201,11 @@ export function NestView({
             // outright, an editor raises a request an owner/admin actions.
             // Hidden below owner once a nest flag is already pending, and
             // withheld from viewers and reviewer-only stewards — neither may
-            // ask for a nest to be destroyed (canRequestDeletion).
+            // ask for a nest to be destroyed (canRequestDeletion). Also
+            // withheld outright when read-only (e.g. an archived nest) —
+            // canDeleteNest/canEditDocs don't fold in isArchived themselves.
             if (
+              !isReadOnly &&
               (canDeleteNest || canEditDocs) &&
               (canDeleteNest || !nestFlagPending)
             )
@@ -3015,8 +3018,12 @@ export function NestView({
                   // hidden outright for viewers of any kind: proposing a
                   // deletion is an editor's act, and the server refuses them
                   // (canRequestDeletion), so the affordance would only lead to
-                  // a 403.
+                  // a 403. Also hidden outright when read-only (e.g. an
+                  // archived nest) — canDelete's authoredByMe branch and
+                  // canEditNode's per-document write-grant branch don't fold
+                  // in isReadOnly themselves.
                   const showDeleteAction =
+                    !isReadOnly &&
                     (canDelete || canEditNode(node)) && (canDelete || !flagPending);
                   const openDeleteFlow = () =>
                     canDelete ? setDeleteNodeTarget(node) : setDeletionTarget(node);

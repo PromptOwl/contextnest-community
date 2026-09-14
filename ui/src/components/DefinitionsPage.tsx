@@ -26,10 +26,12 @@ import type { Definition } from "../lib/api";
 interface Props {
   nestId: string;
   nestName: string;
+  /** Nest is archived — opened from the Archived section, forces read-only. */
+  isArchived?: boolean;
   onBack: () => void;
 }
 
-export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
+export function DefinitionsPage({ nestId, nestName, isArchived, onBack }: Props) {
   const [rows, setRows] = useState<Definition[]>([]);
   const qc = useQueryClient();
   const [loading, setLoading] = useState(true);
@@ -76,6 +78,7 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
           myStewards: meta?.myStewards ?? [],
           isOwner: meta?.permission === "owner",
           isAdmin: meta?.permission === "admin",
+          isArchived,
         });
         // Definitions sit at write-tier, NOT the looser canEditDocs: the
         // steward-editor bypass in app.ts covers /nodes routes only, so a
@@ -89,7 +92,7 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
     return () => {
       ignore = true;
     };
-  }, [nestId, qc]);
+  }, [nestId, qc, isArchived]);
 
   useEffect(() => {
     load();

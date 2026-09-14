@@ -53,6 +53,8 @@ interface Props {
   nestId: string;
   nestName: string;
   isOwner: boolean;
+  /** Nest is archived — opened from the Archived section, forces read-only. */
+  isArchived?: boolean;
   onBack: () => void;
   onOpenDocument: (nodeId: string) => void;
 }
@@ -121,6 +123,7 @@ export function MaturityBoard({
   nestId,
   nestName,
   isOwner,
+  isArchived,
   onBack,
   onOpenDocument,
 }: Props) {
@@ -153,6 +156,7 @@ export function MaturityBoard({
             myStewards: meta?.myStewards ?? [],
             isOwner,
             isAdmin,
+            isArchived,
           }).canEditDocs,
         );
       })
@@ -163,7 +167,7 @@ export function MaturityBoard({
     return () => {
       cancelled = true;
     };
-  }, [nestId, isOwner, isAdmin]);
+  }, [nestId, isOwner, isAdmin, isArchived]);
 
   const load = useCallback(async () => {
     setLoading(true);
