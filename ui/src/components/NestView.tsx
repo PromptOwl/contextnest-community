@@ -599,6 +599,13 @@ export function NestView({
   // Folder levels loaded so far, so a refetch after a mutation restores
   // exactly what is on screen. A ref, not state: it must not re-run fetchData.
   const loadedFolders = useRef<Set<string>>(new Set());
+  // Reactive mirror of the ref above, for Reader Mode only: it needs to know
+  // WHICH known folders already have their docs fetched so an unfetched
+  // folder can default to a collapsed row instead of showing an "expanded"
+  // chevron over nothing.
+  const [loadedFolderPaths, setLoadedFolderPaths] = useState<Set<string>>(
+    new Set(),
+  );
 
   /**
    * Fetch ONE folder level and fold it into `nodes`, replacing whatever was
@@ -614,6 +621,7 @@ export function NestView({
       try {
         const res = await qc.fetchQuery(reads.folderNodes(nestId, folder));
         loadedFolders.current.add(folder);
+        setLoadedFolderPaths((prev) => new Set(prev).add(folder));
         setNodes((prev) => [
           ...prev.filter((n) => folderOfNode(n.id || "") !== folder),
           ...res.nodes,
@@ -1866,6 +1874,7 @@ export function NestView({
           readerHomeNode={readerHomeNode}
           onExpandFolder={fetchLevel}
           loadingFolders={loadingFolders}
+          loadedFolders={loadedFolderPaths}
         />
       </div>
     );

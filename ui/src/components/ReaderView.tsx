@@ -22,10 +22,12 @@ import { conventionKey, isHomeNode } from "@/lib/nest-caps";
  *   left   — a read-only FolderTree for navigation (reuses tocGroups /
  *            knownFolders from NestView). Docs are loaded lazily one folder
  *            level at a time, same as the Documents tab: clicking a folder
- *            row fetches its documents via onExpandFolder. Folders default
- *            open but can be collapsed back (and re-expanded) via the same
- *            row click, so a folder with many docs doesn't permanently eat
- *            the pane's height once opened.
+ *            row fetches its documents via onExpandFolder. A folder defaults
+ *            to expanded ONLY once its docs are actually loaded (NestView
+ *            eager-fetches root + the first top-level folder); every other
+ *            known-but-unfetched folder defaults collapsed, so the chevron
+ *            never claims a folder is open when nothing is loaded under it
+ *            yet. Clicking a row toggles it and fetches on first open.
  *   center — the DocumentViewer for the selected document. Shows a "Back to
  *            Overview" link whenever the reader has navigated away from the
  *            home node, so there's always a way back to it.
@@ -59,6 +61,10 @@ export interface ReaderViewProps {
   onExpandFolder: (path: string) => void;
   /** Folder paths currently being fetched, for a lightweight row indicator. */
   loadingFolders?: Set<string>;
+  /** Folder paths whose docs have actually been fetched into `nodes`, so a
+   *  not-yet-loaded folder can default to a collapsed row instead of an
+   *  "expanded" chevron over nothing. */
+  loadedFolders?: Set<string>;
 }
 
 export function ReaderView({
@@ -70,6 +76,7 @@ export function ReaderView({
   readerHomeNode,
   onExpandFolder,
   loadingFolders,
+  loadedFolders,
 }: ReaderViewProps) {
   // Resolve the home node: explicit designation wins; else first node whose
   // id-leaf or title matches the welcome|index|readme|home|overview convention;
@@ -131,22 +138,23 @@ export function ReaderView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [homeNode?.id, nestId]);
 
-  // Folders default to expanded (matching the prior always-expanded tree) but
-  // can be collapsed back after opening, so reading through a large folder
-  // doesn't permanently consume the pane's height. Collapsing is purely a
-  // display toggle; expanding re-fetches via onExpandFolder, which NestView
-  // already treats as a no-op once a level is loaded.
-  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(
-    () => new Set(),
+  // A folder defaults to expanded once its docs are loaded, collapsed while
+  // they aren't (so the chevron matches what's actually on screen instead of
+  // always reading "open"); `folderOverrides` records an explicit click,
+  // which wins over that default either way. Collapsing is purely a display
+  // toggle; expanding re-fetches via onExpandFolder, which NestView already
+  // treats as a no-op once a level is loaded.
+  const [folderOverrides, setFolderOverrides] = useState<Map<string, boolean>>(
+    () => new Map(),
   );
+  const isFolderCollapsed = (path: string) => {
+    const override = folderOverrides.get(path);
+    if (override !== undefined) return override;
+    return !loadedFolders?.has(path);
+  };
   const toggleFolder = (path: string) => {
-    const opening = collapsedFolders.has(path);
-    setCollapsedFolders((prev) => {
-      const next = new Set(prev);
-      if (opening) next.delete(path);
-      else next.add(path);
-      return next;
-    });
+    const opening = isFolderCollapsed(path);
+    setFolderOverrides((prev) => new Map(prev).set(path, !opening));
     if (opening) onExpandFolder(path);
   };
 
@@ -203,7 +211,7 @@ export function ReaderView({
             className="space-y-0.5"
             groups={tocGroups}
             known={knownFolders}
-            isCollapsed={(path) => collapsedFolders.has(path)}
+            isCollapsed={isFolderCollapsed}
             renderFolder={(node, { collapsed }) => (
               <button
                 type="button"
