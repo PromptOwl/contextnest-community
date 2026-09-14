@@ -50,6 +50,22 @@ export interface NestCaps {
   isReaderView: boolean;
 }
 
+/**
+ * Whether a fetched nest carries an archive timestamp. Every screen that
+ * needs archived-read-only gating (board, definitions, document editor, nest
+ * view) already fetches the nest via GET /nests/:id for other reasons — read
+ * `archived_at` off that same response here instead of trusting a boolean
+ * threaded by hand through navigation, which is how the document editor and
+ * (before this) the board/definitions pages ended up out of sync with a
+ * caller who reached them by a route that didn't happen to forward the flag
+ * (wiki-link nav, a board card click, a deep link, a page refresh).
+ */
+export function isNestArchived(
+  nest: { archived_at?: string | null } | null | undefined,
+): boolean {
+  return !!nest?.archived_at;
+}
+
 export function deriveNestCaps({
   roles,
   permission,

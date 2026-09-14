@@ -827,6 +827,8 @@ export async function getNest(nestId: string) {
       // Public Docs Reader Mode fields — surfaced straight off the SELECT *.
       reader_mode?: number;
       reader_home_node?: string | null;
+      // Set when the nest is archived — surfaced straight off the SELECT *.
+      archived_at?: string | null;
     };
     permission: string;
     // Caller's merged effective roles (collaborator + steward), nest-wide.

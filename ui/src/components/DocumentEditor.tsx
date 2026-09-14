@@ -24,6 +24,7 @@ import {
 import { relTime, formatServerDate } from "../lib/dates";
 import { useRovingFocus } from "../lib/use-roving-focus";
 import { resolveEditorAccess } from "../lib/editor-access";
+import { isNestArchived } from "../lib/nest-caps";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -321,6 +322,13 @@ export function DocumentEditor({
   // (public reader OR a read-only collaborator); 'write'/'admin'/'owner' can
   // edit. null until loaded.
   const permission = (nestMeta.data?.permission ?? null) as string | null;
+  // Read straight off the same GET /nests/:id response `permission` above
+  // comes from, rather than a prop threaded down through App.tsx's View
+  // state — the document page is reachable via wiki-link nav, a board/graph
+  // card click, quick-open, and deep links, none of which forwarded an
+  // isArchived flag, so an archived nest's editor stayed writable everywhere
+  // except the one path (Dashboard → nest → doc) that happened to pass it.
+  const isArchived = isNestArchived(nestMeta.data?.nest);
   // Every edit/approve affordance below gates on these — see editor-access.ts
   // for the rules and ui/src/lib/editor-access.test.ts for the role matrix.
   const {
@@ -337,6 +345,7 @@ export function DocumentEditor({
     nestStewards: myStewards,
     nodeRoles: myNodeRoles,
     grant: myGrant,
+    isArchived,
   });
   // Who deletes outright: the nest admin/owner tier, plus the person who wrote
   // the document — asking permission to delete your own work is the wrong
@@ -347,23 +356,28 @@ export function DocumentEditor({
     !!author &&
     !!adminStatus?.me?.email &&
     author.toLowerCase() === adminStatus.me.email.toLowerCase();
+  // !isArchived guards both: an owner/admin caretaker reopening an archived
+  // nest still can't delete (or ask to delete) from it, matching the
+  // isReadOnly-gated Delete affordances on the nest/document list (NestView).
   const canDeleteDirectly =
-    isOwner ||
-    isAdmin ||
-    permission === "owner" ||
-    permission === "admin" ||
-    authoredByMe;
+    !isArchived &&
+    (isOwner ||
+      isAdmin ||
+      permission === "owner" ||
+      permission === "admin" ||
+      authoredByMe);
   // Even ASKING for a deletion is an editor's act — a viewer of any kind (a
   // read collaborator, a viewer steward, a read share grantee) doesn't get the
   // action at all. Mirrors canRequestDeletion on the server, which refuses
   // them; hiding it means nobody clicks through a 403 for a request they were
   // never allowed to make.
   const canRequestDeletion =
-    canDeleteDirectly ||
-    permission === "write" ||
-    grantCanWrite ||
-    myNodeRoles.includes("editor") ||
-    myStewards.some((s) => s.role === "editor" && s.scope === "nest");
+    !isArchived &&
+    (canDeleteDirectly ||
+      permission === "write" ||
+      grantCanWrite ||
+      myNodeRoles.includes("editor") ||
+      myStewards.some((s) => s.role === "editor" && s.scope === "nest"));
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDeletionModal, setShowDeletionModal] = useState(false);
   // Latest deletion flag on this doc. Pending hides the request button (a

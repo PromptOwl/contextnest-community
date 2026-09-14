@@ -82,7 +82,7 @@ import { PublishDialog } from "./PublishDialog";
 import { NestVisibilityControl } from "./NestVisibilityControl";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { NestPageHeader } from "./NestPageHeader";
-import { deriveNestCaps } from "../lib/nest-caps";
+import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { Button } from "@/components/ui/button";
@@ -382,6 +382,11 @@ export function NestView({
   // picker has usually already cached.
   const [readerHomeTitle, setReaderHomeTitle] = useState<string | null>(null);
   const [isImported, setIsImported] = useState(false);
+  // Fetched straight off GET /nests/:id, independent of the isArchived prop
+  // threaded down from App's View state — a deep link or a page refresh
+  // lands here without that prop ever being set, so the caps below fall back
+  // to whichever of the two actually has the answer.
+  const [nestArchivedAt, setNestArchivedAt] = useState<string | null>(null);
   // Caller's nest-level permission (from GET /nests/:id).
   const [permission, setPermission] = useState<string | null>(null);
   // Stewardship is governance of the commons / one's own nests, not a tool
@@ -903,6 +908,7 @@ export function NestView({
       setNestDescription((nestMeta.nest as any).description ?? null);
       setReaderModeEnabled(!!(nestMeta.nest as any).reader_mode);
       setReaderHomeNode((nestMeta.nest as any).reader_home_node ?? null);
+      setNestArchivedAt((nestMeta.nest as any).archived_at ?? null);
     }
     if (nestMeta?.permission) {
       setPermission(nestMeta.permission);
@@ -1263,7 +1269,7 @@ export function NestView({
     isOwner,
     isAdmin,
     readerMode: readerModeEnabled,
-    isArchived
+    isArchived: isArchived || isNestArchived({ archived_at: nestArchivedAt }),
   });
   // canReviewDocs is folded into isReadOnly inside caps; per-row review uses
   // canReviewNode for scope resolution, so it isn't destructured here.

@@ -17,7 +17,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NestPageHeader } from "./NestPageHeader";
-import { deriveNestCaps } from "../lib/nest-caps";
+import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
@@ -78,7 +78,12 @@ export function DefinitionsPage({ nestId, nestName, isArchived, onBack }: Props)
           myStewards: meta?.myStewards ?? [],
           isOwner: meta?.permission === "owner",
           isAdmin: meta?.permission === "admin",
-          isArchived,
+          // OR'd with the fetched nest itself, not just the isArchived prop
+          // threaded down from App's View state — this page is also
+          // reachable by a route that doesn't forward it (a deep link, a
+          // refresh while already here), and this same fetch already has the
+          // authoritative answer regardless of how we got here.
+          isArchived: isArchived || isNestArchived(meta?.nest),
         });
         // Definitions sit at write-tier, NOT the looser canEditDocs: the
         // steward-editor bypass in app.ts covers /nodes routes only, so a
