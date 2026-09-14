@@ -2,7 +2,12 @@
  * Dashboard — landing page with server info + nest list.
  */
 import React, { useState, useEffect, useMemo } from "react";
+import { cn } from "@/lib/utils";
 import * as api from "../lib/api";
+import {
+  NOTIFICATIONS_PREVIEW_COUNT,
+  visibleNotifications,
+} from "../lib/notifications-preview";
 import { useQueryClient, useQuery } from "@tanstack/react-query";
 import { reads, useNests } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
@@ -115,6 +120,11 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   const [workBulkAction, setWorkBulkAction] = useState<
     "approve" | "reject" | null
   >(null);
+  // The notifications strip defaults to a compact 8-row preview (matches the
+  // panel's original design); "Show all" reveals the rest of what the server
+  // already fetched (up to 50, see /me/work) in a scrollable list instead of
+  // discarding them.
+  const [notificationsExpanded, setNotificationsExpanded] = useState(false);
   // Served from the shared read cache: coming back to the dashboard paints the
   // previous list immediately and revalidates behind it. `isLoading` is true
   // only on a genuine first load with nothing cached, so the loader below still
@@ -932,8 +942,16 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                       Mark all read
                     </button>
                   </div>
-                  <div className="divide-y border-t">
-                    {work.notifications!.slice(0, 8).map((n) => (
+                  <div
+                    className={cn(
+                      "divide-y border-t",
+                      notificationsExpanded && "max-h-80 overflow-y-auto",
+                    )}
+                  >
+                    {visibleNotifications(
+                      work.notifications!,
+                      notificationsExpanded,
+                    ).map((n) => (
                       <div
                         key={n.id}
                         className="flex items-center gap-2 px-4 py-2 text-xs hover:bg-amber-500/10"
@@ -979,6 +997,21 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                       </div>
                     ))}
                   </div>
+                  {work.notifications!.length > NOTIFICATIONS_PREVIEW_COUNT && (
+                    <div className="border-t px-4 py-1.5 text-center">
+                      <button
+                        type="button"
+                        className="text-xs text-primary hover:underline"
+                        onClick={() =>
+                          setNotificationsExpanded((expanded) => !expanded)
+                        }
+                      >
+                        {notificationsExpanded
+                          ? "Show less"
+                          : `Show all (${work.notifications!.length})`}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
               <div className="flex items-center gap-2 mb-2">
