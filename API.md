@@ -43,10 +43,17 @@ an optional `client` object that does ([spec §9.4](https://github.com/PromptOwl
   near-miss on a reserved key (`sessionId`, `Agent`) is refused rather than
   filed as a custom key, which would look attributed and not be.
 - The server fills what the transport already knows, **per key, under** anything
-  the caller sent: `agent` from the API key's label, `session_id` from an
-  `Mcp-Session-Id` header. `CONTEXTNEST_AGENT` / `CONTEXTNEST_SESSION_ID`
-  override those; `CONTEXTNEST_NO_ATTRIBUTION=1` derives nothing (a `client` the
-  caller sent explicitly is still honoured). See `CONFIGURATION.md`.
+  the caller sent. Precedence is caller > env > connection: on MCP the
+  connection means the `initialize` handshake's `clientInfo.name` and the
+  transport's session id; behind that sits the label the operator gave the API
+  key. `CONTEXTNEST_AGENT` / `CONTEXTNEST_SESSION_ID` are the env layer;
+  `CONTEXTNEST_NO_ATTRIBUTION=1` derives nothing (a `client` the caller sent
+  explicitly is still honoured). See `CONFIGURATION.md`.
+- Note the `/mcp` endpoints are **stateless** — one server per request, no
+  session issued — so a handshake's `clientInfo` is not in scope by the time a
+  tool call arrives, and `agent` comes from the key label in practice. An agent
+  that wants to name itself exactly should send `client` rather than rely on
+  what the connection happens to report.
 
 Distinct from `metadata`, which is frontmatter: `metadata` describes the
 document, `client` describes the call that touched it.

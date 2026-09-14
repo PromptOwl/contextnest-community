@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { AuthEnv } from "../auth/middleware.js";
@@ -10,7 +11,7 @@ import { requestBaseUrl } from "../shared/base-url.js";
 import {
   attributeRequest,
   clientToolField,
-  type ClientMetadata,
+  connectionClient,
 } from "../shared/client-metadata.js";
 import { config } from "../config.js";
 import { z } from "zod";
@@ -29,7 +30,7 @@ function createMcpServerForNest(
   userId: string,
   userEmail: string,
   baseUrl: string,
-  client: ClientMetadata | undefined,
+  c: Context<AuthEnv>,
 ): McpServer {
   const server = new McpServer(
     { name: `contextnest-${nestId}`, version: "1.0.0" },
@@ -69,6 +70,11 @@ function createMcpServerForNest(
 
     server.tool(tool.name, tool.description, shape, async (args) => {
       const engine = await engineCache.get(nestId);
+      // Caller attribution (§9.4.2), resolved HERE rather than when the server
+      // was built: the `initialize` handshake completes inside the transport,
+      // so `clientInfo` only exists once a call is being served. A `client`
+      // sent with the tool call itself still wins, per key, in handleToolCall.
+      const client = attributeRequest(c, undefined, connectionClient(server));
       // Audit logging happens inside handleToolCall (covers per-nest +
       // server-level MCP, and thrown calls).
       const out = await handleToolCall(tool.name, args, {
@@ -99,9 +105,7 @@ mcpRoutes.all("/", async (c) => {
     userId,
     userEmail,
     requestBaseUrl(c.req.url),
-    // What the transport knows about the caller. A `client` sent with the tool
-    // call itself wins, per key, inside handleToolCall.
-    attributeRequest(c, undefined),
+    c,
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({

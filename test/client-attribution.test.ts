@@ -234,6 +234,69 @@ describe("MCP", () => {
   });
 });
 
+/** A Hono context stripped to what the binding reads. */
+function fakeCtx(opts: { apiKeyLabel?: string; headers?: Record<string, string> } = {}) {
+  return {
+    get: (k: string) => (k === "apiKeyLabel" ? opts.apiKeyLabel : undefined),
+    set: () => {},
+    req: { header: (h: string) => opts.headers?.[h] },
+  } as any;
+}
+
+describe("binding precedence (§9.4.2)", () => {
+  it("prefers what the MCP connection reported over the API key's label", async () => {
+    const { derivedClient } = await import("../src/shared/client-metadata.js");
+    expect(
+      derivedClient(fakeCtx({ apiKeyLabel: "key-label" }), {
+        agent: "handshake-agent",
+        session_id: "conn-1",
+      }),
+    ).toEqual({ agent: "handshake-agent", session_id: "conn-1" });
+  });
+
+  it("falls back to the key label when the connection reports nothing", async () => {
+    const { derivedClient } = await import("../src/shared/client-metadata.js");
+    // No session invented: a stateless connection has none to report, and a
+    // placeholder is indistinguishable from a real id (§9.4.2).
+    expect(derivedClient(fakeCtx({ apiKeyLabel: "key-label" }), {})).toEqual({
+      agent: "key-label",
+    });
+  });
+
+  it("lets env override the connection, and the caller override env", async () => {
+    const { derivedClient, mergeClient } = await import(
+      "../src/shared/client-metadata.js"
+    );
+    process.env.CONTEXTNEST_AGENT = "env-agent";
+    try {
+      const derived = derivedClient(fakeCtx({ apiKeyLabel: "key-label" }), {
+        agent: "handshake-agent",
+        session_id: "conn-1",
+      });
+      expect(derived.agent).toBe("env-agent");
+      expect(
+        mergeClient(derived, { agent: "caller-agent" }),
+      ).toEqual({ agent: "caller-agent", session_id: "conn-1" });
+    } finally {
+      delete process.env.CONTEXTNEST_AGENT;
+    }
+  });
+
+  it("derives nothing at all under the opt-out, connection included", async () => {
+    const { derivedClient } = await import("../src/shared/client-metadata.js");
+    process.env.CONTEXTNEST_NO_ATTRIBUTION = "1";
+    try {
+      expect(
+        derivedClient(fakeCtx({ apiKeyLabel: "key-label" }), {
+          agent: "handshake-agent",
+        }),
+      ).toEqual({});
+    } finally {
+      delete process.env.CONTEXTNEST_NO_ATTRIBUTION;
+    }
+  });
+});
+
 describe("derived defaults (§9.4.2)", () => {
   it("names the agent from what the operator called the API key", async () => {
     const { data } = await jsonRequest(

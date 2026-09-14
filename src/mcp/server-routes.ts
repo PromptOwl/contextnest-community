@@ -21,6 +21,7 @@
  * updates, governance, sharing — still requires the per-nest endpoint.
  */
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
@@ -32,6 +33,7 @@ import { requestBaseUrl } from "../shared/base-url.js";
 import {
   attributeRequest,
   clientToolField,
+  connectionClient,
   type ClientMetadata,
 } from "../shared/client-metadata.js";
 import {
@@ -435,7 +437,7 @@ function createServerMcp(
   userEmail: string,
   nestScope: string | null,
   baseUrl: string,
-  client: ClientMetadata | undefined,
+  c: Context<AuthEnv>,
 ): McpServer {
   const server = new McpServer(
     { name: "contextnest-server", version: "1.0.0" },
@@ -458,6 +460,8 @@ function createServerMcp(
     // Same §9.4 field the per-nest surface advertises.
     Object.assign(shape, clientToolField);
     server.tool(tool.name, tool.description, shape, async (args) => {
+      // See mcp/routes.ts: resolved per call, because the handshake that
+      // reports `clientInfo` completes inside the transport.
       const out = await handleServerToolCall(
         tool.name,
         args,
@@ -465,7 +469,7 @@ function createServerMcp(
         userEmail,
         nestScope,
         baseUrl,
-        client,
+        attributeRequest(c, undefined, connectionClient(server)),
       );
       return toCallToolResult(out);
     });
@@ -485,7 +489,7 @@ serverMcpRoutes.all("/", async (c) => {
     userEmail,
     c.get("nestScope"),
     requestBaseUrl(c.req.url),
-    attributeRequest(c, undefined),
+    c,
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({
