@@ -287,6 +287,76 @@ describe("nest archive", () => {
     await jsonRequest(app, "POST", `/nests/${nestId}/restore`, {}, owner.apiKey);
   });
 
+  // QA (CU-wdqcq01wb1): the reject verdict still said "delete request rejected"
+  // for an archive ask, and the original "requested" notification stayed
+  // unread in the owner's inbox forever, still reading as if it were open.
+  it("declining an archive request uses archive wording and clears the original notification", async () => {
+    const asked = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/request-deletion`,
+      { targetType: "nest_archive", target: nestId, reason: "trial run" },
+      editor.apiKey,
+    );
+    expect(asked.status).toBe(201);
+
+    const before = await jsonRequest(
+      app,
+      "GET",
+      "/me/work",
+      undefined,
+      owner.apiKey,
+    );
+    expect(
+      before.data.notifications.some(
+        (n: any) =>
+          n.kind === "deletion_requested" &&
+          n.subject_id === asked.data.request.id,
+      ),
+    ).toBe(true);
+
+    const declined = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/deletion-requests/${asked.data.request.id}/decline`,
+      { note: "not now" },
+      owner.apiKey,
+    );
+    expect(declined.status).toBe(200);
+
+    // The requester's verdict must say "archive", not "delete".
+    const editorWork = await jsonRequest(
+      app,
+      "GET",
+      "/me/work",
+      undefined,
+      editor.apiKey,
+    );
+    const verdict = editorWork.data.notifications.find(
+      (n: any) => n.kind === "deletion_declined",
+    );
+    expect(verdict).toBeTruthy();
+    expect(verdict.message).toContain("archive request");
+    expect(verdict.message).not.toContain("deletion request");
+
+    // The original "requested" notification must no longer sit unread, as if
+    // the ask were still pending an answer.
+    const after = await jsonRequest(
+      app,
+      "GET",
+      "/me/work",
+      undefined,
+      owner.apiKey,
+    );
+    expect(
+      after.data.notifications.some(
+        (n: any) =>
+          n.kind === "deletion_requested" &&
+          n.subject_id === asked.data.request.id,
+      ),
+    ).toBe(false);
+  });
+
   // The documented limitation, pinned so it cannot drift unnoticed. A pending
   // DELETION request is not answered by archiving — the two ask for different
   // outcomes — so it survives, and the honour route needs write tier, which an
