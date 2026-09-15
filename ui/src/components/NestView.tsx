@@ -2198,7 +2198,20 @@ export function NestView({
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
-              <Button size="sm" onClick={() => onOpenDocument("new")}>
+              <Button
+                size="sm"
+                // Default into the folder the Documents tab is scoped to, so a
+                // doc lands where the user is looking (CU-wdqcq0247w). The
+                // editor's folder picker still lets them change it.
+                onClick={() =>
+                  onOpenDocument("new", {
+                    folder:
+                      activeTab === "documents" && folderFilter
+                        ? folderFilter
+                        : undefined,
+                  })
+                }
+              >
                 <Plus className="h-3.5 w-3.5 mr-1.5" />
                 New Document
               </Button>
