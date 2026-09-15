@@ -3,19 +3,13 @@
  * layout (sidebar tree + top bar + collapsible comments rail). Kept out of
  * the components so the rules are testable without a DOM.
  */
-
-/** Node id → folder path relative to `nodes/` ("" for a loose root doc). */
-export function folderOfNodeId(id: string): string {
-  const rel = id.startsWith("nodes/") ? id.slice(6) : id;
-  const segs = rel.split("/");
-  return segs.slice(0, -1).join("/");
-}
+import { folderOf } from "./board-dimensions";
 
 /** Every folder on the way to a document — "a/b/c/doc" → ["a", "a/b", "a/b/c"].
  *  The sidebar opens these so the current document is visible on arrival. */
 export function folderAncestors(nodeId: string): string[] {
   if (nodeId === "new") return [];
-  const folder = folderOfNodeId(nodeId);
+  const folder = folderOf(nodeId);
   if (!folder) return [];
   const segs = folder.split("/");
   return segs.map((_, i) => segs.slice(0, i + 1).join("/"));
@@ -31,7 +25,7 @@ export function groupNodesByFolder<T extends { id: string; title?: string }>(
 ): { folder: string; items: T[] }[] {
   const byFolder = new Map<string, T[]>();
   for (const n of nodes) {
-    const folder = folderOfNodeId(n.id);
+    const folder = folderOf(n.id);
     const list = byFolder.get(folder);
     if (list) list.push(n);
     else byFolder.set(folder, [n]);

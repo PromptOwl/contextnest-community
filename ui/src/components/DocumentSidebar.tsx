@@ -52,7 +52,9 @@ interface Props {
 const nestTarget = (n: any): SidebarNestTarget => ({
   nestId: n.id,
   nestName: n.name,
-  isOwner: n.is_owner ?? (n.permission ?? "owner") === "owner",
+  // The list endpoint always sets is_owner; if it ever didn't, unknown must
+  // read as not-owner, never as owner.
+  isOwner: n.is_owner ?? n.permission === "owner",
   isAnonOwned: n.user_id === ANON_USER_ID,
 });
 

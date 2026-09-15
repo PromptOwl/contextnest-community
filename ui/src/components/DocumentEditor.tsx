@@ -480,6 +480,9 @@ export function DocumentEditor({
   // Anchor snapshotted at mouseup (selection is live then); consumed on click.
   const stagedAnchorRef = useRef<api.AnnotationAnchor | null>(null);
   const docViewRef = useRef<HTMLDivElement | null>(null);
+  // The body wrapper, whichever control is inside it (rich editor, raw
+  // markdown, source, artifact HTML) — Enter from the title lands here.
+  const bodyRef = useRef<HTMLDivElement | null>(null);
   const [anchoredThreads, setAnchoredThreads] = useState<api.AnnotationThread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   // The comments rail starts closed — an empty panel beside every document
@@ -947,7 +950,7 @@ export function DocumentEditor({
       setBaseVersion(node?.version);
       setStatus(node?.status ?? null);
       setAuthor(node?.author ?? null);
-      setUpdatedAt((node as any)?.updated_at ?? null);
+      setUpdatedAt(node?.updated_at ?? null);
       setCollaborators(
         Array.isArray(node?.collaborators)
           ? node.collaborators.map((e: unknown) => String(e))
@@ -1875,7 +1878,7 @@ export function DocumentEditor({
               className="h-8"
               onClick={() => setShowShare(true)}
               title="Share this nest — people, teams, visibility"
-              data-testid="document-editor-share-button"
+              data-testid="document-editor-share"
             >
               <Users className="h-4 w-4 sm:mr-1.5" />
               <span className="hidden sm:inline">Share</span>
@@ -2025,20 +2028,15 @@ export function DocumentEditor({
               });
             // Share THIS doc first — it's the narrower, more common ask.
             // Meaningless on an unsaved doc: there's no node id to grant on.
+            // Sharing the whole nest is the top bar's Share button; only the
+            // narrower per-document grant lives here.
             if (canShare && !isNew)
               moreActions.push({
                 label: "Share this document",
                 icon: Share2,
+                separatorBefore: true,
                 testId: "document-editor-share-doc",
                 onSelect: () => setShowShareDoc(true),
-              });
-            if (canShare)
-              moreActions.push({
-                label: "Share nest",
-                icon: Users,
-                separatorBefore: !isNew ? false : true,
-                testId: "document-editor-share",
-                onSelect: () => setShowShare(true),
               });
             // Publishing hosts THIS document on the open web, so it sits with
             // sharing rather than with the editing actions above.
@@ -2304,10 +2302,19 @@ export function DocumentEditor({
                   }}
                   onBlur={saveOnBlur}
                   onKeyDown={(e) => {
-                    // Enter moves on to the body, like a heading would.
+                    // Enter moves on to the body, like a heading would. The
+                    // rich editor when it's mounted; otherwise whatever body
+                    // control is (raw markdown, tool/table source, artifact
+                    // HTML).
                     if (e.key === "Enter") {
                       e.preventDefault();
-                      editorRef.current?.focus();
+                      if (editorRef.current) editorRef.current.focus();
+                      else
+                        bodyRef.current
+                          ?.querySelector<HTMLElement>(
+                            'textarea, [contenteditable="true"], input',
+                          )
+                          ?.focus();
                     }
                   }}
                   placeholder="Untitled"
@@ -2923,6 +2930,7 @@ export function DocumentEditor({
               )}
               {/* Dblclick → edit unless commenting/locked/reviewer/public-viewer. */}
               <div
+                ref={bodyRef}
                 onClick={() => {
                   if (commentMode || isViewOnly || isLocked || isArtifactDraft) return;
                   // Table read view is interactive (query box + buttons), so a
