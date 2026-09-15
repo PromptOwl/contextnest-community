@@ -15,6 +15,7 @@ import {
   readDocPagePrefs,
   writeDocPagePrefs,
   DOC_PAGE_PREFS_KEY,
+  nestSidebarViews,
 } from "./doc-page";
 import { buildFolderTree, type FolderTreeNode } from "../components/FolderTree";
 
@@ -154,5 +155,36 @@ describe("doc page prefs", () => {
       commentsOpen: false,
     });
     expect(() => writeDocPagePrefs(throwing, { commentsOpen: true })).not.toThrow();
+  });
+});
+
+describe("nestSidebarViews — the nest's views under its name in the sidebar", () => {
+  const ids = (v: ReturnType<typeof nestSidebarViews>) => v.map((x) => x.id);
+  const full = { isReadOnly: false, isReaderView: false, canEditDocs: true };
+
+  it("gives an editor every view, workflows only when the plane is on", () => {
+    expect(ids(nestSidebarViews(full, { workflowPlaneEnabled: true }))).toEqual([
+      "overview", "review", "board", "graph", "definitions", "workflows",
+    ]);
+    expect(ids(nestSidebarViews(full, { workflowPlaneEnabled: false }))).not.toContain("workflows");
+  });
+
+  it("hides the review queue and workflows from a read-only caller", () => {
+    const v = ids(nestSidebarViews({ ...full, isReadOnly: true, canEditDocs: false }, { workflowPlaneEnabled: true }));
+    expect(v).toEqual(["overview", "board", "graph", "definitions"]);
+  });
+
+  it("leaves a public reader in reader mode with the overview only", () => {
+    // Same set App hides via isReaderHiddenView — the sidebar must not be a
+    // back door into the board / graph / definitions for a docs-site reader.
+    const v = ids(nestSidebarViews({ isReadOnly: true, isReaderView: true, canEditDocs: false }, { workflowPlaneEnabled: true }));
+    expect(v).toEqual(["overview"]);
+  });
+
+  it("targets the nest page tabs and the top-level pages App knows", () => {
+    const v = nestSidebarViews(full, { workflowPlaneEnabled: true });
+    expect(v.find((x) => x.id === "review")).toMatchObject({ page: "nest", tab: "review" });
+    expect(v.find((x) => x.id === "graph")).toMatchObject({ page: "ontology-graph" });
+    expect(v.find((x) => x.id === "board")).toMatchObject({ page: "board" });
   });
 });

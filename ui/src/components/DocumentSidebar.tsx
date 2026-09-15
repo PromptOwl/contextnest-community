@@ -12,21 +12,33 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
+  BookMarked,
   ChevronDown,
   ChevronRight,
+  ClipboardCheck,
   FileText,
   Folder,
   FolderOpen,
   Globe,
   Building2,
+  Home,
   Lock,
   LayoutGrid,
+  Network,
   PanelLeftClose,
   Plus,
+  Workflow,
 } from "lucide-react";
-import { reads } from "../lib/queries";
+import { reads, useNestMeta } from "../lib/queries";
 import { ANON_USER_ID } from "../lib/constants";
-import { folderAncestors, groupNodesByFolder } from "../lib/doc-page";
+import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
+import { useAuth } from "../auth/AuthContext";
+import {
+  folderAncestors,
+  groupNodesByFolder,
+  nestSidebarViews,
+  type NestSidebarView,
+} from "../lib/doc-page";
 import { FolderTree, type KnownFolder } from "./FolderTree";
 import { cn } from "@/lib/utils";
 
@@ -44,6 +56,8 @@ interface Props {
   onCollapse: () => void;
   onOpenDocument: (target: SidebarNestTarget & { nodeId: string }) => void;
   onOpenNest: (target: SidebarNestTarget) => void;
+  /** Open one of the current nest's views (review queue, board, graph…). */
+  onOpenView: (target: SidebarNestTarget, view: NestSidebarView) => void;
   onOpenDashboard: () => void;
   /** Omit when the caller can't author in this nest. */
   onNewDocument?: () => void;
@@ -64,10 +78,12 @@ export function DocumentSidebar({
   onCollapse,
   onOpenDocument,
   onOpenNest,
+  onOpenView,
   onOpenDashboard,
   onNewDocument,
 }: Props) {
   const nests = useQuery(reads.nestList());
+  const { isAdmin, workflowPlaneEnabled } = useAuth();
   // Which nests are unfolded. The current one always is; others open on click
   // and load their tree on demand.
   const [openNests, setOpenNests] = useState<Set<string>>(() => new Set([nestId]));
@@ -169,6 +185,15 @@ export function DocumentSidebar({
                   </button>
                 )}
               </div>
+              {open && current && (
+                <NestViews
+                  nestId={n.id}
+                  isOwner={nestTarget(n).isOwner}
+                  isAdmin={isAdmin}
+                  workflowPlaneEnabled={workflowPlaneEnabled}
+                  onOpen={(view) => onOpenView(nestTarget(n), view)}
+                />
+              )}
               {open && (
                 <NestTree
                   nestId={n.id}
@@ -190,6 +215,82 @@ function VisibilityGlyph({ visibility }: { visibility?: string }) {
   if (visibility === "org")
     return <Building2 className="h-3 w-3 shrink-0 text-blue-600" aria-label="Organization" />;
   return <Lock className="h-3 w-3 shrink-0 opacity-60" aria-label="Private" />;
+}
+
+const VIEW_ICONS: Record<NestSidebarView["id"], typeof Home> = {
+  overview: Home,
+  review: ClipboardCheck,
+  board: LayoutGrid,
+  graph: Network,
+  definitions: BookMarked,
+  workflows: Workflow,
+};
+
+/** The current nest's views — review queue, board, graph, definitions,
+ *  workflows — under its name, so none of them is a trip back through the
+ *  nest page away. Gated like the nest view switcher (see nestSidebarViews);
+ *  the review queue carries its pending count. */
+function NestViews({
+  nestId,
+  isOwner,
+  isAdmin,
+  workflowPlaneEnabled,
+  onOpen,
+}: {
+  nestId: string;
+  isOwner: boolean;
+  isAdmin: boolean;
+  workflowPlaneEnabled: boolean;
+  onOpen: (view: NestSidebarView) => void;
+}) {
+  const meta = useNestMeta(nestId);
+  const caps = useMemo(() => {
+    const m: any = meta.data;
+    if (!m) return null;
+    return deriveNestCaps({
+      roles: m.roles ?? [],
+      permission: m.permission ?? null,
+      myStewards: m.myStewards ?? [],
+      isOwner,
+      isAdmin,
+      readerMode: !!m.nest?.reader_mode,
+      isArchived: isNestArchived(m.nest),
+    });
+  }, [meta.data, isOwner, isAdmin]);
+  const views = useMemo(
+    () => (caps ? nestSidebarViews(caps, { workflowPlaneEnabled }) : []),
+    [caps, workflowPlaneEnabled],
+  );
+  const showsReview = views.some((v) => v.id === "review");
+  // Only asked for when the row is shown — the endpoint is write-tier.
+  const queue = useQuery({ ...reads.reviewQueue(nestId), enabled: showsReview });
+  const pending = queue.data?.total ?? queue.data?.requests?.length ?? 0;
+
+  if (views.length === 0) return null;
+  return (
+    <div className="mb-1 ml-2 pl-1" data-testid="document-sidebar-views">
+      {views.map((v) => {
+        const Icon = VIEW_ICONS[v.id];
+        return (
+          <button
+            key={v.id}
+            type="button"
+            onClick={() => onOpen(v)}
+            className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-muted-foreground hover:bg-muted hover:text-foreground"
+            data-testid={`document-sidebar-view-${v.id}`}
+          >
+            <Icon className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">{v.label}</span>
+            {v.id === "review" && pending > 0 && (
+              <span className="ml-auto rounded-full bg-amber-100 px-1.5 text-[10px] font-medium tabular-nums text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+                {pending}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 /** One nest's folder → document tree. Folders start closed except the ones

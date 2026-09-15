@@ -1283,6 +1283,17 @@ export default function App() {
                           tab: "documents",
                         })
                       }
+                      onOpenView={(t, v) =>
+                        setView({
+                          page: v.page,
+                          nestId: t.nestId,
+                          nestName: t.nestName,
+                          isOwner: t.isOwner,
+                          isAnonOwned: t.isAnonOwned,
+                          readerMode,
+                          ...(v.page === "nest" && v.tab ? { tab: v.tab } : {}),
+                        } as View)
+                      }
                       onOpenDocument={(t) => {
                         if (t.nestId === doc.nestId && t.nodeId === doc.nodeId) return;
                         openDocument({

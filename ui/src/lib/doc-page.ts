@@ -112,3 +112,39 @@ export function writeDocPagePrefs(
     /* storage blocked — the choice just doesn't persist */
   }
 }
+
+export interface NestSidebarView {
+  id: "overview" | "review" | "board" | "graph" | "definitions" | "workflows";
+  label: string;
+  /** App view page to open. */
+  page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows";
+  /** Nest-page tab, for views that are tabs of the nest page. */
+  tab?: "overview" | "review";
+}
+
+/**
+ * The nest's views listed under its name in the sidebar, so the review queue,
+ * board and graph are one click from any document. Same gates as the nest
+ * view switcher and NestView's tab strip: the review queue and workflows are
+ * for people who can act in them, and a docs-site reader (reader mode) sees
+ * none of the authoring surfaces.
+ */
+export function nestSidebarViews(
+  caps: { isReadOnly: boolean; isReaderView: boolean; canEditDocs: boolean },
+  opts: { workflowPlaneEnabled: boolean },
+): NestSidebarView[] {
+  const views: NestSidebarView[] = [
+    { id: "overview", label: "Overview", page: "nest", tab: "overview" },
+  ];
+  if (caps.isReaderView) return views;
+  if (!caps.isReadOnly)
+    views.push({ id: "review", label: "Review queue", page: "nest", tab: "review" });
+  views.push(
+    { id: "board", label: "Board", page: "board" },
+    { id: "graph", label: "Graph", page: "ontology-graph" },
+    { id: "definitions", label: "Definitions", page: "definitions" },
+  );
+  if (opts.workflowPlaneEnabled && caps.canEditDocs)
+    views.push({ id: "workflows", label: "Workflows", page: "workflows" });
+  return views;
+}
