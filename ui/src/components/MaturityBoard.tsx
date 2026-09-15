@@ -652,9 +652,13 @@ export function MaturityBoard({
                   title={col.title}
                 >
                   <span
-                    className={`min-w-0 text-sm font-medium truncate capitalize ${
-                      col.key === UNCATEGORIZED ? "text-muted-foreground" : ""
-                    }`}
+                    className={`min-w-0 text-sm font-medium truncate ${
+                      // Tag columns must read exactly like the tag chip on the
+                      // card (lib/board-dimensions.ts labelFor returns the raw
+                      // tag value for this dimension) — CSS capitalize would
+                      // make the header disagree with the chip's casing.
+                      effectiveConfig.dimension === "tag" ? "" : "capitalize"
+                    } ${col.key === UNCATEGORIZED ? "text-muted-foreground" : ""}`}
                   >
                     {col.label}
                   </span>
