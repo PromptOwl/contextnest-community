@@ -20,7 +20,9 @@ function canonical(id: string): string {
  * Resolve a `[[target]]` to a node. The path is authoritative: a docs nest has
  * a dozen pages titled "Overview", so a title match is only the fallback for
  * links written as plain titles, never a rewrite of a path that does not
- * exist. Returns null when neither matches — the caller says so.
+ * exist. A slash-less target also matches a page by its slug (`[[atoms]]` →
+ * `…/selectors/atoms`) when no title matches. Returns null when nothing
+ * matches — the caller says so.
  */
 export function resolveWikiTarget<T extends ReaderNode>(target: string, nodes: T[]): T | null {
   const raw = target.trim();
