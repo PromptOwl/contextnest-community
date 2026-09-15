@@ -101,6 +101,7 @@ export const Mention = Extension.create<MentionOptions>({
                   decorations.push(
                     Decoration.inline(localEnd, end, {
                       class: "mention-domain-hidden",
+                      "aria-hidden": "true",
                     }),
                   );
                 }

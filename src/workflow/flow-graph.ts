@@ -78,7 +78,7 @@ export async function assertFlowGraphAcyclic(
   for (const r of rows) {
     if (r.from_node === r.to_node) {
       throw new ConflictError(
-        `This step loops back on itself: ${await nodeTrail(db, nestId, [r.from_node])}.\nA flow can't return to a step it already ran.`,
+        `This step loops back on itself: ${await nodeTrail(db, nestId, [r.from_node])}.\n\nA flow can't return to a step it already ran.`,
       );
     }
     nodes.add(r.from_node);
