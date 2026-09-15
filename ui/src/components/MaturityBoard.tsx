@@ -37,6 +37,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   UNCATEGORIZED,
+  capitalizeColumnHeader,
   cardColumnKeys,
   groupByColumn,
   layoutKey,
@@ -178,7 +179,10 @@ export function MaturityBoard({
     setLoading(true);
     setError(null);
     try {
-      const { nodes: raw } = await qc.fetchQuery(reads.nodes(nestId));
+      // Metadata-only, nest-wide — every node in the nest buckets into a
+      // column, and the board never reads a body, so this skips the vault
+      // crawl `reads.nodes` (content=1) would otherwise pay on every load.
+      const { nodes: raw } = await qc.fetchQuery(reads.nodesMeta(nestId));
       setNodes(
         (raw as any[]).map((n) => ({
           id: n.id,
@@ -407,9 +411,13 @@ export function MaturityBoard({
           <label className="text-sm text-muted-foreground">Columns by</label>
           <select
             value={config.dimension}
-            onChange={(e) =>
-              updateConfig({ dimension: e.target.value as DimensionKind })
-            }
+            onChange={(e) => {
+              // The add-column input is shared between folder and tag mode;
+              // an unsubmitted value from one doesn't mean anything in the
+              // other, so switching dimensions clears it.
+              setNewColumn("");
+              updateConfig({ dimension: e.target.value as DimensionKind });
+            }}
             className="h-8 rounded-md border border-input bg-background px-2 text-sm"
           >
             <option value="folder">Folder</option>
@@ -652,9 +660,9 @@ export function MaturityBoard({
                   title={col.title}
                 >
                   <span
-                    className={`min-w-0 text-sm font-medium truncate capitalize ${
-                      col.key === UNCATEGORIZED ? "text-muted-foreground" : ""
-                    }`}
+                    className={`min-w-0 text-sm font-medium truncate ${
+                      capitalizeColumnHeader(effectiveConfig.dimension) ? "capitalize" : ""
+                    } ${col.key === UNCATEGORIZED ? "text-muted-foreground" : ""}`}
                   >
                     {col.label}
                   </span>

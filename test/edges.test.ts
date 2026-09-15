@@ -184,6 +184,23 @@ describe("edge creation + validation", () => {
       'These steps loop back on each other: "Alpha" → "Beta" → "Gamma" → "Alpha"',
     );
     expect(res.data.error).not.toContain("DAG");
+    // The cycle path and the general explanation are on separate lines, not
+    // run together in one sentence.
+    expect(res.data.error).toContain(
+      '"Alpha".\n\nA flow can\'t return to a step it already ran.',
+    );
+  });
+
+  it("rejects a self-loop edge with a 409 that separates the step from the explanation", async () => {
+    const res = await mkEdge({
+      from_node: "nodes/owner-doc",
+      to_node: "nodes/owner-doc",
+      type: "next",
+    });
+    expect(res.status).toBe(409);
+    expect(res.data.error).toContain(
+      'This step loops back on itself: "Owner Doc".\n\nA flow can\'t return to a step it already ran.',
+    );
   });
 
   it("addresses the cards by id when two share a title", async () => {

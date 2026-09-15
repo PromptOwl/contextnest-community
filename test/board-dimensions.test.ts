@@ -4,6 +4,7 @@ import {
   tagValueInNamespace,
   cardColumnKey,
   buildColumns,
+  capitalizeColumnHeader,
   groupByColumn,
   migrateLayout,
   planMove,
@@ -81,6 +82,16 @@ describe("cardColumnKey", () => {
     expect(cardColumnKey(node({ id: "b", tags: ["#other"] }), cfg)).toBe(
       UNCATEGORIZED,
     );
+  });
+});
+
+describe("capitalizeColumnHeader", () => {
+  it("does not capitalize tag column headers — they must match the card's tag chip casing", () => {
+    expect(capitalizeColumnHeader("tag")).toBe(false);
+  });
+  it("keeps capitalizing folder and status headers", () => {
+    expect(capitalizeColumnHeader("folder")).toBe(true);
+    expect(capitalizeColumnHeader("status")).toBe(true);
   });
 });
 
@@ -502,17 +513,81 @@ describe("resolveConfig", () => {
     ).toEqual(STATUS_ORDER);
   });
 
-  it("enables explicit columns for the tag board only", () => {
+  it("a fresh tag board (no saved columnOrder) is NOT explicit — every present tag auto-shows, same as folder/status", () => {
     expect(
       resolveConfig({ dimension: "tag", tagNamespace: "", layouts: {} })
         .explicitColumns,
-    ).toBe(true);
+    ).toBe(false);
     expect(
       resolveConfig({ dimension: "folder", layouts: {} }).explicitColumns,
     ).toBeFalsy();
     expect(
       resolveConfig({ dimension: "status", layouts: {} }).explicitColumns,
     ).toBeFalsy();
+  });
+
+  it("becomes explicit the moment the tag board has a saved columnOrder (curated)", () => {
+    const s = settings({ dimension: "tag", tagNamespace: "stage" });
+    expect(resolveConfig(s).explicitColumns).toBe(true);
+    // Even an empty saved order (user removed their only column) counts as
+    // curated — it must stay explicit, not fall back to auto-populating.
+    const emptied = settings({
+      dimension: "tag",
+      tagNamespace: "stage",
+      layouts: { "tag:stage": { columnOrder: [] } },
+    });
+    expect(resolveConfig(emptied).explicitColumns).toBe(true);
+  });
+});
+
+describe("tag board auto-populates until curated", () => {
+  const nodes = [
+    node({ id: "a", tags: ["#compliance"] }),
+    node({ id: "b", tags: ["#microsoft", "#spec-review"] }),
+    node({ id: "c", tags: [] }),
+  ];
+
+  it("a fresh tag board shows every present tag, plus Uncategorized for untagged docs", () => {
+    const config = resolveConfig({
+      dimension: "tag",
+      tagNamespace: "",
+      layouts: {},
+    });
+    const cols = buildColumns(nodes, config).map((c) => c.key);
+    expect(new Set(cols)).toEqual(
+      new Set(["compliance", "microsoft", "spec-review", UNCATEGORIZED]),
+    );
+  });
+
+  it("once curated, only the saved columns show — matches the pre-existing explicit-board behavior", () => {
+    const config = resolveConfig({
+      dimension: "tag",
+      tagNamespace: "",
+      layouts: { "tag:": { columnOrder: ["compliance"] } },
+    });
+    expect(buildColumns(nodes, config).map((c) => c.key)).toEqual([
+      "compliance",
+    ]);
+  });
+
+  it("adding a column from an auto-populated board keeps every already-visible tag (mirrors MaturityBoard.addColumn, which seeds columnOrder from the currently-shown keys)", () => {
+    const auto = resolveConfig({
+      dimension: "tag",
+      tagNamespace: "",
+      layouts: {},
+    });
+    const autoKeys = buildColumns(nodes, auto)
+      .map((c) => c.key)
+      .filter((k) => k !== UNCATEGORIZED);
+    const curated = resolveConfig({
+      dimension: "tag",
+      tagNamespace: "",
+      layouts: { "tag:": { columnOrder: [...autoKeys, "new-tag"] } },
+    });
+    expect(buildColumns(nodes, curated).map((c) => c.key)).toEqual([
+      ...autoKeys,
+      "new-tag",
+    ]);
   });
 });
 

@@ -41,6 +41,9 @@ export const keys = {
   // loaded folder levels with it — see the invalidation table below.
   folderNodes: (nestId: string, folder: string) =>
     [...keys.nodes(nestId), "folder", folder] as const,
+  // Nest-wide, metadata only (no body) — the Board's read. Under keys.nodes so
+  // every write that drops the listing drops this with it, same as folderNodes.
+  nodesMeta: (nestId: string) => [...keys.nodes(nestId), "meta"] as const,
   // Describes the whole nest, so it is keyed per nest and NOT per folder —
   // expanding a second folder reuses the first's copy. Under keys.nodes so
   // every write that drops the listing drops this with it.
@@ -479,6 +482,14 @@ export const reads = {
     queryOptions({
       queryKey: keys.folderNodes(nestId, folder),
       queryFn: () => api.listFolderNodes(nestId, folder),
+      staleTime: STALE.listing,
+    }),
+  // Nest-wide, body-free listing (DB index, no vault crawl) — for a dimension
+  // board that buckets every node by tag/folder/status and never reads a body.
+  nodesMeta: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.nodesMeta(nestId),
+      queryFn: () => api.listNodesMeta(nestId),
       staleTime: STALE.listing,
     }),
   census: (nestId: string) =>

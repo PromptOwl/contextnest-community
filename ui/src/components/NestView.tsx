@@ -16,6 +16,7 @@ import { linkHealth } from "../lib/link-health";
 import { folderGrantTarget } from "../lib/folder-target";
 import { checkFolderPath } from "../lib/folder-path";
 import { parseServerDate, formatServerDate } from "../lib/dates";
+import { createConsumeOnceFlag } from "../lib/consume-once-flag";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
   parseSavedFilters, serializeSavedFilters,
@@ -221,6 +222,11 @@ export function NestView({
   }, [nestName, nestId]);
   const renameTimer = useRef<number | null>(null);
   const renameRef = useRef<() => void>(() => { });
+  // Escape reverts editableName via setState, which is batched and hasn't
+  // applied yet when the input's own blur (triggered synchronously by the
+  // Escape handler) fires flushRename — so flushRename would still see the
+  // stale, edited value. This flag tells that one flush to no-op instead.
+  const skipNextFlush = useRef(createConsumeOnceFlag()).current;
   const [renameError, setRenameError] = useState<string | null>(null);
   renameRef.current = async () => {
     const trimmed = editableName.trim();
@@ -247,6 +253,7 @@ export function NestView({
       window.clearTimeout(renameTimer.current);
       renameTimer.current = null;
     }
+    if (skipNextFlush.consume()) return;
     void renameRef.current();
   }, []);
   useEffect(
@@ -1958,6 +1965,7 @@ export function NestView({
                     (e.target as HTMLInputElement).blur();
                   }
                   if (e.key === "Escape") {
+                    skipNextFlush.arm();
                     setEditableName(lastSavedName.current);
                     setRenameError(null);
                     (e.target as HTMLInputElement).blur();

@@ -535,7 +535,7 @@ function EdgesPanel({ nestId }: { nestId: string }) {
       </div>
 
       {error && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive whitespace-pre-line">
           {error}
         </div>
       )}
@@ -1853,7 +1853,7 @@ function CanvasPanel({ nestId }: { nestId: string }) {
           </Button>
         </div>
         {error && (
-          <div className="mx-3 mt-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <div className="mx-3 mt-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive whitespace-pre-line">
             {error}
           </div>
         )}

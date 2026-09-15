@@ -19,6 +19,39 @@ export interface MentionOptions {
 // source of truth; the editor's `@` picker just writes it for you.
 const mentionRegex = /(?:^|\s)@(?:\(([^)]+)\)|([a-zA-Z0-9._@-]+))/g;
 
+/** One `@name` occurrence as text-relative offsets. `localEnd` is where the
+ *  visible chip ends: for an email-shaped mention (`@user@example.com`) it
+ *  sits right after the local part, so the decoration builder can hide the
+ *  `@domain` remainder — same visible `@user` the read-only viewer's chip
+ *  shows, instead of exposing the full address in the editor too. */
+export interface MentionMatch {
+  start: number;
+  end: number;
+  localEnd: number;
+  name: string;
+}
+
+/** Pure text scan, exported so the split between the visible local part and
+ *  the hidden domain is unit-testable without a ProseMirror doc. */
+export function findMentions(text: string): MentionMatch[] {
+  const matches: MentionMatch[] = [];
+  mentionRegex.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = mentionRegex.exec(text)) !== null) {
+    const fullMatch = match[0];
+    const isParenName = match[1] !== undefined;
+    const name = (match[1] ?? match[2] ?? "") as string;
+    const leadingSpace =
+      fullMatch.startsWith(" ") || fullMatch.startsWith("\n") ? 1 : 0;
+    const start = match.index + leadingSpace;
+    const end = start + fullMatch.length - leadingSpace;
+    const atIndex = isParenName ? -1 : name.indexOf("@");
+    const localEnd = atIndex > 0 ? start + 1 + atIndex : end;
+    matches.push({ start, end, localEnd, name });
+  }
+  return matches;
+}
+
 export const Mention = Extension.create<MentionOptions>({
   name: "mention",
 
@@ -47,27 +80,31 @@ export const Mention = Extension.create<MentionOptions>({
               if (node.marks.some((m) => m.type.name === "code")) return;
 
               const text = node.text;
-              let match;
-              mentionRegex.lastIndex = 0;
-              while ((match = mentionRegex.exec(text)) !== null) {
-                const fullMatch = match[0];
-                const name = match[1] || match[2];
-                const leadingSpace =
-                  fullMatch.startsWith(" ") || fullMatch.startsWith("\n")
-                    ? 1
-                    : 0;
-                const start = pos + match.index + leadingSpace;
-                const end = start + fullMatch.length - leadingSpace;
+              for (const m of findMentions(text)) {
+                const start = pos + m.start;
+                const end = pos + m.end;
+                const localEnd = pos + m.localEnd;
 
-                const resolved = !isMember || isMember(name);
+                const resolved = !isMember || isMember(m.name);
                 const attrs: Record<string, string> = {
                   class: `mention ${resolved ? "mention-user" : "mention-unresolved"}`,
-                  "data-mention-name": name,
+                  "data-mention-name": m.name,
                 };
                 if (!resolved) {
-                  attrs.title = `No member named "${name}" in this nest`;
+                  attrs.title = `No member named "${m.name}" in this nest`;
                 }
-                decorations.push(Decoration.inline(start, end, attrs));
+                decorations.push(Decoration.inline(start, localEnd, attrs));
+                // Email-shaped mention: keep only `@localpart` visible, same
+                // as the read-only viewer's chip — the `@domain` remainder
+                // stays in the doc (source of truth) but renders hidden.
+                if (localEnd < end) {
+                  decorations.push(
+                    Decoration.inline(localEnd, end, {
+                      class: "mention-domain-hidden",
+                      "aria-hidden": "true",
+                    }),
+                  );
+                }
               }
             });
 
