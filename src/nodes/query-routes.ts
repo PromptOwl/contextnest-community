@@ -29,7 +29,7 @@ import {
 import { resolveReadableBody, resolveExportBody } from "./readable-body.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { countThreadsByNode } from "../annotations/service.js";
-import { permissionLevel, isPublicReader } from "../shared/access.js";
+import { permissionLevel, isPublicReader, resolveNestPermission } from "../shared/access.js";
 import { exportNestBundle } from "../nests/bundle-service.js";
 import { buildNestGraph, extractWikiTargets } from "./graph-service.js";
 import {
@@ -576,10 +576,14 @@ queryRoutes.get("/search", async (c) => {
   // Nest Plugin with a search() face. Live hits are NOT governed — they come
   // back in their own section, never mixed into the ranked nest hits, and
   // each is promotable into the nest through the normal review path.
+  // Live sources answer with the NEST's credentials, so they are for callers
+  // who hold nest-level access — a single-document grant reaches /search for
+  // its own node but must not fan out to Slack/Gong on the nest's behalf.
   const wantLive = config.FEATURE_PLUGINS && /^(1|true|yes)$/i.test(c.req.query("include_live") ?? "");
-  const live = wantLive
-    ? await liveSearch(nestId, q, Math.min(Number(c.req.query("live_limit")) || 10, 50), await listPluginRows(nestId))
-    : null;
+  const live =
+    wantLive && (config.AUTH_MODE === "open" || (await resolveNestPermission(nestId, userId)) !== "none")
+      ? await liveSearch(nestId, q, Math.min(Number(c.req.query("live_limit")) || 10, 50), await listPluginRows(nestId))
+      : null;
 
   return c.json({
     query: q,

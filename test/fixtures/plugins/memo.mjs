@@ -1,6 +1,6 @@
 // Test plugin for the Community host. Plain ESM, no SDK import: the host
 // validates the manifest, so a fixture can stay dependency-free.
-export const state = { items: [], hits: [], fail: false, seen: [] };
+export const state = { items: [], hits: [], fail: false, seen: [], gate: null };
 export default {
   manifest: {
     name: "memo",
@@ -33,6 +33,7 @@ export default {
       async *[Symbol.asyncIterator]() {
         state.seen.push({ settings: { ...ctx.settings }, cursor, nestId: ctx.nestId });
         if (state.fail) throw new Error("upstream exploded");
+        if (state.gate) await state.gate;
         if (ctx.settings.token !== "sekrit") throw new Error("token not resolved");
         for (const it of state.items) yield { ...it, title: `${ctx.settings.prefix} ${it.title}` };
         r.nextCursor = { n: n + 1 };

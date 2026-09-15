@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { resolve } from "node:path";
-import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
+import { setupTestEnv, createTestApp, registerUser, jsonRequest, resetAuthRateLimit } from "./helpers.js";
 
 const FIXTURE = resolve(__dirname, "fixtures/plugins/memo.mjs");
 
@@ -14,6 +14,7 @@ let app: any;
 let owner: { apiKey: string; userId: string; email: string };
 let editor: { apiKey: string; userId: string; email: string };
 let viewer: { apiKey: string; userId: string; email: string };
+let reviewer: { apiKey: string; userId: string; email: string };
 let nestId: string;
 let fixture: { state: { items: any[]; hits: any[]; fail: boolean; seen: any[] } };
 
@@ -60,6 +61,8 @@ describe("FEATURE_PLUGINS on", () => {
     owner = await registerUser(app, "owner@acme.com", "Owner");
     editor = await registerUser(app, "editor@acme.com", "Editor");
     viewer = await registerUser(app, "viewer@acme.com", "Viewer");
+    await resetAuthRateLimit(); // registration is capped at 3/hour per IP
+    reviewer = await registerUser(app, "reviewer@acme.com", "Reviewer");
     const nest = await jsonRequest(app, "POST", "/nests", { name: "Plugged" }, owner.apiKey);
     nestId = nest.data.nest.id;
     await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: editor.email, permission: "write" }, owner.apiKey);
@@ -171,20 +174,55 @@ describe("FEATURE_PLUGINS on", () => {
     const r = await jsonRequest(app, "POST", `/nests/${nestId}/plugins/memo/run`, {}, editor.apiKey);
     expect(r.status).toBe(200);
     expect(r.data.run.status).toBe("failed");
-    expect(r.data.run.error).toMatch(/exploded/);
+    expect(r.data.run.failed[0]).toMatchObject({ externalId: "(pull)", error: expect.stringMatching(/exploded/) });
   });
 
-  it("governed nest: plugin writes land pending_review", async () => {
+  it("governed nest: plugin writes land pending_review — and an UPDATE after approval re-enters review (review finding #1)", async () => {
     const g = await jsonRequest(app, "POST", "/nests", { name: "Governed" }, owner.apiKey);
+    expect(g.status, JSON.stringify(g.data)).toBe(201);
     const gid = g.data.nest.id;
     await jsonRequest(app, "PATCH", `/nests/${gid}/settings`, { stewardship_enabled: true }, owner.apiKey);
+    await jsonRequest(app, "POST", `/nests/${gid}/collaborators`, { email: reviewer.email, permission: "read" }, owner.apiKey);
+    await jsonRequest(app, "POST", `/nests/${gid}/stewards`, { scope: "nest", users: [{ email: reviewer.email, role: "reviewer" }] }, owner.apiKey);
     await jsonRequest(app, "PUT", `/nests/${gid}/plugins/memo`, { enabled: true, settings: { prefix: "G", token: "sekrit" } }, owner.apiKey);
     fixture.state.items = [item("g1", "Governed item")];
     const run = await jsonRequest(app, "POST", `/nests/${gid}/plugins/memo/run`, {}, owner.apiKey);
-    expect(run.data.run.created).toBe(1);
-    const node = await jsonRequest(app, "GET", `/nests/${gid}/nodes/${run.data.run.results[0].id}`, undefined, owner.apiKey);
+    expect(run.data.run.created, JSON.stringify(run.data)).toBe(1);
+    const id = run.data.run.results[0].id;
+    const node = await jsonRequest(app, "GET", `/nests/${gid}/nodes/${id}`, undefined, owner.apiKey);
     expect(node.status, JSON.stringify(run.data)).toBe(200);
     expect(node.data.node.status).toBe("pending_review");
+
+    // A steward approves → published. Upstream then changes and the plugin re-ingests.
+    const approved = await jsonRequest(app, "POST", `/nests/${gid}/nodes/${id}/approve`, { note: "ok" }, reviewer.apiKey);
+    expect(approved.status, JSON.stringify(approved.data)).toBe(200);
+    expect((await jsonRequest(app, "GET", `/nests/${gid}/nodes/${id}`, undefined, owner.apiKey)).data.node.status).toBe("published");
+    fixture.state.items = [item("g1", "Governed item", "upstream changed", "h2")];
+    const again = await jsonRequest(app, "POST", `/nests/${gid}/plugins/memo/run`, {}, owner.apiKey);
+    expect(again.data.run.updated).toBe(1);
+    const after = await jsonRequest(app, "GET", `/nests/${gid}/nodes/${id}`, undefined, owner.apiKey);
+    expect(after.data.node.status).toBe("pending_review"); // not a stranded, unsubmitted draft
+    const queue = await jsonRequest(app, "GET", `/nests/${gid}/review-queue`, undefined, reviewer.apiKey);
+    expect(JSON.stringify(queue.data)).toContain(id);
+  });
+
+  it("secret env keys are injective across plugin/key boundaries (review finding #2)", async () => {
+    const { envKeyFor } = await import("../src/plugins/registry.js");
+    const keys = [envKeyFor("a-b", "c"), envKeyFor("a", "b_c"), envKeyFor("a", "b-c"), envKeyFor("a", "bc"), envKeyFor("memo", "webhookSecret"), envKeyFor("memo", "webhooksecret")];
+    expect(new Set(keys).size).toBe(keys.length);
+    for (const k of keys) expect(k).toMatch(/^[A-Z][A-Z0-9_]{0,63}$/);
+  });
+
+  it("viewers see that a secret is set but not its tail, and run errors only reach editors (review findings)", async () => {
+    fixture.state.fail = true;
+    await jsonRequest(app, "POST", `/nests/${nestId}/plugins/memo/run`, {}, editor.apiKey);
+    const asViewer = await jsonRequest(app, "GET", `/nests/${nestId}/plugins`, undefined, viewer.apiKey);
+    const v = asViewer.data.plugins.find((p: any) => p.name === "memo");
+    expect(v.settings.token).toBe("••••");
+    expect(JSON.stringify(v.runs[0])).not.toContain("exploded");
+    const asEditor = await jsonRequest(app, "GET", `/nests/${nestId}/plugins`, undefined, editor.apiKey);
+    const e = asEditor.data.plugins.find((p: any) => p.name === "memo");
+    expect(JSON.stringify(e.runs[0])).toContain("exploded");
   });
 
   it("the scheduler tick runs due plugins only, and a failing plugin does not stall the others", async () => {
@@ -234,6 +272,34 @@ describe("FEATURE_PLUGINS on", () => {
     const node = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${p.data.result.id}`, undefined, viewer.apiKey);
     expect(node.status, JSON.stringify(p.data)).toBe(200);
     expect(node.data.node.title).toBe("Promoted live-1");
+  });
+
+  it("viewers never see the webhook token; archived nests stop accepting deliveries (review findings)", async () => {
+    const asViewer = await jsonRequest(app, "GET", `/nests/${nestId}/plugins`, undefined, viewer.apiKey);
+    const v = asViewer.data.plugins.find((p: any) => p.name === "memo");
+    expect(v.webhook_url).toBe("(set)");
+    const asEditor = await jsonRequest(app, "GET", `/nests/${nestId}/plugins`, undefined, editor.apiKey);
+    const url: string = asEditor.data.plugins.find((p: any) => p.name === "memo").webhook_url;
+    const token = url.split("/").pop()!;
+    await jsonRequest(app, "POST", `/nests/${nestId}/archive`, {}, owner.apiKey);
+    const res = await app.request(`/plugin-hooks/${token}`, { method: "POST", headers: { "content-type": "application/json", "x-memo-sig": "shh" }, body: JSON.stringify({ id: "w2", title: "Late", text: "x" }) });
+    expect(res.status).toBe(404);
+    await jsonRequest(app, "POST", `/nests/${nestId}/restore`, {}, owner.apiKey);
+  });
+
+  it("a second run while one is in flight is refused, and the tick does not re-fire it (review finding)", async () => {
+    let release!: () => void;
+    fixture.state.gate = new Promise<void>((r) => (release = r));
+    fixture.state.items = [item("slow", "Slow")];
+    const first = jsonRequest(app, "POST", `/nests/${nestId}/plugins/memo/run`, {}, editor.apiKey);
+    await new Promise((r) => setTimeout(r, 50));
+    const second = await jsonRequest(app, "POST", `/nests/${nestId}/plugins/memo/run`, {}, editor.apiKey);
+    expect(second.status).toBe(409);
+    const { pluginSchedulerTick } = await import("../src/plugins/scheduler.js");
+    expect(await pluginSchedulerTick(Date.now() + 24 * 60 * 60_000)).toEqual([]);
+    release();
+    fixture.state.gate = null;
+    expect((await first).status).toBe(200);
   });
 
   it("disabling a plugin stops run-now and the tick, but keeps its nodes", async () => {

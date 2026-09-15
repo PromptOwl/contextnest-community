@@ -8,7 +8,7 @@
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { loadedPlugins } from "./loader.js";
-import { runPluginPull, type RunSummary } from "./service.js";
+import { runPluginPull, isPullInFlight, type RunSummary } from "./service.js";
 import type { NestPluginRow } from "./registry.js";
 
 function isDue(r: NestPluginRow, now: number): boolean {
@@ -19,6 +19,9 @@ function isDue(r: NestPluginRow, now: number): boolean {
 }
 
 export async function pluginSchedulerTick(now: number = Date.now()): Promise<Array<{ nestId: string; plugin: string; run: RunSummary }>> {
+  // The flag can be turned off at runtime from Settings; the loop keeps
+  // ticking but must fire nothing while the routes 404.
+  if (!config.FEATURE_PLUGINS) return [];
   const db = getDb();
   const rows = (await db.all(
     `SELECT p.* FROM nest_plugins p JOIN nests n ON n.id = p.nest_id
@@ -28,6 +31,7 @@ export async function pluginSchedulerTick(now: number = Date.now()): Promise<Arr
   const fired: Array<{ nestId: string; plugin: string; run: RunSummary }> = [];
   for (const r of rows.filter((r) => isDue(r, now))) {
     if (!plugins.get(r.plugin)?.pull) continue;
+    if (isPullInFlight(r.nest_id, r.plugin)) continue; // a pull longer than the tick is not re-fired
     try {
       const run = await runPluginPull(r.nest_id, r.plugin, "schedule");
       fired.push({ nestId: r.nest_id, plugin: r.plugin, run });

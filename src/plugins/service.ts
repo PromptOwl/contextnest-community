@@ -70,13 +70,28 @@ function makeHost(nestId: string, plugin: NestPlugin) {
   });
 }
 
+/** (nest, plugin) pairs with a pull in flight — one at a time, so a slow pull
+ *  is never re-fired by the next tick or a click and races itself on the cursor. */
+const inFlight = new Set<string>();
+export const isPullInFlight = (nestId: string, name: string) => inFlight.has(`${nestId}:${name}`);
+
 /** Run the plugin's pull() for a nest and record the run. Never throws for plugin failures. */
 export async function runPluginPull(nestId: string, name: string, triggeredBy: TriggeredBy): Promise<RunSummary> {
   const plugin = await requirePlugin(name);
   const row = await getRow(nestId, name);
   if (!row || !row.enabled) throw new ConflictError(`Plugin "${name}" is not enabled on this nest`);
   if (!plugin.pull) throw new ValidationError(`Plugin "${name}" has no pull() face — it only accepts webhooks or answers searches`);
+  const key = `${nestId}:${name}`;
+  if (inFlight.has(key)) throw new ConflictError(`Plugin "${name}" is already running on this nest`);
+  inFlight.add(key);
+  try {
+    return await runPullLocked(nestId, name, plugin, row, triggeredBy);
+  } finally {
+    inFlight.delete(key);
+  }
+}
 
+async function runPullLocked(nestId: string, name: string, plugin: NestPlugin, row: NestPluginRow, triggeredBy: TriggeredBy): Promise<RunSummary> {
   const startedAt = new Date().toISOString();
   const host = makeHost(nestId, plugin);
   const ctx = await opContext(nestId, `system:plugin:${name}`);
@@ -92,7 +107,7 @@ export async function runPluginPull(nestId: string, name: string, triggeredBy: T
     });
   } catch (err) {
     error = (err as Error).message;
-    result = { plugin: name, created: 0, updated: 0, unchanged: 0, conflicts: [], failed: [], results: [], clean: false };
+    result = { plugin: name, created: 0, updated: 0, unchanged: 0, skipped: 0, conflicts: [], failed: [], results: [], clean: false };
     hostLog("error", `${name} on ${nestId} failed: ${error}`);
   }
   const finishedAt = new Date().toISOString();
@@ -136,7 +151,8 @@ export async function runPluginWebhook(row: NestPluginRow, req: { headers: Recor
   }
   const at = new Date().toISOString();
   const status: PluginRunRow["status"] = failed.length ? "failed" : results.some((r) => r.outcome === "conflict") ? "conflicts" : "clean";
-  await recordRunState(row.nest_id, row.plugin, { at, status });
+  // A delivery is not a pull: it must not push the scheduled pull's cadence out.
+  await recordRunState(row.nest_id, row.plugin, { at, status, touchLastRun: false });
   await insertRun({
     nest_id: row.nest_id, plugin: row.plugin, triggered_by: "webhook", status,
     created: results.filter((r) => r.outcome === "created").length,

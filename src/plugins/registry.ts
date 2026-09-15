@@ -4,11 +4,10 @@
  * nest_env as PLUGIN_<NAME>_<KEY>, and settings_json keeps only an `env:`
  * pointer so a read can say "set" without knowing the value.
  */
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { v4 as uuid } from "uuid";
 import { secretKeys, type NestPlugin } from "@promptowl/contextnest-plugin-sdk";
 import { getDb } from "../db/client.js";
-import { insertOrReplace } from "../db/sql.js";
 
 export interface NestPluginRow {
   nest_id: string;
@@ -46,8 +45,29 @@ export interface PluginRunRow {
 /** The reserved secret every webhook-capable plugin gets, whether or not its schema names it. */
 export const WEBHOOK_SECRET_KEY = "webhookSecret";
 
-export const envKeyFor = (plugin: string, key: string) =>
-  `PLUGIN_${plugin.toUpperCase().replace(/-/g, "_")}_${key.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}`;
+/**
+ * `PLUGIN__<PLUGIN>__<KEY>` — injective, so two (plugin, key) pairs can never
+ * share a nest_env row. The plugin part maps `-` → `_` (names are [a-z0-9-],
+ * so no `__` can appear inside it); the key part keeps digits, encodes each
+ * letter with its case (`a` → `A`, `A` → `_A`) and every other character as
+ * `_` + two hex digits, so `webhookSecret`, `webhooksecret`, `webhook-secret`
+ * and `webhook_secret` all land on different rows. Env-store keys are capped
+ * at 64 chars, so a very long setting name is truncated to a hash suffix.
+ */
+export const envKeyFor = (plugin: string, key: string): string => {
+  const p = plugin.toUpperCase().replace(/-/g, "_");
+  let k = "";
+  for (const ch of key) {
+    if (/[0-9]/.test(ch)) k += ch;
+    else if (/[a-z]/.test(ch)) k += ch.toUpperCase();
+    else if (/[A-Z]/.test(ch)) k += `_${ch}`;
+    else k += `_${ch.codePointAt(0)!.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  const full = `PLUGIN__${p}__${k}`;
+  if (full.length <= 64) return full;
+  const digest = createHash("sha256").update(full).digest("hex").slice(0, 12).toUpperCase();
+  return `${full.slice(0, 51)}_${digest}`;
+};
 
 /** Secret setting names for a plugin: schema `x-secret` fields + the reserved webhook secret. */
 export function secretSettingKeys(plugin: NestPlugin): string[] {
@@ -65,8 +85,13 @@ export async function listRows(nestId: string): Promise<NestPluginRow[]> {
   return (await getDb().all("SELECT * FROM nest_plugins WHERE nest_id = ? ORDER BY plugin", [nestId])) as NestPluginRow[];
 }
 
+/** The row for a webhook token — never for an archived nest (it is read-only). */
 export async function rowByWebhookToken(token: string): Promise<NestPluginRow | null> {
-  const row = (await getDb().get("SELECT * FROM nest_plugins WHERE webhook_token = ?", [token])) as NestPluginRow | undefined;
+  const row = (await getDb().get(
+    `SELECT p.* FROM nest_plugins p JOIN nests n ON n.id = p.nest_id
+      WHERE p.webhook_token = ? AND n.archived_at IS NULL`,
+    [token],
+  )) as NestPluginRow | undefined;
   return row ?? null;
 }
 
@@ -108,31 +133,43 @@ export async function upsertRow(
     created_at: prev?.created_at ?? now,
     updated_at: now,
   };
-  await db.run(
-    insertOrReplace(
-      db,
+  // UPDATE the config columns on an existing row (never a REPLACE, which on
+  // SQLite would rewrite cursor_json / last_run_at from the stale `prev` and
+  // lose a run that finished in between); INSERT only when there is no row.
+  if (prev) {
+    await db.run(
+      `UPDATE nest_plugins SET enabled = ?, mode = ?, folder = ?, every_minutes = ?, settings_json = ?, webhook_token = ?, updated_at = ?
+        WHERE nest_id = ? AND plugin = ?`,
+      [row.enabled, row.mode, row.folder, row.every_minutes, row.settings_json, row.webhook_token, row.updated_at, row.nest_id, row.plugin],
+    );
+  } else {
+    await db.run(
       `INSERT INTO nest_plugins (nest_id, plugin, enabled, mode, folder, every_minutes, settings_json, cursor_json, webhook_token, last_run_at, last_status, created_by, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ["nest_id", "plugin"],
-      `enabled = excluded.enabled, mode = excluded.mode, folder = excluded.folder, every_minutes = excluded.every_minutes,
-       settings_json = excluded.settings_json, webhook_token = excluded.webhook_token, updated_at = excluded.updated_at`,
-    ),
-    [row.nest_id, row.plugin, row.enabled, row.mode, row.folder, row.every_minutes, row.settings_json, row.cursor_json, row.webhook_token, row.last_run_at, row.last_status, row.created_by, row.created_at, row.updated_at],
-  );
+      [row.nest_id, row.plugin, row.enabled, row.mode, row.folder, row.every_minutes, row.settings_json, row.cursor_json, row.webhook_token, row.last_run_at, row.last_status, row.created_by, row.created_at, row.updated_at],
+    );
+  }
   return (await getRow(nestId, plugin.manifest.name))!;
 }
 
-export async function recordRunState(nestId: string, plugin: string, patch: { cursor?: unknown; status: string; at: string }): Promise<void> {
+export async function recordRunState(
+  nestId: string,
+  plugin: string,
+  patch: { cursor?: unknown; status: string; at: string; touchLastRun?: boolean },
+): Promise<void> {
   const db = getDb();
-  if (patch.cursor !== undefined) {
-    await db.run("UPDATE nest_plugins SET cursor_json = ?, last_run_at = ?, last_status = ?, updated_at = ? WHERE nest_id = ? AND plugin = ?", [
-      JSON.stringify(patch.cursor), patch.at, patch.status, patch.at, nestId, plugin,
-    ]);
-  } else {
-    await db.run("UPDATE nest_plugins SET last_run_at = ?, last_status = ?, updated_at = ? WHERE nest_id = ? AND plugin = ?", [
-      patch.at, patch.status, patch.at, nestId, plugin,
-    ]);
+  const sets = ["last_status = ?", "updated_at = ?"];
+  const args: Array<string | number | null> = [patch.status, patch.at];
+  // last_run_at drives the pull cadence — only a pull moves it.
+  if (patch.touchLastRun !== false) {
+    sets.push("last_run_at = ?");
+    args.push(patch.at);
   }
+  if (patch.cursor !== undefined) {
+    sets.push("cursor_json = ?");
+    args.push(JSON.stringify(patch.cursor));
+  }
+  await db.run(`UPDATE nest_plugins SET ${sets.join(", ")} WHERE nest_id = ? AND plugin = ?`, [...args, nestId, plugin]);
 }
 
 export async function insertRun(run: Omit<PluginRunRow, "id">): Promise<PluginRunRow> {

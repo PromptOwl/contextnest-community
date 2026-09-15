@@ -1175,7 +1175,16 @@ export function createApp(): Hono<AuthEnv> {
       startPluginScheduler();
     }
 
-    return c.json({ settings: currentServerSettings() });
+    // Same shape as GET, so the Settings page keeps the loaded/refused plugin
+    // list after a save instead of blanking it until the next reload.
+    const loaded = config.FEATURE_PLUGINS ? await loadedPlugins() : null;
+    return c.json({
+      settings: {
+        ...currentServerSettings(),
+        plugins_loaded: loaded ? [...loaded.plugins.values()].map((p) => ({ name: p.manifest.name, version: p.manifest.version, displayName: p.manifest.displayName, capabilities: p.manifest.capabilities })) : [],
+        plugins_load_errors: loaded?.errors ?? [],
+      },
+    });
   });
 
   // GET /admin/trace — the operator audit surface: newest-first activity

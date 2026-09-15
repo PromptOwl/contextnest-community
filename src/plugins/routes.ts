@@ -11,6 +11,7 @@ import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import type { NestPlugin } from "@promptowl/contextnest-plugin-sdk";
 import { config } from "../config.js";
+import { trimSlashes } from "@promptowl/contextnest-engine/plugins";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { tryConsume } from "../shared/rate-limit.js";
@@ -35,7 +36,9 @@ export const requirePlugins = async (c: any, next: () => Promise<void>) => {
   await next();
 };
 
-const mask = (v: unknown) => (typeof v === "string" && v.length > 4 ? `••••${v.slice(-4)}` : "••••");
+// Presence only — no tail. The list is readable at the viewer tier, and a
+// partial secret is still a partial secret.
+const mask = (_v: unknown) => "••••";
 
 function webhookUrl(c: any, token: string | null): string | null {
   if (!token) return null;
@@ -43,7 +46,13 @@ function webhookUrl(c: any, token: string | null): string | null {
   return `${base}/plugin-hooks/${token}`;
 }
 
-function runToResponse(r: PluginRunRow) {
+/**
+ * Error text comes from the plugin / upstream and may echo a request or a
+ * credential fragment; it reaches editors (who configured the plugin), never
+ * the read tier. Viewers still see that a run failed and what it touched.
+ */
+function runToResponse(r: PluginRunRow, reveal: boolean) {
+  const failed = parseJson<Array<{ externalId: string; error: string }>>(r.failed_json, []);
   return {
     id: r.id,
     triggered_by: r.triggered_by,
@@ -52,12 +61,15 @@ function runToResponse(r: PluginRunRow) {
     updated: r.updated,
     unchanged: r.unchanged,
     conflicts: parseJson(r.conflicts_json, []),
-    failed: parseJson(r.failed_json, []),
-    error: r.error,
+    failed: reveal ? failed : failed.map((f) => ({ externalId: f.externalId, error: null })),
+    error: reveal ? r.error : r.error ? "failed" : null,
     started_at: r.started_at,
     finished_at: r.finished_at,
   };
 }
+
+const WRITE_TIERS = new Set(["write", "admin", "owner"]);
+const canReveal = (c: any) => WRITE_TIERS.has(String(c.get("nestPermission") ?? ""));
 
 async function describe(c: any, nestId: string, plugin: NestPlugin, row: NestPluginRow | null) {
   const secrets = secretSettingKeys(plugin);
@@ -84,10 +96,12 @@ async function describe(c: any, nestId: string, plugin: NestPlugin, row: NestPlu
     every_minutes: row?.every_minutes ?? null,
     settings,
     cursor: parseJson<unknown>(row?.cursor_json, null),
-    webhook_url: plugin.webhook ? webhookUrl(c, row?.webhook_token ?? null) : null,
+    // The token in the URL is the credential: editors (who wire the sender)
+    // see it; the read tier sees only that a webhook exists.
+    webhook_url: plugin.webhook ? (canReveal(c) ? webhookUrl(c, row?.webhook_token ?? null) : row?.webhook_token ? "(set)" : null) : null,
     last_run_at: row?.last_run_at ?? null,
     last_status: row?.last_status ?? null,
-    runs: row ? (await recentRuns(nestId, m.name, 10)).map(runToResponse) : [],
+    runs: row ? (await recentRuns(nestId, m.name, 10)).map((r) => runToResponse(r, canReveal(c))) : [],
   };
 }
 
@@ -120,7 +134,7 @@ pluginNestRoutes.put("/:name", requirePlugins, async (c) => {
   }
   if ("folder" in body) {
     if (body.folder !== null && typeof body.folder !== "string") throw new ValidationError("folder must be a string or null");
-    const f = typeof body.folder === "string" ? body.folder.trim().replace(/^\/+|\/+$/g, "") : "";
+    const f = typeof body.folder === "string" ? trimSlashes(body.folder.trim()) : "";
     if (f.includes("..")) throw new ValidationError('folder must not contain ".."');
     patch.folder = f || null;
   }
@@ -221,9 +235,12 @@ pluginNestRoutes.delete("/:name", requirePlugins, async (c) => {
 export const pluginHookRoutes = new Hono();
 pluginHookRoutes.post("/:token", requirePlugins, async (c) => {
   const token = c.req.param("token")!;
-  if (!tryConsume(`plugin-hook:${token}`, { windowMs: 60_000, max: 120 })) return c.json({ error: "Too many requests" }, 429);
+  // Global fence first, so guessing tokens can't grow the bucket map; the
+  // per-row bucket is keyed on a row that exists, never on the raw path.
+  if (!tryConsume("plugin-hook:*", { windowMs: 60_000, max: 600 })) return c.json({ error: "Too many requests" }, 429);
   const row = await rowByWebhookToken(token);
   if (!row || !row.enabled) return c.json({ error: "Not found" }, 404);
+  if (!tryConsume(`plugin-hook:${row.nest_id}:${row.plugin}`, { windowMs: 60_000, max: 120 })) return c.json({ error: "Too many requests" }, 429);
   const headers: Record<string, string> = {};
   c.req.raw.headers.forEach((v, k) => (headers[k.toLowerCase()] = v));
   const body = await c.req.text();
