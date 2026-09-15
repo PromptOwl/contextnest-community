@@ -13,7 +13,7 @@
  * the filesystem. Bodies there put the per-file reads straight back.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { listNodes, listFolderNodes } from "./api";
+import { listNodes, listFolderNodes, listNodesMeta } from "./api";
 
 let urls: string[];
 
@@ -53,5 +53,15 @@ describe("node listing bodies", () => {
   it("keeps the nest root folder body-free too", async () => {
     await listFolderNodes("nest-1", "");
     expect(urls[0]).not.toContain("content=1");
+  });
+
+  // The Board buckets every node in the nest by tag/folder/status and never
+  // reads a body — it needs the nest-wide SET a folder level doesn't give,
+  // without paying the vault crawl listNodes (content=1) would force.
+  it("asks for the whole nest but stays body-free on the Board's listing", async () => {
+    await listNodesMeta("nest-1");
+    expect(urls[0]).toContain("/nests/nest-1/nodes");
+    expect(urls[0]).not.toContain("content=1");
+    expect(urls[0]).not.toContain("folder=");
   });
 });

@@ -271,3 +271,23 @@ export async function markNotificationsRead(
     );
   }
 }
+
+/**
+ * Once a request (review or deletion/archive) is resolved, the "X was
+ * requested" inbox row it produced is no longer actionable — but nothing
+ * else ever marks it read, so it sits in every recipient's /me/work list
+ * looking exactly like a still-open ask (CU: reviewer declines an archive
+ * request, the original "requested" notification stays unread forever).
+ * `subjectId` is the review/deletion request's own id, which is exactly
+ * what those rows were inserted with — not the resolved kind, so a stale
+ * "requested" row is cleared for every recipient regardless of who acted.
+ */
+export async function markNotificationsReadBySubject(
+  subjectId: string,
+  kind: string,
+): Promise<void> {
+  await getDb().run(
+    "UPDATE notifications SET read_at = ? WHERE subject_id = ? AND kind = ? AND read_at IS NULL",
+    [new Date().toISOString(), subjectId, kind],
+  );
+}

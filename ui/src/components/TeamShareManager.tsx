@@ -12,9 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
+import { SearchableSelect } from "./SearchableSelect";
 import { Users, Trash2, Loader2, AlertCircle, Share2 } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../lib/api";
@@ -147,28 +145,24 @@ export function TeamShareManager({ nestId, onChanged }: TeamShareManagerProps) {
           )}
 
           <div className="flex items-center gap-2 pt-1">
-            <Select
-              value={selected}
-              onValueChange={setSelected}
-              disabled={shareable.length === 0}
-            >
-              <SelectTrigger className="h-8 flex-1">
-                <SelectValue
-                  placeholder={
-                    shareable.length === 0
-                      ? "No more teams to share"
-                      : "Select a team…"
-                  }
-                />
-              </SelectTrigger>
-              <SelectContent>
-                {shareable.map((t) => (
-                  <SelectItem key={t.id} value={t.id}>
-                    {t.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <div className="flex-1">
+              {/* Searchable rather than a flat dropdown: past a handful of
+                  teams, scrolling is the wrong interaction. */}
+              <SearchableSelect
+                value={selected}
+                onChange={setSelected}
+                options={shareable.map((t) => ({ value: t.id, label: t.name }))}
+                disabled={shareable.length === 0}
+                placeholder={
+                  shareable.length === 0
+                    ? "No more teams to share"
+                    : "Select a team…"
+                }
+                searchPlaceholder="Search teams…"
+                emptyText="No teams match."
+                testId="team-share-select"
+              />
+            </div>
             <Button size="sm" onClick={share} disabled={busy || !selected}>
               <Share2 className="h-4 w-4 mr-1" />
               Share

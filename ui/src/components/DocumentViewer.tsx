@@ -15,6 +15,10 @@
  * GFM: tables, task lists, strikethrough, footnotes, and autolinks come
  * from `remark-gfm`.
  *
+ * Mentions: `@user@example.com` and `@(Name With Spaces)` render as an
+ * `@name` chip via `remarkMentions`, instead of the raw address `remark-gfm`
+ * would otherwise autolink.
+ *
  * Math: `$…$` / `$$…$$` parse via `remark-math` and typeset with KaTeX.
  * Invalid TeX renders in red instead of throwing.
  *
@@ -31,6 +35,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { remarkMathNoCurrency } from "@/lib/markdown-math";
+import { remarkMentions } from "@/lib/markdown-mentions";
 import type { Plugin } from "unified";
 import type { Root, Text } from "mdast";
 import { visit } from "unist-util-visit";
@@ -234,6 +239,7 @@ export function DocumentViewer({
       <ReactMarkdown
         remarkPlugins={[
           remarkGfm,
+          remarkMentions,
           remarkMath,
           remarkMathNoCurrency,
           remarkColorSpans,
@@ -247,6 +253,12 @@ export function DocumentViewer({
             h1: heading("h1"),
             h2: heading("h2"),
             h3: heading("h3"),
+            // `@user` mention chip — see remarkMentions above. Plain span,
+            // not a link: nothing to navigate to in the read-only viewer,
+            // and the full email stays out of the visible text.
+            mention: ({ children }: any) => (
+              <span className="mention mention-user">{children}</span>
+            ),
             wikilink: ({ children, ...props }: any) => {
               const target = (props["data-wiki-target"] ?? "") as string;
               return (

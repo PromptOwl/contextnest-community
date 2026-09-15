@@ -521,11 +521,12 @@ export async function listNests(
 ): Promise<Nest[]> {
   const db = getDb();
   const scope = opts.archived ? "archived_at IS NOT NULL" : LIVE_ONLY;
+  const orderBy = opts.archived ? "archived_at DESC" : "created_at DESC";
   // Own rows + (for admin/open) all anon-owned. Public discovery is
   // listPublicNests; route layer dedupes by id.
   if (userId === ANON_USER_ID) {
     return (await db.all(
-      `SELECT * FROM nests WHERE user_id = ? AND ${scope} ORDER BY created_at DESC`,
+      `SELECT * FROM nests WHERE user_id = ? AND ${scope} ORDER BY ${orderBy}`,
       [ANON_USER_ID],
     )) as Nest[];
   }
@@ -533,13 +534,13 @@ export async function listNests(
     config.AUTH_MODE === "open" || (await isLicenseAdminUserId(userId));
   if (!includeAnon) {
     return (await db.all(
-      `SELECT * FROM nests WHERE user_id = ? AND ${scope} ORDER BY created_at DESC`,
+      `SELECT * FROM nests WHERE user_id = ? AND ${scope} ORDER BY ${orderBy}`,
       [userId],
     )) as Nest[];
   }
   return (await db.all(
     `SELECT * FROM nests WHERE (user_id = ? OR user_id = ?) AND ${scope}
-      ORDER BY created_at DESC`,
+      ORDER BY ${orderBy}`,
     [userId, ANON_USER_ID],
   )) as Nest[];
 }

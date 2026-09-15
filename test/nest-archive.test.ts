@@ -250,6 +250,23 @@ describe("nest archive", () => {
     );
     expect(asked.status).toBe(201);
 
+    // The owner's notification must use archive terminology, not the deletion
+    // wording the same code path uses for a real delete request — QA caught it
+    // still saying "flagged for deletion" for an archive ask.
+    const { data: ownerWork } = await jsonRequest(
+      app,
+      "GET",
+      "/me/work",
+      undefined,
+      owner.apiKey,
+    );
+    const notification = ownerWork.notifications.find(
+      (n: any) => n.kind === "deletion_requested",
+    );
+    expect(notification).toBeTruthy();
+    expect(notification.message).toContain("was requested to be archived by");
+    expect(notification.message).not.toContain("flagged for deletion");
+
     // The owner archives directly rather than through the queue — nothing stops
     // them, and it grants exactly what was asked for.
     await jsonRequest(app, "POST", `/nests/${nestId}/archive`, {}, owner.apiKey);
@@ -268,6 +285,76 @@ describe("nest archive", () => {
     ).toEqual([]);
 
     await jsonRequest(app, "POST", `/nests/${nestId}/restore`, {}, owner.apiKey);
+  });
+
+  // QA (CU-wdqcq01wb1): the reject verdict still said "delete request rejected"
+  // for an archive ask, and the original "requested" notification stayed
+  // unread in the owner's inbox forever, still reading as if it were open.
+  it("declining an archive request uses archive wording and clears the original notification", async () => {
+    const asked = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/request-deletion`,
+      { targetType: "nest_archive", target: nestId, reason: "trial run" },
+      editor.apiKey,
+    );
+    expect(asked.status).toBe(201);
+
+    const before = await jsonRequest(
+      app,
+      "GET",
+      "/me/work",
+      undefined,
+      owner.apiKey,
+    );
+    expect(
+      before.data.notifications.some(
+        (n: any) =>
+          n.kind === "deletion_requested" &&
+          n.subject_id === asked.data.request.id,
+      ),
+    ).toBe(true);
+
+    const declined = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/deletion-requests/${asked.data.request.id}/decline`,
+      { note: "not now" },
+      owner.apiKey,
+    );
+    expect(declined.status).toBe(200);
+
+    // The requester's verdict must say "archive", not "delete".
+    const editorWork = await jsonRequest(
+      app,
+      "GET",
+      "/me/work",
+      undefined,
+      editor.apiKey,
+    );
+    const verdict = editorWork.data.notifications.find(
+      (n: any) => n.kind === "deletion_declined",
+    );
+    expect(verdict).toBeTruthy();
+    expect(verdict.message).toContain("archive request");
+    expect(verdict.message).not.toContain("deletion request");
+
+    // The original "requested" notification must no longer sit unread, as if
+    // the ask were still pending an answer.
+    const after = await jsonRequest(
+      app,
+      "GET",
+      "/me/work",
+      undefined,
+      owner.apiKey,
+    );
+    expect(
+      after.data.notifications.some(
+        (n: any) =>
+          n.kind === "deletion_requested" &&
+          n.subject_id === asked.data.request.id,
+      ),
+    ).toBe(false);
   });
 
   // The documented limitation, pinned so it cannot drift unnoticed. A pending
@@ -826,5 +913,57 @@ describe("nest archive — drift scanner", () => {
       owner.apiKey,
     );
     expect(after.data.entries.length).toBe(1);
+  });
+});
+
+// The Archived tab sorts by archived_at, not created_at — so a nest archived
+// long after it was created still surfaces at the top when it's the one most
+// recently put away.
+describe("nest archive — archived list ordering", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let firstId: string;
+  let secondId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@acme.com", "Owner");
+
+    // Created out of archive order: "First" predates "Second" but is
+    // archived after it, so created_at DESC and archived_at DESC disagree.
+    const { data: first } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "First" },
+      owner.apiKey,
+    );
+    firstId = first.nest.id;
+    const { data: second } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Second" },
+      owner.apiKey,
+    );
+    secondId = second.nest.id;
+
+    await jsonRequest(app, "POST", `/nests/${secondId}/archive`, {}, owner.apiKey);
+    await jsonRequest(app, "POST", `/nests/${firstId}/archive`, {}, owner.apiKey);
+  }, 30000);
+
+  afterAll(() => env.cleanup());
+
+  it("orders the archived list by archived_at DESC, not created_at DESC", async () => {
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      "/nests?archived=1",
+      null,
+      owner.apiKey,
+    );
+    expect(data.nests.map((n: any) => n.id)).toEqual([firstId, secondId]);
   });
 });

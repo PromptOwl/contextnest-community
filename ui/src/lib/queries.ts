@@ -41,6 +41,9 @@ export const keys = {
   // loaded folder levels with it — see the invalidation table below.
   folderNodes: (nestId: string, folder: string) =>
     [...keys.nodes(nestId), "folder", folder] as const,
+  // Nest-wide, metadata only (no body) — the Board's read. Under keys.nodes so
+  // every write that drops the listing drops this with it, same as folderNodes.
+  nodesMeta: (nestId: string) => [...keys.nodes(nestId), "meta"] as const,
   // Describes the whole nest, so it is keyed per nest and NOT per folder —
   // expanding a second folder reuses the first's copy. Under keys.nodes so
   // every write that drops the listing drops this with it.
@@ -48,6 +51,11 @@ export const keys = {
   stewards: (nestId: string) => [...keys.nest(nestId), "stewards"] as const,
   collaborators: (nestId: string) =>
     [...keys.nest(nestId), "collaborators"] as const,
+  // The read-tier mention roster. Its own entry, not a slice of
+  // `collaborators`: that read needs write permission, and this one exists
+  // precisely for the callers who don't have it.
+  mentionable: (nestId: string) =>
+    [...keys.nest(nestId), "mentionable"] as const,
   definitions: (nestId: string) => [...keys.nest(nestId), "definitions"] as const,
   commentCounts: (nestId: string) =>
     [...keys.nest(nestId), "comment-counts"] as const,
@@ -92,6 +100,9 @@ export const keys = {
   nodeActivity: (nestId: string, nodeId: string, limit: number) =>
     [...keys.node(nestId, nodeId), "activity", limit] as const,
 
+  people: ["people"] as const,
+  peopleSuggest: (q: string) => [...keys.people, "suggest", q] as const,
+
   teams: ["teams"] as const,
   teamList: () => [...keys.teams, "list"] as const,
   team: (teamId: string) => [...keys.teams, "detail", teamId] as const,
@@ -100,6 +111,7 @@ export const keys = {
   admin: ["admin"] as const,
   adminSettings: () => [...keys.admin, "settings"] as const,
   superAdmins: () => [...keys.admin, "super-admins"] as const,
+  communitySites: () => [...keys.admin, "community-sites"] as const,
 
   auth: ["auth"] as const,
   teammates: () => [...keys.auth, "teammates"] as const,
@@ -263,13 +275,17 @@ const NEST_WRITE_SCOPES: Array<{
   },
   // Roles change what the caller may see, so the nest's own permission payload
   // goes with them.
+  // keys.mentionable rides along with all three rosters below (stewards,
+  // collaborators, team shares): each of them changes WHO can be mentioned, and
+  // a stale picker offers someone who no longer has access — or misses someone
+  // who just got it.
   {
     match: /^\/stewards/,
-    affects: (n) => [keys.stewards(n), keys.nest(n)],
+    affects: (n) => [keys.stewards(n), keys.mentionable(n), keys.nest(n)],
   },
   {
     match: /^\/collaborators/,
-    affects: (n) => [keys.collaborators(n), keys.nest(n)],
+    affects: (n) => [keys.collaborators(n), keys.mentionable(n), keys.nest(n)],
   },
   // Sharing a nest with a team, or revoking that share, changes WHO CAN REACH
   // the nest — so it has to drop the collaborators read too. That response
@@ -285,6 +301,7 @@ const NEST_WRITE_SCOPES: Array<{
       keys.nestTeams(n),
       keys.teams,
       keys.collaborators(n),
+      keys.mentionable(n),
       keys.nest(n),
     ],
   },
@@ -379,6 +396,10 @@ export function invalidateForPath(qc: QueryClient, path: string): void {
   if (path.startsWith("/admin")) {
     drop(keys.admin);
     drop(keys.auth);
+    // Settings can widen the people directory (PEOPLE_SUGGEST_ALL_USERS),
+    // which feeds the add-a-person suggestions and every nest's @ roster.
+    drop(keys.people);
+    drop(keys.nests);
     return;
   }
   if (path.startsWith("/auth")) {
@@ -464,6 +485,14 @@ export const reads = {
       queryFn: () => api.listFolderNodes(nestId, folder),
       staleTime: STALE.listing,
     }),
+  // Nest-wide, body-free listing (DB index, no vault crawl) — for a dimension
+  // board that buckets every node by tag/folder/status and never reads a body.
+  nodesMeta: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.nodesMeta(nestId),
+      queryFn: () => api.listNodesMeta(nestId),
+      staleTime: STALE.listing,
+    }),
   census: (nestId: string) =>
     queryOptions({
       queryKey: keys.census(nestId),
@@ -480,6 +509,18 @@ export const reads = {
     queryOptions({
       queryKey: keys.collaborators(nestId),
       queryFn: () => api.listCollaborators(nestId),
+      staleTime: STALE.reference,
+    }),
+  mentionable: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.mentionable(nestId),
+      queryFn: () => api.listMentionablePeople(nestId),
+      staleTime: STALE.reference,
+    }),
+  peopleSuggest: (q: string) =>
+    queryOptions({
+      queryKey: keys.peopleSuggest(q),
+      queryFn: () => api.suggestPeople(q),
       staleTime: STALE.reference,
     }),
   definitions: (nestId: string) =>
@@ -679,6 +720,12 @@ export const reads = {
     queryOptions({
       queryKey: keys.superAdmins(),
       queryFn: () => api.listSuperAdmins(),
+      staleTime: STALE.reference,
+    }),
+  communitySites: () =>
+    queryOptions({
+      queryKey: keys.communitySites(),
+      queryFn: () => api.listCommunitySites(),
       staleTime: STALE.reference,
     }),
   teammates: () =>
