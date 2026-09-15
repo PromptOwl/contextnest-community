@@ -9,7 +9,15 @@ export function nestIdFromLocation(
   loc: { pathname: string; search: string } = window.location,
 ): string | null {
   const m = loc.pathname.match(NEST_PATH);
-  if (m) return decodeURIComponent(m[1]);
+  if (m) {
+    // A malformed escape (a truncated paste ending in "%") throws here; keep
+    // the raw segment so the probe 404s instead of the app crashing.
+    try {
+      return decodeURIComponent(m[1]);
+    } catch {
+      return m[1];
+    }
+  }
   return new URLSearchParams(loc.search).get("nest");
 }
 

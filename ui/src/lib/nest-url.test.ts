@@ -16,6 +16,17 @@ describe("nest-url", () => {
     expect(nestIdFromLocation({ pathname: "/nest/a/b", search: "" })).toBeNull();
   });
 
+  it("keeps a malformed escape as-is instead of throwing", () => {
+    expect(nestIdFromLocation({ pathname: "/nest/abc%", search: "" })).toBe("abc%");
+    expect(nestIdFromLocation({ pathname: "/nest/a%zz", search: "" })).toBe("a%zz");
+  });
+
+  it("round-trips ids that need encoding", () => {
+    for (const id of ["a b", "a#b", "a%b", "a/b", "ü"]) {
+      expect(nestIdFromLocation({ pathname: nestPath(id), search: "" })).toBe(id);
+    }
+  });
+
   it("writes the path form, root when there is no nest", () => {
     expect(nestPath("abc-123")).toBe("/nest/abc-123");
     expect(nestPath(null)).toBe("/");
