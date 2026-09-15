@@ -62,10 +62,13 @@ export interface BoardConfig {
   tagNamespace?: string;
   /** Optional explicit column ordering; unknown-but-present keys append after. */
   columnOrder?: string[];
-  /** When true (the tag board), `columnOrder` is the EXHAUSTIVE column set:
-   *  only listed columns show, tags never promoted to a column don't appear,
-   *  and there is no Uncategorized catch-all. Folder/status leave this off and
-   *  keep auto-populating every present column. */
+  /** When true, `columnOrder` is the EXHAUSTIVE column set: only listed
+   *  columns show, tags never promoted to a column don't appear, and there is
+   *  no Uncategorized catch-all. A fresh tag board (no saved `columnOrder`
+   *  yet) leaves this off so every present tag auto-populates, same as
+   *  folder/status — it flips on the first time the user curates the board
+   *  (adds, removes, or reorders a column, all of which save `columnOrder`).
+   *  Folder/status never set this: they always auto-populate. */
   explicitColumns?: boolean;
   /** Columns to hide. A card whose only column(s) are hidden falls into
    *  UNCATEGORIZED; a multi-tag card keeps any still-shown column. */
@@ -188,9 +191,13 @@ export function resolveConfig(s: BoardSettings): BoardConfig {
       layout.columnOrder ??
       (s.dimension === "status" ? STATUS_ORDER : undefined),
     hiddenColumns: layout.hiddenColumns,
-    // The tag board is user-curated: start empty, show only added columns.
-    // Folder and status keep auto-populating every present column.
-    explicitColumns: s.dimension === "tag",
+    // The tag board is user-curatable, but starts auto-populated: every
+    // present tag is a column, exactly like folder/status, until the user
+    // touches the layout (add/remove/reorder) — that's the first time
+    // `columnOrder` is saved, and from then on it's the EXHAUSTIVE set (see
+    // the field doc above). A nest with many tags would otherwise render
+    // zero columns until each one is typed in by hand.
+    explicitColumns: s.dimension === "tag" && layout.columnOrder !== undefined,
   };
 }
 
