@@ -7,6 +7,7 @@
  * list and to that tab's `keys` (so the unsaved-changes dot tracks it).
  */
 import { useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -33,11 +34,11 @@ import { BetaBadge } from "@/components/ui/beta-badge";
 import type { AdminSettings, SignInGate, ManualSignIn, CommunitySite } from "../lib/api";
 import {
   sendTestNotification,
-  listCommunitySites,
   addCommunitySite,
   updateCommunitySite as updateCommunitySiteApi,
   removeCommunitySite,
 } from "../lib/api";
+import { reads } from "../lib/queries";
 import { copyTextWithToast } from "../lib/clipboard";
 import { toast } from "sonner";
 
@@ -273,6 +274,7 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
   // untouched, string = set to this, null = clear on save.
   const [draft, setDraft] = useState<AdminSettings | null>(settings);
   const [saving, setSaving] = useState(false);
+  const qc = useQueryClient();
   // Error from the last failed save (shape validation or SMTP verify), shown
   // inline near the fields. Cleared on the next edit or a successful save.
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -292,7 +294,11 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
   const [communitySitesError, setCommunitySitesError] = useState<string | null>(null);
   const fetchCommunitySites = async () => {
     try {
-      const res = await listCommunitySites();
+      // Invalidate first so a call after a write (add/edit/delete/toggle)
+      // always hits the network instead of returning the stale cached list —
+      // same reasoning as ApiKeysPage's refresh().
+      await qc.invalidateQueries({ queryKey: reads.communitySites().queryKey });
+      const res = await qc.fetchQuery(reads.communitySites());
       setCommunitySites(res.community_sites);
       setCommunitySitesError(null);
     } catch (e: any) {
