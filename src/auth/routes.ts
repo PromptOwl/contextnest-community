@@ -825,20 +825,22 @@ authRoutes.get("/sso", async (c) => {
   // and neither side has to trust the issuer to keep the jti/scope invariant.
   if ((claims.scope || "") === "mcp") return ssoError("invalid_ticket");
 
-  // Audience binding — a ticket minted for a different server is rejected, so
-  // it can't be replayed elsewhere even if the secret were shared. When the
-  // matched site has no url configured this binding is DISABLED (the secret
-  // is the only control left), so warn loudly — that's a misconfiguration on
-  // an official deployment, not an intended mode. DB-configured sites always
-  // require a url, so this can only happen for the legacy env-var pair.
+  // Audience binding — a ticket minted for a different deployment is rejected,
+  // so it can't be replayed against this one even if the secret were shared.
+  // This checks the ticket's `aud` against THIS deployment's own
+  // PUBLIC_BASE_URL, not the matched site's `url` — a site's `url` is a
+  // display/uniqueness field for the admin list, not an audience value (see
+  // SsoCandidate.url in community-sites.ts). When PUBLIC_BASE_URL is unset
+  // this binding is DISABLED (the secret is the only control left), so warn
+  // loudly — that's a misconfiguration, not an intended mode.
   const expectedAud = config.PUBLIC_BASE_URL;
   if (!expectedAud && !warnedMissingSsoAudience) {
     warnedMissingSsoAudience = true;
     console.warn(
-      `[sso] site "${matched.label}" has a secret but no url configured — ` +
-        "ticket audience binding is DISABLED for it. Set PUBLIC_BASE_URL (legacy) " +
-        "or the site's url so a ticket minted for another server cannot be replayed " +
-        "against this one.",
+      `[sso] site "${matched.label}" has a secret but PUBLIC_BASE_URL is unset — ` +
+        "ticket audience binding is DISABLED. Set PUBLIC_BASE_URL to this " +
+        "deployment's own URL so a ticket minted for another deployment cannot " +
+        "be replayed against this one.",
     );
   }
   if (expectedAud) {

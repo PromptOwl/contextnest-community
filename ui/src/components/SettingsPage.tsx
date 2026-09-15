@@ -1642,9 +1642,10 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                     <CardDescription>
                       Sites trusted for one-click SSO auto-login. A visitor
                       arriving with a ticket signed by one of these sites'
-                      secrets is signed in automatically — matched against the
-                      site's URL as well, so a ticket minted for one site can't
-                      be replayed against another.
+                      secrets is signed in automatically — the ticket's
+                      audience is also checked against this server's own
+                      base URL, so a ticket minted for a different deployment
+                      can't be replayed here.
                     </CardDescription>
                   </div>
                   <Button size="sm" onClick={openAddSiteDialog}>

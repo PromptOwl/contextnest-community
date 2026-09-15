@@ -147,6 +147,17 @@ describe("DELETE /admin/community-sites/:id", () => {
 describe("SSO handshake against a DB-configured site", () => {
   const SECRET = "db-site-secret-0123456789";
   const URL = "https://db-configured.example.com";
+  // The ticket's `aud` binds to THIS deployment's own PUBLIC_BASE_URL, not to
+  // any individual site's `url` (which is a display/uniqueness field only —
+  // see SsoCandidate.url in src/auth/community-sites.ts).
+  const DEPLOYMENT_URL = "https://this-deployment.example.com";
+
+  beforeAll(() => {
+    process.env.PUBLIC_BASE_URL = DEPLOYMENT_URL;
+  });
+  afterAll(() => {
+    delete process.env.PUBLIC_BASE_URL;
+  });
 
   function b64url(input: string | Buffer): string {
     return Buffer.from(input)
@@ -160,7 +171,7 @@ describe("SSO handshake against a DB-configured site", () => {
     const payload = {
       sub: "site-user@example.com",
       name: "Site User",
-      aud: URL,
+      aud: DEPLOYMENT_URL,
       jti: randomUUID(),
       iat: now,
       exp: now + 60,
@@ -177,7 +188,6 @@ describe("SSO handshake against a DB-configured site", () => {
 
   it("no configured sites and no legacy env vars → not_supported", async () => {
     delete process.env.OFFICIAL_COMMUNITY_SSO_SECRET;
-    delete process.env.PUBLIC_BASE_URL;
     const res = await app.request("/auth/sso?ticket=" + ticket(), { method: "GET" });
     expect(location(res)).toContain("sso_error=not_supported");
   });
@@ -217,9 +227,9 @@ describe("SSO handshake against a DB-configured site", () => {
     expect(row?.email).toBe("db-user@example.com");
   });
 
-  it("a ticket minted for a different site's audience is rejected (bad_audience)", async () => {
+  it("a ticket minted for a different deployment's audience is rejected (bad_audience)", async () => {
     const res = await app.request(
-      "/auth/sso?ticket=" + ticket({ sub: "other@example.com", aud: "https://not-this-site.example.com" }),
+      "/auth/sso?ticket=" + ticket({ sub: "other@example.com", aud: "https://not-this-deployment.example.com" }),
       { method: "GET" },
     );
     expect(location(res)).toContain("sso_error=bad_audience");

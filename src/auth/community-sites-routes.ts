@@ -1,8 +1,10 @@
 /**
  * /admin/community-sites — manage official community site connections
  * (CU-wdqcq0247t). Each row is a site trusted for one-click SSO auto-login
- * (GET /auth/sso): a name, a url (the ticket's expected `aud`), a shared
- * secret, and an active flag. Extends the single OFFICIAL_COMMUNITY_SSO_
+ * (GET /auth/sso): a name, a url (display/uniqueness only — the ticket's
+ * `aud` is checked against this deployment's own PUBLIC_BASE_URL, not a
+ * site's url; see SsoCandidate.url in community-sites.ts), a shared secret,
+ * and an active flag. Extends the single OFFICIAL_COMMUNITY_SSO_
  * SECRET/PUBLIC_BASE_URL env-var pair — see community-sites.ts for how the
  * handshake now tries every active site's secret. `secret` is WRITE-ONLY:
  * GET/POST/PATCH responses only report `secret_set`, mirroring the

@@ -132,7 +132,14 @@ export interface SsoCandidate {
   /** Display label for logs — the site name, or "legacy" for the env pair. */
   label: string;
   secret: string;
-  /** Expected `aud` claim, trailing slash stripped; "" skips the aud check. */
+  /**
+   * The site's own URL, trailing slash stripped — a display/uniqueness field
+   * for the admin list only. NOT checked against the ticket's `aud`: the
+   * audience check in GET /auth/sso binds to config.PUBLIC_BASE_URL (this
+   * deployment's own URL), the same for every candidate, so a ticket minted
+   * for a different deployment can't be replayed here regardless of which
+   * site's secret verified it.
+   */
   url: string;
 }
 
