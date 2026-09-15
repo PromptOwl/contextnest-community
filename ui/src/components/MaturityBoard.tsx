@@ -407,9 +407,13 @@ export function MaturityBoard({
           <label className="text-sm text-muted-foreground">Columns by</label>
           <select
             value={config.dimension}
-            onChange={(e) =>
-              updateConfig({ dimension: e.target.value as DimensionKind })
-            }
+            onChange={(e) => {
+              // The add-column input is shared between folder and tag mode;
+              // an unsubmitted value from one doesn't mean anything in the
+              // other, so switching dimensions clears it.
+              setNewColumn("");
+              updateConfig({ dimension: e.target.value as DimensionKind });
+            }}
             className="h-8 rounded-md border border-input bg-background px-2 text-sm"
           >
             <option value="folder">Folder</option>
