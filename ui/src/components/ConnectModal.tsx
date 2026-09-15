@@ -160,6 +160,16 @@ export function ConnectModal({
     2,
   );
 
+  // Claude Code (the CLI) speaks Streamable HTTP natively and registers a
+  // server with one command that it persists itself — no config file to
+  // open, no mcp-remote bridge (that bridge is only for Claude Desktop,
+  // which has no CLI). This is the "one shot" path for Claude Code.
+  const claudeCodeCommand = `claude mcp add --transport http ${slugify(nestName)} ${mcpUrl}${
+    authMode === "open"
+      ? ""
+      : ` --header "Authorization: Bearer ${KEY_PLACEHOLDER}"`
+  }`;
+
   // Native HTTP MCP clients (Cursor, VS Code, Claude Code) configure a server
   // by its url + headers in one JSON stanza — same shape as claudeConfig
   // above, so one paste lands both the endpoint and the auth placeholder
@@ -385,11 +395,38 @@ export function ConnectModal({
                 </ol>
               </TabsContent>
 
-              {/* Claude Desktop */}
+              {/* Claude */}
               <TabsContent value="claude" className="space-y-4 pt-4">
                 <div>
                   <p className="text-sm mb-3">
-                    Add this to your{" "}
+                    <strong>Claude Code</strong> (the CLI) registers a server with
+                    one command — it persists the config itself, no file to find
+                    or edit.
+                    {!showOpenModeBanner && (
+                      <>
+                        {" "}
+                        Replace{" "}
+                        <code className="text-[11px] bg-muted px-1 rounded">
+                          {KEY_PLACEHOLDER}
+                        </code>{" "}
+                        with your generated key.
+                      </>
+                    )}
+                  </p>
+                  <Snippet
+                    label="Run in your terminal (Claude Code CLI)"
+                    value={claudeCodeCommand}
+                    multiline
+                  />
+                  <p className="text-xs text-muted-foreground mt-2">
+                    Takes effect on your next Claude Code session — the nest's
+                    context tools then appear in the tools panel.
+                  </p>
+                </div>
+                <div className="border-t pt-3">
+                  <p className="text-sm mb-3">
+                    Using <strong>Claude Desktop</strong> (the GUI app) instead?
+                    It has no CLI, so add this to your{" "}
                     <code className="text-xs bg-muted px-1 py-0.5 rounded">
                       claude_desktop_config.json
                     </code>
@@ -421,23 +458,24 @@ export function ConnectModal({
                     </code>{" "}
                     (Mac)
                   </p>
+                  <p className="text-xs text-muted-foreground mt-2">
+                    Claude Desktop config runs a local command, so this uses{" "}
+                    <code className="text-[10px]">mcp-remote</code> to bridge to
+                    the server's HTTP endpoint — you need{" "}
+                    <a
+                      href="https://nodejs.org"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline"
+                    >
+                      Node.js
+                    </a>{" "}
+                    installed (it provides{" "}
+                    <code className="text-[10px]">npx</code>). Restart Claude
+                    Desktop after editing; the nest's context tools then appear
+                    in the tools panel.
+                  </p>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  Claude Desktop config runs a local command, so this uses{" "}
-                  <code className="text-[10px]">mcp-remote</code> to bridge to the
-                  server's HTTP endpoint — you need{" "}
-                  <a
-                    href="https://nodejs.org"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="underline"
-                  >
-                    Node.js
-                  </a>{" "}
-                  installed (it provides <code className="text-[10px]">npx</code>).
-                  Restart Claude Desktop after editing; the nest's context tools
-                  then appear in the tools panel.
-                </p>
               </TabsContent>
 
               {/* Raw MCP */}
@@ -446,8 +484,9 @@ export function ConnectModal({
                   <p className="text-sm mb-3">
                     Streamable HTTP MCP endpoint with 21 tools (11 content + 7
                     governance + 3 admin/sync). Works with native HTTP MCP
-                    clients (Claude Code, Cursor, VS Code); for Claude Desktop
-                    use the Claude Desktop tab.
+                    clients (Cursor, VS Code) as a JSON config; Claude Code has
+                    its own one-command setup and Claude Desktop needs a
+                    bridge — see the Claude tab for both.
                     {!showOpenModeBanner && (
                       <>
                         {" "}
