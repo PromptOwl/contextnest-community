@@ -50,6 +50,11 @@ import {
   nestSetupPrompt,
   envFileContents,
   ctxCliConnectSnippet,
+  claudeDesktopConfig,
+  claudeCodeCommand,
+  mcpHttpConfig,
+  slugify,
+  KEY_PLACEHOLDER,
 } from "../lib/connect";
 import { useAuth } from "../auth/AuthContext";
 
@@ -62,8 +67,6 @@ interface ConnectModalProps {
    *  inside a nest — a rotate started here used to kill every other client. */
   onManageKeys?: () => void;
 }
-
-const KEY_PLACEHOLDER = "<paste-your-api-key-here>";
 
 export function ConnectModal({
   isOpen,
@@ -135,32 +138,14 @@ export function ConnectModal({
     }
   };
 
-  // Claude Desktop only speaks stdio in claude_desktop_config.json — it has no
-  // native http/url/headers transport (that shape is for Claude Code / Cursor,
-  // see the MCP tab). Bridge to our Streamable-HTTP endpoint with mcp-remote.
-  const claudeConfig = JSON.stringify(
-    {
-      mcpServers: {
-        [slugify(nestName)]: {
-          command: "npx",
-          // Open mode needs no credential — omit the auth header so the copied
-          // config connects as-is.
-          args: [
-            "-y",
-            "mcp-remote",
-            mcpUrl,
-            ...(authMode === "open"
-              ? []
-              : ["--header", `Authorization: Bearer ${KEY_PLACEHOLDER}`]),
-          ],
-        },
-      },
-    },
-    null,
-    2,
-  );
+  const isOpenMode = authMode === "open";
+  // Config-building logic lives in lib/connect.ts (pure, unit-tested there) —
+  // see claudeDesktopConfig / claudeCodeCommand / mcpHttpConfig.
+  const claudeConfig = claudeDesktopConfig(nestName, mcpUrl, isOpenMode);
+  const claudeCodeCmd = claudeCodeCommand(nestName, mcpUrl, isOpenMode);
+  const mcpConfig = mcpHttpConfig(nestName, mcpUrl, isOpenMode);
 
-  const showOpenModeBanner = authMode === "open";
+  const showOpenModeBanner = isOpenMode;
   const showLoginBanner = !authenticated && authMode === "key";
 
   const authHeaderFlag = showOpenModeBanner
@@ -366,11 +351,38 @@ export function ConnectModal({
                 </ol>
               </TabsContent>
 
-              {/* Claude Desktop */}
+              {/* Claude */}
               <TabsContent value="claude" className="space-y-4 pt-4">
                 <div>
                   <p className="text-sm mb-3">
-                    Add this to your{" "}
+                    <strong>Claude Code</strong> (the CLI) registers a server with
+                    one command — it persists the config itself, no file to find
+                    or edit.
+                    {!showOpenModeBanner && (
+                      <>
+                        {" "}
+                        Replace{" "}
+                        <code className="text-[11px] bg-muted px-1 rounded">
+                          {KEY_PLACEHOLDER}
+                        </code>{" "}
+                        with your generated key.
+                      </>
+                    )}
+                  </p>
+                  <Snippet
+                    label="Run in your terminal (Claude Code CLI)"
+                    value={claudeCodeCmd}
+                    multiline
+                  />
+                  <p className="text-xs text-muted-foreground mt-2">
+                    Takes effect on your next Claude Code session — the nest's
+                    context tools then appear in the tools panel.
+                  </p>
+                </div>
+                <div className="border-t pt-3">
+                  <p className="text-sm mb-3">
+                    Using <strong>Claude Desktop</strong> (the GUI app) instead?
+                    It has no CLI, so add this to your{" "}
                     <code className="text-xs bg-muted px-1 py-0.5 rounded">
                       claude_desktop_config.json
                     </code>
@@ -385,7 +397,11 @@ export function ConnectModal({
                       </>
                     )}
                   </p>
-                  <Snippet label="Config" value={claudeConfig} multiline />
+                  <Snippet
+                    label="Claude Desktop config (via mcp-remote bridge)"
+                    value={claudeConfig}
+                    multiline
+                  />
                   <p className="text-xs text-muted-foreground mt-2">
                     Location:{" "}
                     <code className="text-[10px]">
@@ -398,23 +414,24 @@ export function ConnectModal({
                     </code>{" "}
                     (Mac)
                   </p>
+                  <p className="text-xs text-muted-foreground mt-2">
+                    Claude Desktop config runs a local command, so this uses{" "}
+                    <code className="text-[10px]">mcp-remote</code> to bridge to
+                    the server's HTTP endpoint — you need{" "}
+                    <a
+                      href="https://nodejs.org"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline"
+                    >
+                      Node.js
+                    </a>{" "}
+                    installed (it provides{" "}
+                    <code className="text-[10px]">npx</code>). Restart Claude
+                    Desktop after editing; the nest's context tools then appear
+                    in the tools panel.
+                  </p>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  Claude Desktop config runs a local command, so this uses{" "}
-                  <code className="text-[10px]">mcp-remote</code> to bridge to the
-                  server's HTTP endpoint — you need{" "}
-                  <a
-                    href="https://nodejs.org"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="underline"
-                  >
-                    Node.js
-                  </a>{" "}
-                  installed (it provides <code className="text-[10px]">npx</code>).
-                  Restart Claude Desktop after editing; the nest's context tools
-                  then appear in the tools panel.
-                </p>
               </TabsContent>
 
               {/* Raw MCP */}
@@ -423,26 +440,25 @@ export function ConnectModal({
                   <p className="text-sm mb-3">
                     Streamable HTTP MCP endpoint with 21 tools (11 content + 7
                     governance + 3 admin/sync). Works with native HTTP MCP
-                    clients (Claude Code, Cursor, VS Code); for Claude Desktop
-                    use the Claude Desktop tab.
+                    clients (Cursor, VS Code) as a JSON config; Claude Code has
+                    its own one-command setup and Claude Desktop needs a
+                    bridge — see the Claude tab for both.
                     {!showOpenModeBanner && (
                       <>
                         {" "}
-                        Pass your API key in an{" "}
+                        Replace{" "}
                         <code className="text-[11px] bg-muted px-1 rounded">
-                          Authorization
+                          {KEY_PLACEHOLDER}
                         </code>{" "}
-                        header.
+                        with your generated key.
                       </>
                     )}
                   </p>
-                  <Snippet label="MCP Endpoint" value={mcpUrl} />
-                  {!showOpenModeBanner && (
-                    <Snippet
-                      label="Authorization header"
-                      value={`Bearer ${KEY_PLACEHOLDER}`}
-                    />
-                  )}
+                  <Snippet
+                    label="Direct HTTP config (Cursor, VS Code, Claude Code — not Claude Desktop)"
+                    value={mcpConfig}
+                    multiline
+                  />
                   <Snippet
                     label={`From the ctx CLI (2.2+)${showOpenModeBanner ? "" : " — export CONTEXTNEST_API_KEY first"}`}
                     value={ctxAliasSnippet}
@@ -924,14 +940,5 @@ function CopyButton({ value }: { value: string }) {
         <Copy className="h-3 w-3" />
       )}
     </Button>
-  );
-}
-
-function slugify(s: string) {
-  return (
-    s
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "") || "nest"
   );
 }
