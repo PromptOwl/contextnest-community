@@ -831,7 +831,7 @@ authRoutes.get("/sso", async (c) => {
   // is the only control left), so warn loudly — that's a misconfiguration on
   // an official deployment, not an intended mode. DB-configured sites always
   // require a url, so this can only happen for the legacy env-var pair.
-  const expectedAud = matched.url;
+  const expectedAud = config.PUBLIC_BASE_URL;
   if (!expectedAud && !warnedMissingSsoAudience) {
     warnedMissingSsoAudience = true;
     console.warn(
