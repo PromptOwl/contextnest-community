@@ -14,6 +14,7 @@ import { reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/que
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { setNavGuard, bypassNavGuard } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
+import { nestPath } from "../lib/nest-url";
 import {
   clampTagInput,
   newTags,
@@ -1825,7 +1826,7 @@ export function DocumentEditor({
                 separatorBefore: true,
                 testId: "document-editor-copy-link",
                 onSelect: () => {
-                  const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
+                  const url = `${window.location.origin}${nestPath(nestId)}?doc=${encodeURIComponent(nodeId)}`;
                   void copyTextWithToast(
                     url,
                     "Link copied — recipient needs access to this nest",
