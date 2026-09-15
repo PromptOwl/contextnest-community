@@ -180,6 +180,10 @@ interface NestViewProps {
    *  a folder breadcrumb segment elsewhere in the app. */
   initialTags?: string[];
   initialFolder?: string;
+  /** Reader mode: the page to open first (a `?doc=` deep link). */
+  initialDoc?: string | null;
+  /** Reader mode: the open page changed — the shell mirrors it to the URL. */
+  onReaderDocChange?: (nodeId: string | null) => void;
   /** Tab to open on mount, from ?tab= — falls back to overview when the
    *  slug names a tab this user can't see. */
   initialTab?: string;
@@ -194,6 +198,8 @@ export function NestView({
   isAnonOwned,
   isArchived,
   onBack,
+  initialDoc,
+  onReaderDocChange,
   onOpenDocument,
   onOpenTrace,
   onManageKeys,
@@ -1877,26 +1883,22 @@ export function NestView({
   // caps.isReaderView (reader_mode && isReadOnly), so owners/editors/reviewers/
   // admins never lose the authoring UI.
   if (isReaderView) {
+    // No "Back" here: a public docs reader navigates with the page's own
+    // nav and the shell's header; a button back to the nest list is noise.
     return (
-      <div className="relative">
-        <div className="mb-3">
-          <Button variant="ghost" size="sm" onClick={onBack} className="gap-1.5">
-            <ArrowLeft className="h-4 w-4" />
-            Back
-          </Button>
-        </div>
-        <ReaderView
-          nestId={nestId}
-          nestName={editableName}
-          nodes={nodes}
-          tocGroups={tocGroups}
-          knownFolders={knownFolders}
-          readerHomeNode={readerHomeNode}
-          onExpandFolder={fetchLevel}
-          loadingFolders={loadingFolders}
-          loadedFolders={loadedFolderPaths}
-        />
-      </div>
+      <ReaderView
+        nestId={nestId}
+        nestName={editableName}
+        nodes={nodes}
+        tocGroups={tocGroups}
+        knownFolders={knownFolders}
+        readerHomeNode={readerHomeNode}
+        initialDoc={initialDoc}
+        onDocChange={onReaderDocChange}
+        onExpandFolder={fetchLevel}
+        loadingFolders={loadingFolders}
+        loadedFolders={loadedFolderPaths}
+      />
     );
   }
 
