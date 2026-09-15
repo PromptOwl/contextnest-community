@@ -117,6 +117,7 @@ A super-admin can:
 - Add, remove, and re-role collaborators
 - Add, remove, and re-role stewards
 - Approve and reject pending versions in any nest's review queue
+- Manage the official community sites trusted for SSO auto-login (**Settings → Community sites**, or `GET/POST /admin/community-sites` — see `API.md`)
 
 What a super-admin **cannot** do (owner-only operations):
 

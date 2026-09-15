@@ -58,7 +58,16 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // Raised 47 -> 49 in 1.12.0 for the server-level `nest_create` / `context_create` bootstrap
 // writes — same exception as `context_table_query`: no importable engine module yet, and the
 // tools follow the existing pattern rather than introducing drift.
-const BASELINE = 49;
+//
+// Raised 49 -> 52 for the comment write tools (`context_comment`,
+// `context_resolve_comment`) and the server-level `context_comments` mirror
+// (CU-wdqcq01uqn). Same reason as move, the deletion trio and my_drafts: comments are NOT an
+// engine operation and are not meant to be — they are deliberately outside the engine's
+// version/hash chain (see the header of src/governance/comment-service.ts), which makes them
+// a community-edition governance concern like context_approve and context_stewards. The
+// upstream catalog was checked and carries no comment/annotation operation to import. They
+// mirror the REST annotation routes 1:1.
+const BASELINE = 52;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

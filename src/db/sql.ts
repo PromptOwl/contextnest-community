@@ -24,6 +24,55 @@ export function nowExpr(db: DatabaseAdapter): string {
 }
 
 /**
+ * The last `length` characters of `column`, for comparing a suffix with `= ?`.
+ *
+ * Deliberately NOT `LIKE '%suffix'`, which is unusable for this on two counts.
+ * SQLite's LIKE folds ASCII case and ignores collation entirely — `COLLATE
+ * BINARY` does not make it case-sensitive, it is the `like()` function's own
+ * behaviour — so `'x--Annotations' LIKE '%--annotations'` is TRUE there and
+ * FALSE on Postgres, whose LIKE is case-sensitive. Identical data would count
+ * differently on the two backends this repo supports.
+ *
+ * It also keeps the suffix a bound parameter rather than string-spliced SQL, so
+ * a suffix that ever contained `%` or `_` can't quietly become a wildcard.
+ *
+ * `substr(x, -n)` and `right(x, n)` both return the whole string when it is
+ * shorter than `n`, which compares unequal to the suffix — the answer a caller
+ * wants for a short id.
+ */
+export function suffixOf(
+  db: DatabaseAdapter,
+  column: string,
+  length: number,
+): string {
+  return db.dialect === "sqlite"
+    ? `substr(${column}, -${length})`
+    : `right(${column}, ${length})`;
+}
+
+/** 
+ * Same as nowExpr, to the millisecond: `YYYY-MM-DD HH:MM:SS.mmm`.
+ *
+ * For rows whose ORDER BY is "the sequence they were written in". Second
+ * resolution is not enough there: two rows written in the same second fall
+ * through to whatever the tiebreaker column is, and when that is a UUID
+ * primary key the order is effectively random. A thread's replies are exactly
+ * that case — and an agent posting through MCP replies within the same second
+ * far more often than a human typing does.
+ *
+ * String-sorts correctly against values already stored at second resolution:
+ * '…:05' is a prefix of '…:05.123' and so sorts first, which is right, since
+ * anything written before this format existed was written earlier. Both
+ * consumers already accept the fractional form — ui/src/lib/dates.ts parses
+ * `(\.\d+)?`, and comment-service's normalizer appends the zone either way.
+ */
+export function nowMsExpr(db: DatabaseAdapter): string {
+  return db.dialect === "sqlite"
+    ? "strftime('%Y-%m-%d %H:%M:%f','now')"
+    : "to_char((now() AT TIME ZONE 'utc'), 'YYYY-MM-DD HH24:MI:SS.MS')";
+}
+
+/**
  * Turn a plain `INSERT INTO …` into insert-or-ignore for the dialect.
  *   SQLite:   `INSERT OR IGNORE INTO …`
  *   Postgres: `… ON CONFLICT DO NOTHING` (target-less — ignores any

@@ -40,6 +40,7 @@ interface ConnectorRow {
 }
 
 const EVENT_EMOJI: Record<string, string> = {
+  mention: ":speech_balloon:",
   review_requested: ":memo:",
   review_approved: ":white_check_mark:",
   review_rejected: ":x:",
@@ -134,6 +135,38 @@ async function resolveUrl(nestId: string, raw: string): Promise<string | null> {
     return v && isSafeConnectorUrl(v) ? v : null;
   }
   return isSafeConnectorUrl(raw) ? raw : null;
+}
+
+/**
+ * Could an event of this kind posted for this nest reach anything at all?
+ * Callers that RATION dispatches ask first — a rate-limit token spent on a
+ * fan-out with nowhere to go bills a no-op. Mirrors dispatchEvent's filters:
+ * server-wide webhooks skip digest-delivered kinds, per-nest rows must
+ * subscribe to the kind (or "*").
+ */
+export async function hasAnyConnector(nestId: string, kind: string): Promise<boolean> {
+  if (
+    (config.SLACK_WEBHOOK_URL || config.MSTEAMS_WEBHOOK_URL) &&
+    !DIGEST_DELIVERED_KINDS.has(kind)
+  ) {
+    return true;
+  }
+  try {
+    const rows = (await getDb().all(
+      "SELECT events FROM connectors WHERE nest_id = ? AND enabled = 1",
+      [nestId],
+    )) as Pick<ConnectorRow, "events">[];
+    return rows.some((r) => {
+      try {
+        const kinds = JSON.parse(r.events) as string[];
+        return kinds.includes("*") || kinds.includes(kind);
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false; // table missing (mid-migration) — nothing to deliver to
+  }
 }
 
 /**

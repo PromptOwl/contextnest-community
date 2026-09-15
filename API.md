@@ -142,7 +142,7 @@ Returns whether the caller is the license admin + license metadata.
 Device-flow login. Also gated by `PROMPTOWL_SIGN_IN_GATE`.
 
 ### GET `/auth/sso`
-One-click SSO auto-login from PromptOwl (**official deployment only**). PromptOwl redirects a signed-in user here with a short-lived, single-use, audience-bound HS256 JWT ticket (`?ticket=...`). The server verifies the signature with `OFFICIAL_COMMUNITY_SSO_SECRET`, checks `aud` against `PUBLIC_BASE_URL`, enforces one-time-use via the ticket's `jti`, then provisions the user and starts a session (same provisioning + `PROMPTOWL_SIGN_IN_GATE` as `/auth/promptowl`). On success → `302` to `/`; on failure → `302` to `/?sso_error=<code>` (the SPA shows a toast). **When `OFFICIAL_COMMUNITY_SSO_SECRET` is unset** (i.e. every self-hosted server) the feature is disabled and the endpoint bounces to `/?sso_error=not_supported`. That is the domain lock: without the shared secret no ticket can be verified, so the feature stays exclusive to the official community regardless of this redirect. Error codes: `not_supported`, `missing_ticket`, `invalid_ticket`, `bad_audience`, `ticket_used`, `rate_limited`, `sign_in_restricted`, `service_error` (DB/internal fault while redeeming the ticket).
+One-click SSO auto-login from an **official community site** (**not for self-hosted deployments** — see below). A trusted site redirects a signed-in user here with a short-lived, single-use, audience-bound HS256 JWT ticket (`?ticket=...`). The server tries the ticket's signature against every configured official community site's secret (`GET/POST/PATCH/DELETE /admin/community-sites`, plus the legacy `OFFICIAL_COMMUNITY_SSO_SECRET`/`PUBLIC_BASE_URL` env-var pair for backward compatibility), checks `aud` against this deployment's own `PUBLIC_BASE_URL` (not the matched site's `url`, which is a display/uniqueness field only), enforces one-time-use via the ticket's `jti`, then provisions the user and starts a session (same provisioning + `PROMPTOWL_SIGN_IN_GATE` as `/auth/promptowl`). On success → `302` to `/`; on failure → `302` to `/?sso_error=<code>` (the SPA shows a toast). **When no official community site is configured** (i.e. every self-hosted server, by default) the feature is disabled and the endpoint bounces to `/?sso_error=not_supported`. That is the domain lock: without a matching secret no ticket can be verified, so the feature stays exclusive to configured official sites regardless of this redirect. Error codes: `not_supported`, `missing_ticket`, `invalid_ticket`, `bad_audience`, `ticket_used`, `rate_limited`, `sign_in_restricted`, `service_error` (DB/internal fault while redeeming the ticket).
 
 ### GET `/auth/oidc/login`
 Starts generic **OIDC single sign-on** (Microsoft Entra ID, Google, or any spec-compliant IdP). Superadmin-configurable via `/admin/settings` (`oidc_*` fields) or the `OIDC_*` env vars — see `CONFIGURATION.md → Single sign-on (OIDC)`. Entirely separate from the PromptOwl flows above.
@@ -388,6 +388,24 @@ Changing an existing collaborator's level stays admin-only.
 
 ### DELETE `/nests/:nestId/collaborators/:collabId` (admin)
 Removing a collaborator stays admin-only.
+
+### GET `/nests/:nestId/mentionable` (read+, members only)
+```json
+{ "people": [{ "email": "owner@x.com", "name": "Olive Owner" }] }
+```
+Everyone who can reach the nest (owner, collaborators, shared-team members, stewards, grant holders) — the roster the `@mention` pickers offer and validate against. With `PEOPLE_SUGGEST_ALL_USERS` on, every registered account follows the roster; mentioning one of them from a write+ account adds them to the nest as a `read` collaborator (see `POST /comments`).
+
+Read-tier, because commenting is read-tier and a read-only reviewer is the person most likely to tag someone. The property `GET /collaborators` protects with its write tier is kept by a narrower rule: **you may see the roster if you are on it.** A caller who reaches the nest only through its visibility (`public`, or `org`) is not on the roster → `403`. Write+ callers pass regardless (they can read the fuller roster anyway).
+
+### GET `/people/suggest?q=&limit=` (auth required)
+```json
+{ "people": [{ "email": "c@x.com", "name": "Carl Colleague", "source": "nest" }] }
+```
+Server-wide, not nest-scoped: the people the caller **already works with** — anyone on a nest they own or collaborate on (its owner, collaborators, active stewards) and anyone on a team they own or belong to. `source` ∈ `nest` / `team` / `directory`. For a server admin the directory is every user; `GET /auth/teammates` remains the admin-only full roster.
+
+Scope is deliberately narrow by default, because a single server may hold several unrelated organisations: `PEOPLE_SUGGEST_ALL_USERS` (off by default, Settings → General → People directory) widens it to every registered account, which is right for a single-company deployment and wrong for a shared one. A server admin always sees every account.
+
+`q` filters on name or address (substring, case-insensitive); `limit` caps the list (default and max 20). Suggestions are a convenience for the add-a-person pickers — an address that appears nowhere here is still valid to submit (that is how you invite someone with no account yet), and the add itself re-checks permission and the escalation cap.
 
 ---
 
@@ -1163,6 +1181,42 @@ List comments on a node. Optional `status` = `open` | `resolved`.
 Leave a comment. Body: `{ body, version?, anchor?{start,end,text?}, parentId? }`.
 `parentId` threads a reply. Returns `201 { comment }`. Empty body → `400`.
 
+**`@mentions` notify.** Every name in the comment body — `@user@host`,
+`@localpart`, or `@(Display Name)` — is resolved against the nest's people
+(`GET /nests/:nestId/mentionable`) and each person named gets a `mention` row
+in `GET /me/notifications` linking the document, plus a message on the
+configured connector and an email to their own address when SMTP is set up.
+A channel message names who was mentioned (a room is not a person); the inbox
+row and the email address the recipient directly. The author is never notified
+about their own mention, a name matching nobody
+(or matching two people ambiguously) notifies nobody, and a recipient who
+can't open the document is skipped — so a mention can't disclose a title.
+Unlike a document body, where only names a save *adds* notify, every name in a
+comment notifies: the comment itself is the new event. At most 25 people are
+notified per write (`MAX_MENTION_RECIPIENTS`) — commenting is read-tier and
+unthrottled, so a comment naming a large roster would otherwise be an
+amplifier; names are taken in order of appearance. With `PEOPLE_SUGGEST_ALL_USERS`
+on, a name that matches a registered account off the nest is an invite: a
+write+ author's mention adds them as a `read` collaborator and then notifies;
+a read-only author's mention of an outsider still reaches nobody.
+
+The *stream* of them is bounded too: per nest per 5 minutes, one person may
+cause 50 mention **emails** (`MENTION_DELIVERY_BUDGET`) and 25 mention
+**channel posts** (`MENTION_CHANNEL_BUDGET`) — separate pools, because emails
+scale with how many people were named while a channel post is one message per
+comment. Separate also so the email allowance doesn't depend on something
+invisible: the connector dispatch is a no-op on a nest with no connector
+configured, and a shared pool would have spent the token before it could say
+so, quietly halving the email budget on exactly the deployments least likely to
+have a connector. Past that the comment still posts and the
+inbox rows still land — the queue is the recipient's own record and costs one
+insert — and only the external fan-out is skipped, with a server-log warning.
+The budget sits on delivery rather than on comment creation deliberately: an
+agent working through a review posts a comment per finding, which is exactly
+what `context_comment` is for, and throttling the write would break it. The same applies to the
+annotation thread endpoints (§ Hosted artifacts), which are what the UI's
+comments panel posts.
+
 ### POST `/nests/:nestId/nodes/:nodeId/comments/:commentId/resolve`
 Mark a comment resolved. Records `resolvedBy` + `resolvedAt`. Returns `{ comment }`.
 
@@ -1726,6 +1780,15 @@ Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually;
 - `context_deletion_queue` — pending (or `declined`) requests with their reasons and request ids.
 - `context_resolve_deletion` — `delete` or `decline` (note required) by request id. **Owner/admin only** — the transport is read-tier, so this per-tool check is the only thing between a viewer and a deleted nest.
 
+**Comments read AND write.** `context_comments` reads a document's threads (anchored quotes, replies, open/resolved) — the same annotation store the web UI's comments panel shows. Two write tools close the loop so an agent handed feedback can answer it rather than only read it:
+
+- `context_comment` — leave a comment. Omit `thread` to open a new whole-document thread; pass a `thread` id from `context_comments` to reply into it. One tool for both, because they differ only by that argument.
+- `context_resolve_comment` — resolve a thread, or `reopen: true` to put it back. The caller is recorded as the resolver, exactly as in the UI.
+
+Both are **read-tier**, matching REST (`isAnnotationAction` in `app.ts`): a reviewer who can see the document may comment on it. The transport is read-tier too, so each tool re-checks `canReadNode` itself — that check is the real gate. Deliberately *not* gated on an approved version: a reviewer comments on drafts, and writing a comment discloses nothing (the caller supplies the text), whereas *reading* threads stays gated because anchors quote draft body text. Both run the same side effects the REST routes do — the `@mention` fan-out (so tagging a human notifies them) and the derived `— Annotations` re-projection for artifacts, so an agent's comment doesn't leave that node stale. A `thread` that belongs to another document is refused by name rather than silently opening a new thread.
+
+`context_comments` is also available on the **server-level** endpoint (nest-parameterised, read-only). Comment visibility matches UI node visibility: collaborators/stewards who can read the node may read its threads even before approval; public readers remain blocked until the document is approved. Comment *writes* stay per-nest with the other write tools.
+
 **`context_my_drafts`** mirrors `GET /me/drafts`, nest-scoped: the caller's own unsubmitted (or rejected) documents in this nest, with their path and version. Capped at the 100 most recent; the reply says so explicitly when there are more, so an agent can't read a capped page as the whole set. Self-scoped by construction — it only ever returns rows the caller authored, in a nest they already hold read on, so it needs no permission check of its own. It exists because an agent otherwise cannot see its own unsubmitted work: a draft has no review request, so `context_review_queue` never lists it, and `context_query` skips it (only approved versions are AI-readable). The response names `context_submit_review` as the next step.
 
 Server-admin-only tools (gated by `isLicenseAdminUserId` in non-open mode, same as their REST counterparts):
@@ -1752,14 +1815,15 @@ Execute (the runner contract — the agent IS the runner):
 
 The official PromptOwl deployment connects on its users' behalf without storing
 a `cnst_` key: it mints a short-lived HS256 **service ticket** signed with the
-shared `OFFICIAL_COMMUNITY_SSO_SECRET` (see `CONFIGURATION.md`). The ticket
+shared secret configured for it as an official community site (`/admin/community-sites`,
+or the legacy `OFFICIAL_COMMUNITY_SSO_SECRET` env var — see `CONFIGURATION.md`). The ticket
 carries `scope: "mcp"`, an `aud` bound to this server's `PUBLIC_BASE_URL`, a
 ~5-minute `exp`, and **no `jti`**. It resolves to an already-existing account by
 email — native access never auto-provisions.
 
 Accepted as a `Bearer` on exactly these paths (everything else still requires a
 real credential):
-- `GET /index` and the server-level `ALL /mcp` — cross-nest index + read tools.
+- `GET /index` and the server-level `ALL /mcp` — cross-nest index + read tools (including `context_comments`).
 - `POST /nests/:id/context` and `GET /nests/:id/nodes` — retrieval + doc listing.
 - `ALL /nests/:id/mcp` — the per-nest MCP transport, so a block granted read &
   write on one nest reaches that nest's write tools. Per-nest permission,
@@ -1811,6 +1875,23 @@ An email present in several sources shows its least-revocable origin (`license` 
 - `404` — email has no granted row.
 
 Grants persist in the database and are loaded into the in-memory resolution cache at startup and after every grant/revoke, so they survive restarts. Surfaced in the UI on **Teammates → Superadmins** with per-source badges, add-by-email, and confirm-to-revoke.
+
+### Community sites — GET/POST `/admin/community-sites`, PATCH/DELETE `/admin/community-sites/:id` (server-admin only)
+Manage the **official community sites** trusted for one-click SSO auto-login (`GET /auth/sso` — see above). Each row is a `{ name, url, secret, is_active }` connection; `url` is a display/uniqueness field, not used for audience binding. `GET /auth/sso` tries an incoming ticket's signature against every *active* site's secret, and validates the ticket's `aud` claim against this deployment's own `PUBLIC_BASE_URL` (the same value for every candidate). Replaces the single `OFFICIAL_COMMUNITY_SSO_SECRET`/`PUBLIC_BASE_URL` env-var pair with a DB-backed list for the *secret* side — the env-var pair still works as an implicit extra "legacy" entry, so existing single-site deployments are unaffected. Surfaced in the UI at **Settings → Community sites**.
+
+Same server-admin guard as `/admin/super-admins` (license admin, any effective superadmin; open mode: always allowed).
+
+**GET `/admin/community-sites`** → `200 { community_sites: [{ id, name, url, secret_set, is_active, created_at, updated_at }] }`. `secret` is **write-only** — never returned, only whether one is set.
+
+**POST `/admin/community-sites`** with `{ name, url, secret, is_active? }` → `201` with the row shape above (`is_active` defaults to `true`).
+- `400` — missing name, invalid/non-http(s) url, or a secret under 16 characters.
+- `409` — a site with this url already exists.
+
+**PATCH `/admin/community-sites/:id`** — any subset of `{ name, url, secret, is_active }`; omit `secret` to keep the current one. Same validation and `409` as POST. `404` if the id doesn't exist.
+
+**DELETE `/admin/community-sites/:id`** → `200 { ok: true, id }`. `404` if the id doesn't exist.
+
+Active sites are loaded into an in-memory cache at startup and refreshed after every write, so `GET /auth/sso` never blocks on a DB round trip per request.
 
 ### GET `/admin/trace` (server-admin only)
 Operator activity trail — one newest-first row per API request and per MCP tool call, so the server admin has a single place to audit what every client and agent did. Server-admin only: the license admin, or a `super_admin` in `access.yaml` (open mode: always allowed). Everyone else gets `403`. Cross-tenant data; not scoped to a nest.

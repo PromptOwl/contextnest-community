@@ -7,6 +7,11 @@ import {
   nestSetupPrompt,
   envFileContents,
   ctxCliConnectSnippet,
+  slugify,
+  claudeDesktopConfig,
+  claudeCodeCommand,
+  mcpHttpConfig,
+  KEY_PLACEHOLDER,
 } from "./connect";
 
 // Regression tests written before the implementation (dev-loop: fail-before-build).
@@ -380,6 +385,100 @@ describe("ctx CLI contract (CLI 2.2+: env-based key, remote vault alias)", () =>
     expect(p).not.toContain("ctx vault add");
     expect(p).not.toContain("CONTEXTNEST_API_KEY");
     expect(p).toContain("https://x.ai/mcp");
+  });
+});
+
+describe("slugify", () => {
+  it("lowercases and dashes non-alphanumerics", () => {
+    expect(slugify("GTM Strategy 2026!")).toBe("gtm-strategy-2026");
+  });
+
+  it("falls back to 'nest' for an empty or all-punctuation input", () => {
+    expect(slugify("")).toBe("nest");
+    expect(slugify("!!!")).toBe("nest");
+  });
+});
+
+// Connect modal client-config builders. Kept in connect.ts (React-free) so
+// the shapes the "Configure a specific client" tabs copy are pinned here
+// rather than only inside JSX — see CU-wdqcq02480: the MCP and Claude Desktop
+// tabs once rendered visually-identical blocks despite targeting different
+// transports, which these tests would have caught.
+describe("claudeDesktopConfig", () => {
+  it("bridges through mcp-remote with the endpoint as a positional arg", () => {
+    const c = JSON.parse(claudeDesktopConfig("GTM", "https://x.ai/nests/gtm/mcp"));
+    expect(c.mcpServers.gtm.command).toBe("npx");
+    expect(c.mcpServers.gtm.args).toContain("mcp-remote");
+    expect(c.mcpServers.gtm.args).toContain("https://x.ai/nests/gtm/mcp");
+  });
+
+  it("carries the auth header as an mcp-remote --header arg, with a placeholder key", () => {
+    const c = JSON.parse(claudeDesktopConfig("GTM", "https://x.ai/nests/gtm/mcp"));
+    const headerIdx = c.mcpServers.gtm.args.indexOf("--header");
+    expect(headerIdx).toBeGreaterThan(-1);
+    expect(c.mcpServers.gtm.args[headerIdx + 1]).toBe(
+      `Authorization: Bearer ${KEY_PLACEHOLDER}`,
+    );
+  });
+
+  it("drops the --header arg entirely in open mode", () => {
+    const c = JSON.parse(
+      claudeDesktopConfig("GTM", "https://x.ai/nests/gtm/mcp", true),
+    );
+    expect(c.mcpServers.gtm.args).not.toContain("--header");
+  });
+
+  it("never bakes in a real key", () => {
+    expect(claudeDesktopConfig("GTM", "https://x.ai/nests/gtm/mcp")).not.toMatch(
+      /cnst_/,
+    );
+  });
+});
+
+describe("claudeCodeCommand", () => {
+  it("registers over http with the slugified nest as the server name", () => {
+    const cmd = claudeCodeCommand("GTM Strategy", "https://x.ai/nests/gtm/mcp");
+    expect(cmd).toBe(
+      `claude mcp add --transport http gtm-strategy https://x.ai/nests/gtm/mcp --header "Authorization: Bearer ${KEY_PLACEHOLDER}"`,
+    );
+  });
+
+  it("omits the --header flag in open mode", () => {
+    const cmd = claudeCodeCommand("GTM", "https://x.ai/nests/gtm/mcp", true);
+    expect(cmd).toBe(
+      "claude mcp add --transport http gtm https://x.ai/nests/gtm/mcp",
+    );
+  });
+});
+
+describe("mcpHttpConfig", () => {
+  it("uses url + headers, not command/args (direct HTTP, no mcp-remote bridge)", () => {
+    const c = JSON.parse(mcpHttpConfig("GTM", "https://x.ai/nests/gtm/mcp"));
+    expect(c.mcpServers.gtm.url).toBe("https://x.ai/nests/gtm/mcp");
+    expect(c.mcpServers.gtm.command).toBeUndefined();
+    expect(c.mcpServers.gtm.headers.Authorization).toBe(
+      `Bearer ${KEY_PLACEHOLDER}`,
+    );
+  });
+
+  it("omits the headers key entirely in open mode", () => {
+    const c = JSON.parse(
+      mcpHttpConfig("GTM", "https://x.ai/nests/gtm/mcp", true),
+    );
+    expect(c.mcpServers.gtm.headers).toBeUndefined();
+  });
+
+  it("is shaped differently from claudeDesktopConfig despite the shared mcpServers envelope", () => {
+    // The two tabs used to render identically even though one is a stdio
+    // bridge (command/args) and the other is direct HTTP (url/headers).
+    const desktop = JSON.parse(
+      claudeDesktopConfig("GTM", "https://x.ai/nests/gtm/mcp"),
+    );
+    const http = JSON.parse(mcpHttpConfig("GTM", "https://x.ai/nests/gtm/mcp"));
+    expect(desktop.mcpServers.gtm.command).toBeDefined();
+    expect(http.mcpServers.gtm.command).toBeUndefined();
+    expect(http.mcpServers.gtm.url).toBeDefined();
+    expect(desktop.mcpServers.gtm.url).toBeUndefined();
   });
 });
 
