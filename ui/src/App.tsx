@@ -3,6 +3,8 @@ import { Login } from "./components/Login";
 import { Dashboard } from "./components/Dashboard";
 import { NestView } from "./components/NestView";
 import { DocumentEditor } from "./components/DocumentEditor";
+import { DocumentSidebar } from "./components/DocumentSidebar";
+import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
 import { ApiKeysPage } from "./components/ApiKeysPage";
@@ -287,6 +289,21 @@ export default function App() {
   }, [refreshHealth]);
   // Cmd/Ctrl+K quick-open — active anywhere inside a nest context.
   const [showQuickOpen, setShowQuickOpen] = useState(false);
+  // The document page's index rail. Per-browser; the page itself offers the
+  // toggle (sidebar header to hide, top bar to show).
+  const [docSidebarCollapsed, setDocSidebarCollapsedState] = useState(
+    () => readDocPagePrefs(localStorage).sidebarCollapsed,
+  );
+  const setDocSidebarCollapsed = (collapsed: boolean) => {
+    setDocSidebarCollapsedState(collapsed);
+    writeDocPagePrefs(localStorage, { sidebarCollapsed: collapsed });
+  };
+  // Below md the rail is a drawer over the document instead of a column
+  // beside it; that open/closed state is transient, never persisted.
+  const [docSidebarDrawer, setDocSidebarDrawer] = useState(false);
+  useEffect(() => {
+    setDocSidebarDrawer(false);
+  }, [view]);
 
   const requestLogout = useCallback(() => setLogoutConfirm(true), []);
 
@@ -912,7 +929,15 @@ export default function App() {
   // Board columns are fixed-width and scroll sideways, so the 6xl shell forces
   // horizontal scrolling long before the viewport runs out. Widen the whole
   // shell (header, tabs, main, footer) on that page so they stay aligned.
-  const shellWidth = view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
+  // The document page is its own workspace — a sidebar and a document that
+  // manage their own width — so the shell goes edge to edge there.
+  const isDocPage = view.page === "document";
+  const shellWidth =
+    view.page === "board"
+      ? "max-w-[1800px]"
+      : isDocPage
+        ? "max-w-none"
+        : "max-w-6xl";
 
   return (
     <div className="min-h-screen bg-background">
@@ -1078,7 +1103,9 @@ export default function App() {
           also drags fixed UI — toasts, dialogs — off the window, since their
           percentage boxes resolve against the wider block. `clip` (not
           `hidden`) keeps sticky headers inside pages working. */}
-      <main className={`${shellWidth} mx-auto px-4 py-4 min-w-0 overflow-x-clip`}>
+      <main
+        className={`${shellWidth} mx-auto min-w-0 overflow-x-clip ${isDocPage ? "" : "px-4 py-4"}`}
+      >
         {/* A ?nest link that didn't resolve. Falling through to the dashboard
             made a stale bookmark look like it had simply opened the app, with
             no way to tell "deleted" from "no access" from "bad link"
@@ -1219,7 +1246,78 @@ export default function App() {
               ...opts,
             });
           return (
+            <div className="flex min-h-[calc(100vh-3.5rem)] items-stretch">
+              {docSidebarDrawer && (
+                <button
+                  type="button"
+                  className="fixed inset-0 z-40 bg-black/30 md:hidden"
+                  aria-label="Close sidebar"
+                  onClick={() => setDocSidebarDrawer(false)}
+                />
+              )}
+              {(!docSidebarCollapsed || docSidebarDrawer) && (
+                <div
+                  className={
+                    docSidebarDrawer
+                      ? "fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] border-r bg-background shadow-xl md:static md:z-auto md:w-64 md:max-w-none md:shadow-none"
+                      : "hidden w-64 shrink-0 border-r md:block"
+                  }
+                >
+                  <div className="sticky top-0 h-screen max-h-screen">
+                    <DocumentSidebar
+                      nestId={doc.nestId}
+                      nodeId={doc.nodeId}
+                      onCollapse={() =>
+                        docSidebarDrawer
+                          ? setDocSidebarDrawer(false)
+                          : setDocSidebarCollapsed(true)
+                      }
+                      onOpenDashboard={() => setView({ page: "dashboard" })}
+                      onOpenNest={(t) =>
+                        setView({
+                          page: "nest",
+                          nestId: t.nestId,
+                          nestName: t.nestName,
+                          isOwner: t.isOwner,
+                          isAnonOwned: t.isAnonOwned,
+                          tab: "documents",
+                        })
+                      }
+                      onOpenDocument={(t) => {
+                        if (t.nestId === doc.nestId && t.nodeId === doc.nodeId) return;
+                        openDocument({
+                          nestId: t.nestId,
+                          nestName: t.nestName,
+                          nodeId: t.nodeId,
+                          isOwner: t.isOwner,
+                          isAnonOwned: t.isAnonOwned,
+                        });
+                      }}
+                      onNewDocument={
+                        doc.nodeId === "new"
+                          ? undefined
+                          : () =>
+                              openDocument({
+                                nestId: doc.nestId,
+                                nestName: doc.nestName,
+                                nodeId: "new",
+                                isOwner: doc.isOwner,
+                                isAnonOwned: doc.isAnonOwned,
+                              })
+                      }
+                    />
+                  </div>
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
             <DocumentEditor
+              sidebarCollapsed={docSidebarCollapsed}
+              onToggleSidebar={() => {
+                // Phone: open the drawer. Desktop: bring the column back.
+                if (window.matchMedia("(max-width: 767px)").matches)
+                  setDocSidebarDrawer(true);
+                else setDocSidebarCollapsed(false);
+              }}
               // Key by nest + node so React unmounts the editor when the
               // user hops to a different doc (wiki-link nav) or pivots
               // from an existing doc into a fresh "new" page via a
@@ -1323,6 +1421,8 @@ export default function App() {
               }
               initialTitle={doc.initialTitle}
             />
+              </div>
+            </div>
           );
         })()}
         {view.page === "definitions" &&

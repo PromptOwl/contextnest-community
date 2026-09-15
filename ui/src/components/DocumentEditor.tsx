@@ -10,7 +10,7 @@ import {
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
-import { reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
+import { keys, reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { setNavGuard, bypassNavGuard } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
@@ -25,6 +25,12 @@ import { relTime, formatServerDate } from "../lib/dates";
 import { useRovingFocus } from "../lib/use-roving-focus";
 import { resolveEditorAccess } from "../lib/editor-access";
 import { isNestArchived } from "../lib/nest-caps";
+import {
+  nextCommentsOpen,
+  readDocPagePrefs,
+  writeDocPagePrefs,
+} from "../lib/doc-page";
+import { NestVisibilityControl } from "./NestVisibilityControl";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -67,6 +73,10 @@ import {
   Copy,
   Star,
   Undo2,
+  PanelLeft,
+  Globe,
+  Building2,
+  Lock,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
@@ -195,6 +205,9 @@ interface DocumentEditorProps {
   breadcrumb?: BreadcrumbEntry[];
   /** Jump to ancestor at `index`; drops entries after it. */
   onJumpBreadcrumb?: (index: number) => void;
+  /** The page's index rail is hidden; the top bar offers to bring it back. */
+  sidebarCollapsed?: boolean;
+  onToggleSidebar?: () => void;
 }
 
 export function DocumentEditor({
@@ -214,6 +227,8 @@ export function DocumentEditor({
   initialTitle,
   breadcrumb,
   onJumpBreadcrumb,
+  sidebarCollapsed = false,
+  onToggleSidebar,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
   // Type picker: one tab stop, arrows between the choices (see the radiogroup).
@@ -306,6 +321,7 @@ export function DocumentEditor({
   // Creator + everyone else with a hand in the doc (version authors ∪
   // document-scope grantees) — server-resolved on GET /nodes/:id.
   const [author, setAuthor] = useState<string | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [collaborators, setCollaborators] = useState<string[]>([]);
   const [pendingChange, setPendingChange] = useState<PendingChange | null>(null);
   // Submitter of the active pending review (null when not pending).
@@ -466,6 +482,29 @@ export function DocumentEditor({
   const docViewRef = useRef<HTMLDivElement | null>(null);
   const [anchoredThreads, setAnchoredThreads] = useState<api.AnnotationThread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  // The comments rail starts closed — an empty panel beside every document
+  // was a third of the width spent on nothing — and remembers the last
+  // choice per browser. It opens itself for anything that needs it on
+  // screen (see nextCommentsOpen); the panel stays MOUNTED while hidden so
+  // thread loading, body highlights and deep-link focus keep working.
+  const [commentsOpen, setCommentsOpenState] = useState(
+    () => readDocPagePrefs(localStorage).commentsOpen,
+  );
+  const setCommentsOpen = (open: boolean) => {
+    setCommentsOpenState(open);
+    writeDocPagePrefs(localStorage, { commentsOpen: open });
+  };
+  useEffect(() => {
+    setCommentsOpenState((open) =>
+      nextCommentsOpen(open, {
+        initialThreadId,
+        commentMode,
+        pendingAnchor: !!pendingAnchor,
+        activeThreadId,
+      }),
+    );
+  }, [initialThreadId, commentMode, pendingAnchor, activeThreadId]);
+  const openThreadCount = anchoredThreads.filter((t) => t.status === "open").length;
   const anchorRangesRef = useRef<{ id: string; range: Range }[]>([]);
   const pendingFocusRef = useRef<string | null>(null);
 
@@ -908,6 +947,7 @@ export function DocumentEditor({
       setBaseVersion(node?.version);
       setStatus(node?.status ?? null);
       setAuthor(node?.author ?? null);
+      setUpdatedAt((node as any)?.updated_at ?? null);
       setCollaborators(
         Array.isArray(node?.collaborators)
           ? node.collaborators.map((e: unknown) => String(e))
@@ -1618,20 +1658,43 @@ export function DocumentEditor({
   }
 
   return (
-    <div>
-      {/* Header */}
-      <div className="flex items-center justify-between gap-3 mb-4 mt-14 md:mt-0">
-        <div className="flex items-center gap-2 min-w-0 flex-1">
+    <div className="flex min-h-full flex-col" data-testid="document-page">
+      {/* Top bar — one row, Notion-style: where you are on the left, what you
+          can do with the document on the right. Sticky so the actions stay
+          reachable at any scroll depth; the body scrolls with the window. */}
+      <div
+        className="sticky top-0 z-30 flex h-12 items-center gap-2 border-b bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-3"
+        data-testid="document-editor-topbar"
+      >
+        <div className="flex items-center gap-1 min-w-0 flex-1">
+          {/* Bring the index back: always on a phone (it's a drawer there),
+              on a desktop only once it has been hidden. */}
+          {onToggleSidebar && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className={`h-8 w-8 shrink-0${sidebarCollapsed ? "" : " md:hidden"}`}
+              onClick={onToggleSidebar}
+              title="Show sidebar"
+              aria-label="Show sidebar"
+              data-testid="document-sidebar-expand"
+            >
+              <PanelLeft className="h-4 w-4" />
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="icon"
+            className="h-8 w-8 shrink-0"
             onClick={() => confirmLeave("go back", onBack)}
+            title="Back to documents"
             data-testid="document-editor-back"
           >
-            <ArrowLeft className="h-5 w-5" />
+            <ArrowLeft className="h-4 w-4" />
           </Button>
           {/* Chain: nest > ancestors… > doc. Chip click truncates chain. */}
-          <div className="flex items-center gap-2 min-w-0 flex-wrap">
+          {/* One line: the trail truncates rather than wrapping the bar. */}
+          <div className="flex items-center gap-2 min-w-0 flex-nowrap overflow-hidden">
             <button
               type="button"
               onClick={() =>
@@ -1693,7 +1756,7 @@ export function DocumentEditor({
                 and anyone re-flagging sees it in the request dialog. */}
             {!isNew && deletionRequested && (
               <span
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-red-50 text-red-700 border-red-200"
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-red-50 text-red-700 border-red-200 whitespace-nowrap"
                 title={`${deletionRequest!.requestedBy} asked for this to be deleted: "${deletionRequest!.reason}". A nest admin decides.`}
                 data-testid="deletion-requested-badge"
               >
@@ -1703,7 +1766,7 @@ export function DocumentEditor({
             )}
             {!isNew && !stewardshipEnabled && status === "published" && (
               <span
-                className="px-1.5 py-0.5 rounded text-xs bg-green-50 text-green-700 border border-green-200"
+                className="hidden sm:inline px-1.5 py-0.5 rounded text-xs bg-green-50 text-green-700 border border-green-200 whitespace-nowrap"
                 title="Stewardship off — saving auto-publishes."
               >
                 Auto-published
@@ -1713,12 +1776,43 @@ export function DocumentEditor({
                 where it sits beside the Save button it is about. */}
           </div>
         </div>
-        {/* Save, Submit for review and Discard live in the sticky footer at the
-            bottom of this page — the write actions belong at the end of the
-            form the user is filling in, not above it. What stays here is what
-            is ABOUT the document rather than a change to it: the review verdict,
-            the comparison picker, and the secondary menu. */}
-        <div className="flex items-center gap-2 shrink-0">
+        {/* Right side: state, then every action. The write actions (Save,
+            Submit, Discard) used to sit in a sticky footer under the form;
+            with the document as the page there is no form, and the top bar
+            is where every editor keeps them. */}
+        <div
+          className="flex items-center gap-1 shrink-0"
+          data-testid="document-editor-actions"
+        >
+          {(() => {
+            // One line of state: unsaved > saving > just saved > last edit.
+            if (isDirty)
+              return (
+                <span
+                  className="hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900"
+                  title="These edits are parked locally and not yet saved to the nest."
+                  data-testid="document-editor-dirty-badge"
+                >
+                  <Pencil className="h-3 w-3" />
+                  Unsaved changes
+                </span>
+              );
+            const text = saving
+              ? "Saving…"
+              : justSaved
+                ? "Saved"
+                : updatedAt
+                  ? `Edited ${relTime(updatedAt)}`
+                  : null;
+            return text ? (
+              <span
+                className="hidden sm:inline px-1.5 text-xs text-muted-foreground"
+                title={updatedAt ? formatServerDate(updatedAt) : undefined}
+              >
+                {text}
+              </span>
+            ) : null;
+          })()}
           {/* NOT gated on isViewOnly: that flag answers "may this caller
               author?", and a reviewer-only steward is view-only by definition
               yet is exactly the person meant to act here. Gating approval on it
@@ -1733,6 +1827,86 @@ export function DocumentEditor({
               onReject={handleReject}
             />
           )}
+          {/* Visibility — the nest's tier, right where Notion puts it. An
+              owner/admin flips it in place (same control as the Share dialog
+              and Collaborators tab); everyone else sees a read-only badge. */}
+          {!isNew &&
+            (canShare ? (
+              <NestVisibilityControl
+                nestId={nestId}
+                variant="compact"
+                onChanged={() => void qc.invalidateQueries({ queryKey: keys.nest(nestId) })}
+                onError={(m) => {
+                  if (m) toast.error(m);
+                }}
+              />
+            ) : (
+              nestMeta.data?.nest?.visibility && (
+                <span
+                  className="hidden sm:inline-flex items-center gap-1 px-1.5 text-xs text-muted-foreground"
+                  title={
+                    nestMeta.data.nest.visibility === "public"
+                      ? "Public — anyone with the URL can read"
+                      : nestMeta.data.nest.visibility === "org"
+                        ? "Organization — everyone signed in here can read"
+                        : "Private"
+                  }
+                  data-testid="document-editor-visibility"
+                >
+                  {nestMeta.data.nest.visibility === "public" ? (
+                    <Globe className="h-3.5 w-3.5" />
+                  ) : nestMeta.data.nest.visibility === "org" ? (
+                    <Building2 className="h-3.5 w-3.5" />
+                  ) : (
+                    <Lock className="h-3.5 w-3.5" />
+                  )}
+                  {nestMeta.data.nest.visibility === "public"
+                    ? "Public"
+                    : nestMeta.data.nest.visibility === "org"
+                      ? "Organization"
+                      : "Private"}
+                </span>
+              )
+            ))}
+          {canShare && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8"
+              onClick={() => setShowShare(true)}
+              title="Share this nest — people, teams, visibility"
+              data-testid="document-editor-share-button"
+            >
+              <Users className="h-4 w-4 sm:mr-1.5" />
+              <span className="hidden sm:inline">Share</span>
+            </Button>
+          )}
+          {/* Comments — toggles the rail. The count is open threads. Closing
+              also leaves comment mode, or the rail would reopen itself. */}
+          {!isNew && (
+            <Button
+              variant={commentsOpen ? "secondary" : "ghost"}
+              size="sm"
+              className="h-8"
+              aria-pressed={commentsOpen}
+              onClick={() => {
+                if (commentsOpen) {
+                  setCommentMode(false);
+                  setActiveThreadId(null);
+                  setPendingAnchor(null);
+                  setSelPopover(null);
+                }
+                setCommentsOpen(!commentsOpen);
+              }}
+              title={commentsOpen ? "Hide comments" : "Show comments"}
+              data-testid="document-editor-comments-toggle"
+            >
+              <MessageSquare className="h-4 w-4" />
+              {openThreadCount > 0 && (
+                <span className="ml-1 text-xs tabular-nums">{openThreadCount}</span>
+              )}
+            </Button>
+          )}
           {/* Compare ▾ — pick a past version; the doc area renders an
               ever-present current↔vN diff inline (no modal). */}
           {!isNew && (
@@ -1743,14 +1917,17 @@ export function DocumentEditor({
             >
               <DropdownMenuTrigger asChild>
                 <Button
-                  variant={compareVersion != null ? "secondary" : "outline"}
+                  variant={compareVersion != null ? "secondary" : "ghost"}
                   size="sm"
+                  className="h-8"
                   title="Compare with a past version"
                   data-testid="document-editor-compare"
                 >
-                  <GitCompare className="h-4 w-4 mr-1" />
-                  {compareVersion != null ? `Comparing v${compareVersion}` : "Compare"}
-                  <ChevronDown className="h-4 w-4 ml-1" />
+                  <GitCompare className="h-4 w-4" />
+                  <span className={compareVersion != null ? "ml-1" : "hidden xl:inline ml-1"}>
+                    {compareVersion != null ? `Comparing v${compareVersion}` : "Compare"}
+                  </span>
+                  <ChevronDown className="h-3.5 w-3.5 ml-0.5 opacity-60" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56 max-h-80 overflow-y-auto">
@@ -1816,8 +1993,15 @@ export function DocumentEditor({
                 testId: "document-editor-history",
                 onSelect: openVersions,
               });
-            // The markdown-source toggle lives on the Content label instead —
-            // it is a writing control, not a document action.
+            // Rich ↔ raw markdown. It used to sit on the Content label; the
+            // page has no labels now, and it is a rare switch.
+            if (!isSourceOnly && compareVersion == null && !isArtifactDraft)
+              moreActions.push({
+                label: rawMode ? "Rich editor" : "Markdown source",
+                icon: Code2,
+                testId: "document-editor-markdown-toggle",
+                onSelect: () => setRawMode((v) => !v),
+              });
             if (!isNew)
               moreActions.push({
                 label: "Copy link",
@@ -1871,6 +2055,22 @@ export function DocumentEditor({
             // One Delete entry: the author (and the admin/owner tier) deletes
             // outright, everyone else raises a request. Hidden below that tier
             // once a flag is already open.
+            // Discard only where there is unreviewed work to throw away —
+            // which is exactly what a draft or rejected status means.
+            const canWrite = !isViewOnly && !isReviewerOnly && !isLocked;
+            if (
+              canWrite &&
+              !isNew &&
+              canEditContent &&
+              (status === "draft" || status === "rejected")
+            )
+              moreActions.push({
+                label: discarding ? "Discarding…" : "Discard draft",
+                icon: Undo2,
+                separatorBefore: true,
+                testId: "document-editor-discard",
+                onSelect: () => setConfirmDiscard(true),
+              });
             const showDelete =
               !isNew && canRequestDeletion && (canDeleteDirectly || !deletionRequested);
             if (showDelete)
@@ -1911,13 +2111,79 @@ export function DocumentEditor({
             return moreActions.length ? (
               <OverflowMenu
                 actions={moreActions}
-                variant="outline"
+                variant="ghost"
                 testId="document-editor-more"
               />
             ) : null;
           })()}
+          {(() => {
+            const canWrite = !isViewOnly && !isReviewerOnly && !isLocked;
+            const showSubmit = !isViewOnly && canSubmitForReview;
+            return (
+              <>
+                {showSubmit && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8"
+                    onClick={() => setShowSubmitModal(true)}
+                    data-testid="document-editor-submit"
+                    title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
+                  >
+                    <Send className="h-4 w-4 sm:mr-1.5" />
+                    <span className="hidden sm:inline">Submit for review</span>
+                  </Button>
+                )}
+                {canWrite &&
+                  (mode === "edit" ? (
+                    <Button
+                      size="sm"
+                      className="h-8"
+                      // Keep focus in the editor field so clicking Save doesn't
+                      // fire the field's blur (which would trigger a second,
+                      // concurrent save alongside this click). One save per click.
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={handleSave}
+                      disabled={!canSave}
+                      data-testid="document-editor-save"
+                    >
+                      {saving ? (
+                        <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                      ) : justSaved && !isDirty ? (
+                        <Check className="h-4 w-4 mr-1.5" />
+                      ) : (
+                        <Save className="h-4 w-4 mr-1.5" />
+                      )}
+                      {saving
+                        ? "Saving…"
+                        : justSaved && !isDirty
+                          ? "Saved"
+                          : isNew
+                            ? "Create"
+                            : "Save"}
+                    </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      className="h-8"
+                      onClick={() => setMode("edit")}
+                      data-testid="document-editor-start-edit"
+                    >
+                      <Pencil className="h-4 w-4 mr-1.5" />
+                      Edit
+                    </Button>
+                  ))}
+              </>
+            );
+          })()}
         </div>
       </div>
+
+      {/* Body: a reading-width column (the document) with the comments rail
+          beside it when open. */}
+      <div className="flex flex-1 flex-col items-stretch lg:flex-row lg:items-start">
+        <div className="min-w-0 flex-1">
+        <div className="mx-auto w-full max-w-3xl px-5 py-6 sm:px-10 sm:py-10">
 
       {error && (
         <Alert variant="destructive" className="mb-4">
@@ -2015,27 +2281,20 @@ export function DocumentEditor({
             </Alert>
           )}
 
-          {/* Notion-style h1 in view mode; Input in edit mode. */}
+          {/* Title — the page's h1, and the field that edits it, are one
+              thing (Notion-style): a borderless heading that takes the caret.
+              Read-only sessions get a plain h1. */}
           <div>
             {mode === "view" && !isNew ? (
               <h1
-                className="text-3xl font-bold leading-tight text-foreground"
+                className="text-4xl font-bold leading-tight tracking-tight text-foreground"
                 data-testid="document-editor-title"
               >
                 {title || (loading ? "Loading…" : "Untitled")}
               </h1>
             ) : (
-              // Labeled, outlined title field — required like Content, and
-              // visibly a field before it's clicked. Sized like the other
-              // inputs, only a notch heavier, so the form reads as one rhythm.
               <>
-                <label
-                  htmlFor="document-editor-title"
-                  className="block text-sm font-medium mb-1"
-                >
-                  Title <span className="text-destructive">*</span>
-                </label>
-                <Input
+                <input
                   id="document-editor-title"
                   ref={titleInputRef}
                   value={title}
@@ -2044,7 +2303,14 @@ export function DocumentEditor({
                     setTouched(true);
                   }}
                   onBlur={saveOnBlur}
-                  placeholder="Give this document a name"
+                  onKeyDown={(e) => {
+                    // Enter moves on to the body, like a heading would.
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      editorRef.current?.focus();
+                    }
+                  }}
+                  placeholder="Untitled"
                   // Mirrors MAX_TITLE_LENGTH in src/nodes/service.ts — a hard
                   // stop here so the server's 400 is unreachable from the UI.
                   // maxLength never truncates an existing longer value, so
@@ -2053,12 +2319,12 @@ export function DocumentEditor({
                   disabled={fieldsDisabled}
                   required
                   aria-required="true"
+                  aria-label="Title"
                   aria-invalid={touched && !title.trim() ? true : undefined}
                   data-testid="document-editor-title"
-                  className={`h-10 text-base font-medium placeholder:font-normal placeholder:text-muted-foreground/60${touched && !title.trim()
-                    ? " border-destructive focus-visible:ring-destructive"
-                    : ""
-                    }`}
+                  className={`block w-full bg-transparent text-4xl font-bold leading-tight tracking-tight text-foreground outline-none placeholder:text-muted-foreground/40 disabled:opacity-100${
+                    touched && !title.trim() ? " placeholder:text-destructive/60" : ""
+                  }`}
                 />
                 {((touched && !title.trim()) || title.length >= 90) && (
                   <div className="mt-1 flex items-start justify-between gap-2 text-xs">
@@ -2238,52 +2504,12 @@ export function DocumentEditor({
               they see only the existing tag chips. */}
           {(canEditContent || tags.length > 0) && (
             <div>
-              {canEditContent && (
-                <>
-                  <label className="block mb-1 text-sm font-medium">Tags</label>
-                  <div className="flex items-center gap-2">
-                    <Input
-                      value={tagInput}
-                      onChange={(e) => setTagInput(clampTagInput(e.target.value))}
-                      onKeyDown={(e) => {
-                        // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
-                        if (e.key === "Enter" || e.key === "," || e.key === " ") {
-                          e.preventDefault();
-                          addTag();
-                        }
-                      }}
-                      placeholder='Press Enter or space. Try "#api #v2" or "api, v2"'
-                      disabled={fieldsDisabled}
-                      // A hard stop the way Title has one — several tags fit,
-                      // a pasted paragraph does not.
-                      maxLength={TAG_INPUT_MAX_LENGTH}
-                      data-testid="document-editor-tag-input"
-                    />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={addTag}
-                      disabled={fieldsDisabled || !tagInput.trim()}
-                    >
-                      Add
-                    </Button>
-                  </div>
-                  {tagInput.trim() && (
-                    <p
-                      className="mt-1 text-xs text-muted-foreground"
-                      data-testid="document-editor-tag-preview"
-                    >
-                      {tagPreview.tags.length > 0
-                        ? `Will add: ${tagPreview.tags.join(", ")}`
-                        : "Nothing new to add"}
-                      {tagPreview.notes.length > 0 &&
-                        ` — ${tagPreview.notes.join(" ")}`}
-                    </p>
-                  )}
-                </>
-              )}
+              {/* Tags read as one quiet row under the title: the chips, then
+                  an unboxed "Add a tag" field that commits on Enter, space or
+                  comma exactly as the old input did. */}
+              <div className="flex flex-wrap items-center gap-1.5">
               {tags.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 mt-2">
+                <div className="flex flex-wrap gap-1.5">
                   {tags.map((t) => {
                     // View mode: chip click → filter nest by tag. Edit mode: X removes.
                     const tagClickable = mode === "view" && !!onTagClick;
@@ -2324,6 +2550,42 @@ export function DocumentEditor({
                     );
                   })}
                 </div>
+              )}
+              {canEditContent && !fieldsDisabled && (
+                <input
+                  value={tagInput}
+                  onChange={(e) => setTagInput(clampTagInput(e.target.value))}
+                  onKeyDown={(e) => {
+                    // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
+                    if (e.key === "Enter" || e.key === "," || e.key === " ") {
+                      e.preventDefault();
+                      addTag();
+                    }
+                  }}
+                  onBlur={() => {
+                    if (tagInput.trim()) addTag();
+                  }}
+                  placeholder={tags.length ? "Add a tag" : "Add a tag…"}
+                  // A hard stop the way Title has one — several tags fit,
+                  // a pasted paragraph does not.
+                  maxLength={TAG_INPUT_MAX_LENGTH}
+                  aria-label="Add a tag"
+                  className="h-6 min-w-[7rem] flex-1 bg-transparent px-1 text-xs outline-none placeholder:text-muted-foreground/60 focus:placeholder:text-muted-foreground"
+                  data-testid="document-editor-tag-input"
+                />
+              )}
+              </div>
+              {tagInput.trim() && (
+                <p
+                  className="mt-1 text-xs text-muted-foreground"
+                  data-testid="document-editor-tag-preview"
+                >
+                  {tagPreview.tags.length > 0
+                    ? `Will add: ${tagPreview.tags.join(", ")}`
+                    : "Nothing new to add"}
+                  {tagPreview.notes.length > 0 &&
+                    ` — ${tagPreview.notes.join(" ")}`}
+                </p>
               )}
             </div>
           )}
@@ -2672,41 +2934,18 @@ export function DocumentEditor({
                   }
                 }}
               >
-                <div className="flex items-center justify-between gap-2 mb-1">
-                  <label className="block text-sm font-medium">
+                {/* Source-only kinds keep a label: code and CSV are not prose,
+                    and the label says which raw form the box expects. Documents
+                    get none — the body is the page. */}
+                {(isArtifactDraft || effectiveType === "tool" || effectiveType === "table") && (
+                  <div className="mb-1 text-xs font-medium text-muted-foreground">
                     {isArtifactDraft
                       ? "Artifact HTML"
                       : effectiveType === "tool"
                         ? "Tool source (code)"
-                        : effectiveType === "table"
-                          ? "Table data (CSV)"
-                          : "Content"}
-                    {canEditContent && <span className="text-destructive"> *</span>}
-                  </label>
-                  {/* Rich editor ↔ raw markdown. It belongs on the field it
-                      switches, not buried in the header's ⋮ menu — it is used
-                      while writing, and the label names the mode you get. The
-                      click must not reach the wrapper, which enters edit mode. */}
-                  {!isSourceOnly && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setRawMode((v) => !v);
-                      }}
-                      className="inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
-                      title={
-                        rawMode
-                          ? "Back to the rich editor"
-                          : "Edit the raw markdown source"
-                      }
-                      data-testid="document-editor-markdown-toggle"
-                    >
-                      <Code2 className="h-3 w-3" />
-                      {rawMode ? "Rich editor" : "Markdown source"}
-                    </button>
-                  )}
-                </div>
+                        : "Table data (CSV)"}
+                  </div>
+                )}
                 {compareVersion != null ? (
                   /* Ever-present inline diff: current vs a chosen past version. */
                   <div data-testid="document-editor-inline-diff">
@@ -2930,7 +3169,8 @@ export function DocumentEditor({
                     onMouseUp={isNew ? undefined : onDocMouseUp}
                     onClick={isNew ? undefined : onDocClick}
                     onMouseMove={isNew ? undefined : onDocMouseMove}
-                    className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text"
+                    className="min-h-[300px] cursor-text"
+                    data-testid="document-view-surface"
                   >
                     {effectiveType === "table" && !isNew ? (
                       <div className="p-4">
@@ -2970,37 +3210,18 @@ export function DocumentEditor({
                       return url;
                     }}
                     onWikiLinkClick={handleWikiLinkClick}
-                    placeholder="Start writing..."
-                    // New document: Title is the first required field, so it
-                    // gets focus instead (see the effect below), not the body.
-                    autofocus={isNew ? false : "end"}
+                    placeholder="Start writing, or select text to format it…"
+                    // Nobody gets the caret on open: a new document focuses
+                    // Title (see the effect below), an existing one reads as
+                    // a page until you click into it — "end" would also
+                    // scroll a long document to its last line on arrival.
+                    autofocus={false}
+                    variant="page"
                   />
                 )}
               </div>
             </div>
 
-            {/* Ever-present comments rail — beside the doc, not stacked below. */}
-            {!isNew && (
-              <aside className="w-full lg:w-80 shrink-0 self-start lg:sticky lg:top-4 flex flex-col min-h-0 max-h-[70vh]">
-                <AnnotationsPanel
-                  nestId={nestId}
-                  nodeId={nodeId}
-                  readOnly={isViewOnly}
-                  pendingAnchor={pendingAnchor}
-                  onClearAnchor={() => setPendingAnchor(null)}
-                  onFocusAnchor={focusAnchor}
-                  onThreadsChange={setAnchoredThreads}
-                  activeThreadId={activeThreadId}
-                  commentMode={commentMode}
-                  onSetCommentMode={(on) => {
-                    setCommentMode(on);
-                    if (on) setMode("view");
-                    setSelPopover(null);
-                    if (!on) setActiveThreadId(null);
-                  }}
-                />
-              </aside>
-            )}
           </div>
 
           {/* Floating "Comment" button on text selection — pins a comment to
@@ -3111,6 +3332,36 @@ export function DocumentEditor({
 
         </div>
       )}
+
+        </div>
+      </div>
+            {/* Ever-present comments rail — beside the doc, not stacked below. */}
+            {!isNew && (
+              <aside
+                className={`w-full shrink-0 border-t lg:w-80 lg:border-t-0 lg:border-l lg:sticky lg:top-12 lg:self-start lg:max-h-[calc(100vh-3rem)] flex flex-col min-h-0 max-h-[70vh] px-3 py-3${commentsOpen ? "" : " hidden"}`}
+                data-testid="document-comments-rail"
+                aria-hidden={!commentsOpen}
+              >
+                <AnnotationsPanel
+                  nestId={nestId}
+                  nodeId={nodeId}
+                  readOnly={isViewOnly}
+                  pendingAnchor={pendingAnchor}
+                  onClearAnchor={() => setPendingAnchor(null)}
+                  onFocusAnchor={focusAnchor}
+                  onThreadsChange={setAnchoredThreads}
+                  activeThreadId={activeThreadId}
+                  commentMode={commentMode}
+                  onSetCommentMode={(on) => {
+                    setCommentMode(on);
+                    if (on) setMode("view");
+                    setSelPopover(null);
+                    if (!on) setActiveThreadId(null);
+                  }}
+                />
+              </aside>
+            )}
+      </div>
 
       {showVersions && !isNew && (
         <VersionHistoryModal
@@ -3399,108 +3650,6 @@ export function DocumentEditor({
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Sticky action bar. The write actions sit at the END of the form the
-          user is filling in and stay reachable at any scroll depth — this
-          document is long, and Save used to scroll off the top of a page that
-          takes minutes to fill in. `-mx-4 px-4` spans the padding <main> owns
-          so the bar reads as a bar rather than an indented box. */}
-      {(() => {
-        const canWrite = !isViewOnly && !isReviewerOnly && !isLocked;
-        const showSubmit = !isViewOnly && canSubmitForReview;
-        // Discard only where there is unreviewed work to throw away — which is
-        // exactly what a draft or rejected status means.
-        const showDiscard =
-          canWrite &&
-          !isNew &&
-          canEditContent &&
-          (status === "draft" || status === "rejected");
-        if (!canWrite && !showSubmit) return null;
-        return (
-          <div
-            // -mb-4 cancels the py-4 <main> puts below every page, so at full
-            // scroll the bar ends flush with the window instead of floating
-            // above a strip of padding.
-            className="sticky bottom-0 z-20 -mx-4 -mb-4 mt-6 px-4 py-3 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 flex items-center gap-2"
-            data-testid="document-editor-actions"
-          >
-            {isDirty && (
-              <span
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900"
-                title="These edits are parked locally and not yet saved to the nest."
-                data-testid="document-editor-dirty-badge"
-              >
-                <Pencil className="h-3 w-3" />
-                Unsaved changes
-              </span>
-            )}
-            <div className="ml-auto flex items-center gap-2">
-              {showDiscard && (
-                <Button
-                  variant="ghost"
-                  onClick={() => setConfirmDiscard(true)}
-                  disabled={discarding}
-                  className="text-muted-foreground hover:text-destructive"
-                  title="Throw away the unreviewed edits and go back to the last approved version"
-                  data-testid="document-editor-discard"
-                >
-                  {discarding ? (
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  ) : (
-                    <Trash2 className="h-4 w-4 mr-2" />
-                  )}
-                  Discard draft
-                </Button>
-              )}
-              {showSubmit && (
-                <Button
-                  variant="outline"
-                  onClick={() => setShowSubmitModal(true)}
-                  data-testid="document-editor-submit"
-                  title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
-                >
-                  <Send className="h-4 w-4 mr-2" />
-                  Submit for review
-                </Button>
-              )}
-              {canWrite &&
-                (mode === "edit" ? (
-                  <Button
-                    // Keep focus in the editor field so clicking Save doesn't
-                    // fire the field's blur (which would trigger a second,
-                    // concurrent save alongside this click). One save per click.
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={handleSave}
-                    disabled={!canSave}
-                    data-testid="document-editor-save"
-                  >
-                    {saving ? (
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    ) : justSaved && !isDirty ? (
-                      <Check className="h-4 w-4 mr-2 text-green-600" />
-                    ) : (
-                      <Save className="h-4 w-4 mr-2" />
-                    )}
-                    {saving
-                      ? "Saving…"
-                      : justSaved && !isDirty
-                        ? "Saved"
-                        : isNew
-                          ? "Create"
-                          : "Save"}
-                  </Button>
-                ) : (
-                  <Button
-                    onClick={() => setMode("edit")}
-                    data-testid="document-editor-start-edit"
-                  >
-                    <Pencil className="h-4 w-4 mr-2" />
-                    Start Editing
-                  </Button>
-                ))}
-            </div>
-          </div>
-        );
-      })()}
     </div>
   );
 }
