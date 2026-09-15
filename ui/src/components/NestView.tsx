@@ -2581,7 +2581,9 @@ export function NestView({
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="pt-0">
-                  {stats.total === 0 ? (
+                  {/* Empty folders still deserve the tree (CU-wdqcq0247y) —
+                      only a nest with neither docs nor folders is empty. */}
+                  {stats.total === 0 && knownFolders.length === 0 ? (
                     <div className="py-8 text-center">
                       <FileText className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
                       <p className="text-sm text-muted-foreground">
