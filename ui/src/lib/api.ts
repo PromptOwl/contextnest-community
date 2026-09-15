@@ -947,6 +947,19 @@ export async function listFolderNodes(nestId: string, folder: string) {
   );
 }
 
+/**
+ * The whole nest, metadata only — no body, no `folder` scope. Same
+ * body-free/index-backed path as listFolderNodes (see its comment), just
+ * unscoped so every node in the nest comes back in one request.
+ *
+ * For consumers like the Board that bucket EVERY node by tag/folder/status
+ * and never read a body: using listNodes here would force the `content=1`
+ * vault crawl for bytes that are thrown away, on every load and refresh.
+ */
+export async function listNodesMeta(nestId: string) {
+  return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
+}
+
 /** The nest-wide shape — one per nest, not per folder level. */
 export async function getNestCensus(nestId: string) {
   return request<{ census: NestCensus }>(`/nests/${nestId}/census`);

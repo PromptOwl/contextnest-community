@@ -179,7 +179,10 @@ export function MaturityBoard({
     setLoading(true);
     setError(null);
     try {
-      const { nodes: raw } = await qc.fetchQuery(reads.nodes(nestId));
+      // Metadata-only, nest-wide — every node in the nest buckets into a
+      // column, and the board never reads a body, so this skips the vault
+      // crawl `reads.nodes` (content=1) would otherwise pay on every load.
+      const { nodes: raw } = await qc.fetchQuery(reads.nodesMeta(nestId));
       setNodes(
         (raw as any[]).map((n) => ({
           id: n.id,
