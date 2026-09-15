@@ -943,12 +943,15 @@ export default function App() {
   // moving between them never drops the index. Reader mode keeps its own
   // three-pane reader instead.
   const inNest = "nestId" in view && nestIsReaderView !== true;
-  const showSidebar = inNest && (!docSidebarCollapsed || docSidebarDrawer);
+  // The dashboard gets the same rail (every nest, none expanded) — it's the
+  // app's navigation, not the nest's.
+  const withSidebar = inNest || view.page === "dashboard";
+  const showSidebar = withSidebar && (!docSidebarCollapsed || docSidebarDrawer);
   const pageWidth =
     view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
   // Header and footer keep the page width; <main> goes edge to edge inside a
   // nest so the sidebar column can sit against the window's left edge.
-  const shellWidth = inNest ? "max-w-none" : pageWidth;
+  const shellWidth = withSidebar ? "max-w-none" : pageWidth;
 
   return (
     <div className="min-h-screen bg-background">
@@ -1136,7 +1139,7 @@ export default function App() {
           percentage boxes resolve against the wider block. `clip` (not
           `hidden`) keeps sticky headers inside pages working. */}
       <main
-        className={`${shellWidth} mx-auto min-w-0 overflow-x-clip${inNest ? "" : " px-4 py-4"}`}
+        className={`${shellWidth} mx-auto min-w-0 overflow-x-clip${withSidebar ? "" : " px-4 py-4"}`}
       >
         {/* A ?nest link that didn't resolve. Falling through to the dashboard
             made a stale bookmark look like it had simply opened the app, with
@@ -1174,8 +1177,8 @@ export default function App() {
           </div>
         </div>
         ) : (
-        <div className={inNest ? "flex min-h-[calc(100vh-3.5rem)] items-stretch" : ""}>
-        {inNest && docSidebarDrawer && (
+        <div className={withSidebar ? "flex min-h-[calc(100vh-3.5rem)] items-stretch" : ""}>
+        {withSidebar && docSidebarDrawer && (
           <button
             type="button"
             className="fixed inset-0 z-40 bg-black/30 md:hidden"
@@ -1183,8 +1186,9 @@ export default function App() {
             onClick={() => setDocSidebarDrawer(false)}
           />
         )}
-        {showSidebar && "nestId" in view && (() => {
+        {showSidebar && (() => {
           const cur = view;
+          const nestOf = (v: typeof cur) => ("nestId" in v ? v : null);
           return (
             <div
               className={
@@ -1195,7 +1199,7 @@ export default function App() {
             >
               <div className="sticky top-0 h-screen max-h-screen">
                 <DocumentSidebar
-                  nestId={cur.nestId}
+                  nestId={nestOf(cur)?.nestId ?? null}
                   nodeId={cur.page === "document" ? cur.nodeId : null}
                   activeView={
                     cur.page === "nest"
@@ -1257,7 +1261,7 @@ export default function App() {
                     });
                   }}
                   onNewDocument={
-                    cur.page === "document" && cur.nodeId === "new"
+                    !("nestId" in cur) || (cur.page === "document" && cur.nodeId === "new")
                       ? undefined
                       : () =>
                           setView({
@@ -1274,8 +1278,8 @@ export default function App() {
             </div>
           );
         })()}
-        <div className={inNest ? "min-w-0 flex-1" : ""}>
-        <div className={inNest && !isDocPage ? `${pageWidth} mx-auto px-4 py-4` : ""}>
+        <div className={withSidebar ? "min-w-0 flex-1" : ""}>
+        <div className={withSidebar && !isDocPage ? `${pageWidth} mx-auto px-4 py-4` : ""}>
         {view.page === "dashboard" && (
           <Dashboard
             onManageKeys={() => setView({ page: "api-keys" })}

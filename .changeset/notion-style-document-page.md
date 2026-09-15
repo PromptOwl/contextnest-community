@@ -19,3 +19,5 @@ The document page reads like a page, not a form.
 **The sidebar stays.** Leaving a document for the board, graph, review queue or definitions kept the index — it wraps every page inside a nest now, with the current view highlighted and Connect one row down, and the old tab strip only shows on phones or when the sidebar is hidden.
 
 **Definitions is just the table.** Rows edit in place (click one; Enter or Ctrl+Enter saves, Escape cancels), a new term is the last row, and the duplicate-term warning appears under the row you're on. No form above the table.
+
+The sidebar is on the dashboard too (every nest, none expanded), and under a nest it keeps Overview and Review queue — with a badge when something is waiting — at the top, with Board · Graph · Definitions · Workflows folded under **Views** (remembered per browser, opened when you're on one of them).

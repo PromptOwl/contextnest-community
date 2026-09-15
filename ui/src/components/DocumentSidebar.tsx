@@ -38,6 +38,8 @@ import {
   folderAncestors,
   groupNodesByFolder,
   nestSidebarViews,
+  readDocPagePrefs,
+  writeDocPagePrefs,
   type NestSidebarView,
 } from "../lib/doc-page";
 import { FolderTree, type KnownFolder } from "./FolderTree";
@@ -51,7 +53,9 @@ export interface SidebarNestTarget {
 }
 
 interface Props {
-  nestId: string;
+  /** The nest on screen, or null on the dashboard (every nest listed, none
+   *  expanded). */
+  nestId: string | null;
   /** The open document ("new" while creating one), or null on a nest page. */
   nodeId: string | null;
   /** Which of the nest's views is on screen, for the highlight. */
@@ -93,8 +97,11 @@ export function DocumentSidebar({
   const { isAdmin, workflowPlaneEnabled } = useAuth();
   // Which nests are unfolded. The current one always is; others open on click
   // and load their tree on demand.
-  const [openNests, setOpenNests] = useState<Set<string>>(() => new Set([nestId]));
+  const [openNests, setOpenNests] = useState<Set<string>>(
+    () => new Set(nestId ? [nestId] : []),
+  );
   useEffect(() => {
+    if (!nestId) return;
     setOpenNests((prev) => (prev.has(nestId) ? prev : new Set([...prev, nestId])));
   }, [nestId]);
 
@@ -118,7 +125,11 @@ export function DocumentSidebar({
         <button
           type="button"
           onClick={onOpenDashboard}
-          className="flex min-w-0 items-center gap-1.5 rounded px-1.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+          aria-current={nestId === null ? "page" : undefined}
+          className={cn(
+            "flex min-w-0 items-center gap-1.5 rounded px-1.5 py-1 text-xs font-medium hover:bg-muted hover:text-foreground",
+            nestId === null ? "bg-muted text-foreground" : "text-muted-foreground",
+          )}
           title="All nests"
         >
           <LayoutGrid className="h-3.5 w-3.5" />
@@ -279,36 +290,80 @@ function NestViews({
   const queue = useQuery({ ...reads.reviewQueue(nestId), enabled: showsReview });
   const pending = queue.data?.total ?? queue.data?.requests?.length ?? 0;
 
+  // The "Views" group folds by default (remembered per browser) and opens
+  // itself when the view on screen is inside it, so the highlight is visible.
+  const [viewsOpen, setViewsOpenState] = useState(
+    () => readDocPagePrefs(localStorage).viewsOpen,
+  );
+  const setViewsOpen = (open: boolean) => {
+    setViewsOpenState(open);
+    writeDocPagePrefs(localStorage, { viewsOpen: open });
+  };
+  const activeInGroup = views.some((v) => v.group === "views" && v.id === activeView);
+  const groupShown = viewsOpen || activeInGroup;
+  const top = views.filter((v) => !v.group);
+  const grouped = views.filter((v) => v.group === "views");
+
   if (views.length === 0) return null;
+
+  const row = (v: NestSidebarView, indent = false) => {
+    const Icon = VIEW_ICONS[v.id];
+    const active = v.id === activeView;
+    return (
+      <button
+        key={v.id}
+        type="button"
+        onClick={() => onOpen(v)}
+        aria-current={active ? "page" : undefined}
+        className={cn(
+          "flex w-full items-center gap-1.5 rounded py-1 text-left hover:bg-muted",
+          indent ? "pl-6 pr-1.5" : "px-1.5",
+          active
+            ? "bg-muted font-medium text-foreground"
+            : "text-muted-foreground hover:text-foreground",
+        )}
+        data-testid={`document-sidebar-view-${v.id}`}
+      >
+        <Icon className="h-3.5 w-3.5 shrink-0" />
+        <span className="truncate">{v.label}</span>
+        {/* Something to review: a dot you can see from across the room,
+            with the count — like an unread badge. Nothing at zero. */}
+        {v.id === "review" && pending > 0 && (
+          <span
+            className="ml-auto inline-flex items-center gap-1 rounded-full bg-amber-100 px-1.5 py-px text-[10px] font-semibold tabular-nums text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+            title={`${pending} awaiting review`}
+            data-testid="document-sidebar-review-badge"
+          >
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden />
+            {pending}
+          </span>
+        )}
+      </button>
+    );
+  };
+
   return (
     <div className="mb-1 ml-2 pl-1" data-testid="document-sidebar-views">
-      {views.map((v) => {
-        const Icon = VIEW_ICONS[v.id];
-        const active = v.id === activeView;
-        return (
+      {top.map((v) => row(v))}
+      {grouped.length > 0 && (
+        <>
           <button
-            key={v.id}
             type="button"
-            onClick={() => onOpen(v)}
-            aria-current={active ? "page" : undefined}
-            className={cn(
-              "flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left hover:bg-muted",
-              active
-                ? "bg-muted font-medium text-foreground"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-            data-testid={`document-sidebar-view-${v.id}`}
+            onClick={() => setViewsOpen(!groupShown)}
+            aria-expanded={groupShown}
+            className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-muted-foreground hover:bg-muted hover:text-foreground"
+            data-testid="document-sidebar-views-group"
           >
-            <Icon className="h-3.5 w-3.5 shrink-0" />
-            <span className="truncate">{v.label}</span>
-            {v.id === "review" && pending > 0 && (
-              <span className="ml-auto rounded-full bg-amber-100 px-1.5 text-[10px] font-medium tabular-nums text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
-                {pending}
-              </span>
+            {groupShown ? (
+              <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5 shrink-0" />
             )}
+            <span className="truncate">Views</span>
           </button>
-        );
-      })}
+          {groupShown && grouped.map((v) => row(v, true))}
+        </>
+      )}
       {onConnect && (
         <button
           type="button"

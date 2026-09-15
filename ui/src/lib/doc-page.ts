@@ -68,11 +68,17 @@ export function nextCommentsOpen(
 export interface DocPagePrefs {
   sidebarCollapsed: boolean;
   commentsOpen: boolean;
+  /** The sidebar's "Views" group (board, graph, definitions, workflows). */
+  viewsOpen: boolean;
 }
 
 export const DOC_PAGE_PREFS_KEY = "contextnest:doc-page";
 
-const DEFAULT_PREFS: DocPagePrefs = { sidebarCollapsed: false, commentsOpen: false };
+const DEFAULT_PREFS: DocPagePrefs = {
+  sidebarCollapsed: false,
+  commentsOpen: false,
+  viewsOpen: false,
+};
 
 type StorageLike = {
   getItem: (k: string) => string | null;
@@ -95,6 +101,10 @@ export function readDocPagePrefs(storage: StorageLike): DocPagePrefs {
         typeof parsed?.commentsOpen === "boolean"
           ? parsed.commentsOpen
           : DEFAULT_PREFS.commentsOpen,
+      viewsOpen:
+        typeof parsed?.viewsOpen === "boolean"
+          ? parsed.viewsOpen
+          : DEFAULT_PREFS.viewsOpen,
     };
   } catch {
     return { ...DEFAULT_PREFS };
@@ -116,6 +126,9 @@ export function writeDocPagePrefs(
 export interface NestSidebarView {
   id: "overview" | "review" | "board" | "graph" | "definitions" | "workflows";
   label: string;
+  /** Top-level rows are the ones you act on daily; the rest fold under a
+   *  collapsed "Views" group so the sidebar reads as nest → docs. */
+  group?: "views";
   /** App view page to open. */
   page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows";
   /** Nest-page tab, for views that are tabs of the nest page. */
@@ -140,11 +153,11 @@ export function nestSidebarViews(
   if (!caps.isReadOnly)
     views.push({ id: "review", label: "Review queue", page: "nest", tab: "review" });
   views.push(
-    { id: "board", label: "Board", page: "board" },
-    { id: "graph", label: "Graph", page: "ontology-graph" },
-    { id: "definitions", label: "Definitions", page: "definitions" },
+    { id: "board", label: "Board", page: "board", group: "views" },
+    { id: "graph", label: "Graph", page: "ontology-graph", group: "views" },
+    { id: "definitions", label: "Definitions", page: "definitions", group: "views" },
   );
   if (opts.workflowPlaneEnabled && caps.canEditDocs)
-    views.push({ id: "workflows", label: "Workflows", page: "workflows" });
+    views.push({ id: "workflows", label: "Workflows", page: "workflows", group: "views" });
   return views;
 }

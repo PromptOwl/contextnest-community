@@ -113,10 +113,11 @@ describe("doc page prefs", () => {
     };
   };
 
-  it("defaults to sidebar open and comments closed", () => {
+  it("defaults to sidebar open, comments closed, views group folded", () => {
     expect(readDocPagePrefs(memory())).toEqual({
       sidebarCollapsed: false,
       commentsOpen: false,
+      viewsOpen: false,
     });
   });
 
@@ -126,11 +127,13 @@ describe("doc page prefs", () => {
     expect(readDocPagePrefs(s)).toEqual({
       sidebarCollapsed: false,
       commentsOpen: true,
+      viewsOpen: false,
     });
     writeDocPagePrefs(s, { sidebarCollapsed: true });
     expect(readDocPagePrefs(s)).toEqual({
       sidebarCollapsed: true,
       commentsOpen: true,
+      viewsOpen: false,
     });
     expect(s.map.has(DOC_PAGE_PREFS_KEY)).toBe(true);
   });
@@ -141,6 +144,7 @@ describe("doc page prefs", () => {
     expect(readDocPagePrefs(s)).toEqual({
       sidebarCollapsed: false,
       commentsOpen: false,
+      viewsOpen: false,
     });
     const throwing = {
       getItem: () => {
@@ -153,6 +157,7 @@ describe("doc page prefs", () => {
     expect(readDocPagePrefs(throwing)).toEqual({
       sidebarCollapsed: false,
       commentsOpen: false,
+      viewsOpen: false,
     });
     expect(() => writeDocPagePrefs(throwing, { commentsOpen: true })).not.toThrow();
   });
@@ -179,6 +184,14 @@ describe("nestSidebarViews — the nest's views under its name in the sidebar", 
     // back door into the board / graph / definitions for a docs-site reader.
     const v = ids(nestSidebarViews({ isReadOnly: true, isReaderView: true, canEditDocs: false }, { workflowPlaneEnabled: true }));
     expect(v).toEqual(["overview"]);
+  });
+
+  it("keeps overview and the review queue at the top and folds the rest under Views", () => {
+    const v = nestSidebarViews(full, { workflowPlaneEnabled: true });
+    expect(v.filter((x) => !x.group).map((x) => x.id)).toEqual(["overview", "review"]);
+    expect(v.filter((x) => x.group === "views").map((x) => x.id)).toEqual([
+      "board", "graph", "definitions", "workflows",
+    ]);
   });
 
   it("targets the nest page tabs and the top-level pages App knows", () => {
