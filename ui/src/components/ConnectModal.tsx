@@ -160,6 +160,25 @@ export function ConnectModal({
     2,
   );
 
+  // Native HTTP MCP clients (Cursor, VS Code, Claude Code) configure a server
+  // by its url + headers in one JSON stanza — same shape as claudeConfig
+  // above, so one paste lands both the endpoint and the auth placeholder
+  // instead of two separate copies the user has to splice together by hand.
+  const mcpHttpConfig = JSON.stringify(
+    {
+      mcpServers: {
+        [slugify(nestName)]: {
+          url: mcpUrl,
+          ...(authMode === "open"
+            ? {}
+            : { headers: { Authorization: `Bearer ${KEY_PLACEHOLDER}` } }),
+        },
+      },
+    },
+    null,
+    2,
+  );
+
   const showOpenModeBanner = authMode === "open";
   const showLoginBanner = !authenticated && authMode === "key";
 
@@ -428,21 +447,15 @@ export function ConnectModal({
                     {!showOpenModeBanner && (
                       <>
                         {" "}
-                        Pass your API key in an{" "}
+                        Replace{" "}
                         <code className="text-[11px] bg-muted px-1 rounded">
-                          Authorization
+                          {KEY_PLACEHOLDER}
                         </code>{" "}
-                        header.
+                        with your generated key.
                       </>
                     )}
                   </p>
-                  <Snippet label="MCP Endpoint" value={mcpUrl} />
-                  {!showOpenModeBanner && (
-                    <Snippet
-                      label="Authorization header"
-                      value={`Bearer ${KEY_PLACEHOLDER}`}
-                    />
-                  )}
+                  <Snippet label="MCP config" value={mcpHttpConfig} multiline />
                   <Snippet
                     label={`From the ctx CLI (2.2+)${showOpenModeBanner ? "" : " — export CONTEXTNEST_API_KEY first"}`}
                     value={ctxAliasSnippet}
