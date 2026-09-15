@@ -404,7 +404,11 @@ export function ConnectModal({
                       </>
                     )}
                   </p>
-                  <Snippet label="Config" value={claudeConfig} multiline />
+                  <Snippet
+                    label="Claude Desktop config (via mcp-remote bridge)"
+                    value={claudeConfig}
+                    multiline
+                  />
                   <p className="text-xs text-muted-foreground mt-2">
                     Location:{" "}
                     <code className="text-[10px]">
@@ -455,7 +459,11 @@ export function ConnectModal({
                       </>
                     )}
                   </p>
-                  <Snippet label="MCP config" value={mcpHttpConfig} multiline />
+                  <Snippet
+                    label="Direct HTTP config (Cursor, VS Code, Claude Code — not Claude Desktop)"
+                    value={mcpHttpConfig}
+                    multiline
+                  />
                   <Snippet
                     label={`From the ctx CLI (2.2+)${showOpenModeBanner ? "" : " — export CONTEXTNEST_API_KEY first"}`}
                     value={ctxAliasSnippet}
