@@ -64,6 +64,13 @@ import {
   loadGrantedSuperAdmins,
 } from "./governance/access-service.js";
 import {
+  listCommunitySites,
+  createCommunitySite,
+  updateCommunitySite,
+  deleteCommunitySite,
+  loadActiveCommunitySites,
+} from "./auth/community-sites.js";
+import {
   llmsTxtRoutes,
   nestIndexRoutes,
   serverMcpRoutes,
@@ -1316,6 +1323,140 @@ export function createApp(): Hono<AuthEnv> {
     await loadGrantedSuperAdmins();
 
     return c.json({ ok: true, email });
+  });
+
+  // ─── /admin/community-sites — manage official community site connections ──
+  // (CU-wdqcq0247t). Each row is a site trusted for one-click SSO auto-login
+  // (GET /auth/sso): a name, a url (the ticket's expected `aud`), a shared
+  // secret, and an active flag. Extends the single OFFICIAL_COMMUNITY_SSO_
+  // SECRET/PUBLIC_BASE_URL env-var pair — see auth/community-sites.ts for how
+  // the handshake now tries every active site's secret. `secret` is
+  // WRITE-ONLY: GET/POST/PATCH responses only report `secret_set`, mirroring
+  // the mcp_signing_secret/oidc_client_secret discipline in /admin/settings.
+  app.use("/admin/community-sites", flexAuthMiddleware);
+  app.use("/admin/community-sites/*", flexAuthMiddleware);
+
+  const isHttpUrl = (v: string) => /^https?:\/\/\S+$/i.test(v);
+  const serializeSite = (site: {
+    id: string;
+    name: string;
+    url: string;
+    secret: string;
+    is_active: boolean;
+    created_at: string;
+    updated_at: string;
+  }) => ({
+    id: site.id,
+    name: site.name,
+    url: site.url,
+    secret_set: !!site.secret,
+    is_active: site.is_active,
+    created_at: site.created_at,
+    updated_at: site.updated_at,
+  });
+
+  app.get("/admin/community-sites", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const sites = await listCommunitySites();
+    return c.json({ community_sites: sites.map(serializeSite) });
+  });
+
+  app.post("/admin/community-sites", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can add a community site." }, 403);
+
+    let body: { name?: unknown; url?: unknown; secret?: unknown; is_active?: unknown };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    const url =
+      typeof body.url === "string" ? body.url.trim().replace(/\/$/, "") : "";
+    const secret = typeof body.secret === "string" ? body.secret.trim() : "";
+    const is_active = body.is_active === undefined ? true : !!body.is_active;
+
+    if (!name) return c.json({ error: "A name is required." }, 400);
+    if (!url || !isHttpUrl(url))
+      return c.json({ error: "A valid http(s) site URL is required." }, 400);
+    if (!secret || secret.length < 16)
+      return c.json({ error: "A secret of at least 16 characters is required." }, 400);
+
+    try {
+      const site = await createCommunitySite({ name, url, secret, is_active });
+      await loadActiveCommunitySites();
+      return c.json(serializeSite(site), 201);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/unique|duplicate/i.test(msg))
+        return c.json({ error: "A community site with this URL already exists." }, 409);
+      throw err;
+    }
+  });
+
+  app.patch("/admin/community-sites/:id", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can edit a community site." }, 403);
+
+    const id = c.req.param("id");
+    let body: Record<string, unknown>;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const patch: Partial<{
+      name: string;
+      url: string;
+      secret: string;
+      is_active: boolean;
+    }> = {};
+    if ("name" in body) {
+      const v = typeof body.name === "string" ? body.name.trim() : "";
+      if (!v) return c.json({ error: "A name is required." }, 400);
+      patch.name = v;
+    }
+    if ("url" in body) {
+      const v =
+        typeof body.url === "string" ? body.url.trim().replace(/\/$/, "") : "";
+      if (!v || !isHttpUrl(v))
+        return c.json({ error: "A valid http(s) site URL is required." }, 400);
+      patch.url = v;
+    }
+    if ("secret" in body) {
+      const v = typeof body.secret === "string" ? body.secret.trim() : "";
+      if (!v || v.length < 16)
+        return c.json({ error: "A secret of at least 16 characters is required." }, 400);
+      patch.secret = v;
+    }
+    if ("is_active" in body) patch.is_active = !!body.is_active;
+
+    try {
+      const site = await updateCommunitySite(id, patch);
+      if (!site) return c.json({ error: "Community site not found." }, 404);
+      await loadActiveCommunitySites();
+      return c.json(serializeSite(site));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/unique|duplicate/i.test(msg))
+        return c.json({ error: "A community site with this URL already exists." }, 409);
+      throw err;
+    }
+  });
+
+  app.delete("/admin/community-sites/:id", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can remove a community site." }, 403);
+
+    const id = c.req.param("id");
+    const removed = await deleteCommunitySite(id);
+    if (!removed) return c.json({ error: "Community site not found." }, 404);
+    await loadActiveCommunitySites();
+    return c.json({ ok: true, id });
   });
 
   // GET /stats — dashboard summary counts: nests visible to caller,

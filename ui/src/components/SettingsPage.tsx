@@ -7,9 +7,10 @@
  * list and to that tab's `keys` (so the unsaved-changes dot tracks it).
  */
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff, Users } from "lucide-react";
+import { ArrowLeft, Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
   Card,
@@ -18,10 +19,25 @@ import {
   CardDescription,
   CardContent,
 } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { BetaBadge } from "@/components/ui/beta-badge";
-import type { AdminSettings, SignInGate, ManualSignIn } from "../lib/api";
-import { sendTestNotification } from "../lib/api";
+import type { AdminSettings, SignInGate, ManualSignIn, CommunitySite } from "../lib/api";
+import {
+  sendTestNotification,
+  listCommunitySites,
+  addCommunitySite,
+  updateCommunitySite as updateCommunitySiteApi,
+  removeCommunitySite,
+} from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
 import { toast } from "sonner";
 
@@ -93,6 +109,14 @@ const TABS: {
     id: "notifications",
     label: "Notifications",
     keys: ["slack_webhook_url", "msteams_webhook_url", "smtp_url", "notify_email_from", "notify_email_to"],
+  },
+  {
+    // Not draft-backed like the tabs above — sites are added/edited/removed
+    // immediately via their own API calls (like the superadmins panel on the
+    // Teammates page), so this tab has no keys to track for the unsaved dot.
+    id: "community-sites",
+    label: "Community sites",
+    keys: [],
   },
   {
     id: "advanced",
@@ -260,6 +284,93 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
   useEffect(() => {
     if (settings) setDraft(settings);
   }, [settings]);
+
+  // Community sites — official sites trusted for SSO auto-login. Not part of
+  // the settings draft: each row is its own resource, added/edited/removed
+  // immediately (mirrors the superadmins panel on the Teammates page).
+  const [communitySites, setCommunitySites] = useState<CommunitySite[] | null>(null);
+  const [communitySitesError, setCommunitySitesError] = useState<string | null>(null);
+  const fetchCommunitySites = async () => {
+    try {
+      const res = await listCommunitySites();
+      setCommunitySites(res.community_sites);
+      setCommunitySitesError(null);
+    } catch (e: any) {
+      setCommunitySitesError(e.message);
+    }
+  };
+  useEffect(() => {
+    fetchCommunitySites();
+  }, []);
+  const [siteDialog, setSiteDialog] = useState<
+    { mode: "add" } | { mode: "edit"; site: CommunitySite } | null
+  >(null);
+  const [siteForm, setSiteForm] = useState({ name: "", url: "", secret: "", is_active: true });
+  const [siteSaving, setSiteSaving] = useState(false);
+  const [siteFormError, setSiteFormError] = useState<string | null>(null);
+  const [deleteSiteTarget, setDeleteSiteTarget] = useState<CommunitySite | null>(null);
+  const [deletingSite, setDeletingSite] = useState(false);
+
+  const openAddSiteDialog = () => {
+    setSiteForm({ name: "", url: "", secret: "", is_active: true });
+    setSiteFormError(null);
+    setSiteDialog({ mode: "add" });
+  };
+  const openEditSiteDialog = (site: CommunitySite) => {
+    setSiteForm({ name: site.name, url: site.url, secret: "", is_active: site.is_active });
+    setSiteFormError(null);
+    setSiteDialog({ mode: "edit", site });
+  };
+  const saveSiteDialog = async () => {
+    if (!siteDialog) return;
+    setSiteSaving(true);
+    setSiteFormError(null);
+    try {
+      if (siteDialog.mode === "add") {
+        await addCommunitySite({
+          name: siteForm.name.trim(),
+          url: siteForm.url.trim(),
+          secret: siteForm.secret.trim(),
+          is_active: siteForm.is_active,
+        });
+      } else {
+        const patch: Partial<{ name: string; url: string; secret: string; is_active: boolean }> = {
+          name: siteForm.name.trim(),
+          url: siteForm.url.trim(),
+          is_active: siteForm.is_active,
+        };
+        if (siteForm.secret.trim()) patch.secret = siteForm.secret.trim();
+        await updateCommunitySiteApi(siteDialog.site.id, patch);
+      }
+      setSiteDialog(null);
+      await fetchCommunitySites();
+    } catch (e: any) {
+      setSiteFormError(e.message);
+    } finally {
+      setSiteSaving(false);
+    }
+  };
+  const toggleSiteActive = async (site: CommunitySite) => {
+    try {
+      await updateCommunitySiteApi(site.id, { is_active: !site.is_active });
+      await fetchCommunitySites();
+    } catch (e: any) {
+      toast.error(e.message);
+    }
+  };
+  const confirmDeleteSite = async () => {
+    if (!deleteSiteTarget) return;
+    setDeletingSite(true);
+    try {
+      await removeCommunitySite(deleteSiteTarget.id);
+      setDeleteSiteTarget(null);
+      await fetchCommunitySites();
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setDeletingSite(false);
+    }
+  };
 
   const set = (patch: Partial<AdminSettings>) => {
     setDraft((d) => (d ? { ...d, ...patch } : d));
@@ -1511,8 +1622,198 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
               </CardContent>
             </Card>
           </TabsContent>
+
+          {/* Community sites */}
+          <TabsContent value="community-sites" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <Globe2 className="h-4 w-4 text-muted-foreground" />
+                      Official community sites
+                    </CardTitle>
+                    <CardDescription>
+                      Sites trusted for one-click SSO auto-login. A visitor
+                      arriving with a ticket signed by one of these sites'
+                      secrets is signed in automatically — matched against the
+                      site's URL as well, so a ticket minted for one site can't
+                      be replayed against another.
+                    </CardDescription>
+                  </div>
+                  <Button size="sm" onClick={openAddSiteDialog}>
+                    <Plus className="h-4 w-4 mr-1.5" />
+                    Add site
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {communitySitesError && (
+                  <div
+                    role="alert"
+                    className="mb-4 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+                  >
+                    {communitySitesError}
+                  </div>
+                )}
+                {!communitySites ? (
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground py-6">
+                    <Loader2 className="h-4 w-4 animate-spin" /> Loading community sites…
+                  </div>
+                ) : communitySites.length === 0 ? (
+                  <p className="text-sm text-muted-foreground py-6">
+                    No community sites configured yet. Add one to enable SSO
+                    auto-login from it.
+                  </p>
+                ) : (
+                  <div className="divide-y">
+                    {communitySites.map((site) => (
+                      <div
+                        key={site.id}
+                        className="flex items-center justify-between gap-3 py-3"
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-sm truncate">{site.name}</span>
+                            <Badge
+                              variant="outline"
+                              className={
+                                site.is_active
+                                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                                  : "border-muted-foreground/20 text-muted-foreground"
+                              }
+                            >
+                              {site.is_active ? "Active" : "Inactive"}
+                            </Badge>
+                          </div>
+                          <div className="text-xs text-muted-foreground truncate">
+                            {site.url} · secret {site.secret_set ? "set" : "not set"}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <Switch
+                            checked={site.is_active}
+                            onCheckedChange={() => toggleSiteActive(site)}
+                            aria-label={`Toggle ${site.name} active`}
+                          />
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => openEditSiteDialog(site)}
+                            title="Edit this community site"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                            onClick={() => setDeleteSiteTarget(site)}
+                            title="Remove this community site"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
         </Tabs>
       )}
+
+      <Dialog open={!!siteDialog} onOpenChange={(open) => !open && setSiteDialog(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {siteDialog?.mode === "edit" ? "Edit community site" : "Add community site"}
+            </DialogTitle>
+            <DialogDescription>
+              The secret is write-only — leave it blank when editing to keep
+              the current one.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label htmlFor="site-name">Name</Label>
+              <Input
+                id="site-name"
+                value={siteForm.name}
+                onChange={(e) => setSiteForm((f) => ({ ...f, name: e.target.value }))}
+                placeholder="Main community site"
+              />
+            </div>
+            <div>
+              <Label htmlFor="site-url">Site URL</Label>
+              <Input
+                id="site-url"
+                value={siteForm.url}
+                onChange={(e) => setSiteForm((f) => ({ ...f, url: e.target.value }))}
+                placeholder="https://community.example.com"
+              />
+            </div>
+            <div>
+              <Label htmlFor="site-secret">Secret key</Label>
+              <Input
+                id="site-secret"
+                type="password"
+                value={siteForm.secret}
+                onChange={(e) => setSiteForm((f) => ({ ...f, secret: e.target.value }))}
+                placeholder={
+                  siteDialog?.mode === "edit" ? "Leave blank to keep the current secret" : "Shared secret (16+ characters)"
+                }
+                {...noAutofill("password")}
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label htmlFor="site-active">Auto-login enabled</Label>
+              <Switch
+                id="site-active"
+                checked={siteForm.is_active}
+                onCheckedChange={(v) => setSiteForm((f) => ({ ...f, is_active: v }))}
+              />
+            </div>
+            {siteFormError && (
+              <div role="alert" className="text-sm text-destructive">
+                {siteFormError}
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSiteDialog(null)}>
+              Cancel
+            </Button>
+            <Button onClick={saveSiteDialog} disabled={siteSaving}>
+              {siteSaving && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
+              {siteDialog?.mode === "edit" ? "Save changes" : "Add site"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!deleteSiteTarget} onOpenChange={(open) => !open && setDeleteSiteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove {deleteSiteTarget?.name}?</DialogTitle>
+            <DialogDescription>
+              Visitors arriving from this site will no longer be auto-signed-in.
+              This can't be undone from here — you'll need to re-add the site
+              and its secret to restore it.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteSiteTarget(null)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={confirmDeleteSite} disabled={deletingSite}>
+              {deletingSite && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

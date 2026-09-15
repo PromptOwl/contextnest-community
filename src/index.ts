@@ -18,6 +18,7 @@ import {
   loadAccessConfig,
   loadGrantedSuperAdmins,
 } from "./governance/access-service.js";
+import { loadActiveCommunitySites } from "./auth/community-sites.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
 import { startScheduler } from "./workflow/scheduler.js";
 import { sweepStale } from "./shared/rate-limit.js";
@@ -80,6 +81,15 @@ async function main() {
     await loadGrantedSuperAdmins();
   } catch (err) {
     console.error("[access] failed to load DB-granted superadmins:", err);
+  }
+
+  // Load active official community sites into the in-memory cache GET
+  // /auth/sso reads synchronously. Refreshed on every admin write; a failure
+  // here must not stop the server (the legacy env-var pair still works).
+  try {
+    await loadActiveCommunitySites();
+  } catch (err) {
+    console.error("[sso] failed to load community sites:", err);
   }
 
   // Validate PromptOwl license key (non-blocking — server runs either way)

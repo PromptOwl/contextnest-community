@@ -413,6 +413,54 @@ export async function removeSuperAdmin(email: string) {
   );
 }
 
+// ─── Community sites (official-site SSO connections) ───────────────────
+// Sites trusted for one-click SSO auto-login (GET /auth/sso). `secret` is
+// write-only — set it to change it, otherwise omit it; the server never
+// echoes the value back, only whether one is set.
+
+export interface CommunitySite {
+  id: string;
+  name: string;
+  url: string;
+  secret_set: boolean;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listCommunitySites() {
+  return request<{ community_sites: CommunitySite[] }>("/admin/community-sites");
+}
+
+export async function addCommunitySite(input: {
+  name: string;
+  url: string;
+  secret: string;
+  is_active?: boolean;
+}) {
+  return request<CommunitySite>("/admin/community-sites", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function updateCommunitySite(
+  id: string,
+  patch: Partial<{ name: string; url: string; secret: string; is_active: boolean }>,
+) {
+  return request<CommunitySite>(`/admin/community-sites/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function removeCommunitySite(id: string) {
+  return request<{ ok: boolean; id: string }>(
+    `/admin/community-sites/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
 // Logged-in user changes their own password (e.g., after an admin reset
 // handed them a temporary one). Invalidates other sessions server-side.
 export async function changePassword(current: string, next: string) {
