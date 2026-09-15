@@ -1479,6 +1479,29 @@ export function runMigrations(db: Database.Database): void {
     widenNestVisibilityWithGuard(db);
     recordMigration("041_nest_visibility_org");
   }
+
+  // 042: official community site connections (CU-wdqcq0247t). Extends the
+  // single OFFICIAL_COMMUNITY_SSO_SECRET / PUBLIC_BASE_URL env-var pair to a
+  // DB-backed list so an operator can trust SSO tickets from multiple
+  // official sites, each with its own name/url/secret and an active flag.
+  // Managed from Server Settings via /admin/community-sites; see
+  // src/auth/community-sites.ts.
+  if (!hasMigration("042_community_sites")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS community_sites (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          url TEXT NOT NULL UNIQUE,
+          secret TEXT NOT NULL,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      recordMigration("042_community_sites");
+    })();
+  }
 }
 
 /**

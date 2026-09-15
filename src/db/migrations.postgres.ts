@@ -74,6 +74,7 @@ const HISTORICAL_MIGRATIONS = [
   "038_nest_archive",
   "039_nest_pins",
   "041_nest_visibility_org",
+  "042_community_sites",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -710,6 +711,20 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       PRIMARY KEY (user_id, nest_id)
     );
     CREATE INDEX IF NOT EXISTS idx_nest_pins_user ON nest_pins(user_id);
+
+    -- community_sites (migration 042): official community site connections
+    -- trusted for SSO auto-login — extends the single OFFICIAL_COMMUNITY_SSO_
+    -- SECRET/PUBLIC_BASE_URL env-var pair to a DB-backed list, each row with
+    -- its own name/url/secret and an active flag. See src/auth/community-sites.ts.
+    CREATE TABLE IF NOT EXISTS community_sites (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      url TEXT NOT NULL UNIQUE,
+      secret TEXT NOT NULL,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      updated_at TEXT NOT NULL DEFAULT ${NOW}
+    );
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,

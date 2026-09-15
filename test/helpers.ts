@@ -123,6 +123,10 @@ export async function createTestApp(
     // isSuperAdmin() cache (post-reset module instance = the one the app uses).
     const access = await import("../src/governance/access-service.js");
     await access.loadGrantedSuperAdmins();
+    // Mirror index.ts startup: load active community sites into the sync
+    // cache GET /auth/sso reads (post-reset module instance).
+    const communitySites = await import("../src/auth/community-sites.js");
+    await communitySites.loadActiveCommunitySites();
   }
   const { createApp } = await import("../src/app.js");
 

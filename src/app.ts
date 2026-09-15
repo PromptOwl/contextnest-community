@@ -63,6 +63,7 @@ import {
   getAccessConfig,
   loadGrantedSuperAdmins,
 } from "./governance/access-service.js";
+import { communitySiteRoutes } from "./auth/community-sites-routes.js";
 import {
   llmsTxtRoutes,
   nestIndexRoutes,
@@ -1317,6 +1318,14 @@ export function createApp(): Hono<AuthEnv> {
 
     return c.json({ ok: true, email });
   });
+
+  // ─── /admin/community-sites — manage official community site connections ──
+  // (CU-wdqcq0247t). CRUD lives in auth/community-sites-routes.ts, following
+  // the same routes-file + app.route() convention as /teams and the
+  // nest-scoped domains — auth is applied here at registration, same as them.
+  app.use("/admin/community-sites", flexAuthMiddleware);
+  app.use("/admin/community-sites/*", flexAuthMiddleware);
+  app.route("/admin/community-sites", communitySiteRoutes);
 
   // GET /stats — dashboard summary counts: nests visible to caller,
   // documents across those nests, total users on the server. Uses

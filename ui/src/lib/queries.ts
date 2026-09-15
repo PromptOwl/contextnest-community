@@ -111,6 +111,7 @@ export const keys = {
   admin: ["admin"] as const,
   adminSettings: () => [...keys.admin, "settings"] as const,
   superAdmins: () => [...keys.admin, "super-admins"] as const,
+  communitySites: () => [...keys.admin, "community-sites"] as const,
 
   auth: ["auth"] as const,
   teammates: () => [...keys.auth, "teammates"] as const,
@@ -719,6 +720,12 @@ export const reads = {
     queryOptions({
       queryKey: keys.superAdmins(),
       queryFn: () => api.listSuperAdmins(),
+      staleTime: STALE.reference,
+    }),
+  communitySites: () =>
+    queryOptions({
+      queryKey: keys.communitySites(),
+      queryFn: () => api.listCommunitySites(),
       staleTime: STALE.reference,
     }),
   teammates: () =>
