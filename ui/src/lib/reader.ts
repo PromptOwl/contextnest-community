@@ -58,14 +58,21 @@ function leaf(id: string): string {
   return id.split("/").pop() ?? id;
 }
 
+/** True for the page that introduces its folder: overview/index/readme…, or a slug equal to the folder's own name (`hosted-nest/hosted-nest`). */
+export function isLeadPage(node: ReaderNode, folder: string): boolean {
+  const l = leaf(node.id).toLowerCase();
+  const folderLeaf = (folder.split("/").filter(Boolean).pop() ?? "").toLowerCase();
+  return LEAD.test(l) || LEAD.test(String(node.title ?? "")) || (!!folderLeaf && l === folderLeaf);
+}
+
+/** A folder's pages with its lead page first; the rest keep their order. */
+export function orderWithinFolder<T extends ReaderNode>(folder: string, items: T[]): T[] {
+  const lead = items.filter((n) => isLeadPage(n, folder));
+  return [...lead, ...items.filter((n) => !lead.includes(n))];
+}
+
 export function readingOrder<T extends ReaderNode>(groups: Array<{ folder: string; items: T[] }>): T[] {
-  const out: T[] = [];
-  for (const g of groups) {
-    const lead = g.items.filter((n) => LEAD.test(leaf(n.id)) || LEAD.test(String(n.title ?? "")));
-    const rest = g.items.filter((n) => !lead.includes(n));
-    out.push(...lead, ...rest);
-  }
-  return out;
+  return groups.flatMap((g) => orderWithinFolder(g.folder, g.items));
 }
 
 export function neighbours<T extends ReaderNode>(order: T[], id: string): { prev: T | null; next: T | null } {

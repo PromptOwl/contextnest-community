@@ -5,7 +5,7 @@ import { DocumentViewer } from "./DocumentViewer";
 import * as api from "../lib/api";
 import { conventionKey, isHomeNode } from "@/lib/nest-caps";
 import { extractHeadings } from "@/lib/toc";
-import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle } from "@/lib/reader";
+import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle, orderWithinFolder } from "@/lib/reader";
 import { relTime } from "@/lib/dates";
 
 /**
@@ -123,11 +123,20 @@ export function ReaderView({
     setFolderOverrides((prev) => new Map(prev).set(path, !opening));
     if (opening) onExpandFolder(path);
   };
-  // Keep the open page's own folder expanded when arriving by deep link.
+  // Open every ancestor of the current page in the nav — a deep link into
+  // platform/plugins/google-drive should show Platform › Plugins expanded,
+  // not a collapsed tree the reader has to dig through.
   useEffect(() => {
     if (!selectedId) return;
-    const folder = selectedId.replace(/^nodes\//, "").split("/").slice(0, -1).join("/");
-    if (folder && !loadedFolders?.has(folder)) onExpandFolder(folder);
+    const segs = selectedId.replace(/^nodes\//, "").split("/").slice(0, -1);
+    const ancestors = segs.map((_, i) => segs.slice(0, i + 1).join("/"));
+    if (ancestors.length === 0) return;
+    setFolderOverrides((prev) => {
+      const next = new Map(prev);
+      for (const a of ancestors) next.set(a, false);
+      return next;
+    });
+    for (const a of ancestors) if (!loadedFolders?.has(a)) onExpandFolder(a);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
@@ -161,10 +170,12 @@ export function ReaderView({
   // A nest whose every page lives under one folder ("docs/…") starts the nav
   // inside it — the extra level would only indent everything by one step.
   const rootFolder = useMemo(() => commonRootFolder(tocGroups, knownFolders), [tocGroups, knownFolders]);
+  // Lead page first within each folder — the nav and prev/next agree.
+  const orderedGroups = useMemo(() => tocGroups.map((g) => ({ ...g, items: orderWithinFolder(g.folder, g.items) })), [tocGroups]);
   const nav = (
     <FolderTree
       className="space-y-px"
-      groups={tocGroups}
+      groups={orderedGroups}
       baseFolder={rootFolder || undefined}
       known={knownFolders}
       isCollapsed={isFolderCollapsed}

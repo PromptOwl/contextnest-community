@@ -4,7 +4,7 @@
  * mean in a folder-ordered nest.
  */
 import { describe, it, expect } from "vitest";
-import { resolveWikiTarget, breadcrumbFor, sectionLabel, readingOrder, neighbours, stripLeadingTitle, commonRootFolder, displayTitle } from "./reader";
+import { resolveWikiTarget, breadcrumbFor, sectionLabel, readingOrder, neighbours, stripLeadingTitle, commonRootFolder, displayTitle, orderWithinFolder } from "./reader";
 
 const nodes = [
   { id: "nodes/docs/welcome", title: "Welcome" },
@@ -94,5 +94,12 @@ describe("displayTitle", () => {
     expect(displayTitle({ id: "nodes/docs/welcome", title: "Welcome" }, "# PromptOwl Documentation\n")).toBe("PromptOwl Documentation");
     expect(displayTitle({ id: "nodes/docs/x", title: "Self-Hosting" }, "# Something else\n")).toBe("Self-Hosting");
     expect(displayTitle({ id: "nodes/docs/overview", title: "Overview" }, "no heading")).toBe("Overview");
+  });
+});
+
+describe("orderWithinFolder", () => {
+  it("puts a page named after its folder first, like an overview", () => {
+    const items = [{ id: "nodes/docs/platform/plugins/building-a-plugin", title: "Building a Plugin" }, { id: "nodes/docs/platform/plugins/google-drive", title: "Google Drive" }, { id: "nodes/docs/platform/plugins/plugins", title: "Plugins" }];
+    expect(orderWithinFolder("docs/platform/plugins", items).map((n) => n.id.split("/").pop())).toEqual(["plugins", "building-a-plugin", "google-drive"]);
   });
 });
