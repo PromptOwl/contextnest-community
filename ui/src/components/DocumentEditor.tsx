@@ -1366,6 +1366,8 @@ export function DocumentEditor({
       const nextVersion =
         (res as any)?.version ?? (res as any)?.node?.version;
       if (typeof nextVersion === "number") setBaseVersion(nextVersion);
+      // The top bar's "Edited …" reads this; the save just moved it.
+      setUpdatedAt((res as any)?.node?.updated_at ?? new Date().toISOString());
       savedId = nodeId;
     }
     initialSnapshotRef.current = {
@@ -1715,13 +1717,13 @@ export function DocumentEditor({
         data-testid="document-editor-topbar"
       >
         <div className="flex items-center gap-1 min-w-0 flex-1">
-          {/* Bring the index back: always on a phone (it's a drawer there),
-              on a desktop only once it has been hidden. */}
-          {onToggleSidebar && (
+          {/* Bring the index back once it has been hidden. (On a phone the
+              app header carries the drawer toggle for every page.) */}
+          {sidebarCollapsed && onToggleSidebar && (
             <Button
               variant="ghost"
               size="icon"
-              className={`h-8 w-8 shrink-0${sidebarCollapsed ? "" : " md:hidden"}`}
+              className="h-8 w-8 shrink-0"
               onClick={onToggleSidebar}
               title="Show sidebar"
               aria-label="Show sidebar"
@@ -2120,6 +2122,7 @@ export function DocumentEditor({
                 label: discarding ? "Discarding…" : "Discard draft",
                 icon: Undo2,
                 separatorBefore: true,
+                disabled: discarding,
                 testId: "document-editor-discard",
                 onSelect: () => setConfirmDiscard(true),
               });

@@ -1872,25 +1872,9 @@ export async function updateNode(
         };
         opInput.title = patch.title;
       }
-      if (patch.schedule !== undefined) {
-        if (!isRunnableType(node.frontmatter.type)) {
-          throw new ValidationError(
-            `schedule is only valid for runnable node types (${RUNNABLE_NODE_TYPES.join(
-              ", "
-            )})`
-          );
-        }
-        const metadata = { ...(node.frontmatter.metadata as any) };
-        if (patch.schedule === "") delete metadata.schedule;
-        else metadata.schedule = patch.schedule;
-        node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
-        // The op merges metadata and reads null as "clear this key" — an empty
-        // schedule means remove it, not store "".
-        opInput.metadata = {
-          ...(opInput.metadata as object),
-          schedule: patch.schedule === "" ? null : patch.schedule,
-        };
-      }
+      // Re-type BEFORE the schedule gate below, so "turn this document into
+      // an agent and schedule it" is one call — the gate reads the type the
+      // node is becoming, as create does.
       if (patch.type !== undefined && patch.type !== node.frontmatter.type) {
         assertAcceptedType(patch.type);
         // A skill node is invalid without a skill block and this surface has
@@ -1909,6 +1893,25 @@ export async function updateNode(
         }
         node = { ...node, frontmatter: { ...node.frontmatter, type: patch.type as any } };
         opInput.type = patch.type;
+      }
+      if (patch.schedule !== undefined) {
+        if (!isRunnableType(node.frontmatter.type)) {
+          throw new ValidationError(
+            `schedule is only valid for runnable node types (${RUNNABLE_NODE_TYPES.join(
+              ", "
+            )})`
+          );
+        }
+        const metadata = { ...(node.frontmatter.metadata as any) };
+        if (patch.schedule === "") delete metadata.schedule;
+        else metadata.schedule = patch.schedule;
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+        // The op merges metadata and reads null as "clear this key" — an empty
+        // schedule means remove it, not store "".
+        opInput.metadata = {
+          ...(opInput.metadata as object),
+          schedule: patch.schedule === "" ? null : patch.schedule,
+        };
       }
       if (patch.prime !== undefined) {
         await assertMayFlagPrime(nestId, userEmail);

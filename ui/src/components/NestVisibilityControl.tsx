@@ -43,6 +43,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import * as api from "../lib/api";
+import { useNestMeta } from "../lib/queries";
 
 interface Props {
   nestId: string;
@@ -76,16 +77,16 @@ export function NestVisibilityControl({
   // becomes readable by anyone on the internet, outside your organization.
   const [confirmPublic, setConfirmPublic] = useState(false);
 
+  // The same cached GET /nests/:id every nest screen reads — the compact
+  // variant sits on every document page, so a second fetch per view would
+  // add up, and the cache is what onChanged invalidates.
+  const meta = useNestMeta(nestId);
+  const serverVisibility = (meta.data as any)?.nest?.visibility as
+    | api.NestVisibility
+    | undefined;
   useEffect(() => {
-    // Read current visibility straight from the server so the toggle
-    // reflects truth without the parent having to thread it through.
-    api
-      .getNest(nestId)
-      .then((res) => setVisibility(res.nest?.visibility ?? "private"))
-      .catch(() => {
-        /* leave default; the roster below surfaces any real error */
-      });
-  }, [nestId]);
+    if (serverVisibility) setVisibility(serverVisibility);
+  }, [serverVisibility]);
 
   const apply = async (target: api.NestVisibility, acknowledgePublic?: boolean) => {
     // Optimistic change, reverting to the PREVIOUS value on failure — never

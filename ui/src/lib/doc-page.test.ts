@@ -166,28 +166,37 @@ describe("doc page prefs", () => {
 describe("nestSidebarViews — the nest's views under its name in the sidebar", () => {
   const ids = (v: ReturnType<typeof nestSidebarViews>) => v.map((x) => x.id);
   const full = { isReadOnly: false, isReaderView: false, canEditDocs: true };
+  const governed = { workflowPlaneEnabled: true, stewardshipEnabled: true };
 
   it("gives an editor every view, workflows only when the plane is on", () => {
-    expect(ids(nestSidebarViews(full, { workflowPlaneEnabled: true }))).toEqual([
+    expect(ids(nestSidebarViews(full, governed))).toEqual([
       "overview", "review", "board", "graph", "definitions", "workflows",
     ]);
-    expect(ids(nestSidebarViews(full, { workflowPlaneEnabled: false }))).not.toContain("workflows");
+    expect(ids(nestSidebarViews(full, { ...governed, workflowPlaneEnabled: false }))).not.toContain("workflows");
+  });
+
+  it("shows the review queue only where NestView shows its tab: governed, or something pending", () => {
+    // Same rule as NestView's showReviewTab — an editor on an ungoverned nest
+    // with nothing waiting would otherwise get a row that lands on the overview.
+    expect(ids(nestSidebarViews(full, { workflowPlaneEnabled: true }))).not.toContain("review");
+    expect(ids(nestSidebarViews(full, { workflowPlaneEnabled: true, hasPending: true }))).toContain("review");
+    expect(ids(nestSidebarViews(full, { workflowPlaneEnabled: true, stewardshipEnabled: true }))).toContain("review");
   });
 
   it("hides the review queue and workflows from a read-only caller", () => {
-    const v = ids(nestSidebarViews({ ...full, isReadOnly: true, canEditDocs: false }, { workflowPlaneEnabled: true }));
+    const v = ids(nestSidebarViews({ ...full, isReadOnly: true, canEditDocs: false }, governed));
     expect(v).toEqual(["overview", "board", "graph", "definitions"]);
   });
 
   it("leaves a public reader in reader mode with the overview only", () => {
     // Same set App hides via isReaderHiddenView — the sidebar must not be a
     // back door into the board / graph / definitions for a docs-site reader.
-    const v = ids(nestSidebarViews({ isReadOnly: true, isReaderView: true, canEditDocs: false }, { workflowPlaneEnabled: true }));
+    const v = ids(nestSidebarViews({ isReadOnly: true, isReaderView: true, canEditDocs: false }, governed));
     expect(v).toEqual(["overview"]);
   });
 
   it("keeps overview and the review queue at the top and folds the rest under Views", () => {
-    const v = nestSidebarViews(full, { workflowPlaneEnabled: true });
+    const v = nestSidebarViews(full, governed);
     expect(v.filter((x) => !x.group).map((x) => x.id)).toEqual(["overview", "review"]);
     expect(v.filter((x) => x.group === "views").map((x) => x.id)).toEqual([
       "board", "graph", "definitions", "workflows",
@@ -195,7 +204,7 @@ describe("nestSidebarViews — the nest's views under its name in the sidebar", 
   });
 
   it("targets the nest page tabs and the top-level pages App knows", () => {
-    const v = nestSidebarViews(full, { workflowPlaneEnabled: true });
+    const v = nestSidebarViews(full, governed);
     expect(v.find((x) => x.id === "review")).toMatchObject({ page: "nest", tab: "review" });
     expect(v.find((x) => x.id === "graph")).toMatchObject({ page: "ontology-graph" });
     expect(v.find((x) => x.id === "board")).toMatchObject({ page: "board" });

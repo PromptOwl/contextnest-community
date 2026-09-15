@@ -72,6 +72,17 @@ describe("convert a node's type", () => {
     expect(node.schedule ?? null).toBeNull();
   });
 
+  it("converts into a runnable type and schedules it in the same call", async () => {
+    // The schedule gate has to see the type the node is becoming, not the
+    // one it was — otherwise convert-and-schedule needs two round trips.
+    expect((await create("Weekly Digest")).status).toBe(201);
+    const res = await patch("nodes/weekly-digest", { type: "agent", schedule: "0 7 * * 1" });
+    expect(res.status).toBe(200);
+    const node = await read("nodes/weekly-digest");
+    expect(node.type).toBe("agent");
+    expect(node.schedule).toBe("0 7 * * 1");
+  });
+
   it("rejects an unknown type with a 400, and leaves the node alone", async () => {
     expect((await create("Stays")).status).toBe(201);
     const res = await patch("nodes/stays", { type: "spreadsheet" });

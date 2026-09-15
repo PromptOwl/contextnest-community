@@ -75,8 +75,8 @@ interface Props {
 const nestTarget = (n: any): SidebarNestTarget => ({
   nestId: n.id,
   nestName: n.name,
-  // The list endpoint always sets is_owner; if it ever didn't, unknown must
-  // read as not-owner, never as owner.
+  // The list endpoint always sets is_owner; the fallback reads the permission
+  // field rather than assuming ownership.
   isOwner: n.is_owner ?? n.permission === "owner",
   isAnonOwned: n.user_id === ANON_USER_ID,
 });
@@ -281,14 +281,25 @@ function NestViews({
       isArchived: isNestArchived(m.nest),
     });
   }, [meta.data, isOwner, isAdmin]);
-  const views = useMemo(
-    () => (caps ? nestSidebarViews(caps, { workflowPlaneEnabled }) : []),
-    [caps, workflowPlaneEnabled],
-  );
-  const showsReview = views.some((v) => v.id === "review");
-  // Only asked for when the row is shown — the endpoint is write-tier.
-  const queue = useQuery({ ...reads.reviewQueue(nestId), enabled: showsReview });
+  // The queue read is write-tier, so only writers ask; its count decides
+  // whether an ungoverned nest gets the row at all (see nestSidebarViews).
+  const queue = useQuery({
+    ...reads.reviewQueue(nestId),
+    enabled: !!caps && !caps.isReadOnly && !caps.isReaderView,
+  });
   const pending = queue.data?.total ?? queue.data?.requests?.length ?? 0;
+  const stewardshipEnabled = !!(meta.data as any)?.nest?.stewardship_enabled;
+  const views = useMemo(
+    () =>
+      caps
+        ? nestSidebarViews(caps, {
+            workflowPlaneEnabled,
+            stewardshipEnabled,
+            hasPending: pending > 0,
+          })
+        : [],
+    [caps, workflowPlaneEnabled, stewardshipEnabled, pending],
+  );
 
   // The "Views" group folds by default (remembered per browser) and opens
   // itself when the view on screen is inside it, so the highlight is visible.

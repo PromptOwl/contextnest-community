@@ -961,6 +961,27 @@ export default function App() {
             row reads as part of the page below it, not a second bar. */}
         <div className="border-b border-border">
         <div className={`${shellWidth} mx-auto px-4 py-3 flex items-center justify-between`}>
+          <div className="flex items-center gap-1">
+          {/* The sidebar toggle lives in the app header so it exists on every
+              page that has a sidebar: always on a phone (the rail is a drawer
+              there), on a desktop only once the rail has been hidden. */}
+          {withSidebar && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className={`h-8 w-8 shrink-0${showSidebar ? " md:hidden" : ""}`}
+              title="Show sidebar"
+              aria-label="Show sidebar"
+              data-testid="nest-sidebar-expand"
+              onClick={() => {
+                if (window.matchMedia("(max-width: 767px)").matches)
+                  setDocSidebarDrawer(true);
+                else setDocSidebarCollapsed(false);
+              }}
+            >
+              <PanelLeft className="h-4 w-4" />
+            </Button>
+          )}
           <button
             onClick={() => setView({ page: "dashboard" })}
             className="flex items-center gap-2 hover:opacity-80"
@@ -975,6 +996,7 @@ export default function App() {
               Community
             </Badge>
           </button>
+          </div>
 
           <div className="flex items-center gap-2">
             {/* The ONE search entry point, on every page the palette works on
@@ -1073,23 +1095,6 @@ export default function App() {
               showSidebar ? " md:hidden" : ""
             }`}
           >
-            {inNest && !showSidebar && (
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 shrink-0"
-                title="Show sidebar"
-                aria-label="Show sidebar"
-                data-testid="nest-sidebar-expand"
-                onClick={() => {
-                  if (window.matchMedia("(max-width: 767px)").matches)
-                    setDocSidebarDrawer(true);
-                  else setDocSidebarCollapsed(false);
-                }}
-              >
-                <PanelLeft className="h-4 w-4" />
-              </Button>
-            )}
             <Tabs
               value={view.page}
               onValueChange={(page) =>

@@ -144,13 +144,23 @@ export interface NestSidebarView {
  */
 export function nestSidebarViews(
   caps: { isReadOnly: boolean; isReaderView: boolean; canEditDocs: boolean },
-  opts: { workflowPlaneEnabled: boolean },
+  opts: {
+    workflowPlaneEnabled: boolean;
+    /** The nest runs stewardship — the queue is a standing surface then. */
+    stewardshipEnabled?: boolean;
+    /** Something is already waiting (reviews, deletion flags) — the queue
+     *  shows on an ungoverned nest too, same as NestView's tab. */
+    hasPending?: boolean;
+  },
 ): NestSidebarView[] {
   const views: NestSidebarView[] = [
     { id: "overview", label: "Overview", page: "nest", tab: "overview" },
   ];
   if (caps.isReaderView) return views;
-  if (!caps.isReadOnly)
+  // Mirrors NestView's showReviewTab && !isReadOnly: an editor on an
+  // ungoverned nest with nothing pending would otherwise get a row that
+  // lands on the overview.
+  if (!caps.isReadOnly && (opts.stewardshipEnabled || opts.hasPending))
     views.push({ id: "review", label: "Review queue", page: "nest", tab: "review" });
   views.push(
     { id: "board", label: "Board", page: "board", group: "views" },
