@@ -13,3 +13,5 @@ The document page reads like a page, not a form.
 **Comments stay out of the way.** The comments rail starts closed instead of taking a third of the width to say "No comments yet", and opens from the top bar (with the open-thread count), for a deep link to a thread, on entering comment mode, or when you pin a comment to a selection. Its state is remembered per browser.
 
 **Fix: opening a document no longer says "Unsaved changes".** A document whose markdown didn't round-trip byte-for-byte through the editor — any document with a table — opened already dirty and wrote a spurious version on the first click-out. The editor normalising a freshly parsed table is no longer reported as an edit.
+
+**Turn into.** A document can now become an agent, skill, tool, table or hosted artifact after the fact — ⋮ → *Turn into…* on the document page, and *Turn into a document* on an artifact's page — where the type used to be fixed at creation. `PATCH /nests/:id/nodes/:nodeId` accepts `type` with the same gate as create; converting to a skill defaults its trigger from the title, and converting away from a runnable type drops its schedule.

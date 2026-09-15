@@ -10,7 +10,7 @@ import {
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
-import { keys, reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
+import { invalidateForPath, keys, reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { setNavGuard, bypassNavGuard } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
@@ -857,6 +857,47 @@ export function DocumentEditor({
   // offers, so nobody has to navigate back out to relocate what they're
   // reading. `null` = dialog closed.
   const [moveTo, setMoveTo] = useState<string | null>(null);
+  // "Turn into…" — re-type an existing node. The picked type is staged in
+  // the dialog until confirmed; the body is kept as-is, so the dialog says
+  // what each target kind expects of it.
+  const [turnInto, setTurnInto] = useState<string | null>(null);
+  const [turningInto, setTurningInto] = useState(false);
+  const turnIntoOptions = useMemo(() => {
+    const all: Array<{ value: string; label: string; Icon: typeof FileText; expects: string }> = [
+      { value: "document", label: "Document", Icon: FileText, expects: "Markdown prose." },
+      ...(typeArtifactEnabled
+        ? [{ value: "artifact", label: "Artifact", Icon: Code2, expects: "An HTML page — the body is hosted and rendered as-is." }]
+        : []),
+      ...(typeTableEnabled
+        ? [{ value: "table", label: "Table", Icon: Table2, expects: "CSV — one header row, then data rows." }]
+        : []),
+      ...(workflowPlaneEnabled
+        ? [
+            { value: "agent", label: "Agent", Icon: Bot, expects: "Markdown instructions an orchestrator runs; can carry a schedule." },
+            { value: "skill", label: "Skill", Icon: Zap, expects: "Markdown instructions with a trigger (defaulted from the title)." },
+            { value: "tool", label: "Tool", Icon: Wrench, expects: "Source code, shown and edited as code." },
+          ]
+        : []),
+    ];
+    return all.filter((o) => o.value !== (nodeType ?? "document"));
+  }, [typeArtifactEnabled, typeTableEnabled, workflowPlaneEnabled, nodeType]);
+  const handleTurnInto = async () => {
+    if (!turnInto || isNew) return;
+    setTurningInto(true);
+    try {
+      await api.updateNode(nestId, nodeId, { type: turnInto });
+      invalidateForPath(qc, `/nests/${nestId}/nodes/${nodeId}`);
+      toast.success(`Turned into ${turnIntoOptions.find((o) => o.value === turnInto)?.label ?? turnInto}`);
+      setTurnInto(null);
+      // Reload so the page re-renders as the new kind (an artifact opens in
+      // the artifact viewer; a table in the grid).
+      await loadNode();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to convert");
+    } finally {
+      setTurningInto(false);
+    }
+  };
   const [moving, setMoving] = useState(false);
   const currentFolder = useMemo(() => {
     if (isNew || !nodeId) return "";
@@ -1656,6 +1697,10 @@ export function DocumentEditor({
         reviewerOnly={isReviewerOnly}
         initialThreadId={initialThreadId}
         onBack={onBack}
+        onTurnedInto={() => {
+          invalidateForPath(qc, `/nests/${nestId}/nodes/${nodeId}`);
+          void loadNode();
+        }}
       />
     );
   }
@@ -2025,6 +2070,15 @@ export function DocumentEditor({
                 icon: FolderInput,
                 testId: "document-editor-move",
                 onSelect: () => setMoveTo(currentFolder),
+              });
+            // Re-type in place: a document becomes an agent, a table, a
+            // hosted artifact… (create-only before; Notion calls it "Turn into").
+            if (!isNew && canEditContent && !isLocked && turnIntoOptions.length > 0)
+              moreActions.push({
+                label: "Turn into…",
+                icon: RefreshCw,
+                testId: "document-editor-turn-into",
+                onSelect: () => setTurnInto(turnIntoOptions[0].value),
               });
             // Share THIS doc first — it's the narrower, more common ask.
             // Meaningless on an unsaved doc: there's no node id to grant on.
@@ -3461,6 +3515,60 @@ export function DocumentEditor({
         excludeNodeId={isNew ? undefined : nodeId}
         onSelect={handleDocLinkInsert}
       />
+
+      <Dialog
+        open={turnInto !== null}
+        onOpenChange={(open) => {
+          if (!open && !turningInto) setTurnInto(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-[480px]">
+          <DialogHeader>
+            <DialogTitle>Turn into</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Changes what kind of node this is. The body is kept as it is — pick
+            the kind that matches what's in it, or edit the body after.
+          </p>
+          <div role="radiogroup" aria-label="New type" className="space-y-1">
+            {turnIntoOptions.map(({ value, label, Icon, expects }) => {
+              const active = turnInto === value;
+              return (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => setTurnInto(value)}
+                  className={`flex w-full items-start gap-3 rounded-md border px-3 py-2 text-left text-sm hover:bg-muted ${
+                    active ? "border-primary bg-primary/5" : ""
+                  }`}
+                  data-testid={`document-editor-turn-into-${value}`}
+                >
+                  <Icon className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span className="flex flex-col">
+                    <span className="font-medium">{label}</span>
+                    <span className="text-xs text-muted-foreground">{expects}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTurnInto(null)} disabled={turningInto}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleTurnInto()}
+              disabled={turningInto || !turnInto}
+              data-testid="document-editor-turn-into-confirm"
+            >
+              {turningInto ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+              Turn into {turnIntoOptions.find((o) => o.value === turnInto)?.label ?? ""}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={moveTo !== null}

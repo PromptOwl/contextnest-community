@@ -1056,6 +1056,8 @@ export async function updateNode(
     schedule?: string;
     /** Owner/admin only; `null` clears the flag back to tag/nest inheritance. */
     prime?: boolean | null;
+    /** Re-type the node ("Turn into…"). Same accepted set as create. */
+    type?: string;
   },
   baseVersion?: number,
 ) {

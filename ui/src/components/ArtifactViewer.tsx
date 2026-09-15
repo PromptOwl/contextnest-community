@@ -37,7 +37,7 @@ import {
 import { VersionHistoryModal, type VersionHistoryData } from "./governance";
 import {
   ArrowLeft, Loader2, MessageSquarePlus, ExternalLink, RefreshCw,
-  Eye, Highlighter, Check, RotateCcw, Send, History, Code2, X,
+  Eye, Highlighter, Check, RotateCcw, Send, History, Code2, X, FileText,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -66,6 +66,9 @@ interface ArtifactViewerProps {
    *  ?thread= deep link). */
   initialThreadId?: string;
   onBack: () => void;
+  /** The artifact was turned back into a markdown document — the host page
+   *  re-reads the node and renders the editor instead. */
+  onTurnedInto?: () => void;
 }
 
 function fmtTime(s: string): string {
@@ -83,8 +86,26 @@ export function ArtifactViewer({
   reviewerOnly = false,
   initialThreadId,
   onBack,
+  onTurnedInto,
 }: ArtifactViewerProps) {
   const [mode, setMode] = useState<"preview" | "annotate" | "edit">("preview");
+  // "Turn into document" — the reverse of DocumentEditor's Turn into… The
+  // HTML body is kept; the markdown editor shows it as source to rework.
+  const [confirmTurnInto, setConfirmTurnInto] = useState(false);
+  const [turningInto, setTurningInto] = useState(false);
+  const turnIntoDocument = async () => {
+    setTurningInto(true);
+    try {
+      await api.updateNode(nestId, nodeId, { type: "document" });
+      toast.success("Turned into a document");
+      setConfirmTurnInto(false);
+      onTurnedInto?.();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to convert");
+    } finally {
+      setTurningInto(false);
+    }
+  };
   const qc = useQueryClient();
   const [threads, setThreads] = useState<AnnotationThread[]>([]);
   const [loadingThreads, setLoadingThreads] = useState(true);
@@ -558,6 +579,17 @@ export function ArtifactViewer({
           >
             <RefreshCw className="h-4 w-4" />
           </Button>
+          {!viewOnly && !reviewerOnly && onTurnedInto && (
+            <Button
+              variant="outline"
+              size="icon"
+              title="Turn into a document"
+              onClick={() => setConfirmTurnInto(true)}
+              data-testid="artifact-turn-into-document"
+            >
+              <FileText className="h-4 w-4" />
+            </Button>
+          )}
           <a href={hostedUrl} target="_blank" rel="noopener noreferrer">
             <Button variant="outline" size="icon" title="Open in new tab">
               <ExternalLink className="h-4 w-4" />
@@ -846,7 +878,29 @@ export function ArtifactViewer({
               : undefined
           }
         />
+
       )}
+      <Dialog open={confirmTurnInto} onOpenChange={(o) => { if (!turningInto) setConfirmTurnInto(o); }}>
+        <DialogContent className="sm:max-w-[440px]">
+          <DialogHeader>
+            <DialogTitle>Turn into a document?</DialogTitle>
+            <DialogDescription>
+              The HTML stays as the body, opened in the markdown editor's source
+              view for you to rework. It stops being hosted as a page until it
+              is turned back into an artifact.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmTurnInto(false)} disabled={turningInto}>
+              Cancel
+            </Button>
+            <Button onClick={() => void turnIntoDocument()} disabled={turningInto} data-testid="artifact-turn-into-confirm">
+              {turningInto ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+              Turn into document
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Confirm for the banner's "Restore this version" (the history modal
           carries its own confirm inside VersionHistory). */}
