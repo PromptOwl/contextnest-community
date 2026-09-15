@@ -19,6 +19,7 @@ import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
 import { navigateGuarded } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
+import { nestIdFromLocation, nestPath } from "./lib/nest-url";
 import {
   deriveNestCaps,
   isReaderHiddenView,
@@ -225,7 +226,8 @@ export default function App() {
     track("$pageview", { page: view.page });
   }, [view.page]);
   const [showAdminLogin, setShowAdminLogin] = useState(false);
-  // ?nest=<id> deep-link probe; 200 → skip Login, mount NestView.
+  // /nest/<id> (or legacy ?nest=<id>) deep-link probe; 200 → skip Login,
+  // mount NestView.
   // "missing" is "no ?nest to open"; "unreachable" is "there was one and it
   // didn't resolve" — a deleted nest, a typo'd id, or access that was revoked.
   // They render differently: only the second one owes the user an explanation.
@@ -240,9 +242,7 @@ export default function App() {
     | { status: "unreachable"; nestId: string }
   >(() => {
     if (typeof window === "undefined") return { status: "idle" };
-    const params = new URLSearchParams(window.location.search);
-    const nestId = params.get("nest");
-    return nestId ? { status: "loading" } : { status: "idle" };
+    return nestIdFromLocation() ? { status: "loading" } : { status: "idle" };
   });
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(
     null,
@@ -385,7 +385,7 @@ export default function App() {
     if (deepLinkProbe.status !== "loading") return;
     const params = new URLSearchParams(window.location.search);
     // A retry re-probes the id it failed on, which is no longer in the URL.
-    const nestId = deepLinkProbe.nestId ?? params.get("nest");
+    const nestId = deepLinkProbe.nestId ?? nestIdFromLocation();
     if (!nestId) {
       setDeepLinkProbe({ status: "missing" });
       return;
@@ -513,8 +513,12 @@ export default function App() {
     // any link copied off that screen — land back on the same dead end. The id
     // rides in the probe state instead, so "Try again" still has one.
     const params = new URLSearchParams(window.location.search);
+    // The nest rides in the path (/nest/<id>), never the query — a legacy
+    // ?nest= that got us here is dropped once the path form is written.
+    params.delete("nest");
+    let pathNestId: string | null = null;
     if (view.page === "document") {
-      params.set("nest", view.nestId);
+      pathNestId = view.nestId;
       if (view.nodeId && view.nodeId !== "new") params.set("doc", view.nodeId);
       else params.delete("doc");
       // Keep the focused-thread deep link shareable; drop it otherwise so a
@@ -524,7 +528,7 @@ export default function App() {
       params.delete("view");
       params.delete("tab");
     } else if (view.page === "nest") {
-      params.set("nest", view.nestId);
+      pathNestId = view.nestId;
       params.delete("doc");
       params.delete("thread");
       params.delete("view");
@@ -541,7 +545,7 @@ export default function App() {
       view.page === "board" ||
       view.page === "nest-trace"
     ) {
-      params.set("nest", view.nestId);
+      pathNestId = view.nestId;
       params.delete("doc");
       params.delete("thread");
       params.delete("tab");
@@ -558,15 +562,13 @@ export default function App() {
                 : "trace",
       );
     } else {
-      params.delete("nest");
       params.delete("doc");
       params.delete("thread");
       params.delete("view");
       params.delete("tab");
     }
     const qs = params.toString();
-    const next =
-      window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
+    const next = nestPath(pathNestId) + (qs ? `?${qs}` : "") + window.location.hash;
     const current =
       window.location.pathname + window.location.search + window.location.hash;
     if (next !== current) {
@@ -661,18 +663,16 @@ export default function App() {
   // their back arrows used to return to the nest page, but the view switcher
   // makes that a tab click, so back now means "leave this nest".
   const leaveNest = useCallback(() => {
-    // Drop ?nest from URL so refresh doesn't re-enter the nest.
-    if (typeof window !== "undefined") {
+    // Drop the nest from the URL so refresh doesn't re-enter it.
+    if (typeof window !== "undefined" && nestIdFromLocation()) {
       const params = new URLSearchParams(window.location.search);
-      if (params.has("nest")) {
-        params.delete("nest");
-        const qs = params.toString();
-        window.history.replaceState(
-          {},
-          "",
-          window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
-        );
-      }
+      params.delete("nest");
+      const qs = params.toString();
+      window.history.replaceState(
+        {},
+        "",
+        nestPath(null) + (qs ? `?${qs}` : "") + window.location.hash,
+      );
     }
     // Unauth → bounce to Login (Dashboard would 401).
     if (!authenticated && authMode === "key") {
