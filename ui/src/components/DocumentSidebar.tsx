@@ -26,6 +26,7 @@ import {
   LayoutGrid,
   Network,
   PanelLeftClose,
+  Plug,
   Plus,
   Workflow,
 } from "lucide-react";
@@ -51,13 +52,17 @@ export interface SidebarNestTarget {
 
 interface Props {
   nestId: string;
-  /** The open document; "new" while creating one. */
-  nodeId: string;
+  /** The open document ("new" while creating one), or null on a nest page. */
+  nodeId: string | null;
+  /** Which of the nest's views is on screen, for the highlight. */
+  activeView?: NestSidebarView["id"] | null;
   onCollapse: () => void;
   onOpenDocument: (target: SidebarNestTarget & { nodeId: string }) => void;
   onOpenNest: (target: SidebarNestTarget) => void;
   /** Open one of the current nest's views (review queue, board, graph…). */
   onOpenView: (target: SidebarNestTarget, view: NestSidebarView) => void;
+  /** Connect this nest to a CLI / MCP client / API caller. */
+  onConnect?: () => void;
   onOpenDashboard: () => void;
   /** Omit when the caller can't author in this nest. */
   onNewDocument?: () => void;
@@ -75,10 +80,12 @@ const nestTarget = (n: any): SidebarNestTarget => ({
 export function DocumentSidebar({
   nestId,
   nodeId,
+  activeView = null,
   onCollapse,
   onOpenDocument,
   onOpenNest,
   onOpenView,
+  onConnect,
   onOpenDashboard,
   onNewDocument,
 }: Props) {
@@ -191,7 +198,9 @@ export function DocumentSidebar({
                   isOwner={nestTarget(n).isOwner}
                   isAdmin={isAdmin}
                   workflowPlaneEnabled={workflowPlaneEnabled}
+                  activeView={activeView}
                   onOpen={(view) => onOpenView(nestTarget(n), view)}
+                  onConnect={onConnect}
                 />
               )}
               {open && (
@@ -235,13 +244,17 @@ function NestViews({
   isOwner,
   isAdmin,
   workflowPlaneEnabled,
+  activeView,
   onOpen,
+  onConnect,
 }: {
   nestId: string;
   isOwner: boolean;
   isAdmin: boolean;
   workflowPlaneEnabled: boolean;
+  activeView: NestSidebarView["id"] | null;
   onOpen: (view: NestSidebarView) => void;
+  onConnect?: () => void;
 }) {
   const meta = useNestMeta(nestId);
   const caps = useMemo(() => {
@@ -271,12 +284,19 @@ function NestViews({
     <div className="mb-1 ml-2 pl-1" data-testid="document-sidebar-views">
       {views.map((v) => {
         const Icon = VIEW_ICONS[v.id];
+        const active = v.id === activeView;
         return (
           <button
             key={v.id}
             type="button"
             onClick={() => onOpen(v)}
-            className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-muted-foreground hover:bg-muted hover:text-foreground"
+            aria-current={active ? "page" : undefined}
+            className={cn(
+              "flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left hover:bg-muted",
+              active
+                ? "bg-muted font-medium text-foreground"
+                : "text-muted-foreground hover:text-foreground",
+            )}
             data-testid={`document-sidebar-view-${v.id}`}
           >
             <Icon className="h-3.5 w-3.5 shrink-0" />
@@ -289,6 +309,18 @@ function NestViews({
           </button>
         );
       })}
+      {onConnect && (
+        <button
+          type="button"
+          onClick={onConnect}
+          className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-muted-foreground hover:bg-muted hover:text-foreground"
+          title="Connect a CLI, MCP client or API caller to this nest"
+          data-testid="document-sidebar-connect"
+        >
+          <Plug className="h-3.5 w-3.5 shrink-0" />
+          <span className="truncate">Connect</span>
+        </button>
+      )}
     </div>
   );
 }

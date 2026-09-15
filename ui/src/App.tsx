@@ -4,6 +4,7 @@ import { Dashboard } from "./components/Dashboard";
 import { NestView } from "./components/NestView";
 import { DocumentEditor } from "./components/DocumentEditor";
 import { DocumentSidebar } from "./components/DocumentSidebar";
+import { ConnectModal } from "./components/ConnectModal";
 import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
@@ -27,7 +28,7 @@ import {
   isViewBlockedInReaderMode,
 } from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText, Keyboard } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText, Keyboard, PanelLeft } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
 import { AgentDocsPage } from "./components/AgentDocsPage";
 import { ActivityTracePage } from "./components/ActivityTracePage";
@@ -304,6 +305,9 @@ export default function App() {
   useEffect(() => {
     setDocSidebarDrawer(false);
   }, [view]);
+  // Connect (CLI / MCP / API setup for this nest) from the sidebar — the nest
+  // page has its own button; this one serves every other nest page.
+  const [showConnect, setShowConnect] = useState(false);
 
   const requestLogout = useCallback(() => setLogoutConfirm(true), []);
 
@@ -627,8 +631,10 @@ export default function App() {
   // Workflows tab (an execution plane — every action inside it mutates).
   // null = not resolved yet; the tab stays hidden until we know, so a viewer
   // never sees it flash. getNest is cached, so this shares NestView's fetch.
-  const nestScopedId = isNestScoped(view) ? view.nestId : null;
-  const nestScopedIsOwner = isNestScoped(view) ? view.isOwner : false;
+  // "nestId" in view: the five switcher pages plus the document and trace
+  // pages — the sidebar shows on all of them and needs the same caps.
+  const nestScopedId = "nestId" in view ? view.nestId : null;
+  const nestScopedIsOwner = "nestId" in view ? view.isOwner : false;
   const [nestCanEdit, setNestCanEdit] = useState<boolean | null>(null);
   useEffect(() => {
     setNestCanEdit(null);
@@ -932,12 +938,17 @@ export default function App() {
   // The document page is its own workspace — a sidebar and a document that
   // manage their own width — so the shell goes edge to edge there.
   const isDocPage = view.page === "document";
-  const shellWidth =
-    view.page === "board"
-      ? "max-w-[1800px]"
-      : isDocPage
-        ? "max-w-none"
-        : "max-w-6xl";
+  // The nest sidebar (nests → views → documents) wraps every page inside a
+  // nest — document, nest, board, graph, definitions, workflows, trace — so
+  // moving between them never drops the index. Reader mode keeps its own
+  // three-pane reader instead.
+  const inNest = "nestId" in view && nestIsReaderView !== true;
+  const showSidebar = inNest && (!docSidebarCollapsed || docSidebarDrawer);
+  const pageWidth =
+    view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
+  // Header and footer keep the page width; <main> goes edge to edge inside a
+  // nest so the sidebar column can sit against the window's left edge.
+  const shellWidth = inNest ? "max-w-none" : pageWidth;
 
   return (
     <div className="min-h-screen bg-background">
@@ -1054,7 +1065,28 @@ export default function App() {
             Nest context is read straight off the view: every page in
             NEST_VIEWS carries the same nestId/nestName/isOwner/isAnonOwned. */}
         {isNestScoped(view) && (
-          <div className={`${shellWidth} mx-auto px-4 py-2 overflow-x-auto`}>
+          <div
+            className={`${pageWidth} mx-auto px-4 py-2 overflow-x-auto flex items-center gap-2${
+              showSidebar ? " md:hidden" : ""
+            }`}
+          >
+            {inNest && !showSidebar && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 shrink-0"
+                title="Show sidebar"
+                aria-label="Show sidebar"
+                data-testid="nest-sidebar-expand"
+                onClick={() => {
+                  if (window.matchMedia("(max-width: 767px)").matches)
+                    setDocSidebarDrawer(true);
+                  else setDocSidebarCollapsed(false);
+                }}
+              >
+                <PanelLeft className="h-4 w-4" />
+              </Button>
+            )}
             <Tabs
               value={view.page}
               onValueChange={(page) =>
@@ -1104,7 +1136,7 @@ export default function App() {
           percentage boxes resolve against the wider block. `clip` (not
           `hidden`) keeps sticky headers inside pages working. */}
       <main
-        className={`${shellWidth} mx-auto min-w-0 overflow-x-clip ${isDocPage ? "" : "px-4 py-4"}`}
+        className={`${shellWidth} mx-auto min-w-0 overflow-x-clip${inNest ? "" : " px-4 py-4"}`}
       >
         {/* A ?nest link that didn't resolve. Falling through to the dashboard
             made a stale bookmark look like it had simply opened the app, with
@@ -1142,7 +1174,108 @@ export default function App() {
           </div>
         </div>
         ) : (
-        <>
+        <div className={inNest ? "flex min-h-[calc(100vh-3.5rem)] items-stretch" : ""}>
+        {inNest && docSidebarDrawer && (
+          <button
+            type="button"
+            className="fixed inset-0 z-40 bg-black/30 md:hidden"
+            aria-label="Close sidebar"
+            onClick={() => setDocSidebarDrawer(false)}
+          />
+        )}
+        {showSidebar && "nestId" in view && (() => {
+          const cur = view;
+          return (
+            <div
+              className={
+                docSidebarDrawer
+                  ? "fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] border-r bg-background shadow-xl md:static md:z-auto md:w-64 md:max-w-none md:shadow-none"
+                  : "hidden w-64 shrink-0 border-r md:block"
+              }
+            >
+              <div className="sticky top-0 h-screen max-h-screen">
+                <DocumentSidebar
+                  nestId={cur.nestId}
+                  nodeId={cur.page === "document" ? cur.nodeId : null}
+                  activeView={
+                    cur.page === "nest"
+                      ? cur.tab === "review"
+                        ? "review"
+                        : "overview"
+                      : cur.page === "board"
+                        ? "board"
+                        : cur.page === "ontology-graph"
+                          ? "graph"
+                          : cur.page === "definitions"
+                            ? "definitions"
+                            : cur.page === "workflows"
+                              ? "workflows"
+                              : null
+                  }
+                  onCollapse={() =>
+                    docSidebarDrawer
+                      ? setDocSidebarDrawer(false)
+                      : setDocSidebarCollapsed(true)
+                  }
+                  onOpenDashboard={() => setView({ page: "dashboard" })}
+                  onOpenNest={(t) =>
+                    setView({
+                      page: "nest",
+                      nestId: t.nestId,
+                      nestName: t.nestName,
+                      isOwner: t.isOwner,
+                      isAnonOwned: t.isAnonOwned,
+                      tab: "documents",
+                    })
+                  }
+                  onOpenView={(t, v) =>
+                    setView({
+                      page: v.page,
+                      nestId: t.nestId,
+                      nestName: t.nestName,
+                      isOwner: t.isOwner,
+                      isAnonOwned: t.isAnonOwned,
+                      readerMode,
+                      ...(v.page === "nest" && v.tab ? { tab: v.tab } : {}),
+                    } as View)
+                  }
+                  onConnect={() => setShowConnect(true)}
+                  onOpenDocument={(t) => {
+                    if (
+                      cur.page === "document" &&
+                      t.nestId === cur.nestId &&
+                      t.nodeId === cur.nodeId
+                    )
+                      return;
+                    setView({
+                      page: "document",
+                      nestId: t.nestId,
+                      nestName: t.nestName,
+                      nodeId: t.nodeId,
+                      isOwner: t.isOwner,
+                      isAnonOwned: t.isAnonOwned,
+                    });
+                  }}
+                  onNewDocument={
+                    cur.page === "document" && cur.nodeId === "new"
+                      ? undefined
+                      : () =>
+                          setView({
+                            page: "document",
+                            nestId: cur.nestId,
+                            nestName: cur.nestName,
+                            nodeId: "new",
+                            isOwner: cur.isOwner,
+                            isAnonOwned: cur.isAnonOwned,
+                          })
+                  }
+                />
+              </div>
+            </div>
+          );
+        })()}
+        <div className={inNest ? "min-w-0 flex-1" : ""}>
+        <div className={inNest && !isDocPage ? `${pageWidth} mx-auto px-4 py-4` : ""}>
         {view.page === "dashboard" && (
           <Dashboard
             onManageKeys={() => setView({ page: "api-keys" })}
@@ -1246,81 +1379,6 @@ export default function App() {
               ...opts,
             });
           return (
-            <div className="flex min-h-[calc(100vh-3.5rem)] items-stretch">
-              {docSidebarDrawer && (
-                <button
-                  type="button"
-                  className="fixed inset-0 z-40 bg-black/30 md:hidden"
-                  aria-label="Close sidebar"
-                  onClick={() => setDocSidebarDrawer(false)}
-                />
-              )}
-              {(!docSidebarCollapsed || docSidebarDrawer) && (
-                <div
-                  className={
-                    docSidebarDrawer
-                      ? "fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] border-r bg-background shadow-xl md:static md:z-auto md:w-64 md:max-w-none md:shadow-none"
-                      : "hidden w-64 shrink-0 border-r md:block"
-                  }
-                >
-                  <div className="sticky top-0 h-screen max-h-screen">
-                    <DocumentSidebar
-                      nestId={doc.nestId}
-                      nodeId={doc.nodeId}
-                      onCollapse={() =>
-                        docSidebarDrawer
-                          ? setDocSidebarDrawer(false)
-                          : setDocSidebarCollapsed(true)
-                      }
-                      onOpenDashboard={() => setView({ page: "dashboard" })}
-                      onOpenNest={(t) =>
-                        setView({
-                          page: "nest",
-                          nestId: t.nestId,
-                          nestName: t.nestName,
-                          isOwner: t.isOwner,
-                          isAnonOwned: t.isAnonOwned,
-                          tab: "documents",
-                        })
-                      }
-                      onOpenView={(t, v) =>
-                        setView({
-                          page: v.page,
-                          nestId: t.nestId,
-                          nestName: t.nestName,
-                          isOwner: t.isOwner,
-                          isAnonOwned: t.isAnonOwned,
-                          readerMode,
-                          ...(v.page === "nest" && v.tab ? { tab: v.tab } : {}),
-                        } as View)
-                      }
-                      onOpenDocument={(t) => {
-                        if (t.nestId === doc.nestId && t.nodeId === doc.nodeId) return;
-                        openDocument({
-                          nestId: t.nestId,
-                          nestName: t.nestName,
-                          nodeId: t.nodeId,
-                          isOwner: t.isOwner,
-                          isAnonOwned: t.isAnonOwned,
-                        });
-                      }}
-                      onNewDocument={
-                        doc.nodeId === "new"
-                          ? undefined
-                          : () =>
-                              openDocument({
-                                nestId: doc.nestId,
-                                nestName: doc.nestName,
-                                nodeId: "new",
-                                isOwner: doc.isOwner,
-                                isAnonOwned: doc.isAnonOwned,
-                              })
-                      }
-                    />
-                  </div>
-                </div>
-              )}
-              <div className="min-w-0 flex-1">
             <DocumentEditor
               sidebarCollapsed={docSidebarCollapsed}
               onToggleSidebar={() => {
@@ -1432,8 +1490,6 @@ export default function App() {
               }
               initialTitle={doc.initialTitle}
             />
-              </div>
-            </div>
           );
         })()}
         {view.page === "definitions" &&
@@ -1528,7 +1584,9 @@ export default function App() {
             onBack={leaveNest}
           />
         )}
-        </>
+        </div>
+        </div>
+        </div>
         )}
       </main>
 
@@ -1543,6 +1601,18 @@ export default function App() {
         </footer>
       )}
 
+      {showConnect && "nestId" in view && (
+        <ConnectModal
+          isOpen
+          onClose={() => setShowConnect(false)}
+          nestId={view.nestId}
+          nestName={view.nestName}
+          onManageKeys={() => {
+            setShowConnect(false);
+            setView({ page: "api-keys" });
+          }}
+        />
+      )}
       {showAdminLogin && (
         <AdminLoginModal
           existingAdmin={adminStatus?.admin?.email || null}
