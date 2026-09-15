@@ -50,6 +50,11 @@ import {
   nestSetupPrompt,
   envFileContents,
   ctxCliConnectSnippet,
+  claudeDesktopConfig,
+  claudeCodeCommand,
+  mcpHttpConfig,
+  slugify,
+  KEY_PLACEHOLDER,
 } from "../lib/connect";
 import { useAuth } from "../auth/AuthContext";
 
@@ -62,8 +67,6 @@ interface ConnectModalProps {
    *  inside a nest — a rotate started here used to kill every other client. */
   onManageKeys?: () => void;
 }
-
-const KEY_PLACEHOLDER = "<paste-your-api-key-here>";
 
 export function ConnectModal({
   isOpen,
@@ -135,61 +138,14 @@ export function ConnectModal({
     }
   };
 
-  // Claude Desktop only speaks stdio in claude_desktop_config.json — it has no
-  // native http/url/headers transport (that shape is for Claude Code / Cursor,
-  // see the MCP tab). Bridge to our Streamable-HTTP endpoint with mcp-remote.
-  const claudeConfig = JSON.stringify(
-    {
-      mcpServers: {
-        [slugify(nestName)]: {
-          command: "npx",
-          // Open mode needs no credential — omit the auth header so the copied
-          // config connects as-is.
-          args: [
-            "-y",
-            "mcp-remote",
-            mcpUrl,
-            ...(authMode === "open"
-              ? []
-              : ["--header", `Authorization: Bearer ${KEY_PLACEHOLDER}`]),
-          ],
-        },
-      },
-    },
-    null,
-    2,
-  );
+  const isOpenMode = authMode === "open";
+  // Config-building logic lives in lib/connect.ts (pure, unit-tested there) —
+  // see claudeDesktopConfig / claudeCodeCommand / mcpHttpConfig.
+  const claudeConfig = claudeDesktopConfig(nestName, mcpUrl, isOpenMode);
+  const claudeCodeCmd = claudeCodeCommand(nestName, mcpUrl, isOpenMode);
+  const mcpConfig = mcpHttpConfig(nestName, mcpUrl, isOpenMode);
 
-  // Claude Code (the CLI) speaks Streamable HTTP natively and registers a
-  // server with one command that it persists itself — no config file to
-  // open, no mcp-remote bridge (that bridge is only for Claude Desktop,
-  // which has no CLI). This is the "one shot" path for Claude Code.
-  const claudeCodeCommand = `claude mcp add --transport http ${slugify(nestName)} ${mcpUrl}${
-    authMode === "open"
-      ? ""
-      : ` --header "Authorization: Bearer ${KEY_PLACEHOLDER}"`
-  }`;
-
-  // Native HTTP MCP clients (Cursor, VS Code, Claude Code) configure a server
-  // by its url + headers in one JSON stanza — same shape as claudeConfig
-  // above, so one paste lands both the endpoint and the auth placeholder
-  // instead of two separate copies the user has to splice together by hand.
-  const mcpHttpConfig = JSON.stringify(
-    {
-      mcpServers: {
-        [slugify(nestName)]: {
-          url: mcpUrl,
-          ...(authMode === "open"
-            ? {}
-            : { headers: { Authorization: `Bearer ${KEY_PLACEHOLDER}` } }),
-        },
-      },
-    },
-    null,
-    2,
-  );
-
-  const showOpenModeBanner = authMode === "open";
+  const showOpenModeBanner = isOpenMode;
   const showLoginBanner = !authenticated && authMode === "key";
 
   const authHeaderFlag = showOpenModeBanner
@@ -415,7 +371,7 @@ export function ConnectModal({
                   </p>
                   <Snippet
                     label="Run in your terminal (Claude Code CLI)"
-                    value={claudeCodeCommand}
+                    value={claudeCodeCmd}
                     multiline
                   />
                   <p className="text-xs text-muted-foreground mt-2">
@@ -500,7 +456,7 @@ export function ConnectModal({
                   </p>
                   <Snippet
                     label="Direct HTTP config (Cursor, VS Code, Claude Code — not Claude Desktop)"
-                    value={mcpHttpConfig}
+                    value={mcpConfig}
                     multiline
                   />
                   <Snippet
@@ -984,14 +940,5 @@ function CopyButton({ value }: { value: string }) {
         <Copy className="h-3 w-3" />
       )}
     </Button>
-  );
-}
-
-function slugify(s: string) {
-  return (
-    s
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "") || "nest"
   );
 }

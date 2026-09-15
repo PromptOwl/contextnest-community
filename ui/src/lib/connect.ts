@@ -18,6 +18,10 @@ export interface NestCountRow {
   document_count?: number | string | null;
 }
 
+/** The Connect modal never shows a real key — every snippet carries this
+ *  placeholder instead, so a copied snippet is a reusable template. */
+export const KEY_PLACEHOLDER = "<paste-your-api-key-here>";
+
 /** Totals across a user's nests — powers the "your whole brain" summary line. */
 export function nestSummary(nests: NestCountRow[]): {
   nestCount: number;
@@ -109,15 +113,18 @@ export function nestChatPrompt(nestName: string, description?: string): string {
 }
 
 /**
- * A `ctx` vault alias must be a plain token; nest names are free text. Same
- * shape the Connect modal uses for file names: lowercase, dashes, nothing else.
+ * A nest name reduced to a plain token: lowercase, dashes, nothing else.
+ * Shared by every identifier the Connect modal derives from a nest name — a
+ * `ctx` vault alias, an `mcpServers` key, a downloaded file name — so the
+ * same nest maps to the same token everywhere.
  */
-function ctxAlias(raw: string): string {
-  const alias = raw
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return alias || "nest";
+export function slugify(raw: string): string {
+  return (
+    raw
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "nest"
+  );
 }
 
 /**
@@ -136,7 +143,7 @@ export function ctxCliConnectSnippet(
   openMode = false,
 ): string {
   const base = serverUrl.replace(/\/+$/, "");
-  const a = ctxAlias(alias);
+  const a = slugify(alias);
   const auth = openMode ? "" : " --bearer-env CONTEXTNEST_API_KEY";
   return [
     `ctx vault add ${a} --url ${base}/nests/${nestId}/mcp${auth}`,
@@ -267,4 +274,79 @@ export function nestSetupPrompt(
   ]
     .filter((line): line is string => line !== null)
     .join("\n");
+}
+
+/**
+ * Claude Desktop only speaks stdio in `claude_desktop_config.json` — no
+ * native http/url/headers transport (that shape is for Claude Code / Cursor,
+ * see {@link mcpHttpConfig}). Bridges to the Streamable-HTTP endpoint with
+ * `mcp-remote`.
+ */
+export function claudeDesktopConfig(
+  nestName: string,
+  mcpUrl: string,
+  openMode = false,
+): string {
+  return JSON.stringify(
+    {
+      mcpServers: {
+        [slugify(nestName)]: {
+          command: "npx",
+          args: [
+            "-y",
+            "mcp-remote",
+            mcpUrl,
+            ...(openMode
+              ? []
+              : ["--header", `Authorization: Bearer ${KEY_PLACEHOLDER}`]),
+          ],
+        },
+      },
+    },
+    null,
+    2,
+  );
+}
+
+/**
+ * Claude Code (the CLI) speaks Streamable HTTP natively and registers a
+ * server with one command that it persists itself — no config file to open,
+ * no `mcp-remote` bridge (that bridge is only for Claude Desktop, which has
+ * no CLI). The one-shot path for Claude Code.
+ */
+export function claudeCodeCommand(
+  nestName: string,
+  mcpUrl: string,
+  openMode = false,
+): string {
+  return `claude mcp add --transport http ${slugify(nestName)} ${mcpUrl}${
+    openMode ? "" : ` --header "Authorization: Bearer ${KEY_PLACEHOLDER}"`
+  }`;
+}
+
+/**
+ * Native HTTP MCP clients (Cursor, VS Code, Claude Code) configure a server
+ * by its url + headers in one JSON stanza — same envelope shape as
+ * {@link claudeDesktopConfig}, so one paste lands both the endpoint and the
+ * auth placeholder instead of two separate copies spliced together by hand.
+ */
+export function mcpHttpConfig(
+  nestName: string,
+  mcpUrl: string,
+  openMode = false,
+): string {
+  return JSON.stringify(
+    {
+      mcpServers: {
+        [slugify(nestName)]: {
+          url: mcpUrl,
+          ...(openMode
+            ? {}
+            : { headers: { Authorization: `Bearer ${KEY_PLACEHOLDER}` } }),
+        },
+      },
+    },
+    null,
+    2,
+  );
 }
