@@ -303,6 +303,17 @@ function labelFor(key: string, config: BoardConfig): string {
   return key;
 }
 
+/**
+ * Whether the Board column header should get CSS `text-transform: capitalize`.
+ * Tag column keys/labels are the raw tag value (see `labelFor` above), the
+ * same value the card's tag chip renders uncapitalized — capitalizing only
+ * the header would make the two disagree on casing. Folder and status labels
+ * have no such chip to match, so they keep the capitalize styling.
+ */
+export function capitalizeColumnHeader(dimension: DimensionKind): boolean {
+  return dimension !== "tag";
+}
+
 function titleFor(key: string, config: BoardConfig): string {
   if (key === UNCATEGORIZED) return "Uncategorized";
   if (key === "" && config.dimension === "folder") return "(root)";

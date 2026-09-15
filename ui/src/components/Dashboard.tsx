@@ -27,6 +27,7 @@ import {
   type NestScope,
 } from "../lib/dashboard-scope";
 import { canRequestNestRemoval } from "../lib/nest-caps";
+import { filterAndSortArchivedNests } from "../lib/archived-nests";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
@@ -153,17 +154,10 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   const [archivedSort, setArchivedSort] = useState<"archived" | "name">(
     "archived",
   );
-  const filteredArchivedNests = useMemo(() => {
-    const q = archivedQuery.trim().toLowerCase();
-    const matched = q
-      ? archivedNests.filter((n: any) => (n.name ?? "").toLowerCase().includes(q))
-      : archivedNests;
-    return [...matched].sort((a: any, b: any) =>
-      archivedSort === "name"
-        ? String(a.name ?? "").localeCompare(String(b.name ?? ""))
-        : String(b.archived_at ?? "").localeCompare(String(a.archived_at ?? "")),
-    );
-  }, [archivedNests, archivedQuery, archivedSort]);
+  const filteredArchivedNests = useMemo(
+    () => filterAndSortArchivedNests(archivedNests, archivedQuery, archivedSort),
+    [archivedNests, archivedQuery, archivedSort],
+  );
   const [restoreTarget, setRestoreTarget] = useState<{
     id: string;
     name: string;

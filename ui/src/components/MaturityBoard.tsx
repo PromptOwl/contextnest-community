@@ -37,6 +37,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   UNCATEGORIZED,
+  capitalizeColumnHeader,
   cardColumnKeys,
   groupByColumn,
   layoutKey,
@@ -657,11 +658,7 @@ export function MaturityBoard({
                 >
                   <span
                     className={`min-w-0 text-sm font-medium truncate ${
-                      // Tag columns must read exactly like the tag chip on the
-                      // card (lib/board-dimensions.ts labelFor returns the raw
-                      // tag value for this dimension) — CSS capitalize would
-                      // make the header disagree with the chip's casing.
-                      effectiveConfig.dimension === "tag" ? "" : "capitalize"
+                      capitalizeColumnHeader(effectiveConfig.dimension) ? "capitalize" : ""
                     } ${col.key === UNCATEGORIZED ? "text-muted-foreground" : ""}`}
                   >
                     {col.label}

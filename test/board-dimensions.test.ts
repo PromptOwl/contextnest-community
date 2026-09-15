@@ -4,6 +4,7 @@ import {
   tagValueInNamespace,
   cardColumnKey,
   buildColumns,
+  capitalizeColumnHeader,
   groupByColumn,
   migrateLayout,
   planMove,
@@ -81,6 +82,16 @@ describe("cardColumnKey", () => {
     expect(cardColumnKey(node({ id: "b", tags: ["#other"] }), cfg)).toBe(
       UNCATEGORIZED,
     );
+  });
+});
+
+describe("capitalizeColumnHeader", () => {
+  it("does not capitalize tag column headers — they must match the card's tag chip casing", () => {
+    expect(capitalizeColumnHeader("tag")).toBe(false);
+  });
+  it("keeps capitalizing folder and status headers", () => {
+    expect(capitalizeColumnHeader("folder")).toBe(true);
+    expect(capitalizeColumnHeader("status")).toBe(true);
   });
 });
 
