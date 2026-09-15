@@ -102,8 +102,8 @@ export function ReaderView({
       const { node } = await api.getNode(nestId, nodeId);
       setContent((prev) => ({ ...prev, [nodeId]: node?.content ?? "" }));
     } catch {
-      setContent((prev) => ({ ...prev, [nodeId]: "" }));
-      setNotice("This page could not be loaded. It may have moved or been unpublished.");
+      // Not cached: a transient failure must be retryable. The notice offers it.
+      setNotice("This page could not be loaded.");
     } finally {
       inFlight.current.delete(nodeId);
       setLoadingId((cur) => (cur === nodeId ? null : cur));
@@ -246,6 +246,14 @@ export function ReaderView({
         {notice && (
           <p role="status" className="mb-4 text-sm text-amber-800 dark:text-amber-300">
             {notice}
+            {selectedId && content[selectedId] === undefined && (
+              <>
+                {" "}
+                <button type="button" className="underline underline-offset-2" onClick={() => { setNotice(null); void loadNode(selectedId); }}>
+                  Try again
+                </button>
+              </>
+            )}
           </p>
         )}
         {selectedNode && (
@@ -328,7 +336,9 @@ export function ReaderView({
  * version and recency are plain text.
  */
 function Provenance({ node }: { node: any }) {
-  const status = String(node.status || "published");
+  // Default to draft, like every other status read in the codebase: a
+  // governance line must never claim "Published" for a node that hasn't said so.
+  const status = String(node.status || "draft");
   const updated = node.updated_at ? relTime(node.updated_at) : null;
   return (
     <p className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-muted-foreground">
