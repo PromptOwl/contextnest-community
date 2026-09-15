@@ -207,6 +207,8 @@ export async function getHealth() {
     /** Present when oidc_enabled — lets the login page label the button by IdP. */
     oidc_issuer?: string;
     workflow_plane_enabled?: boolean;
+    /** Nest Plugins (default OFF). Off → the Plugins tab and live search are hidden. */
+    plugins_enabled?: boolean;
     /** Import teams from PromptOwl (default OFF). Off → the panel is hidden. */
     promptowl_teams_enabled?: boolean;
     /** Content-type toggles — default ON server-side; the editor's type
@@ -242,6 +244,13 @@ export interface AdminSettings {
   public_base_url: string;
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
+  /** Nest Plugins (default OFF). */
+  plugins_enabled: boolean;
+  /** Comma-separated plugin package names / module paths the server loads. */
+  plugins_packages: string;
+  /** Read-only: what actually loaded, and what was refused. */
+  plugins_loaded?: Array<{ name: string; version: string; displayName: string; capabilities: string[] }>;
+  plugins_load_errors?: Array<{ spec: string; error: string }>;
   /** Import teams from PromptOwl (default OFF). Off → /teams/promptowl 404s
    *  and the PromptOwl Teams panel is hidden. */
   promptowl_teams_enabled: boolean;
@@ -1085,9 +1094,104 @@ export async function moveNode(nestId: string, nodeId: string, folder: string) {
 
 // ─── Search & Query ─────────────────────────────────────────────────────
 
-export async function searchNodes(nestId: string, query: string) {
-  return request<{ count: number; nodes: any[] }>(
-    `/nests/${nestId}/search?q=${encodeURIComponent(query)}`,
+export async function searchNodes(
+  nestId: string,
+  query: string,
+  opts: { includeLive?: boolean } = {},
+) {
+  return request<{ count: number; nodes: any[]; live?: LiveSearchSource[]; live_errors?: Array<{ plugin: string; error: string }> }>(
+    `/nests/${nestId}/search?q=${encodeURIComponent(query)}${opts.includeLive ? "&include_live=1" : ""}`,
+  );
+}
+
+// ─── Nest Plugins ────────────────────────────────────────────────────────
+
+export interface LiveSearchHit {
+  title: string;
+  snippet: string;
+  externalId: string;
+  url?: string;
+  occurredAt?: string;
+  governed: false;
+  promotable: true;
+}
+export interface LiveSearchSource {
+  plugin: string;
+  displayName: string;
+  hits: LiveSearchHit[];
+}
+
+export interface PluginRun {
+  id: string;
+  triggered_by: string;
+  status: "clean" | "conflicts" | "failed";
+  created: number;
+  updated: number;
+  unchanged: number;
+  conflicts: Array<{ externalId: string; id: string }>;
+  failed: Array<{ externalId: string; error: string }>;
+  error: string | null;
+  started_at: string;
+  finished_at: string;
+}
+
+export interface NestPlugin {
+  name: string;
+  version: string;
+  displayName: string;
+  description: string;
+  capabilities: Array<"pull" | "webhook" | "process" | "search">;
+  itemKinds: string[];
+  settingsSchema: { type: "object"; required?: string[]; properties?: Record<string, any> };
+  secretKeys: string[];
+  faces: { pull: boolean; webhook: boolean; process: boolean; search: boolean; healthcheck: boolean };
+  configured: boolean;
+  enabled: boolean;
+  mode: "raw" | "summary";
+  folder: string | null;
+  every_minutes: number | null;
+  settings: Record<string, unknown>;
+  cursor: unknown;
+  webhook_url: string | null;
+  last_run_at: string | null;
+  last_status: string | null;
+  runs: PluginRun[];
+}
+
+export async function listNestPlugins(nestId: string) {
+  return request<{ plugins: NestPlugin[]; load_errors: Array<{ spec: string; error: string }> }>(`/nests/${nestId}/plugins`);
+}
+
+export async function updateNestPlugin(
+  nestId: string,
+  name: string,
+  patch: { enabled?: boolean; mode?: "raw" | "summary"; folder?: string | null; every_minutes?: number | null; settings?: Record<string, unknown> },
+) {
+  return request<{ plugin: NestPlugin }>(`/nests/${nestId}/plugins/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function removeNestPlugin(nestId: string, name: string) {
+  return request<{ deleted: true }>(`/nests/${nestId}/plugins/${encodeURIComponent(name)}`, { method: "DELETE" });
+}
+
+export async function runNestPlugin(nestId: string, name: string) {
+  return request<{ run: PluginRun & { results: Array<{ externalId: string; id: string; outcome: string }> } }>(
+    `/nests/${nestId}/plugins/${encodeURIComponent(name)}/run`,
+    { method: "POST", body: "{}" },
+  );
+}
+
+export async function nestPluginHealth(nestId: string, name: string) {
+  return request<{ ok: boolean; detail?: string }>(`/nests/${nestId}/plugins/${encodeURIComponent(name)}/health`);
+}
+
+export async function promoteLiveHit(nestId: string, name: string, externalId: string) {
+  return request<{ result: { externalId: string; id: string; outcome: string } }>(
+    `/nests/${nestId}/plugins/${encodeURIComponent(name)}/promote`,
+    { method: "POST", body: JSON.stringify({ externalId }) },
   );
 }
 

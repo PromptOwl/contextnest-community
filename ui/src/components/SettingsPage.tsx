@@ -131,6 +131,8 @@ const TABS: {
       "type_artifact_enabled",
       "type_table_enabled",
       "workflow_plane_enabled",
+      "plugins_enabled",
+      "plugins_packages",
       "promptowl_teams_enabled",
       "subagent_runs_enabled",
       "subagent_max_depth",
@@ -1531,6 +1533,62 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                     }
                   />
                 </div>
+              </CardContent>
+            </Card>
+
+            {/* Nest Plugins — ingest + enterprise search from outside sources */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  Plugins <BetaBadge className="ml-1 align-middle" />
+                </CardTitle>
+                <CardDescription>
+                  Connect outside sources — GitHub, Gong, Slack, Teams, email —
+                  to nests through Nest Plugins. Off by default. When on, nest
+                  editors get a Plugins tab and search can include live results
+                  from connected sources (shown separately, not governed until
+                  promoted).
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">{draft.plugins_enabled ? "On" : "Off"}</span>
+                  <Switch
+                    checked={draft.plugins_enabled}
+                    onCheckedChange={(v) => set({ plugins_enabled: v })}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="plugins_packages">Installed plugin packages</Label>
+                  <Input
+                    id="plugins_packages"
+                    value={draft.plugins_packages ?? ""}
+                    placeholder="@promptowl/contextnest-plugin-github-markdown, @acme/contextnest-plugin-wiki"
+                    onChange={(e) => set({ plugins_packages: e.target.value })}
+                    disabled={!draft.plugins_enabled}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Comma-separated npm package names installed on this server
+                    (or absolute paths to a module). This is an allowlist — only
+                    what is named here loads. Saving reloads the set live.
+                  </p>
+                </div>
+                {(settings?.plugins_loaded?.length || settings?.plugins_load_errors?.length) ? (
+                  <div className="text-sm space-y-1">
+                    {settings?.plugins_loaded?.map((p) => (
+                      <div key={p.name} className="flex items-center gap-2">
+                        <Check className="h-3.5 w-3.5 text-muted-foreground" />
+                        <span>{p.displayName}</span>
+                        <span className="text-xs text-muted-foreground">{p.name} v{p.version} · {p.capabilities.join(", ")}</span>
+                      </div>
+                    ))}
+                    {settings?.plugins_load_errors?.map((e) => (
+                      <div key={e.spec} className="text-destructive text-xs">
+                        {e.spec}: {e.error}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </CardContent>
             </Card>
 

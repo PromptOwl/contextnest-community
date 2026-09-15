@@ -126,6 +126,8 @@ import {
 import { useAuth } from "../auth/AuthContext";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { CollaboratorManager } from "./CollaboratorManager";
+import { NestPluginsPanel } from "./NestPluginsPanel";
+import { LiveSearchResults } from "./LiveSearchResults";
 import { toast } from "sonner";
 
 function timeAgo(dateStr: string) {
@@ -203,7 +205,7 @@ export function NestView({
   initialTab,
   onTabChange,
 }: NestViewProps) {
-  const { isAdmin, adminStatus, authMode } = useAuth();
+  const { isAdmin, adminStatus, authMode, pluginsEnabled } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
   //   - real-owner nest → only that owner
   //   - anon-owned + open mode → any caller (server treats anon as commons)
@@ -1008,18 +1010,23 @@ export function NestView({
   // Full-text CONTENT hits from the server search endpoint, unioned with
   // the instant client title/tag match below. Debounced; best-effort.
   const [contentHits, setContentHits] = useState<Set<string>>(new Set());
+  // Live (plugin) hits ride the same debounced call when plugins are on — they
+  // render in their own "not governed" section, never in the node list.
+  const [liveHits, setLiveHits] = useState<{ sources: api.LiveSearchSource[]; errors: Array<{ plugin: string; error: string }> }>({ sources: [], errors: [] });
   useEffect(() => {
     const q = search.trim();
     if (q.length < 2) {
       setContentHits(new Set());
+      setLiveHits({ sources: [], errors: [] });
       return;
     }
     let cancelled = false;
     const t = setTimeout(async () => {
       try {
-        const { nodes: hits } = await api.searchNodes(nestId, q);
+        const { nodes: hits, live, live_errors } = await api.searchNodes(nestId, q, { includeLive: pluginsEnabled });
         if (!cancelled) {
           setContentHits(new Set((hits as any[]).map((n) => n.id)));
+          setLiveHits({ sources: live ?? [], errors: live_errors ?? [] });
         }
       } catch {
         /* fall back to client-side matching only */
@@ -1029,7 +1036,7 @@ export function NestView({
       cancelled = true;
       clearTimeout(t);
     };
-  }, [nestId, search]);
+  }, [nestId, search, pluginsEnabled]);
 
   const loadFullNest = useCallback(async () => {
     if (fullNodes || fullLoading) return;
@@ -1447,6 +1454,7 @@ export function NestView({
     "external-edits": !isReadOnly,
     stewards: stewardshipEnabled && canManageGovernance,
     collaborators: canManage || collabCanWrite,
+    plugins: pluginsEnabled && (canManage || collabCanWrite),
   };
   useEffect(() => {
     if (!initialLoad && !tabVisible[activeTab]) setActiveTab("overview");
@@ -2449,6 +2457,10 @@ export function NestView({
             {(canManage || collabCanWrite) && (
               <TabsTrigger value="collaborators">Collaborators</TabsTrigger>
             )}
+            {/* Plugins — connected outside sources. Server flag + write access. */}
+            {pluginsEnabled && (canManage || collabCanWrite) && (
+              <TabsTrigger value="plugins">Plugins</TabsTrigger>
+            )}
           </TabsList>
           {!isReadOnly && canEditDocs && (
             <Button
@@ -2999,6 +3011,15 @@ export function NestView({
                     </button>
                   ))}
                 </div>
+              )}
+              {pluginsEnabled && search.trim().length >= 2 && (
+                <LiveSearchResults
+                  nestId={nestId}
+                  sources={liveHits.sources}
+                  errors={liveHits.errors}
+                  canPromote={!isReadOnly && canEditDocs}
+                  onPromoted={() => void fetchLevel(folderFilter ?? "")}
+                />
               )}
               {initialLoad || loadingFolders.has(baseFolder) ? (
                 <div className="flex items-center justify-center py-8">
@@ -4293,6 +4314,15 @@ export function NestView({
                 />
               </CardContent>
             </Card>
+          </TabsContent>
+        )}
+        {pluginsEnabled && (canManage || collabCanWrite) && (
+          <TabsContent value="plugins" className="space-y-4">
+            <NestPluginsPanel
+              nestId={nestId}
+              canEdit={!isReadOnly && (canManage || collabCanWrite)}
+              onIngested={() => void fetchLevel(folderFilter ?? "")}
+            />
           </TabsContent>
         )}
       </Tabs>
