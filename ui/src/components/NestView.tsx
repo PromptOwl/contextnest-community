@@ -2198,7 +2198,20 @@ export function NestView({
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
-              <Button size="sm" onClick={() => onOpenDocument("new")}>
+              <Button
+                size="sm"
+                // Default into the folder the Documents tab is scoped to, so a
+                // doc lands where the user is looking (CU-wdqcq0247w). The
+                // editor's folder picker still lets them change it.
+                onClick={() =>
+                  onOpenDocument("new", {
+                    folder:
+                      activeTab === "documents" && folderFilter
+                        ? folderFilter
+                        : undefined,
+                  })
+                }
+              >
                 <Plus className="h-3.5 w-3.5 mr-1.5" />
                 New Document
               </Button>
@@ -2568,7 +2581,9 @@ export function NestView({
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="pt-0">
-                  {stats.total === 0 ? (
+                  {/* Empty folders still deserve the tree (CU-wdqcq0247y) —
+                      only a nest with neither docs nor folders is empty. */}
+                  {stats.total === 0 && knownFolders.length === 0 ? (
                     <div className="py-8 text-center">
                       <FileText className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
                       <p className="text-sm text-muted-foreground">
