@@ -5,7 +5,7 @@ import { DocumentViewer } from "./DocumentViewer";
 import * as api from "../lib/api";
 import { conventionKey, isHomeNode } from "@/lib/nest-caps";
 import { extractHeadings } from "@/lib/toc";
-import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle, orderWithinFolder } from "@/lib/reader";
+import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle, orderWithinFolder, ancestorsOf } from "@/lib/reader";
 import { relTime } from "@/lib/dates";
 
 /**
@@ -128,8 +128,7 @@ export function ReaderView({
   // not a collapsed tree the reader has to dig through.
   useEffect(() => {
     if (!selectedId) return;
-    const segs = selectedId.replace(/^nodes\//, "").split("/").slice(0, -1);
-    const ancestors = segs.map((_, i) => segs.slice(0, i + 1).join("/"));
+    const ancestors = ancestorsOf(selectedId);
     if (ancestors.length === 0) return;
     setFolderOverrides((prev) => {
       const next = new Map(prev);
@@ -255,7 +254,7 @@ export function ReaderView({
               <nav aria-label="Breadcrumb" className="mb-2 text-[13px] text-muted-foreground">
                 {crumbs.map((c, i) => (
                   <span key={i}>
-                    {i > 0 && <span className="mx-1.5 text-muted-foreground/60">/</span>}
+                    {i > 0 && <span aria-hidden className="mx-1.5 text-muted-foreground/60">/</span>}
                     {c}
                   </span>
                 ))}

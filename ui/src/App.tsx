@@ -1048,7 +1048,7 @@ export default function App() {
             NEST_VIEWS carries the same nestId/nestName/isOwner/isAnonOwned. */}
         {/* Reader mode leaves a lone "Nest" tab once the authoring views are
             filtered out — a one-tab strip is chrome, not navigation. */}
-        {isNestScoped(view) && !(readerMode && !(workflowPlaneEnabled && nestCanEdit === true)) && (
+        {isNestScoped(view) && (!readerMode || (workflowPlaneEnabled && nestCanEdit === true)) && (
           <div className={`${shellWidth} mx-auto px-4 py-2 overflow-x-auto`}>
             <Tabs
               value={view.page}

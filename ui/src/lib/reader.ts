@@ -115,3 +115,9 @@ export function displayTitle(node: { id: string; title?: string } | null | undef
   const m = body.match(/^\s*#[ \t]+(.+?)[ \t]*#*[ \t]*(?:\r?\n|$)/);
   return m ? m[1].replace(/[*_`]/g, "").trim() : title;
 }
+
+/** Every folder above a node, shallowest first: `docs`, `docs/platform`, `docs/platform/plugins`. */
+export function ancestorsOf(id: string): string[] {
+  const segs = id.replace(/^nodes\//, "").split("/").filter(Boolean).slice(0, -1);
+  return segs.map((_, i) => segs.slice(0, i + 1).join("/"));
+}
