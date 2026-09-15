@@ -83,6 +83,7 @@ import { tableDiffSides } from "../lib/csv-table";
 import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { CodeHighlight } from "./CodeHighlight";
+import { prettyFolder, prettyFolderPath } from "./FolderTree";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { PublishDialog } from "./PublishDialog";
 import { ShareTargetDialog } from "./ShareTargetDialog";
@@ -804,10 +805,7 @@ export function DocumentEditor({
     return raw.map((seg, i) => ({
       // Raw cumulative path (matches NestView's folderFilter) + prettified label.
       path: raw.slice(0, i + 1).join("/"),
-      label: seg
-        .split("-")
-        .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
-        .join(" "),
+      label: prettyFolder(seg),
     }));
   }, [isNew, nodeId]);
 
@@ -2178,7 +2176,7 @@ export function DocumentEditor({
                             }`}
                           title={`Scope to ${path}`}
                         >
-                          {seg}
+                          {prettyFolder(seg)}
                         </button>
                         {/* Step OUT one level — pops just this (current) segment
                             to its parent, so a deep path can be walked back up
@@ -3228,7 +3226,7 @@ export function DocumentEditor({
               <SelectItem value="__root__">Nest root</SelectItem>
               {folderOptions.map((f) => (
                 <SelectItem key={f} value={f}>
-                  {f}
+                  {prettyFolderPath(f)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -3619,7 +3617,7 @@ function FolderStepPicker({
                 onSelect={() => onPick(folder ? `${folder}/${k}` : k)}
               >
                 <FolderOpen className="h-3.5 w-3.5 mr-2 text-blue-500" />
-                {k}
+                {prettyFolder(k)}
               </DropdownMenuItem>
             ))}
             <DropdownMenuSeparator />
