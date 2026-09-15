@@ -1047,8 +1047,10 @@ export default function App() {
             Nest context is read straight off the view: every page in
             NEST_VIEWS carries the same nestId/nestName/isOwner/isAnonOwned. */}
         {/* Reader mode leaves a lone "Nest" tab once the authoring views are
-            filtered out — a one-tab strip is chrome, not navigation. */}
-        {isNestScoped(view) && (!readerMode || (workflowPlaneEnabled && nestCanEdit === true)) && (
+            filtered out — a one-tab strip is chrome, not navigation. readerMode
+            already implies a read-only caller (deriveNestCaps), so the
+            workflows tab can never join it. */}
+        {isNestScoped(view) && !readerMode && (
           <div className={`${shellWidth} mx-auto px-4 py-2 overflow-x-auto`}>
             <Tabs
               value={view.page}
