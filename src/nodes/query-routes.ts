@@ -44,6 +44,8 @@ import {
 import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
+import { liveSearch } from "../plugins/service.js";
+import { listRows as listPluginRows } from "../plugins/registry.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
 
@@ -570,10 +572,20 @@ queryRoutes.get("/search", async (c) => {
   const userEmail = await resolveCallerEmail(userId);
   const accessible = await filterAccessible(nestId, userId, userEmail, matches);
 
+  // Enterprise search: `include_live=1` fans the query out to every enabled
+  // Nest Plugin with a search() face. Live hits are NOT governed — they come
+  // back in their own section, never mixed into the ranked nest hits, and
+  // each is promotable into the nest through the normal review path.
+  const wantLive = config.FEATURE_PLUGINS && /^(1|true|yes)$/i.test(c.req.query("include_live") ?? "");
+  const live = wantLive
+    ? await liveSearch(nestId, q, Math.min(Number(c.req.query("live_limit")) || 10, 50), await listPluginRows(nestId))
+    : null;
+
   return c.json({
     query: q,
     count: accessible.length,
     nodes: accessible.map((n) => toSearchHit(n, q)),
+    ...(live ? { live: live.live, live_errors: live.errors } : {}),
   });
 });
 

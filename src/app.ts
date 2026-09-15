@@ -47,6 +47,8 @@ import {
 import { scheduleRoutes } from "./workflow/schedule-routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
+import { pluginNestRoutes, pluginHookRoutes } from "./plugins/routes.js";
+import { loadedPlugins, invalidatePlugins } from "./plugins/loader.js";
 import { sendTestNotification } from "./notify/dispatch.js";
 import { hookNestRoutes, hookFireRoutes } from "./workflow/hook-routes.js";
 import {
@@ -579,6 +581,10 @@ export function createApp(): Hono<AuthEnv> {
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
     workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+    // Nest Plugins (default OFF). Off → /nests/:id/plugins 404s, the plugin
+    // scheduler idles, and search ignores include_live.
+    plugins_enabled: config.FEATURE_PLUGINS,
+    plugins_packages: config.PLUGINS.join(","),
     promptowl_teams_enabled: config.PROMPTOWL_TEAMS_ENABLED,
     type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
     type_table_enabled: config.TYPE_TABLE_ENABLED,
@@ -625,7 +631,21 @@ export function createApp(): Hono<AuthEnv> {
   app.get("/admin/settings", async (c) => {
     if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
-    return c.json(currentServerSettings());
+    // Which plugins actually loaded (and which packages were refused) so the
+    // operator can see the allowlist's effect without reading server logs.
+    const loaded = config.FEATURE_PLUGINS ? await loadedPlugins() : null;
+    return c.json({
+      ...currentServerSettings(),
+      plugins_loaded: loaded
+        ? [...loaded.plugins.values()].map((p) => ({
+            name: p.manifest.name,
+            version: p.manifest.version,
+            displayName: p.manifest.displayName,
+            capabilities: p.manifest.capabilities,
+          }))
+        : [],
+      plugins_load_errors: loaded?.errors ?? [],
+    });
   });
 
   // Send a test notification to the saved Slack/Teams webhook so the admin can
@@ -707,6 +727,24 @@ export function createApp(): Hono<AuthEnv> {
         name: "FEATURE_WORKFLOW_PLANE",
         value: body.workflow_plane_enabled ? "true" : null,
       });
+    }
+    // Nest Plugins. Default OFF — enabling writes "true", disabling clears.
+    if ("plugins_enabled" in body) {
+      pending.push({ name: "FEATURE_PLUGINS", value: body.plugins_enabled ? "true" : null });
+    }
+    // The plugin allowlist: comma-separated package names or absolute module
+    // paths. Validated by shape only here; whether each one LOADS is reported
+    // on GET (plugins_load_errors) after the live reload below.
+    if ("plugins_packages" in body) {
+      const raw = body.plugins_packages;
+      if (raw !== null && typeof raw !== "string") {
+        addError("plugins_packages", "Plugins must be a comma-separated list of package names or module paths.");
+      } else {
+        const specs = (raw || "").split(",").map((s: string) => s.trim()).filter(Boolean);
+        const bad = specs.find((s: string) => !/^(@?[a-z0-9][a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)?|\/[^\0]+|\.{1,2}\/[^\0]+)$/i.test(s));
+        if (bad) addError("plugins_packages", `"${bad}" is not a package name or module path.`);
+        else pending.push({ name: "PLUGINS", value: specs.length ? specs.join(",") : null });
+      }
     }
     // Import teams from PromptOwl. Default OFF — enabling writes "true",
     // disabling clears the row (falls back to the default).
@@ -1124,6 +1162,14 @@ export function createApp(): Hono<AuthEnv> {
       }
       if (value === null) delete process.env[name];
       else process.env[name] = value;
+    }
+    // A changed allowlist reloads the plugin set on its next use — no restart.
+    if (pending.some((p) => p.name === "PLUGINS" || p.name === "FEATURE_PLUGINS")) {
+      invalidatePlugins();
+      // The plugin scheduler is started at boot only when the flag was on;
+      // a runtime enable needs it started here (idempotent).
+      const { startPluginScheduler } = await import("./plugins/scheduler.js");
+      startPluginScheduler();
     }
 
     return c.json({ settings: currentServerSettings() });
@@ -1641,6 +1687,8 @@ export function createApp(): Hono<AuthEnv> {
   // path is the capability; presets add platform signature verification on
   // top (see workflow/hook-routes.ts).
   app.route("/hooks", hookFireRoutes);
+  // Nest Plugin webhooks — token-authenticated, gated by FEATURE_PLUGINS.
+  app.route("/plugin-hooks", pluginHookRoutes);
 
   // === Agent entry point: /llms.txt (public manual), /index (person nest
   // index), /mcp (server-level MCP). See src/mcp/server-routes.ts. ===
@@ -2244,6 +2292,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/env", envRoutes);
   nestsApp.route("/:nestId/connectors", connectorRoutes);
   nestsApp.route("/:nestId/hooks", hookNestRoutes);
+  nestsApp.route("/:nestId/plugins", pluginNestRoutes);
   nestsApp.route("/:nestId/definitions", definitionRoutes);
   nestsApp.route("/:nestId/assets", assetRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);

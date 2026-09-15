@@ -1502,6 +1502,53 @@ export function runMigrations(db: Database.Database): void {
       recordMigration("042_community_sites");
     })();
   }
+
+  // 043: Nest Plugins (CU-wdqcq024u0). One row per (nest, plugin): enabled,
+  // raw/summary mode, target folder, pull cadence, the plugin's own opaque
+  // cursor (JSON), non-secret settings (JSON — secrets live in nest_env as
+  // PLUGIN_<NAME>_<KEY>), a webhook capability token, and last-run summary.
+  // plugin_runs is the per-run ledger the Settings → Plugins tab reads.
+  if (!hasMigration("043_nest_plugins")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS nest_plugins (
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          plugin TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 0,
+          mode TEXT NOT NULL DEFAULT 'raw',
+          folder TEXT,
+          every_minutes INTEGER,
+          settings_json TEXT NOT NULL DEFAULT '{}',
+          cursor_json TEXT,
+          webhook_token TEXT UNIQUE,
+          last_run_at TEXT,
+          last_status TEXT,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (nest_id, plugin)
+        );
+        CREATE TABLE IF NOT EXISTS plugin_runs (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          plugin TEXT NOT NULL,
+          triggered_by TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created INTEGER NOT NULL DEFAULT 0,
+          updated INTEGER NOT NULL DEFAULT 0,
+          unchanged INTEGER NOT NULL DEFAULT 0,
+          conflicts_json TEXT NOT NULL DEFAULT '[]',
+          failed_json TEXT NOT NULL DEFAULT '[]',
+          error TEXT,
+          started_at TEXT NOT NULL,
+          finished_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_plugin_runs_nest
+          ON plugin_runs(nest_id, plugin, started_at DESC);
+      `);
+      recordMigration("043_nest_plugins");
+    })();
+  }
 }
 
 /**

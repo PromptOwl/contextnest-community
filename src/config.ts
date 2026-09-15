@@ -516,6 +516,37 @@ export const config = {
     return process.env.FEATURE_WORKFLOW_PLANE === "true";
   },
   /**
+   * Nest Plugins — connect outside sources (GitHub, Gong, Slack, Teams,
+   * email…) to nests through plugins written against the Apache-2.0
+   * `@promptowl/contextnest-plugin-sdk`. Gated SEPARATELY from the workflow
+   * plane: an operator should be able to turn on enterprise search + ingest
+   * without turning on runs/edges. Off by default; every /plugins route 404s
+   * and the plugin scheduler stays idle until it's on. Superadmin-editable at
+   * runtime via /admin/settings (plugins_enabled).
+   */
+  get FEATURE_PLUGINS(): boolean {
+    return process.env.FEATURE_PLUGINS === "true";
+  },
+  /**
+   * Comma-separated plugin package specifiers the server loads at boot (npm
+   * package names resolvable from the server's node_modules, or absolute
+   * paths to an ESM module). An explicit allowlist — never a directory scan:
+   * plugins run in-process, so what runs is the operator's call.
+   * Superadmin-editable via /admin/settings (plugins_packages); a change
+   * reloads the plugin set live.
+   */
+  get PLUGINS(): string[] {
+    return (process.env.PLUGINS || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  },
+  /** Per-plugin pull cadence floor, minutes. */
+  get PLUGIN_MIN_INTERVAL_MINUTES(): number {
+    const n = Number(process.env.PLUGIN_MIN_INTERVAL_MINUTES || 5);
+    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 5;
+  },
+  /**
    * Content-type toggles — soft-disable a node type server-wide. DEFAULT ON:
    * missing/unset/anything-but-"false" = enabled, so existing deployments see
    * zero behavior change. Only CREATION of the type is refused when disabled;

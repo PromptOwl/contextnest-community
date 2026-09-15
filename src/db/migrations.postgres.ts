@@ -75,6 +75,7 @@ const HISTORICAL_MIGRATIONS = [
   "039_nest_pins",
   "041_nest_visibility_org",
   "042_community_sites",
+  "043_nest_plugins",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -725,6 +726,43 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       created_at TEXT NOT NULL DEFAULT ${NOW},
       updated_at TEXT NOT NULL DEFAULT ${NOW}
     );
+
+    -- 043: Nest Plugins — per-(nest, plugin) config + the per-run ledger.
+    -- Secrets are NOT here: they live in nest_env as PLUGIN_<NAME>_<KEY>.
+    CREATE TABLE IF NOT EXISTS nest_plugins (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      plugin TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      mode TEXT NOT NULL DEFAULT 'raw',
+      folder TEXT,
+      every_minutes INTEGER,
+      settings_json TEXT NOT NULL DEFAULT '{}',
+      cursor_json TEXT,
+      webhook_token TEXT UNIQUE,
+      last_run_at TEXT,
+      last_status TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (nest_id, plugin)
+    );
+    CREATE TABLE IF NOT EXISTS plugin_runs (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      plugin TEXT NOT NULL,
+      triggered_by TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created INTEGER NOT NULL DEFAULT 0,
+      updated INTEGER NOT NULL DEFAULT 0,
+      unchanged INTEGER NOT NULL DEFAULT 0,
+      conflicts_json TEXT NOT NULL DEFAULT '[]',
+      failed_json TEXT NOT NULL DEFAULT '[]',
+      error TEXT,
+      started_at TEXT NOT NULL,
+      finished_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_plugin_runs_nest
+      ON plugin_runs(nest_id, plugin, started_at DESC);
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,

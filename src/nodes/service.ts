@@ -244,7 +244,7 @@ export async function storagePrefix(nestId: string): Promise<string> {
  * defense (each segment slugified independently — "../" collapses to "-",
  * empty segments drop).
  */
-function folderToSegments(folder: string): string[] {
+export function folderToSegments(folder: string): string[] {
   const segments = folder.split("/").map(slugify).filter(Boolean);
   // A folder named "!!!" or "..." slugifies away entirely, and an empty segment
   // list means "the nest root" — so the doc lands at nodes/<title> instead, and
@@ -432,6 +432,9 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
         ? String((fm.metadata as any).schedule)
         : undefined,
     prime: documentPrimeFlag(fm.metadata),
+    // Nest Plugin provenance (metadata.provenance) — lets the UI say "ingested
+    // by <plugin> from <url>" and show the raw/summary badge.
+    ...((fm.metadata as any)?.provenance ? { provenance: (fm.metadata as any).provenance } : {}),
   };
 }
 
@@ -1218,6 +1221,10 @@ export interface CreateNodeInput {
   tags?: string[];
   scope?: string;
   status?: string;
+  /** Extra frontmatter metadata merged over the defaults. Used by system
+   *  writers (Nest Plugins stamp `metadata.provenance`); not exposed to the
+   *  REST create body. */
+  metadata?: Record<string, unknown>;
   /** Explicit node id (e.g. "nodes/foo"). When omitted the id is derived from
    *  the title slug. Used by derived/system nodes that need a deterministic,
    *  collision-free id independent of the human-readable title. */
@@ -1246,6 +1253,8 @@ export interface UpdateNodePatch {
   schedule?: string;
   /** Document-scope prime flag. `null` clears it back to tag/nest inheritance. */
   prime?: boolean | null;
+  /** Extra frontmatter metadata merged into the existing block (system writers only). */
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -1485,6 +1494,7 @@ async function createNodeOnce(
       scope: input.scope || "team",
       ...(input.schedule ? { schedule: input.schedule } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
+      ...(input.metadata ?? {}),
     };
     const publishReason = await autoPublishReason(nestId, userEmail, {
       tags,
@@ -1890,6 +1900,11 @@ export async function updateNode(
         else metadata.prime = patch.prime;
         node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
         opInput.metadata = { ...(opInput.metadata as object), prime: patch.prime };
+      }
+      if (patch.metadata) {
+        const metadata = { ...(node.frontmatter.metadata as any), ...patch.metadata };
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+        opInput.metadata = { ...(opInput.metadata as object), ...patch.metadata };
       }
 
       const hasStewards = await isStewardshipEnabled(nestId);
