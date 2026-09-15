@@ -90,6 +90,9 @@ type View =
        *  read-only — the shell hides the board/graph/definitions tabs and
        *  NestView renders the stripped ReaderView. */
       readerMode?: boolean;
+      /** Reader mode: the page open in the reader, mirrored to ?doc= so a
+       *  public page is a shareable link that lands inside the docs layout. */
+      readerDoc?: string;
     }
   | {
       page: "document";
@@ -427,6 +430,20 @@ export default function App() {
         // ?doc=<nodeId> → open that document directly (the doc view's own
         // load surfaces a not-found error if the id is stale).
         const docId = params.get("doc");
+        // In reader mode a doc link opens INSIDE the docs layout (nav +
+        // outline), not the bare document page a collaborator would get.
+        if (docId && docId !== "new" && readerMode) {
+          setView({
+            page: "nest",
+            nestId: nest.id,
+            nestName: nest.name,
+            isOwner,
+            isAnonOwned: false,
+            readerMode,
+            readerDoc: docId,
+          });
+          return;
+        }
         if (docId && docId !== "new") {
           setView({
             page: "document",
@@ -529,7 +546,8 @@ export default function App() {
       params.delete("tab");
     } else if (view.page === "nest") {
       pathNestId = view.nestId;
-      params.delete("doc");
+      if (view.readerMode && view.readerDoc) params.set("doc", view.readerDoc);
+      else params.delete("doc");
       params.delete("thread");
       params.delete("view");
       // Overview is the default, so it stays out of the URL — a plain ?nest
@@ -1028,7 +1046,11 @@ export default function App() {
             single bottom border, rather than two stacked bars.
             Nest context is read straight off the view: every page in
             NEST_VIEWS carries the same nestId/nestName/isOwner/isAnonOwned. */}
-        {isNestScoped(view) && (
+        {/* Reader mode leaves a lone "Nest" tab once the authoring views are
+            filtered out — a one-tab strip is chrome, not navigation. readerMode
+            already implies a read-only caller (deriveNestCaps), so the
+            workflows tab can never join it. */}
+        {isNestScoped(view) && !readerMode && (
           <div className={`${shellWidth} mx-auto px-4 py-2 overflow-x-auto`}>
             <Tabs
               value={view.page}
@@ -1152,6 +1174,8 @@ export default function App() {
             initialTags={view.initialTags}
             initialFolder={view.initialFolder}
             initialTab={view.tab}
+            initialDoc={view.readerDoc ?? null}
+            onReaderDocChange={(nodeId) => setView({ ...view, readerDoc: nodeId ?? undefined })}
             onManageKeys={() => setView({ page: "api-keys" })}
             onTabChange={(tab) => setView({ ...view, tab })}
             onBack={leaveNest}

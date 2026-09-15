@@ -184,6 +184,10 @@ export interface DocumentViewerProps {
    *  preview (unknown target). Synchronous — caller caches the list. */
   previewFor?: (target: string) => { title: string; snippet: string } | null;
   className?: string;
+  /** Render `[[wikilinks]]` as ordinary links (no «guillemets»). The
+   *  guillemets mark "points at another document" for authors; a public
+   *  docs reader expects links that read like links. */
+  plainLinks?: boolean;
 }
 
 export function DocumentViewer({
@@ -191,6 +195,7 @@ export function DocumentViewer({
   onWikiLinkClick,
   previewFor,
   className,
+  plainLinks = false,
 }: DocumentViewerProps) {
   // One hover-preview at a time; opens after a short debounce so quick
   // mouse passes don't flash popovers. Fixed-positioned at the cursor.
@@ -261,10 +266,15 @@ export function DocumentViewer({
             ),
             wikilink: ({ children, ...props }: any) => {
               const target = (props["data-wiki-target"] ?? "") as string;
+              const display = (props["data-wiki-display"] ?? target) as string;
               return (
                 <button
                   type="button"
-                  className="wiki-link wiki-link-exists bg-transparent border-0 p-0 m-0 cursor-pointer"
+                  className={
+                    plainLinks
+                      ? "bg-transparent border-0 p-0 m-0 cursor-pointer text-primary underline underline-offset-2 decoration-primary/40 hover:decoration-primary font-normal"
+                      : "wiki-link wiki-link-exists bg-transparent border-0 p-0 m-0 cursor-pointer"
+                  }
                   title={previewFor ? undefined : `Open "${target}"`}
                   onClick={(e) => {
                     e.preventDefault();
@@ -277,7 +287,7 @@ export function DocumentViewer({
                   }
                   onMouseLeave={hidePreview}
                 >
-                  {children}
+                  {plainLinks ? display : children}
                 </button>
               );
             },
