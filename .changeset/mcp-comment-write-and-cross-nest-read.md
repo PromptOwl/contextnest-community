@@ -8,4 +8,6 @@ An agent can answer a comment, not just read one.
 
 **Comments are readable from the cross-nest endpoint.** A client connected to the server-level MCP endpoint asking for a document's comments used to get `Tool context_comments not found` — for every node type. It's now declared there like the other read tools, nest-parameterised. (Writes stay on the per-nest endpoint.)
 
+**A collaborator can read comments on their own unapproved draft.** `context_comments` used to gate on the same "no approved version → invisible to AI" rule as `context_get`/`context_export`, so a document with no approved version refused its comments to everyone, including the collaborator or steward who wrote it and can already see it in the UI. It now gates on per-node read access instead (`canReadNode`), matching the UI: a collaborator or steward who can read the node reads its threads even pre-approval, while a public reader — who couldn't see the draft either way — stays blocked until approval.
+
 **A thread's replies keep their order.** Comment timestamps were stored to the second, with a random UUID as the tiebreaker, so two replies posted inside the same second came back in arbitrary order — in the thread and in the projection an agent reads. They're now stored to the millisecond. Existing comments are untouched and still sort correctly against new ones.
