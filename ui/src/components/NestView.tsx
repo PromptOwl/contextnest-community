@@ -15,7 +15,7 @@ import { activityTimestamp } from "../lib/node-sort";
 import { linkHealth } from "../lib/link-health";
 import { folderGrantTarget } from "../lib/folder-target";
 import { checkFolderPath } from "../lib/folder-path";
-import { parseServerDate, formatServerDate } from "../lib/dates";
+import { parseServerDate } from "../lib/dates";
 import { createConsumeOnceFlag } from "../lib/consume-once-flag";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
@@ -24,8 +24,8 @@ import {
 } from "../lib/saved-filters";
 import {
   FileText, FileCode2, Plus, ArrowLeft, History, Shield, Search, Upload, Sparkles,
-  Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
-  Pencil, Trash2, FileWarning, Globe, Lock, Building2, FolderInput, Users,
+  Clock, CheckCircle2, Send, Loader2, Link2, Settings as SettingsIcon,
+  Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
   FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus, Wrench, Table2,
   Activity, Share2, BookOpen, Archive,
@@ -91,6 +91,7 @@ import {
 } from "../lib/nest-caps";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
+import { ExternalEditsTab, useExternalEdits } from "./nest/ExternalEditsTab";
 import { Button } from "@/components/ui/button";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
@@ -376,8 +377,10 @@ export function NestView({
   const [feedFilter, setFeedFilter] = useState<"all" | "changes" | "comments">(
     "all",
   );
-  const [externalEdits, setExternalEdits] = useState<api.ExternalEditEntry[]>([]);
-  const [externalEditsLoading, setExternalEditsLoading] = useState(false);
+  // A grant-only nest offers no governance reads (external edits, queue…).
+  const [grantOnly, setGrantOnly] = useState(false);
+  // Tab badge; the tab itself renders the list (same cached read).
+  const externalEditCount = useExternalEdits(nestId, !grantOnly).data?.entries.length ?? 0;
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   const [allowSelfApprove, setAllowSelfApprove] = useState(false);
   const [primeOnlyReview, setPrimeOnlyReview] = useState(false);
@@ -829,12 +832,13 @@ export function NestView({
       return null;
     });
     const grantOnly = !!(nestMeta as any)?.grant_only;
+    setGrantOnly(grantOnly);
     // Each request is independently swallowed — if listNodes throws, we must
     // still apply stewardshipEnabled from the settings response. Previously a
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
     const empty = <T,>(v: T) => Promise.resolve(v);
-    const [, stewardsData, queueData, deletionData, settingsData, externalData, countsData, feedData] =
+    const [, stewardsData, queueData, deletionData, settingsData, countsData, feedData] =
       await Promise.all([
         // The five reads below go through the shared cache (same keys and
         // invalidation as the hook-based screens) so returning from a document
@@ -883,12 +887,6 @@ export function NestView({
               };
             }),
         grantOnly
-          ? empty({ entries: [], total: 0 })
-          : qc.fetchQuery(reads.externalEdits(nestId)).catch((e) => {
-              console.error("[NestView] listExternalEdits failed", nestId, e);
-              return { entries: [], total: 0 };
-            }),
-        grantOnly
           ? empty({ counts: {} as Record<string, number> })
           : qc.fetchQuery(reads.commentCounts(nestId)).catch((e) => {
               console.error("[NestView] getCommentCounts failed", nestId, e);
@@ -932,7 +930,6 @@ export function NestView({
     setAllowSelfApprove(settingsData.allow_self_approve);
     setPrimeOnlyReview(!!settingsData.prime_only_review);
     setPrimeTags(settingsData.prime_tags ?? []);
-    setExternalEdits(externalData.entries);
     if (nestMeta?.nest?.visibility) {
       setVisibility(nestMeta.nest.visibility);
     }
@@ -979,20 +976,6 @@ export function NestView({
       setFeedLoadingMore(false);
     }
   }, [nestId, feedComments.length]);
-
-  const refreshExternalEdits = useCallback(async () => {
-    setExternalEditsLoading(true);
-    try {
-      await api.scanExternalEdits(nestId).catch((e) => {
-        console.error("[NestView] scanExternalEdits failed", nestId, e);
-        return null;
-      });
-      const { entries } = await api.listExternalEdits(nestId);
-      setExternalEdits(entries);
-    } finally {
-      setExternalEditsLoading(false);
-    }
-  }, [nestId]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -2413,12 +2396,12 @@ export function NestView({
             {!isReadOnly && (
               <TabsTrigger value="external-edits" className="gap-2">
                 External Edits
-                {externalEdits.length > 0 && (
+                {externalEditCount > 0 && (
                   <Badge
                     variant="secondary"
                     className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
                   >
-                    {externalEdits.length}
+                    {externalEditCount}
                   </Badge>
                 )}
               </TabsTrigger>
@@ -4041,91 +4024,12 @@ export function NestView({
         )}
 
         <TabsContent value="external-edits" className="space-y-4">
-          <Card>
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <CardTitle className="text-lg flex items-center gap-2">
-                    <FileWarning className="h-4 w-4 text-orange-600" />
-                    External Edits
-                  </CardTitle>
-                  <CardDescription>
-                    Files edited directly on disk, awaiting your approval.
-                  </CardDescription>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={refreshExternalEdits}
-                  disabled={externalEditsLoading}
-                  className="h-8 w-8"
-                  data-testid="external-edits-refresh"
-                >
-                  {externalEditsLoading ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <RefreshCw className="h-4 w-4" />
-                  )}
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {initialLoad ? (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-                </div>
-              ) : externalEdits.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-8 text-center">
-                  <CheckCircle2 className="h-10 w-10 text-green-500 mb-3" />
-                  <p className="text-sm font-medium">No pending external edits</p>
-                  <p className="text-xs text-muted-foreground">
-                    All files on disk match their last approved state.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {externalEdits.map((entry) => {
-                    // Resolve the human-readable title; fall back to the bare
-                    // doc name so internal `nodes/` paths never leak to the UI.
-                    const docTitle =
-                      nodes.find((n) => n.id === entry.document_id)?.title ||
-                      entry.document_id.split("/").pop();
-                    return (
-                      <div
-                        key={entry.suggestion_id}
-                        className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors"
-                        onClick={() => onOpenDocument(entry.document_id)}
-                        data-testid={`external-edit-row-${entry.suggestion_id}`}
-                      >
-                        <FileWarning className="h-5 w-5 text-orange-600 flex-shrink-0" />
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium truncate">
-                              {docTitle}
-                            </span>
-                            <Badge
-                              variant="secondary"
-                              className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
-                            >
-                              {entry.source}
-                            </Badge>
-                          </div>
-                          <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                            <Clock className="h-3 w-3" />
-                            <span>
-                              {formatServerDate(entry.detected_at)}
-                            </span>
-                            <span>•</span>
-                            <span>by {entry.actor}</span>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          <ExternalEditsTab
+            nestId={nestId}
+            enabled={!grantOnly}
+            onOpenDocument={onOpenDocument}
+            titleOf={(id) => nodes.find((n) => n.id === id)?.title}
+          />
         </TabsContent>
 
         {stewardshipEnabled && canManageGovernance && (
