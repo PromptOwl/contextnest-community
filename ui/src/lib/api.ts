@@ -2267,6 +2267,8 @@ export interface WatcherNotification {
   read_at: string | null;
   /** Document the row is about, when there is one — null for nest-level rows. */
   node_id?: string | null;
+  /** Resolved server-side; the inbox navigates on it without a nest list. */
+  nest_name: string;
 }
 
 export interface WorkPagination {
