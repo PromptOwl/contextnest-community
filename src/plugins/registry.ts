@@ -47,8 +47,10 @@ export const WEBHOOK_SECRET_KEY = "webhookSecret";
 
 /**
  * `PLUGIN__<PLUGIN>__<KEY>` — injective, so two (plugin, key) pairs can never
- * share a nest_env row. The plugin part maps `-` → `_` (names are [a-z0-9-],
- * so no `__` can appear inside it); the key part keeps digits, encodes each
+ * share a nest_env row. The plugin part maps `-` → `_` (names are [a-z0-9-]
+ * — the SDK's manifest schema enforces `^[a-z0-9]+(-[a-z0-9]+)*$` and the
+ * engine's loader validates every manifest before it reaches us, so no `__`
+ * can appear inside it); the key part keeps digits, encodes each
  * letter with its case (`a` → `A`, `A` → `_A`) and every other character as
  * `_` + two hex digits, so `webhookSecret`, `webhooksecret`, `webhook-secret`
  * and `webhook_secret` all land on different rows. Env-store keys are capped
@@ -112,6 +114,10 @@ export async function upsertRow(
   by: string,
 ): Promise<NestPluginRow> {
   const db = getDb();
+  // Read-merge-write on settings_json: two editors saving the same plugin at
+  // the same instant is last-write-wins on the settings object, the same
+  // rule as nest settings. The run-state columns are untouched here (see the
+  // UPDATE below), so a PUT racing a scheduled run never loses the cursor.
   const prev = await getRow(nestId, plugin.manifest.name);
   const now = new Date().toISOString();
   const settings = { ...parseJson<Record<string, unknown>>(prev?.settings_json, {}), ...(patch.settings ?? {}) };

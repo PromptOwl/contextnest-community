@@ -14,6 +14,7 @@ import { config } from "../config.js";
 import { trimSlashes } from "@promptowl/contextnest-engine/plugins";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
+import { permissionLevel } from "../shared/access.js";
 import { tryConsume } from "../shared/rate-limit.js";
 import { loadedPlugins } from "./loader.js";
 import {
@@ -70,8 +71,8 @@ function runToResponse(r: PluginRunRow, reveal: boolean) {
   };
 }
 
-const WRITE_TIERS = new Set(["write", "admin", "owner"]);
-const canReveal = (c: any) => WRITE_TIERS.has(String(c.get("nestPermission") ?? ""));
+// Write tier and up, the same ladder the query/run routes use — one source of truth.
+const canReveal = (c: any) => permissionLevel(c.get("nestPermission")) >= permissionLevel("write");
 
 async function describe(c: any, nestId: string, plugin: NestPlugin, row: NestPluginRow | null) {
   const secrets = secretSettingKeys(plugin);

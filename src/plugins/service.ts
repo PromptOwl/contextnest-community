@@ -123,7 +123,9 @@ async function runPullLocked(nestId: string, name: string, plugin: NestPlugin, r
   }
   const finishedAt = new Date().toISOString();
   const status: PluginRunRow["status"] = error ? "failed" : result.clean ? "clean" : result.failed.length ? "failed" : "conflicts";
-  await recordRunState(nestId, name, { at: finishedAt, status, ...(result.clean && result.nextCursor !== undefined ? { cursor: result.nextCursor } : {}) });
+  // Ledger first, then the row's cursor/last-run: a crash between the two
+  // leaves a run with no advanced cursor (re-runnable), never an advanced
+  // cursor with no run to explain it.
   const run = await insertRun({
     nest_id: nestId,
     plugin: name,
@@ -138,6 +140,7 @@ async function runPullLocked(nestId: string, name: string, plugin: NestPlugin, r
     started_at: startedAt,
     finished_at: finishedAt,
   });
+  await recordRunState(nestId, name, { at: finishedAt, status, ...(result.clean && result.nextCursor !== undefined ? { cursor: result.nextCursor } : {}) });
   return { ...result, id: run.id, status, error, triggered_by: triggeredBy, started_at: startedAt, finished_at: finishedAt };
 }
 
@@ -162,8 +165,6 @@ export async function runPluginWebhook(row: NestPluginRow, req: { headers: Recor
   }
   const at = new Date().toISOString();
   const status: PluginRunRow["status"] = failed.length ? "failed" : results.some((r) => r.outcome === "conflict") ? "conflicts" : "clean";
-  // A delivery is not a pull: it must not push the scheduled pull's cadence out.
-  await recordRunState(row.nest_id, row.plugin, { at, status, touchLastRun: false });
   await insertRun({
     nest_id: row.nest_id, plugin: row.plugin, triggered_by: "webhook", status,
     created: results.filter((r) => r.outcome === "created").length,
@@ -172,6 +173,8 @@ export async function runPluginWebhook(row: NestPluginRow, req: { headers: Recor
     conflicts_json: JSON.stringify(results.filter((r) => r.outcome === "conflict")),
     failed_json: JSON.stringify(failed), error: null, started_at: at, finished_at: at,
   });
+  // A delivery is not a pull: it must not push the scheduled pull's cadence out.
+  await recordRunState(row.nest_id, row.plugin, { at, status, touchLastRun: false });
   return { results, failed };
 }
 
