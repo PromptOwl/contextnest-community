@@ -1115,7 +1115,7 @@ export default function App() {
         {/* The divider sits under the top row, not under the tabs — the tab
             row reads as part of the page below it, not a second bar. */}
         <div className="border-b border-border">
-        <div className={`${shellWidth} mx-auto px-4 py-3 flex items-center justify-between`}>
+        <div className={`${shellWidth} mx-auto h-16 px-4 flex items-center justify-between`}>
           <div className="flex items-center gap-1">
           {/* The sidebar toggle lives in the app header so it exists on every
               page that has a sidebar: always on a phone (the rail is a drawer

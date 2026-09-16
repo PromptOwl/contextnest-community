@@ -135,7 +135,7 @@ export function DocumentSidebar({
       {/* Brand row — the same logo + badge the app header shows, so the rail
           and the header read as one surface (the header hides its own copy
           while the rail is open). Clicking it goes home. */}
-      <div className="flex h-14 items-center justify-between gap-1 border-b border-border px-3">
+      <div className="flex h-16 shrink-0 items-center justify-between gap-1 border-b border-border px-4">
         <button
           type="button"
           onClick={onOpenDashboard}
@@ -166,7 +166,7 @@ export function DocumentSidebar({
         <button
           type="button"
           onClick={onOpenDashboard}
-          className="mx-2 mt-2 flex items-center gap-1.5 rounded px-1.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+          className="mx-2 mt-3 flex items-center gap-2 rounded px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
           title="All nests"
         >
           <LayoutGrid className="h-3.5 w-3.5" />
@@ -272,7 +272,7 @@ function DashboardNav({
   onOpen?: (id: string) => void;
 }) {
   return (
-    <div className="mb-1" data-testid="document-sidebar-dashboard">
+    <div className="mt-3 space-y-1" data-testid="document-sidebar-dashboard">
       {dashboardPages.map((page) => (
         <DashboardRow key={page.id} page={page} active={page.id === active} onOpen={onOpen} />
       ))}
@@ -303,17 +303,17 @@ function DashboardRow({
       onClick={() => onOpen?.(page.id)}
       aria-current={active ? "page" : undefined}
       className={cn(
-        "flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left hover:bg-muted",
+        "flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm hover:bg-muted",
         active ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground",
       )}
       data-testid={`document-sidebar-dashboard-${page.id}`}
     >
-      <Icon className="h-3.5 w-3.5 shrink-0" />
+      <Icon className="h-4 w-4 shrink-0" />
       <span className="truncate">{page.label}</span>
       {count > 0 && (
         <span
           className={cn(
-            "ml-auto rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums",
+            "ml-auto rounded-full px-2 py-0.5 text-[11px] font-semibold tabular-nums",
             page.badge?.tone === "primary"
               ? "bg-primary text-primary-foreground"
               : "bg-muted-foreground/15 text-muted-foreground",
