@@ -1,18 +1,23 @@
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type React from "react";
 import { Login } from "./components/Login";
-import { NestView } from "./components/NestView";
-import { DocumentEditor } from "./components/DocumentEditor";
+// Page-sized components load on first use — one chunk each — so the shell
+// and the dashboard do not carry the editor or the nest page up front.
+const lazyNamed = <T extends Record<string, any>, K extends keyof T>(load: () => Promise<T>, name: K) =>
+  lazy(() => load().then((m) => ({ default: m[name] as React.ComponentType<any> })));
+const NestView = lazyNamed(() => import("./components/NestView"), "NestView") as unknown as typeof import("./components/NestView").NestView;
+const DocumentEditor = lazyNamed(() => import("./components/DocumentEditor"), "DocumentEditor") as unknown as typeof import("./components/DocumentEditor").DocumentEditor;
 import { DocumentSidebar } from "./components/DocumentSidebar";
 import { ConnectModal } from "./components/ConnectModal";
 import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
 import { AdminLoginModal } from "./components/AdminLoginModal";
-import { TeammatesPage } from "./components/TeammatesPage";
-import { ApiKeysPage } from "./components/ApiKeysPage";
-import { TeamsPage } from "./components/TeamsPage";
-import { SettingsPage } from "./components/SettingsPage";
-import { GuidePage } from "./components/GuidePage";
+const TeammatesPage = lazyNamed(() => import("./components/TeammatesPage"), "TeammatesPage");
+const ApiKeysPage = lazyNamed(() => import("./components/ApiKeysPage"), "ApiKeysPage");
+const TeamsPage = lazyNamed(() => import("./components/TeamsPage"), "TeamsPage");
+const SettingsPage = lazyNamed(() => import("./components/SettingsPage"), "SettingsPage") as unknown as typeof import("./components/SettingsPage").SettingsPage;
+const GuidePage = lazyNamed(() => import("./components/GuidePage"), "GuidePage");
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
-import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
+import { getLicenseStatus, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { useQueryClient } from "@tanstack/react-query";
@@ -33,8 +38,8 @@ import {
 } from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
 import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, BookOpen, ScrollText, Activity, Search, FileText, Keyboard, PanelLeft, ChevronRight } from "lucide-react";
-import { AgentDocsPage } from "./components/AgentDocsPage";
-import { ActivityTracePage } from "./components/ActivityTracePage";
+const AgentDocsPage = lazyNamed(() => import("./components/AgentDocsPage"), "AgentDocsPage");
+const ActivityTracePage = lazyNamed(() => import("./components/ActivityTracePage"), "ActivityTracePage");
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -442,7 +447,7 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const { nest, permission, roles, myStewards } = await getNest(nestId);
+        const { nest, permission, roles, myStewards } = await qc.fetchQuery(reads.nest(nestId));
         if (cancelled) return;
         // Deep-link / refresh nav has no is_owner from a nest-list row, so
         // derive it from the authoritative permission — resolveNestPermission
@@ -675,7 +680,7 @@ export default function App() {
     setNestIsReaderView(null);
     if (!nestScopedId) return;
     let cancelled = false;
-    getNest(nestScopedId)
+    qc.fetchQuery(reads.nest(nestScopedId))
       .then((meta: any) => {
         if (cancelled) return;
         const caps = deriveNestCaps({
@@ -1392,6 +1397,9 @@ export default function App() {
         </div>
         ) : (
         <div className={withSidebar && !isDocPage ? "px-4 py-4" : ""}>
+        {/* One boundary for every lazily loaded page: the shell (header, rail)
+            stays put while a page chunk arrives. */}
+        <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
         {view.page === "dashboard" && (() => {
           const Page = dashboardPage(view.tab).Component;
           return (
@@ -1649,6 +1657,7 @@ export default function App() {
           <GuidePage onBack={() => setView({ page: "dashboard" })} />
         )}
 
+        </Suspense>
         </div>
         )}
       </main>

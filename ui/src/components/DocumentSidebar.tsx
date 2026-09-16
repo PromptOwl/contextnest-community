@@ -10,7 +10,7 @@
  * stays consistent with the Documents tab.
  */
 import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import {
   ChevronDown,
   ChevronRight,
@@ -495,35 +495,51 @@ function NestTree({
   /** Present when the caller can author here: a + on every folder row. */
   onNewDocument?: (folder: string) => void;
 }) {
-  const meta = useQuery(reads.nodesMeta(nestId));
-  const census = useQuery(reads.census(nestId));
-  const groups = useMemo(
-    () => groupNodesByFolder<any>(meta.data?.nodes ?? []),
-    [meta.data],
-  );
-  // Every folder the nest has, empty ones included, so a folder with no
-  // document still gets a row and every level keeps its own expander.
-  const known = useMemo<KnownFolder[]>(() => {
-    const totals = new Map<string, number>();
-    for (const f of census.data?.census.folders ?? []) totals.set(f.path, f.total ?? 0);
-    for (const g of groups)
-      if (g.folder && !totals.has(g.folder)) totals.set(g.folder, g.items.length);
-    return [...totals.entries()].map(([path, total]) => ({ path, total }));
-  }, [census.data, groups]);
-
+  // Folders start closed except the ones on the way to the open document; a
+  // folder the user hasn't touched is open iff it leads to that document.
   const [toggled, setToggled] = useState<Map<string, boolean>>(() => new Map());
   const ancestors = useMemo(
     () => new Set(currentNodeId ? folderAncestors(currentNodeId) : []),
     [currentNodeId],
   );
-  // A folder the user hasn't touched is open iff it leads to the open doc.
   const isCollapsed = (path: string) => toggled.get(path) ?? !ancestors.has(path);
 
-  if (meta.isLoading)
+  // Every folder the nest has (with totals), empty ones included, so a folder
+  // with no document still gets a row and its own expander.
+  const census = useQuery(reads.census(nestId));
+  const known = useMemo<KnownFolder[]>(
+    () => (census.data?.census.folders ?? []).map((f) => ({ path: f.path, total: f.total ?? 0 })),
+    [census.data],
+  );
+
+  // Documents come one folder level at a time — the root plus every open
+  // folder — the same reads the nest page's Documents tab makes (shared cache),
+  // instead of one whole-nest listing that was the heaviest read on the page.
+  const openLevels = useMemo(() => {
+    const open = known.map((k) => k.path).filter((p) => !isCollapsed(p));
+    return ["", ...open];
+    // isCollapsed is derived from toggled + ancestors
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [known, toggled, ancestors]);
+  const levels = useQueries({
+    queries: openLevels.map((folder) => reads.folderNodes(nestId, folder)),
+  });
+  const root = levels[0];
+  // useQueries hands back new result objects every render; group only when
+  // the loaded documents actually change (keyed by their ids).
+  const loadedNodes = levels.flatMap((l) => l.data?.nodes ?? []);
+  const loadedKey = loadedNodes.map((n) => n.id).join("|");
+  const groups = useMemo(
+    () => groupNodesByFolder<any>(loadedNodes),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [loadedKey],
+  );
+
+  if (root?.isLoading && census.isLoading)
     return <div className="px-3 py-1 text-xs text-muted-foreground">Loading…</div>;
-  if (meta.isError)
+  if (root?.isError)
     return <div className="px-3 py-1 text-xs text-muted-foreground">Couldn't load</div>;
-  if ((meta.data?.nodes ?? []).length === 0 && known.length === 0)
+  if (!root?.isLoading && (root?.data?.nodes ?? []).length === 0 && known.length === 0)
     return <div className="px-3 py-1 text-xs text-muted-foreground">No documents yet</div>;
 
   return (
