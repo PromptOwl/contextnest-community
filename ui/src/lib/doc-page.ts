@@ -3,7 +3,9 @@
  * layout (sidebar tree + top bar + collapsible comments rail). Kept out of
  * the components so the rules are testable without a DOM.
  */
+import type { LucideIcon } from "lucide-react";
 import { folderOf } from "./board-dimensions";
+import { visibleNestPages } from "./nest-pages";
 
 /** Every folder on the way to a document — "a/b/c/doc" → ["a", "a/b", "a/b/c"].
  *  The sidebar opens these so the current document is visible on arrival. */
@@ -124,8 +126,12 @@ export function writeDocPagePrefs(
 }
 
 export interface NestSidebarView {
-  id: "overview" | "review" | "board" | "graph" | "definitions" | "workflows";
+  /** "overview" / "review" for the nest page's own tabs; a registry page id
+   *  (its folder name under pages/nest) for the rest. */
+  id: string;
   label: string;
+  /** Registry pages bring their icon; the nest-page tabs have fixed ones. */
+  icon?: LucideIcon;
   /** Top-level rows are the ones you act on daily; the rest fold under a
    *  collapsed "Views" group so the sidebar reads as nest → docs. */
   group?: "views";
@@ -162,12 +168,9 @@ export function nestSidebarViews(
   // lands on the overview.
   if (!caps.isReadOnly && (opts.stewardshipEnabled || opts.hasPending))
     views.push({ id: "review", label: "Review queue", page: "nest", tab: "review" });
-  views.push(
-    { id: "board", label: "Board", page: "board", group: "views" },
-    { id: "graph", label: "Graph", page: "ontology-graph", group: "views" },
-    { id: "definitions", label: "Definitions", page: "definitions", group: "views" },
-  );
-  if (opts.workflowPlaneEnabled && caps.canEditDocs)
-    views.push({ id: "workflows", label: "Workflows", page: "workflows", group: "views" });
+  // The registry pages, each gated by its own meta.visible (workflows: the
+  // workflow-plane flag and write access).
+  for (const p of visibleNestPages({ ...caps, workflowPlaneEnabled: opts.workflowPlaneEnabled }))
+    views.push({ id: p.id, label: p.label, icon: p.icon, page: p.viewPage, group: "views" });
   return views;
 }

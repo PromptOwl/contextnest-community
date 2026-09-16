@@ -10,7 +10,6 @@ import { TeammatesPage } from "./components/TeammatesPage";
 import { ApiKeysPage } from "./components/ApiKeysPage";
 import { TeamsPage } from "./components/TeamsPage";
 import { SettingsPage } from "./components/SettingsPage";
-import { WorkflowsView } from "./components/WorkflowsView";
 import { GuidePage } from "./components/GuidePage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
@@ -21,7 +20,9 @@ import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
 import { navigateGuarded } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
-import { nestIdFromLocation, nestPath } from "./lib/nest-url";
+import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
+import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
+import { NestPageProvider } from "./lib/nest-page-context";
 import { dashboardPage, dashboardPageIdFromPath, dashboardPath, DEFAULT_PAGE_ID } from "./lib/pages";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
 import { useBreadcrumbTail, type Crumb } from "./lib/breadcrumb";
@@ -31,12 +32,9 @@ import {
   isViewBlockedInReaderMode,
 } from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText, Keyboard, PanelLeft, ChevronRight } from "lucide-react";
-import { OntologyGraphView } from "./components/OntologyGraphView";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, BookOpen, ScrollText, Activity, Search, FileText, Keyboard, PanelLeft, ChevronRight } from "lucide-react";
 import { AgentDocsPage } from "./components/AgentDocsPage";
 import { ActivityTracePage } from "./components/ActivityTracePage";
-import { DefinitionsPage } from "./components/DefinitionsPage";
-import { MaturityBoard } from "./components/MaturityBoard";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -179,18 +177,25 @@ type View =
       readerMode?: boolean;
     };
 
-/** The views of a single nest, in switcher order. "Nest" (not "Documents")
- *  because the nest page has its own Documents tab inside it. */
+/** The views of a single nest, in switcher order: the nest page ("Nest", not
+ *  "Documents" — it has its own Documents tab) then the registry pages. */
 const NEST_VIEWS = [
-  { page: "nest", label: "Nest", icon: FileText },
-  { page: "board", label: "Board", icon: LayoutGrid },
-  { page: "ontology-graph", label: "Graph", icon: Network },
-  { page: "definitions", label: "Definitions", icon: BookMarked },
-  { page: "workflows", label: "Workflows", icon: Workflow, beta: true },
-] as const;
+  { page: "nest" as const, label: "Nest", icon: FileText, beta: false },
+  ...nestPages.map((p) => ({ page: p.viewPage, label: p.label, icon: p.icon, beta: !!p.beta })),
+];
 
 /** NestView's own tab slugs — the whitelist for ?tab=. Some are permission
  *  gated inside NestView, which falls back to overview when one isn't shown. */
+/** Breadcrumb labels for those tabs. */
+const NEST_TAB_LABELS: Record<string, string> = {
+  overview: "Overview",
+  documents: "Documents",
+  review: "Review queue",
+  "external-edits": "External edits",
+  stewards: "Stewards",
+  collaborators: "Collaborators",
+};
+
 const NEST_TABS = [
   "overview",
   "documents",
@@ -200,7 +205,7 @@ const NEST_TABS = [
   "collaborators",
 ];
 
-type NestScopedView = Extract<View, { page: (typeof NEST_VIEWS)[number]["page"] }>;
+type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" }>;
 
 const isNestScoped = (view: View): view is NestScopedView =>
   NEST_VIEWS.some((v) => v.page === view.page);
@@ -431,7 +436,7 @@ export default function App() {
     // and silently dropped the parameter — the probe then settled on "ok", so
     // the re-run below found nothing left to do and the link opened Overview.
     // Wait for health for that link only; every other view resolves at once.
-    if (loading && params.get("view") === "workflows") return;
+    if (loading && nestViewFromLocation() === "workflows") return;
     // Re-runs if workflowPlaneEnabled resolves mid-probe (health may land after
     // this effect first fires); the cancel guard drops the stale navigation.
     let cancelled = false;
@@ -493,14 +498,18 @@ export default function App() {
         // ?view=<sub> → land on a nest-scoped sub-page (shareable deep link).
         // edge-types stays gated on the flag so a shared link can't reach a
         // plane the server has disabled — it falls back to the nest view.
-        const sub = params.get("view");
+        // The view rides in the path (/nest/<id>/<segment>), legacy ?view= still
+        // read. Registry pages resolve through their meta; a page whose gate
+        // fails (workflows without the flag) falls back to the nest view.
+        const sub = nestViewFromLocation();
+        const subMeta = nestPageForPath(sub);
         const subPage =
-          sub === "graph" ? "ontology-graph"
-          : sub === "workflows" && workflowPlaneEnabled ? "workflows"
-          : sub === "definitions" ? "definitions"
-          : sub === "board" ? "board"
-          : sub === "trace" ? "nest-trace"
-          : null;
+          subMeta
+            ? subMeta.visible && !subMeta.visible({ isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled })
+              ? null
+              : subMeta.viewPage
+            : sub === "trace" ? "nest-trace"
+            : null;
         // In reader mode the board / ontology-graph / definitions pages are
         // hidden — a deep link into one must not enter it (the tab is gone, but
         // the page state is top-level and would otherwise render the full
@@ -567,6 +576,7 @@ export default function App() {
     // ?nest= that got us here is dropped once the path form is written.
     params.delete("nest");
     let pathNestId: string | null = null;
+    let pathView: string | null = null;
     if (view.page === "document") {
       pathNestId = view.nestId;
       if (view.nodeId && view.nodeId !== "new") params.set("doc", view.nodeId);
@@ -588,8 +598,8 @@ export default function App() {
       if (view.tab && view.tab !== "overview") params.set("tab", view.tab);
       else params.delete("tab");
     } else if (
-      // Nest-scoped sub-pages: keep ?nest and tag the sub-view so the address
-      // bar stays shareable instead of dropping the nest context.
+      // Nest views ride in the path (/nest/<id>/<segment>) — the registry
+      // page owns its segment; trace is the one non-registry sub-page.
       view.page === "ontology-graph" ||
       view.page === "workflows" ||
       view.page === "definitions" ||
@@ -597,21 +607,11 @@ export default function App() {
       view.page === "nest-trace"
     ) {
       pathNestId = view.nestId;
+      pathView = view.page === "nest-trace" ? "trace" : nestPageForView(view.page)?.path ?? null;
       params.delete("doc");
       params.delete("thread");
       params.delete("tab");
-      params.set(
-        "view",
-        view.page === "ontology-graph"
-          ? "graph"
-          : view.page === "workflows"
-            ? "workflows"
-            : view.page === "definitions"
-              ? "definitions"
-              : view.page === "board"
-                ? "board"
-                : "trace",
-      );
+      params.delete("view");
     } else {
       params.delete("doc");
       params.delete("thread");
@@ -620,7 +620,7 @@ export default function App() {
     }
     const qs = params.toString();
     const path =
-      view.page === "dashboard" ? dashboardPath(view.tab) : nestPath(pathNestId);
+      view.page === "dashboard" ? dashboardPath(view.tab) : nestPath(pathNestId, pathView);
     const next = path + (qs ? `?${qs}` : "") + window.location.hash;
     const current =
       window.location.pathname + window.location.search + window.location.hash;
@@ -743,13 +743,10 @@ export default function App() {
       if (pageTail.length) return [home, nest, ...pageTail];
       const leaf =
         view.page === "nest"
-          ? view.tab === "review" ? "Review queue" : view.tab === "documents" ? "Documents" : "Overview"
-          : view.page === "board" ? "Board"
-          : view.page === "ontology-graph" ? "Graph"
-          : view.page === "definitions" ? "Definitions"
-          : view.page === "workflows" ? "Workflows"
+          ? NEST_TAB_LABELS[view.tab ?? "overview"] ?? "Overview"
           : view.page === "document" ? "Document"
-          : "Trace";
+          : view.page === "nest-trace" ? "Trace"
+          : nestPageForView(view.page)?.label ?? "";
       return [home, nest, { label: leaf }];
     }
     return pageTail.length ? [home, ...pageTail] : [];
@@ -1076,15 +1073,7 @@ export default function App() {
                       ? cur.tab === "review"
                         ? "review"
                         : "overview"
-                      : cur.page === "board"
-                        ? "board"
-                        : cur.page === "ontology-graph"
-                          ? "graph"
-                          : cur.page === "definitions"
-                            ? "definitions"
-                            : cur.page === "workflows"
-                              ? "workflows"
-                              : null
+                      : nestPageForView(cur.page)?.id ?? null
                   }
                   onCollapse={() =>
                     docSidebarDrawer
@@ -1132,7 +1121,6 @@ export default function App() {
                       isAnonOwned: t.isAnonOwned,
                     });
                   }}
-                            initialFolder: folder,
                   onNewDocument={
                     !("nestId" in cur) || (cur.page === "document" && cur.nodeId === "new")
                       ? undefined
@@ -1144,6 +1132,7 @@ export default function App() {
                             nodeId: "new",
                             isOwner: cur.isOwner,
                             isAnonOwned: cur.isAnonOwned,
+                            initialFolder: folder,
                           })
                   }
                 />
@@ -1330,11 +1319,11 @@ export default function App() {
               }
             >
               <TabsList>
-                {NEST_VIEWS.filter(
-                  (v) =>
-                    v.page !== "workflows" ||
-                    (workflowPlaneEnabled && nestCanEdit === true),
-                )
+                {NEST_VIEWS.filter((v) => {
+                  // Each registry page carries its own gate (meta.visible).
+                  const meta = nestPageForView(v.page);
+                  return !meta?.visible || meta.visible({ isReadOnly: nestCanEdit === false, isReaderView: !!readerMode, canEditDocs: nestCanEdit === true, workflowPlaneEnabled });
+                })
                   // Public Docs Reader Mode presents a clean, read-only docs
                   // view — the board, ontology graph and definitions authoring
                   // surfaces are hidden so a public reader sees only the docs.
@@ -1345,7 +1334,7 @@ export default function App() {
                     <TabsTrigger key={v.page} value={v.page} className="gap-1.5">
                       <Icon className="h-3.5 w-3.5" />
                       {v.label}
-                      {"beta" in v && <BetaBadge />}
+                      {v.beta && <BetaBadge />}
                     </TabsTrigger>
                   );
                 })}
@@ -1606,35 +1595,32 @@ export default function App() {
             />
           );
         })()}
-        {view.page === "definitions" &&
-          !isViewBlockedInReaderMode(view.page, readerMode) && (
-          <DefinitionsPage
-            nestId={view.nestId}
-            nestName={view.nestName}
-            isArchived={view.isArchived}
-            onBack={leaveNest}
-          />
-        )}
-        {view.page === "board" &&
-          !isViewBlockedInReaderMode(view.page, readerMode) && (
-          <MaturityBoard
-            nestId={view.nestId}
-            nestName={view.nestName}
-            isOwner={view.isOwner}
-            isArchived={view.isArchived}
-            onBack={leaveNest}
-            onOpenDocument={(nodeId) =>
-              setView({
-                page: "document",
-                nestId: view.nestId,
-                nestName: view.nestName,
-                nodeId,
-                isOwner: view.isOwner,
-                isAnonOwned: view.isAnonOwned,
-              })
-            }
-          />
-        )}
+        {/* Nest views from the registry (Board, Graph, Definitions, Workflows):
+            one render for all, gated the same way the deep-link probe is. */}
+        {isNestScoped(view) && view.page !== "nest" && (() => {
+          const page = nestPageForView(view.page);
+          if (!page || isViewBlockedInReaderMode(view.page, readerMode)) return null;
+          const v = view;
+          const ctx = {
+            nestId: v.nestId,
+            nestName: v.nestName,
+            isOwner: v.isOwner,
+            isAnonOwned: v.isAnonOwned,
+            isArchived: v.isArchived,
+            openDocument: (nodeId: string) =>
+              setView({ page: "document", nestId: v.nestId, nestName: v.nestName, nodeId, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned }),
+            openNest: (opts?: { tags?: string[] }) =>
+              setView({ page: "nest", nestId: v.nestId, nestName: v.nestName, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, ...(opts?.tags ? { initialTags: opts.tags } : {}) }),
+            leaveNest,
+          };
+          return (
+            <NestPageProvider value={ctx}>
+              <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+                <page.Component />
+              </Suspense>
+            </NestPageProvider>
+          );
+        })()}
         {view.page === "api-keys" && (
           <ApiKeysPage onBack={() => setView({ page: "dashboard" })} />
         )}
@@ -1658,46 +1644,11 @@ export default function App() {
         {view.page === "docs" && (
           <AgentDocsPage onBack={() => setView({ page: "dashboard" })} />
         )}
-        {view.page === "ontology-graph" &&
-          !isViewBlockedInReaderMode(view.page, readerMode) && (
-          <OntologyGraphView
-            nestId={view.nestId}
-            nestName={view.nestName}
-            onOpenTag={(tag) =>
-              setView({
-                page: "nest",
-                nestId: view.nestId,
-                nestName: view.nestName,
-                isOwner: view.isOwner,
-                isAnonOwned: view.isAnonOwned,
-                initialTags: [tag],
-              })
-            }
-            onOpenDocument={(nodeId) =>
-              setView({
-                page: "document",
-                nestId: view.nestId,
-                nestName: view.nestName,
-                nodeId,
-                isOwner: view.isOwner,
-                isAnonOwned: view.isAnonOwned,
-              })
-            }
-            onBack={leaveNest}
-          />
-        )}
 
         {view.page === "guide" && (
           <GuidePage onBack={() => setView({ page: "dashboard" })} />
         )}
 
-        {view.page === "workflows" && (
-          <WorkflowsView
-            nestId={view.nestId}
-            nestName={view.nestName}
-            onBack={leaveNest}
-          />
-        )}
         </div>
         )}
       </main>

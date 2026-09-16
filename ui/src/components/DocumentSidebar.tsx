@@ -12,7 +12,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  BookMarked,
   ChevronDown,
   ChevronRight,
   ClipboardCheck,
@@ -22,13 +21,11 @@ import {
   Globe,
   Building2,
   Home,
-  Lock,
   LayoutGrid,
-  Network,
+  Lock,
   PanelLeftClose,
   Plug,
   Plus,
-  Workflow,
 } from "lucide-react";
 import { reads, useNestMeta } from "../lib/queries";
 import { ANON_USER_ID } from "../lib/constants";
@@ -250,10 +247,10 @@ export function DocumentSidebar({
               )}
               {open && (
                 <NestTree
-                  onNewDocument={current ? onNewDocument : undefined}
                   nestId={n.id}
                   currentNodeId={current ? nodeId : null}
                   onOpen={(id) => onOpenDocument({ ...nestTarget(n), nodeId: id })}
+                  onNewDocument={current ? onNewDocument : undefined}
                 />
               )}
             </div>
@@ -336,14 +333,8 @@ function VisibilityGlyph({ visibility }: { visibility?: string }) {
   return <Lock className="h-3 w-3 shrink-0 opacity-60" aria-label="Private" />;
 }
 
-const VIEW_ICONS: Record<NestSidebarView["id"], typeof Home> = {
-  overview: Home,
-  review: ClipboardCheck,
-  board: LayoutGrid,
-  graph: Network,
-  definitions: BookMarked,
-  workflows: Workflow,
-};
+// The nest page's own tabs; registry pages carry their icon in meta.
+const TAB_ICONS: Record<string, typeof Home> = { overview: Home, review: ClipboardCheck };
 
 /** The current nest's views — review queue, board, graph, definitions,
  *  workflows — under its name, so none of them is a trip back through the
@@ -417,7 +408,7 @@ function NestViews({
   if (views.length === 0) return null;
 
   const row = (v: NestSidebarView, indent = false) => {
-    const Icon = VIEW_ICONS[v.id];
+    const Icon = v.icon ?? TAB_ICONS[v.id] ?? Home;
     const active = v.id === activeView;
     return (
       <button
@@ -487,22 +478,22 @@ function NestViews({
         </button>
       )}
     </div>
-  onNewDocument,
   );
 }
 
 /** One nest's folder → document tree. Folders start closed except the ones
-  /** Present when the caller can author here: a + on every folder row. */
-  onNewDocument?: (folder: string) => void;
  *  on the way to the open document. */
 function NestTree({
   nestId,
   currentNodeId,
   onOpen,
+  onNewDocument,
 }: {
   nestId: string;
   currentNodeId: string | null;
   onOpen: (nodeId: string) => void;
+  /** Present when the caller can author here: a + on every folder row. */
+  onNewDocument?: (folder: string) => void;
 }) {
   const meta = useQuery(reads.nodesMeta(nestId));
   const census = useQuery(reads.census(nestId));
@@ -534,7 +525,6 @@ function NestTree({
     return <div className="px-3 py-1 text-xs text-muted-foreground">Couldn't load</div>;
   if ((meta.data?.nodes ?? []).length === 0 && known.length === 0)
     return <div className="px-3 py-1 text-xs text-muted-foreground">No documents yet</div>;
-        <div className="group flex items-center">
 
   return (
     <FolderTree
@@ -544,6 +534,7 @@ function NestTree({
       isCollapsed={isCollapsed}
       className="ml-2 border-l border-border/60 pl-1"
       renderFolder={(node, { collapsed }) => (
+        <div className="group flex items-center">
         <button
           type="button"
           onClick={() =>
@@ -554,6 +545,15 @@ function NestTree({
           title={node.path}
         >
           {collapsed ? (
+            <Folder className="h-3.5 w-3.5 shrink-0" />
+          ) : (
+            <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+          )}
+          <span className="truncate">{node.label}</span>
+          {node.total > 0 && (
+            <span className="ml-auto text-[10px] tabular-nums opacity-70">{node.total}</span>
+          )}
+        </button>
           {onNewDocument && (
             <button
               type="button"
@@ -567,15 +567,6 @@ function NestTree({
             </button>
           )}
         </div>
-            <Folder className="h-3.5 w-3.5 shrink-0" />
-          ) : (
-            <FolderOpen className="h-3.5 w-3.5 shrink-0" />
-          )}
-          <span className="truncate">{node.label}</span>
-          {node.total > 0 && (
-            <span className="ml-auto text-[10px] tabular-nums opacity-70">{node.total}</span>
-          )}
-        </button>
       )}
       renderDoc={(doc) => {
         const active = doc.id === currentNodeId;
