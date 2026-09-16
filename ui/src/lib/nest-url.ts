@@ -5,7 +5,10 @@
  * `?view=<segment>` query forms are still read so existing links and
  * server-built emails keep resolving; the app only ever writes the path form.
  */
-const NEST_PATH = /^\/nest\/([^/]+)(?:\/([a-z0-9-]+))?\/?$/;
+// The view segment accepts anything: an unknown or misspelt view must still
+// resolve the nest — the registry decides what the segment means and falls
+// back to the nest page when it means nothing.
+const NEST_PATH = /^\/nest\/([^/]+)(?:\/([^/]+))?\/?$/;
 
 function decodeSegment(raw: string): string {
   // A malformed escape (a truncated paste ending in "%") throws here; keep

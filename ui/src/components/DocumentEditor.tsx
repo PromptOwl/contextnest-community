@@ -502,10 +502,14 @@ export function DocumentEditor({
     setCommentsOpenState(open);
     writeDocPagePrefs(localStorage, { commentsOpen: open });
   };
+  // The deep link forces the rail open only until it has been acted on (the
+  // thread focused, or the user closed the rail) — the prop itself lives as
+  // long as the page, and re-applying it after a close snapped the rail back.
+  const initialThreadConsumedRef = useRef(false);
   useEffect(() => {
     setCommentsOpenState((open) =>
       nextCommentsOpen(open, {
-        initialThreadId,
+        initialThreadId: initialThreadConsumedRef.current ? null : initialThreadId,
         commentMode,
         pendingAnchor: !!pendingAnchor,
         activeThreadId,
@@ -522,7 +526,6 @@ export function DocumentEditor({
   // into view; pendingFocusRef scrolls the doc to its anchored quote once the
   // rendered view builds highlight ranges. Consumed once — later thread churn
   // (replies, resolves) must not re-yank the view.
-  const initialThreadConsumedRef = useRef(false);
   useEffect(() => {
     if (!initialThreadId || initialThreadConsumedRef.current) return;
     const hit = anchoredThreads.find((t) => t.id === initialThreadId);
@@ -1946,6 +1949,8 @@ export function DocumentEditor({
               aria-pressed={commentsOpen}
               onClick={() => {
                 if (commentsOpen) {
+                  // A user close beats the deep link from here on.
+                  initialThreadConsumedRef.current = true;
                   setCommentMode(false);
                   setActiveThreadId(null);
                   setPendingAnchor(null);
@@ -2807,25 +2812,25 @@ export function DocumentEditor({
                             );
                           })}
                         </div>
-                        {newType === "artifact" && (
+                        {currentTypeValue === "artifact" && (
                           <p className="mt-1 text-[11px] text-muted-foreground">
                             Hosted HTML — the body is served as a sandboxed page.
                           </p>
                         )}
-                        {(newType === "agent" || newType === "skill") && (
+                        {(currentTypeValue === "agent" || currentTypeValue === "skill") && (
                           <p className="mt-1 text-[11px] text-muted-foreground">
                             The body is the instructions. Add flow edges from it in the
                             Workflows tab, then trigger a run.
                           </p>
                         )}
-                        {newType === "table" && (
+                        {currentTypeValue === "table" && (
                           <p className="mt-1 text-[11px] text-muted-foreground">
                             The body is CSV — header first, directives welcome
                             (<code>sku:key, price:number, region</code>). Agents fetch
                             exact rows with table-query instead of reading it whole.
                           </p>
                         )}
-                        {newType === "tool" && (
+                        {currentTypeValue === "tool" && (
                           <p className="mt-1 text-[11px] text-muted-foreground">
                             The body is code. Wire it to an agent on the canvas and the
                             runner ships it (plus the nest's env vars) in the run bundle.
@@ -3390,7 +3395,7 @@ export function DocumentEditor({
           {mode === "edit" && (
             <div
               className="sticky bottom-0 z-20 mt-auto flex items-center justify-center gap-2 border-t bg-background/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/80"
-              data-testid="document-editor-actions"
+              data-testid="document-editor-actions-bottom"
             >
               {(() => {
                 const canWrite = !isViewOnly && !isReviewerOnly && !isLocked;

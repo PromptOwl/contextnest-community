@@ -49,3 +49,11 @@ describe("nest-url views", () => {
     expect(nestViewFromLocation({ pathname: "/", search: "" })).toBeNull();
   });
 });
+
+describe("nest-url unknown view segment", () => {
+  it("keeps the nest id when the view segment is not one the registry knows", () => {
+    const loc = { pathname: "/nest/abc/My_View", search: "" };
+    expect(nestIdFromLocation(loc)).toBe("abc");
+    expect(nestViewFromLocation(loc)).toBe("My_View");
+  });
+});

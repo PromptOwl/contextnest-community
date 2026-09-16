@@ -153,6 +153,10 @@ export function NestVisibilityControl({
   );
 
   if (variant === "compact") {
+    // Until the nest read lands the local state is the "private" default —
+    // showing it would flash a Lock on a public nest. The read is the cached
+    // one every nest screen shares, so this is a frame on a cold load only.
+    if (!serverVisibility) return null;
     const Icon = isPublic ? Globe : isOrg ? Building2 : Lock;
     const current = TIERS.find((t) => t.value === visibility) ?? TIERS[0];
     return (
