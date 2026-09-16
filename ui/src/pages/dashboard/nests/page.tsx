@@ -494,7 +494,7 @@ export default function NestsPage() {
               the archived list brings its own filter/sort. */}
           {!loading && (
             <div className="flex flex-wrap items-center gap-2">
-              {!showArchived && allNests.length > 5 && (
+              {allNests.length > 5 && (
               <>
               <Input
                 value={nestQuery}
@@ -576,155 +576,7 @@ export default function NestsPage() {
             </div>
           )}
 
-          {/* Archived nests are put away, not gone — the switch above is the
-              one place they appear, and the only place they can be restored
-              from. The list replaces the live grid while it is on. */}
-          {showArchived ? (
-            <div className="space-y-4" data-testid="archived-nests">
-            {archivedLoading ? (
-              <div className="flex items-center gap-2 py-10 justify-center text-sm text-muted-foreground">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Loading archived nests…
-              </div>
-            ) : archivedNests.length === 0 ? (
-              <div className="rounded-lg border border-dashed py-12 text-center">
-                <Archive className="h-8 w-8 mx-auto mb-3 text-muted-foreground" />
-                <p className="text-sm font-medium">No archived nests</p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Archiving a nest puts it here instead of deleting it — the option
-                  is in the delete dialog on any nest you own.
-                </p>
-              </div>
-            ) : (
-              <>
-                <p className="text-xs text-muted-foreground">
-                  These nests are read-only. They don't appear on your dashboard,
-                  answer agents over MCP, or serve published links until restored.
-                </p>
-                {archivedNests.length > 5 && (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Input
-                      value={archivedQuery}
-                      onChange={(e) => setArchivedQuery(e.target.value)}
-                      placeholder="Filter archived nests by name…"
-                      className="h-9 max-w-xs"
-                      data-testid="archived-filter-input"
-                    />
-                    <select
-                      value={archivedSort}
-                      onChange={(e) =>
-                        setArchivedSort(e.target.value as typeof archivedSort)
-                      }
-                      className="h-9 rounded-md border bg-background px-2 text-sm"
-                      aria-label="Sort archived nests"
-                      data-testid="archived-sort-select"
-                    >
-                      <option value="archived">Date archived</option>
-                      <option value="name">Name (A–Z)</option>
-                    </select>
-                    <span className="text-xs text-muted-foreground">
-                      {filteredArchivedNests.length} of {archivedNests.length}
-                    </span>
-                    {archivedQuery.trim() !== "" && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-8 px-2 text-xs text-muted-foreground"
-                        onClick={() => setArchivedQuery("")}
-                        data-testid="archived-clear-filter"
-                      >
-                        Clear filter
-                      </Button>
-                    )}
-                  </div>
-                )}
-                {filteredArchivedNests.length === 0 ? (
-                  <div className="rounded-lg border border-dashed py-12 text-center">
-                    <p className="text-sm font-medium">Nothing matches this filter</p>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="mt-3"
-                      onClick={() => setArchivedQuery("")}
-                    >
-                      Clear filter
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {filteredArchivedNests.map((n: any) => {
-                      const openNest = () =>
-                        onSelectNest(
-                          n.id,
-                          n.name,
-                          n.is_owner ?? false,
-                          n.user_id === ANON_USER_ID,
-                          true,
-                        );
-                      return (
-                        <div
-                          key={n.id}
-                          role="button"
-                          tabIndex={0}
-                          onClick={openNest}
-                          onKeyDown={(e) => {
-                            if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
-                              e.preventDefault();
-                              openNest();
-                            }
-                          }}
-                          className="flex items-center gap-3 rounded-lg border px-4 py-3 hover:bg-secondary/50 cursor-pointer"
-                        >
-                          <Archive className="h-4 w-4 text-muted-foreground shrink-0" />
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate text-sm font-medium">{n.name}</div>
-                            <div className="truncate text-xs text-muted-foreground">
-                              {n.archived_at
-                                ? `Archived ${relTime(n.archived_at)}`
-                                : "Archived"}
-                              {n.description ? ` — ${n.description}` : ""}
-                            </div>
-                          </div>
-                          {n.is_owner && (
-                            <>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setRestoreTarget({ id: n.id, name: n.name });
-                                }}
-                                data-testid="restore-nest"
-                              >
-                                <ArchiveRestore className="h-3.5 w-3.5 mr-1.5" />
-                                Restore
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="text-red-700 hover:text-red-800"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setDeleteTarget({
-                                    id: n.id,
-                                    name: n.name,
-                                    isImported: !!n.is_imported,
-                                  });
-                                }}
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </Button>
-                            </>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            )}
-            </div>
-          ) : loading ? (
+          {loading ? (
             <div className="text-center py-12 text-muted-foreground">Loading...</div>
           ) : allNests.length + unsynced.length > 0 &&
             filteredNests.length + filteredUnsynced.length === 0 ? (
@@ -1208,6 +1060,160 @@ export default function NestsPage() {
                 </div>
               )}
             </>
+          )}
+
+          {/* Archived nests are put away, not gone — the switch above adds them
+              here, under the live grid, with their own filter/sort and Restore.
+              Nothing above changes. */}
+          {showArchived && (
+            <div className="space-y-4 border-t pt-6" data-testid="archived-nests">
+              <h3 className="flex items-center gap-2 text-lg font-semibold">
+                <Archive className="h-5 w-5 text-muted-foreground" />
+                Archived nests
+              </h3>
+            {archivedLoading ? (
+              <div className="flex items-center gap-2 py-10 justify-center text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Loading archived nests…
+              </div>
+            ) : archivedNests.length === 0 ? (
+              <div className="rounded-lg border border-dashed py-12 text-center">
+                <Archive className="h-8 w-8 mx-auto mb-3 text-muted-foreground" />
+                <p className="text-sm font-medium">No archived nests</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Archiving a nest puts it here instead of deleting it — the option
+                  is in the delete dialog on any nest you own.
+                </p>
+              </div>
+            ) : (
+              <>
+                <p className="text-xs text-muted-foreground">
+                  These nests are read-only. They don't appear on your dashboard,
+                  answer agents over MCP, or serve published links until restored.
+                </p>
+                {archivedNests.length > 5 && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Input
+                      value={archivedQuery}
+                      onChange={(e) => setArchivedQuery(e.target.value)}
+                      placeholder="Filter archived nests by name…"
+                      className="h-9 max-w-xs"
+                      data-testid="archived-filter-input"
+                    />
+                    <select
+                      value={archivedSort}
+                      onChange={(e) =>
+                        setArchivedSort(e.target.value as typeof archivedSort)
+                      }
+                      className="h-9 rounded-md border bg-background px-2 text-sm"
+                      aria-label="Sort archived nests"
+                      data-testid="archived-sort-select"
+                    >
+                      <option value="archived">Date archived</option>
+                      <option value="name">Name (A–Z)</option>
+                    </select>
+                    <span className="text-xs text-muted-foreground">
+                      {filteredArchivedNests.length} of {archivedNests.length}
+                    </span>
+                    {archivedQuery.trim() !== "" && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-8 px-2 text-xs text-muted-foreground"
+                        onClick={() => setArchivedQuery("")}
+                        data-testid="archived-clear-filter"
+                      >
+                        Clear filter
+                      </Button>
+                    )}
+                  </div>
+                )}
+                {filteredArchivedNests.length === 0 ? (
+                  <div className="rounded-lg border border-dashed py-12 text-center">
+                    <p className="text-sm font-medium">Nothing matches this filter</p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-3"
+                      onClick={() => setArchivedQuery("")}
+                    >
+                      Clear filter
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {filteredArchivedNests.map((n: any) => {
+                      const openNest = () =>
+                        onSelectNest(
+                          n.id,
+                          n.name,
+                          n.is_owner ?? false,
+                          n.user_id === ANON_USER_ID,
+                          true,
+                        );
+                      return (
+                        <div
+                          key={n.id}
+                          role="button"
+                          tabIndex={0}
+                          onClick={openNest}
+                          onKeyDown={(e) => {
+                            if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
+                              e.preventDefault();
+                              openNest();
+                            }
+                          }}
+                          className="flex items-center gap-3 rounded-lg border px-4 py-3 hover:bg-secondary/50 cursor-pointer"
+                        >
+                          <Archive className="h-4 w-4 text-muted-foreground shrink-0" />
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm font-medium">{n.name}</div>
+                            <div className="truncate text-xs text-muted-foreground">
+                              {n.archived_at
+                                ? `Archived ${relTime(n.archived_at)}`
+                                : "Archived"}
+                              {n.description ? ` — ${n.description}` : ""}
+                            </div>
+                          </div>
+                          {n.is_owner && (
+                            <>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setRestoreTarget({ id: n.id, name: n.name });
+                                }}
+                                data-testid="restore-nest"
+                              >
+                                <ArchiveRestore className="h-3.5 w-3.5 mr-1.5" />
+                                Restore
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-red-700 hover:text-red-800"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setDeleteTarget({
+                                    id: n.id,
+                                    name: n.name,
+                                    isImported: !!n.is_imported,
+                                  });
+                                }}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+            </div>
           )}
       </div>
 

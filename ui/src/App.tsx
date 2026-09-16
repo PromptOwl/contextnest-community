@@ -993,9 +993,10 @@ export default function App() {
   const showSidebar = withSidebar && (!docSidebarCollapsed || docSidebarDrawer);
   const pageWidth =
     view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
-  // Header and footer keep the page width; <main> goes edge to edge inside a
-  // nest so the sidebar column can sit against the window's left edge.
-  const shellWidth = withSidebar ? "max-w-none" : pageWidth;
+  // Beside the sidebar the shell fills its flex column: `w-full`, and no
+  // `mx-auto` — auto margins on a flex-column item shrink it to its content.
+  // Without a sidebar the old centred page width applies.
+  const shellWidth = withSidebar ? "w-full max-w-none" : `${pageWidth} mx-auto`;
 
   return (
     <div className={withSidebar ? "flex min-h-screen items-stretch bg-background" : "min-h-screen bg-background"}>
@@ -1115,7 +1116,7 @@ export default function App() {
         {/* The divider sits under the top row, not under the tabs — the tab
             row reads as part of the page below it, not a second bar. */}
         <div className="border-b border-border">
-        <div className={`${shellWidth} mx-auto h-16 px-4 flex items-center justify-between`}>
+        <div className={`${shellWidth} h-16 px-4 flex items-center justify-between`}>
           <div className="flex items-center gap-1">
           {/* The sidebar toggle lives in the app header so it exists on every
               page that has a sidebar: always on a phone (the rail is a drawer
@@ -1250,7 +1251,7 @@ export default function App() {
             workflows tab can never join it. */}
         {isNestScoped(view) && !readerMode && (
            <div
-           className={`${shellWidth} mx-auto px-4 py-2 overflow-x-auto flex items-center gap-2${
+           className={`${shellWidth} px-4 py-2 overflow-x-auto flex items-center gap-2${
              showSidebar ? " md:hidden" : ""
            }`}
          >
@@ -1303,7 +1304,7 @@ export default function App() {
           percentage boxes resolve against the wider block. `clip` (not
           `hidden`) keeps sticky headers inside pages working. */}
       <main
-        className={`${shellWidth} mx-auto min-w-0 overflow-x-clip${withSidebar ? "" : " px-4 py-4"}`}
+        className={`${shellWidth} min-w-0 overflow-x-clip${withSidebar ? "" : " px-4 py-4"}`}
       >
         {/* A ?nest link that didn't resolve. Falling through to the dashboard
             made a stale bookmark look like it had simply opened the app, with
@@ -1647,7 +1648,7 @@ export default function App() {
           the window at full scroll. The build version is a footnote; a write
           action reaching the edge of the screen is not. */}
       {view.page !== "document" && (
-        <footer className={`${shellWidth} mx-auto px-4 py-4 text-xs text-muted-foreground text-center`}>
+        <footer className={`${shellWidth} px-4 py-4 text-xs text-muted-foreground text-center`}>
           ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
         </footer>
       )}
