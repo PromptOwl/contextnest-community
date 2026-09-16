@@ -62,7 +62,7 @@ const { status, data } = await jsonRequest(app, 'POST', '/nests', { name: 'Test'
 
 ### Dashboard pages
 
-One folder per page under `ui/src/pages/dashboard/<slug>/`: `meta.ts` (path, label, icon, order, optional badge) + `page.tsx` (default-export component, reads navigation via `useAppNav()`). `ui/src/lib/pages.ts` builds the registry from the folders — App, sidebar and URL sync derive from it, so nothing else needs editing. `pages.test.ts` guards the invariants.
+One folder per page under `ui/src/pages/dashboard/<slug>/`: `meta.ts` (path, label, icon, order, optional badge and width) + `page.tsx` (default-export component, reads navigation via `useAppNav()`). `ui/src/lib/pages.ts` builds the registry from the folders — App, sidebar and URL sync derive from it, so nothing else needs editing. `pages.test.ts` guards the invariants.
 
 ### Auth Modes
 

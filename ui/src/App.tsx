@@ -1341,7 +1341,17 @@ export default function App() {
           </div>
         </div>
         ) : (
-        <div className={withSidebar && !isDocPage ? "px-4 py-4" : ""}>
+        <div
+          className={
+            !withSidebar || isDocPage
+              ? ""
+              : view.page === "dashboard" && dashboardPage(view.tab).width === "contained"
+                ? "mx-auto max-w-6xl px-4 py-4"
+                : "px-4 py-4"
+          }
+        >
+        {/* width: a page says whether it wants the whole column (grids) or a
+            readable cap (row lists) — PageMeta.width. Nest pages fill it. */}
         {view.page === "dashboard" && (() => {
           const Page = dashboardPage(view.tab).Component;
           return (

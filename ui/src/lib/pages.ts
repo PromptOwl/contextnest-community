@@ -29,6 +29,9 @@ export interface PageMeta {
   /** Sidebar order, ascending. */
   order: number;
   badge?: PageBadge;
+  /** "full" (default) fills the column — grids; "contained" caps at a
+   *  readable width — long row lists. */
+  width?: "full" | "contained";
 }
 
 export interface DashboardPage extends PageMeta {
