@@ -17,7 +17,7 @@ import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { AlertCircle, ChevronDown, ChevronRight, Loader2, Play, Plug, RefreshCw, Trash2 } from "lucide-react";
+import { AlertCircle, ChevronDown, ChevronRight, Link2, Loader2, Play, Plug, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../lib/api";
 import type { NestPlugin, PluginRun } from "../lib/api";
@@ -53,6 +53,27 @@ function fieldsOf(p: NestPlugin): Field[] {
 }
 
 const fmtTime = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : "never");
+
+const providerLabel = (p: string) => ({ google: "Google", microsoft: "Microsoft" } as Record<string, string>)[p] ?? p;
+
+/** After the provider sends the person back, the callback lands them here with
+ *  `?connected=<plugin>` or `?connect_error=<reason>`. Read once, then drop it
+ *  from the URL so a refresh doesn't repeat the toast. */
+function consumeConnectResult(): { connected?: string; error?: string } | null {
+  const url = new URL(window.location.href);
+  const connected = url.searchParams.get("connected");
+  const error = url.searchParams.get("connect_error");
+  if (!connected && !error) return null;
+  url.searchParams.delete("connected");
+  url.searchParams.delete("connect_error");
+  window.history.replaceState(null, "", url.toString());
+  return { connected: connected ?? undefined, error: error ?? undefined };
+}
+
+const CONNECT_ERRORS: Record<string, string> = {
+  access_denied: "You cancelled at the provider — nothing was connected.",
+  exchange_failed: "The provider refused the connection. Check the OAuth client in Server settings and try again.",
+};
 
 function RunStatus({ status }: { status: PluginRun["status"] | string | null }) {
   if (!status) return null;
@@ -150,8 +171,21 @@ function PluginRow({ nestId, plugin, canEdit, onChanged, onIngested }: { nestId:
     }
   };
 
+  const disconnectAccount = async () => {
+    if (!confirm(`Disconnect the ${plugin.oauth?.provider ?? ""} account from ${plugin.displayName}? Pulls stop until someone connects again.`)) return;
+    try {
+      await api.disconnectNestPlugin(nestId, plugin.name);
+      const { plugins } = await api.listNestPlugins(nestId);
+      const next = plugins.find((p) => p.name === plugin.name);
+      if (next) onChanged(next);
+      toast.success("Account disconnected");
+    } catch (e: any) {
+      toast.error(e?.message || "Could not disconnect");
+    }
+  };
+
   const remove = async () => {
-    if (!confirm(`Disconnect ${plugin.displayName} from this nest? Its settings and secrets are forgotten; nodes it wrote stay.`)) return;
+    if (!confirm(`Remove ${plugin.displayName} from this nest? Its settings and secrets are forgotten; nodes it wrote stay.`)) return;
     try {
       await api.removeNestPlugin(nestId, plugin.name);
       const { plugins } = await api.listNestPlugins(nestId);
@@ -253,6 +287,35 @@ function PluginRow({ nestId, plugin, canEdit, onChanged, onIngested }: { nestId:
             )}
           </div>
 
+          {plugin.oauth && (
+            <div className="space-y-1">
+              <Label className="text-sm">Account</Label>
+              {plugin.oauth.connected ? (
+                <div className="flex flex-wrap items-center gap-2 text-sm">
+                  <span>
+                    Connected{plugin.oauth.connected_by ? ` by ${plugin.oauth.connected_by}` : ""}
+                    {plugin.oauth.connected_at ? ` · ${fmtTime(plugin.oauth.connected_at)}` : ""}
+                  </span>
+                  {canEdit && (
+                    <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={disconnectAccount}>Disconnect account</Button>
+                  )}
+                </div>
+              ) : canEdit ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button variant="outline" size="sm" asChild>
+                    <a href={api.pluginConnectUrl(nestId, plugin.name)}>
+                      <Link2 className="h-4 w-4 mr-1.5" />
+                      Connect {providerLabel(plugin.oauth.provider)} account
+                    </a>
+                  </Button>
+                  <span className="text-xs text-muted-foreground">You'll be sent to {providerLabel(plugin.oauth.provider)} to allow read access ({plugin.oauth.scopes.length} permission{plugin.oauth.scopes.length === 1 ? "" : "s"}).</span>
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">No account connected yet. An editor connects one from this panel.</p>
+              )}
+            </div>
+          )}
+
           {plugin.webhook_url && (
             <div className="space-y-1">
               <Label className="text-sm">Webhook URL</Label>
@@ -279,7 +342,7 @@ function PluginRow({ nestId, plugin, canEdit, onChanged, onIngested }: { nestId:
               {plugin.configured && (
                 <Button variant="ghost" size="sm" className="ml-auto text-muted-foreground" onClick={remove}>
                   <Trash2 className="h-4 w-4 mr-1.5" />
-                  Disconnect
+                  Remove
                 </Button>
               )}
               {health && (
@@ -335,6 +398,13 @@ export function NestPluginsPanel({ nestId, canEdit, onIngested }: Props) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    const r = consumeConnectResult();
+    if (!r) return;
+    if (r.connected) toast.success(`${r.connected}: account connected`);
+    else if (r.error) toast.error(CONNECT_ERRORS[r.error] ?? `Could not connect: ${r.error}`);
+  }, []);
 
   return (
     <Card>

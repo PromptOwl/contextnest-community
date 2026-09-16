@@ -69,7 +69,7 @@ export const envKeyFor = (plugin: string, key: string): string => {
   return `${full.slice(0, 51)}_${digest}`;
 };
 
-/** Secret setting names for a plugin: schema `x-secret` fields + the reserved webhook secret. */
+/** Secret setting names for a plugin: schema `x-secret` fields + the reserved webhook secret. (OAuth tokens live in nest_env too but are never settable through PUT.) */
 export function secretSettingKeys(plugin: NestPlugin): string[] {
   const keys = new Set(secretKeys(plugin.manifest));
   if (plugin.manifest.capabilities.includes("webhook")) keys.add(WEBHOOK_SECRET_KEY);

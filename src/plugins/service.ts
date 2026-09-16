@@ -9,6 +9,7 @@ import type { NestPlugin, InboundItem, SearchHit } from "@promptowl/contextnest-
 import { ValidationError, NotFoundError, ConflictError } from "../shared/errors.js";
 import { opContext } from "../nodes/engine.js";
 import { getPlugin, loadedPlugins } from "./loader.js";
+import { accessTokenFor } from "./oauth.js";
 import { communityWriter } from "./writer.js";
 import { config } from "../config.js";
 import {
@@ -42,13 +43,19 @@ const hostLog = (level: string, msg: string, data?: unknown) => {
   else console.log(line);
 };
 
-/** Stored non-secret settings + resolved secrets, as the plugin sees them. */
-export async function resolvedSettings(nestId: string, plugin: NestPlugin, row: NestPluginRow | null): Promise<Record<string, unknown>> {
+/**
+ * Stored non-secret settings + resolved secrets, as the plugin sees them.
+ * For an OAuth plugin the host adds a fresh `accessToken` (refreshed from the
+ * stored refresh token, which the plugin never receives).
+ */
+export async function resolvedSettings(nestId: string, plugin: NestPlugin, row: NestPluginRow | null, opts: { withAccessToken?: boolean } = { withAccessToken: true }): Promise<Record<string, unknown>> {
   const stored = parseJson<Record<string, unknown>>(row?.settings_json, {});
   const secrets = await readSecrets(nestId, plugin.manifest.name, secretSettingKeys(plugin));
   const out: Record<string, unknown> = { ...stored };
-  for (const k of secretSettingKeys(plugin)) delete out[k]; // never trust an env: pointer as a value
-  return { ...out, ...secrets };
+  for (const k of [...secretSettingKeys(plugin), "accessToken"]) delete out[k]; // never trust a stored value for these
+  const merged = { ...out, ...secrets };
+  if (plugin.manifest.oauth && opts.withAccessToken !== false) merged.accessToken = await accessTokenFor(nestId, plugin);
+  return merged;
 }
 
 export async function requirePlugin(name: string): Promise<NestPlugin> {
@@ -92,6 +99,10 @@ export async function runPluginPull(nestId: string, name: string, triggeredBy: T
 }
 
 async function runPullLocked(nestId: string, name: string, plugin: NestPlugin, row: NestPluginRow, triggeredBy: TriggeredBy): Promise<RunSummary> {
+  // Settings (and, for an OAuth plugin, a fresh access token) resolve BEFORE
+  // the run: "not connected" / "reconnect" is the caller's state to fix and
+  // surfaces as a 409, not as a failed run in the ledger.
+  const settings = await resolvedSettings(nestId, plugin, row);
   const startedAt = new Date().toISOString();
   const host = makeHost(nestId, plugin);
   const ctx = await opContext(nestId, `system:plugin:${name}`);
@@ -100,7 +111,7 @@ async function runPullLocked(nestId: string, name: string, plugin: NestPlugin, r
   try {
     result = await host.ingest(ctx, {
       plugin: name,
-      settings: await resolvedSettings(nestId, plugin, row),
+      settings,
       cursor: parseJson<unknown>(row.cursor_json, undefined),
       mode: row.mode,
       target: row.folder ? { folder: row.folder } : {},

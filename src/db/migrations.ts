@@ -1549,6 +1549,27 @@ export function runMigrations(db: Database.Database): void {
       recordMigration("043_nest_plugins");
     })();
   }
+
+  // 044: single-use OAuth consent states for plugin "Connect" (CU-wdqcq027m5).
+  // A row lives for the ten minutes between the redirect to the provider and
+  // its callback; it carries the PKCE verifier and who started the flow.
+  if (!hasMigration("044_plugin_oauth_states")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS plugin_oauth_states (
+          state TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          plugin TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          user_email TEXT NOT NULL,
+          verifier TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        );
+      `);
+      recordMigration("044_plugin_oauth_states");
+    })();
+  }
 }
 
 /**

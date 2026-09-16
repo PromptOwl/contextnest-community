@@ -42,6 +42,11 @@ const SETTING_ENV = [
   "POSTHOG_KEY",
   "POSTHOG_HOST",
   "TELEMETRY_ENABLED",
+  "OAUTH_GOOGLE_CLIENT_ID",
+  "OAUTH_GOOGLE_CLIENT_SECRET",
+  "OAUTH_MICROSOFT_CLIENT_ID",
+  "OAUTH_MICROSOFT_CLIENT_SECRET",
+  "OAUTH_MICROSOFT_TENANT",
 ];
 
 beforeEach(() => {
@@ -439,5 +444,50 @@ describe("/admin/settings — agent SSO (token exchange) guard", () => {
       admin.apiKey,
     );
     expect(viaAutoProvisionOff.status).toBe(200);
+  });
+});
+
+describe("/admin/settings — plugin OAuth clients", () => {
+  it("stores ids in the clear and secrets write-only (presence flag only), and reports the redirect URL", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const before = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(before.data.oauth_google_client_id).toBe("");
+    expect(before.data.oauth_google_client_secret_set).toBe(false);
+    expect(before.data).not.toHaveProperty("oauth_google_client_secret");
+
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      {
+        public_base_url: "https://nest.example.com",
+        oauth_google_client_id: " 123.apps.googleusercontent.com ",
+        oauth_google_client_secret: "GOCSPX-shh",
+        oauth_microsoft_client_id: "0000-1111",
+        oauth_microsoft_client_secret: "ms-shh",
+        oauth_microsoft_tenant: "contoso.onmicrosoft.com",
+      },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.settings.oauth_google_client_id).toBe("123.apps.googleusercontent.com");
+    expect(res.data.settings.oauth_google_client_secret_set).toBe(true);
+    expect(res.data.settings.oauth_microsoft_client_secret_set).toBe(true);
+    expect(res.data.settings.oauth_microsoft_tenant).toBe("contoso.onmicrosoft.com");
+    expect(res.data.settings.oauth_redirect_uri).toBe("https://nest.example.com/auth/plugins/callback");
+    expect(JSON.stringify(res.data)).not.toContain("shh");
+    expect(await persistedSetting("OAUTH_GOOGLE_CLIENT_SECRET")).toBe("GOCSPX-shh");
+
+    // "" clears a secret; an untouched PATCH leaves it alone.
+    await jsonRequest(app, "PATCH", "/admin/settings", { oauth_microsoft_tenant: "" }, admin.apiKey);
+    expect(await persistedSetting("OAUTH_GOOGLE_CLIENT_SECRET")).toBe("GOCSPX-shh");
+    const cleared = await jsonRequest(app, "PATCH", "/admin/settings", { oauth_google_client_secret: "" }, admin.apiKey);
+    expect(cleared.data.settings.oauth_google_client_secret_set).toBe(false);
+
+    const bad = await jsonRequest(app, "PATCH", "/admin/settings", { oauth_google_client_id: "has spaces and <tags>" }, admin.apiKey);
+    expect(bad.status).toBe(400);
+    expect(bad.data.fieldErrors).toHaveProperty("oauth_google_client_id");
   });
 });

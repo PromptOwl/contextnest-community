@@ -76,6 +76,7 @@ const HISTORICAL_MIGRATIONS = [
   "041_nest_visibility_org",
   "042_community_sites",
   "043_nest_plugins",
+  "044_plugin_oauth_states",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -763,6 +764,18 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
     CREATE INDEX IF NOT EXISTS idx_plugin_runs_nest
       ON plugin_runs(nest_id, plugin, started_at DESC);
+
+    -- 044: single-use OAuth consent states for plugin "Connect".
+    CREATE TABLE IF NOT EXISTS plugin_oauth_states (
+      state TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      plugin TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      user_email TEXT NOT NULL,
+      verifier TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,

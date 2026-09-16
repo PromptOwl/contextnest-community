@@ -133,6 +133,11 @@ const TABS: {
       "workflow_plane_enabled",
       "plugins_enabled",
       "plugins_packages",
+      "oauth_google_client_id",
+      "oauth_google_client_secret",
+      "oauth_microsoft_client_id",
+      "oauth_microsoft_client_secret",
+      "oauth_microsoft_tenant",
       "promptowl_teams_enabled",
       "subagent_runs_enabled",
       "subagent_max_depth",
@@ -398,7 +403,9 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
       if (
         k === "anthropic_api_key" ||
         k === "oidc_client_secret" ||
-        k === "mcp_signing_secret"
+        k === "mcp_signing_secret" ||
+        k === "oauth_google_client_secret" ||
+        k === "oauth_microsoft_client_secret"
       ) {
         const v = draft[k];
         return (typeof v === "string" && v.trim() !== "") || v === null;
@@ -1589,6 +1596,69 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                     ))}
                   </div>
                 ) : null}
+
+                {/* OAuth clients: plugins that connect a person's account
+                    (Google Drive, Microsoft) send them through these. One
+                    client per provider for the whole server; each nest then
+                    connects its own account. */}
+                <div className="border-t pt-4 space-y-4">
+                  <div>
+                    <div className="text-sm font-medium">Connect accounts (OAuth)</div>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Plugins that read a person's own account — Google Drive, Microsoft — need an
+                      OAuth client registered with that provider. Register one with this redirect URL:
+                    </p>
+                    <code className="mt-1 block text-xs break-all">
+                      {settings?.oauth_redirect_uri || "Set PUBLIC_BASE_URL on the server first."}
+                    </code>
+                  </div>
+                  {(
+                    [
+                      { provider: "Google", idKey: "oauth_google_client_id", secretKey: "oauth_google_client_secret", setKey: "oauth_google_client_secret_set", where: "Google Cloud console → APIs & Services → Credentials → OAuth client (Web application)." },
+                      { provider: "Microsoft", idKey: "oauth_microsoft_client_id", secretKey: "oauth_microsoft_client_secret", setKey: "oauth_microsoft_client_secret_set", where: "Entra admin center → App registrations → Web platform; add a client secret under Certificates & secrets." },
+                    ] as const
+                  ).map(({ provider, idKey, secretKey, setKey, where }) => {
+                    const secretDraft = draft[secretKey];
+                    return (
+                      <div key={provider} className="space-y-2">
+                        <div className="text-sm">{provider}</div>
+                        <p className="text-xs text-muted-foreground">{where}</p>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <div className="space-y-1">
+                            <Label htmlFor={idKey} className="text-xs">Client ID</Label>
+                            <Input id={idKey} value={draft[idKey] ?? ""} onChange={(e) => set({ [idKey]: e.target.value })} disabled={!draft.plugins_enabled} />
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-xs">Client secret</Label>
+                            <TextField
+                              type="password"
+                              value={typeof secretDraft === "string" ? secretDraft : ""}
+                              placeholder={secretDraft === null ? "Will be cleared when you save" : settings?.[setKey] ? "Set — paste a new one to replace it" : "Paste to set"}
+                              onChange={(v) => set({ [secretKey]: v })}
+                            />
+                            {settings?.[setKey] && secretDraft !== null && (
+                              <button type="button" className="text-xs text-destructive hover:underline" onClick={() => set({ [secretKey]: null })}>
+                                Clear secret
+                              </button>
+                            )}
+                            {secretDraft === null && (
+                              <button type="button" className="text-xs text-muted-foreground hover:underline" onClick={() => set({ [secretKey]: undefined })}>
+                                Keep current secret
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        {provider === "Microsoft" && (
+                          <div className="space-y-1">
+                            <Label htmlFor="oauth_microsoft_tenant" className="text-xs">Tenant</Label>
+                            <Input id="oauth_microsoft_tenant" value={draft.oauth_microsoft_tenant ?? ""} placeholder="common" onChange={(e) => set({ oauth_microsoft_tenant: e.target.value })} disabled={!draft.plugins_enabled} />
+                            <p className="text-xs text-muted-foreground">Your tenant id to limit sign-in to your organisation; leave empty for any Microsoft account.</p>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </CardContent>
             </Card>
 

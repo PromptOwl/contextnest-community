@@ -251,6 +251,15 @@ export interface AdminSettings {
   /** Read-only: what actually loaded, and what was refused. */
   plugins_loaded?: Array<{ name: string; version: string; displayName: string; capabilities: string[] }>;
   plugins_load_errors?: Array<{ spec: string; error: string }>;
+  /** OAuth clients for plugin "Connect". Secrets are write-only. */
+  oauth_google_client_id: string;
+  oauth_google_client_secret?: string;
+  oauth_google_client_secret_set?: boolean;
+  oauth_microsoft_client_id: string;
+  oauth_microsoft_client_secret?: string;
+  oauth_microsoft_client_secret_set?: boolean;
+  oauth_microsoft_tenant: string;
+  oauth_redirect_uri?: string;
   /** Import teams from PromptOwl (default OFF). Off → /teams/promptowl 404s
    *  and the PromptOwl Teams panel is hidden. */
   promptowl_teams_enabled: boolean;
@@ -1153,9 +1162,20 @@ export interface NestPlugin {
   settings: Record<string, unknown>;
   cursor: unknown;
   webhook_url: string | null;
+  /** Present when the plugin needs a person's consent (manifest.oauth). */
+  oauth: { provider: string; scopes: string[]; connected: boolean; connected_by?: string; connected_at?: string } | null;
   last_run_at: string | null;
   last_status: string | null;
   runs: PluginRun[];
+}
+
+/** The URL that starts a plugin's consent flow — navigate the browser to it (it 302s to the provider). */
+export function pluginConnectUrl(nestId: string, name: string): string {
+  return `/nests/${nestId}/plugins/${encodeURIComponent(name)}/connect`;
+}
+
+export async function disconnectNestPlugin(nestId: string, name: string) {
+  return request<{ disconnected: true }>(`/nests/${nestId}/plugins/${encodeURIComponent(name)}/connection`, { method: "DELETE" });
 }
 
 export async function listNestPlugins(nestId: string) {

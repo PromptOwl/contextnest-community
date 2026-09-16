@@ -47,7 +47,7 @@ import {
 import { scheduleRoutes } from "./workflow/schedule-routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
-import { pluginNestRoutes, pluginHookRoutes } from "./plugins/routes.js";
+import { pluginNestRoutes, pluginHookRoutes, pluginOAuthCallbackRoutes } from "./plugins/routes.js";
 import { loadedPlugins, invalidatePlugins } from "./plugins/loader.js";
 import { sendTestNotification } from "./notify/dispatch.js";
 import { hookNestRoutes, hookFireRoutes } from "./workflow/hook-routes.js";
@@ -588,6 +588,14 @@ export function createApp(): Hono<AuthEnv> {
     // scheduler idles, and search ignores include_live.
     plugins_enabled: config.FEATURE_PLUGINS,
     plugins_packages: config.PLUGINS.join(","),
+    // OAuth clients for plugin "Connect" (Google / Microsoft). Secrets are
+    // write-only: only their presence is reported.
+    oauth_google_client_id: process.env.OAUTH_GOOGLE_CLIENT_ID || "",
+    oauth_google_client_secret_set: !!process.env.OAUTH_GOOGLE_CLIENT_SECRET,
+    oauth_microsoft_client_id: process.env.OAUTH_MICROSOFT_CLIENT_ID || "",
+    oauth_microsoft_client_secret_set: !!process.env.OAUTH_MICROSOFT_CLIENT_SECRET,
+    oauth_microsoft_tenant: process.env.OAUTH_MICROSOFT_TENANT || "",
+    oauth_redirect_uri: config.PUBLIC_BASE_URL ? `${config.PUBLIC_BASE_URL}/auth/plugins/callback` : "",
     promptowl_teams_enabled: config.PROMPTOWL_TEAMS_ENABLED,
     type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
     type_table_enabled: config.TYPE_TABLE_ENABLED,
@@ -921,6 +929,22 @@ export function createApp(): Hono<AuthEnv> {
     }
     // ── Agent SSO / token-exchange (POST /auth/token-exchange) ────────────
     // Default-off toggles persist "false" as null (unset already = off). The
+    // OAuth clients for plugin "Connect". Ids are plain; secrets write-only
+    // ("" clears), same discipline as oidc_client_secret.
+    for (const [field, name, secret] of [
+      ["oauth_google_client_id", "OAUTH_GOOGLE_CLIENT_ID", false],
+      ["oauth_google_client_secret", "OAUTH_GOOGLE_CLIENT_SECRET", true],
+      ["oauth_microsoft_client_id", "OAUTH_MICROSOFT_CLIENT_ID", false],
+      ["oauth_microsoft_client_secret", "OAUTH_MICROSOFT_CLIENT_SECRET", true],
+      ["oauth_microsoft_tenant", "OAUTH_MICROSOFT_TENANT", false],
+    ] as const) {
+      if (!(field in body)) continue;
+      const v = body[field];
+      if (v === null || v === "") pending.push({ name, value: null });
+      else if (typeof v !== "string") addError(field, `${field} must be a string (or empty to clear it).`);
+      else if (!secret && !/^[\w.@:-]{1,200}$/.test(v.trim())) addError(field, `${field} does not look like a client id / tenant.`);
+      else pending.push({ name, value: v.trim() });
+    }
     // MCP signing secret is write-only, same discipline as oidc_client_secret.
     if ("sso_token_exchange_enabled" in body) {
       pending.push({
@@ -1701,6 +1725,8 @@ export function createApp(): Hono<AuthEnv> {
   app.route("/hooks", hookFireRoutes);
   // Nest Plugin webhooks — token-authenticated, gated by FEATURE_PLUGINS.
   app.route("/plugin-hooks", pluginHookRoutes);
+  // OAuth consent callback for plugin "Connect" — the state row is the credential.
+  app.route("/auth/plugins", pluginOAuthCallbackRoutes);
 
   // === Agent entry point: /llms.txt (public manual), /index (person nest
   // index), /mcp (server-level MCP). See src/mcp/server-routes.ts. ===

@@ -30,6 +30,8 @@ import {
   type PluginRunRow,
 } from "./registry.js";
 import { minIntervalMinutes, promoteHit, requirePlugin, resolvedSettings, runPluginPull, runPluginWebhook } from "./service.js";
+import { beginConnect, completeConnect, connectionInfo, consumeState, disconnect } from "./oauth.js";
+import { getPlugin } from "./loader.js";
 
 export const requirePlugins = async (c: any, next: () => Promise<void>) => {
   if (!config.FEATURE_PLUGINS) return c.json({ error: "Not found" }, 404);
@@ -99,6 +101,8 @@ async function describe(c: any, nestId: string, plugin: NestPlugin, row: NestPlu
     // The token in the URL is the credential: editors (who wire the sender)
     // see it; the read tier sees only that a webhook exists.
     webhook_url: plugin.webhook ? (canReveal(c) ? webhookUrl(c, row?.webhook_token ?? null) : row?.webhook_token ? "(set)" : null) : null,
+    // Per-user consent: what to connect, and whether someone has.
+    oauth: await connectionInfo(nestId, plugin),
     last_run_at: row?.last_run_at ?? null,
     last_status: row?.last_status ?? null,
     runs: row ? (await recentRuns(nestId, m.name, 10)).map((r) => runToResponse(r, canReveal(c))) : [],
@@ -152,7 +156,8 @@ pluginNestRoutes.put("/:name", requirePlugins, async (c) => {
     if (!body.settings || typeof body.settings !== "object" || Array.isArray(body.settings)) throw new ValidationError("settings must be an object");
     const incoming = body.settings as Record<string, unknown>;
     const declared = new Set([...Object.keys(plugin.manifest.settings.properties ?? {}), ...secretKeys]);
-    const unknown = Object.keys(incoming).filter((k) => !declared.has(k));
+    // The access token is the host's to mint — never a setting anyone stores.
+    const unknown = Object.keys(incoming).filter((k) => !declared.has(k) || k === "accessToken");
     if (unknown.length) throw new ValidationError(`unknown setting(s) for ${plugin.manifest.name}: ${unknown.join(", ")}`);
     const plain: Record<string, unknown> = {};
     const secrets: Record<string, string> = {};
@@ -167,7 +172,7 @@ pluginNestRoutes.put("/:name", requirePlugins, async (c) => {
     // Let the plugin veto BEFORE anything is written, seeing the merged view.
     if (plugin.validateSettings) {
       const row = await getRow(nestId, plugin.manifest.name);
-      const merged = { ...(await resolvedSettings(nestId, plugin, row)), ...plain, ...Object.fromEntries(Object.entries(secrets).filter(([, v]) => v)) };
+      const merged = { ...(await resolvedSettings(nestId, plugin, row, { withAccessToken: false })), ...plain, ...Object.fromEntries(Object.entries(secrets).filter(([, v]) => v)) };
       try {
         await plugin.validateSettings(merged);
       } catch (err) {
@@ -214,6 +219,26 @@ pluginNestRoutes.post("/:name/promote", requirePlugins, async (c) => {
   return c.json({ result });
 });
 
+// GET /nests/:nestId/plugins/:name/connect — start the consent flow (write tier: the nest middleware
+// treats GET as read, so the permission is checked here explicitly).
+pluginNestRoutes.get("/:name/connect", requirePlugins, async (c) => {
+  if (!canReveal(c)) return c.json({ error: "Only editors can connect an account to this nest" }, 403);
+  const nestId = c.req.param("nestId")!;
+  const plugin = await requirePlugin(c.req.param("name")!);
+  if (!plugin.manifest.oauth) throw new ValidationError(`${plugin.manifest.displayName} does not use a connected account`);
+  const email = await resolveCallerEmail(c.get("userId"));
+  const url = await beginConnect(nestId, plugin, String(c.get("userId")), email);
+  return c.redirect(url, 302);
+});
+
+// DELETE /nests/:nestId/plugins/:name/connection — forget the account's tokens.
+pluginNestRoutes.delete("/:name/connection", requirePlugins, async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const plugin = await requirePlugin(c.req.param("name")!);
+  await disconnect(nestId, plugin, await resolveCallerEmail(c.get("userId")));
+  return c.json({ disconnected: true });
+});
+
 // DELETE /nests/:nestId/plugins/:name — forget config + secrets; nodes stay.
 pluginNestRoutes.delete("/:name", requirePlugins, async (c) => {
   const nestId = c.req.param("nestId")!;
@@ -232,6 +257,38 @@ pluginNestRoutes.delete("/:name", requirePlugins, async (c) => {
  * (same model as /hooks/:id); the plugin's webhook() verifies the delivery
  * over the raw body before anything is parsed. Rate-limited per token.
  */
+/**
+ * GET /auth/plugins/callback — the provider sends the browser back here.
+ * Unauthenticated by design (the state row is the credential: single use,
+ * ten minutes, bound to the nest/plugin/user that started it). Ends with a
+ * redirect to the nest's Plugins tab either way, carrying the outcome.
+ */
+export const pluginOAuthCallbackRoutes = new Hono();
+pluginOAuthCallbackRoutes.get("/callback", requirePlugins, async (c) => {
+  const state = c.req.query("state") ?? "";
+  const row = state ? await consumeState(state) : null;
+  if (!row) return c.json({ error: "This connection link is invalid or has expired. Start again from the nest's Plugins tab." }, 400);
+  const back = (params: Record<string, string>) => {
+    const u = new URL(`${config.PUBLIC_BASE_URL || new URL(c.req.url).origin}/nest/${row.nest_id}`);
+    u.searchParams.set("tab", "plugins");
+    for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
+    return c.redirect(u.toString(), 302);
+  };
+  const err = c.req.query("error");
+  if (err) return back({ connect_error: err });
+  const code = c.req.query("code");
+  if (!code) return back({ connect_error: "no_code" });
+  const plugin = await getPlugin(row.plugin);
+  if (!plugin) return back({ connect_error: "plugin_not_loaded" });
+  try {
+    await completeConnect(row, plugin, code);
+    return back({ connected: row.plugin });
+  } catch (e) {
+    console.warn(`[plugins] oauth callback for ${row.plugin} on ${row.nest_id} failed: ${(e as Error).message}`);
+    return back({ connect_error: "exchange_failed" });
+  }
+});
+
 export const pluginHookRoutes = new Hono();
 pluginHookRoutes.post("/:token", requirePlugins, async (c) => {
   const token = c.req.param("token")!;

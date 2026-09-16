@@ -101,6 +101,12 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `NOTIFY_EMAIL_FROM` | _(unset)_ | From address for notification emails. |
 | `NOTIFY_EMAIL_TO` | _(unset)_ | Comma-separated recipients for notification emails. |
 | `NOTIFY_DEBOUNCE_MS` | `15000` | Per-nest buffer window before notifications flush; bursts collapse into one digest message. |
+| `FEATURE_PLUGINS` | `false` | Turn on nest plugins (sources such as Google Drive, Slack, GitHub, Gong… brought in through `@promptowl/contextnest-plugin-sdk` plugins). Off: every `/nests/:id/plugins` route `404`s, the scheduler idles, `include_live` search is ignored. Also editable from Settings → Advanced → Plugins. See [Plugins](#plugins). |
+| `PLUGINS` | `""` | Comma-separated allowlist of plugin packages to load — npm package names installed next to the server, or absolute paths to an ESM module. Only what is named here runs. Editable at runtime; a change reloads the set live. |
+| `PLUGIN_MIN_INTERVAL_MINUTES` | `5` | Floor for a plugin's pull cadence. |
+| `OAUTH_GOOGLE_CLIENT_ID` / `OAUTH_GOOGLE_CLIENT_SECRET` | _(unset)_ | Google OAuth client used when a plugin connects a person's Google account (`manifest.oauth.provider = "google"`). Secret is write-only on the Settings API. See [Connected accounts](#connected-accounts-oauth). |
+| `OAUTH_MICROSOFT_CLIENT_ID` / `OAUTH_MICROSOFT_CLIENT_SECRET` / `OAUTH_MICROSOFT_TENANT` | _(unset)_ | Entra app used for `provider = "microsoft"`. Tenant defaults to `common` (any Microsoft account); set your tenant id to restrict sign-in. |
+| `PLUGIN_OAUTH_<NAME>_CLIENT_ID` / `_SECRET` | _(unset)_ | Client for a plugin that declares a `custom` OAuth provider; `<NAME>` is the plugin name upper-cased with `-` → `_`. |
 
 ---
 
@@ -347,6 +353,29 @@ Error codes returned by the endpoint: `disabled` (404), `rate_limited` (429),
 `bad_request`, `provider_disabled`, `provider_misconfigured` (400),
 `invalid_subject_token` (401), `email_not_verified`, `domain_not_allowed`,
 `no_account` (403), `server_error` (500).
+
+---
+
+## Plugins
+
+`FEATURE_PLUGINS=true` plus a `PLUGINS` allowlist turns the Plugins tab on for every nest. Each plugin is a small Apache-2.0 npm package written against [`@promptowl/contextnest-plugin-sdk`](https://github.com/PromptOwl/CommunityNestSDK) (Google Drive, SharePoint, GitHub, Slack, Notion, Gong, Fireflies, monday, RSS, inbound email ship there). Per nest, an editor configures a plugin's settings, chooses raw or summary landing, a target folder and a pull cadence; secrets are stored write-only under `PLUGIN__<PLUGIN>__<KEY>` in the nest's env. Ingested nodes arrive through the normal review path on governed nests and never overwrite a node a person has edited.
+
+```bash
+npm install @promptowl/contextnest-plugin-google-drive @promptowl/contextnest-plugin-slack
+FEATURE_PLUGINS=true PLUGINS=@promptowl/contextnest-plugin-google-drive,@promptowl/contextnest-plugin-slack
+```
+
+### Connected accounts (OAuth)
+
+Some plugins read a *person's* account rather than a server credential — Google Drive is the first. Those declare `oauth` in their manifest and get a **Connect** button in the nest's Plugins tab. The server does the rest: consent redirect with PKCE and a single-use state, the callback at `/auth/plugins/callback`, the refresh token stored write-only, and a fresh access token minted before every run.
+
+Setup, once per server:
+
+1. Set `PUBLIC_BASE_URL` — the redirect URL is `<PUBLIC_BASE_URL>/auth/plugins/callback`, and providers require it to match exactly. Settings → Advanced → Plugins shows it.
+2. Register an OAuth client with the provider using that redirect URL — Google: Cloud console → APIs & Services → Credentials → OAuth client (Web application); Microsoft: Entra admin center → App registrations (Web platform) + a client secret.
+3. Put the client id and secret in Settings → Advanced → Plugins → Connect accounts (or the `OAUTH_*` env vars above).
+
+Then any editor of a nest presses Connect, allows access at the provider, and lands back on the Plugins tab with the plugin connected. Viewers see who connected and when; editors can disconnect, which deletes the refresh token. The access token is never stored and never appears in the Settings API. If a refresh fails (revoked at the provider, password change), the next run is refused with a *reconnect* message rather than recorded as a failed run.
 
 ---
 

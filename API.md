@@ -1734,6 +1734,24 @@ every route above with the same HTML notice, never a hint about which it was.
 
 ---
 
+## 9a. Plugins (sources)
+
+**Feature-flagged — every route below `404`s unless `FEATURE_PLUGINS=true`** (Settings → Advanced → Plugins). Configuration in [`CONFIGURATION.md`](./CONFIGURATION.md#plugins). Reads are read-tier (viewers see what is connected; settings come back masked); everything else is write-tier.
+
+- `GET /nests/:nestId/plugins` — `{ plugins: [...], load_errors: [...] }`. Each plugin: manifest fields (`name`, `version`, `displayName`, `capabilities`, `settingsSchema`, `secretKeys`, `faces`), the nest's row (`enabled`, `configured`, `mode` raw|summary, `folder`, `every_minutes`, masked `settings`), `webhook_url` (write-tier only), `oauth` (`null`, or `{ provider, scopes, connected, connected_by?, connected_at? }` when the plugin connects an account), `last_run_at`, `last_status`, recent `runs`.
+- `PUT /nests/:nestId/plugins/:name` (write) — upsert. Body: `{ enabled?, mode?, folder?, every_minutes?, settings? }`. Secrets omitted or `""` are left untouched; `accessToken` is refused (`400`) — it is injected by the OAuth flow, never stored. Settings are validated by the plugin before saving.
+- `DELETE /nests/:nestId/plugins/:name` (write) — forget settings, secrets and cursor; nodes stay.
+- `GET /nests/:nestId/plugins/:name/health` (write) — the plugin's own connectivity check.
+- `POST /nests/:nestId/plugins/:name/run` (write) — pull now; returns the run row. `409` while a run is in flight or when a connected account is required and missing.
+- `POST /nests/:nestId/plugins/:name/promote` (write) — `{ externalId }` from a live search hit → fetch and land it as a node.
+- `GET /nests/:nestId/plugins/:name/connect` (write) — `302` to the provider's consent screen (PKCE, single-use state, 10-minute expiry). `409` when the server has no client for the provider (the message names the setting).
+- `DELETE /nests/:nestId/plugins/:name/connection` (write) — forget the refresh token.
+- `GET /auth/plugins/callback?code&state` — provider return; no auth (the state is the credential). `400` on an unknown/expired state, otherwise `302` to `/nest/:nestId?tab=plugins&connected=<name>` or `…&connect_error=<reason>` (`access_denied`, `exchange_failed`, `no_code`, `plugin_not_loaded`).
+- `POST /plugin-hooks/:token` — inbound webhook for webhook-capable plugins; the per-nest token in the path is the credential.
+- `GET /nests/:nestId/search?q=…&include_live=1` — enterprise search: fans the query out to every enabled plugin with `search` and returns their hits alongside the nest's under `live`.
+
+---
+
 ## 9b. Workflow plane ("turing")
 
 **Feature-flagged — every route below `404`s unless `FEATURE_WORKFLOW_PLANE=true`** (Settings → Workflow plane). Typed edges, an edge-type registry, and governed runs. Full contract in [`WORKFLOW_PLANE.md`](./WORKFLOW_PLANE.md). Reads are read-tier, mutations write-tier via the standard nest gate.
