@@ -1056,6 +1056,8 @@ export async function updateNode(
     schedule?: string;
     /** Owner/admin only; `null` clears the flag back to tag/nest inheritance. */
     prime?: boolean | null;
+    /** Re-type the node ("Turn into…"). Same accepted set as create. */
+    type?: string;
   },
   baseVersion?: number,
 ) {
@@ -1779,6 +1781,11 @@ export async function listExternalEdits(nestId: string, refresh = false) {
   );
 }
 
+/** Pending external edits, as a number — the badge read. */
+export async function countExternalEdits(nestId: string) {
+  return request<{ total: number }>(`/nests/${nestId}/external-edits?count=1`);
+}
+
 export async function scanExternalEdits(nestId: string) {
   return request<{ scanned: number; staged: number }>(
     `/nests/${nestId}/external-edits/scan`,
@@ -2265,6 +2272,8 @@ export interface WatcherNotification {
   read_at: string | null;
   /** Document the row is about, when there is one — null for nest-level rows. */
   node_id?: string | null;
+  /** Resolved server-side; the inbox navigates on it without a nest list. */
+  nest_name: string;
 }
 
 export interface WorkPagination {

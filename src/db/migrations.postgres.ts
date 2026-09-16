@@ -75,6 +75,7 @@ const HISTORICAL_MIGRATIONS = [
   "039_nest_pins",
   "041_nest_visibility_org",
   "042_community_sites",
+  "043_node_suggestion_details",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -300,13 +301,24 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_node_index_folder
       ON node_index(nest_id, folder);
 
-    -- node_suggestions (migration 036). Which documents have an external edit
-    -- staged — so the listing's pending badge is a SELECT, not a vault walk.
+    -- node_suggestions (migrations 036 + 043). One row per staged external
+    -- edit with the suggestion itself — so the External Edits list and its
+    -- badge are a SELECT, not a vault walk, and old vs new is detected_at.
     CREATE TABLE IF NOT EXISTS node_suggestions (
       nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
       node_id TEXT NOT NULL,
-      PRIMARY KEY (nest_id, node_id)
+      suggestion_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      detected_at TEXT NOT NULL,
+      target_hash TEXT NOT NULL,
+      proposed_hash TEXT NOT NULL,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      PRIMARY KEY (nest_id, node_id, suggestion_id)
     );
+    CREATE INDEX IF NOT EXISTS idx_node_suggestions_nest_detected
+      ON node_suggestions(nest_id, detected_at DESC);
 
     -- sessions (migration 003).
     CREATE TABLE IF NOT EXISTS sessions (
@@ -766,6 +778,36 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     await db.run(
       "ALTER TABLE nests ADD CONSTRAINT nests_visibility_check CHECK (visibility IN ('private', 'org', 'public'))",
     );
+  }
+
+  // Migration 043 parity: a database from before 043 has the flag-only
+  // node_suggestions (no suggestion_id). Rebuild it empty and mark every nest
+  // stale so the next index rebuild re-fills it from disk. Guarded on the
+  // column so an up-to-date database pays nothing.
+  const suggestionIdCol = (await db.get(
+    `SELECT 1 AS ok FROM information_schema.columns
+      WHERE table_name = 'node_suggestions' AND column_name = 'suggestion_id'`,
+  )) as { ok?: number } | undefined;
+  if (!suggestionIdCol?.ok) {
+    await db.exec(`
+      DROP TABLE IF EXISTS node_suggestions;
+      CREATE TABLE node_suggestions (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        suggestion_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        detected_at TEXT NOT NULL,
+        target_hash TEXT NOT NULL,
+        proposed_hash TEXT NOT NULL,
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT ${NOW},
+        PRIMARY KEY (nest_id, node_id, suggestion_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_node_suggestions_nest_detected
+        ON node_suggestions(nest_id, detected_at DESC);
+      UPDATE nests SET index_synced_at = NULL;
+    `);
   }
 
   // Migration 005 parity: anon-owned nests default to public visibility.

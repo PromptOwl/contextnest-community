@@ -72,6 +72,9 @@ export const keys = {
   nestTeams: (nestId: string) => [...keys.nest(nestId), "teams"] as const,
   externalEdits: (nestId: string) =>
     [...keys.nest(nestId), "external-edits"] as const,
+  // Under keys.externalEdits so whatever drops the list drops the count.
+  externalEditCount: (nestId: string) =>
+    [...keys.externalEdits(nestId), "count"] as const,
   hooks: (nestId: string, agent?: string) =>
     [...keys.nest(nestId), "hooks", agent ?? "all"] as const,
   reviewQueue: (nestId: string, status: string) =>
@@ -614,6 +617,12 @@ export const reads = {
     queryOptions({
       queryKey: keys.externalEdits(nestId),
       queryFn: () => api.listExternalEdits(nestId),
+      staleTime: STALE.governance,
+    }),
+  externalEditCount: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.externalEditCount(nestId),
+      queryFn: () => api.countExternalEdits(nestId),
       staleTime: STALE.governance,
     }),
   reviewQueue: (nestId: string, status = "pending") =>

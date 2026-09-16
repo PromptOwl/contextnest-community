@@ -1502,6 +1502,37 @@ export function runMigrations(db: Database.Database): void {
       recordMigration("042_community_sites");
     })();
   }
+
+  // 043: node_suggestions carries the suggestion itself, not just a flag —
+  // one row per staged external edit (id, who, when, source, hashes, note),
+  // so the External Edits list and its badge are a SELECT and the UI can
+  // tell an old suggestion from a new one. The old flag rows carried no id,
+  // so the table is rebuilt empty and every nest's index is marked stale:
+  // the next rebuild re-fills it from disk (node-index rebuild).
+  if (!hasMigration("043_node_suggestion_details")) {
+    db.transaction(() => {
+      db.exec(`
+        DROP TABLE IF EXISTS node_suggestions;
+        CREATE TABLE node_suggestions (
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          suggestion_id TEXT NOT NULL,
+          source TEXT NOT NULL,
+          actor TEXT NOT NULL,
+          detected_at TEXT NOT NULL,
+          target_hash TEXT NOT NULL,
+          proposed_hash TEXT NOT NULL,
+          note TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (nest_id, node_id, suggestion_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_node_suggestions_nest_detected
+          ON node_suggestions(nest_id, detected_at DESC);
+        UPDATE nests SET index_synced_at = NULL;
+      `);
+      recordMigration("043_node_suggestion_details");
+    })();
+  }
 }
 
 /**

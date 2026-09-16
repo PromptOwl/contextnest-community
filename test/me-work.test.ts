@@ -217,4 +217,6 @@ it("a review verdict notification carries the document it is about", async () =>
   );
   expect(verdict).toBeTruthy();
   expect(verdict.node_id).toBe("nodes/verdict-doc");
+  // Resolved in the same read: the inbox navigates on it, no nest list needed.
+  expect(verdict.nest_name).toBe("Verdict Nest");
 });

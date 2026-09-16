@@ -703,6 +703,7 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
 ```
 Requires nest write permission.
 - `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
+- `type` — re-type the node in place (the editor's "Turn into…"): `document`, `artifact`, `table`, `agent`, `skill`, `tool`, or any other engine type. Same gate as create — the artifact/table feature flags and the accepted set (`400` otherwise). The body is kept as-is. Converting to `skill` defaults the trigger from the title; converting away from a runnable type drops its `schedule`.
 - `prime` — owner/admin only (`403` otherwise). `true`/`false` set the document-scope flag, `null` clears it back to tag/nest inheritance. An edit that makes the document prime is itself gated, so it lands as a draft awaiting approval.
 
 ### DELETE `/nests/:nestId/nodes/:nodeId`
@@ -850,6 +851,14 @@ Cancels the pending review. Returns node to `draft`.
 Allowed for the person who submitted it (withdrawing your own submission) and
 for anyone with approve rights on the node. Anyone else gets 403 — read access
 to the nest alone is not enough.
+
+### GET `/nests/:nestId/external-edits`
+Query: `?refresh=true` to rescan the disk first; `?count=1` to get the total only.
+
+Pending external (on-disk) edits awaiting approval, newest first. The list is computed by scanning every document's suggestions, so `?count=1` saves bytes (`{ "total": n }`), not server time — the UI uses it for the tab badge.
+```json
+{ "entries": [{ "suggestion_id": "...", "document_id": "nodes/foo", "source": "out-of-band-edit", "detected_at": "...", "actor": "..." }], "total": 1 }
+```
 
 ### GET `/nests/:nestId/review-queue`
 Query: `?status=pending&limit=50&offset=0`
@@ -1017,6 +1026,10 @@ steward scope honored). Change items mirror the queue (not access-filtered).
 tab badge binds to `counts.changes` (actionable items), not the feed length.
 The UI deep-links a comment item to its document with the thread focused via
 `?nest=<id>&doc=<nodeId>&thread=<threadId>`.
+
+### Notification rows (`GET /me/work` → `notifications`, `GET /me/notifications`)
+
+Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review verdicts, document deletion flags, mentions); nest-level rows have `node_id: null`.
 
 ### GET `/me/drafts`
 

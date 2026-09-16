@@ -519,7 +519,11 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     changeNote?: string;
     schedule?: string;
     prime?: boolean | null;
+    type?: string;
   }>();
+  if (body.type !== undefined && typeof body.type !== "string") {
+    throw new ValidationError("type must be a string");
+  }
 
   // Conflict detection via X-Base-Version header — REST-only contract.
   const baseVersionHeader = c.req.header("X-Base-Version");
@@ -554,6 +558,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       changeNote: body.changeNote,
       schedule: body.schedule,
       prime: body.prime,
+      type: body.type,
     },
     authorEmail,
   );
