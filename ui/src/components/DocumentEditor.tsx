@@ -2178,74 +2178,47 @@ export function DocumentEditor({
               />
             ) : null;
           })()}
-          {(() => {
-            const canWrite = !isViewOnly && !isReviewerOnly && !isLocked;
-            const showSubmit = !isViewOnly && canSubmitForReview;
-            return (
-              <>
-                {showSubmit && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-8"
-                    onClick={() => setShowSubmitModal(true)}
-                    data-testid="document-editor-submit"
-                    title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
-                  >
-                    <Send className="h-4 w-4 sm:mr-1.5" />
-                    <span className="hidden sm:inline">Submit for review</span>
-                  </Button>
-                )}
-                {canWrite &&
-                  (mode === "edit" ? (
-                    <Button
-                      size="sm"
-                      className="h-8"
-                      // Keep focus in the editor field so clicking Save doesn't
-                      // fire the field's blur (which would trigger a second,
-                      // concurrent save alongside this click). One save per click.
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={handleSave}
-                      disabled={!canSave}
-                      data-testid="document-editor-save"
-                    >
-                      {saving ? (
-                        <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
-                      ) : justSaved && !isDirty ? (
-                        <Check className="h-4 w-4 mr-1.5" />
-                      ) : (
-                        <Save className="h-4 w-4 mr-1.5" />
-                      )}
-                      {saving
-                        ? "Saving…"
-                        : justSaved && !isDirty
-                          ? "Saved"
-                          : isNew
-                            ? "Create"
-                            : "Save"}
-                    </Button>
-                  ) : (
-                    <Button
-                      size="sm"
-                      className="h-8"
-                      onClick={() => setMode("edit")}
-                      data-testid="document-editor-start-edit"
-                    >
-                      <Pencil className="h-4 w-4 mr-1.5" />
-                      Edit
-                    </Button>
-                  ))}
-              </>
-            );
-          })()}
+          {/* View mode: Submit for review and Edit up here. In edit mode the
+              sticky bar at the bottom of the document carries Submit + Save. */}
+          {mode !== "edit" && (
+            <>
+              {!isViewOnly && canSubmitForReview && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() => setShowSubmitModal(true)}
+                  data-testid="document-editor-submit"
+                  title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
+                >
+                  <Send className="h-4 w-4 sm:mr-1.5" />
+                  <span className="hidden sm:inline">Submit for review</span>
+                </Button>
+              )}
+              {!isViewOnly && !isReviewerOnly && !isLocked && (
+                <Button
+                  size="sm"
+                  className="h-8"
+                  onClick={() => setMode("edit")}
+                  data-testid="document-editor-start-edit"
+                >
+                  <Pencil className="h-4 w-4 mr-1.5" />
+                  Edit
+                </Button>
+              )}
+            </>
+          )}
         </div>
       </div>
 
       {/* Body: a reading-width column (the document) with the comments rail
           beside it when open. */}
       <div className="flex flex-1 flex-col items-stretch lg:flex-row lg:items-start">
-        <div className="min-w-0 flex-1">
-        <div className="mx-auto w-full max-w-3xl px-5 py-6 sm:px-10 sm:py-10">
+        {/* The column is at least a window tall so the action bar sits at the
+            window bottom on a short document too (mt-auto), and sticks there
+            while a long one scrolls under it. 7rem = app header + top bar. */}
+        <div className="flex min-w-0 flex-1 flex-col min-h-[calc(100vh-7rem)]">
+        <div className="w-full px-5 py-6 sm:px-10 sm:py-8">
 
       {error && (
         <Alert variant="destructive" className="mb-4">
@@ -2393,7 +2366,7 @@ export function DocumentEditor({
                   aria-label="Title"
                   aria-invalid={touched && !title.trim() ? true : undefined}
                   data-testid="document-editor-title"
-                  className={`block w-full bg-transparent text-4xl font-bold leading-tight tracking-tight text-foreground outline-none placeholder:text-muted-foreground/40 disabled:opacity-100${
+                  className={`block w-full bg-transparent text-4xl font-bold leading-tight tracking-tight text-foreground outline-none border-b border-border pb-1 focus:border-primary placeholder:text-muted-foreground/50 disabled:opacity-100${
                     touched && !title.trim() ? " placeholder:text-destructive/60" : ""
                   }`}
                 />
@@ -2575,10 +2548,33 @@ export function DocumentEditor({
               they see only the existing tag chips. */}
           {(canEditContent || tags.length > 0) && (
             <div>
-              {/* Tags read as one quiet row under the title: the chips, then
-                  an unboxed "Add a tag" field that commits on Enter, space or
-                  comma exactly as the old input did. */}
-              <div className="flex flex-wrap items-center gap-1.5">
+              {/* Tags: an underlined "Add a tag" field (Enter, space or comma
+                  commit, as the old input did), then the chips on their own row
+                  beneath it. */}
+              <div className="space-y-2">
+              {canEditContent && !fieldsDisabled && (
+                <input
+                  value={tagInput}
+                  onChange={(e) => setTagInput(clampTagInput(e.target.value))}
+                  onKeyDown={(e) => {
+                    // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
+                    if (e.key === "Enter" || e.key === "," || e.key === " ") {
+                      e.preventDefault();
+                      addTag();
+                    }
+                  }}
+                  onBlur={() => {
+                    if (tagInput.trim()) addTag();
+                  }}
+                  placeholder={tags.length ? "Add a tag" : "Add a tag…"}
+                  // A hard stop the way Title has one — several tags fit,
+                  // a pasted paragraph does not.
+                  maxLength={TAG_INPUT_MAX_LENGTH}
+                  aria-label="Add a tag"
+                  className="block h-8 w-full border-b border-border bg-transparent px-1 text-sm outline-none focus:border-primary placeholder:text-muted-foreground/70 focus:placeholder:text-muted-foreground"
+                  data-testid="document-editor-tag-input"
+                />
+              )}
               {tags.length > 0 && (
                 <div className="flex flex-wrap gap-1.5">
                   {tags.map((t) => {
@@ -2621,29 +2617,6 @@ export function DocumentEditor({
                     );
                   })}
                 </div>
-              )}
-              {canEditContent && !fieldsDisabled && (
-                <input
-                  value={tagInput}
-                  onChange={(e) => setTagInput(clampTagInput(e.target.value))}
-                  onKeyDown={(e) => {
-                    // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
-                    if (e.key === "Enter" || e.key === "," || e.key === " ") {
-                      e.preventDefault();
-                      addTag();
-                    }
-                  }}
-                  onBlur={() => {
-                    if (tagInput.trim()) addTag();
-                  }}
-                  placeholder={tags.length ? "Add a tag" : "Add a tag…"}
-                  // A hard stop the way Title has one — several tags fit,
-                  // a pasted paragraph does not.
-                  maxLength={TAG_INPUT_MAX_LENGTH}
-                  aria-label="Add a tag"
-                  className="h-6 min-w-[7rem] flex-1 bg-transparent px-1 text-xs outline-none placeholder:text-muted-foreground/60 focus:placeholder:text-muted-foreground"
-                  data-testid="document-editor-tag-input"
-                />
               )}
               </div>
               {tagInput.trim() && (
@@ -3406,6 +3379,65 @@ export function DocumentEditor({
       )}
 
         </div>
+        {/* Sticky action bar, edit mode only — Submit / Create·Save sit at the
+            bottom of the document column so they stay in reach at the end of
+            a long body. In view mode Submit and Edit live in the top bar. */}
+        {mode === "edit" && (
+        <div
+          className="sticky bottom-0 z-20 mt-auto flex items-center justify-center gap-2 border-t bg-background/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/80"
+          data-testid="document-editor-actions"
+        >
+          {(() => {
+            const canWrite = !isViewOnly && !isReviewerOnly && !isLocked;
+            const showSubmit = !isViewOnly && canSubmitForReview;
+            return (
+              <>
+                {showSubmit && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8"
+                    onClick={() => setShowSubmitModal(true)}
+                    data-testid="document-editor-submit"
+                    title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
+                  >
+                    <Send className="h-4 w-4 sm:mr-1.5" />
+                    <span className="hidden sm:inline">Submit for review</span>
+                  </Button>
+                )}
+                {canWrite && (
+                    <Button
+                      size="sm"
+                      className="h-8"
+                      // Keep focus in the editor field so clicking Save doesn't
+                      // fire the field's blur (which would trigger a second,
+                      // concurrent save alongside this click). One save per click.
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={handleSave}
+                      disabled={!canSave}
+                      data-testid="document-editor-save"
+                    >
+                      {saving ? (
+                        <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                      ) : justSaved && !isDirty ? (
+                        <Check className="h-4 w-4 mr-1.5" />
+                      ) : (
+                        <Save className="h-4 w-4 mr-1.5" />
+                      )}
+                      {saving
+                        ? "Saving…"
+                        : justSaved && !isDirty
+                          ? "Saved"
+                          : isNew
+                            ? "Create"
+                            : "Save"}
+                    </Button>
+                  )}
+              </>
+            );
+          })()}
+        </div>
+        )}
       </div>
             {/* Ever-present comments rail — beside the doc, not stacked below. */}
             {!isNew && (
