@@ -583,7 +583,8 @@ export function ArtifactViewer({
             <Button
               variant="outline"
               size="icon"
-              title="Turn into a document"
+              title={editDirty ? "Save or discard the source edits first" : "Turn into a document"}
+              disabled={editDirty}
               onClick={() => setConfirmTurnInto(true)}
               data-testid="artifact-turn-into-document"
             >

@@ -2079,7 +2079,12 @@ export function DocumentEditor({
                 label: "Turn into…",
                 icon: RefreshCw,
                 testId: "document-editor-turn-into",
-                onSelect: () => setTurnInto(turnIntoOptions[0].value),
+                // Through the leave guard: the server re-types the SAVED body,
+                // and loadNode() afterwards drops any unsaved draft.
+                onSelect: () =>
+                  confirmLeave("turn it into another kind", () =>
+                    setTurnInto(turnIntoOptions[0].value),
+                  ),
               });
             // Share THIS doc first — it's the narrower, more common ask.
             // Meaningless on an unsaved doc: there's no node id to grant on.
