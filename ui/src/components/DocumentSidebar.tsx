@@ -45,6 +45,7 @@ import {
 import { FolderTree, type KnownFolder } from "./FolderTree";
 import { dashboardPages, type DashboardPage } from "../lib/pages";
 import { cn } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
 
 export interface SidebarNestTarget {
   nestId: string;
@@ -69,6 +70,8 @@ interface Props {
   /** Connect this nest to a CLI / MCP client / API caller. */
   onConnect?: () => void;
   onOpenDashboard: () => void;
+  /** Brand image for the top row — the same one the app header uses. */
+  logoUrl: string;
   /** Dashboard only: the open page and how to switch. */
   dashboardTab?: string | null;
   onOpenDashboardTab?: (id: string) => void;
@@ -95,6 +98,7 @@ export function DocumentSidebar({
   onOpenView,
   onConnect,
   onOpenDashboard,
+  logoUrl,
   dashboardTab = null,
   onOpenDashboardTab,
   onNewDocument,
@@ -128,22 +132,23 @@ export function DocumentSidebar({
       className="flex h-full flex-col bg-muted/30 text-sm"
       data-testid="document-sidebar"
     >
-      <div className="flex items-center justify-between gap-1 px-2 pt-2 pb-1">
-        {/* The way back to the dashboard. On the dashboard itself the Nests
-            row below is that, so only the hide button stays. */}
-        {nestId !== null ? (
-          <button
-            type="button"
-            onClick={onOpenDashboard}
-            className="flex min-w-0 items-center gap-1.5 rounded px-1.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
-            title="All nests"
-          >
-            <LayoutGrid className="h-3.5 w-3.5" />
-            All nests
-          </button>
-        ) : (
-          <span />
-        )}
+      {/* Brand row — the same logo + badge the app header shows, so the rail
+          and the header read as one surface (the header hides its own copy
+          while the rail is open). Clicking it goes home. */}
+      <div className="flex h-14 items-center justify-between gap-1 border-b border-border px-3">
+        <button
+          type="button"
+          onClick={onOpenDashboard}
+          className="flex min-w-0 items-center gap-2 hover:opacity-80"
+          title="Dashboard"
+          data-testid="document-sidebar-brand"
+        >
+          <img src={logoUrl} alt="ContextNest" className="h-7 w-7 object-contain" />
+          <span className="font-semibold">ContextNest</span>
+          <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+            Community
+          </Badge>
+        </button>
         <button
           type="button"
           onClick={onCollapse}
@@ -155,6 +160,19 @@ export function DocumentSidebar({
           <PanelLeftClose className="h-4 w-4" />
         </button>
       </div>
+      {/* Inside a nest: the way back to every nest. On the dashboard the
+          Nests row below is that. */}
+      {nestId !== null && (
+        <button
+          type="button"
+          onClick={onOpenDashboard}
+          className="mx-2 mt-2 flex items-center gap-1.5 rounded px-1.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+          title="All nests"
+        >
+          <LayoutGrid className="h-3.5 w-3.5" />
+          All nests
+        </button>
+      )}
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
         {nestId === null && (
@@ -372,10 +390,10 @@ function NestViews({
     () =>
       caps
         ? nestSidebarViews(caps, {
-            workflowPlaneEnabled,
-            stewardshipEnabled,
-            hasPending: pending > 0,
-          })
+          workflowPlaneEnabled,
+          stewardshipEnabled,
+          hasPending: pending > 0,
+        })
         : [],
     [caps, workflowPlaneEnabled, stewardshipEnabled, pending],
   );

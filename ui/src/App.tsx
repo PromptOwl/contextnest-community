@@ -998,7 +998,118 @@ export default function App() {
   const shellWidth = withSidebar ? "max-w-none" : pageWidth;
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className={withSidebar ? "flex min-h-screen items-stretch bg-background" : "min-h-screen bg-background"}>
+      {/* The sidebar is a full-height column beside the whole shell — header
+          included — with the brand at its top, so header and rail read as one
+          surface. The unreachable-nest screen keeps the plain shell. */}
+      {withSidebar && deepLinkProbe.status !== "unreachable" && (
+        <>
+        {withSidebar && docSidebarDrawer && (
+          <button
+            type="button"
+            className="fixed inset-0 z-40 bg-black/30 md:hidden"
+            aria-label="Close sidebar"
+            onClick={() => setDocSidebarDrawer(false)}
+          />
+        )}
+        {showSidebar && (() => {
+          const cur = view;
+          const nestOf = (v: typeof cur) => ("nestId" in v ? v : null);
+          return (
+            <div
+              className={
+                docSidebarDrawer
+                  ? "fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] border-r bg-background shadow-xl md:static md:z-auto md:w-64 md:max-w-none md:shadow-none"
+                  : "hidden w-64 shrink-0 border-r md:block"
+              }
+            >
+              <div className="sticky top-0 h-screen max-h-screen">
+                <DocumentSidebar
+                  logoUrl={logoUrl ?? hootieIcon}
+                  nestId={nestOf(cur)?.nestId ?? null}
+                  nodeId={cur.page === "document" ? cur.nodeId : null}
+                  activeView={
+                    cur.page === "nest"
+                      ? cur.tab === "review"
+                        ? "review"
+                        : "overview"
+                      : cur.page === "board"
+                        ? "board"
+                        : cur.page === "ontology-graph"
+                          ? "graph"
+                          : cur.page === "definitions"
+                            ? "definitions"
+                            : cur.page === "workflows"
+                              ? "workflows"
+                              : null
+                  }
+                  onCollapse={() =>
+                    docSidebarDrawer
+                      ? setDocSidebarDrawer(false)
+                      : setDocSidebarCollapsed(true)
+                  }
+                  onOpenDashboard={() => setView({ page: "dashboard" })}
+                  dashboardTab={cur.page === "dashboard" ? (cur.tab ?? DEFAULT_PAGE_ID) : null}
+                  onOpenDashboardTab={(tab) => setView({ page: "dashboard", tab })}
+                  onOpenNest={(t) =>
+                    setView({
+                      page: "nest",
+                      nestId: t.nestId,
+                      nestName: t.nestName,
+                      isOwner: t.isOwner,
+                      isAnonOwned: t.isAnonOwned,
+                      tab: "documents",
+                    })
+                  }
+                  onOpenView={(t, v) =>
+                    setView({
+                      page: v.page,
+                      nestId: t.nestId,
+                      nestName: t.nestName,
+                      isOwner: t.isOwner,
+                      isAnonOwned: t.isAnonOwned,
+                      readerMode,
+                      ...(v.page === "nest" && v.tab ? { tab: v.tab } : {}),
+                    } as View)
+                  }
+                  onConnect={() => setShowConnect(true)}
+                  onOpenDocument={(t) => {
+                    if (
+                      cur.page === "document" &&
+                      t.nestId === cur.nestId &&
+                      t.nodeId === cur.nodeId
+                    )
+                      return;
+                    setView({
+                      page: "document",
+                      nestId: t.nestId,
+                      nestName: t.nestName,
+                      nodeId: t.nodeId,
+                      isOwner: t.isOwner,
+                      isAnonOwned: t.isAnonOwned,
+                    });
+                  }}
+                  onNewDocument={
+                    !("nestId" in cur) || (cur.page === "document" && cur.nodeId === "new")
+                      ? undefined
+                      : () =>
+                          setView({
+                            page: "document",
+                            nestId: cur.nestId,
+                            nestName: cur.nestName,
+                            nodeId: "new",
+                            isOwner: cur.isOwner,
+                            isAnonOwned: cur.isAnonOwned,
+                          })
+                  }
+                />
+              </div>
+            </div>
+          );
+        })()}
+        </>
+      )}
+      <div className={withSidebar ? "flex min-w-0 flex-1 flex-col" : ""}>
       {/* Header */}
       <header className="bg-card">
         {/* The divider sits under the top row, not under the tabs — the tab
@@ -1028,7 +1139,7 @@ export default function App() {
           )}
           <button
             onClick={() => setView({ page: "dashboard" })}
-            className="flex items-center gap-2 hover:opacity-80"
+            className={`flex items-center gap-2 hover:opacity-80${showSidebar ? " md:hidden" : ""}`}
           >
             <img
               src={logoUrl ?? hootieIcon}
@@ -1139,7 +1250,7 @@ export default function App() {
             workflows tab can never join it. */}
         {isNestScoped(view) && !readerMode && (
            <div
-           className={`${pageWidth} mx-auto px-4 py-2 overflow-x-auto flex items-center gap-2${
+           className={`${shellWidth} mx-auto px-4 py-2 overflow-x-auto flex items-center gap-2${
              showSidebar ? " md:hidden" : ""
            }`}
          >
@@ -1230,111 +1341,7 @@ export default function App() {
           </div>
         </div>
         ) : (
-        <div className={withSidebar ? "flex min-h-[calc(100vh-3.5rem)] items-stretch" : ""}>
-        {withSidebar && docSidebarDrawer && (
-          <button
-            type="button"
-            className="fixed inset-0 z-40 bg-black/30 md:hidden"
-            aria-label="Close sidebar"
-            onClick={() => setDocSidebarDrawer(false)}
-          />
-        )}
-        {showSidebar && (() => {
-          const cur = view;
-          const nestOf = (v: typeof cur) => ("nestId" in v ? v : null);
-          return (
-            <div
-              className={
-                docSidebarDrawer
-                  ? "fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] border-r bg-background shadow-xl md:static md:z-auto md:w-64 md:max-w-none md:shadow-none"
-                  : "hidden w-64 shrink-0 border-r md:block"
-              }
-            >
-              <div className="sticky top-0 h-screen max-h-screen">
-                <DocumentSidebar
-                  nestId={nestOf(cur)?.nestId ?? null}
-                  nodeId={cur.page === "document" ? cur.nodeId : null}
-                  activeView={
-                    cur.page === "nest"
-                      ? cur.tab === "review"
-                        ? "review"
-                        : "overview"
-                      : cur.page === "board"
-                        ? "board"
-                        : cur.page === "ontology-graph"
-                          ? "graph"
-                          : cur.page === "definitions"
-                            ? "definitions"
-                            : cur.page === "workflows"
-                              ? "workflows"
-                              : null
-                  }
-                  onCollapse={() =>
-                    docSidebarDrawer
-                      ? setDocSidebarDrawer(false)
-                      : setDocSidebarCollapsed(true)
-                  }
-                  onOpenDashboard={() => setView({ page: "dashboard" })}
-                  dashboardTab={cur.page === "dashboard" ? (cur.tab ?? DEFAULT_PAGE_ID) : null}
-                  onOpenDashboardTab={(tab) => setView({ page: "dashboard", tab })}
-                  onOpenNest={(t) =>
-                    setView({
-                      page: "nest",
-                      nestId: t.nestId,
-                      nestName: t.nestName,
-                      isOwner: t.isOwner,
-                      isAnonOwned: t.isAnonOwned,
-                      tab: "documents",
-                    })
-                  }
-                  onOpenView={(t, v) =>
-                    setView({
-                      page: v.page,
-                      nestId: t.nestId,
-                      nestName: t.nestName,
-                      isOwner: t.isOwner,
-                      isAnonOwned: t.isAnonOwned,
-                      readerMode,
-                      ...(v.page === "nest" && v.tab ? { tab: v.tab } : {}),
-                    } as View)
-                  }
-                  onConnect={() => setShowConnect(true)}
-                  onOpenDocument={(t) => {
-                    if (
-                      cur.page === "document" &&
-                      t.nestId === cur.nestId &&
-                      t.nodeId === cur.nodeId
-                    )
-                      return;
-                    setView({
-                      page: "document",
-                      nestId: t.nestId,
-                      nestName: t.nestName,
-                      nodeId: t.nodeId,
-                      isOwner: t.isOwner,
-                      isAnonOwned: t.isAnonOwned,
-                    });
-                  }}
-                  onNewDocument={
-                    !("nestId" in cur) || (cur.page === "document" && cur.nodeId === "new")
-                      ? undefined
-                      : () =>
-                          setView({
-                            page: "document",
-                            nestId: cur.nestId,
-                            nestName: cur.nestName,
-                            nodeId: "new",
-                            isOwner: cur.isOwner,
-                            isAnonOwned: cur.isAnonOwned,
-                          })
-                  }
-                />
-              </div>
-            </div>
-          );
-        })()}
-        <div className={withSidebar ? "min-w-0 flex-1" : ""}>
-        <div className={withSidebar && !isDocPage ? `${pageWidth} mx-auto px-4 py-4` : ""}>
+        <div className={withSidebar && !isDocPage ? "px-4 py-4" : ""}>
         {view.page === "dashboard" && (() => {
           const Page = dashboardPage(view.tab).Component;
           return (
@@ -1631,8 +1638,6 @@ export default function App() {
           />
         )}
         </div>
-        </div>
-        </div>
         )}
       </main>
 
@@ -1647,6 +1652,7 @@ export default function App() {
         </footer>
       )}
 
+      </div>
       {showConnect && "nestId" in view && (
         <ConnectModal
           isOpen
