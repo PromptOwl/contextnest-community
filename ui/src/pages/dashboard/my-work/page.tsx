@@ -14,7 +14,7 @@ import { reads } from "../../../lib/queries";
 import { useAuth } from "../../../auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
 import {
-  Check, Trash2, Loader2, Inbox, ChevronRight, ChevronLeft, Archive,
+  Check, Trash2, Loader2, ChevronRight, ChevronLeft, Archive,
 } from "lucide-react";
 import { BULK_REVIEW_LIMIT } from "../../../lib/constants";
 import { toast } from "sonner";
@@ -379,15 +379,6 @@ export default function MyWorkPage() {
                   )}
                 </div>
               )}
-              <div className="flex items-center gap-2 mb-2">
-                <Inbox className="h-5 w-5 text-muted-foreground" />
-                <h2 className="text-xl font-semibold">My Work</h2>
-                {work.items.length > 0 && (
-                  <span className="rounded-full bg-primary text-primary-foreground text-xs font-semibold px-2 py-0.5">
-                    {work.items.length}
-                  </span>
-                )}
-              </div>
               {workLoading ? (
                 // Loader, not the empty state: "nothing here" while the
                 // best-effort /me/work fetch is still in flight reads as an
