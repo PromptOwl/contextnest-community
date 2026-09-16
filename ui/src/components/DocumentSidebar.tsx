@@ -75,8 +75,9 @@ interface Props {
   /** Dashboard only: the open page and how to switch. */
   dashboardTab?: string | null;
   onOpenDashboardTab?: (id: string) => void;
-  /** Omit when the caller can't author in this nest. */
-  onNewDocument?: () => void;
+  /** New document, optionally inside a folder. Omit when the caller can't
+   *  author in this nest. */
+  onNewDocument?: (folder?: string) => void;
 }
 
 const nestTarget = (n: any): SidebarNestTarget => ({
@@ -227,7 +228,7 @@ export function DocumentSidebar({
                 {current && onNewDocument && (
                   <button
                     type="button"
-                    onClick={onNewDocument}
+                    onClick={() => onNewDocument()}
                     className="rounded p-0.5 opacity-0 hover:bg-muted group-hover:opacity-100 focus:opacity-100"
                     title="New document"
                     aria-label="New document"
@@ -249,6 +250,7 @@ export function DocumentSidebar({
               )}
               {open && (
                 <NestTree
+                  onNewDocument={current ? onNewDocument : undefined}
                   nestId={n.id}
                   currentNodeId={current ? nodeId : null}
                   onOpen={(id) => onOpenDocument({ ...nestTarget(n), nodeId: id })}
@@ -485,10 +487,13 @@ function NestViews({
         </button>
       )}
     </div>
+  onNewDocument,
   );
 }
 
 /** One nest's folder → document tree. Folders start closed except the ones
+  /** Present when the caller can author here: a + on every folder row. */
+  onNewDocument?: (folder: string) => void;
  *  on the way to the open document. */
 function NestTree({
   nestId,
@@ -529,6 +534,7 @@ function NestTree({
     return <div className="px-3 py-1 text-xs text-muted-foreground">Couldn't load</div>;
   if ((meta.data?.nodes ?? []).length === 0 && known.length === 0)
     return <div className="px-3 py-1 text-xs text-muted-foreground">No documents yet</div>;
+        <div className="group flex items-center">
 
   return (
     <FolderTree
@@ -548,6 +554,19 @@ function NestTree({
           title={node.path}
         >
           {collapsed ? (
+          {onNewDocument && (
+            <button
+              type="button"
+              onClick={() => onNewDocument(node.path)}
+              className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 hover:bg-muted hover:text-foreground focus:opacity-100 group-hover:opacity-100"
+              title={`New document in ${node.label}`}
+              aria-label={`New document in ${node.label}`}
+              data-testid="document-sidebar-folder-new"
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
             <Folder className="h-3.5 w-3.5 shrink-0" />
           ) : (
             <FolderOpen className="h-3.5 w-3.5 shrink-0" />

@@ -1132,10 +1132,11 @@ export default function App() {
                       isAnonOwned: t.isAnonOwned,
                     });
                   }}
+                            initialFolder: folder,
                   onNewDocument={
                     !("nestId" in cur) || (cur.page === "document" && cur.nodeId === "new")
                       ? undefined
-                      : () =>
+                      : (folder?: string) =>
                           setView({
                             page: "document",
                             nestId: cur.nestId,
