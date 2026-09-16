@@ -852,6 +852,14 @@ Allowed for the person who submitted it (withdrawing your own submission) and
 for anyone with approve rights on the node. Anyone else gets 403 — read access
 to the nest alone is not enough.
 
+### GET `/nests/:nestId/external-edits`
+Query: `?refresh=true` to rescan the disk first; `?count=1` to get the total only.
+
+Pending external (on-disk) edits awaiting approval, newest first. The list is computed by scanning every document's suggestions, so `?count=1` saves bytes (`{ "total": n }`), not server time — the UI uses it for the tab badge.
+```json
+{ "entries": [{ "suggestion_id": "...", "document_id": "nodes/foo", "source": "out-of-band-edit", "detected_at": "...", "actor": "..." }], "total": 1 }
+```
+
 ### GET `/nests/:nestId/review-queue`
 Query: `?status=pending&limit=50&offset=0`
 

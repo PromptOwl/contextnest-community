@@ -1781,6 +1781,11 @@ export async function listExternalEdits(nestId: string, refresh = false) {
   );
 }
 
+/** Pending external edits, as a number — the badge read. */
+export async function countExternalEdits(nestId: string) {
+  return request<{ total: number }>(`/nests/${nestId}/external-edits?count=1`);
+}
+
 export async function scanExternalEdits(nestId: string) {
   return request<{ scanned: number; staged: number }>(
     `/nests/${nestId}/external-edits/scan`,
