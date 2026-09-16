@@ -43,6 +43,7 @@ import {
   type NestSidebarView,
 } from "../lib/doc-page";
 import { FolderTree, type KnownFolder } from "./FolderTree";
+import { dashboardPages, type DashboardPage } from "../lib/pages";
 import { cn } from "@/lib/utils";
 
 export interface SidebarNestTarget {
@@ -53,8 +54,8 @@ export interface SidebarNestTarget {
 }
 
 interface Props {
-  /** The nest on screen, or null on the dashboard (every nest listed, none
-   *  expanded). */
+  /** The nest on screen, or null on the dashboard (app pages listed, no
+   *  nests). */
   nestId: string | null;
   /** The open document ("new" while creating one), or null on a nest page. */
   nodeId: string | null;
@@ -68,6 +69,9 @@ interface Props {
   /** Connect this nest to a CLI / MCP client / API caller. */
   onConnect?: () => void;
   onOpenDashboard: () => void;
+  /** Dashboard only: the open page and how to switch. */
+  dashboardTab?: string | null;
+  onOpenDashboardTab?: (id: string) => void;
   /** Omit when the caller can't author in this nest. */
   onNewDocument?: () => void;
 }
@@ -91,9 +95,12 @@ export function DocumentSidebar({
   onOpenView,
   onConnect,
   onOpenDashboard,
+  dashboardTab = null,
+  onOpenDashboardTab,
   onNewDocument,
 }: Props) {
-  const nests = useQuery(reads.nestList());
+  // Only inside a nest — the dashboard rail is app pages, not nests.
+  const nests = useQuery({ ...reads.nestList(), enabled: nestId !== null });
   const { isAdmin, workflowPlaneEnabled } = useAuth();
   // Which nests are unfolded. The current one always is; others open on click
   // and load their tree on demand.
@@ -122,19 +129,21 @@ export function DocumentSidebar({
       data-testid="document-sidebar"
     >
       <div className="flex items-center justify-between gap-1 px-2 pt-2 pb-1">
-        <button
-          type="button"
-          onClick={onOpenDashboard}
-          aria-current={nestId === null ? "page" : undefined}
-          className={cn(
-            "flex min-w-0 items-center gap-1.5 rounded px-1.5 py-1 text-xs font-medium hover:bg-muted hover:text-foreground",
-            nestId === null ? "bg-muted text-foreground" : "text-muted-foreground",
-          )}
-          title="All nests"
-        >
-          <LayoutGrid className="h-3.5 w-3.5" />
-          All nests
-        </button>
+        {/* The way back to the dashboard. On the dashboard itself the Nests
+            row below is that, so only the hide button stays. */}
+        {nestId !== null ? (
+          <button
+            type="button"
+            onClick={onOpenDashboard}
+            className="flex min-w-0 items-center gap-1.5 rounded px-1.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+            title="All nests"
+          >
+            <LayoutGrid className="h-3.5 w-3.5" />
+            All nests
+          </button>
+        ) : (
+          <span />
+        )}
         <button
           type="button"
           onClick={onCollapse}
@@ -148,10 +157,16 @@ export function DocumentSidebar({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
-        {nests.isLoading && (
+        {nestId === null && (
+          <DashboardNav
+            active={dashboardTab}
+            onOpen={onOpenDashboardTab}
+          />
+        )}
+        {nestId !== null && nests.isLoading && (
           <div className="px-2 py-2 text-xs text-muted-foreground">Loading…</div>
         )}
-        {rows.map((n) => {
+        {nestId !== null && rows.map((n) => {
           const open = openNests.has(n.id);
           const current = n.id === nestId;
           return (
@@ -226,6 +241,70 @@ export function DocumentSidebar({
         })}
       </div>
     </nav>
+  );
+}
+
+/** The dashboard's pages, straight from the registry — what its tab strip
+ *  used to be. Same row style as a nest's views so the rail reads as one. */
+function DashboardNav({
+  active,
+  onOpen,
+}: {
+  active: string | null;
+  onOpen?: (id: string) => void;
+}) {
+  return (
+    <div className="mb-1" data-testid="document-sidebar-dashboard">
+      {dashboardPages.map((page) => (
+        <DashboardRow key={page.id} page={page} active={page.id === active} onOpen={onOpen} />
+      ))}
+    </div>
+  );
+}
+
+function DashboardRow({
+  page,
+  active,
+  onOpen,
+}: {
+  page: DashboardPage;
+  active: boolean;
+  onOpen?: (id: string) => void;
+}) {
+  // Badge: a one-row read whose total is the number — the page fetches its
+  // own list when opened. Pages without a badge skip the query.
+  const badge = useQuery({
+    ...(page.badge?.options() ?? { queryKey: ["page-badge", page.id, "none"], queryFn: async () => null }),
+    enabled: !!page.badge,
+  });
+  const count = page.badge ? page.badge.count(badge.data) : 0;
+  const Icon = page.icon;
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen?.(page.id)}
+      aria-current={active ? "page" : undefined}
+      className={cn(
+        "flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left hover:bg-muted",
+        active ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground",
+      )}
+      data-testid={`document-sidebar-dashboard-${page.id}`}
+    >
+      <Icon className="h-3.5 w-3.5 shrink-0" />
+      <span className="truncate">{page.label}</span>
+      {count > 0 && (
+        <span
+          className={cn(
+            "ml-auto rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums",
+            page.badge?.tone === "primary"
+              ? "bg-primary text-primary-foreground"
+              : "bg-muted-foreground/15 text-muted-foreground",
+          )}
+        >
+          {count}
+        </span>
+      )}
+    </button>
   );
 }
 

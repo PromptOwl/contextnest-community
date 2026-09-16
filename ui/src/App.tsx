@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Login } from "./components/Login";
-import { Dashboard } from "./components/Dashboard";
 import { NestView } from "./components/NestView";
 import { DocumentEditor } from "./components/DocumentEditor";
 import { DocumentSidebar } from "./components/DocumentSidebar";
@@ -23,6 +22,8 @@ import { ANON_USER_ID } from "./lib/constants";
 import { navigateGuarded } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
 import { nestIdFromLocation, nestPath } from "./lib/nest-url";
+import { dashboardPage, dashboardPageIdFromPath, dashboardPath, DEFAULT_PAGE_ID } from "./lib/pages";
+import { AppNavProvider, type AppNav } from "./lib/app-nav";
 import {
   deriveNestCaps,
   isReaderHiddenView,
@@ -70,7 +71,11 @@ export interface BreadcrumbEntry {
 }
 
 type View =
-  | { page: "dashboard" }
+  | {
+      page: "dashboard";
+      /** A dashboard page id (its folder under pages/dashboard); omitted = nests. */
+      tab?: string;
+    }
   | {
       page: "nest";
       nestId: string;
@@ -218,7 +223,13 @@ export default function App() {
     error,
     logout,
   } = useAuth();
-  const [view, setViewNow] = useState<View>({ page: "dashboard" });
+  const [view, setViewNow] = useState<View>(() => ({
+    page: "dashboard",
+    // /my-work and /my-drafts open straight onto their page.
+    ...(typeof window !== "undefined"
+      ? { tab: dashboardPageIdFromPath(window.location.pathname) ?? DEFAULT_PAGE_ID }
+      : {}),
+  }));
   // Every view change asks the mounted screen first — an editor holding
   // unsaved edits answers with its leave dialog instead of losing them. The
   // guard is a no-op anywhere that registered none, so call sites are unchanged.
@@ -607,7 +618,9 @@ export default function App() {
       params.delete("tab");
     }
     const qs = params.toString();
-    const next = nestPath(pathNestId) + (qs ? `?${qs}` : "") + window.location.hash;
+    const path =
+      view.page === "dashboard" ? dashboardPath(view.tab) : nestPath(pathNestId);
+    const next = path + (qs ? `?${qs}` : "") + window.location.hash;
     const current =
       window.location.pathname + window.location.search + window.location.hash;
     if (next !== current) {
@@ -699,6 +712,19 @@ export default function App() {
       });
     }
   }, [view, nestCanEdit]);
+
+  // What a dashboard page can do to the app. Pages read it with useAppNav()
+  // instead of props, so App renders every page the same way.
+  const appNav = useMemo<AppNav>(
+    () => ({
+      openNest: (id, name, isOwner, isAnonOwned, isArchived) =>
+        setView({ page: "nest", nestId: id, nestName: name, isOwner, isAnonOwned, isArchived }),
+      openReview: (nestId, nestName, nodeId) =>
+        setView({ page: "document", nestId, nestName, nodeId, isOwner: true, isAnonOwned: true }),
+      manageKeys: () => setView({ page: "api-keys" }),
+    }),
+    [setView],
+  );
 
   // Back out of the nest entirely. Shared by all five nest-scoped pages —
   // their back arrows used to return to the nest page, but the view switcher
@@ -1249,6 +1275,8 @@ export default function App() {
                       : setDocSidebarCollapsed(true)
                   }
                   onOpenDashboard={() => setView({ page: "dashboard" })}
+                  dashboardTab={cur.page === "dashboard" ? (cur.tab ?? DEFAULT_PAGE_ID) : null}
+                  onOpenDashboardTab={(tab) => setView({ page: "dashboard", tab })}
                   onOpenNest={(t) =>
                     setView({
                       page: "nest",
@@ -1307,31 +1335,16 @@ export default function App() {
         })()}
         <div className={withSidebar ? "min-w-0 flex-1" : ""}>
         <div className={withSidebar && !isDocPage ? `${pageWidth} mx-auto px-4 py-4` : ""}>
-        {view.page === "dashboard" && (
-          <Dashboard
-            onManageKeys={() => setView({ page: "api-keys" })}
-            onSelectNest={(id, name, isOwner, isAnonOwned, isArchived) =>
-              setView({
-                page: "nest",
-                nestId: id,
-                nestName: name,
-                isOwner,
-                isAnonOwned,
-                isArchived,
-              })
-            }
-            onOpenReview={(nestId, nestName, nodeId) =>
-              setView({
-                page: "document",
-                nestId,
-                nestName,
-                nodeId,
-                isOwner: true,
-                isAnonOwned: true,
-              })
-            }
-          />
-        )}
+        {view.page === "dashboard" && (() => {
+          const Page = dashboardPage(view.tab).Component;
+          return (
+            <AppNavProvider value={appNav}>
+              <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+                <Page />
+              </Suspense>
+            </AppNavProvider>
+          );
+        })()}
         {view.page === "nest" && (
           <NestView
             nestId={view.nestId}
