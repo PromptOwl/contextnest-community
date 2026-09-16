@@ -317,8 +317,10 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       created_at TEXT NOT NULL DEFAULT ${NOW},
       PRIMARY KEY (nest_id, node_id, suggestion_id)
     );
-    CREATE INDEX IF NOT EXISTS idx_node_suggestions_nest_detected
-      ON node_suggestions(nest_id, detected_at DESC);
+    -- idx_node_suggestions_nest_detected is created after the 043 parity
+    -- check below: a pre-043 database already has node_suggestions without
+    -- detected_at, so CREATE TABLE IF NOT EXISTS is a no-op and indexing the
+    -- column here aborts the whole bootstrap before the rebuild can run.
 
     -- sessions (migration 003).
     CREATE TABLE IF NOT EXISTS sessions (
@@ -804,11 +806,14 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
         created_at TEXT NOT NULL DEFAULT ${NOW},
         PRIMARY KEY (nest_id, node_id, suggestion_id)
       );
-      CREATE INDEX IF NOT EXISTS idx_node_suggestions_nest_detected
-        ON node_suggestions(nest_id, detected_at DESC);
       UPDATE nests SET index_synced_at = NULL;
     `);
   }
+  // Both shapes (fresh bootstrap and the rebuild above) now carry detected_at.
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_node_suggestions_nest_detected
+      ON node_suggestions(nest_id, detected_at DESC);
+  `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(
