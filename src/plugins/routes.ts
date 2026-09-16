@@ -248,6 +248,8 @@ pluginNestRoutes.delete("/:name", requirePlugins, async (c) => {
   if (!row) throw new NotFoundError("Plugin is not configured on this nest");
   const by = await resolveCallerEmail(c.get("userId"));
   await putSecrets(nestId, plugin.manifest.name, Object.fromEntries(secretSettingKeys(plugin).map((k) => [k, ""])), by);
+  // A connected account is a secret too — the refresh token must not outlive the row.
+  if (plugin.manifest.oauth) await disconnect(nestId, plugin, by);
   const { getDb } = await import("../db/client.js");
   await getDb().run("DELETE FROM nest_plugins WHERE nest_id = ? AND plugin = ?", [nestId, plugin.manifest.name]);
   return c.json({ deleted: true });

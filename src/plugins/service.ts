@@ -79,6 +79,10 @@ function makeHost(nestId: string, plugin: NestPlugin) {
 
 /** (nest, plugin) pairs with a pull in flight — one at a time, so a slow pull
  *  is never re-fired by the next tick or a click and races itself on the cursor. */
+// Per-process: on a multi-instance Postgres deployment two servers can each
+// accept a run for the same (nest, plugin); the writer's content-hash rule
+// keeps that safe (the second lands as unchanged/conflict), just not
+// single-flight. A DB-row lock is the upgrade if that topology becomes real.
 const inFlight = new Set<string>();
 export const isPullInFlight = (nestId: string, name: string) => inFlight.has(`${nestId}:${name}`);
 

@@ -175,6 +175,21 @@ describe("plugin OAuth connect", () => {
     expect(list.data.plugins.find((x: any) => x.name === "oauthy").oauth.connected).toBe(false);
   });
 
+  it("removing the plugin from the nest forgets the connection too — a fresh configure needs a fresh connect", async () => {
+    const start = await app.request(`/nests/${nestId}/plugins/oauthy/connect`, { headers: { authorization: `Bearer ${editor.apiKey}` }, redirect: "manual" });
+    const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
+    await app.request(`/auth/plugins/callback?code=good-code&state=${state}`, { redirect: "manual" });
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/plugins`, undefined, editor.apiKey)).data.plugins.find((x: any) => x.name === "oauthy").oauth.connected).toBe(true);
+    expect((await jsonRequest(app, "DELETE", `/nests/${nestId}/plugins/oauthy`, undefined, editor.apiKey)).status).toBe(200);
+    const { getDb } = await import("../src/db/client.js");
+    const rows = await getDb().all<{ key: string; value: string }>("SELECT key, value FROM nest_env WHERE nest_id = ? AND key LIKE 'PLUGIN__OAUTHY__%'", [nestId]);
+    expect(rows.filter((r) => r.value)).toEqual([]);
+    await jsonRequest(app, "PUT", `/nests/${nestId}/plugins/oauthy`, { enabled: true, settings: { folder: "x" } }, editor.apiKey);
+    const again = await jsonRequest(app, "GET", `/nests/${nestId}/plugins`, undefined, editor.apiKey);
+    expect(again.data.plugins.find((x: any) => x.name === "oauthy").oauth.connected).toBe(false);
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/plugins/oauthy/run`, {}, editor.apiKey)).status).toBe(409);
+  });
+
   it("with no OAuth client configured for the provider, connect is a 409 that names the setting", async () => {
     const saved = process.env.PLUGIN_OAUTH_OAUTHY_CLIENT_ID;
     delete process.env.PLUGIN_OAUTH_OAUTHY_CLIENT_ID;
