@@ -282,6 +282,9 @@ interface MarkdownEditorProps {
    *  only appears while the editor has focus; inline formatting comes from
    *  the selection bubble. */
   variant?: "boxed" | "page";
+  /** Rendered at the toolbar's right end — the document page puts its
+   *  document-level switches (source view, Turn into) there. */
+  toolbarEnd?: React.ReactNode;
 }
 
 export const MarkdownEditor = forwardRef<
@@ -304,6 +307,7 @@ export const MarkdownEditor = forwardRef<
     className,
     autofocus = "end",
     variant = "boxed",
+    toolbarEnd,
   }: MarkdownEditorProps,
   ref: ForwardedRef<MarkdownEditorHandle>,
 ) {
@@ -315,7 +319,6 @@ export const MarkdownEditor = forwardRef<
   const [previewing, setPreviewing] = useState(false);
   // Page mode shows the block toolbar only while writing. Toolbar buttons
   // preventDefault on mousedown, so clicking one never blurs the editor.
-  const [focused, setFocused] = useState(false);
   const isPage = variant === "page";
   const [previewMarkdown, setPreviewMarkdown] = useState("");
   const qc = useQueryClient();
@@ -799,19 +802,6 @@ export const MarkdownEditor = forwardRef<
       editor.off("update", update);
     };
   }, [editor, effectiveEditable]);
-
-  // Focus tracking for the page variant's show-while-writing toolbar.
-  useEffect(() => {
-    if (!editor) return;
-    const on = () => setFocused(true);
-    const off = () => setFocused(false);
-    editor.on("focus", on);
-    editor.on("blur", off);
-    return () => {
-      editor.off("focus", on);
-      editor.off("blur", off);
-    };
-  }, [editor]);
 
   // Load the nest's node list once each time the popup opens (not per
   // keystroke). Re-fetching on open keeps the list fresh (docs created
@@ -1316,23 +1306,18 @@ export const MarkdownEditor = forwardRef<
       )}
       data-variant={variant}
     >
-      {/* Page mode: the toolbar is a writing tool, so it appears with the
-          caret and goes away with it — the document reads as prose the rest
-          of the time. It sticks under the document top bar (h-12). */}
+      {/* Page mode: the toolbar is always there in edit mode — it is what says
+          "this is an editor". It sticks a little under the document top bar
+          (h-12) so the two bars read as separate surfaces while scrolling. */}
       {editable && (
         <div
           className={cn(
             "sticky z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/75",
             isPage
-              ? "top-12 -mx-2 mb-2 rounded-md border shadow-sm transition-opacity"
+              ? "top-14 -mx-2 mb-3 rounded-md border shadow-sm"
               : "top-0 border-b",
-            // Page mode keeps the toolbar's box while hidden so focusing the
-            // body doesn't shove the text down by a toolbar's height.
-            isPage && !(focused || previewing || searchOpen) && "invisible",
           )}
-          aria-hidden={isPage && !(focused || previewing || searchOpen)}
           data-testid="markdown-editor-toolbar"
-          data-visible={!isPage || focused || previewing || searchOpen ? "true" : "false"}
         >
           <Toolbar
             editor={editor}
@@ -1351,6 +1336,7 @@ export const MarkdownEditor = forwardRef<
                 return !p;
               })
             }
+            end={toolbarEnd}
           />
         </div>
       )}
@@ -1360,7 +1346,7 @@ export const MarkdownEditor = forwardRef<
         <div
           className={cn(
             "sticky z-30 flex flex-wrap items-center gap-1 border-b bg-background/95 px-2 py-1 backdrop-blur",
-            isPage ? "top-[6.25rem]" : "top-0",
+            isPage ? "top-[6.75rem]" : "top-0",
           )}
         >
           <Search className="h-3.5 w-3.5 text-muted-foreground" />
@@ -2046,6 +2032,7 @@ function Toolbar({
   uploading,
   previewing,
   onTogglePreview,
+  end,
 }: {
   editor: Editor;
   onLink: () => void;
@@ -2056,6 +2043,7 @@ function Toolbar({
   uploading: boolean;
   previewing: boolean;
   onTogglePreview: () => void;
+  end?: React.ReactNode;
 }) {
   const roving = useRovingFocus<HTMLDivElement>();
   // Hidden file input driven by the "Insert table from CSV" toolbar button.
@@ -2318,10 +2306,13 @@ function Toolbar({
         <Eye className="h-3.5 w-3.5" />
       </ToolbarButton>
 
-      <div className="ml-auto text-xs text-muted-foreground hidden sm:flex items-center gap-2 px-1">
-        <span>[[wiki]]</span>
-        <span>@mention</span>
-        <span>[ ] task</span>
+      <div className="ml-auto flex items-center gap-1">
+        <div className="hidden items-center gap-2 px-1 text-xs text-muted-foreground lg:flex">
+          <span>[[wiki]]</span>
+          <span>@mention</span>
+          <span>[ ] task</span>
+        </div>
+        {end}
       </div>
     </div>
   );
