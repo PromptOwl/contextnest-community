@@ -1,10 +1,11 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazyChunk } from "./lib/lazy-chunk";
 import type React from "react";
 import { Login } from "./components/Login";
 // Page-sized components load on first use — one chunk each — so the shell
 // and the dashboard do not carry the editor or the nest page up front.
 const lazyNamed = <T extends Record<string, any>, K extends keyof T>(load: () => Promise<T>, name: K) =>
-  lazy(() => load().then((m) => ({ default: m[name] as React.ComponentType<any> })));
+  lazyChunk(() => load().then((m) => ({ default: m[name] as React.ComponentType<any> })));
 const NestView = lazyNamed(() => import("./components/NestView"), "NestView") as unknown as typeof import("./components/NestView").NestView;
 const DocumentEditor = lazyNamed(() => import("./components/DocumentEditor"), "DocumentEditor") as unknown as typeof import("./components/DocumentEditor").DocumentEditor;
 import { DocumentSidebar } from "./components/DocumentSidebar";
@@ -1046,8 +1047,9 @@ export default function App() {
     <div className={withSidebar ? "flex min-h-screen items-stretch bg-background" : "min-h-screen bg-background"}>
       {/* The sidebar is a full-height column beside the whole shell — header
           included — with the brand at its top, so header and rail read as one
-          surface. The unreachable-nest screen keeps the plain shell. */}
-      {withSidebar && deepLinkProbe.status !== "unreachable" && (
+          surface. It stays on the unreachable-nest screen too — that is exactly
+          where the user needs a way back. */}
+      {withSidebar && (
         <>
         {withSidebar && docSidebarDrawer && (
           <button
