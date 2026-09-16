@@ -1952,6 +1952,7 @@ export function NestView({
         title={
           canManage ? (
             <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1">
               <input
                 value={editableName}
                 onChange={(e) => {
@@ -1977,6 +1978,28 @@ export function NestView({
                 title="Click to rename — saved automatically"
                 className="w-full min-w-0 truncate text-xl font-semibold bg-transparent outline-none border-b border-transparent hover:border-border focus:border-primary px-1 -ml-1 rounded-sm"
               />
+              {/* Same rename the overflow menu used to offer (name + description
+                  dialog), beside the name so it is discoverable; the input itself
+                  still edits inline. !loading: the description only lands with
+                  fetchData, so opening earlier would prefill it empty. */}
+              {!loading && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    // Flush a pending inline rename first so the dialog primes
+                    // from the latest text instead of racing the debounce.
+                    flushRename();
+                    setShowRename(true);
+                  }}
+                  className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  title="Rename nest"
+                  aria-label="Rename nest"
+                  data-testid="nest-rename"
+                >
+                  <Pencil className="h-4 w-4" />
+                </button>
+              )}
+              </div>
               {renameError && (
                 <p
                   role="alert"
@@ -2184,39 +2207,6 @@ export function NestView({
                   e.target.value = "";
                 }}
               />
-              <DropdownMenu modal={false}>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" size="sm" data-testid="nest-import-files">
-                    <Upload className="h-3.5 w-3.5 mr-1.5" />
-                    Import
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onSelect={() => importInputRef.current?.click()}>
-                    Files (.md / .html)
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => importDirRef.current?.click()}>
-                    Whole vault (folder, keeps structure)
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-              <Button
-                size="sm"
-                // Default into the folder the Documents tab is scoped to, so a
-                // doc lands where the user is looking (CU-wdqcq0247w). The
-                // editor's folder picker still lets them change it.
-                onClick={() =>
-                  onOpenDocument("new", {
-                    folder:
-                      activeTab === "documents" && folderFilter
-                        ? folderFilter
-                        : undefined,
-                  })
-                }
-              >
-                <Plus className="h-3.5 w-3.5 mr-1.5" />
-                New Document
-              </Button>
             </>
           )}
           {/* Secondary actions collapsed into an overflow menu at the end.
@@ -2225,24 +2215,6 @@ export function NestView({
               destructive, write+admin gated. */}
           {(() => {
             const actions: OverflowAction[] = [];
-            // Same tier as the inline header rename (owner/nest-admin —
-            // matches the server's PATCH /nests/:nestId guard); the dialog
-            // additionally covers the description. Also gated on !loading:
-            // isOwner is known synchronously (prop) but nestDescription only
-            // lands with fetchData, so opening the dialog earlier would
-            // prefill an empty description for a nest that has one.
-            if (!isReadOnly && canManage && !loading)
-              actions.push({
-                label: "Rename nest",
-                icon: Pencil,
-                onSelect: () => {
-                  // Flush any pending inline header rename first so the
-                  // dialog primes from (and the server holds) the user's
-                  // latest text instead of racing the 1200ms debounce.
-                  flushRename();
-                  setShowRename(true);
-                },
-              });
             if (!isReadOnly && canManageGovernance)
               actions.push({
                 label: "Nest settings",
@@ -2466,16 +2438,53 @@ export function NestView({
             )}
           </TabsList>
           {!isReadOnly && canEditDocs && (
+            <div className="ml-auto flex shrink-0 items-center gap-2">
             <Button
               variant="outline"
               size="sm"
-              className="ml-auto shrink-0 text-muted-foreground"
+              className="text-muted-foreground"
               onClick={() => setShowNewFolder(true)}
               title="Create a folder (nest with parent/child)"
             >
               <FolderPlus className="h-4 w-4 mr-1.5" />
               New Folder
             </Button>
+            {/* Import and New Document act on the content area too, so they
+                sit with New Folder rather than in the nest header. */}
+              <DropdownMenu modal={false}>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" data-testid="nest-import-files">
+                    <Upload className="h-3.5 w-3.5 mr-1.5" />
+                    Import
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => importInputRef.current?.click()}>
+                    Files (.md / .html)
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => importDirRef.current?.click()}>
+                    Whole vault (folder, keeps structure)
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <Button
+                size="sm"
+                // Default into the folder the Documents tab is scoped to, so a
+                // doc lands where the user is looking (CU-wdqcq0247w). The
+                // editor's folder picker still lets them change it.
+                onClick={() =>
+                  onOpenDocument("new", {
+                    folder:
+                      activeTab === "documents" && folderFilter
+                        ? folderFilter
+                        : undefined,
+                  })
+                }
+              >
+                <Plus className="h-3.5 w-3.5 mr-1.5" />
+                New Document
+              </Button>
+            </div>
           )}
         </div>
 
