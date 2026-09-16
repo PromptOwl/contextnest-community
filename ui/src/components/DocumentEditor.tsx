@@ -15,6 +15,7 @@ import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { setNavGuard, bypassNavGuard } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { nestPath } from "../lib/nest-url";
+import { useBreadcrumb } from "../lib/breadcrumb";
 import {
   clampTagInput,
   newTags,
@@ -286,6 +287,8 @@ export function DocumentEditor({
   }>;
 
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
+  // Header breadcrumb: Home › nest › this document (App adds the front).
+  useBreadcrumb([{ label: isNew ? "New document" : title.trim() || "Untitled" }]);
   // Folder path under nodes/ for new docs (e.g. "gtm/deals"). Create-only:
   // moving an existing doc is a rename with backlink fallout, handled elsewhere.
   const [folder, setFolder] = useState(initialFolder ?? "");

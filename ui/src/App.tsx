@@ -24,13 +24,14 @@ import { track } from "./lib/analytics";
 import { nestIdFromLocation, nestPath } from "./lib/nest-url";
 import { dashboardPage, dashboardPageIdFromPath, dashboardPath, DEFAULT_PAGE_ID } from "./lib/pages";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
+import { useBreadcrumbTail, type Crumb } from "./lib/breadcrumb";
 import {
   deriveNestCaps,
   isReaderHiddenView,
   isViewBlockedInReaderMode,
 } from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText, Keyboard, PanelLeft } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText, Keyboard, PanelLeft, ChevronRight } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
 import { AgentDocsPage } from "./components/AgentDocsPage";
 import { ActivityTracePage } from "./components/ActivityTracePage";
@@ -713,6 +714,47 @@ export default function App() {
     }
   }, [view, nestCanEdit]);
 
+  // Header breadcrumb. App owns the base — Home, and the nest when inside
+  // one — from the view; the page owns the tail through useBreadcrumb()
+  // (the document page passes its title). A page that set nothing gets an
+  // automatic leaf: the registry label on the dashboard, the view's name in
+  // a nest. Only the dashboard's root page has no "Home" in front of it.
+  const pageTail = useBreadcrumbTail();
+  const crumbs = useMemo<Crumb[]>(() => {
+    const home: Crumb = { label: "Home", go: () => setView({ page: "dashboard" }) };
+    if (view.page === "dashboard") {
+      const page = dashboardPage(view.tab);
+      if (pageTail.length) return [home, ...pageTail];
+      return page.id === DEFAULT_PAGE_ID ? [{ label: page.label }] : [home, { label: page.label }];
+    }
+    if ("nestId" in view) {
+      const nest: Crumb = {
+        label: view.nestName,
+        go: () =>
+          setView({
+            page: "nest",
+            nestId: view.nestId,
+            nestName: view.nestName,
+            isOwner: view.isOwner,
+            isAnonOwned: view.isAnonOwned,
+            tab: "overview",
+          }),
+      };
+      if (pageTail.length) return [home, nest, ...pageTail];
+      const leaf =
+        view.page === "nest"
+          ? view.tab === "review" ? "Review queue" : view.tab === "documents" ? "Documents" : "Overview"
+          : view.page === "board" ? "Board"
+          : view.page === "ontology-graph" ? "Graph"
+          : view.page === "definitions" ? "Definitions"
+          : view.page === "workflows" ? "Workflows"
+          : view.page === "document" ? "Document"
+          : "Trace";
+      return [home, nest, { label: leaf }];
+    }
+    return pageTail.length ? [home, ...pageTail] : [];
+  }, [view, setView, pageTail]);
+
   // What a dashboard page can do to the app. Pages read it with useAppNav()
   // instead of props, so App renders every page the same way.
   const appNav = useMemo<AppNav>(
@@ -1152,6 +1194,23 @@ export default function App() {
               Community
             </Badge>
           </button>
+          {withSidebar && crumbs.length > 0 && (
+            <nav aria-label="Breadcrumb" className="ml-1 flex min-w-0 items-center gap-1 text-sm" data-testid="header-breadcrumb">
+              {crumbs.map((c, i) => {
+                const last = i === crumbs.length - 1;
+                return (
+                  <span key={i} className="flex min-w-0 items-center gap-1">
+                    {i > 0 && <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" aria-hidden />}
+                    {last || !c.go ? (
+                      <span className={last ? "truncate text-base font-semibold" : "truncate text-muted-foreground"} aria-current={last ? "page" : undefined}>{c.label}</span>
+                    ) : (
+                      <button type="button" onClick={c.go} className="truncate text-muted-foreground hover:text-foreground">{c.label}</button>
+                    )}
+                  </span>
+                );
+              })}
+            </nav>
+          )}
           </div>
 
           <div className="flex items-center gap-2">

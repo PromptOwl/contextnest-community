@@ -8,7 +8,7 @@ import { reads } from "../../../lib/queries";
 import { useAuth } from "../../../auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
 import {
-  Trash2, Loader2, Pencil, CheckCircle2, Folder, ChevronRight, ChevronLeft,
+  Trash2, Loader2, CheckCircle2, Folder, ChevronRight, ChevronLeft,
 } from "lucide-react";
 import { toast } from "sonner";
 import { relTime } from "../../../lib/dates";
@@ -207,15 +207,6 @@ export default function MyDraftsPage() {
             appeared in no queue at all and was only findable by search. */}
       <div>
           <div>
-            <div className="flex items-center gap-2 mb-2">
-              <Pencil className="h-5 w-5 text-muted-foreground" />
-              <h2 className="text-xl font-semibold">My Drafts</h2>
-              {(draftsPage?.total ?? 0) > 0 && (
-                <span className="rounded-full bg-muted text-muted-foreground text-xs font-semibold px-2 py-0.5">
-                  {draftsPage!.total}
-                </span>
-              )}
-            </div>
             {/* Find and order the list. Both run on the server: the list spans
                 pages, so filtering the page in hand would quietly search a
                 subset. */}
