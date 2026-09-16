@@ -19,6 +19,7 @@ import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
 import { navigateGuarded } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
+import { nestIdFromLocation, nestPath } from "./lib/nest-url";
 import {
   deriveNestCaps,
   isReaderHiddenView,
@@ -89,6 +90,9 @@ type View =
        *  read-only — the shell hides the board/graph/definitions tabs and
        *  NestView renders the stripped ReaderView. */
       readerMode?: boolean;
+      /** Reader mode: the page open in the reader, mirrored to ?doc= so a
+       *  public page is a shareable link that lands inside the docs layout. */
+      readerDoc?: string;
     }
   | {
       page: "document";
@@ -225,7 +229,8 @@ export default function App() {
     track("$pageview", { page: view.page });
   }, [view.page]);
   const [showAdminLogin, setShowAdminLogin] = useState(false);
-  // ?nest=<id> deep-link probe; 200 → skip Login, mount NestView.
+  // /nest/<id> (or legacy ?nest=<id>) deep-link probe; 200 → skip Login,
+  // mount NestView.
   // "missing" is "no ?nest to open"; "unreachable" is "there was one and it
   // didn't resolve" — a deleted nest, a typo'd id, or access that was revoked.
   // They render differently: only the second one owes the user an explanation.
@@ -240,9 +245,7 @@ export default function App() {
     | { status: "unreachable"; nestId: string }
   >(() => {
     if (typeof window === "undefined") return { status: "idle" };
-    const params = new URLSearchParams(window.location.search);
-    const nestId = params.get("nest");
-    return nestId ? { status: "loading" } : { status: "idle" };
+    return nestIdFromLocation() ? { status: "loading" } : { status: "idle" };
   });
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(
     null,
@@ -385,7 +388,7 @@ export default function App() {
     if (deepLinkProbe.status !== "loading") return;
     const params = new URLSearchParams(window.location.search);
     // A retry re-probes the id it failed on, which is no longer in the URL.
-    const nestId = deepLinkProbe.nestId ?? params.get("nest");
+    const nestId = deepLinkProbe.nestId ?? nestIdFromLocation();
     if (!nestId) {
       setDeepLinkProbe({ status: "missing" });
       return;
@@ -427,6 +430,20 @@ export default function App() {
         // ?doc=<nodeId> → open that document directly (the doc view's own
         // load surfaces a not-found error if the id is stale).
         const docId = params.get("doc");
+        // In reader mode a doc link opens INSIDE the docs layout (nav +
+        // outline), not the bare document page a collaborator would get.
+        if (docId && docId !== "new" && readerMode) {
+          setView({
+            page: "nest",
+            nestId: nest.id,
+            nestName: nest.name,
+            isOwner,
+            isAnonOwned: false,
+            readerMode,
+            readerDoc: docId,
+          });
+          return;
+        }
         if (docId && docId !== "new") {
           setView({
             page: "document",
@@ -513,8 +530,12 @@ export default function App() {
     // any link copied off that screen — land back on the same dead end. The id
     // rides in the probe state instead, so "Try again" still has one.
     const params = new URLSearchParams(window.location.search);
+    // The nest rides in the path (/nest/<id>), never the query — a legacy
+    // ?nest= that got us here is dropped once the path form is written.
+    params.delete("nest");
+    let pathNestId: string | null = null;
     if (view.page === "document") {
-      params.set("nest", view.nestId);
+      pathNestId = view.nestId;
       if (view.nodeId && view.nodeId !== "new") params.set("doc", view.nodeId);
       else params.delete("doc");
       // Keep the focused-thread deep link shareable; drop it otherwise so a
@@ -524,8 +545,9 @@ export default function App() {
       params.delete("view");
       params.delete("tab");
     } else if (view.page === "nest") {
-      params.set("nest", view.nestId);
-      params.delete("doc");
+      pathNestId = view.nestId;
+      if (view.readerMode && view.readerDoc) params.set("doc", view.readerDoc);
+      else params.delete("doc");
       params.delete("thread");
       params.delete("view");
       // Overview is the default, so it stays out of the URL — a plain ?nest
@@ -541,7 +563,7 @@ export default function App() {
       view.page === "board" ||
       view.page === "nest-trace"
     ) {
-      params.set("nest", view.nestId);
+      pathNestId = view.nestId;
       params.delete("doc");
       params.delete("thread");
       params.delete("tab");
@@ -558,15 +580,13 @@ export default function App() {
                 : "trace",
       );
     } else {
-      params.delete("nest");
       params.delete("doc");
       params.delete("thread");
       params.delete("view");
       params.delete("tab");
     }
     const qs = params.toString();
-    const next =
-      window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
+    const next = nestPath(pathNestId) + (qs ? `?${qs}` : "") + window.location.hash;
     const current =
       window.location.pathname + window.location.search + window.location.hash;
     if (next !== current) {
@@ -661,18 +681,16 @@ export default function App() {
   // their back arrows used to return to the nest page, but the view switcher
   // makes that a tab click, so back now means "leave this nest".
   const leaveNest = useCallback(() => {
-    // Drop ?nest from URL so refresh doesn't re-enter the nest.
-    if (typeof window !== "undefined") {
+    // Drop the nest from the URL so refresh doesn't re-enter it.
+    if (typeof window !== "undefined" && nestIdFromLocation()) {
       const params = new URLSearchParams(window.location.search);
-      if (params.has("nest")) {
-        params.delete("nest");
-        const qs = params.toString();
-        window.history.replaceState(
-          {},
-          "",
-          window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
-        );
-      }
+      params.delete("nest");
+      const qs = params.toString();
+      window.history.replaceState(
+        {},
+        "",
+        nestPath(null) + (qs ? `?${qs}` : "") + window.location.hash,
+      );
     }
     // Unauth → bounce to Login (Dashboard would 401).
     if (!authenticated && authMode === "key") {
@@ -1028,7 +1046,11 @@ export default function App() {
             single bottom border, rather than two stacked bars.
             Nest context is read straight off the view: every page in
             NEST_VIEWS carries the same nestId/nestName/isOwner/isAnonOwned. */}
-        {isNestScoped(view) && (
+        {/* Reader mode leaves a lone "Nest" tab once the authoring views are
+            filtered out — a one-tab strip is chrome, not navigation. readerMode
+            already implies a read-only caller (deriveNestCaps), so the
+            workflows tab can never join it. */}
+        {isNestScoped(view) && !readerMode && (
           <div className={`${shellWidth} mx-auto px-4 py-2 overflow-x-auto`}>
             <Tabs
               value={view.page}
@@ -1152,6 +1174,8 @@ export default function App() {
             initialTags={view.initialTags}
             initialFolder={view.initialFolder}
             initialTab={view.tab}
+            initialDoc={view.readerDoc ?? null}
+            onReaderDocChange={(nodeId) => setView({ ...view, readerDoc: nodeId ?? undefined })}
             onManageKeys={() => setView({ page: "api-keys" })}
             onTabChange={(tab) => setView({ ...view, tab })}
             onBack={leaveNest}
