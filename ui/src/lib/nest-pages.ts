@@ -15,7 +15,8 @@
  * state; a new page still needs its View member and a render branch is not
  * needed — App renders whichever registry page matches view.page.
  */
-import { lazy, type ComponentType, type LazyExoticComponent } from "react";
+import type { ComponentType, LazyExoticComponent } from "react";
+import { lazyChunk } from "./lazy-chunk";
 import type { LucideIcon } from "lucide-react";
 
 export interface NestPageCaps {
@@ -58,7 +59,7 @@ export const nestPages: NestPage[] = Object.entries(metas)
     const id = idOf(file);
     const load = loaders[file.replace(/meta\.ts$/, "page.tsx")];
     if (!load) throw new Error(`pages/nest/${id}: meta.ts has no page.tsx beside it`);
-    return { id, ...mod.meta, Component: lazy(load) };
+    return { id, ...mod.meta, Component: lazyChunk(load) };
   })
   .sort((a, b) => a.order - b.order);
 

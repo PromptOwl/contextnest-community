@@ -2,7 +2,8 @@
  * NestView — governance dashboard for a single nest.
  * Uses ported PromptOwl components for the UI, wired to REST API.
  */
-import { Suspense, lazy, useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { Suspense, useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { lazyChunk } from "../lib/lazy-chunk";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
@@ -48,12 +49,12 @@ import {
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 // Each tab is its own chunk, loaded when first opened.
-const ExternalEditsTab = lazy(() => import("./nest/ExternalEditsTab").then((m) => ({ default: m.ExternalEditsTab })));
-const StewardsTab = lazy(() => import("./nest/StewardsTab").then((m) => ({ default: m.StewardsTab })));
-const CollaboratorsTab = lazy(() => import("./nest/CollaboratorsTab").then((m) => ({ default: m.CollaboratorsTab })));
-const ReviewTab = lazy(() => import("./nest/ReviewTab").then((m) => ({ default: m.ReviewTab })));
-const OverviewTab = lazy(() => import("./nest/OverviewTab").then((m) => ({ default: m.OverviewTab })));
-const DocumentsTab = lazy(() => import("./nest/DocumentsTab").then((m) => ({ default: m.DocumentsTab })));
+const ExternalEditsTab = lazyChunk(() => import("./nest/ExternalEditsTab").then((m) => ({ default: m.ExternalEditsTab })));
+const StewardsTab = lazyChunk(() => import("./nest/StewardsTab").then((m) => ({ default: m.StewardsTab })));
+const CollaboratorsTab = lazyChunk(() => import("./nest/CollaboratorsTab").then((m) => ({ default: m.CollaboratorsTab })));
+const ReviewTab = lazyChunk(() => import("./nest/ReviewTab").then((m) => ({ default: m.ReviewTab })));
+const OverviewTab = lazyChunk(() => import("./nest/OverviewTab").then((m) => ({ default: m.OverviewTab })));
+const DocumentsTab = lazyChunk(() => import("./nest/DocumentsTab").then((m) => ({ default: m.DocumentsTab })));
 import { useFeedComments } from "./nest/feed-query";
 import { Button } from "@/components/ui/button";
 import {

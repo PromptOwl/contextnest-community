@@ -10,7 +10,8 @@
  * folder name is the page id. Pages read navigation from `useAppNav()`, not
  * props, so App renders every page the same way.
  */
-import { lazy, type ComponentType, type LazyExoticComponent } from "react";
+import type { ComponentType, LazyExoticComponent } from "react";
+import { lazyChunk } from "./lazy-chunk";
 import type { LucideIcon } from "lucide-react";
 
 export interface PageBadge {
@@ -48,7 +49,7 @@ export const dashboardPages: DashboardPage[] = Object.entries(metas)
     const id = idOf(file);
     const load = loaders[file.replace(/meta\.ts$/, "page.tsx")];
     if (!load) throw new Error(`pages/dashboard/${id}: meta.ts has no page.tsx beside it`);
-    return { id, ...mod.meta, Component: lazy(load) };
+    return { id, ...mod.meta, Component: lazyChunk(load) };
   })
   .sort((a, b) => a.order - b.order);
 
