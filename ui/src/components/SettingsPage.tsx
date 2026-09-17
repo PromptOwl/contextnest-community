@@ -1690,7 +1690,7 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                                   : "border-muted-foreground/20 text-muted-foreground"
                               }
                             >
-                              {site.is_active ? "Active" : "Inactive"}
+                              {site.is_active ? "Enabled" : "Disabled"}
                             </Badge>
                           </div>
                           <div className="text-xs text-muted-foreground truncate">
@@ -1701,7 +1701,8 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                           <Switch
                             checked={site.is_active}
                             onCheckedChange={() => toggleSiteActive(site)}
-                            aria-label={`Toggle ${site.name} active`}
+                            aria-label={`Enable ${site.name}`}
+                            title="Enabled sites can sign visitors in with an SSO ticket. This is the admin switch, not a reachability check."
                           />
                           <Button
                             variant="outline"
