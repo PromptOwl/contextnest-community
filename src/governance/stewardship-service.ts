@@ -429,7 +429,7 @@ export interface CreatorStewardResult {
 
 /**
  * Creator reviews their documents: make the author of a new document its
- * reviewer. Called from createNode BEFORE the document is written, because
+ * reviewer. Called from createNodeOnce BEFORE the document is written, because
  * the create publishes v1 on the strength of this row — the row has to exist
  * before that decision, and a failure here must fail the create rather than
  * leave a document published on a false premise. The caller compensates with
