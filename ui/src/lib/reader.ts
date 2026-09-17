@@ -141,3 +141,6 @@ export function foldersCoveredBy(nodes: { id?: string }[]): Set<string> {
  */
 export const READER_SIDE_COLUMN_CLASS =
   "lg:sticky lg:top-6 lg:self-start lg:h-[calc(100vh-5rem)] lg:overflow-y-auto";
+
+/** The card every reader panel sits in — the app's standard card surface. */
+export const READER_CARD_CLASS = "rounded-lg border border-border bg-card p-4";

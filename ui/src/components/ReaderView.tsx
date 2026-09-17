@@ -1,21 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, ChevronDown, Menu } from "lucide-react";
+import { ChevronRight, ChevronDown, Menu, BookOpen, Folder, FolderOpen, FileText } from "lucide-react";
 import { FolderTree } from "./FolderTree";
 import { DocumentViewer } from "./DocumentViewer";
 import * as api from "../lib/api";
 import { conventionKey, isHomeNode } from "@/lib/nest-caps";
 import { extractHeadings } from "@/lib/toc";
-import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle, orderWithinFolder, ancestorsOf, READER_SIDE_COLUMN_CLASS } from "@/lib/reader";
+import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle, orderWithinFolder, ancestorsOf, READER_SIDE_COLUMN_CLASS, READER_CARD_CLASS } from "@/lib/reader";
 import { relTime } from "@/lib/dates";
 
 /**
  * Public Docs Reader Mode — the read-only face of a nest.
  *
- * A docs site, not a dashboard: one page-scrolled article at reading width,
- * a folder nav on the left that stays put, an outline of the open page on
- * the right, previous/next at the end. There are no boxes — the nav and the
- * outline are set off from the article by a single hairline each, because
- * that rule is the only structure the page has to encode.
+ * A docs site, not a dashboard: one article at reading width, a folder nav
+ * on the left that stays put, an outline of the open page on the right,
+ * previous/next at the end. Three cards on the app's usual card surface —
+ * the same frame the rest of the nest UI uses — so the reader reads as part
+ * of the product rather than a bare page.
  *
  * What is specific to THIS reader: every page carries its governance under
  * the title — version, status, when it changed. A nest is versioned,
@@ -189,6 +189,7 @@ export function ReaderView({
           className="flex w-full items-center gap-1.5 py-1.5 pr-2 text-left text-[13px] font-medium text-foreground/80 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-sm"
         >
           {collapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+          {collapsed ? <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <FolderOpen className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
           <span className="truncate">{sectionLabel(node.path)}</span>
           {loadingFolders?.has(node.path) && <span className="ml-auto text-[11px] text-muted-foreground">loading</span>}
         </button>
@@ -201,12 +202,13 @@ export function ReaderView({
             onClick={() => setSelectedId(n.id)}
             aria-current={current ? "page" : undefined}
             className={
-              "block w-full border-l-2 py-1 pl-3 pr-2 text-left text-[13px] leading-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-r-sm " +
-              (current ? "border-primary text-foreground font-medium" : "border-transparent text-muted-foreground hover:text-foreground hover:border-border")
+              "flex w-full items-center gap-1.5 rounded-md py-1 pl-2 pr-2 text-left text-[13px] leading-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 " +
+              (current ? "bg-accent text-foreground font-medium" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground")
             }
             title={n.title || n.id}
           >
-            {n.title || n.id}
+            <FileText className="h-3.5 w-3.5 shrink-0 opacity-70" />
+            <span className="truncate">{n.title || n.id}</span>
           </button>
         );
       }}
@@ -214,9 +216,9 @@ export function ReaderView({
   );
 
   return (
-    <div className="mx-auto w-full max-w-[88rem] lg:grid lg:grid-cols-[15rem_minmax(0,1fr)_13rem] lg:gap-10">
-      {/* Nav — a sticky column at desktop width, a disclosure above the article on a phone. */}
-      <aside className={READER_SIDE_COLUMN_CLASS + " lg:border-r lg:pr-5 mb-6 lg:mb-0"}>
+    <div className="mx-auto w-full max-w-[88rem] lg:grid lg:grid-cols-[16rem_minmax(0,1fr)_14rem] lg:gap-5">
+      {/* Nav — a sticky card at desktop width, a disclosure above the article on a phone. */}
+      <aside className={READER_SIDE_COLUMN_CLASS + " " + READER_CARD_CLASS + " mb-4 lg:mb-0"}>
         <button
           type="button"
           onClick={() => setNavOpen((o) => !o)}
@@ -227,25 +229,26 @@ export function ReaderView({
           Contents
         </button>
         <div className={(navOpen ? "block" : "hidden") + " lg:block"}>
-          {homeNode && (
-            <button
-              type="button"
-              onClick={() => setSelectedId(homeNode.id)}
-              aria-current={selectedId === homeNode.id ? "page" : undefined}
-              className={
-                "mb-3 block w-full truncate text-left text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-sm " +
-                (selectedId === homeNode.id ? "text-foreground" : "text-foreground/80 hover:text-foreground")
-              }
-            >
-              {nestName}
-            </button>
-          )}
+          {/* The nest's name heads the nav; with a home page it is also the way back to it. */}
+          <button
+            type="button"
+            onClick={() => homeNode && setSelectedId(homeNode.id)}
+            disabled={!homeNode}
+            aria-current={homeNode && selectedId === homeNode.id ? "page" : undefined}
+            className={
+              "mb-3 flex w-full items-center gap-2 text-left text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-sm disabled:cursor-default " +
+              (homeNode && selectedId !== homeNode.id ? "text-foreground/80 hover:text-foreground" : "text-foreground")
+            }
+          >
+            <BookOpen className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <span className="truncate">{nestName}</span>
+          </button>
           {nav}
         </div>
       </aside>
 
       {/* Article — page-scrolled, reading width. */}
-      <article className="min-w-0">
+      <article className={"min-w-0 " + READER_CARD_CLASS + " px-6 py-6 lg:min-h-[calc(100vh-5rem)] lg:px-8"}>
         {notice && (
           <p role="status" className="mb-4 text-sm text-amber-800 dark:text-amber-300">
             {notice}
@@ -308,10 +311,12 @@ export function ReaderView({
       </article>
 
       {/* Outline — headings of the open page; only rendered when there is more than one. */}
-      <aside className={"hidden lg:block " + READER_SIDE_COLUMN_CLASS + " lg:border-l lg:pl-5"}>
-        {outline.length > 1 && (
-          <nav aria-label="On this page">
-            <p className="mb-2 text-[12px] font-medium text-muted-foreground">On this page</p>
+      <aside className={"hidden lg:block " + READER_SIDE_COLUMN_CLASS + " " + READER_CARD_CLASS}>
+        <nav aria-label="On this page">
+          <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">On this page</p>
+          {outline.length <= 1 ? (
+            <p className="text-[13px] text-muted-foreground/70">{selectedId ? "No sections on this page." : "Open a page to see its sections."}</p>
+          ) : (
             <ul className="space-y-1">
               {outline.map((h) => (
                 <li key={h.id} className={h.level === 3 ? "pl-3" : ""}>
@@ -326,8 +331,8 @@ export function ReaderView({
                 </li>
               ))}
             </ul>
-          </nav>
-        )}
+          )}
+        </nav>
       </aside>
     </div>
   );
