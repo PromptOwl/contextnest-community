@@ -607,6 +607,10 @@ export function NestView({
   //   isReadOnly     — no write/review/manage (public + plain 'read' collabs)
   // Rules live in lib/nest-caps so the board (and any later nest-scoped view)
   // gates on exactly the same derivation instead of a lookalike copy.
+  // Archived: every write is refused server-side, so the affordances that
+  // only lead to a refusal (or that configure a nest nobody can change) are
+  // withheld — Connect, the reader-mode switch, the trace, steward changes.
+  const nestArchived = isArchived || isNestArchived({ archived_at: nestArchivedAt });
   const caps = deriveNestCaps({
     roles,
     permission,
@@ -615,7 +619,7 @@ export function NestView({
     isAdmin,
     readerMode: readerModeEnabled,
     previewReader,
-    isArchived: isArchived || isNestArchived({ archived_at: nestArchivedAt }),
+    isArchived: nestArchived,
   });
   // canReviewDocs is folded into isReadOnly inside caps; per-row review uses
   // canReviewNode for scope resolution, so it isn't destructured here.
@@ -1308,7 +1312,7 @@ export function NestView({
               toggle: the landing document is part of the same setting, and
               changing it must not mean switching reader mode off and on
               again. */}
-            {canManageReaderMode && (
+            {canManageReaderMode && !nestArchived && (
               <Button
                 variant="outline"
                 size="sm"
@@ -1376,10 +1380,12 @@ export function NestView({
         {/* Connect (external clients) and Add-with-AI (seed content) are
               distinct first-class actions — Connect wires tools, Add-with-AI
               generates context into the nest. */}
-        <Button variant="outline" size="sm" onClick={() => setShowConnect(true)}>
-          <Link2 className="h-3.5 w-3.5 mr-1.5" />
-          Connect
-        </Button>
+        {!nestArchived && (
+          <Button variant="outline" size="sm" onClick={() => setShowConnect(true)}>
+            <Link2 className="h-3.5 w-3.5 mr-1.5" />
+            Connect
+          </Button>
+        )}
         {!isReadOnly && (
           <Button variant="outline" size="sm" onClick={() => setShowGenerate(true)}>
             <Sparkles className="h-3.5 w-3.5 mr-1.5" />
@@ -1450,9 +1456,10 @@ export function NestView({
               onSelect: () => setShowAssignSteward(true),
             });
           // Nest-scoped activity trace — a read-only audit view, so not
-          // gated on isReadOnly. Same owner/nest-admin rule as the server's
-          // GET /nests/:id/trace (canManageStewards).
-          if (canManageGovernance && onOpenTrace)
+          // gated on isReadOnly (a viewer may see it); withheld on an archived
+          // nest with the rest of its management. Same owner/nest-admin rule
+          // as the server's GET /nests/:id/trace (canManageStewards).
+          if (canManageGovernance && onOpenTrace && !nestArchived)
             actions.push({
               label: "Activity trace",
               icon: Activity,
@@ -1819,7 +1826,7 @@ export function NestView({
             <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
               <StewardsTab
                 nestId={nestId}
-                canManage={canManageGovernance}
+                canManage={canManageGovernance && !caps.isReadOnly}
                 currentUserEmail={currentEmail}
                 onAssign={() => setShowAssignSteward(true)}
                 onRemove={setRemoveStewardId}

@@ -243,6 +243,9 @@ export function DocumentEditor({
   // /collaborators and /visibility). New, unsaved docs have no shareable
   // nest target distinct from the nest list, so only offer it once we're
   // looking at a real nest the caller can administer.
+  // Folded with !isArchived at each use below (isArchived resolves later,
+  // off the nest fetch): an archived nest's visibility, sharing and
+  // publishing are frozen, so the controls that change them are withheld.
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
   const [showPublish, setShowPublish] = useState(false);
@@ -1888,7 +1891,7 @@ export function DocumentEditor({
               owner/admin flips it in place (same control as the Share dialog
               and Collaborators tab); everyone else sees a read-only badge. */}
           {!isNew &&
-            (canShare ? (
+            (canShare && !isArchived ? (
               <NestVisibilityControl
                 nestId={nestId}
                 variant="compact"
@@ -1925,7 +1928,7 @@ export function DocumentEditor({
                 </span>
               )
             ))}
-          {canShare && (
+          {canShare && !isArchived && (
             <Button
               variant="ghost"
               size="sm"
@@ -2077,7 +2080,7 @@ export function DocumentEditor({
             // Meaningless on an unsaved doc: there's no node id to grant on.
             // Sharing the whole nest is the top bar's Share button; only the
             // narrower per-document grant lives here.
-            if (canShare && !isNew)
+            if (canShare && !isNew && !isArchived)
               moreActions.push({
                 label: "Share this document",
                 icon: Share2,
@@ -2087,7 +2090,7 @@ export function DocumentEditor({
               });
             // Publishing hosts THIS document on the open web, so it sits with
             // sharing rather than with the editing actions above.
-            if (canShare && !isNew)
+            if (canShare && !isNew && !isArchived)
               moreActions.push({
                 label: "Publish",
                 icon: Share2,
