@@ -112,20 +112,6 @@ export function deriveNestCaps({
 
 
 /**
- * Reader Mode has no tab strip whose click triggers a folder fetch, so a nest
- * whose docs all live one level down (the common docs-site shape) opens with
- * only the empty root level loaded — ReaderView would render nothing until a
- * folder row is clicked. Picks the first top-level folder (no "/" in its
- * path) so NestView can eagerly fetch it alongside root, giving Reader Mode
- * something to show without a click.
- */
-export function firstTopLevelFolder<T extends { path: string }>(
-  knownFolders: T[],
-): T | undefined {
-  return knownFolders.find((f) => !f.path.includes("/"));
-}
-
-/**
  * Whether a non-deleting caller may ask for a nest to be archived or deleted
  * (Dashboard's card-grid bin icon, and NestView's overflow-menu "Delete"
  * entry once canDeleteNest is false, share this same rule). Mirrors the

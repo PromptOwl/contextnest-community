@@ -27,8 +27,8 @@ import { relTime } from "@/lib/dates";
  *     would open the wrong one.
  *   - The open page is mirrored to `?doc=` by the shell so any page is a
  *     shareable link, and a `?doc=` deep link lands inside this layout.
- *   - Folders load lazily, one level at a time, exactly like the Documents
- *     tab; NestView owns the fetch and the `nodes` merge.
+ *   - NestView loads the whole nest up front (metadata only) so the nav shows
+ *     every folder and the home page resolves wherever it lives.
  */
 
 const HOME_NODE_CONVENTION = ["welcome", "index", "readme", "home", "overview"];

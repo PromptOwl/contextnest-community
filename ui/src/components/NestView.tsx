@@ -43,7 +43,6 @@ import { ShareNestDialog } from "./ShareNestDialog";
 import { NestPageHeader } from "./NestPageHeader";
 import {
   deriveNestCaps,
-  firstTopLevelFolder,
   isNestArchived,
 } from "../lib/nest-caps";
 import { DeleteNestDialog } from "./DeleteNestDialog";
@@ -618,16 +617,28 @@ export function NestView({
   const { canManage, collabCanWrite, canEditDocs, isReadOnly, isReaderView } =
     caps;
 
-  // Reader Mode has no tab strip to trigger a folder fetch, so a nest whose
-  // docs all live one level down (the common docs-site shape) opens with
-  // only the empty root level loaded — ReaderView renders nothing. Load the
-  // nest's first top-level folder by default so there's something to read
-  // without a click; ReaderView's onExpandFolder (below) covers the rest.
+  // Reader Mode shows the whole nest at once: the nav lists every folder's
+  // pages without a click, and a home page outside the first folder still
+  // resolves on load. One body-free nest-wide read replaces the per-level
+  // lazy fetches; every folder it covers is marked loaded so nav rows open.
   useEffect(() => {
     if (!isReaderView) return;
-    const first = firstTopLevelFolder(knownFolders);
-    if (first) void fetchLevel(first.path);
-  }, [isReaderView, knownFolders, fetchLevel]);
+    let cancelled = false;
+    qc.fetchQuery(reads.nodesMeta(nestId))
+      .then(({ nodes: all }) => {
+        if (cancelled) return;
+        const folders = new Set<string>([""]);
+        for (const n of all) {
+          const parts = folderOfNode(n.id || "").split("/").filter(Boolean);
+          for (let i = 1; i <= parts.length; i++) folders.add(parts.slice(0, i).join("/"));
+        }
+        loadedFolders.current = folders;
+        setLoadedFolderPaths(folders);
+        setNodes(all);
+      })
+      .catch((e: any) => toast.error(e?.message || "Failed to load documents"));
+    return () => { cancelled = true; };
+  }, [isReaderView, nestId, qc]);
 
   // Does a steward row with `role` cover this node? Same scope-resolution
   // rules as the server: document scope matches by id, tag scope matches
