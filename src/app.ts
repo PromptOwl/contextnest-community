@@ -690,11 +690,14 @@ export function createApp(): Hono<AuthEnv> {
     if ("telemetry_enabled" in body) {
       pending.push({ name: "TELEMETRY_ENABLED", value: body.telemetry_enabled ? "true" : "false" });
     }
-    // PostHog: empty key clears the row and turns analytics off. The host is
-    // checked here because a typo'd one fails silently in the browser.
+    // PostHog: empty key clears the row and turns analytics off. Both fields
+    // are checked here because a typo'd key or host fails silently in the
+    // browser; a project key is "phc_" plus a long alphanumeric token.
     if ("posthog_key" in body) {
       const v = String(body.posthog_key ?? "").trim();
-      pending.push({ name: "POSTHOG_KEY", value: v || null });
+      if (v && !/^phc_[A-Za-z0-9]{20,}$/.test(v))
+        addError("posthog_key", "PostHog project key must look like phc_… — copy the project API key from PostHog settings.");
+      else pending.push({ name: "POSTHOG_KEY", value: v || null });
     }
     if ("posthog_host" in body) {
       const v = String(body.posthog_host ?? "").trim().replace(/\/$/, "");

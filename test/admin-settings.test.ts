@@ -142,7 +142,7 @@ describe("/admin/settings — validation", () => {
     expect(res.data.fieldErrors).toHaveProperty("promptowl_sign_in_gate");
   });
 
-  it("saves a PostHog key and rejects a non-URL host", async () => {
+  it("saves a PostHog key, rejects a junk key and a non-URL host", async () => {
     const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
     const admin = await registerUser(app, OWNER_EMAIL);
 
@@ -150,17 +150,17 @@ describe("/admin/settings — validation", () => {
       app,
       "PATCH",
       "/admin/settings",
-      { posthog_key: "phc_test", posthog_host: "https://eu.i.posthog.com/" },
+      { posthog_key: "phc_TestProjectKey0123456789abcdefXYZ", posthog_host: "https://eu.i.posthog.com/" },
       admin.apiKey,
     );
     expect(ok.status).toBe(200);
     // Trailing slash stripped, same as public_base_url.
     expect(ok.data.settings.posthog_host).toBe("https://eu.i.posthog.com");
-    expect(await persistedSetting("POSTHOG_KEY")).toBe("phc_test");
+    expect(await persistedSetting("POSTHOG_KEY")).toBe("phc_TestProjectKey0123456789abcdefXYZ");
 
     // The browser gets the key from /health — but only while telemetry is on.
     const health = await jsonRequest(app, "GET", "/health");
-    expect(health.data.posthog_key).toBe("phc_test");
+    expect(health.data.posthog_key).toBe("phc_TestProjectKey0123456789abcdefXYZ");
     await jsonRequest(app, "PATCH", "/admin/settings", { telemetry_enabled: false }, admin.apiKey);
     const healthOff = await jsonRequest(app, "GET", "/health");
     expect(healthOff.data.posthog_key).toBeNull();
@@ -170,6 +170,23 @@ describe("/admin/settings — validation", () => {
     );
     expect(bad.status).toBe(400);
     expect(bad.data.fieldErrors).toHaveProperty("posthog_host");
+
+    // A junk key was accepted and saved as-is (CU-wdqcq027fr); it must be
+    // rejected before anything is written, keyed to the field for the UI.
+    for (const junk of ["abc123", "fsdddd", "phc_short", "phx_TestProjectKey0123456789abcdefXYZ"]) {
+      const badKey = await jsonRequest(
+        app, "PATCH", "/admin/settings", { posthog_key: junk }, admin.apiKey,
+      );
+      expect(badKey.status).toBe(400);
+      expect(badKey.data.fieldErrors).toHaveProperty("posthog_key");
+    }
+    expect(await persistedSetting("POSTHOG_KEY")).toBe("phc_TestProjectKey0123456789abcdefXYZ");
+
+    // Clearing the key is still allowed — that is how analytics turns off.
+    const cleared = await jsonRequest(
+      app, "PATCH", "/admin/settings", { posthog_key: "" }, admin.apiKey,
+    );
+    expect(cleared.status).toBe(200);
   });
 
   it("rejects an out-of-range max_body_bytes", async () => {
