@@ -30,7 +30,13 @@ export function resolveWikiTarget<T extends ReaderNode>(target: string, nodes: T
   if (raw.includes("/")) {
     const want = canonical(raw);
     const byPath = nodes.find((n) => canonical(n.id) === want);
-    return byPath ?? null;
+    if (byPath) return byPath;
+    // The path is stale (the page was moved, or the link was written as
+    // `nodes/<slug>` from the root): fall back to the slug, but only when
+    // exactly one page carries it — never guess between look-alikes.
+    const slug = want.split("/").pop() ?? "";
+    const bySlug = nodes.filter((n) => canonical(n.id).endsWith(`/${slug}`));
+    return bySlug.length === 1 ? bySlug[0] : null;
   }
   const want = raw.toLowerCase();
   return nodes.find((n) => String(n.title ?? "").toLowerCase() === want) ?? nodes.find((n) => canonical(n.id).endsWith(`/${want}`)) ?? null;
@@ -122,4 +128,43 @@ export function displayTitle(node: { id: string; title?: string } | null | undef
 export function ancestorsOf(id: string): string[] {
   const segs = id.replace(/^nodes\//, "").split("/").filter(Boolean).slice(0, -1);
   return segs.map((_, i) => segs.slice(0, i + 1).join("/"));
+}
+
+/**
+ * Every folder the nest-wide listing covers — root plus each ancestor of each
+ * page — so Reader Mode can mark them all loaded in one go and open every nav
+ * row instead of leaving unfetched folders collapsed.
+ */
+export function foldersCoveredBy(nodes: { id?: string }[]): Set<string> {
+  return new Set(["", ...nodes.flatMap((n) => ancestorsOf(n.id || ""))]);
+}
+
+/**
+ * The nav and the outline fill their grid row and scroll internally — the
+ * same height as each other and as the article — so the three cards end
+ * at the same point on every page rather than wherever each column's
+ * content happened to stop. min-h-0 is what lets a grid item shrink to
+ * its row and overflow instead of stretching the page.
+ */
+export const READER_SIDE_COLUMN_CLASS = "lg:min-h-0 lg:overflow-y-auto";
+
+/** The card every reader panel sits in — the app's standard card surface. */
+export const READER_CARD_CLASS = "rounded-lg border border-border bg-card p-4";
+
+/**
+ * Pages whose title or tags contain the query, case-insensitively; a
+ * leading "#" on either side is ignored so "#gtm" and "gtm" both hit the
+ * tag. Empty query → null, meaning "not searching" (show the tree).
+ */
+export function searchNodes<T extends { id: string; title?: string; tags?: unknown[] }>(
+  nodes: T[],
+  query: string,
+): T[] | null {
+  const q = query.trim().toLowerCase().replace(/^#/, "");
+  if (!q) return null;
+  return nodes.filter(
+    (n) =>
+      String(n.title || leaf(n.id)).toLowerCase().includes(q) ||
+      (n.tags ?? []).some((t) => String(t).toLowerCase().replace(/^#/, "").includes(q)),
+  );
 }

@@ -102,6 +102,7 @@ import {
   installLicenseKey,
 } from "./auth/license.js";
 import { persistSetting } from "./db/settings.js";
+import { posthogKeyError } from "./shared/posthog-key.js";
 import { isOidcReady } from "./auth/oidc.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
@@ -690,11 +691,15 @@ export function createApp(): Hono<AuthEnv> {
     if ("telemetry_enabled" in body) {
       pending.push({ name: "TELEMETRY_ENABLED", value: body.telemetry_enabled ? "true" : "false" });
     }
-    // PostHog: empty key clears the row and turns analytics off. The host is
-    // checked here because a typo'd one fails silently in the browser.
+    // PostHog: empty key clears the row and turns analytics off. Both fields
+    // are checked here because a typo'd key or host fails silently in the
+    // browser; a project key is "phc_" plus a long alphanumeric token. The
+    // message names the rule that failed so a near-miss is not a mystery.
     if ("posthog_key" in body) {
       const v = String(body.posthog_key ?? "").trim();
-      pending.push({ name: "POSTHOG_KEY", value: v || null });
+      const keyError = posthogKeyError(v);
+      if (keyError) addError("posthog_key", keyError);
+      else pending.push({ name: "POSTHOG_KEY", value: v || null });
     }
     if ("posthog_host" in body) {
       const v = String(body.posthog_host ?? "").trim().replace(/\/$/, "");
@@ -2013,17 +2018,30 @@ export function createApp(): Hono<AuthEnv> {
     // caller's per-node role.
     const isStewardRoster =
       path.includes("/stewards") && !path.includes("/nodes/");
-    // Reuse the permission already resolved above — resolveNestPermission
-    // folds the license/super admin into "admin", so owner/admin covers
-    // server admin, nest owner, and admin collaborators (same rule as the
-    // shared canManageStewards used by MCP).
-    if (isStewardRoster && permission !== "owner" && permission !== "admin") {
+    // Gate on the caller's UNCAPPED standing (rawPermission folds the
+    // license/super admin into "admin", so owner/admin covers server admin,
+    // nest owner, and admin collaborators — same rule as canManageStewards).
+    // The archive cap would otherwise turn the owner into "read" here and
+    // tell them they lack a permission they hold; an archived nest keeps its
+    // roster readable and refuses changes as archived, like everything else.
+    if (
+      isStewardRoster &&
+      access.rawPermission !== "owner" &&
+      access.rawPermission !== "admin"
+    ) {
       return c.json(
         {
           error:
             "You don't have permission to manage stewards. Only a nest admin, the nest owner, or the server admin can do this.",
         },
         403,
+      );
+    }
+    if (isStewardRoster && access.archived && c.req.method !== "GET") {
+      return deny(
+        403,
+        "This nest is archived, so it is read-only. Restore it to change stewards.",
+        { archived: true },
       );
     }
     // Match the resource as an exact path segment, NOT a substring: a node id
@@ -2140,6 +2158,17 @@ export function createApp(): Hono<AuthEnv> {
       !stewardEditorBypass &&
       effectiveLevel < permissionLevel(required)
     ) {
+      // The archive cap is what refused this, not the caller's standing —
+      // an owner told "your permission: 'read'" on their own nest would go
+      // looking for a grant that can't help. Name the real reason, with the
+      // same {archived:true} marker the open-mode branch sends.
+      if (access.archived && permissionLevel(access.rawPermission) >= permissionLevel(required)) {
+        return deny(
+          403,
+          "This nest is archived, so it is read-only. Restore it to make changes.",
+          { archived: true },
+        );
+      }
       return deny(
         403,
         `You don't have access to perform this action on this nest. Required permission: '${required}', your permission: '${permission}'. Ask the nest owner or a server admin to grant you ${required} access.`,

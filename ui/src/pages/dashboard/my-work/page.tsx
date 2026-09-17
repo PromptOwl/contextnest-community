@@ -14,12 +14,13 @@ import { reads } from "../../../lib/queries";
 import { useAuth } from "../../../auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
 import {
-  Check, Trash2, Loader2, ChevronRight, ChevronLeft, Archive,
+  Check, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle,
 } from "lucide-react";
 import { BULK_REVIEW_LIMIT } from "../../../lib/constants";
 import { toast } from "sonner";
 import { relTime, formatServerDate } from "../../../lib/dates";
 import { Button } from "@/components/ui/button";
+import { APPROVE_BUTTON_CLASS, REJECT_BUTTON_CLASS } from "@/lib/review-actions-style";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ReasonDialog, ReviewActions } from "../../../components/governance";
 
@@ -499,17 +500,17 @@ export default function MyWorkPage() {
                             {w.reason ? ` · "${w.reason}"` : ""}
                           </span>
                         </button>
-                        <div className="flex items-center gap-1 shrink-0">
+                        <div className="flex items-center gap-2 shrink-0">
                           {w.type === "deletion" ? (
                             <>
                               {/* Honouring an archive ask archives — it is an
-                                  approval, not a destruction, so it says so. */}
+                                  approval, not a destruction, so it says so and
+                                  wears the same green/red pair as ReviewActions. */}
                               <Button
-                                size="sm"
                                 variant="outline"
                                 className={
                                   isArchiveAsk(w)
-                                    ? ""
+                                    ? APPROVE_BUTTON_CLASS
                                     : "text-destructive hover:text-destructive"
                                 }
                                 onClick={() => {
@@ -518,22 +519,21 @@ export default function MyWorkPage() {
                                 }}
                               >
                                 {isArchiveAsk(w) ? (
-                                  <Archive className="h-3.5 w-3.5 mr-1" />
+                                  <CheckCircle2 className="h-4 w-4 mr-2" />
                                 ) : (
-                                  <Trash2 className="h-3.5 w-3.5 mr-1" />
+                                  <Trash2 className="h-4 w-4 mr-2" />
                                 )}
                                 {isArchiveAsk(w) ? "Approve" : "Delete"}
                               </Button>
                               <Button
-                                size="sm"
-                                variant="ghost"
-                                className="text-muted-foreground"
+                                variant="outline"
+                                className={REJECT_BUTTON_CLASS}
                                 onClick={() => {
                                   setDeletionAction("decline");
                                   setDeletionTarget(w);
                                 }}
                               >
-                                Reject
+                                <XCircle className="h-4 w-4 mr-2" /> Reject
                               </Button>
                             </>
                           ) : (

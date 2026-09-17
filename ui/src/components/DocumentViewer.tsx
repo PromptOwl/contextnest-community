@@ -40,10 +40,15 @@ import type { Plugin } from "unified";
 import type { Root, Text } from "mdast";
 import { visit } from "unist-util-visit";
 import { cn } from "@/lib/utils";
+import { CONTEXT_URI_PREFIX, CONTEXT_URI_RE, contextUriDocPath, contextUriLabel } from "@/lib/context-uri";
 
-const wikiLinkRegex = /\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]/g;
+// `[[target]]`, `[[target|Display]]`, or a bare `contextnest://nodes/…` URI.
+const wikiLinkRegex = new RegExp(
+  `\\[\\[([^\\]|\\n]+)(?:\\|([^\\]\\n]+))?\\]\\]|(${CONTEXT_URI_RE.source})`,
+  "g",
+);
 
-// `[[Title]]` / `[[Title|Display]]` → synthetic `wikilink` hast element.
+// `[[Title]]` / `[[Title|Display]]` / `contextnest://…` → synthetic `wikilink` hast element.
 // Custom hName sidesteps react-markdown's urlTransform allowlist (no `wiki:` scheme to sanitize).
 const remarkWikiLinks: Plugin<[], Root> = () => (tree) => {
   visit(tree, "text", (node: Text, index, parent) => {
@@ -60,22 +65,23 @@ const remarkWikiLinks: Plugin<[], Root> = () => (tree) => {
       if (m.index > lastIndex) {
         newChildren.push({ type: "text", value: text.slice(lastIndex, m.index) });
       }
-      const target = m[1].trim();
-      const display = (m[2] ?? m[1]).trim();
-      newChildren.push({
-        type: "wikiLink",
-        data: {
-          hName: "wikilink",
-          hProperties: {
-            "data-wiki-target": target,
-            "data-wiki-display": display,
-          },
-          // «Title» is Hootie's wiki-link convention — the guillemets read as
-          // "this points at another document" without relying on link colour
-          // alone. The target and the hover preview use the bare title.
-          hChildren: [{ type: "text", value: `«${display}»` }],
-        },
-      });
+      let target: string;
+      let display: string;
+      if (m[3]) {
+        // A URI that names no document (tag/, search/, a folder) stays text.
+        const path = contextUriDocPath(m[3]);
+        if (!path) {
+          newChildren.push({ type: "text", value: m[3] });
+          lastIndex = wikiLinkRegex.lastIndex;
+          continue;
+        }
+        target = path;
+        display = contextUriLabel(path);
+      } else {
+        target = m[1].trim();
+        display = (m[2] ?? m[1]).trim();
+      }
+      newChildren.push(wikiLinkNode(target, display));
       lastIndex = wikiLinkRegex.lastIndex;
     }
     if (lastIndex < text.length) {
@@ -84,7 +90,38 @@ const remarkWikiLinks: Plugin<[], Root> = () => (tree) => {
     parent.children.splice(index, 1, ...newChildren);
     return index + newChildren.length;
   });
+  // `[label](contextnest://nodes/…)` — a real markdown link whose scheme
+  // react-markdown would otherwise strip; it is the same wiki link with the
+  // label as its display.
+  visit(tree, "link", (node: any, index, parent) => {
+    if (!parent || index === null || index === undefined) return;
+    if (typeof node.url !== "string" || !node.url.startsWith(CONTEXT_URI_PREFIX)) return;
+    const path = contextUriDocPath(node.url);
+    if (!path) return;
+    const label = (node.children ?? [])
+      .map((c: any) => (c.type === "text" ? c.value : ""))
+      .join("")
+      .trim();
+    parent.children.splice(index, 1, wikiLinkNode(path, label || contextUriLabel(path)));
+  });
 };
+
+function wikiLinkNode(target: string, display: string) {
+  return {
+    type: "wikiLink",
+    data: {
+      hName: "wikilink",
+      hProperties: {
+        "data-wiki-target": target,
+        "data-wiki-display": display,
+      },
+      // «Title» is Hootie's wiki-link convention — the guillemets read as
+      // "this points at another document" without relying on link colour
+      // alone. The target and the hover preview use the bare title.
+      hChildren: [{ type: "text", value: `«${display}»` }],
+    },
+  };
+}
 
 // `<span style="color: #rrggbb">…</span>` — the one raw-HTML shape the
 // editor itself writes (its text-color swatches). remark tokenizes raw HTML

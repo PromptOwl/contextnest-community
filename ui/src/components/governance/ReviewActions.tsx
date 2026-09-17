@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { APPROVE_BUTTON_CLASS, REJECT_BUTTON_CLASS } from "@/lib/review-actions-style";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import {
@@ -78,14 +79,14 @@ export function ReviewActions({
         <div className="flex items-center gap-2">
           <Button
             variant="outline"
-            className="border-green-200 text-green-700 hover:bg-green-50 hover:text-green-800"
+            className={APPROVE_BUTTON_CLASS}
             onClick={() => setActionType("approve")}
           >
             <CheckCircle2 className="h-4 w-4 mr-2" /> Approve
           </Button>
           <Button
             variant="outline"
-            className="border-red-200 text-red-700 hover:bg-red-50 hover:text-red-800"
+            className={REJECT_BUTTON_CLASS}
             onClick={() => setActionType("reject")}
           >
             <XCircle className="h-4 w-4 mr-2" /> Reject

@@ -39,6 +39,7 @@ import {
   Trash2,
   Loader2,
   AlertCircle,
+  Archive,
   FileText,
   Folder,
 } from "lucide-react";
@@ -51,6 +52,8 @@ interface ShareTargetDialogProps {
   target: string;
   /** Human label for the header — document title or pretty folder path. */
   label: string;
+  /** The nest is archived: show who has access, allow no changes. */
+  archived?: boolean;
   onClose: () => void;
 }
 
@@ -59,6 +62,7 @@ export function ShareTargetDialog({
   targetType,
   target,
   label,
+  archived = false,
   onClose,
 }: ShareTargetDialogProps) {
   const [grants, setGrants] = useState<api.Grant[]>([]);
@@ -171,6 +175,14 @@ export function ShareTargetDialog({
         </DialogHeader>
 
         <div className="space-y-4 py-1">
+          {archived && (
+            <Alert>
+              <Archive className="h-4 w-4" />
+              <AlertDescription>
+                This nest is archived, so sharing is read-only. Restore the nest to change who has access.
+              </AlertDescription>
+            </Alert>
+          )}
           {error && (
             <Alert variant="destructive">
               <AlertCircle className="h-4 w-4" />
@@ -178,6 +190,7 @@ export function ShareTargetDialog({
             </Alert>
           )}
 
+          {!archived && (
           <form onSubmit={handleAdd} className="space-y-2">
             <div className="flex flex-col sm:flex-row gap-2">
               <Input
@@ -212,6 +225,7 @@ export function ShareTargetDialog({
               register with this email.
             </p>
           </form>
+          )}
 
           <div className="rounded-lg border p-4 space-y-2 max-h-[40vh] overflow-y-auto">
             <Label className="text-sm font-medium">
@@ -234,16 +248,18 @@ export function ShareTargetDialog({
                     <Badge variant="secondary" className="text-[11px]">
                       {g.role === "write" ? "Can edit" : "Can view"}
                     </Badge>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={busy}
-                      onClick={() => handleRemove(g)}
-                      title="Remove access"
-                      data-testid={`unshare-${g.id}`}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
+                    {!archived && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={busy}
+                        onClick={() => handleRemove(g)}
+                        title="Remove access"
+                        data-testid={`unshare-${g.id}`}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
                   </div>
                 ))}
               </div>

@@ -4,7 +4,7 @@
  * mean in a folder-ordered nest.
  */
 import { describe, it, expect } from "vitest";
-import { resolveWikiTarget, breadcrumbFor, sectionLabel, readingOrder, neighbours, stripLeadingTitle, commonRootFolder, displayTitle, orderWithinFolder, ancestorsOf } from "./reader";
+import { resolveWikiTarget, breadcrumbFor, sectionLabel, readingOrder, neighbours, stripLeadingTitle, commonRootFolder, displayTitle, orderWithinFolder, ancestorsOf, foldersCoveredBy, READER_SIDE_COLUMN_CLASS, searchNodes } from "./reader";
 
 const nodes = [
   { id: "nodes/docs/welcome", title: "Welcome" },
@@ -26,6 +26,12 @@ describe("resolveWikiTarget", () => {
   it("falls back to a case-insensitive title match when the path does not exist", () => {
     expect(resolveWikiTarget("hosted nest", nodes)?.id).toBe("nodes/docs/platform/hosted-nest/hosted-nest");
     expect(resolveWikiTarget("docs/platform/hosted-nest/overview", nodes)).toBeNull(); // a wrong path is NOT silently rewritten to some 'Overview'
+  });
+  it("a stale path still lands when its slug names exactly one page", () => {
+    // Written as `nodes/<slug>` from the root, or the page moved folders since.
+    expect(resolveWikiTarget("nodes/atoms", nodes)?.id).toBe("nodes/docs/protocol/selectors/atoms");
+    expect(resolveWikiTarget("old/place/frontmatter", nodes)?.id).toBe("nodes/docs/protocol/concepts/frontmatter");
+    expect(resolveWikiTarget("nodes/overview", nodes)).toBeNull(); // two 'overview' pages — not a guess
   });
   it("a slash-less target also matches a page slug when no title does", () => {
     expect(resolveWikiTarget("atoms", nodes)?.id).toBe("nodes/docs/protocol/selectors/atoms");
@@ -112,5 +118,65 @@ describe("ancestorsOf", () => {
   it("lists every folder above a page, shallowest first, so a deep link can open the whole chain", () => {
     expect(ancestorsOf("nodes/docs/platform/plugins/google-drive")).toEqual(["docs", "docs/platform", "docs/platform/plugins"]);
     expect(ancestorsOf("nodes/readme")).toEqual([]);
+  });
+});
+
+// Reader Mode loads the whole nest in one read and marks every folder it
+// touched as loaded, so the nav shows every folder expanded on first paint
+// and a home page outside the first folder resolves (CU-wdqcq027jd,
+// CU-wdqcq027g7).
+describe("foldersCoveredBy", () => {
+  it("is just root for an empty nest", () => {
+    expect([...foldersCoveredBy([])]).toEqual([""]);
+  });
+  it("collects root and every ancestor folder of every page, once", () => {
+    const folders = foldersCoveredBy([
+      { id: "nodes/welcome" },
+      { id: "nodes/docs/intro" },
+      { id: "nodes/docs/platform/plugins/google-drive" },
+      { id: "nodes/docs/platform/overview" },
+      { id: "nodes/gtm/deals/acme" },
+    ]);
+    expect([...folders].sort()).toEqual(
+      ["", "docs", "docs/platform", "docs/platform/plugins", "gtm", "gtm/deals"].sort(),
+    );
+  });
+});
+
+// Both side columns share one class string; it must let the card shrink to
+// its grid row and scroll inside it, or the columns size to content again
+// and end at different points (CU-wdqcq027jm).
+describe("READER_SIDE_COLUMN_CLASS", () => {
+  it("shrinks to the grid row and scrolls internally", () => {
+    expect(READER_SIDE_COLUMN_CLASS).toContain("lg:min-h-0");
+    expect(READER_SIDE_COLUMN_CLASS).toContain("lg:overflow-y-auto");
+    expect(READER_SIDE_COLUMN_CLASS).not.toMatch(/\blg:(max-h|self-start|sticky)/);
+  });
+});
+
+// The nav's search box: a visitor finds a page by its title or one of its
+// tags without walking the tree.
+describe("searchNodes", () => {
+  const nodes = [
+    { id: "nodes/docs/selectors", title: "Selectors", tags: ["#api", "grammar"] },
+    { id: "nodes/gtm/deals/acme", title: "Acme deal", tags: ["#gtm"] },
+    { id: "nodes/untitled-note", tags: [] },
+  ];
+  it("is null (not searching) for an empty or blank query", () => {
+    expect(searchNodes(nodes, "")).toBeNull();
+    expect(searchNodes(nodes, "   ")).toBeNull();
+  });
+  it("matches titles case-insensitively, falling back to the slug", () => {
+    expect(searchNodes(nodes, "SELECT")!.map((n) => n.id)).toEqual(["nodes/docs/selectors"]);
+    expect(searchNodes(nodes, "untitled")!.map((n) => n.id)).toEqual(["nodes/untitled-note"]);
+  });
+  it("matches tags with or without the # on either side", () => {
+    for (const q of ["gtm", "#gtm", "GTM"]) {
+      expect(searchNodes(nodes, q)!.map((n) => n.id)).toEqual(["nodes/gtm/deals/acme"]);
+    }
+    expect(searchNodes(nodes, "#grammar")!.map((n) => n.id)).toEqual(["nodes/docs/selectors"]);
+  });
+  it("returns an empty list when nothing matches", () => {
+    expect(searchNodes(nodes, "zzz")).toEqual([]);
   });
 });

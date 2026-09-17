@@ -1004,8 +1004,10 @@ export async function listFolderNodes(nestId: string, folder: string) {
  * and never read a body: using listNodes here would force the `content=1`
  * vault crawl for bytes that are thrown away, on every load and refresh.
  */
-export async function listNodesMeta(nestId: string) {
-  return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
+export async function listNodesMeta(nestId: string, approvedOnly = false) {
+  return request<{ count: number; nodes: any[] }>(
+    `/nests/${nestId}/nodes${approvedOnly ? "?approved_only=1" : ""}`,
+  );
 }
 
 /** The nest-wide shape — one per nest, not per folder level. */
@@ -1020,8 +1022,11 @@ export async function getCommentCounts(nestId: string) {
   }>(`/nests/${nestId}/comment-counts`);
 }
 
-export async function getNode(nestId: string, nodeId: string) {
-  return request<{ node: any }>(`/nests/${nestId}/nodes/${nodeId}`);
+/** approvedOnly serves the approved body, as a public reader would get it. */
+export async function getNode(nestId: string, nodeId: string, approvedOnly = false) {
+  return request<{ node: any }>(
+    `/nests/${nestId}/nodes/${nodeId}${approvedOnly ? "?approved_only=1" : ""}`,
+  );
 }
 
 export async function createNode(

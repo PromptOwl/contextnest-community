@@ -1,21 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, ChevronDown, Menu } from "lucide-react";
+import { ChevronRight, ChevronDown, ChevronLeft, Menu, BookOpen, Folder, FolderOpen, FileText, Search, X } from "lucide-react";
 import { FolderTree } from "./FolderTree";
 import { DocumentViewer } from "./DocumentViewer";
 import * as api from "../lib/api";
 import { conventionKey, isHomeNode } from "@/lib/nest-caps";
 import { extractHeadings } from "@/lib/toc";
-import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle, orderWithinFolder, ancestorsOf } from "@/lib/reader";
+import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle, orderWithinFolder, ancestorsOf, READER_SIDE_COLUMN_CLASS, READER_CARD_CLASS, searchNodes } from "@/lib/reader";
 import { relTime } from "@/lib/dates";
 
 /**
  * Public Docs Reader Mode — the read-only face of a nest.
  *
- * A docs site, not a dashboard: one page-scrolled article at reading width,
- * a folder nav on the left that stays put, an outline of the open page on
- * the right, previous/next at the end. There are no boxes — the nav and the
- * outline are set off from the article by a single hairline each, because
- * that rule is the only structure the page has to encode.
+ * A docs site, not a dashboard: one article at reading width, a folder nav
+ * on the left that stays put, an outline of the open page on the right,
+ * previous/next at the end. Three cards on the app's usual card surface —
+ * the same frame the rest of the nest UI uses — so the reader reads as part
+ * of the product rather than a bare page.
  *
  * What is specific to THIS reader: every page carries its governance under
  * the title — version, status, when it changed. A nest is versioned,
@@ -27,8 +27,8 @@ import { relTime } from "@/lib/dates";
  *     would open the wrong one.
  *   - The open page is mirrored to `?doc=` by the shell so any page is a
  *     shareable link, and a `?doc=` deep link lands inside this layout.
- *   - Folders load lazily, one level at a time, exactly like the Documents
- *     tab; NestView owns the fetch and the `nodes` merge.
+ *   - NestView loads the whole nest up front (metadata only) so the nav shows
+ *     every folder and the home page resolves wherever it lives.
  */
 
 const HOME_NODE_CONVENTION = ["welcome", "index", "readme", "home", "overview"];
@@ -51,6 +51,8 @@ export interface ReaderViewProps {
   onExpandFolder: (path: string) => void;
   loadingFolders?: Set<string>;
   loadedFolders?: Set<string>;
+  /** Serve approved bodies only — an owner previewing what a visitor gets. */
+  approvedOnly?: boolean;
 }
 
 export function ReaderView({
@@ -65,6 +67,7 @@ export function ReaderView({
   onExpandFolder,
   loadingFolders,
   loadedFolders,
+  approvedOnly = false,
 }: ReaderViewProps) {
   const homeNode = useMemo(() => {
     if (readerHomeNode) {
@@ -99,7 +102,7 @@ export function ReaderView({
     inFlight.current.add(nodeId);
     setLoadingId(nodeId);
     try {
-      const { node } = await api.getNode(nestId, nodeId);
+      const { node } = await api.getNode(nestId, nodeId, approvedOnly);
       setContent((prev) => ({ ...prev, [nodeId]: node?.content ?? "" }));
     } catch {
       // Not cached: a transient failure must be retryable. The notice offers it.
@@ -141,6 +144,10 @@ export function ReaderView({
 
   const [notice, setNotice] = useState<string | null>(null);
   const [navOpen, setNavOpen] = useState(false);
+  // Nav search: title or tag. While a query is typed the tree gives way to a
+  // flat list of hits with their folder, so a page is one keystroke away.
+  const [query, setQuery] = useState("");
+  const hits = useMemo(() => searchNodes(nodes, query), [nodes, query]);
 
   const openWikiLink = (target: string) => {
     const hit = resolveWikiTarget(target, nodes);
@@ -154,7 +161,8 @@ export function ReaderView({
   const body = rawBody === undefined ? undefined : stripLeadingTitle(rawBody, title);
   const loading = !!selectedId && body === undefined && loadingId === selectedId;
 
-  const outline = useMemo(() => (body ? extractHeadings(body).filter((h) => h.level > 1) : []), [body]);
+  // Same outline the editor shows: every heading, indented by level.
+  const outline = useMemo(() => (body ? extractHeadings(body) : []), [body]);
   const order = useMemo(() => readingOrder(tocGroups), [tocGroups]);
   const { prev, next } = selectedId ? neighbours(order, selectedId) : { prev: null, next: null };
   const crumbs = selectedId ? breadcrumbFor(selectedId) : [];
@@ -186,6 +194,7 @@ export function ReaderView({
           className="flex w-full items-center gap-1.5 py-1.5 pr-2 text-left text-[13px] font-medium text-foreground/80 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-sm"
         >
           {collapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+          {collapsed ? <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <FolderOpen className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
           <span className="truncate">{sectionLabel(node.path)}</span>
           {loadingFolders?.has(node.path) && <span className="ml-auto text-[11px] text-muted-foreground">loading</span>}
         </button>
@@ -198,12 +207,13 @@ export function ReaderView({
             onClick={() => setSelectedId(n.id)}
             aria-current={current ? "page" : undefined}
             className={
-              "block w-full border-l-2 py-1 pl-3 pr-2 text-left text-[13px] leading-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-r-sm " +
-              (current ? "border-primary text-foreground font-medium" : "border-transparent text-muted-foreground hover:text-foreground hover:border-border")
+              "flex w-full items-center gap-1.5 rounded-md py-1 pl-2 pr-2 text-left text-[13px] leading-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 " +
+              (current ? "bg-accent text-foreground font-medium" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground")
             }
             title={n.title || n.id}
           >
-            {n.title || n.id}
+            <FileText className="h-3.5 w-3.5 shrink-0 opacity-70" />
+            <span className="truncate">{n.title || n.id}</span>
           </button>
         );
       }}
@@ -211,9 +221,14 @@ export function ReaderView({
   );
 
   return (
-    <div className="mx-auto w-full max-w-[88rem] lg:grid lg:grid-cols-[15rem_minmax(0,1fr)_13rem] lg:gap-10">
-      {/* Nav — a sticky column at desktop width, a disclosure above the article on a phone. */}
-      <aside className="lg:sticky lg:top-6 lg:self-start lg:max-h-[calc(100vh-5rem)] lg:overflow-y-auto lg:border-r lg:pr-5 mb-6 lg:mb-0">
+    // Desktop: the three cards fill the viewport below the shell header
+    // (4rem + 1px border, 1rem main padding each side, 3rem footer) and
+    // scroll on their own — the page itself never scrolls. --reader-offset
+    // lets a wrapper (the preview banner) claim part of that height. Phone:
+    // cards stack and the page scrolls.
+    <div className="mx-auto w-full max-w-[88rem] lg:grid lg:h-[calc(100vh-9.25rem-var(--reader-offset,0px))] lg:grid-cols-[16rem_minmax(0,1fr)_14rem] lg:gap-5">
+      {/* Nav — a card that scrolls on its own at desktop width, a disclosure above the article on a phone. */}
+      <aside className={READER_SIDE_COLUMN_CLASS + " " + READER_CARD_CLASS + " mb-4 lg:mb-0"}>
         <button
           type="button"
           onClick={() => setNavOpen((o) => !o)}
@@ -224,25 +239,83 @@ export function ReaderView({
           Contents
         </button>
         <div className={(navOpen ? "block" : "hidden") + " lg:block"}>
-          {homeNode && (
+          {/* The nest's name heads the nav; with a home page it is also the way back to it. */}
+          <h2 className="mb-3 border-b pb-3">
             <button
               type="button"
-              onClick={() => setSelectedId(homeNode.id)}
-              aria-current={selectedId === homeNode.id ? "page" : undefined}
+              onClick={() => homeNode && setSelectedId(homeNode.id)}
+              disabled={!homeNode}
+              aria-current={homeNode && selectedId === homeNode.id ? "page" : undefined}
+              title={nestName}
               className={
-                "mb-3 block w-full truncate text-left text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-sm " +
-                (selectedId === homeNode.id ? "text-foreground" : "text-foreground/80 hover:text-foreground")
+                "flex w-full items-center gap-2 text-left text-base font-bold tracking-tight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-sm disabled:cursor-default " +
+                (homeNode && selectedId !== homeNode.id ? "text-foreground/80 hover:text-foreground" : "text-foreground")
               }
             >
-              {nestName}
+              <BookOpen className="h-5 w-5 shrink-0 text-primary" />
+              <span className="truncate">{nestName}</span>
             </button>
+          </h2>
+          <label className="relative mb-3 block">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by title or tag"
+              aria-label="Search pages by title or tag"
+              className="h-8 w-full rounded-md border border-input bg-background pl-8 pr-7 text-[13px] placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                aria-label="Clear search"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-sm p-0.5 text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </label>
+          {hits ? (
+            hits.length === 0 ? (
+              <p className="px-2 text-[13px] text-muted-foreground/70">No pages match.</p>
+            ) : (
+              <ul className="space-y-px">
+                {hits.map((n) => {
+                  const current = selectedId === n.id;
+                  const where = breadcrumbFor(n.id).join(" / ");
+                  return (
+                    <li key={n.id}>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedId(n.id)}
+                        aria-current={current ? "page" : undefined}
+                        title={n.title || n.id}
+                        className={
+                          "flex w-full items-start gap-1.5 rounded-md py-1 pl-2 pr-2 text-left text-[13px] leading-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 " +
+                          (current ? "bg-accent text-foreground font-medium" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground")
+                        }
+                      >
+                        <FileText className="mt-[3px] h-3.5 w-3.5 shrink-0 opacity-70" />
+                        <span className="min-w-0">
+                          <span className="block truncate">{n.title || n.id}</span>
+                          {where && <span className="block truncate text-[11px] font-normal text-muted-foreground/70">{where}</span>}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )
+          ) : (
+            nav
           )}
-          {nav}
         </div>
       </aside>
 
       {/* Article — page-scrolled, reading width. */}
-      <article className="min-w-0">
+      <article className={"min-w-0 " + READER_CARD_CLASS + " px-6 py-6 lg:min-h-0 lg:overflow-y-auto lg:px-8"}>
         {notice && (
           <p role="status" className="mb-4 text-sm text-amber-800 dark:text-amber-300">
             {notice}
@@ -259,7 +332,7 @@ export function ReaderView({
         {selectedNode && (
           <header className="mb-6">
             {crumbs.length > 0 && (
-              <nav aria-label="Breadcrumb" className="mb-2 text-[13px] text-muted-foreground">
+              <nav aria-label="Breadcrumb" className="mb-2 truncate text-[13px] text-muted-foreground" title={crumbs.join(" / ")}>
                 {crumbs.map((c, i) => (
                   <span key={i}>
                     {i > 0 && <span aria-hidden className="mx-1.5 text-muted-foreground/60">/</span>}
@@ -268,7 +341,7 @@ export function ReaderView({
                 ))}
               </nav>
             )}
-            <h1 className="text-[2rem] leading-[1.15] font-semibold tracking-tight text-foreground">{title}</h1>
+            <h1 className="break-words text-[2rem] leading-[1.15] font-semibold tracking-tight text-foreground">{title}</h1>
             <Provenance node={selectedNode} />
           </header>
         )}
@@ -279,24 +352,40 @@ export function ReaderView({
             content={body}
             onWikiLinkClick={openWikiLink}
             plainLinks
-            className="max-w-[72ch] px-0 py-0 min-h-0 max-h-none overflow-visible prose-base prose-headings:scroll-mt-24 prose-h2:mt-10 prose-h2:text-xl prose-h3:text-base prose-p:leading-7 prose-pre:rounded-sm prose-code:before:content-none prose-code:after:content-none"
+            className="max-w-none px-0 py-0 min-h-0 max-h-none overflow-visible prose-base prose-headings:scroll-mt-24 prose-h2:mt-10 prose-h2:text-xl prose-h3:text-base prose-p:leading-7 prose-pre:rounded-sm prose-code:before:content-none prose-code:after:content-none"
           />
         )}
         {(prev || next) && (
-          <nav aria-label="Previous and next pages" className="mt-14 flex flex-wrap justify-between gap-4 border-t pt-6 text-sm">
-            <div>
+          <nav aria-label="Previous and next pages" className="mt-14 grid grid-cols-2 gap-4 border-t pt-6 text-sm">
+            <div className="min-w-0">
               {prev && (
-                <button type="button" onClick={() => setSelectedId(prev.id)} className="group text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-sm">
-                  <span className="block text-[12px] text-muted-foreground">Previous</span>
-                  <span className="text-foreground group-hover:underline">{prev.title || prev.id}</span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedId(prev.id)}
+                  title={prev.title || prev.id}
+                  className="group flex w-full items-center gap-3 rounded-lg border px-4 py-3 text-left hover:border-primary/60 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                >
+                  <ChevronLeft className="h-4 w-4 shrink-0 text-muted-foreground group-hover:text-primary" />
+                  <span className="min-w-0">
+                    <span className="block text-[12px] text-muted-foreground">Previous</span>
+                    <span className="block truncate font-medium text-foreground group-hover:text-primary">{prev.title || prev.id}</span>
+                  </span>
                 </button>
               )}
             </div>
-            <div className="text-right">
+            <div className="min-w-0">
               {next && (
-                <button type="button" onClick={() => setSelectedId(next.id)} className="group text-right focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-sm">
-                  <span className="block text-[12px] text-muted-foreground">Next</span>
-                  <span className="text-foreground group-hover:underline">{next.title || next.id}</span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedId(next.id)}
+                  title={next.title || next.id}
+                  className="group flex w-full items-center justify-end gap-3 rounded-lg border px-4 py-3 text-right hover:border-primary/60 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                >
+                  <span className="min-w-0">
+                    <span className="block text-[12px] text-muted-foreground">Next</span>
+                    <span className="block truncate font-medium text-foreground group-hover:text-primary">{next.title || next.id}</span>
+                  </span>
+                  <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground group-hover:text-primary" />
                 </button>
               )}
             </div>
@@ -305,13 +394,15 @@ export function ReaderView({
       </article>
 
       {/* Outline — headings of the open page; only rendered when there is more than one. */}
-      <aside className="hidden lg:block lg:sticky lg:top-6 lg:self-start lg:max-h-[calc(100vh-5rem)] lg:overflow-y-auto lg:border-l lg:pl-5">
-        {outline.length > 1 && (
-          <nav aria-label="On this page">
-            <p className="mb-2 text-[12px] font-medium text-muted-foreground">On this page</p>
+      <aside className={"hidden lg:block " + READER_SIDE_COLUMN_CLASS + " " + READER_CARD_CLASS}>
+        <nav aria-label="On this page">
+          <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">On this page</p>
+          {outline.length === 0 ? (
+            <p className="text-[13px] text-muted-foreground/70">{selectedId ? "No headings yet." : "Open a page to see its headings."}</p>
+          ) : (
             <ul className="space-y-1">
               {outline.map((h) => (
-                <li key={h.id} className={h.level === 3 ? "pl-3" : ""}>
+                <li key={h.id} style={{ paddingLeft: (h.level - 1) * 12 }}>
                   <button
                     type="button"
                     onClick={() => jumpTo(h.id)}
@@ -323,8 +414,8 @@ export function ReaderView({
                 </li>
               ))}
             </ul>
-          </nav>
-        )}
+          )}
+        </nav>
       </aside>
     </div>
   );

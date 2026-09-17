@@ -16,7 +16,7 @@ import {
   Clock, CheckCircle2, Loader2, Link2, Settings as SettingsIcon,
   Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
   FileStack, FolderPlus, X,
-  Activity, BookOpen, Archive,
+  Activity, BookOpen, Archive, Eye,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { prettyFolderPath } from "./FolderTree";
@@ -43,9 +43,9 @@ import { ShareNestDialog } from "./ShareNestDialog";
 import { NestPageHeader } from "./NestPageHeader";
 import {
   deriveNestCaps,
-  firstTopLevelFolder,
   isNestArchived,
 } from "../lib/nest-caps";
+import { foldersCoveredBy } from "../lib/reader";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 // Each tab is its own chunk, loaded when first opened.
@@ -211,6 +211,10 @@ export function NestView({
   // counts, tags, types, authors. Without it every filter and stat tile would
   // describe only the folders the user happened to open.
   const [census, setCensus] = useState<api.NestCensus | null>(null);
+  // The first census read has answered (either way). Until it has, the
+  // Overview must not judge the nest empty — the nest meta lands first and
+  // cleared initialLoad while the tree was still on the wire.
+  const [censusSettled, setCensusSettled] = useState(false);
   // Full roster — admin-only (listStewards 403s for non-admins → stays []).
   // Caller's OWN steward rows (scoped), from GET /nests/:id. Drives per-node
   // affordances for non-admin reviewers/editors who can't read the roster.
@@ -255,6 +259,9 @@ export function NestView({
   const [readerHomeNode, setReaderHomeNode] = useState<string | null>(null);
   const [readerModeSaving, setReaderModeSaving] = useState(false);
   const [readerDialogOpen, setReaderDialogOpen] = useState(false);
+  // "Preview as reader": an owner/editor looking at the visitor-facing reader
+  // from inside the authoring UI. Presentation only — rights are unchanged.
+  const [previewReader, setPreviewReader] = useState(false);
   const [homeNodePickerOpen, setHomeNodePickerOpen] = useState(false);
   // Title of the saved home node — the stored value is an id, and an id is not
   // what people recognise. Resolved from the full document list, which the
@@ -425,6 +432,8 @@ export function NestView({
       setCensus(fresh);
     } catch (e) {
       console.error("[NestView] getNestCensus failed", nestId, e);
+    } finally {
+      setCensusSettled(true);
     }
   }, [nestId, qc]);
 
@@ -561,6 +570,7 @@ export function NestView({
     loadedFolders.current = new Set();
     setExpandedFolders(new Set());
     setNodes([]);
+    setCensusSettled(false);
     void fetchLevel(folderFilter ?? "");
     void fetchCensus();
   }, [nestId, folderFilter, fetchLevel, fetchCensus]);
@@ -604,6 +614,10 @@ export function NestView({
   //   isReadOnly     — no write/review/manage (public + plain 'read' collabs)
   // Rules live in lib/nest-caps so the board (and any later nest-scoped view)
   // gates on exactly the same derivation instead of a lookalike copy.
+  // Archived: every write is refused server-side, so the affordances that
+  // only lead to a refusal (or that configure a nest nobody can change) are
+  // withheld — Connect, the reader-mode switch, the trace, steward changes.
+  const nestArchived = isArchived || isNestArchived({ archived_at: nestArchivedAt });
   const caps = deriveNestCaps({
     roles,
     permission,
@@ -611,23 +625,44 @@ export function NestView({
     isOwner,
     isAdmin,
     readerMode: readerModeEnabled,
-    isArchived: isArchived || isNestArchived({ archived_at: nestArchivedAt }),
+    previewReader,
+    isArchived: nestArchived,
   });
   // canReviewDocs is folded into isReadOnly inside caps; per-row review uses
   // canReviewNode for scope resolution, so it isn't destructured here.
   const { canManage, collabCanWrite, canEditDocs, isReadOnly, isReaderView } =
     caps;
 
-  // Reader Mode has no tab strip to trigger a folder fetch, so a nest whose
-  // docs all live one level down (the common docs-site shape) opens with
-  // only the empty root level loaded — ReaderView renders nothing. Load the
-  // nest's first top-level folder by default so there's something to read
-  // without a click; ReaderView's onExpandFolder (below) covers the rest.
+  // Reader Mode shows the whole nest at once: the nav lists every folder's
+  // pages without a click, and a home page outside the first folder still
+  // resolves on load. One body-free nest-wide read replaces the per-level
+  // lazy fetches; every folder it covers is marked loaded so nav rows open.
   useEffect(() => {
     if (!isReaderView) return;
-    const first = firstTopLevelFolder(knownFolders);
-    if (first) void fetchLevel(first.path);
-  }, [isReaderView, knownFolders, fetchLevel]);
+    let cancelled = false;
+    // A preview lists only approved documents, exactly as a visitor sees it.
+    qc.fetchQuery(reads.nodesMeta(nestId, previewReader))
+      .then(({ nodes: all }) => {
+        if (cancelled) return;
+        const folders = foldersCoveredBy(all);
+        loadedFolders.current = folders;
+        setLoadedFolderPaths(folders);
+        setNodes(all);
+      })
+      .catch((e: any) => toast.error(e?.message || "Failed to load documents"));
+    return () => { cancelled = true; };
+  }, [isReaderView, previewReader, nestId, qc]);
+  // The preview swapped `nodes` for the approved-only set and marked every
+  // folder loaded; leaving it reopens the authoring tree from scratch, the
+  // same way a scope change does.
+  const exitPreview = () => {
+    setPreviewReader(false);
+    loadedFolders.current = new Set();
+    setLoadedFolderPaths(new Set());
+    setExpandedFolders(new Set());
+    setNodes([]);
+    void fetchLevel(folderFilter ?? "");
+  };
 
   // Does a steward row with `role` cover this node? Same scope-resolution
   // rules as the server: document scope matches by id, tag scope matches
@@ -1065,8 +1100,23 @@ export function NestView({
   if (isReaderView) {
     // No "Back" here: a public docs reader navigates with the page's own
     // nav and the shell's header; a button back to the nest list is noise.
+    // The banner takes 3.5rem (row + margin) off the reader's viewport
+    // height so the three cards still end at the window's edge.
     return (
+      <div style={previewReader ? ({ "--reader-offset": "3.5rem" } as React.CSSProperties) : undefined}>
+        {previewReader && (
+          <div
+            role="status"
+            className="mb-4 flex items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200"
+          >
+            <span>Previewing as a reader — this is what visitors see.</span>
+            <Button variant="outline" size="sm" className="h-7" onClick={exitPreview}>
+              Exit preview
+            </Button>
+          </div>
+        )}
       <ReaderView
+          key={previewReader ? "preview" : "reader"}
         nestId={nestId}
         nestName={editableName}
         nodes={nodes}
@@ -1078,7 +1128,9 @@ export function NestView({
         onExpandFolder={fetchLevel}
         loadingFolders={loadingFolders}
         loadedFolders={loadedFolderPaths}
+          approvedOnly={previewReader}
       />
+      </div>
     );
   }
 
@@ -1243,8 +1295,7 @@ export function NestView({
                 variant="outline"
                 // Green for public, blue for org — same pairing the dashboard
                 // card badge uses, so the two tiers never read as one colour.
-                className={`shrink-0 gap-1 ${
-                  visibility === "public"
+                  className={`shrink-0 gap-1 ${visibility === "public"
                     ? "border-green-200 bg-green-50 text-green-700"
                     : "border-blue-200 bg-blue-50 text-blue-700"
                 }`}
@@ -1268,13 +1319,12 @@ export function NestView({
               toggle: the landing document is part of the same setting, and
               changing it must not mean switching reader mode off and on
               again. */}
-          {canManageReaderMode && (
+            {canManageReaderMode && !nestArchived && (
             <Button
               variant="outline"
               size="sm"
               onClick={() => setReaderDialogOpen(true)}
-              className={`shrink-0 h-7 gap-1.5 ${
-                readerModeEnabled
+                className={`shrink-0 h-7 gap-1.5 ${readerModeEnabled
                   ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
                   : ""
               }`}
@@ -1309,8 +1359,7 @@ export function NestView({
             return (
               <Badge
                 variant="outline"
-                className={`shrink-0 gap-1 ${
-                  isArchiveAsk
+                  className={`shrink-0 gap-1 ${isArchiveAsk
                     ? "border-amber-200 bg-amber-50 text-amber-700"
                     : "border-red-200 bg-red-50 text-red-700"
                 } ${isOwn ? "cursor-pointer hover:opacity-80" : ""}`}
@@ -1338,10 +1387,12 @@ export function NestView({
           {/* Connect (external clients) and Add-with-AI (seed content) are
               distinct first-class actions — Connect wires tools, Add-with-AI
               generates context into the nest. */}
+        {!nestArchived && (
           <Button variant="outline" size="sm" onClick={() => setShowConnect(true)}>
             <Link2 className="h-3.5 w-3.5 mr-1.5" />
             Connect
           </Button>
+        )}
           {!isReadOnly && (
             <Button variant="outline" size="sm" onClick={() => setShowGenerate(true)}>
               <Sparkles className="h-3.5 w-3.5 mr-1.5" />
@@ -1412,9 +1463,10 @@ export function NestView({
                 onSelect: () => setShowAssignSteward(true),
               });
             // Nest-scoped activity trace — a read-only audit view, so not
-            // gated on isReadOnly. Same owner/nest-admin rule as the server's
-            // GET /nests/:id/trace (canManageStewards).
-            if (canManageGovernance && onOpenTrace)
+          // gated on isReadOnly (a viewer may see it); withheld on an archived
+          // nest with the rest of its management. Same owner/nest-admin rule
+          // as the server's GET /nests/:id/trace (canManageStewards).
+          if (canManageGovernance && onOpenTrace && !nestArchived)
               actions.push({
                 label: "Activity trace",
                 icon: Activity,
@@ -1674,7 +1726,7 @@ export function NestView({
         <TabsContent value="overview" className="space-y-4">
           <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
           <OverviewTab
-            initialLoad={initialLoad}
+              initialLoad={initialLoad || !censusSettled}
             stats={stats}
             recentlyEdited={recentlyEdited}
             recentlyEditedCount={recentlyEditedCount}
@@ -1781,7 +1833,7 @@ export function NestView({
           <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
             <StewardsTab
               nestId={nestId}
-              canManage={canManageGovernance}
+                canManage={canManageGovernance && !caps.isReadOnly}
               currentUserEmail={currentEmail}
               onAssign={() => setShowAssignSteward(true)}
               onRemove={setRemoveStewardId}
@@ -2062,6 +2114,19 @@ export function NestView({
           )}
 
           <DialogFooter>
+            {readerModeEnabled && (
+              <Button
+                variant="outline"
+                className="mr-auto gap-1.5"
+                onClick={() => {
+                  setReaderDialogOpen(false);
+                  setPreviewReader(true);
+                }}
+              >
+                <Eye className="h-3.5 w-3.5" />
+                Preview as reader
+              </Button>
+            )}
             <Button variant="outline" onClick={() => setReaderDialogOpen(false)}>
               Done
             </Button>

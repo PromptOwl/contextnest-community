@@ -436,8 +436,11 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   // the person who was granted edit rights a read-only document.
   (response as any).myGrant = await resolveNodeGrant(nestId, userId, nodeId);
 
-  // Public readers see approved version body only.
-  if (publicReader) {
+  // Public readers see approved version body only. ?approved_only=1 asks for
+  // the same body on purpose — an owner previewing the public reader — and
+  // mirrors the listing's flag; it narrows what is served, never widens it.
+  const approvedOnly = c.req.query("approved_only") === "1" || c.req.query("approved_only") === "true";
+  if (publicReader || approvedOnly) {
     const approved = await versions.getApprovedVersion(nestId, nodeId);
     if (approved != null) {
       // Kept for the raw path: frontmatter=1 must serve the APPROVED
@@ -469,6 +472,13 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
         });
       }
       return c.json({ node: response });
+    }
+    // Nothing approved yet. A public reader never gets here (canReadNode
+    // refused them above), but an owner asking for approved_only would fall
+    // through to their own draft — under a "this is what visitors see"
+    // banner. The honest answer is the one a visitor gets: no such page.
+    if (approvedOnly) {
+      throw new NotFoundError("This document has no approved version yet.");
     }
   }
 

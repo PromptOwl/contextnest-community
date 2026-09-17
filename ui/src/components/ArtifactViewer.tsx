@@ -23,6 +23,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import type { AnnotationThread } from "../lib/api";
 import { extractText, buildAnchor } from "../lib/artifact-text";
+import { DocumentViewer } from "./DocumentViewer";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -117,6 +118,12 @@ export function ArtifactViewer({
   const [threads, setThreads] = useState<AnnotationThread[]>([]);
   const [loadingThreads, setLoadingThreads] = useState(true);
   const [extractedText, setExtractedText] = useState<string>("");
+  // The served body as fetched. An artifact is normally HTML for the iframe,
+  // but a markdown/plain file stored as an artifact is not — the browser
+  // would render it as one run-on paragraph, so Preview renders it as
+  // markdown instead. null until fetched.
+  const [rawBody, setRawBody] = useState<string | null>(null);
+  const bodyIsHtml = rawBody == null || /^s*</.test(rawBody);
   const [textLoading, setTextLoading] = useState(false);
   const [snapshot, setSnapshot] = useState<number | null>(snapshotVersion ?? null);
   const [iframeKey, setIframeKey] = useState(0);
@@ -235,6 +242,9 @@ export function ArtifactViewer({
         setShowVersions(false);
         setViewingVersion(v);
         setMode("preview");
+        // The body cache describes the live snapshot, not the pinned one.
+        setExtractedText("");
+        setRawBody(null);
         setIframeKey((k) => k + 1);
       });
     },
@@ -243,6 +253,8 @@ export function ArtifactViewer({
 
   const exitVersionView = useCallback(() => {
     setViewingVersion(null);
+    setExtractedText("");
+    setRawBody(null);
     setIframeKey((k) => k + 1);
   }, []);
 
@@ -263,6 +275,7 @@ export function ArtifactViewer({
       // describe the pre-restore body.
       setSnapshot(null);
       setExtractedText("");
+      setRawBody(null);
       setNodeMeta(null);
       setEditDraft("");
       setIframeKey((k) => k + 1);
@@ -333,6 +346,7 @@ export function ArtifactViewer({
       // the governance path working, not a bug.
       setSnapshot(null);
       setExtractedText("");
+      setRawBody(null);
       setIframeKey((k) => k + 1);
       setMode("preview");
       toast.success(
@@ -393,19 +407,22 @@ export function ArtifactViewer({
     setTextLoading(true);
     try {
       const { html, snapshot: served } = await api.fetchArtifactHtml(
-        nestId, nodeId, snapshot, iframeKey,
+        nestId, nodeId, viewingVersion ?? snapshot, iframeKey,
       );
       setExtractedText(extractText(html));
-      if (served != null) setSnapshot(served);
+      setRawBody(html);
+      // A pinned read reports the pinned version, not the live snapshot.
+      if (served != null && viewingVersion == null) setSnapshot(served);
     } catch (e: any) {
       toast.error(e?.message || "Failed to load artifact text");
     } finally {
       setTextLoading(false);
     }
-  }, [extractedText, textLoading, nestId, nodeId, snapshot, iframeKey]);
+  }, [extractedText, textLoading, nestId, nodeId, snapshot, viewingVersion, iframeKey]);
 
+  // Preview needs the body too, to know whether it is HTML at all.
   useEffect(() => {
-    if (mode === "annotate") void ensureText();
+    if (mode === "annotate" || mode === "preview") void ensureText();
   }, [mode, ensureText]);
 
   // Capture a selection inside the extracted-text panel. The panel renders the
@@ -498,7 +515,7 @@ export function ArtifactViewer({
   return (
     <div className="flex min-h-full flex-col">
       {/* Top bar — the same sticky h-12 bar the document page has. */}
-      <div className="sticky top-0 z-30 flex h-12 items-center justify-between gap-3 border-b bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-3">
+      <div className="sticky top-16 z-30 flex h-12 items-center justify-between gap-3 border-b bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-3">
         <div className="flex items-center gap-2 min-w-0">
           <Button
             variant="ghost"
@@ -726,6 +743,11 @@ export function ArtifactViewer({
                 </>
               )}
             </div>
+          ) : mode === "preview" && !bodyIsHtml ? (
+            <DocumentViewer
+              content={rawBody ?? ""}
+              className="flex-1 min-h-[70vh] max-h-none overflow-visible rounded-lg border bg-background"
+            />
           ) : mode === "preview" ? (
             <iframe
               key={iframeKey}
@@ -762,7 +784,7 @@ export function ArtifactViewer({
         {/* Annotations rail — beside the artifact, the document page's rail
             shape; hidden (not unmounted) when closed so threads stay loaded. */}
         <aside
-          className={`w-full shrink-0 border-t lg:w-80 lg:border-t-0 lg:border-l lg:sticky lg:top-12 lg:self-start lg:max-h-[calc(100vh-3rem)] flex flex-col min-h-0 max-h-[70vh]${commentsOpen ? "" : " hidden"}`}
+          className={`w-full shrink-0 border-t lg:w-80 lg:border-t-0 lg:border-l lg:sticky lg:top-28 lg:self-start lg:max-h-[calc(100vh-7rem)] flex flex-col min-h-0 max-h-[70vh]${commentsOpen ? "" : " hidden"}`}
           data-testid="artifact-comments-rail"
           aria-hidden={!commentsOpen}
         >
