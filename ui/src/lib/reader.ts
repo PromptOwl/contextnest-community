@@ -150,3 +150,21 @@ export const READER_SIDE_COLUMN_CLASS = "lg:min-h-0 lg:overflow-y-auto";
 
 /** The card every reader panel sits in — the app's standard card surface. */
 export const READER_CARD_CLASS = "rounded-lg border border-border bg-card p-4";
+
+/**
+ * Pages whose title or tags contain the query, case-insensitively; a
+ * leading "#" on either side is ignored so "#gtm" and "gtm" both hit the
+ * tag. Empty query → null, meaning "not searching" (show the tree).
+ */
+export function searchNodes<T extends { id: string; title?: string; tags?: unknown[] }>(
+  nodes: T[],
+  query: string,
+): T[] | null {
+  const q = query.trim().toLowerCase().replace(/^#/, "");
+  if (!q) return null;
+  return nodes.filter(
+    (n) =>
+      String(n.title || leaf(n.id)).toLowerCase().includes(q) ||
+      (n.tags ?? []).some((t) => String(t).toLowerCase().replace(/^#/, "").includes(q)),
+  );
+}

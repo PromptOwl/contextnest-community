@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, ChevronDown, ChevronLeft, Menu, BookOpen, Folder, FolderOpen, FileText } from "lucide-react";
+import { ChevronRight, ChevronDown, ChevronLeft, Menu, BookOpen, Folder, FolderOpen, FileText, Search, X } from "lucide-react";
 import { FolderTree } from "./FolderTree";
 import { DocumentViewer } from "./DocumentViewer";
 import * as api from "../lib/api";
 import { conventionKey, isHomeNode } from "@/lib/nest-caps";
 import { extractHeadings } from "@/lib/toc";
-import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle, orderWithinFolder, ancestorsOf, READER_SIDE_COLUMN_CLASS, READER_CARD_CLASS } from "@/lib/reader";
+import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle, orderWithinFolder, ancestorsOf, READER_SIDE_COLUMN_CLASS, READER_CARD_CLASS, searchNodes } from "@/lib/reader";
 import { relTime } from "@/lib/dates";
 
 /**
@@ -144,6 +144,10 @@ export function ReaderView({
 
   const [notice, setNotice] = useState<string | null>(null);
   const [navOpen, setNavOpen] = useState(false);
+  // Nav search: title or tag. While a query is typed the tree gives way to a
+  // flat list of hits with their folder, so a page is one keystroke away.
+  const [query, setQuery] = useState("");
+  const hits = useMemo(() => searchNodes(nodes, query), [nodes, query]);
 
   const openWikiLink = (target: string) => {
     const hit = resolveWikiTarget(target, nodes);
@@ -252,7 +256,61 @@ export function ReaderView({
               <span className="truncate">{nestName}</span>
             </button>
           </h2>
-          {nav}
+          <label className="relative mb-3 block">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by title or tag"
+              aria-label="Search pages by title or tag"
+              className="h-8 w-full rounded-md border border-input bg-background pl-8 pr-7 text-[13px] placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                aria-label="Clear search"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-sm p-0.5 text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </label>
+          {hits ? (
+            hits.length === 0 ? (
+              <p className="px-2 text-[13px] text-muted-foreground/70">No pages match.</p>
+            ) : (
+              <ul className="space-y-px">
+                {hits.map((n) => {
+                  const current = selectedId === n.id;
+                  const where = breadcrumbFor(n.id).join(" / ");
+                  return (
+                    <li key={n.id}>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedId(n.id)}
+                        aria-current={current ? "page" : undefined}
+                        title={n.title || n.id}
+                        className={
+                          "flex w-full items-start gap-1.5 rounded-md py-1 pl-2 pr-2 text-left text-[13px] leading-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 " +
+                          (current ? "bg-accent text-foreground font-medium" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground")
+                        }
+                      >
+                        <FileText className="mt-[3px] h-3.5 w-3.5 shrink-0 opacity-70" />
+                        <span className="min-w-0">
+                          <span className="block truncate">{n.title || n.id}</span>
+                          {where && <span className="block truncate text-[11px] font-normal text-muted-foreground/70">{where}</span>}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )
+          ) : (
+            nav
+          )}
         </div>
       </aside>
 

@@ -4,7 +4,7 @@
  * mean in a folder-ordered nest.
  */
 import { describe, it, expect } from "vitest";
-import { resolveWikiTarget, breadcrumbFor, sectionLabel, readingOrder, neighbours, stripLeadingTitle, commonRootFolder, displayTitle, orderWithinFolder, ancestorsOf, foldersCoveredBy, READER_SIDE_COLUMN_CLASS } from "./reader";
+import { resolveWikiTarget, breadcrumbFor, sectionLabel, readingOrder, neighbours, stripLeadingTitle, commonRootFolder, displayTitle, orderWithinFolder, ancestorsOf, foldersCoveredBy, READER_SIDE_COLUMN_CLASS, searchNodes } from "./reader";
 
 const nodes = [
   { id: "nodes/docs/welcome", title: "Welcome" },
@@ -151,5 +151,32 @@ describe("READER_SIDE_COLUMN_CLASS", () => {
     expect(READER_SIDE_COLUMN_CLASS).toContain("lg:min-h-0");
     expect(READER_SIDE_COLUMN_CLASS).toContain("lg:overflow-y-auto");
     expect(READER_SIDE_COLUMN_CLASS).not.toMatch(/\blg:(max-h|self-start|sticky)/);
+  });
+});
+
+// The nav's search box: a visitor finds a page by its title or one of its
+// tags without walking the tree.
+describe("searchNodes", () => {
+  const nodes = [
+    { id: "nodes/docs/selectors", title: "Selectors", tags: ["#api", "grammar"] },
+    { id: "nodes/gtm/deals/acme", title: "Acme deal", tags: ["#gtm"] },
+    { id: "nodes/untitled-note", tags: [] },
+  ];
+  it("is null (not searching) for an empty or blank query", () => {
+    expect(searchNodes(nodes, "")).toBeNull();
+    expect(searchNodes(nodes, "   ")).toBeNull();
+  });
+  it("matches titles case-insensitively, falling back to the slug", () => {
+    expect(searchNodes(nodes, "SELECT")!.map((n) => n.id)).toEqual(["nodes/docs/selectors"]);
+    expect(searchNodes(nodes, "untitled")!.map((n) => n.id)).toEqual(["nodes/untitled-note"]);
+  });
+  it("matches tags with or without the # on either side", () => {
+    for (const q of ["gtm", "#gtm", "GTM"]) {
+      expect(searchNodes(nodes, q)!.map((n) => n.id)).toEqual(["nodes/gtm/deals/acme"]);
+    }
+    expect(searchNodes(nodes, "#grammar")!.map((n) => n.id)).toEqual(["nodes/docs/selectors"]);
+  });
+  it("returns an empty list when nothing matches", () => {
+    expect(searchNodes(nodes, "zzz")).toEqual([]);
   });
 });
