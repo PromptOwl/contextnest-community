@@ -27,10 +27,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import * as api from "../lib/api";
-import { reads, useApiKeys } from "../lib/queries";
-import { parseServerDate } from "../lib/dates";
-import { KeyRevealModal } from "./ConnectModal";
+import * as api from "../../../lib/api";
+import { reads, useApiKeys } from "../../../lib/queries";
+import { parseServerDate } from "../../../lib/dates";
+import { useAppNav } from "../../../lib/app-nav";
+import { KeyRevealModal } from "../../../components/ConnectModal";
 
 function when(value: string | null): string {
   if (!value) return "never";
@@ -38,7 +39,8 @@ function when(value: string | null): string {
   return d ? d.toLocaleDateString() : "never";
 }
 
-export function ApiKeysPage({ onBack }: { onBack: () => void }) {
+export default function ApiKeysPage() {
+  const { openDashboard: onBack } = useAppNav();
   const qc = useQueryClient();
   const { data, isLoading } = useApiKeys();
   const keys = data?.keys ?? [];

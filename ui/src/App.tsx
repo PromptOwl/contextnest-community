@@ -12,7 +12,6 @@ import { DocumentSidebar } from "./components/DocumentSidebar";
 import { ConnectModal } from "./components/ConnectModal";
 import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
 import { AdminLoginModal } from "./components/AdminLoginModal";
-const ApiKeysPage = lazyNamed(() => import("./components/ApiKeysPage"), "ApiKeysPage");
 const TeamsPage = lazyNamed(() => import("./components/TeamsPage"), "TeamsPage");
 const GuidePage = lazyNamed(() => import("./components/GuidePage"), "GuidePage");
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
@@ -1616,9 +1615,6 @@ export default function App() {
             </NestPageProvider>
           );
         })()}
-        {view.page === "api-keys" && (
-          <ApiKeysPage onBack={() => setView({ page: "dashboard" })} />
-        )}
         {/* Account pages (user menu) — whichever registry page matches. */}
         {(() => {
           const page = accountPageForView(view.page);
