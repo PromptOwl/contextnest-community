@@ -45,6 +45,7 @@ import { notifyMentions } from "../governance/mention-notify.js";
 import {
   resolveUserRoles,
   stewardDocumentCreator,
+  removeSteward,
 } from "../governance/stewardship-service.js";
 import { canApproveWith } from "../governance/roles.js";
 import {
@@ -1503,15 +1504,24 @@ async function createNodeOnce(
       ...(input.schedule ? { schedule: input.schedule } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
     };
+    // Creator-reviews: steward the author BEFORE deciding to publish, since v1
+    // publishes on the strength of that row. A failure here fails the create
+    // with nothing written — never a document published on a false premise.
+    // The id is reserved by the lock and free (checked above), so the row
+    // can't name someone else's document; if the write below never lands the
+    // row is removed again.
     const creatorReviews =
       opts.creatorReviews !== false &&
       (await isStewardshipEnabled(nestId)) &&
       (await nestCreatorIsReviewer(nestId));
+    const creatorSteward = creatorReviews
+      ? await stewardDocumentCreator(nestId, id, userEmail)
+      : null;
     const publishReason = await autoPublishReason(
       nestId,
       userEmail,
       { tags, metadata },
-      { creatorReviews },
+      { creatorReviews: creatorSteward?.canApprove === true },
     );
     // Same note in the engine history and the governance row: the version
     // history an admin reads in the UI comes from node_versions, so leaving the
@@ -1556,7 +1566,14 @@ async function createNodeOnce(
       } catch {
         onDisk = false;
       }
-      if (!onDisk) throw err;
+      if (!onDisk) {
+        // Nothing was written, so the steward row minted above would name a
+        // document that never existed — take it back before rethrowing.
+        if (creatorSteward?.insertedId) {
+          await removeSteward(creatorSteward.insertedId);
+        }
+        throw err;
+      }
       console.error("publishDocument failed (node create auto-publish)", err);
       published = false;
     }
@@ -1591,17 +1608,6 @@ async function createNodeOnce(
         status: "draft",
         tags,
       });
-    }
-
-    // After the version rows, so the roster only ever names a document that
-    // exists. Best-effort like the publish above: the document is written and
-    // versioned by now, and a 500 here would only invite a retry that 409s.
-    if (creatorReviews) {
-      try {
-        await stewardDocumentCreator(nestId, id, userEmail);
-      } catch (err) {
-        console.error("stewardDocumentCreator failed (node create)", id, err);
-      }
     }
 
     await trackEvent("node.create", { nestId, nodeId: id });

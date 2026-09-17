@@ -97,7 +97,9 @@ A per-nest flag (**off** by default; nest Settings → "Creators review their ow
 When it's on, creating a document in a governed nest does two things:
 
 1. **The author is stewarded as a document-scope `reviewer`** of that document — exactly the row an admin would otherwise add by hand (`POST /nests/:id/stewards` with `scope: "document"`, or the `documents:` section of `stewards.yaml`). The nest owner is skipped; they already approve everything.
-2. **The first version publishes immediately.** The author is the document's reviewer, so nobody else needs to bless v1.
+2. **The first version publishes immediately.** The author is the document's reviewer, so nobody else needs to bless v1. This holds for the owner too: with this on, the owner's own new documents publish at v1 whether or not `allow_self_approve` is on — the two settings are independent, and this one only ever touches v1.
+
+The row is written **before** the publish decision, so v1 only publishes when the author really can approve the next change. If a document-scope row for the author already exists on that id with a lesser role (an admin stewarded the id ahead of time), it is left alone and v1 lands as a draft instead. If the row can't be written, the create fails with nothing written.
 
 Everything after v1 is the ordinary review cycle, and separation of duties is untouched:
 

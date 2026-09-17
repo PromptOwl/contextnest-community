@@ -20,6 +20,7 @@ import {
   collabPermToRole,
   canViewWith,
   canEditWith,
+  canApproveWith,
   primaryRole,
 } from "./roles.js";
 import type {
@@ -418,37 +419,52 @@ export async function createStewardRecord(params: {
   return results;
 }
 
+/** What stewardDocumentCreator found or did, so the create can act on it. */
+export interface CreatorStewardResult {
+  /** True when the author can approve changes to this document. */
+  canApprove: boolean;
+  /** Set when this call inserted the row — the caller removes it if the create fails. */
+  insertedId?: string;
+}
+
 /**
  * Creator reviews their documents: make the author of a new document its
- * reviewer. Called from createNode once the document exists, so a failed
- * create never leaves a steward row pointing at nothing.
+ * reviewer. Called from createNode BEFORE the document is written, because
+ * the create publishes v1 on the strength of this row — the row has to exist
+ * before that decision, and a failure here must fail the create rather than
+ * leave a document published on a false premise. The caller compensates with
+ * removeSteward(insertedId) if the write that follows never lands.
  *
  * The nest owner is skipped — they already approve everything, and the roster
- * refuses owner rows for the same reason (createStewardRecord). Idempotent: a
- * retried create finds its own row and leaves it. Nobody is emailed — the
- * author just wrote the document; the row is a consequence of that, not an
- * assignment someone made.
+ * refuses owner rows for the same reason (createStewardRecord). An existing
+ * document-scope row for the author is left as it is: a reviewer row already
+ * does the job, and a lesser role someone assigned on purpose is not silently
+ * promoted — the caller sees canApprove=false and drafts v1 instead. Nobody is
+ * emailed: the author just wrote the document; the row is a consequence of
+ * that, not an assignment someone made.
  */
 export async function stewardDocumentCreator(
   nestId: string,
   nodeId: string,
   userEmail: string,
-): Promise<void> {
+): Promise<CreatorStewardResult> {
   const email = userEmail.trim().toLowerCase();
-  if (!email) return;
+  if (!email) return { canApprove: false };
   const ownerEmail = ((await getNestOwnerEmail(nestId)) || "").toLowerCase();
-  if (email === ownerEmail) return;
+  if (email === ownerEmail) return { canApprove: true };
 
   const db = getDb();
-  const existing = await db.get(
-    `SELECT 1 AS present FROM stewards
+  const existing = (await db.get(
+    `SELECT role FROM stewards
        WHERE nest_id = ? AND is_active = 1 AND scope = 'document'
          AND node_pattern = ? AND LOWER(user_email) = ?`,
     [nestId, nodeId, email],
-  );
-  if (existing) return;
+  )) as { role: string } | undefined;
+  if (existing) {
+    return { canApprove: canApproveWith([existing.role as EffectiveRole]) };
+  }
 
-  await assignSteward({
+  const created = await assignSteward({
     nestId,
     scope: "document",
     nodePattern: nodeId,
@@ -459,6 +475,7 @@ export async function stewardDocumentCreator(
     assignedAt: new Date().toISOString(),
     isActive: true,
   });
+  return { canApprove: true, insertedId: created.id };
 }
 
 // ─── STEWARD RESOLUTION ─────────────────────────────────────────────────

@@ -248,6 +248,34 @@ describe("flag on", () => {
     ]);
   });
 
+  it("a lesser role someone pre-assigned is kept, and v1 drafts", async () => {
+    // An admin can steward a document id that doesn't exist yet. If that row
+    // says "editor", the creator can't approve — so v1 must NOT publish on
+    // the promise that they can, and the row is not silently promoted.
+    const pre = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/stewards`,
+      {
+        scope: "document",
+        documentId: "nodes/pre-assigned",
+        users: [{ email: alice.email, role: "editor" }],
+      },
+      owner.apiKey,
+    );
+    expect(pre.status).toBe(201);
+
+    const { status } = await createDoc(alice, {
+      title: "pre-assigned",
+      content: "v1",
+    });
+    expect(status).toBe(201);
+    expect(await statusOf(alice, "nodes/pre-assigned")).toBe("draft");
+    expect(await docStewards("nodes/pre-assigned")).toEqual([
+      { email: alice.email, role: "editor", scope: "document" },
+    ]);
+  });
+
   it("creating twice never doubles the steward row", async () => {
     // A retried create onto a fresh id after a conflict, or two documents by
     // the same author, must each get exactly one row for their own id.
