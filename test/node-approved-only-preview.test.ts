@@ -32,6 +32,12 @@ beforeAll(async () => {
     app, "PATCH", `/nests/${nestId}/nodes/nodes/guide`,
     { content: "# Guide\n\nDraft text nobody approved." }, owner.apiKey,
   );
+  // And a document created under stewardship: a draft with no approved
+  // version at all.
+  await jsonRequest(
+    app, "POST", `/nests/${nestId}/nodes`,
+    { title: "Unreviewed", content: "# Unreviewed\n\nNever approved." }, owner.apiKey,
+  );
 }, 30000);
 
 afterAll(() => env.cleanup());
@@ -54,5 +60,33 @@ describe("GET node ?approved_only=1", () => {
     expect(data.node.content).not.toContain("Draft text");
     expect(data.node.version).toBe(1);
     expect(data.node.status).toBe("published");
+  });
+});
+
+// A draft-only document has nothing a visitor could see. The owner reads it
+// normally, but under approved_only the answer must be "no such page" — not
+// their own draft dressed up as the public view.
+describe("GET node ?approved_only=1 with no approved version", () => {
+  it("the owner reads the draft without the flag", async () => {
+    const { status, data } = await jsonRequest(
+      app, "GET", `/nests/${nestId}/nodes/nodes/unreviewed`, undefined, owner.apiKey,
+    );
+    expect(status).toBe(200);
+    expect(data.node.content).toContain("Never approved");
+  });
+
+  it("with approved_only the same document is a 404, never the draft", async () => {
+    const { status, data } = await jsonRequest(
+      app, "GET", `/nests/${nestId}/nodes/nodes/unreviewed?approved_only=1`, undefined, owner.apiKey,
+    );
+    expect(status).toBe(404);
+    expect(data.error).toMatch(/no approved version/i);
+  });
+
+  it("the approved-only listing does not offer it either", async () => {
+    const { data } = await jsonRequest(
+      app, "GET", `/nests/${nestId}/nodes?approved_only=1`, undefined, owner.apiKey,
+    );
+    expect(data.nodes.map((n: any) => n.id)).not.toContain("nodes/unreviewed");
   });
 });

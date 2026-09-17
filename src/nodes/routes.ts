@@ -473,6 +473,13 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       }
       return c.json({ node: response });
     }
+    // Nothing approved yet. A public reader never gets here (canReadNode
+    // refused them above), but an owner asking for approved_only would fall
+    // through to their own draft — under a "this is what visitors see"
+    // banner. The honest answer is the one a visitor gets: no such page.
+    if (approvedOnly) {
+      throw new NotFoundError("This document has no approved version yet.");
+    }
   }
 
   // Resolved-from-DB workflow status; on-disk frontmatter status is
