@@ -172,13 +172,21 @@ describe("/admin/settings — validation", () => {
     expect(bad.data.fieldErrors).toHaveProperty("posthog_host");
 
     // A junk key was accepted and saved as-is (CU-wdqcq027fr); it must be
-    // rejected before anything is written, keyed to the field for the UI.
-    for (const junk of ["abc123", "fsdddd", "phc_short", "phx_TestProjectKey0123456789abcdefXYZ"]) {
+    // rejected before anything is written, keyed to the field for the UI —
+    // and the message must name the rule that failed, so a key with the
+    // right prefix but half its length is not a mystery.
+    const junk: Array<[string, RegExp]> = [
+      ["abc123", /must start with phc_/],
+      ["phx_TestProjectKey0123456789abcdefXYZ", /must start with phc_/],
+      ["phc_ewrer", /too short/],
+      ["phc_Test Project Key 0123456789abcdef", /letters and digits/],
+    ];
+    for (const [key, reason] of junk) {
       const badKey = await jsonRequest(
-        app, "PATCH", "/admin/settings", { posthog_key: junk }, admin.apiKey,
+        app, "PATCH", "/admin/settings", { posthog_key: key }, admin.apiKey,
       );
       expect(badKey.status).toBe(400);
-      expect(badKey.data.fieldErrors).toHaveProperty("posthog_key");
+      expect(badKey.data.fieldErrors.posthog_key).toMatch(reason);
     }
     expect(await persistedSetting("POSTHOG_KEY")).toBe("phc_TestProjectKey0123456789abcdefXYZ");
 

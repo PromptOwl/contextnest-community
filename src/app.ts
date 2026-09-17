@@ -102,6 +102,7 @@ import {
   installLicenseKey,
 } from "./auth/license.js";
 import { persistSetting } from "./db/settings.js";
+import { posthogKeyError } from "./shared/posthog-key.js";
 import { isOidcReady } from "./auth/oidc.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
@@ -692,11 +693,12 @@ export function createApp(): Hono<AuthEnv> {
     }
     // PostHog: empty key clears the row and turns analytics off. Both fields
     // are checked here because a typo'd key or host fails silently in the
-    // browser; a project key is "phc_" plus a long alphanumeric token.
+    // browser; a project key is "phc_" plus a long alphanumeric token. The
+    // message names the rule that failed so a near-miss is not a mystery.
     if ("posthog_key" in body) {
       const v = String(body.posthog_key ?? "").trim();
-      if (v && !/^phc_[A-Za-z0-9]{20,}$/.test(v))
-        addError("posthog_key", "PostHog project key must look like phc_… — copy the project API key from PostHog settings.");
+      const keyError = posthogKeyError(v);
+      if (keyError) addError("posthog_key", keyError);
       else pending.push({ name: "POSTHOG_KEY", value: v || null });
     }
     if ("posthog_host" in body) {
