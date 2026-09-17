@@ -230,6 +230,53 @@ describe("nest archive", () => {
     expect(asEditor.data.error).toMatch(/Only a nest admin/);
   });
 
+  // Same cap, next roster: the steward gate read the capped permission and
+  // told the owner they "don't have permission to manage stewards". Standing
+  // is unchanged by archiving — the roster (and the trace) stay readable,
+  // and a change is refused as archived.
+  it("the owner still reads the steward roster and trace, and an add is refused as archived", async () => {
+    const roster = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/stewards`,
+      null,
+      owner.apiKey,
+    );
+    expect(roster.status).toBe(200);
+
+    const trace = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/trace`,
+      null,
+      owner.apiKey,
+    );
+    expect(trace.status).toBe(200);
+
+    const add = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/stewards`,
+      { userEmail: "reviewer@acme.com", role: "reviewer", scope: "nest" },
+      owner.apiKey,
+    );
+    expect(add.status).toBe(403);
+    expect(add.data.error).toMatch(/archived/i);
+    expect(add.data.error).not.toMatch(/don't have permission/);
+
+    // A write collaborator never could manage stewards; that refusal keeps
+    // its own wording.
+    const asEditor = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/stewards`,
+      null,
+      editor.apiKey,
+    );
+    expect(asEditor.status).toBe(403);
+    expect(asEditor.data.error).toMatch(/don't have permission to manage stewards/);
+  });
+
   it("drops out of cross-nest search while archived", async () => {
     const { data } = await jsonRequest(
       app,

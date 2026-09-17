@@ -2018,17 +2018,30 @@ export function createApp(): Hono<AuthEnv> {
     // caller's per-node role.
     const isStewardRoster =
       path.includes("/stewards") && !path.includes("/nodes/");
-    // Reuse the permission already resolved above — resolveNestPermission
-    // folds the license/super admin into "admin", so owner/admin covers
-    // server admin, nest owner, and admin collaborators (same rule as the
-    // shared canManageStewards used by MCP).
-    if (isStewardRoster && permission !== "owner" && permission !== "admin") {
+    // Gate on the caller's UNCAPPED standing (rawPermission folds the
+    // license/super admin into "admin", so owner/admin covers server admin,
+    // nest owner, and admin collaborators — same rule as canManageStewards).
+    // The archive cap would otherwise turn the owner into "read" here and
+    // tell them they lack a permission they hold; an archived nest keeps its
+    // roster readable and refuses changes as archived, like everything else.
+    if (
+      isStewardRoster &&
+      access.rawPermission !== "owner" &&
+      access.rawPermission !== "admin"
+    ) {
       return c.json(
         {
           error:
             "You don't have permission to manage stewards. Only a nest admin, the nest owner, or the server admin can do this.",
         },
         403,
+      );
+    }
+    if (isStewardRoster && access.archived && c.req.method !== "GET") {
+      return deny(
+        403,
+        "This nest is archived, so it is read-only. Restore it to change stewards.",
+        { archived: true },
       );
     }
     // Match the resource as an exact path segment, NOT a substring: a node id
