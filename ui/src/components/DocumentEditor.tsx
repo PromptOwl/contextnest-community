@@ -85,7 +85,6 @@ import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu
 import { toast } from "sonner";
 import {
   MarkdownEditor,
-  slugFromNodeId,
   type MarkdownEditorHandle,
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
@@ -1624,7 +1623,7 @@ export function DocumentEditor({
     !isNew && stewardshipEnabled && status === "draft" && !isReviewerOnly;
 
   const handleDocLinkInsert = (node: { id: string; title: string }) => {
-    editorRef.current?.insertWikiLink(slugFromNodeId(node.id), node.title);
+    editorRef.current?.insertWikiLink(node.id, node.title);
   };
 
   const handleWikiLinkClick = async (linkTitle: string, id: string | null) => {

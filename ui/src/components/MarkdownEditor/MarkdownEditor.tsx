@@ -125,7 +125,9 @@ function normalizeLinkUrl(
   return { url: parsed.toString(), error: null };
 }
 
-// Obsidian wiki link: `[[nodes/<slug>|Title]]` — full path + alias.
+// Obsidian wiki link: `[[nodes/<folder>/<slug>|Title]]` — the full node id
+// as the target (a bare slug would resolve wrong once two folders share
+// one), plus the title as the alias.
 function formatWikiLink(slug: string, title: string): string {
   const safeSlug = (slug || title).trim();
   const display = (title || slug).trim();
@@ -241,8 +243,8 @@ import "./editor-styles.css";
 import { useAuth } from "../../auth/AuthContext";
 
 export interface MarkdownEditorHandle {
-  /** Insert `[[nodes/<slug>|Title]]` at cursor. */
-  insertWikiLink: (slug: string, title: string) => void;
+  /** Insert `[[<node id>|Title]]` at cursor. */
+  insertWikiLink: (nodeId: string, title: string) => void;
   /** Put the caret at the start of the body (Enter from the title). */
   focus: () => void;
 }
@@ -866,7 +868,7 @@ export const MarkdownEditor = forwardRef<
           key: n.id,
           primary: n.title,
           secondary: n.id,
-          insert: formatWikiLink(slugFromNodeId(n.id), n.title),
+          insert: formatWikiLink(n.id, n.title),
         })),
     );
   }, [
