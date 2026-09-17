@@ -128,11 +128,11 @@ function normalizeLinkUrl(
 // Obsidian wiki link: `[[nodes/<folder>/<slug>|Title]]` — the full node id
 // as the target (a bare slug would resolve wrong once two folders share
 // one), plus the title as the alias.
-function formatWikiLink(slug: string, title: string): string {
-  const safeSlug = (slug || title).trim();
-  const display = (title || slug).trim();
-  if (!safeSlug) return "";
-  const target = safeSlug.startsWith("nodes/") ? safeSlug : `nodes/${safeSlug}`;
+function formatWikiLink(nodeId: string, title: string): string {
+  const safeId = (nodeId || title).trim();
+  const display = (title || nodeId).trim();
+  if (!safeId) return "";
+  const target = safeId.startsWith("nodes/") ? safeId : `nodes/${safeId}`;
   return `[[${target}|${display}]] `;
 }
 import {
@@ -892,9 +892,9 @@ export const MarkdownEditor = forwardRef<
   useImperativeHandle(
     ref,
     (): MarkdownEditorHandle => ({
-      insertWikiLink: (slug, title) => {
+      insertWikiLink: (nodeId, title) => {
         if (!editor) return;
-        editor.chain().focus().insertContent(formatWikiLink(slug, title)).run();
+        editor.chain().focus().insertContent(formatWikiLink(nodeId, title)).run();
       },
       focus: () => {
         editor?.chain().focus("start").run();
