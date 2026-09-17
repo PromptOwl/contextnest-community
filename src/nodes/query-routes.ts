@@ -343,8 +343,9 @@ queryRoutes.post("/context", async (c) => {
       const matchedLower = new Set(
         compileDetail.matchedTitles.map((t) => t.toLowerCase()),
       );
-      titleMatches = allDocs.filter((d: ContextNode) =>
-        matchedLower.has(d.frontmatter.title.toLowerCase()),
+      titleMatches = allDocs.filter(
+        (d: ContextNode) =>
+          matchedLower.has(d.frontmatter.title.toLowerCase()) && isVisible(d),
       );
     }
   }
@@ -432,11 +433,12 @@ queryRoutes.post("/context", async (c) => {
   // often compiles to nothing, or to one weak title while the real answer
   // sits in another document's body. So every visible document is scored
   // against the prompt and unioned with the compiled set, best first so the
-  // budget keeps the right ones; anything under half the top score is noise
-  // (a stray "run" in a body) and dropped. Hop neighbours ride along unscored
-  // — the caller asked for them. Every node carries score + via so a caller
-  // can cite matches and skip hops. An empty answer stays empty: callers
-  // dump the whole nest otherwise.
+  // budget keeps the right ones. Of the body hits, anything under half the
+  // top score is noise (a stray "run" in a body) and dropped; compiled
+  // matches are what the caller's tag or title named and always stay, as do
+  // hop neighbours — the caller asked for them. Every node carries score +
+  // via so a caller can cite matches and skip hops. An empty answer stays
+  // empty: callers dump the whole nest otherwise.
   const relevance = new Map<string, { score: number; via: string }>();
   let fallback: "fulltext" | null = null;
   if (compileDetail) {
@@ -454,7 +456,7 @@ queryRoutes.post("/context", async (c) => {
     const top = Math.max(0, ...documents.map((d) => relevance.get(d.id)!.score));
     documents = documents.filter((d) => {
       const r = relevance.get(d.id)!;
-      return r.via === "hop" || r.score >= top / 2;
+      return compiled.has(d.id) || r.via === "hop" || r.score >= top / 2;
     });
     documents.sort((a, b) => relevance.get(b.id)!.score - relevance.get(a.id)!.score);
   }
@@ -801,7 +803,8 @@ queryRoutes.get("/export", async (c) => {
   );
 
   // Optional token budget — full set by default; an agent can cap a fetch
-  // with ?max_tokens= (same estimator as POST /context).
+  // with ?max_tokens= (same estimator and fill rule as POST /context: a
+  // document that doesn't fit is skipped, not the end of the list).
   const maxParam = parseInt(c.req.query("max_tokens") ?? "", 10);
   const maxTokens = Number.isFinite(maxParam) && maxParam > 0 ? maxParam : null;
   let included = fields;
@@ -810,11 +813,11 @@ queryRoutes.get("/export", async (c) => {
     let tokens = 0;
     for (const f of fields) {
       const t = approxTokens(nodeToMarkdown(f));
-      if (tokens + t > maxTokens && kept.length > 0) break;
+      if (tokens + t > maxTokens) continue;
       kept.push(f);
       tokens += t;
     }
-    included = kept;
+    included = kept.length > 0 ? kept : fields.slice(0, 1);
   }
 
   trackEvent("nest.export", {

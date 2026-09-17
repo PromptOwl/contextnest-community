@@ -379,6 +379,43 @@ describe("POST /context — prompt relevance", () => {
     expect(ids).not.toContain("nodes/ops-runbook");
   });
 
+  it("keeps a compiled tag match even when it scores under the cutoff", async () => {
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Q3 Ledger",
+      content: "# Ledger\n\nNumbers.",
+      tags: ["audit"],
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Onboarding Checklist Guide",
+      content: "# Onboarding\n\nSteps.",
+    });
+    // #audit compiles (2/12) but sits under half the title match (5/12).
+    const { data } = await ctx({ prompt: "audit onboarding checklist" });
+    expect(data.trace.compiled.matched_tags).toEqual(["audit"]);
+    const ledger = data.nodes.find((n: any) => n.id === "nodes/q3-ledger");
+    expect(ledger).toEqual(expect.objectContaining({ via: "tag" }));
+    expect(data.nodes[0].id).toBe("nodes/onboarding-checklist-guide");
+  });
+
+  it("a prompt title match never surfaces a draft unless include_drafts", async () => {
+    // Own nest: stewardship on makes a create land as an unapproved draft.
+    const own = (await jsonRequest(app, "POST", "/nests", { name: "Drafts" })).data.nest.id;
+    await jsonRequest(app, "PATCH", `/nests/${own}/settings`, { stewardship_enabled: true });
+    await jsonRequest(app, "POST", `/nests/${own}/nodes`, {
+      title: "Zephyr Plan",
+      content: "# Zephyr\n\nUnreleased.",
+    });
+    const list = await jsonRequest(app, "GET", `/nests/${own}/nodes`);
+    expect(list.data.nodes[0].status).not.toBe("published");
+
+    const ask = (body: object) => jsonRequest(app, "POST", `/nests/${own}/context`, body);
+    let { data } = await ask({ prompt: "zephyr plan" });
+    expect(data.trace.compiled.matched_titles).toEqual(["Zephyr Plan"]);
+    expect(data.nodes).toEqual([]);
+    ({ data } = await ask({ prompt: "zephyr plan", include_drafts: true }));
+    expect(data.nodes.map((n: any) => n.id)).toEqual(["nodes/zephyr-plan"]);
+  });
+
   it("selector path carries no score/via and keeps hop default", async () => {
     const { data } = await ctx({ selector: "[[Hub Note]]" });
     const ids = data.nodes.map((n: any) => n.id);
