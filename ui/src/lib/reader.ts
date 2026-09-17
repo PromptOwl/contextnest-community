@@ -30,7 +30,13 @@ export function resolveWikiTarget<T extends ReaderNode>(target: string, nodes: T
   if (raw.includes("/")) {
     const want = canonical(raw);
     const byPath = nodes.find((n) => canonical(n.id) === want);
-    return byPath ?? null;
+    if (byPath) return byPath;
+    // The path is stale (the page was moved, or the link was written as
+    // `nodes/<slug>` from the root): fall back to the slug, but only when
+    // exactly one page carries it — never guess between look-alikes.
+    const slug = want.split("/").pop() ?? "";
+    const bySlug = nodes.filter((n) => canonical(n.id).endsWith(`/${slug}`));
+    return bySlug.length === 1 ? bySlug[0] : null;
   }
   const want = raw.toLowerCase();
   return nodes.find((n) => String(n.title ?? "").toLowerCase() === want) ?? nodes.find((n) => canonical(n.id).endsWith(`/${want}`)) ?? null;

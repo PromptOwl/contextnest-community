@@ -27,6 +27,12 @@ describe("resolveWikiTarget", () => {
     expect(resolveWikiTarget("hosted nest", nodes)?.id).toBe("nodes/docs/platform/hosted-nest/hosted-nest");
     expect(resolveWikiTarget("docs/platform/hosted-nest/overview", nodes)).toBeNull(); // a wrong path is NOT silently rewritten to some 'Overview'
   });
+  it("a stale path still lands when its slug names exactly one page", () => {
+    // Written as `nodes/<slug>` from the root, or the page moved folders since.
+    expect(resolveWikiTarget("nodes/atoms", nodes)?.id).toBe("nodes/docs/protocol/selectors/atoms");
+    expect(resolveWikiTarget("old/place/frontmatter", nodes)?.id).toBe("nodes/docs/protocol/concepts/frontmatter");
+    expect(resolveWikiTarget("nodes/overview", nodes)).toBeNull(); // two 'overview' pages — not a guess
+  });
   it("a slash-less target also matches a page slug when no title does", () => {
     expect(resolveWikiTarget("atoms", nodes)?.id).toBe("nodes/docs/protocol/selectors/atoms");
     expect(resolveWikiTarget("frontmatter", nodes)?.id).toBe("nodes/docs/protocol/concepts/frontmatter"); // title wins, same answer
