@@ -1586,8 +1586,18 @@ async function createNodeOnce(
     } catch (err) {
       // Nothing is on disk (the inner catch only rethrows when the write never
       // landed), so the steward row would name a document that never existed.
+      // The original failure is what the caller needs to see; a failed
+      // compensation is logged, not substituted for it.
       if (creatorSteward?.insertedId) {
-        await removeSteward(creatorSteward.insertedId);
+        try {
+          await removeSteward(creatorSteward.insertedId);
+        } catch (cleanupErr) {
+          console.error(
+            "removeSteward failed while compensating a failed create",
+            id,
+            cleanupErr,
+          );
+        }
       }
       throw err;
     }

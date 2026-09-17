@@ -475,15 +475,15 @@ export async function stewardDocumentCreator(
   } catch (err) {
     if (!isUniqueViolation(err)) throw err;
   }
-  const existing = (await getDb().get(
-    `SELECT role FROM stewards
-       WHERE nest_id = ? AND is_active = 1 AND scope = 'document'
-         AND node_pattern = ? AND LOWER(user_email) = ?`,
-    [nestId, nodeId, email],
-  )) as { role: string } | undefined;
-  // Someone else's row already covers this author — a reviewer row does the
-  // job as-is; a lesser role someone assigned on purpose is not promoted.
-  return { canApprove: canApproveWith([(existing?.role ?? "viewer") as EffectiveRole]) };
+  // Someone already stewarded this author on this id. Their row is left as
+  // it is — a lesser role assigned on purpose is not promoted — and whether
+  // v1 may publish is answered by the same resolution the approve gate uses
+  // (collaborator role + every steward scope), so the two can never disagree.
+  return {
+    canApprove: canApproveWith(
+      await resolveUserRoles(nestId, email, { nodeId }),
+    ),
+  };
 }
 
 /** A unique-index conflict, from either database. */

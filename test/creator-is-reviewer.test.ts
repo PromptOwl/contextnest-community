@@ -276,6 +276,44 @@ describe("flag on", () => {
     ]);
   });
 
+  it("a pre-assigned lesser row doesn't hide a broader approve right", async () => {
+    // The publish decision must agree with the approve gate. Bob is made an
+    // admin collaborator, then pre-stewarded as a document-scope editor on a
+    // future id: a bespoke read of that one row would say "can't approve",
+    // while can-approve (which unions his admin role) says he can. v1 should
+    // publish, matching the gate.
+    const grant = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: bob.email, permission: "admin" },
+      owner.apiKey,
+    );
+    expect(grant.status).toBe(201);
+    const pre = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/stewards`,
+      {
+        scope: "document",
+        documentId: "nodes/bob-admin-doc",
+        users: [{ email: bob.email, role: "editor" }],
+      },
+      owner.apiKey,
+    );
+    expect(pre.status).toBe(201);
+
+    const { status } = await createDoc(bob, {
+      title: "bob-admin-doc",
+      content: "v1",
+    });
+    expect(status).toBe(201);
+    expect(await statusOf(bob, "nodes/bob-admin-doc")).toBe("published");
+    expect(await docStewards("nodes/bob-admin-doc")).toEqual([
+      { email: bob.email, role: "editor", scope: "document" },
+    ]);
+  });
+
   it("creating twice never doubles the steward row", async () => {
     // A retried create onto a fresh id after a conflict, or two documents by
     // the same author, must each get exactly one row for their own id.
