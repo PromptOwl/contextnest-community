@@ -4,7 +4,7 @@
  * mean in a folder-ordered nest.
  */
 import { describe, it, expect } from "vitest";
-import { resolveWikiTarget, breadcrumbFor, sectionLabel, readingOrder, neighbours, stripLeadingTitle, commonRootFolder, displayTitle, orderWithinFolder, ancestorsOf } from "./reader";
+import { resolveWikiTarget, breadcrumbFor, sectionLabel, readingOrder, neighbours, stripLeadingTitle, commonRootFolder, displayTitle, orderWithinFolder, ancestorsOf, foldersCoveredBy } from "./reader";
 
 const nodes = [
   { id: "nodes/docs/welcome", title: "Welcome" },
@@ -114,3 +114,26 @@ describe("ancestorsOf", () => {
     expect(ancestorsOf("nodes/readme")).toEqual([]);
   });
 });
+
+// Reader Mode loads the whole nest in one read and marks every folder it
+// touched as loaded, so the nav shows every folder expanded on first paint
+// and a home page outside the first folder resolves (CU-wdqcq027jd,
+// CU-wdqcq027g7).
+describe("foldersCoveredBy", () => {
+  it("is just root for an empty nest", () => {
+    expect([...foldersCoveredBy([])]).toEqual([""]);
+  });
+  it("collects root and every ancestor folder of every page, once", () => {
+    const folders = foldersCoveredBy([
+      { id: "nodes/welcome" },
+      { id: "nodes/docs/intro" },
+      { id: "nodes/docs/platform/plugins/google-drive" },
+      { id: "nodes/docs/platform/overview" },
+      { id: "nodes/gtm/deals/acme" },
+    ]);
+    expect([...folders].sort()).toEqual(
+      ["", "docs", "docs/platform", "docs/platform/plugins", "gtm", "gtm/deals"].sort(),
+    );
+  });
+});
+

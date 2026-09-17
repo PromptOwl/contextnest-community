@@ -45,6 +45,7 @@ import {
   deriveNestCaps,
   isNestArchived,
 } from "../lib/nest-caps";
+import { foldersCoveredBy } from "../lib/reader";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 // Each tab is its own chunk, loaded when first opened.
@@ -627,11 +628,7 @@ export function NestView({
     qc.fetchQuery(reads.nodesMeta(nestId))
       .then(({ nodes: all }) => {
         if (cancelled) return;
-        const folders = new Set<string>([""]);
-        for (const n of all) {
-          const parts = folderOfNode(n.id || "").split("/").filter(Boolean);
-          for (let i = 1; i <= parts.length; i++) folders.add(parts.slice(0, i).join("/"));
-        }
+        const folders = foldersCoveredBy(all);
         loadedFolders.current = folders;
         setLoadedFolderPaths(folders);
         setNodes(all);

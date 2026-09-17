@@ -123,3 +123,13 @@ export function ancestorsOf(id: string): string[] {
   const segs = id.replace(/^nodes\//, "").split("/").filter(Boolean).slice(0, -1);
   return segs.map((_, i) => segs.slice(0, i + 1).join("/"));
 }
+
+/**
+ * Every folder the nest-wide listing covers — root plus each ancestor of each
+ * page — so Reader Mode can mark them all loaded in one go and open every nav
+ * row instead of leaving unfetched folders collapsed.
+ */
+export function foldersCoveredBy(nodes: { id?: string }[]): Set<string> {
+  return new Set(["", ...nodes.flatMap((n) => ancestorsOf(n.id || ""))]);
+}
+
