@@ -30,8 +30,6 @@ export interface PageMeta {
   /** Sidebar order, ascending. */
   order: number;
   badge?: PageBadge;
-  /** Reachable by URL and the account menu, not listed in the sidebar. */
-  hidden?: boolean;
 }
 
 export interface DashboardPage extends PageMeta {

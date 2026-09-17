@@ -13,6 +13,7 @@ import { ConnectModal } from "./components/ConnectModal";
 import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 const TeammatesPage = lazyNamed(() => import("./components/TeammatesPage"), "TeammatesPage");
+const AccountPage = lazyNamed(() => import("./components/AccountPage"), "AccountPage");
 const ApiKeysPage = lazyNamed(() => import("./components/ApiKeysPage"), "ApiKeysPage");
 const TeamsPage = lazyNamed(() => import("./components/TeamsPage"), "TeamsPage");
 const SettingsPage = lazyNamed(() => import("./components/SettingsPage"), "SettingsPage") as unknown as typeof import("./components/SettingsPage").SettingsPage;
@@ -127,6 +128,7 @@ type View =
     }
   | { page: "api-keys" }
   | { page: "teammates" }
+  | { page: "account" }
   | { page: "teams" }
   | { page: "settings" }
   | { page: "guide" }
@@ -235,13 +237,18 @@ export default function App() {
     error,
     logout,
   } = useAuth();
-  const [view, setViewNow] = useState<View>(() => ({
-    page: "dashboard",
-    // /my-work and /my-drafts open straight onto their page.
-    ...(typeof window !== "undefined"
-      ? { tab: dashboardPageIdFromPath(window.location.pathname) ?? DEFAULT_PAGE_ID }
-      : {}),
-  }));
+  const [view, setViewNow] = useState<View>(() => {
+    if (typeof window !== "undefined" && window.location.pathname.replace(/\/+$/, "") === "/account") {
+      return { page: "account" };
+    }
+    return {
+      page: "dashboard",
+      // /my-work and /my-drafts open straight onto their page.
+      ...(typeof window !== "undefined"
+        ? { tab: dashboardPageIdFromPath(window.location.pathname) ?? DEFAULT_PAGE_ID }
+        : {}),
+    };
+  });
   // Every view change asks the mounted screen first — an editor holding
   // unsaved edits answers with its leave dialog instead of losing them. The
   // guard is a no-op anywhere that registered none, so call sites are unchanged.
@@ -625,7 +632,11 @@ export default function App() {
     }
     const qs = params.toString();
     const path =
-      view.page === "dashboard" ? dashboardPath(view.tab) : nestPath(pathNestId, pathView);
+      view.page === "dashboard"
+        ? dashboardPath(view.tab)
+        : view.page === "account"
+          ? "/account"
+          : nestPath(pathNestId, pathView);
     const next = path + (qs ? `?${qs}` : "") + window.location.hash;
     const current =
       window.location.pathname + window.location.search + window.location.hash;
@@ -1277,7 +1288,7 @@ export default function App() {
                 onGuide={() => setView({ page: "guide" })}
                 onShortcuts={() => setShowShortcuts(true)}
                 onTrace={() => setView({ page: "trace" })}
-                onAccount={() => setView({ page: "dashboard", tab: "account" })}
+                onAccount={() => setView({ page: "account" })}
                 onLogout={requestLogout}
               />
             ) : (
@@ -1636,6 +1647,9 @@ export default function App() {
         )}
         {view.page === "teammates" && (
           <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
+        )}
+        {view.page === "account" && (
+          <AccountPage onBack={() => setView({ page: "dashboard" })} />
         )}
         {view.page === "teams" && (
           <TeamsPage onBack={() => setView({ page: "dashboard" })} />

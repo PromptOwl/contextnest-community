@@ -1,19 +1,19 @@
 /**
- * AccountPage — Your Account (/account): who you are on this server. Name is
+ * AccountPage — Your Account: who you are on this server. Name is
  * editable in place (PATCH /auth/profile); password opens the change dialog.
  */
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
-import { Shield } from "lucide-react";
-import { useAuth } from "../../../auth/AuthContext";
-import { updateProfile } from "../../../lib/api";
-import { ChangePasswordDialog } from "../../../components/ChangePasswordDialog";
+import { ArrowLeft, Shield } from "lucide-react";
+import { useAuth } from "../auth/AuthContext";
+import { updateProfile } from "../lib/api";
+import { ChangePasswordDialog } from "./ChangePasswordDialog";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
-export default function AccountPage() {
+export function AccountPage({ onBack }: { onBack: () => void }) {
   const { adminStatus, isAdmin, refresh } = useAuth();
   const me = adminStatus?.me ?? null;
   const [editing, setEditing] = useState(false);
@@ -46,7 +46,12 @@ export default function AccountPage() {
 
   return (
     <div className="mx-auto max-w-2xl" data-testid="account-page">
-      <h1 className="text-2xl font-semibold mb-6">Your Account</h1>
+      <div className="flex items-center gap-3 mb-4">
+        <Button variant="ghost" size="icon" onClick={onBack}>
+          <ArrowLeft className="h-4 w-4" />
+        </Button>
+        <h2 className="text-2xl font-semibold">Your Account</h2>
+      </div>
 
       <Row label="Profile photo">
         <Avatar className="h-20 w-20">

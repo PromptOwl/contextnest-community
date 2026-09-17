@@ -12,7 +12,7 @@ import {
 describe("dashboard page registry", () => {
   it("finds every page folder and keeps them in sidebar order", () => {
     const ids = dashboardPages.map((p) => p.id);
-    expect(ids).toEqual(["nests", "my-work", "my-drafts", "account"]);
+    expect(ids).toEqual(["nests", "my-work", "my-drafts"]);
     const orders = dashboardPages.map((p) => p.order);
     expect(orders).toEqual([...orders].sort((a, b) => a - b));
   });
