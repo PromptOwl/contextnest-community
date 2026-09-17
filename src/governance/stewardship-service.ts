@@ -453,6 +453,9 @@ export async function stewardDocumentCreator(
   const ownerEmail = ((await getNestOwnerEmail(nestId)) || "").toLowerCase();
   if (email === ownerEmail) return { canApprove: true };
 
+  // Lookup and insert aren't one transaction: the caller holds the node's
+  // write lock for the whole create, so nothing else can race this id, and
+  // idx_stewards_uniq_document refuses a duplicate row regardless.
   const db = getDb();
   const existing = (await db.get(
     `SELECT role FROM stewards

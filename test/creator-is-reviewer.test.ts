@@ -285,6 +285,48 @@ describe("flag on", () => {
   });
 });
 
+describe("flag on, via MCP", () => {
+  // MCP and REST share createNode, but the PR claims every create surface
+  // participates — prove it on the wire rather than by reading the code.
+  async function mcpCreate(caller: User, args: Record<string, unknown>) {
+    const res = await app.request(`/nests/${nestId}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        Authorization: `Bearer ${caller.apiKey}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "context_create", arguments: args },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const ct = res.headers.get("content-type") || "";
+    const payload = ct.includes("application/json")
+      ? await res.json()
+      : JSON.parse(
+          (await res.text())
+            .split("\n")
+            .find((l: string) => l.startsWith("data: "))!
+            .slice("data: ".length),
+        );
+    expect(payload.error).toBeUndefined();
+    return payload.result.content.map((c: any) => c.text).join("");
+  }
+
+  it("an editor's context_create publishes v1 and stewards the editor", async () => {
+    const text = await mcpCreate(alice, { title: "via-mcp", content: "v1" });
+    expect(text).toContain("nodes/via-mcp");
+    expect(await statusOf(alice, "nodes/via-mcp")).toBe("published");
+    expect(await docStewards("nodes/via-mcp")).toEqual([
+      { email: alice.email, role: "reviewer", scope: "document" },
+    ]);
+  });
+});
+
 describe("flag on, stewardship off", () => {
   let ungoverned: string;
 
