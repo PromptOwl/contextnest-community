@@ -459,18 +459,25 @@ export function OntologyGraphView({
     [sim.nodes],
   );
 
+  // A layer toggle with nothing behind it is noise: a nest with no stewards
+  // gets no Stewardship switch (or legend row), and likewise for categories
+  // and links. Structure is always there — the nest node is.
+  const hasStewards = (graph?.stewards.length ?? 0) > 0;
+  const hasTags = (graph?.tags.length ?? 0) > 0;
+  const hasLinks = (graph?.links.length ?? 0) > 0;
+
   return (
     <div className="space-y-4">
       <NestPageHeader nestName={nestName} onBack={onBack}>
         <div className="flex items-center gap-3 text-sm">
           {(
             [
-              ["structure", "Structure", FolderTree],
-              ["links", "Links", Link2],
-              ["stewardship", "Stewardship", Users],
-              ["categories", "Categories", Tag],
+              ["structure", "Structure", FolderTree, true],
+              ["links", "Links", Link2, hasLinks],
+              ["stewardship", "Stewardship", Users, hasStewards],
+              ["categories", "Categories", Tag, hasTags],
             ] as const
-          ).map(([key, label, Icon]) => (
+          ).filter(([, , , present]) => present).map(([key, label, Icon]) => (
             <label key={key} className="flex items-center gap-1.5 cursor-pointer select-none">
               <input
                 type="checkbox"
@@ -687,8 +694,8 @@ export function OntologyGraphView({
             <Legend color={COLORS.folder} label="Folder" />
             <Legend color={COLORS.doc} label="Document" />
             <Legend color="#ef4444" label="Orphan document" />
-            <Legend color={COLORS.tag} label="Category / tag" />
-            <Legend color={COLORS.steward} label="Steward" />
+            {hasTags && <Legend color={COLORS.tag} label="Category / tag" />}
+            {hasStewards && <Legend color={COLORS.steward} label="Steward" />}
           </div>
         </div>
       </div>
