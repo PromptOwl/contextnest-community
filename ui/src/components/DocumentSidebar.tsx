@@ -292,7 +292,7 @@ function DashboardNav({
 }) {
   return (
     <div className="mt-3 space-y-1" data-testid="document-sidebar-dashboard">
-      {dashboardPages.map((page) => (
+      {dashboardPages.filter((p) => !p.hidden).map((page) => (
         <DashboardRow key={page.id} page={page} active={page.id === active} onOpen={onOpen} />
       ))}
     </div>

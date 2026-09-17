@@ -18,7 +18,7 @@ const TeamsPage = lazyNamed(() => import("./components/TeamsPage"), "TeamsPage")
 const SettingsPage = lazyNamed(() => import("./components/SettingsPage"), "SettingsPage") as unknown as typeof import("./components/SettingsPage").SettingsPage;
 const GuidePage = lazyNamed(() => import("./components/GuidePage"), "GuidePage");
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
-import { getLicenseStatus, changePassword, updateProfile, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
+import { getLicenseStatus, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { useQueryClient } from "@tanstack/react-query";
@@ -38,7 +38,7 @@ import {
   isViewBlockedInReaderMode,
 } from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, BookOpen, ScrollText, Activity, Search, FileText, Keyboard, PanelLeft, ChevronRight, UserPen } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, BookOpen, ScrollText, Activity, Search, FileText, Keyboard, PanelLeft, ChevronRight, UserRound } from "lucide-react";
 const AgentDocsPage = lazyNamed(() => import("./components/AgentDocsPage"), "AgentDocsPage");
 const ActivityTracePage = lazyNamed(() => import("./components/ActivityTracePage"), "ActivityTracePage");
 import { Input } from "@/components/ui/input";
@@ -231,7 +231,6 @@ export default function App() {
     workflowPlaneEnabled,
     subagentRunsEnabled,
     refreshHealth,
-    refresh,
     loading,
     error,
     logout,
@@ -284,8 +283,6 @@ export default function App() {
   // screen mounts when authenticated flips false in key mode).
   const [logoutConfirm, setLogoutConfirm] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
-  const [showChangePassword, setShowChangePassword] = useState(false);
-  const [showEditProfile, setShowEditProfile] = useState(false);
   // Server-wide settings for the admin Settings page. Loaded once for admins.
   const [serverSettings, setServerSettings] = useState<AdminSettings | null>(null);
   useEffect(() => {
@@ -960,19 +957,6 @@ export default function App() {
         </DialogContent>
       </Dialog>
 
-      <ChangePasswordDialog
-        open={showChangePassword}
-        onClose={() => setShowChangePassword(false)}
-      />
-      {adminStatus?.me && (
-        <EditProfileDialog
-          open={showEditProfile}
-          initialName={adminStatus.me.name ?? ""}
-          onClose={() => setShowEditProfile(false)}
-          onSaved={refresh}
-        />
-      )}
-
       {/* One palette for both scopes: inside a nest it starts scoped to that
           nest and can widen to every nest, so the pick has to open whichever
           nest the row came from — openSearchHit does that for both. */}
@@ -1293,8 +1277,7 @@ export default function App() {
                 onGuide={() => setView({ page: "guide" })}
                 onShortcuts={() => setShowShortcuts(true)}
                 onTrace={() => setView({ page: "trace" })}
-                onEditProfile={() => setShowEditProfile(true)}
-                onChangePassword={() => setShowChangePassword(true)}
+                onAccount={() => setView({ page: "dashboard", tab: "account" })}
                 onLogout={requestLogout}
               />
             ) : (
@@ -1726,8 +1709,7 @@ interface UserMenuProps {
   onGuide: () => void;
   onShortcuts: () => void;
   onTrace: () => void;
-  onEditProfile: () => void;
-  onChangePassword: () => void;
+  onAccount: () => void;
   onLogout: () => void;
 }
 
@@ -1741,8 +1723,7 @@ function UserMenu({
   onGuide,
   onShortcuts,
   onTrace,
-  onEditProfile,
-  onChangePassword,
+  onAccount,
   onLogout,
 }: UserMenuProps) {
   const displayName = me.name?.trim() || me.email;
@@ -1829,20 +1810,12 @@ function UserMenu({
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem
-          onSelect={onEditProfile}
+          onSelect={onAccount}
           className="cursor-pointer"
-          data-testid="user-menu-edit-profile"
+          data-testid="user-menu-account"
         >
-          <UserPen className="h-3.5 w-3.5 mr-2" />
-          Edit profile
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          onSelect={onChangePassword}
-          className="cursor-pointer"
-          data-testid="user-menu-change-password"
-        >
-          <KeyRound className="h-3.5 w-3.5 mr-2" />
-          Change password
+          <UserRound className="h-3.5 w-3.5 mr-2" />
+          Account
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem
@@ -1858,283 +1831,3 @@ function UserMenu({
   );
 }
 
-// Self-service password change — usable by anyone signed in, including a user
-// who logged in with an admin-issued temporary password. Calls /auth/password,
-// which verifies the current password and invalidates other sessions.
-// Eye toggle pinned inside a password field to reveal/hide the value.
-function PasswordToggle({
-  shown,
-  onToggle,
-}: {
-  shown: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      tabIndex={-1}
-      aria-label={shown ? "Hide password" : "Show password"}
-      title={shown ? "Hide password" : "Show password"}
-      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-    >
-      {shown ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-    </button>
-  );
-}
-
-function EditProfileDialog({
-  open,
-  initialName,
-  onClose,
-  onSaved,
-}: {
-  open: boolean;
-  initialName: string;
-  onClose: () => void;
-  onSaved: () => Promise<void>;
-}) {
-  const [name, setName] = useState(initialName);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  // Re-seed from the live name each time the dialog opens.
-  useEffect(() => {
-    if (open) {
-      setName(initialName);
-      setError(null);
-    }
-  }, [open, initialName]);
-
-  const submit = async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      await updateProfile(name);
-      await onSaved();
-      toast.success("Profile updated.");
-      onClose();
-    } catch (e: any) {
-      setError(e?.message || "Could not update profile.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o && !saving) onClose(); }}>
-      <DialogContent className="sm:max-w-[400px]">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <UserPen className="h-4 w-4 text-muted-foreground" />
-            Edit profile
-          </DialogTitle>
-          <DialogDescription>
-            The name teammates see on your documents and comments. Leave it
-            empty to show your email instead.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-1 py-1">
-          <label htmlFor="ep-name" className="block text-sm font-medium">
-            Display name
-          </label>
-          <Input
-            id="ep-name"
-            value={name}
-            maxLength={80}
-            placeholder="Your name"
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && !saving) void submit(); }}
-            autoComplete="name"
-            data-testid="edit-profile-name"
-          />
-          {error && <p className="text-sm text-destructive">{error}</p>}
-        </div>
-        <DialogFooter className="gap-2">
-          <Button variant="outline" onClick={onClose} disabled={saving}>
-            Cancel
-          </Button>
-          <Button onClick={submit} disabled={saving || name.trim() === initialName.trim()}>
-            {saving ? "Saving..." : "Save"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function ChangePasswordDialog({
-  open,
-  onClose,
-}: {
-  open: boolean;
-  onClose: () => void;
-}) {
-  const [current, setCurrent] = useState("");
-  const [next, setNext] = useState("");
-  const [confirm, setConfirm] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  // Reveal toggles per field so a user can verify what they typed.
-  const [showCurrent, setShowCurrent] = useState(false);
-  const [showNext, setShowNext] = useState(false);
-  const [showConfirm, setShowConfirm] = useState(false);
-
-  const reset = () => {
-    setCurrent("");
-    setNext("");
-    setConfirm("");
-    setError(null);
-    setShowCurrent(false);
-    setShowNext(false);
-    setShowConfirm(false);
-  };
-
-  const submit = async () => {
-    setError(null);
-    if (next.trim().length === 0) {
-      setError("New password cannot be empty or only whitespace.");
-      return;
-    }
-    if (next.length < 8) {
-      setError("New password must be at least 8 characters.");
-      return;
-    }
-    if (next !== confirm) {
-      setError("New passwords don't match.");
-      return;
-    }
-    if (next === current) {
-      setError("New password must be different from the current password.");
-      return;
-    }
-    setSaving(true);
-    try {
-      await changePassword(current, next);
-      toast.success("Password changed. Your other sessions were signed out.");
-      reset();
-      onClose();
-    } catch (e: any) {
-      setError(e?.message || "Could not change password.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        if (!o && !saving) {
-          reset();
-          onClose();
-        }
-      }}
-    >
-      <DialogContent className="sm:max-w-[400px]">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <KeyRound className="h-4 w-4 text-muted-foreground" />
-            Change password
-          </DialogTitle>
-          <DialogDescription>
-            If an admin gave you a temporary password, set your own here. This
-            signs out your other sessions.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-3 py-1">
-          <div className="space-y-1">
-            <label
-              htmlFor="cp-current"
-              className="block text-sm font-medium"
-            >
-              Current password
-            </label>
-            <div className="relative">
-              <Input
-                id="cp-current"
-                type={showCurrent ? "text" : "password"}
-                placeholder="Enter your current password"
-                value={current}
-                onChange={(e) => setCurrent(e.target.value)}
-                autoComplete="current-password"
-                className="pr-10"
-              />
-              <PasswordToggle
-                shown={showCurrent}
-                onToggle={() => setShowCurrent((s) => !s)}
-              />
-            </div>
-          </div>
-          <div className="space-y-1">
-            <label htmlFor="cp-next" className="block text-sm font-medium">
-              New password
-            </label>
-            <div className="relative">
-              <Input
-                id="cp-next"
-                type={showNext ? "text" : "password"}
-                placeholder="At least 8 characters"
-                value={next}
-                onChange={(e) => setNext(e.target.value)}
-                autoComplete="new-password"
-                className="pr-10"
-              />
-              <PasswordToggle
-                shown={showNext}
-                onToggle={() => setShowNext((s) => !s)}
-              />
-            </div>
-          </div>
-          <div className="space-y-1">
-            <label
-              htmlFor="cp-confirm"
-              className="block text-sm font-medium"
-            >
-              Confirm new password
-            </label>
-            <div className="relative">
-              <Input
-                id="cp-confirm"
-                type={showConfirm ? "text" : "password"}
-                placeholder="Re-enter your new password"
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-                autoComplete="new-password"
-                aria-invalid={confirm.length > 0 && confirm !== next}
-                className="pr-10"
-              />
-              <PasswordToggle
-                shown={showConfirm}
-                onToggle={() => setShowConfirm((s) => !s)}
-              />
-            </div>
-            {confirm.length > 0 && confirm !== next && (
-              <p className="text-sm text-destructive">
-                Passwords don't match.
-              </p>
-            )}
-          </div>
-          {error && <p className="text-sm text-destructive">{error}</p>}
-        </div>
-        <DialogFooter className="gap-2">
-          <Button
-            variant="outline"
-            onClick={() => {
-              reset();
-              onClose();
-            }}
-            disabled={saving}
-          >
-            Cancel
-          </Button>
-          <Button
-            onClick={submit}
-            disabled={saving || !current || !next || !confirm || next !== confirm}
-          >
-            {saving ? "Saving..." : "Change password"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
