@@ -453,32 +453,43 @@ export async function stewardDocumentCreator(
   const ownerEmail = ((await getNestOwnerEmail(nestId)) || "").toLowerCase();
   if (email === ownerEmail) return { canApprove: true };
 
-  // Lookup and insert aren't one transaction: the caller holds the node's
-  // write lock for the whole create, so nothing else can race this id, and
-  // idx_stewards_uniq_document refuses a duplicate row regardless.
-  const db = getDb();
-  const existing = (await db.get(
+  // Insert first, then read on conflict — never check-then-insert. The create
+  // holds the node's write lock, but POST /stewards does not, so an admin can
+  // pre-assign this exact (id, author) row at any moment; the unique index
+  // idx_stewards_uniq_document turns that race into a conflict we resolve by
+  // taking whatever landed at face value.
+  const row = {
+    nestId,
+    scope: "document" as const,
+    nodePattern: nodeId,
+    userEmail: email,
+    userId: await userIdForEmail(email),
+    role: "reviewer" as const,
+    assignedBy: email,
+    assignedAt: new Date().toISOString(),
+    isActive: true,
+  };
+  try {
+    const created = await assignSteward(row);
+    return { canApprove: true, insertedId: created.id };
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+  }
+  const existing = (await getDb().get(
     `SELECT role FROM stewards
        WHERE nest_id = ? AND is_active = 1 AND scope = 'document'
          AND node_pattern = ? AND LOWER(user_email) = ?`,
     [nestId, nodeId, email],
   )) as { role: string } | undefined;
-  if (existing) {
-    return { canApprove: canApproveWith([existing.role as EffectiveRole]) };
-  }
+  // Someone else's row already covers this author — a reviewer row does the
+  // job as-is; a lesser role someone assigned on purpose is not promoted.
+  return { canApprove: canApproveWith([(existing?.role ?? "viewer") as EffectiveRole]) };
+}
 
-  const created = await assignSteward({
-    nestId,
-    scope: "document",
-    nodePattern: nodeId,
-    userEmail: email,
-    userId: await userIdForEmail(email),
-    role: "reviewer",
-    assignedBy: email,
-    assignedAt: new Date().toISOString(),
-    isActive: true,
-  });
-  return { canApprove: true, insertedId: created.id };
+/** A unique-index conflict, from either database. */
+function isUniqueViolation(err: unknown): boolean {
+  const code = (err as { code?: string } | null)?.code;
+  return code === "SQLITE_CONSTRAINT_UNIQUE" || code === "23505";
 }
 
 // ─── STEWARD RESOLUTION ─────────────────────────────────────────────────
