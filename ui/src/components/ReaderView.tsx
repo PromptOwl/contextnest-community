@@ -352,7 +352,7 @@ export function ReaderView({
             content={body}
             onWikiLinkClick={openWikiLink}
             plainLinks
-            className="max-w-[72ch] px-0 py-0 min-h-0 max-h-none overflow-visible prose-base prose-headings:scroll-mt-24 prose-h2:mt-10 prose-h2:text-xl prose-h3:text-base prose-p:leading-7 prose-pre:rounded-sm prose-code:before:content-none prose-code:after:content-none"
+            className="max-w-none px-0 py-0 min-h-0 max-h-none overflow-visible prose-base prose-headings:scroll-mt-24 prose-h2:mt-10 prose-h2:text-xl prose-h3:text-base prose-p:leading-7 prose-pre:rounded-sm prose-code:before:content-none prose-code:after:content-none"
           />
         )}
         {(prev || next) && (
