@@ -1510,8 +1510,11 @@ async function createNodeOnce(
     // publishes on the strength of that row. A failure here fails the create
     // with nothing written — never a document published on a false premise.
     // The id is reserved by the lock and free (checked above), so the row
-    // can't name someone else's document; if the write below never lands the
-    // row is removed again.
+    // can't name someone else's document. Not atomic with the engine write
+    // (a separate filesystem + DB path this can't join in one transaction), so
+    // it is compensated instead: everything from here until the document is on
+    // disk runs under one guard that takes the row back on any failure. A row
+    // left behind on a free id would attach to whoever creates that id next.
     const governed = await isStewardshipEnabled(nestId);
     const creatorReviews =
       opts.creatorReviews !== false &&
@@ -1520,65 +1523,73 @@ async function createNodeOnce(
     const creatorSteward = creatorReviews
       ? await stewardDocumentCreator(nestId, id, userEmail)
       : null;
-    const publishReason = await autoPublishReason(
-      nestId,
-      userEmail,
-      { tags, metadata },
-      { creatorReviews: creatorSteward?.canApprove === true, governed },
-    );
-    // Same note in the engine history and the governance row: the version
-    // history an admin reads in the UI comes from node_versions, so leaving the
-    // reason only in history.yaml hides it from the audit that matters.
-    const publishNote =
-      publishReason === null ? undefined : `Auto-published on create (${publishReason})`;
 
-    // Write — and publish, when the gate allows — through the engine's canonical
-    // create. Governance stays here; the engine owns frontmatter assembly,
-    // validation, version assignment and the index regen, so a document created
-    // here is identical to one created by the CLI or mcp-server.
-    let published = publishReason !== null;
+    let published = false;
+    let publishNote: string | undefined;
     try {
-      await engineApi.run(
-        "context_create",
-        {
-          id,
-          title: input.title,
-          content: input.content,
-          type: requestedType,
-          // A skill node is invalid without a skill block, and this surface has
-          // no field for one — default the trigger from the title, same as the
-          // CLI and mcp-server do.
-          ...(requestedType === "skill"
-            ? { trigger: `when asked to ${input.title.toLowerCase()}` }
-            : {}),
-          ...(tags.length ? { tags } : {}),
-          ...(input.status ? { status: input.status } : {}),
-          metadata,
-          publish: published,
-          ...(publishNote ? { note: publishNote } : {}),
-        },
-        await opContext(nestId, userEmail),
+      const publishReason = await autoPublishReason(
+        nestId,
+        userEmail,
+        { tags, metadata },
+        { creatorReviews: creatorSteward?.canApprove === true, governed },
       );
-    } catch (err) {
-      // The op writes the node before publishing it. If the write landed and
-      // only the publish failed, register the document as a draft instead of
-      // throwing and stranding a file that has no governance rows.
-      let onDisk = true;
+      // Same note in the engine history and the governance row: the version
+      // history an admin reads in the UI comes from node_versions, so leaving
+      // the reason only in history.yaml hides it from the audit that matters.
+      publishNote =
+        publishReason === null
+          ? undefined
+          : `Auto-published on create (${publishReason})`;
+      published = publishReason !== null;
+
+      // Write — and publish, when the gate allows — through the engine's
+      // canonical create. Governance stays here; the engine owns frontmatter
+      // assembly, validation, version assignment and the index regen, so a
+      // document created here is identical to one created by the CLI or
+      // mcp-server.
       try {
-        await storage.readDocument(id);
-      } catch {
-        onDisk = false;
-      }
-      if (!onDisk) {
-        // Nothing was written, so the steward row minted above would name a
-        // document that never existed — take it back before rethrowing.
-        if (creatorSteward?.insertedId) {
-          await removeSteward(creatorSteward.insertedId);
+        await engineApi.run(
+          "context_create",
+          {
+            id,
+            title: input.title,
+            content: input.content,
+            type: requestedType,
+            // A skill node is invalid without a skill block, and this surface
+            // has no field for one — default the trigger from the title, same
+            // as the CLI and mcp-server do.
+            ...(requestedType === "skill"
+              ? { trigger: `when asked to ${input.title.toLowerCase()}` }
+              : {}),
+            ...(tags.length ? { tags } : {}),
+            ...(input.status ? { status: input.status } : {}),
+            metadata,
+            publish: published,
+            ...(publishNote ? { note: publishNote } : {}),
+          },
+          await opContext(nestId, userEmail),
+        );
+      } catch (err) {
+        // The op writes the node before publishing it. If the write landed and
+        // only the publish failed, register the document as a draft instead of
+        // throwing and stranding a file that has no governance rows.
+        let onDisk = true;
+        try {
+          await storage.readDocument(id);
+        } catch {
+          onDisk = false;
         }
-        throw err;
+        if (!onDisk) throw err;
+        console.error("publishDocument failed (node create auto-publish)", err);
+        published = false;
       }
-      console.error("publishDocument failed (node create auto-publish)", err);
-      published = false;
+    } catch (err) {
+      // Nothing is on disk (the inner catch only rethrows when the write never
+      // landed), so the steward row would name a document that never existed.
+      if (creatorSteward?.insertedId) {
+        await removeSteward(creatorSteward.insertedId);
+      }
+      throw err;
     }
 
     const node = await storage.readDocument(id);

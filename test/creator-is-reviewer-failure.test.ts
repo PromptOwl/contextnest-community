@@ -17,6 +17,25 @@ import {
 } from "./helpers.js";
 
 const failNext = { on: false };
+// Second injection point: a failure AFTER the steward row landed but before
+// the document is written (the prime lookup runs in that gap).
+const failPrimeNext = { on: false };
+
+vi.mock("../src/governance/prime-service.js", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("../src/governance/prime-service.js")
+  >();
+  return {
+    ...actual,
+    isPrimeDocument: async (...args: Parameters<typeof actual.isPrimeDocument>) => {
+      if (failPrimeNext.on) {
+        failPrimeNext.on = false;
+        throw new Error("simulated prime lookup failure");
+      }
+      return actual.isPrimeDocument(...args);
+    },
+  };
+});
 
 vi.mock("../src/governance/stewardship-service.js", async (importOriginal) => {
   const actual = await importOriginal<
@@ -117,5 +136,53 @@ describe("steward write fails", () => {
       owner.apiKey,
     );
     expect(read.data.node.status).toBe("published");
+  });
+});
+
+describe("a failure after the steward row landed, before the document did", () => {
+  it("the create fails and the row is taken back — nothing is left on a free id", async () => {
+    failPrimeNext.on = true;
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "gap", content: "v1" },
+      alice.apiKey,
+    );
+    expect(status).toBe(500);
+
+    const read = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/nodes/gap`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(read.status).toBe(404);
+    // The leak the compensation exists to prevent: a reviewer row on an id
+    // nobody owns, which would attach to whoever creates that id next.
+    const stewards = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/stewards`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(
+      stewards.data.stewards.filter(
+        (s: any) => s.scope === "document" && s.nodePattern === "nodes/gap",
+      ),
+    ).toEqual([]);
+  });
+
+  it("a retry after that failure creates the document normally", async () => {
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "gap", content: "v1" },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
   });
 });
