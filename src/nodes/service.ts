@@ -1333,10 +1333,12 @@ async function autoPublishReason(
   nestId: string,
   userEmail: string,
   doc: { tags?: readonly unknown[]; metadata?: unknown },
-  opts: { creatorReviews?: boolean } = {},
+  opts: { creatorReviews?: boolean; governed?: boolean } = {},
 ): Promise<string | null> {
-  // Ungoverned nest: nothing to review, nobody to review it.
-  if (!(await isStewardshipEnabled(nestId))) return "no stewards configured";
+  // Ungoverned nest: nothing to review, nobody to review it. A caller that
+  // already looked this up passes it in — create is a hot path.
+  const governed = opts.governed ?? (await isStewardshipEnabled(nestId));
+  if (!governed) return "no stewards configured";
   if (await isPrimeDocument(nestId, doc.tags, doc.metadata)) return null;
   // Creator-reviews (a create, in a nest with the posture on): the author is
   // this document's reviewer, so v1 is theirs to publish. Only v1 — every
@@ -1510,9 +1512,10 @@ async function createNodeOnce(
     // The id is reserved by the lock and free (checked above), so the row
     // can't name someone else's document; if the write below never lands the
     // row is removed again.
+    const governed = await isStewardshipEnabled(nestId);
     const creatorReviews =
       opts.creatorReviews !== false &&
-      (await isStewardshipEnabled(nestId)) &&
+      governed &&
       (await nestCreatorIsReviewer(nestId));
     const creatorSteward = creatorReviews
       ? await stewardDocumentCreator(nestId, id, userEmail)
@@ -1521,7 +1524,7 @@ async function createNodeOnce(
       nestId,
       userEmail,
       { tags, metadata },
-      { creatorReviews: creatorSteward?.canApprove === true },
+      { creatorReviews: creatorSteward?.canApprove === true, governed },
     );
     // Same note in the engine history and the governance row: the version
     // history an admin reads in the UI comes from node_versions, so leaving the
