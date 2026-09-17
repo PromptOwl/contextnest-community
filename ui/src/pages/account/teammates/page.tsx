@@ -2,12 +2,13 @@
  * TeammatesPage — admin-only view for inviting teammates and managing their keys.
  */
 import React, { useState, useEffect } from "react";
-import * as api from "../lib/api";
+import * as api from "../../../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
-import { reads } from "../lib/queries";
-import { parseServerDate } from "../lib/dates";
-import { useAuth } from "../auth/AuthContext";
-import { copyTextWithToast } from "../lib/clipboard";
+import { reads } from "../../../lib/queries";
+import { parseServerDate } from "../../../lib/dates";
+import { useAuth } from "../../../auth/AuthContext";
+import { useAppNav } from "../../../lib/app-nav";
+import { copyTextWithToast } from "../../../lib/clipboard";
 import {
   ArrowLeft, UserPlus, Shield, ShieldCheck, ShieldOff, Users, Copy, Check,
   AlertCircle, Loader2,
@@ -26,9 +27,6 @@ import {
 } from "@/components/ui/dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 
-interface TeammatesPageProps {
-  onBack: () => void;
-}
 
 interface Teammate {
   id: string;
@@ -40,7 +38,8 @@ interface Teammate {
   last_active: string | null;
 }
 
-export function TeammatesPage({ onBack }: TeammatesPageProps) {
+export default function TeammatesPage() {
+  const { openDashboard: onBack } = useAppNav();
   const { adminStatus } = useAuth();
   const myEmail = adminStatus?.me?.email?.toLowerCase() ?? null;
   const [teammates, setTeammates] = useState<Teammate[]>([]);
