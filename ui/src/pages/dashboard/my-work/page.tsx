@@ -500,7 +500,7 @@ export default function MyWorkPage() {
                             {w.reason ? ` · "${w.reason}"` : ""}
                           </span>
                         </button>
-                        <div className="flex items-center gap-1 shrink-0">
+                        <div className="flex items-center gap-2 shrink-0">
                           {w.type === "deletion" ? (
                             <>
                               {/* Honouring an archive ask archives — it is an
