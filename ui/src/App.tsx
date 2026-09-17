@@ -12,7 +12,6 @@ import { DocumentSidebar } from "./components/DocumentSidebar";
 import { ConnectModal } from "./components/ConnectModal";
 import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
 import { AdminLoginModal } from "./components/AdminLoginModal";
-const TeamsPage = lazyNamed(() => import("./components/TeamsPage"), "TeamsPage");
 const GuidePage = lazyNamed(() => import("./components/GuidePage"), "GuidePage");
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, type LicenseStatus } from "./lib/api";
@@ -1627,9 +1626,6 @@ export default function App() {
             </AppNavProvider>
           );
         })()}
-        {view.page === "teams" && (
-          <TeamsPage onBack={() => setView({ page: "dashboard" })} />
-        )}
         {view.page === "docs" && (
           <AgentDocsPage onBack={() => setView({ page: "dashboard" })} />
         )}

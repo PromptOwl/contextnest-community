@@ -11,7 +11,7 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { PersonCombobox } from "./PersonCombobox";
+import { PersonCombobox } from "../../../components/PersonCombobox";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -32,14 +32,15 @@ import {
   CheckCircle2, XCircle, Pencil, X,
 } from "lucide-react";
 import { toast } from "sonner";
-import { PromptowlTeamsPanel } from "./PromptowlTeamsPanel";
-import * as api from "../lib/api";
+import { PromptowlTeamsPanel } from "../../../components/PromptowlTeamsPanel";
+import * as api from "../../../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
-import { reads } from "../lib/queries";
-import type { Team, TeamMember, TeamRole } from "../lib/api";
-import { TEAM_ROLES } from "../lib/api";
-import { useAuth } from "../auth/AuthContext";
-import { isEmailish } from "../lib/utils";
+import { reads } from "../../../lib/queries";
+import type { Team, TeamMember, TeamRole } from "../../../lib/api";
+import { TEAM_ROLES } from "../../../lib/api";
+import { useAuth } from "../../../auth/AuthContext";
+import { useAppNav } from "../../../lib/app-nav";
+import { isEmailish } from "../../../lib/utils";
 
 const MAX_VISIBLE_MEMBERS = 5;
 const roleLabel = (role: string) =>
@@ -59,11 +60,9 @@ function myTeamRank(team: Team, myEmail: string, isServerAdmin: boolean): number
   return m ? ROLE_RANK[m.role] ?? 0 : 0;
 }
 
-interface TeamsPageProps {
-  onBack: () => void;
-}
 
-export function TeamsPage({ onBack }: TeamsPageProps) {
+export default function TeamsPage() {
+  const { openDashboard: onBack } = useAppNav();
   const { adminStatus, isAdmin, promptowlTeamsEnabled } = useAuth();
   const myEmail = (adminStatus?.me?.email || "").toLowerCase();
   // Importing needs the PromptOwl token from a PromptOwl sign-in, so the tab is
