@@ -504,6 +504,12 @@ export function DocumentEditor({
     setCommentsOpenState(open);
     writeDocPagePrefs(localStorage, { commentsOpen: open });
   };
+  // Outline for the right rail: view mode, markdown body, real structure.
+  const outlineHeadings = useMemo(
+    () => (mode === "view" && !looksLikeHtml(content) ? extractHeadings(content) : []),
+    [mode, content],
+  );
+  const showOutline = !isNew && outlineHeadings.length >= 3;
   // The deep link forces the rail open only until it has been acted on (the
   // thread focused, or the user closed the rail) — the prop itself lives as
   // long as the page, and re-applying it after a close snapped the rail back.
@@ -1723,7 +1729,7 @@ export function DocumentEditor({
           can do with the document on the right. Sticky so the actions stay
           reachable at any scroll depth; the body scrolls with the window. */}
       <div
-        className="sticky top-0 z-30 flex h-12 items-center gap-2 border-b bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-3"
+        className="sticky top-16 z-30 flex h-12 items-center gap-2 border-b bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-3"
         data-testid="document-editor-topbar"
       >
         <div className="flex items-center gap-1 min-w-0 flex-1">
@@ -2673,38 +2679,6 @@ export function DocumentEditor({
                   </div>
                 )}
 
-                {/* Outline/TOC — view mode, only when the doc has real structure. */}
-                {mode === "view" &&
-                  !looksLikeHtml(content) &&
-                  (() => {
-                    const headings = extractHeadings(content);
-                    if (headings.length < 3) return null;
-                    return (
-                      <nav className="border rounded-lg bg-muted/20 px-3 py-2">
-                        <div className="text-xs font-medium text-muted-foreground mb-1">
-                          Outline
-                        </div>
-                        <div className="space-y-0.5">
-                          {headings.map((h) => (
-                            <button
-                              key={h.id}
-                              type="button"
-                              className="block w-full text-left text-sm text-primary hover:underline truncate"
-                              style={{ paddingLeft: `${(h.level - 1) * 12}px` }}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                document
-                                  .getElementById(h.id)
-                                  ?.scrollIntoView({ behavior: "smooth", block: "start" });
-                              }}
-                            >
-                              {h.text}
-                            </button>
-                          ))}
-                        </div>
-                      </nav>
-                    );
-                  })()}
 
                 {/* Type + Schedule share one row: Type (new-doc kind, icon segmented
               control) on the left, Schedule (runnable orchestrator hint) on the
@@ -3335,10 +3309,13 @@ export function DocumentEditor({
                     <div className="text-xs font-medium text-muted-foreground mb-2">
                       Related documents
                     </div>
-                    <div className="flex flex-wrap gap-2">
-                      {related.map((r) => (
+                    {/* A dot between titles: a run of "Weekly Sync — April 13"
+                        style titles is otherwise one unbroken line. */}
+                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                      {related.map((r, i) => (
+                        <Fragment key={r.id}>
+                        {i > 0 && <span aria-hidden className="text-muted-foreground/50">·</span>}
                         <button
-                          key={r.id}
                           type="button"
                           className="text-sm text-primary hover:underline text-left"
                           title={
@@ -3355,6 +3332,7 @@ export function DocumentEditor({
                         >
                           {r.title}
                         </button>
+                        </Fragment>
                       ))}
                     </div>
                   </div>
@@ -3367,10 +3345,11 @@ export function DocumentEditor({
                       Mentioned in {unlinked.length} document
                       {unlinked.length !== 1 ? "s" : ""} without a link
                     </div>
-                    <div className="flex flex-wrap gap-2">
-                      {unlinked.map((m) => (
+                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                      {unlinked.map((m, i) => (
+                        <Fragment key={m.id}>
+                        {i > 0 && <span aria-hidden className="text-muted-foreground/50">·</span>}
                         <button
-                          key={m.id}
                           type="button"
                           className="text-sm text-primary hover:underline text-left"
                           onClick={() =>
@@ -3382,6 +3361,7 @@ export function DocumentEditor({
                         >
                           {m.title}
                         </button>
+                        </Fragment>
                       ))}
                     </div>
                   </div>
@@ -3469,13 +3449,42 @@ export function DocumentEditor({
             </div>
           )}
         </div>
-        {/* Ever-present comments rail — beside the doc, not stacked below. */}
+        {/* Right rail — the outline while reading, the comments once they
+            are opened. A long outline stacked above the body pushed the
+            document off the first screen; beside it, both stay in view.
+            The comments panel stays mounted while hidden so its threads
+            keep the in-text highlights alive. */}
         {!isNew && (
           <aside
-            className={`w-full shrink-0 border-t lg:w-80 lg:border-t-0 lg:border-l lg:sticky lg:top-12 lg:self-start lg:max-h-[calc(100vh-3rem)] flex flex-col min-h-0 max-h-[70vh] px-3 py-3${commentsOpen ? "" : " hidden"}`}
+            className={`w-full shrink-0 border-t lg:w-80 lg:border-t-0 lg:border-l lg:sticky lg:top-28 lg:self-start lg:max-h-[calc(100vh-7rem)] flex flex-col min-h-0 max-h-[70vh] px-4 py-4${commentsOpen || showOutline ? "" : " hidden"}`}
             data-testid="document-comments-rail"
-            aria-hidden={!commentsOpen}
+            aria-hidden={!commentsOpen && !showOutline}
           >
+            {!commentsOpen && showOutline && (
+              <nav className="flex flex-col min-h-0 rounded-lg border border-border bg-card p-5" aria-label="Outline">
+                <div className="mb-4 border-b pb-3 text-sm font-semibold">Outline</div>
+                <div className="space-y-0.5 overflow-y-auto min-h-0">
+                  {outlineHeadings.map((h) => (
+                    <button
+                      key={h.id}
+                      type="button"
+                      className="block w-full text-left text-sm text-primary hover:underline truncate"
+                      style={{ paddingLeft: `${(h.level - 1) * 12}px` }}
+                      title={h.text}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        document
+                          .getElementById(h.id)
+                          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                      }}
+                    >
+                      {h.text}
+                    </button>
+                  ))}
+                </div>
+              </nav>
+            )}
+            <div className={commentsOpen ? "flex flex-col flex-1 min-h-0" : "hidden"}>
             <AnnotationsPanel
               nestId={nestId}
               nodeId={nodeId}
@@ -3493,6 +3502,7 @@ export function DocumentEditor({
                 if (!on) setActiveThreadId(null);
               }}
             />
+            </div>
           </aside>
         )}
       </div>

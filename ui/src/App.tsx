@@ -1151,10 +1151,16 @@ export default function App() {
       )}
       <div className={withSidebar ? "flex min-w-0 flex-1 flex-col" : ""}>
       {/* Header */}
-      <header className="bg-card">
+      {/* `contents`: a sticky child only sticks within its parent's box, and
+          <header> is exactly one row tall — so the row below must have the
+          page column as its containing block, not the header. */}
+      <header className="contents">
         {/* The divider sits under the top row, not under the tabs — the tab
             row reads as part of the page below it, not a second bar. */}
-        <div className="border-b border-border">
+        {/* Sticky: the breadcrumb and account row stay put while a page
+            scrolls, and every in-page sticky bar (document toolbar, artifact
+            toolbar, comment rails) offsets by this row's 4rem. */}
+        <div className="sticky top-0 z-40 border-b border-border bg-card">
         <div className={`${shellWidth} h-16 px-4 flex items-center justify-between`}>
           <div className="flex items-center gap-1">
           {/* The sidebar toggle lives in the app header so it exists on every

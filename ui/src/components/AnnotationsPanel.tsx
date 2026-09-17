@@ -175,8 +175,8 @@ export function AnnotationsPanel({
     : threads;
 
   return (
-    <section className="flex flex-col flex-1 min-h-0 max-h-[calc(100vh-2rem)] rounded-lg border border-border bg-card p-4" data-testid="annotations-panel">
-      <div className="flex items-center gap-2 mb-3 shrink-0">
+    <section className="flex flex-col flex-1 min-h-0 max-h-[calc(100vh-2rem)] rounded-lg border border-border bg-card p-5" data-testid="annotations-panel">
+      <div className="flex items-center gap-2 mb-4 border-b pb-3 shrink-0">
         <MessageSquare className="h-4 w-4 text-muted-foreground" />
         <h3 className="text-sm font-semibold">
           Comments{threads ? ` (${count})` : ""}

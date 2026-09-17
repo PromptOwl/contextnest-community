@@ -211,6 +211,10 @@ export function NestView({
   // counts, tags, types, authors. Without it every filter and stat tile would
   // describe only the folders the user happened to open.
   const [census, setCensus] = useState<api.NestCensus | null>(null);
+  // The first census read has answered (either way). Until it has, the
+  // Overview must not judge the nest empty — the nest meta lands first and
+  // cleared initialLoad while the tree was still on the wire.
+  const [censusSettled, setCensusSettled] = useState(false);
   // Full roster — admin-only (listStewards 403s for non-admins → stays []).
   // Caller's OWN steward rows (scoped), from GET /nests/:id. Drives per-node
   // affordances for non-admin reviewers/editors who can't read the roster.
@@ -428,6 +432,8 @@ export function NestView({
       setCensus(fresh);
     } catch (e) {
       console.error("[NestView] getNestCensus failed", nestId, e);
+    } finally {
+      setCensusSettled(true);
     }
   }, [nestId, qc]);
 
@@ -564,6 +570,7 @@ export function NestView({
     loadedFolders.current = new Set();
     setExpandedFolders(new Set());
     setNodes([]);
+    setCensusSettled(false);
     void fetchLevel(folderFilter ?? "");
     void fetchCensus();
   }, [nestId, folderFilter, fetchLevel, fetchCensus]);
@@ -1719,7 +1726,7 @@ export function NestView({
         <TabsContent value="overview" className="space-y-4">
           <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
           <OverviewTab
-            initialLoad={initialLoad}
+              initialLoad={initialLoad || !censusSettled}
             stats={stats}
             recentlyEdited={recentlyEdited}
             recentlyEditedCount={recentlyEditedCount}
