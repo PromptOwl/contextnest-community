@@ -5,7 +5,7 @@ import { DocumentViewer } from "./DocumentViewer";
 import * as api from "../lib/api";
 import { conventionKey, isHomeNode } from "@/lib/nest-caps";
 import { extractHeadings } from "@/lib/toc";
-import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle, orderWithinFolder, ancestorsOf } from "@/lib/reader";
+import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle, orderWithinFolder, ancestorsOf, READER_SIDE_COLUMN_CLASS } from "@/lib/reader";
 import { relTime } from "@/lib/dates";
 
 /**
@@ -213,7 +213,7 @@ export function ReaderView({
   return (
     <div className="mx-auto w-full max-w-[88rem] lg:grid lg:grid-cols-[15rem_minmax(0,1fr)_13rem] lg:gap-10">
       {/* Nav — a sticky column at desktop width, a disclosure above the article on a phone. */}
-      <aside className="lg:sticky lg:top-6 lg:self-start lg:h-[calc(100vh-5rem)] lg:overflow-y-auto lg:border-r lg:pr-5 mb-6 lg:mb-0">
+      <aside className={READER_SIDE_COLUMN_CLASS + " lg:border-r lg:pr-5 mb-6 lg:mb-0"}>
         <button
           type="button"
           onClick={() => setNavOpen((o) => !o)}
@@ -305,7 +305,7 @@ export function ReaderView({
       </article>
 
       {/* Outline — headings of the open page; only rendered when there is more than one. */}
-      <aside className="hidden lg:block lg:sticky lg:top-6 lg:self-start lg:h-[calc(100vh-5rem)] lg:overflow-y-auto lg:border-l lg:pl-5">
+      <aside className={"hidden lg:block " + READER_SIDE_COLUMN_CLASS + " lg:border-l lg:pl-5"}>
         {outline.length > 1 && (
           <nav aria-label="On this page">
             <p className="mb-2 text-[12px] font-medium text-muted-foreground">On this page</p>

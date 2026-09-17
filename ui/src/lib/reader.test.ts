@@ -4,7 +4,7 @@
  * mean in a folder-ordered nest.
  */
 import { describe, it, expect } from "vitest";
-import { resolveWikiTarget, breadcrumbFor, sectionLabel, readingOrder, neighbours, stripLeadingTitle, commonRootFolder, displayTitle, orderWithinFolder, ancestorsOf, foldersCoveredBy } from "./reader";
+import { resolveWikiTarget, breadcrumbFor, sectionLabel, readingOrder, neighbours, stripLeadingTitle, commonRootFolder, displayTitle, orderWithinFolder, ancestorsOf, foldersCoveredBy, READER_SIDE_COLUMN_CLASS } from "./reader";
 
 const nodes = [
   { id: "nodes/docs/welcome", title: "Welcome" },
@@ -137,3 +137,13 @@ describe("foldersCoveredBy", () => {
   });
 });
 
+// Both side columns are framed by one class string; it must pin a height,
+// not just cap one, or the columns size to content again and the hairlines
+// end at different points (CU-wdqcq027jm).
+describe("READER_SIDE_COLUMN_CLASS", () => {
+  it("pins a fixed viewport-based height and scrolls internally", () => {
+    expect(READER_SIDE_COLUMN_CLASS).toMatch(/\blg:h-\[calc\(100vh-[^\]]+\)\]/);
+    expect(READER_SIDE_COLUMN_CLASS).not.toMatch(/\blg:max-h-/);
+    expect(READER_SIDE_COLUMN_CLASS).toContain("lg:overflow-y-auto");
+  });
+});

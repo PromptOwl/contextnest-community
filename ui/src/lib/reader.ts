@@ -133,3 +133,11 @@ export function foldersCoveredBy(nodes: { id?: string }[]): Set<string> {
   return new Set(["", ...nodes.flatMap((n) => ancestorsOf(n.id || ""))]);
 }
 
+/**
+ * The nav and the outline are the same height — one viewport-based size,
+ * scrolled internally — so the two hairlines framing the article end at
+ * the same point on every page rather than wherever each column's content
+ * happened to stop.
+ */
+export const READER_SIDE_COLUMN_CLASS =
+  "lg:sticky lg:top-6 lg:self-start lg:h-[calc(100vh-5rem)] lg:overflow-y-auto";
