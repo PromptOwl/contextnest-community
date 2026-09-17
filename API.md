@@ -82,6 +82,13 @@ Revoke one key. 404 if the id isn't the caller's. Anything still using it stops 
 { "current_password": "...", "new_password": "..." }
 ```
 
+### PATCH `/auth/profile` (auth required)
+Set the caller's display name (≤ 80 chars, trimmed). An empty string clears it, so the UI shows the email. Not available to the anonymous OPEN-mode user.
+```json
+{ "name": "Alan" }
+```
+Response: `{ "ok": true, "name": "Alan" }`
+
 ### POST `/auth/invite` (admin only)
 Creates an invited user and returns a **temporary password** (once) for the admin to hand off. No API key is minted — teammates sign in with the temp password, then mint their own key from the Connect modal.
 ```json

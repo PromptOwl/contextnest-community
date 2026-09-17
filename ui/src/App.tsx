@@ -18,7 +18,7 @@ const TeamsPage = lazyNamed(() => import("./components/TeamsPage"), "TeamsPage")
 const SettingsPage = lazyNamed(() => import("./components/SettingsPage"), "SettingsPage") as unknown as typeof import("./components/SettingsPage").SettingsPage;
 const GuidePage = lazyNamed(() => import("./components/GuidePage"), "GuidePage");
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
-import { getLicenseStatus, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
+import { getLicenseStatus, changePassword, updateProfile, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { useQueryClient } from "@tanstack/react-query";
@@ -38,7 +38,7 @@ import {
   isViewBlockedInReaderMode,
 } from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, BookOpen, ScrollText, Activity, Search, FileText, Keyboard, PanelLeft, ChevronRight } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, BookOpen, ScrollText, Activity, Search, FileText, Keyboard, PanelLeft, ChevronRight, UserPen } from "lucide-react";
 const AgentDocsPage = lazyNamed(() => import("./components/AgentDocsPage"), "AgentDocsPage");
 const ActivityTracePage = lazyNamed(() => import("./components/ActivityTracePage"), "ActivityTracePage");
 import { Input } from "@/components/ui/input";
@@ -231,6 +231,7 @@ export default function App() {
     workflowPlaneEnabled,
     subagentRunsEnabled,
     refreshHealth,
+    refresh,
     loading,
     error,
     logout,
@@ -284,6 +285,7 @@ export default function App() {
   const [logoutConfirm, setLogoutConfirm] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
+  const [showEditProfile, setShowEditProfile] = useState(false);
   // Server-wide settings for the admin Settings page. Loaded once for admins.
   const [serverSettings, setServerSettings] = useState<AdminSettings | null>(null);
   useEffect(() => {
@@ -962,6 +964,14 @@ export default function App() {
         open={showChangePassword}
         onClose={() => setShowChangePassword(false)}
       />
+      {adminStatus?.me && (
+        <EditProfileDialog
+          open={showEditProfile}
+          initialName={adminStatus.me.name ?? ""}
+          onClose={() => setShowEditProfile(false)}
+          onSaved={refresh}
+        />
+      )}
 
       {/* One palette for both scopes: inside a nest it starts scoped to that
           nest and can widen to every nest, so the pick has to open whichever
@@ -1283,6 +1293,7 @@ export default function App() {
                 onGuide={() => setView({ page: "guide" })}
                 onShortcuts={() => setShowShortcuts(true)}
                 onTrace={() => setView({ page: "trace" })}
+                onEditProfile={() => setShowEditProfile(true)}
                 onChangePassword={() => setShowChangePassword(true)}
                 onLogout={requestLogout}
               />
@@ -1715,6 +1726,7 @@ interface UserMenuProps {
   onGuide: () => void;
   onShortcuts: () => void;
   onTrace: () => void;
+  onEditProfile: () => void;
   onChangePassword: () => void;
   onLogout: () => void;
 }
@@ -1729,6 +1741,7 @@ function UserMenu({
   onGuide,
   onShortcuts,
   onTrace,
+  onEditProfile,
   onChangePassword,
   onLogout,
 }: UserMenuProps) {
@@ -1816,6 +1829,14 @@ function UserMenu({
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem
+          onSelect={onEditProfile}
+          className="cursor-pointer"
+          data-testid="user-menu-edit-profile"
+        >
+          <UserPen className="h-3.5 w-3.5 mr-2" />
+          Edit profile
+        </DropdownMenuItem>
+        <DropdownMenuItem
           onSelect={onChangePassword}
           className="cursor-pointer"
           data-testid="user-menu-change-password"
@@ -1859,6 +1880,85 @@ function PasswordToggle({
     >
       {shown ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
     </button>
+  );
+}
+
+function EditProfileDialog({
+  open,
+  initialName,
+  onClose,
+  onSaved,
+}: {
+  open: boolean;
+  initialName: string;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [name, setName] = useState(initialName);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Re-seed from the live name each time the dialog opens.
+  useEffect(() => {
+    if (open) {
+      setName(initialName);
+      setError(null);
+    }
+  }, [open, initialName]);
+
+  const submit = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await updateProfile(name);
+      await onSaved();
+      toast.success("Profile updated.");
+      onClose();
+    } catch (e: any) {
+      setError(e?.message || "Could not update profile.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o && !saving) onClose(); }}>
+      <DialogContent className="sm:max-w-[400px]">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <UserPen className="h-4 w-4 text-muted-foreground" />
+            Edit profile
+          </DialogTitle>
+          <DialogDescription>
+            The name teammates see on your documents and comments. Leave it
+            empty to show your email instead.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-1 py-1">
+          <label htmlFor="ep-name" className="block text-sm font-medium">
+            Display name
+          </label>
+          <Input
+            id="ep-name"
+            value={name}
+            maxLength={80}
+            placeholder="Your name"
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !saving) void submit(); }}
+            autoComplete="name"
+            data-testid="edit-profile-name"
+          />
+          {error && <p className="text-sm text-destructive">{error}</p>}
+        </div>
+        <DialogFooter className="gap-2">
+          <Button variant="outline" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button onClick={submit} disabled={saving || name.trim() === initialName.trim()}>
+            {saving ? "Saving..." : "Save"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
