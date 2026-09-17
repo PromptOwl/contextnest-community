@@ -1322,6 +1322,11 @@ export function DocumentEditor({
     setTags([...tags, ...accepted]);
     setTagInput("");
     setTouched(true);
+    // Local until Save — say so, or "added" reads as persisted.
+    toast.success(
+      accepted.length === 1 ? `Tag "${accepted[0]}" added` : `${accepted.length} tags added`,
+      { description: "Save the document to keep it." },
+    );
   }, [tagPreview, tags]);
 
   const removeTag = (t: string) => {
