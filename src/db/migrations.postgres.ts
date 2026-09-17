@@ -109,6 +109,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       allow_self_approve INTEGER NOT NULL DEFAULT 0,
       prime_only_review INTEGER NOT NULL DEFAULT 0,
       prime_tags TEXT NOT NULL DEFAULT 'prime-document',
+      creator_is_reviewer INTEGER NOT NULL DEFAULT 0,
       shared_teams TEXT NOT NULL DEFAULT '[]',
       index_synced_at TEXT,
       reader_mode INTEGER NOT NULL DEFAULT 0,
@@ -439,6 +440,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- created before prime shipped still gets the columns on upgrade.
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS prime_only_review INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS prime_tags TEXT NOT NULL DEFAULT 'prime-document';
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS creator_is_reviewer INTEGER NOT NULL DEFAULT 0;
 
     -- node_index freshness stamp: same inline-plus-explicit-ALTER pattern. The
     -- inline declaration only reaches a database created after it shipped, and

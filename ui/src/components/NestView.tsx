@@ -375,6 +375,7 @@ export function NestView({
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   const [allowSelfApprove, setAllowSelfApprove] = useState(false);
   const [primeOnlyReview, setPrimeOnlyReview] = useState(false);
+  const [creatorIsReviewer, setCreatorIsReviewer] = useState(false);
   const [primeTags, setPrimeTags] = useState<string[]>([]);
   const [visibility, setVisibility] = useState<api.NestVisibility>("private");
   const [visibilitySaving, setVisibilitySaving] = useState(false);
@@ -866,6 +867,7 @@ export function NestView({
               allow_self_approve: false,
               prime_only_review: false,
               prime_tags: [] as string[],
+              creator_is_reviewer: false,
             })
           : qc.fetchQuery(reads.settings(nestId)).catch((e) => {
               console.error("[NestView] getNestSettings failed", nestId, e);
@@ -874,6 +876,7 @@ export function NestView({
                 allow_self_approve: false,
                 prime_only_review: false,
                 prime_tags: [] as string[],
+                creator_is_reviewer: false,
               };
             }),
         grantOnly
@@ -925,6 +928,7 @@ export function NestView({
     setStewardshipEnabled(settingsData.stewardship_enabled);
     setAllowSelfApprove(settingsData.allow_self_approve);
     setPrimeOnlyReview(!!settingsData.prime_only_review);
+    setCreatorIsReviewer(!!settingsData.creator_is_reviewer);
     setPrimeTags(settingsData.prime_tags ?? []);
     setExternalEdits(externalData.entries);
     if (nestMeta?.nest?.visibility) {
@@ -4371,6 +4375,7 @@ export function NestView({
           allowSelfApprove={allowSelfApprove}
           primeOnlyReview={primeOnlyReview}
           primeTags={primeTags}
+          creatorIsReviewer={creatorIsReviewer}
           canManageStewardship={canManageGovernance}
           onClose={() => setShowSettings(false)}
           onChanged={(next) => {
@@ -4382,6 +4387,7 @@ export function NestView({
             setAllowSelfApprove(next.allowSelfApprove);
             setPrimeOnlyReview(next.primeOnlyReview);
             setPrimeTags(next.primeTags);
+            setCreatorIsReviewer(next.creatorIsReviewer);
             fetchData();
           }}
         />

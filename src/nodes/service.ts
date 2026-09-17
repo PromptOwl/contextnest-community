@@ -37,11 +37,15 @@ import {
   resolveNestPath,
   nestAllowsSelfApprove,
   nestReviewsPrimeOnly,
+  nestCreatorIsReviewer,
 } from "../nests/service.js";
 import { isPrimeDocument, documentPrimeFlag } from "../governance/prime-service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
 import { notifyMentions } from "../governance/mention-notify.js";
-import { resolveUserRoles } from "../governance/stewardship-service.js";
+import {
+  resolveUserRoles,
+  stewardDocumentCreator,
+} from "../governance/stewardship-service.js";
 import { canApproveWith } from "../governance/roles.js";
 import {
   resolveCallerEmail,
@@ -1261,6 +1265,13 @@ export interface UpdateNodePatch {
  */
 export interface WriteOptions {
   notifyMentions?: boolean;
+  /**
+   * False keeps a create out of the nest's creator-reviews posture: the
+   * author is not stewarded and v1 is not published on their authority. For
+   * documents the system derives (the annotations projection), which nobody
+   * authored.
+   */
+  creatorReviews?: boolean;
 }
 
 export interface NodeMutationResult {
@@ -1320,11 +1331,17 @@ async function assertMayFlagPrime(
 async function autoPublishReason(
   nestId: string,
   userEmail: string,
-  doc: { tags?: readonly unknown[]; metadata?: unknown }
+  doc: { tags?: readonly unknown[]; metadata?: unknown },
+  opts: { creatorReviews?: boolean } = {},
 ): Promise<string | null> {
   // Ungoverned nest: nothing to review, nobody to review it.
   if (!(await isStewardshipEnabled(nestId))) return "no stewards configured";
   if (await isPrimeDocument(nestId, doc.tags, doc.metadata)) return null;
+  // Creator-reviews (a create, in a nest with the posture on): the author is
+  // this document's reviewer, so v1 is theirs to publish. Only v1 — every
+  // later edit, theirs included, is a change to a reviewed document and goes
+  // through the queue.
+  if (opts.creatorReviews) return "creator is the document's reviewer";
   // Prime-only posture: everything that isn't prime self-publishes.
   if (await nestReviewsPrimeOnly(nestId)) {
     return "prime-only review, document is not prime";
@@ -1486,10 +1503,16 @@ async function createNodeOnce(
       ...(input.schedule ? { schedule: input.schedule } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
     };
-    const publishReason = await autoPublishReason(nestId, userEmail, {
-      tags,
-      metadata,
-    });
+    const creatorReviews =
+      opts.creatorReviews !== false &&
+      (await isStewardshipEnabled(nestId)) &&
+      (await nestCreatorIsReviewer(nestId));
+    const publishReason = await autoPublishReason(
+      nestId,
+      userEmail,
+      { tags, metadata },
+      { creatorReviews },
+    );
     // Same note in the engine history and the governance row: the version
     // history an admin reads in the UI comes from node_versions, so leaving the
     // reason only in history.yaml hides it from the audit that matters.
@@ -1568,6 +1591,17 @@ async function createNodeOnce(
         status: "draft",
         tags,
       });
+    }
+
+    // After the version rows, so the roster only ever names a document that
+    // exists. Best-effort like the publish above: the document is written and
+    // versioned by now, and a 500 here would only invite a retry that 409s.
+    if (creatorReviews) {
+      try {
+        await stewardDocumentCreator(nestId, id, userEmail);
+      } catch (err) {
+        console.error("stewardDocumentCreator failed (node create)", id, err);
+      }
     }
 
     await trackEvent("node.create", { nestId, nodeId: id });

@@ -402,7 +402,7 @@ export async function syncAnnotationsNode(
             tags: ["annotations"],
           },
           userEmail,
-          { notifyMentions: false },
+          { notifyMentions: false, creatorReviews: false },
         );
       } else {
         throw err;

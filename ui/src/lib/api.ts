@@ -604,6 +604,8 @@ export interface NestSettings {
   prime_only_review: boolean;
   /** Tags that mark a document prime (normalized, no leading `#`). */
   prime_tags: string[];
+  /** The person who creates a document becomes its reviewer; v1 publishes. */
+  creator_is_reviewer: boolean;
 }
 
 export async function getNestSettings(nestId: string) {
@@ -617,6 +619,7 @@ export async function updateNestSettings(
     allow_self_approve?: boolean;
     prime_only_review?: boolean;
     prime_tags?: string[];
+    creator_is_reviewer?: boolean;
   },
 ) {
   return request<NestSettings>(`/nests/${nestId}/settings`, {

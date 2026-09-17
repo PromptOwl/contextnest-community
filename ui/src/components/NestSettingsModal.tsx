@@ -22,6 +22,7 @@ import {
   Loader2,
   Info,
   UserCheck,
+  UserPen,
   Star,
 } from "lucide-react";
 import * as api from "../lib/api";
@@ -33,6 +34,7 @@ interface NestSettingsModalProps {
   allowSelfApprove: boolean;
   primeOnlyReview: boolean;
   primeTags: string[];
+  creatorIsReviewer: boolean;
   /** False hides the stewardship section. Server still enforces. */
   canManageStewardship: boolean;
   onClose: () => void;
@@ -41,6 +43,7 @@ interface NestSettingsModalProps {
     allowSelfApprove: boolean;
     primeOnlyReview: boolean;
     primeTags: string[];
+    creatorIsReviewer: boolean;
   }) => void;
 }
 
@@ -51,6 +54,7 @@ export function NestSettingsModal({
   allowSelfApprove,
   primeOnlyReview,
   primeTags,
+  creatorIsReviewer,
   canManageStewardship,
   onClose,
   onChanged,
@@ -59,6 +63,7 @@ export function NestSettingsModal({
   const [selfApprove, setSelfApprove] = useState(allowSelfApprove);
   const [primeOnly, setPrimeOnly] = useState(primeOnlyReview);
   const [primeTagText, setPrimeTagText] = useState(primeTags.join(", "));
+  const [creatorReviews, setCreatorReviews] = useState(creatorIsReviewer);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Acknowledgement required only when the caller is turning stewardship
@@ -88,11 +93,13 @@ export function NestSettingsModal({
     const primeOnlyChanged = primeOnly !== primeOnlyReview;
     const primeTagsChanged =
       nextPrimeTags.join(",") !== primeTags.join(",");
+    const creatorReviewsChanged = creatorReviews !== creatorIsReviewer;
     if (
       !stewardshipChanged &&
       !selfApproveChanged &&
       !primeOnlyChanged &&
-      !primeTagsChanged
+      !primeTagsChanged &&
+      !creatorReviewsChanged
     ) {
       onClose();
       return;
@@ -105,13 +112,17 @@ export function NestSettingsModal({
         ...(selfApproveChanged ? { allow_self_approve: selfApprove } : {}),
         ...(primeOnlyChanged ? { prime_only_review: primeOnly } : {}),
         ...(primeTagsChanged ? { prime_tags: nextPrimeTags } : {}),
+        ...(creatorReviewsChanged
+          ? { creator_is_reviewer: creatorReviews }
+          : {}),
       });
       // Trust the server's response, not our optimistic local state, in
       // case the permission check rejected silently or the DB rejected.
       if (
         result.stewardship_enabled !== enabled ||
         result.allow_self_approve !== selfApprove ||
-        result.prime_only_review !== primeOnly
+        result.prime_only_review !== primeOnly ||
+        result.creator_is_reviewer !== creatorReviews
       ) {
         setError(
           "Server did not accept the change. You may not have permission to change these settings.",
@@ -126,6 +137,7 @@ export function NestSettingsModal({
         allowSelfApprove: result.allow_self_approve,
         primeOnlyReview: result.prime_only_review,
         primeTags: result.prime_tags,
+        creatorIsReviewer: result.creator_is_reviewer,
       });
     } catch (err: any) {
       setError(err.message);
@@ -314,6 +326,39 @@ export function NestSettingsModal({
                 prime. A single document can also be flagged directly from its
                 editor, which overrides its tags.
               </p>
+            </div>
+          </div>
+          )}
+
+          {/* Creator reviews — only meaningful once stewardship is on. */}
+          {canManageStewardship && enabled && (
+          <div className="rounded-lg border p-4 space-y-3">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label className="flex items-center gap-2 text-sm font-medium">
+                  <UserPen className="h-4 w-4" />
+                  Creators review their own documents
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Default off. When enabled, whoever creates a document becomes
+                  its <strong>reviewer</strong> and the first version publishes
+                  right away. Changes by anyone else go to the creator for
+                  approval; the creator&rsquo;s own later edits go to the
+                  nest&rsquo;s other reviewers. Applies to documents created
+                  from now on — existing documents keep their stewards.
+                </p>
+              </div>
+              <Switch checked={creatorReviews} onCheckedChange={setCreatorReviews} />
+            </div>
+
+            <div className="flex items-start gap-2 text-xs text-muted-foreground pt-2 border-t">
+              <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+              <div>
+                <strong className="text-foreground">Prime wins.</strong> A
+                prime document still starts as a draft — its creator is made
+                its reviewer, but someone else has to approve the first
+                version.
+              </div>
             </div>
           </div>
           )}

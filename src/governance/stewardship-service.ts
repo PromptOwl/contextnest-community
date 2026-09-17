@@ -418,6 +418,49 @@ export async function createStewardRecord(params: {
   return results;
 }
 
+/**
+ * Creator reviews their documents: make the author of a new document its
+ * reviewer. Called from createNode once the document exists, so a failed
+ * create never leaves a steward row pointing at nothing.
+ *
+ * The nest owner is skipped — they already approve everything, and the roster
+ * refuses owner rows for the same reason (createStewardRecord). Idempotent: a
+ * retried create finds its own row and leaves it. Nobody is emailed — the
+ * author just wrote the document; the row is a consequence of that, not an
+ * assignment someone made.
+ */
+export async function stewardDocumentCreator(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+): Promise<void> {
+  const email = userEmail.trim().toLowerCase();
+  if (!email) return;
+  const ownerEmail = ((await getNestOwnerEmail(nestId)) || "").toLowerCase();
+  if (email === ownerEmail) return;
+
+  const db = getDb();
+  const existing = await db.get(
+    `SELECT 1 AS present FROM stewards
+       WHERE nest_id = ? AND is_active = 1 AND scope = 'document'
+         AND node_pattern = ? AND LOWER(user_email) = ?`,
+    [nestId, nodeId, email],
+  );
+  if (existing) return;
+
+  await assignSteward({
+    nestId,
+    scope: "document",
+    nodePattern: nodeId,
+    userEmail: email,
+    userId: await userIdForEmail(email),
+    role: "reviewer",
+    assignedBy: email,
+    assignedAt: new Date().toISOString(),
+    isActive: true,
+  });
+}
+
 // ─── STEWARD RESOLUTION ─────────────────────────────────────────────────
 // Ported from PromptOwl's resolveStewardsForDocument aggregation pipeline.
 // Priority: document(1) > tag(2) > nest(3).

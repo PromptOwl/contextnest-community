@@ -24,6 +24,8 @@ import {
   setStewardshipEnabled,
   disableStewardshipAndWipeGovernance,
   nestAllowsSelfApprove,
+  nestCreatorIsReviewer,
+  setCreatorIsReviewer,
   setAllowSelfApprove,
   nestReviewsPrimeOnly,
   setPrimeOnlyReview,
@@ -677,6 +679,7 @@ nestRoutes.get("/:nestId/settings", async (c) => {
     allow_self_approve: await nestAllowsSelfApprove(nestId),
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
+    creator_is_reviewer: await nestCreatorIsReviewer(nestId),
   });
 });
 
@@ -706,6 +709,7 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     allow_self_approve?: boolean;
     prime_only_review?: boolean;
     prime_tags?: string[] | string;
+    creator_is_reviewer?: boolean;
   }>();
   let wiped: {
     stewards: number;
@@ -750,12 +754,18 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
       Array.isArray(body.prime_tags) ? body.prime_tags : [body.prime_tags],
     );
   }
+  // Creator-reviews is likewise future-only: it stewards nobody retroactively
+  // and turning it off leaves every steward row it created in place.
+  if (typeof body.creator_is_reviewer === "boolean") {
+    await setCreatorIsReviewer(nestId, body.creator_is_reviewer);
+  }
 
   return c.json({
     stewardship_enabled: await isStewardshipEnabled(nestId),
     allow_self_approve: await nestAllowsSelfApprove(nestId),
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
+    creator_is_reviewer: await nestCreatorIsReviewer(nestId),
     wiped,
   });
 });
