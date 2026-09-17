@@ -14,6 +14,8 @@ describe("contextUriDocPath", () => {
     expect(contextUriDocPath("contextnest://nodes/a/b@3")).toBe("nodes/a/b");
     expect(contextUriDocPath("contextnest://nodes/a/b#summary")).toBe("nodes/a/b");
     expect(contextUriDocPath("contextnest://nodes/a/b.")).toBe("nodes/a/b");
+    // A fragment ending in "/" does not make the URI a folder.
+    expect(contextUriDocPath("contextnest://nodes/a/b#frag/")).toBe("nodes/a/b");
   });
   it("is null for tag, search, folder and malformed URIs", () => {
     expect(contextUriDocPath("contextnest://tag/gtm")).toBeNull();
@@ -26,13 +28,20 @@ describe("contextUriDocPath", () => {
 });
 
 describe("CONTEXT_URI_RE", () => {
-  it("finds every bare URI in a line and stops at whitespace or brackets", () => {
-    const line = "see contextnest://nodes/a and (contextnest://nodes/b/c) or contextnest://nodes/d.";
+  it("finds every bare URI in a line and stops at whitespace, brackets or sentence punctuation", () => {
+    const line = "see contextnest://nodes/a and (contextnest://nodes/b/c) or contextnest://nodes/d. Then contextnest://nodes/e: done!";
     expect(line.match(CONTEXT_URI_RE)).toEqual([
       "contextnest://nodes/a",
       "contextnest://nodes/b/c",
-      "contextnest://nodes/d.",
+      "contextnest://nodes/d",
+      "contextnest://nodes/e",
     ]);
+  });
+  // The viewer replaces each match with a link node and keeps the rest of
+  // the text as-is, so what the regex leaves out is what the reader sees.
+  it("leaves the punctuation after a URI in the prose", () => {
+    const line = "See contextnest://nodes/d. Then continue.";
+    expect(line.replace(CONTEXT_URI_RE, (u) => `«${u}»`)).toBe("See «contextnest://nodes/d». Then continue.");
   });
 });
 

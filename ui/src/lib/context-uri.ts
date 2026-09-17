@@ -5,8 +5,13 @@
  */
 export const CONTEXT_URI_PREFIX = "contextnest://";
 
-/** Bare URIs in prose — up to whitespace or a bracket/quote that ends the token. */
-export const CONTEXT_URI_RE = /contextnest:\/\/[^\s<>()[\]"'`,;]+/g;
+/**
+ * Bare URIs in prose — up to whitespace or a bracket/quote that ends the
+ * token. Sentence punctuation right after the URI (`…/deals.`, `…/deals:`)
+ * belongs to the prose, so the match stops before it and the viewer keeps
+ * it as text.
+ */
+export const CONTEXT_URI_RE = /contextnest:\/\/[^\s<>()[\]"'`,;]*[^\s<>()[\]"'`,;.:!?]/g;
 
 /**
  * The node path a document URI points at (`nodes/gtm/deals`), with any
@@ -15,11 +20,14 @@ export const CONTEXT_URI_RE = /contextnest:\/\/[^\s<>()[\]"'`,;]+/g;
  */
 export function contextUriDocPath(uri: string): string | null {
   if (!uri.startsWith(CONTEXT_URI_PREFIX)) return null;
-  let rest = uri.slice(CONTEXT_URI_PREFIX.length).replace(/[.,;:!?]+$/, "");
+  let rest = uri.slice(CONTEXT_URI_PREFIX.length);
   if (!rest || rest.includes("//")) return null;
-  if (rest.startsWith("tag/") || rest.startsWith("search/") || rest.endsWith("/")) return null;
-  rest = rest.split("#")[0].split("@")[0];
-  return rest || null;
+  if (rest.startsWith("tag/") || rest.startsWith("search/")) return null;
+  // Pin and anchor first — a fragment may end in "/" without making the
+  // URI a folder. Then any sentence punctuation a caller left on.
+  rest = rest.split("#")[0].split("@")[0].replace(/[.,;:!?]+$/, "");
+  if (!rest || rest.endsWith("/")) return null;
+  return rest;
 }
 
 /** What a bare URI reads as on screen: the page's slug. */
