@@ -1634,9 +1634,6 @@ export default function App() {
         {view.page === "teams" && (
           <TeamsPage onBack={() => setView({ page: "dashboard" })} />
         )}
-        {view.page === "trace" && (
-          <ActivityTracePage onBack={() => setView({ page: "dashboard" })} />
-        )}
         {view.page === "docs" && (
           <AgentDocsPage onBack={() => setView({ page: "dashboard" })} />
         )}
