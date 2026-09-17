@@ -16,7 +16,7 @@ import {
   Clock, CheckCircle2, Loader2, Link2, Settings as SettingsIcon,
   Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
   FileStack, FolderPlus, X,
-  Activity, BookOpen, Archive,
+  Activity, BookOpen, Archive, Eye,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { prettyFolderPath } from "./FolderTree";
@@ -255,6 +255,9 @@ export function NestView({
   const [readerHomeNode, setReaderHomeNode] = useState<string | null>(null);
   const [readerModeSaving, setReaderModeSaving] = useState(false);
   const [readerDialogOpen, setReaderDialogOpen] = useState(false);
+  // "Preview as reader": an owner/editor looking at the visitor-facing reader
+  // from inside the authoring UI. Presentation only — rights are unchanged.
+  const [previewReader, setPreviewReader] = useState(false);
   const [homeNodePickerOpen, setHomeNodePickerOpen] = useState(false);
   // Title of the saved home node — the stored value is an id, and an id is not
   // what people recognise. Resolved from the full document list, which the
@@ -611,6 +614,7 @@ export function NestView({
     isOwner,
     isAdmin,
     readerMode: readerModeEnabled,
+    previewReader,
     isArchived: isArchived || isNestArchived({ archived_at: nestArchivedAt }),
   });
   // canReviewDocs is folded into isReadOnly inside caps; per-row review uses
@@ -625,7 +629,8 @@ export function NestView({
   useEffect(() => {
     if (!isReaderView) return;
     let cancelled = false;
-    qc.fetchQuery(reads.nodesMeta(nestId))
+    // A preview lists only approved documents, exactly as a visitor sees it.
+    qc.fetchQuery(reads.nodesMeta(nestId, previewReader))
       .then(({ nodes: all }) => {
         if (cancelled) return;
         const folders = foldersCoveredBy(all);
@@ -635,7 +640,18 @@ export function NestView({
       })
       .catch((e: any) => toast.error(e?.message || "Failed to load documents"));
     return () => { cancelled = true; };
-  }, [isReaderView, nestId, qc]);
+  }, [isReaderView, previewReader, nestId, qc]);
+  // The preview swapped `nodes` for the approved-only set and marked every
+  // folder loaded; leaving it reopens the authoring tree from scratch, the
+  // same way a scope change does.
+  const exitPreview = () => {
+    setPreviewReader(false);
+    loadedFolders.current = new Set();
+    setLoadedFolderPaths(new Set());
+    setExpandedFolders(new Set());
+    setNodes([]);
+    void fetchLevel(folderFilter ?? "");
+  };
 
   // Does a steward row with `role` cover this node? Same scope-resolution
   // rules as the server: document scope matches by id, tag scope matches
@@ -1074,19 +1090,34 @@ export function NestView({
     // No "Back" here: a public docs reader navigates with the page's own
     // nav and the shell's header; a button back to the nest list is noise.
     return (
-      <ReaderView
-        nestId={nestId}
-        nestName={editableName}
-        nodes={nodes}
-        tocGroups={tocGroups}
-        knownFolders={knownFolders}
-        readerHomeNode={readerHomeNode}
-        initialDoc={initialDoc}
-        onDocChange={onReaderDocChange}
-        onExpandFolder={fetchLevel}
-        loadingFolders={loadingFolders}
-        loadedFolders={loadedFolderPaths}
-      />
+      <>
+        {previewReader && (
+          <div
+            role="status"
+            className="mb-4 flex items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200"
+          >
+            <span>Previewing as a reader — this is what visitors see.</span>
+            <Button variant="outline" size="sm" className="h-7" onClick={exitPreview}>
+              Exit preview
+            </Button>
+          </div>
+        )}
+        <ReaderView
+          key={previewReader ? "preview" : "reader"}
+          nestId={nestId}
+          nestName={editableName}
+          nodes={nodes}
+          tocGroups={tocGroups}
+          knownFolders={knownFolders}
+          readerHomeNode={readerHomeNode}
+          initialDoc={initialDoc}
+          onDocChange={onReaderDocChange}
+          onExpandFolder={fetchLevel}
+          loadingFolders={loadingFolders}
+          loadedFolders={loadedFolderPaths}
+          approvedOnly={previewReader}
+        />
+      </>
     );
   }
 
@@ -2070,6 +2101,19 @@ export function NestView({
           )}
 
           <DialogFooter>
+            {readerModeEnabled && (
+              <Button
+                variant="outline"
+                className="mr-auto gap-1.5"
+                onClick={() => {
+                  setReaderDialogOpen(false);
+                  setPreviewReader(true);
+                }}
+              >
+                <Eye className="h-3.5 w-3.5" />
+                Preview as reader
+              </Button>
+            )}
             <Button variant="outline" onClick={() => setReaderDialogOpen(false)}>
               Done
             </Button>

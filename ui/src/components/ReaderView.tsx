@@ -51,6 +51,8 @@ export interface ReaderViewProps {
   onExpandFolder: (path: string) => void;
   loadingFolders?: Set<string>;
   loadedFolders?: Set<string>;
+  /** Serve approved bodies only — an owner previewing what a visitor gets. */
+  approvedOnly?: boolean;
 }
 
 export function ReaderView({
@@ -65,6 +67,7 @@ export function ReaderView({
   onExpandFolder,
   loadingFolders,
   loadedFolders,
+  approvedOnly = false,
 }: ReaderViewProps) {
   const homeNode = useMemo(() => {
     if (readerHomeNode) {
@@ -99,7 +102,7 @@ export function ReaderView({
     inFlight.current.add(nodeId);
     setLoadingId(nodeId);
     try {
-      const { node } = await api.getNode(nestId, nodeId);
+      const { node } = await api.getNode(nestId, nodeId, approvedOnly);
       setContent((prev) => ({ ...prev, [nodeId]: node?.content ?? "" }));
     } catch {
       // Not cached: a transient failure must be retryable. The notice offers it.

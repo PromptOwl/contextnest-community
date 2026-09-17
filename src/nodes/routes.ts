@@ -436,8 +436,11 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   // the person who was granted edit rights a read-only document.
   (response as any).myGrant = await resolveNodeGrant(nestId, userId, nodeId);
 
-  // Public readers see approved version body only.
-  if (publicReader) {
+  // Public readers see approved version body only. ?approved_only=1 asks for
+  // the same body on purpose — an owner previewing the public reader — and
+  // mirrors the listing's flag; it narrows what is served, never widens it.
+  const approvedOnly = c.req.query("approved_only") === "1" || c.req.query("approved_only") === "true";
+  if (publicReader || approvedOnly) {
     const approved = await versions.getApprovedVersion(nestId, nodeId);
     if (approved != null) {
       // Kept for the raw path: frontmatter=1 must serve the APPROVED

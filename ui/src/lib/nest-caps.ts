@@ -28,6 +28,12 @@ export interface NestCapsInput {
    * keep the full authoring UI.
    */
   readerMode?: boolean;
+  /**
+   * An owner/editor asked to see the visitor-facing reader ("Preview as
+   * reader"). Only meaningful with readerMode on; it flips the presentation,
+   * never the caller's rights.
+   */
+  previewReader?: boolean;
   isArchived?: boolean;
 }
 
@@ -73,6 +79,7 @@ export function deriveNestCaps({
   isOwner,
   isAdmin,
   readerMode,
+  previewReader,
   isArchived,
 }: NestCapsInput): NestCaps {
   // If the nest is archived, enforce read-only
@@ -98,7 +105,7 @@ export function deriveNestCaps({
     collabCanWrite ||
     myStewards.some((s) => s.role === "editor" && s.scope === "nest");
   const isReadOnly = !canEditDocs && !canReviewDocs && !canManage;
-  const isReaderView = !!readerMode && isReadOnly;
+  const isReaderView = !!readerMode && (isReadOnly || !!previewReader);
 
   return {
     canManage,
