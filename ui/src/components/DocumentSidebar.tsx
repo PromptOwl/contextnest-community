@@ -26,6 +26,7 @@ import {
   PanelLeftClose,
   Plug,
   Plus,
+  Search,
 } from "lucide-react";
 import { reads, useNestMeta } from "../lib/queries";
 import { ANON_USER_ID } from "../lib/constants";
@@ -114,15 +115,20 @@ export function DocumentSidebar({
     setOpenNests((prev) => (prev.has(nestId) ? prev : new Set([...prev, nestId])));
   }, [nestId]);
 
+  // Nest-name filter; the current nest always stays so its tree never vanishes.
+  const [nestFilter, setNestFilter] = useState("");
   const rows = useMemo(() => {
     const list: any[] = nests.data?.nests ?? [];
+    const q = nestFilter.trim().toLowerCase();
     // Current nest first so the tree you're in is never below the fold.
-    return [...list].sort((a, b) => {
-      if (a.id === nestId) return -1;
-      if (b.id === nestId) return 1;
-      return String(a.name).localeCompare(String(b.name));
-    });
-  }, [nests.data, nestId]);
+    return list
+      .filter((n) => !q || n.id === nestId || String(n.name).toLowerCase().includes(q))
+      .sort((a, b) => {
+        if (a.id === nestId) return -1;
+        if (b.id === nestId) return 1;
+        return String(a.name).localeCompare(String(b.name));
+      });
+  }, [nests.data, nestId, nestFilter]);
 
   return (
     <nav
@@ -170,6 +176,20 @@ export function DocumentSidebar({
           <LayoutGrid className="h-3.5 w-3.5" />
           All nests
         </button>
+      )}
+      {nestId !== null && (nests.data?.nests?.length ?? 0) > 1 && (
+        <div className="relative mx-2 mt-1 mb-2">
+          <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <input
+            type="search"
+            value={nestFilter}
+            onChange={(e) => setNestFilter(e.target.value)}
+            placeholder="Filter nests"
+            aria-label="Filter nests"
+            className="h-7 w-full rounded border border-border bg-background pl-7 pr-2 text-xs outline-none focus:ring-1 focus:ring-ring"
+            data-testid="document-sidebar-nest-filter"
+          />
+        </div>
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
