@@ -14,10 +14,9 @@ import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 const ApiKeysPage = lazyNamed(() => import("./components/ApiKeysPage"), "ApiKeysPage");
 const TeamsPage = lazyNamed(() => import("./components/TeamsPage"), "TeamsPage");
-const SettingsPage = lazyNamed(() => import("./components/SettingsPage"), "SettingsPage") as unknown as typeof import("./components/SettingsPage").SettingsPage;
 const GuidePage = lazyNamed(() => import("./components/GuidePage"), "GuidePage");
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
-import { getLicenseStatus, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
+import { getLicenseStatus, type LicenseStatus } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { useQueryClient } from "@tanstack/react-query";
@@ -231,7 +230,6 @@ export default function App() {
     isAdmin,
     workflowPlaneEnabled,
     subagentRunsEnabled,
-    refreshHealth,
     loading,
     error,
     logout,
@@ -289,36 +287,6 @@ export default function App() {
   // screen mounts when authenticated flips false in key mode).
   const [logoutConfirm, setLogoutConfirm] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
-  // Server-wide settings for the admin Settings page. Loaded once for admins.
-  const [serverSettings, setServerSettings] = useState<AdminSettings | null>(null);
-  useEffect(() => {
-    if (!isAdmin) return;
-    getAdminSettings()
-      .then(setServerSettings)
-      .catch(() => {});
-  }, [isAdmin]);
-  const updateServerSettings = useCallback(async (
-    patch: Partial<AdminSettings> & { anthropic_api_key?: string | null },
-  ) => {
-    try {
-      const res = await updateAdminSettings(patch);
-      setServerSettings(res.settings);
-      // Feature flags gate other views (workflow-plane nav, sub-agent picker,
-      // PromptOwl teams …) off the /health-sourced AuthContext state, not
-      // serverSettings. Always re-read health after a save so ANY flag exposed
-      // there takes effect live — no page reload, and no per-key allowlist to
-      // keep in sync as new flags are added.
-      await refreshHealth();
-      toast.success("Settings saved");
-    } catch (e: any) {
-      toast.error(e?.message || "Failed to save settings");
-      // A rejected save (validation / SMTP verify) persisted nothing server-side,
-      // so DON'T re-sync — that would reset the draft and wipe what the admin
-      // typed. Re-throw the original error (with its `body.fieldErrors`) so the
-      // Settings page can focus the offending field's tab and show the message.
-      throw e;
-    }
-  }, [refreshHealth]);
   // Cmd/Ctrl+K quick-open — active anywhere inside a nest context.
   const [showQuickOpen, setShowQuickOpen] = useState(false);
   // The document page's index rail. Per-browser; the page itself offers the
@@ -1665,14 +1633,6 @@ export default function App() {
         })()}
         {view.page === "teams" && (
           <TeamsPage onBack={() => setView({ page: "dashboard" })} />
-        )}
-
-        {view.page === "settings" && (
-          <SettingsPage
-            onBack={() => setView({ page: "dashboard" })}
-            settings={serverSettings}
-            onUpdate={updateServerSettings}
-          />
         )}
         {view.page === "trace" && (
           <ActivityTracePage onBack={() => setView({ page: "dashboard" })} />

@@ -6,7 +6,7 @@
  * tabs by role so the page stays short. Add a new setting to a tab's <Card>
  * list and to that tab's `keys` (so the unsaved-changes dot tracks it).
  */
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -31,15 +31,18 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { BetaBadge } from "@/components/ui/beta-badge";
-import type { AdminSettings, SignInGate, ManualSignIn, CommunitySite } from "../lib/api";
+import type { AdminSettings, SignInGate, ManualSignIn, CommunitySite } from "../../../lib/api";
 import {
   sendTestNotification,
   addCommunitySite,
   updateCommunitySite as updateCommunitySiteApi,
   removeCommunitySite,
-} from "../lib/api";
-import { reads } from "../lib/queries";
-import { copyTextWithToast } from "../lib/clipboard";
+} from "../../../lib/api";
+import { reads } from "../../../lib/queries";
+import { copyTextWithToast } from "../../../lib/clipboard";
+import { getAdminSettings, updateAdminSettings } from "../../../lib/api";
+import { useAuth } from "../../../auth/AuthContext";
+import { useAppNav } from "../../../lib/app-nav";
 import { toast } from "sonner";
 
 interface SettingsPageProps {
@@ -265,7 +268,7 @@ function NumField({
   );
 }
 
-export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) {
+function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) {
   // Local editable copy. Re-synced whenever the server value changes (initial
   // load, and after a successful save — which clears the dirty state). Extends
   // AdminSettings with the write-only `anthropic_api_key`: the server returns it
@@ -1823,5 +1826,49 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+/** The route: owns the server-settings load + save (moved out of App), and
+ *  hands the form the same props it always took. */
+export default function SettingsRoute() {
+  const { openDashboard } = useAppNav();
+  const { isAdmin, refreshHealth } = useAuth();
+  // Server-wide settings for the admin Settings page. Loaded once for admins.
+  const [serverSettings, setServerSettings] = useState<AdminSettings | null>(null);
+  useEffect(() => {
+    if (!isAdmin) return;
+    getAdminSettings()
+      .then(setServerSettings)
+      .catch(() => {});
+  }, [isAdmin]);
+  const updateServerSettings = useCallback(async (
+    patch: Partial<AdminSettings> & { anthropic_api_key?: string | null },
+  ) => {
+    try {
+      const res = await updateAdminSettings(patch);
+      setServerSettings(res.settings);
+      // Feature flags gate other views (workflow-plane nav, sub-agent picker,
+      // PromptOwl teams …) off the /health-sourced AuthContext state, not
+      // serverSettings. Always re-read health after a save so ANY flag exposed
+      // there takes effect live — no page reload, and no per-key allowlist to
+      // keep in sync as new flags are added.
+      await refreshHealth();
+      toast.success("Settings saved");
+    } catch (e: any) {
+      toast.error(e?.message || "Failed to save settings");
+      // A rejected save (validation / SMTP verify) persisted nothing server-side,
+      // so DON'T re-sync — that would reset the draft and wipe what the admin
+      // typed. Re-throw the original error (with its `body.fieldErrors`) so the
+      // Settings page can focus the offending field's tab and show the message.
+      throw e;
+    }
+  }, [refreshHealth]);
+  return (
+    <SettingsPage
+      onBack={openDashboard}
+      settings={serverSettings}
+      onUpdate={updateServerSettings}
+    />
   );
 }
