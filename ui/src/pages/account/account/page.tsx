@@ -5,15 +5,17 @@
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { ArrowLeft, Shield } from "lucide-react";
-import { useAuth } from "../auth/AuthContext";
-import { updateProfile } from "../lib/api";
-import { ChangePasswordDialog } from "./ChangePasswordDialog";
+import { useAuth } from "../../../auth/AuthContext";
+import { useAppNav } from "../../../lib/app-nav";
+import { updateProfile } from "../../../lib/api";
+import { ChangePasswordDialog } from "../../../components/ChangePasswordDialog";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
-export function AccountPage({ onBack }: { onBack: () => void }) {
+export default function AccountPage() {
+  const { openDashboard: onBack } = useAppNav();
   const { adminStatus, isAdmin, refresh } = useAuth();
   const me = adminStatus?.me ?? null;
   const [editing, setEditing] = useState(false);

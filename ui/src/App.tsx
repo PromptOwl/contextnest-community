@@ -13,7 +13,6 @@ import { ConnectModal } from "./components/ConnectModal";
 import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 const TeammatesPage = lazyNamed(() => import("./components/TeammatesPage"), "TeammatesPage");
-const AccountPage = lazyNamed(() => import("./components/AccountPage"), "AccountPage");
 const ApiKeysPage = lazyNamed(() => import("./components/ApiKeysPage"), "ApiKeysPage");
 const TeamsPage = lazyNamed(() => import("./components/TeamsPage"), "TeamsPage");
 const SettingsPage = lazyNamed(() => import("./components/SettingsPage"), "SettingsPage") as unknown as typeof import("./components/SettingsPage").SettingsPage;
@@ -31,6 +30,7 @@ import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-u
 import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { NestPageProvider } from "./lib/nest-page-context";
 import { dashboardPage, dashboardPageIdFromPath, dashboardPath, DEFAULT_PAGE_ID } from "./lib/pages";
+import { accountPageForPath, accountPageForView } from "./lib/account-pages";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
 import { useBreadcrumbTail, type Crumb } from "./lib/breadcrumb";
 import {
@@ -238,9 +238,9 @@ export default function App() {
     logout,
   } = useAuth();
   const [view, setViewNow] = useState<View>(() => {
-    if (typeof window !== "undefined" && window.location.pathname.replace(/\/+$/, "") === "/account") {
-      return { page: "account" };
-    }
+    // /account, /teammates, … open straight onto their page.
+    const account = typeof window !== "undefined" ? accountPageForPath(window.location.pathname) : undefined;
+    if (account) return { page: account.viewPage } as View;
     return {
       page: "dashboard",
       // /my-work and /my-drafts open straight onto their page.
@@ -634,8 +634,8 @@ export default function App() {
     const path =
       view.page === "dashboard"
         ? dashboardPath(view.tab)
-        : view.page === "account"
-          ? "/account"
+        : accountPageForView(view.page)
+          ? accountPageForView(view.page)!.path
           : nestPath(pathNestId, pathView);
     const next = path + (qs ? `?${qs}` : "") + window.location.hash;
     const current =
@@ -765,6 +765,8 @@ export default function App() {
           : nestPageForView(view.page)?.label ?? "";
       return [home, nest, { label: leaf }];
     }
+    const account = accountPageForView(view.page);
+    if (account) return pageTail.length ? [home, ...pageTail] : [home, { label: account.label }];
     return pageTail.length ? [home, ...pageTail] : [];
   }, [view, setView, pageTail]);
 
@@ -777,6 +779,7 @@ export default function App() {
       openReview: (nestId, nestName, nodeId) =>
         setView({ page: "document", nestId, nestName, nodeId, isOwner: true, isAnonOwned: true }),
       manageKeys: () => setView({ page: "api-keys" }),
+      openDashboard: () => setView({ page: "dashboard" }),
     }),
     [setView],
   );
@@ -1039,7 +1042,9 @@ export default function App() {
   const inNest = "nestId" in view && nestIsReaderView !== true;
   // The dashboard gets the same rail (every nest, none expanded) — it's the
   // app's navigation, not the nest's.
-  const withSidebar = inNest || view.page === "dashboard";
+  // Account pages (user menu) get their own rail: the pages the caller may open.
+  const accountPage = accountPageForView(view.page);
+  const withSidebar = inNest || view.page === "dashboard" || !!accountPage;
   const showSidebar = withSidebar && (!docSidebarCollapsed || docSidebarDrawer);
   const pageWidth =
     view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
@@ -1095,6 +1100,8 @@ export default function App() {
                   onOpenDashboard={() => setView({ page: "dashboard" })}
                   dashboardTab={cur.page === "dashboard" ? (cur.tab ?? DEFAULT_PAGE_ID) : null}
                   onOpenDashboardTab={(tab) => setView({ page: "dashboard", tab })}
+                  accountTab={accountPage?.id ?? null}
+                  onOpenAccountTab={(p) => setView({ page: p.viewPage } as View)}
                   onOpenNest={(t) =>
                     setView({
                       page: "nest",
@@ -1648,9 +1655,18 @@ export default function App() {
         {view.page === "teammates" && (
           <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
         )}
-        {view.page === "account" && (
-          <AccountPage onBack={() => setView({ page: "dashboard" })} />
-        )}
+        {/* Account pages (user menu) — whichever registry page matches. */}
+        {(() => {
+          const page = accountPageForView(view.page);
+          if (!page) return null;
+          return (
+            <AppNavProvider value={appNav}>
+              <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+                <page.Component />
+              </Suspense>
+            </AppNavProvider>
+          );
+        })()}
         {view.page === "teams" && (
           <TeamsPage onBack={() => setView({ page: "dashboard" })} />
         )}
