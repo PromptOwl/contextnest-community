@@ -164,6 +164,24 @@ describe("nest archive", () => {
     expect(create.status).toBe(403);
   });
 
+  // The owner told "your permission: 'read', ask the owner for write" on
+  // their own nest went looking for a grant that could not help; the refusal
+  // must name the archive (CU-wdqcq02a1c).
+  it("a refused write names the archive, not a permission the owner lacks", async () => {
+    const write = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/${nodeId}`,
+      { content: "# Edited while archived" },
+      owner.apiKey,
+    );
+    expect(write.status).toBe(403);
+    expect(write.data.error).toMatch(/archived/i);
+    expect(write.data.error).not.toMatch(/your permission/);
+    expect(write.data.archived).toBe(true);
+  });
+
+
   it("drops out of cross-nest search while archived", async () => {
     const { data } = await jsonRequest(
       app,

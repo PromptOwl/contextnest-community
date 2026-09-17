@@ -3711,6 +3711,7 @@ export function DocumentEditor({
           targetType="document"
           target={nodeId}
           label={title || nodeId}
+          archived={isArchived}
           onClose={() => setShowShareDoc(false)}
         />
       )}

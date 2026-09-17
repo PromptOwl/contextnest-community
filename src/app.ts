@@ -2145,6 +2145,17 @@ export function createApp(): Hono<AuthEnv> {
       !stewardEditorBypass &&
       effectiveLevel < permissionLevel(required)
     ) {
+      // The archive cap is what refused this, not the caller's standing —
+      // an owner told "your permission: 'read'" on their own nest would go
+      // looking for a grant that can't help. Name the real reason, with the
+      // same {archived:true} marker the open-mode branch sends.
+      if (access.archived && permissionLevel(access.rawPermission) >= permissionLevel(required)) {
+        return deny(
+          403,
+          "This nest is archived, so it is read-only. Restore it to make changes.",
+          { archived: true },
+        );
+      }
       return deny(
         403,
         `You don't have access to perform this action on this nest. Required permission: '${required}', your permission: '${permission}'. Ask the nest owner or a server admin to grant you ${required} access.`,
