@@ -11,7 +11,7 @@ import {
   createTestApp,
   jsonRequest,
 } from "./helpers";
-import { compilePrompt, tokenizePrompt } from "../src/nodes/prompt-compiler";
+import { compilePrompt, scorePrompt, tokenizePrompt } from "../src/nodes/prompt-compiler";
 import { resolveNodeUrl } from "../src/governance/title-resolver";
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -72,6 +72,7 @@ describe("tokenizePrompt", () => {
 
   it("returns [] for empty / whitespace / stopwords-only input", () => {
     expect(tokenizePrompt("")).toEqual([]);
+    expect(tokenizePrompt("hello there, good morning!")).toEqual([]);
     expect(tokenizePrompt("  ")).toEqual([]);
     expect(tokenizePrompt("a the of")).toEqual([]);
   });
@@ -123,6 +124,28 @@ describe("compilePrompt — against seeded nest", () => {
     expect(result.selector).toBeNull();
     expect(result.matchedTags).toEqual([]);
     expect(result.matchedTitles).toEqual([]);
+  });
+});
+
+describe("scorePrompt", () => {
+  const doc = {
+    frontmatter: { title: "API Authentication Guide", tags: ["#security"] },
+    body: "Bearer tokens explained.",
+  };
+
+  it("weights title > tag > body and reports the best hit as via", () => {
+    // title: starts-a-word = 2 of 4, starts-the-title = 3; tag = 2; body word = 1
+    expect(scorePrompt(doc, ["authentication"])).toEqual({ score: 0.5, via: "title" });
+    expect(scorePrompt(doc, ["api"])).toEqual({ score: 0.75, via: "title" });
+    expect(scorePrompt(doc, ["security"])).toEqual({ score: 0.5, via: "tag" });
+    expect(scorePrompt(doc, ["bearer"])).toEqual({ score: 0.25, via: "fulltext" });
+    expect(scorePrompt(doc, ["bearer", "guide"])).toEqual({ score: 3 / 8, via: "title" });
+  });
+
+  it("scores 0 with via null when nothing hits — mid-word body hits don't count", () => {
+    expect(scorePrompt(doc, ["quantum"])).toEqual({ score: 0, via: null });
+    expect(scorePrompt(doc, ["ken"])).toEqual({ score: 0, via: null }); // to-ken-s
+    expect(scorePrompt(doc, [])).toEqual({ score: 0, via: null });
   });
 });
 
@@ -288,6 +311,79 @@ describe("POST /context — explicit [[Title]] selector", () => {
     // #brand side goes through the engine; tolerate index lag like the
     // other selector tests, but the title side must always resolve.
     expect(res.status).toBe(200);
+  });
+});
+
+// ── relevance: ranked prompt matches, no hop noise (CU-wdqcq02018) ────────
+// PromptOwl cites every node this returns, so a prompt must come back with
+// real matches only, ranked, each flagged with how it matched.
+
+describe("POST /context — prompt relevance", () => {
+  const ctx = (payload: object) =>
+    jsonRequest(app, "POST", `/nests/${nestId}/context`, payload);
+
+  it("a greeting returns no nodes rather than the nest", async () => {
+    const { data } = await ctx({ prompt: "hello" });
+    expect(data.nodes).toEqual([]);
+    expect(data.context).toBe("");
+    expect(data.trace.compiled.fallback).toBeNull();
+  });
+
+  it("falls back to full-text when tags and titles miss, ranked by score", async () => {
+    // "postgres" / "migrations" live only in Database Setup's body.
+    const { data } = await ctx({ prompt: "how do I run postgres migrations" });
+    expect(data.trace.compiled.fallback).toBe("fulltext");
+    expect(data.nodes[0].id).toBe("nodes/database-setup");
+    expect(data.nodes[0].via).toBe("fulltext");
+    expect(data.nodes[0].score).toBeGreaterThan(0);
+    for (const n of data.nodes) expect(n.score).toBeGreaterThan(0);
+  });
+
+  it("does not hop-expand a prompt match unless hops is passed", async () => {
+    const { data } = await ctx({ prompt: "hub" });
+    const ids = data.nodes.map((n: any) => n.id);
+    expect(ids).toContain("nodes/hub-note");
+    expect(ids).not.toContain("nodes/spoke-note");
+    expect(data.trace.compiled.fallback).toBeNull();
+  });
+
+  it("flags hop neighbours as via: hop and ranks them last", async () => {
+    const { data } = await ctx({ prompt: "hub", hops: 1 });
+    const hub = data.nodes.find((n: any) => n.id === "nodes/hub-note");
+    const spoke = data.nodes.find((n: any) => n.id === "nodes/spoke-note");
+    expect(hub.via).toBe("title");
+    expect(spoke).toEqual(expect.objectContaining({ via: "hop", score: 0 }));
+    expect(data.nodes.indexOf(hub)).toBeLessThan(data.nodes.indexOf(spoke));
+  });
+
+  it("unions body hits with a compiled title match, ranked, dropping the weak tail", async () => {
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Widget Policy",
+      content: "# Widget Policy\n\nAll widgets ship with a policy.",
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Ops Runbook",
+      content: "# Ops\n\nwidget policy rollout steps.",
+    });
+    // Title compiles for Widget Policy only; Ops Runbook is a body-only hit
+    // that still surfaces, after it, because it scores above half the top.
+    let { data } = await ctx({ prompt: "widget policy rollout" });
+    let ids = data.nodes.map((n: any) => n.id);
+    expect(ids.slice(0, 2)).toEqual(["nodes/widget-policy", "nodes/ops-runbook"]);
+    expect(data.nodes[1].via).toBe("fulltext");
+    expect(data.trace.compiled.fallback).toBeNull();
+    // A lone body mention against a title match is noise — cut.
+    ({ data } = await ctx({ prompt: "widget" }));
+    ids = data.nodes.map((n: any) => n.id);
+    expect(ids).toContain("nodes/widget-policy");
+    expect(ids).not.toContain("nodes/ops-runbook");
+  });
+
+  it("selector path carries no score/via and keeps hop default", async () => {
+    const { data } = await ctx({ selector: "[[Hub Note]]" });
+    const ids = data.nodes.map((n: any) => n.id);
+    expect(ids).toContain("nodes/spoke-note");
+    expect(data.nodes[0]).not.toHaveProperty("score");
   });
 });
 
