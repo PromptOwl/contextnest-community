@@ -143,13 +143,13 @@ describe("foldersCoveredBy", () => {
   });
 });
 
-// Both side columns are framed by one class string; it must pin a height,
-// not just cap one, or the columns size to content again and the hairlines
-// end at different points (CU-wdqcq027jm).
+// Both side columns share one class string; it must let the card shrink to
+// its grid row and scroll inside it, or the columns size to content again
+// and end at different points (CU-wdqcq027jm).
 describe("READER_SIDE_COLUMN_CLASS", () => {
-  it("pins a fixed viewport-based height and scrolls internally", () => {
-    expect(READER_SIDE_COLUMN_CLASS).toMatch(/\blg:h-\[calc\(100vh-[^\]]+\)\]/);
-    expect(READER_SIDE_COLUMN_CLASS).not.toMatch(/\blg:max-h-/);
+  it("shrinks to the grid row and scrolls internally", () => {
+    expect(READER_SIDE_COLUMN_CLASS).toContain("lg:min-h-0");
     expect(READER_SIDE_COLUMN_CLASS).toContain("lg:overflow-y-auto");
+    expect(READER_SIDE_COLUMN_CLASS).not.toMatch(/\blg:(max-h|self-start|sticky)/);
   });
 });

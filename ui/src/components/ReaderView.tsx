@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, ChevronDown, Menu, BookOpen, Folder, FolderOpen, FileText } from "lucide-react";
+import { ChevronRight, ChevronDown, ChevronLeft, Menu, BookOpen, Folder, FolderOpen, FileText } from "lucide-react";
 import { FolderTree } from "./FolderTree";
 import { DocumentViewer } from "./DocumentViewer";
 import * as api from "../lib/api";
@@ -157,7 +157,8 @@ export function ReaderView({
   const body = rawBody === undefined ? undefined : stripLeadingTitle(rawBody, title);
   const loading = !!selectedId && body === undefined && loadingId === selectedId;
 
-  const outline = useMemo(() => (body ? extractHeadings(body).filter((h) => h.level > 1) : []), [body]);
+  // Same outline the editor shows: every heading, indented by level.
+  const outline = useMemo(() => (body ? extractHeadings(body) : []), [body]);
   const order = useMemo(() => readingOrder(tocGroups), [tocGroups]);
   const { prev, next } = selectedId ? neighbours(order, selectedId) : { prev: null, next: null };
   const crumbs = selectedId ? breadcrumbFor(selectedId) : [];
@@ -216,8 +217,13 @@ export function ReaderView({
   );
 
   return (
-    <div className="mx-auto w-full max-w-[88rem] lg:grid lg:grid-cols-[16rem_minmax(0,1fr)_14rem] lg:gap-5">
-      {/* Nav — a sticky card at desktop width, a disclosure above the article on a phone. */}
+    // Desktop: the three cards fill the viewport below the shell header
+    // (4rem + 1px border, 1rem main padding each side, 3rem footer) and
+    // scroll on their own — the page itself never scrolls. --reader-offset
+    // lets a wrapper (the preview banner) claim part of that height. Phone:
+    // cards stack and the page scrolls.
+    <div className="mx-auto w-full max-w-[88rem] lg:grid lg:h-[calc(100vh-9.25rem-var(--reader-offset,0px))] lg:grid-cols-[16rem_minmax(0,1fr)_14rem] lg:gap-5">
+      {/* Nav — a card that scrolls on its own at desktop width, a disclosure above the article on a phone. */}
       <aside className={READER_SIDE_COLUMN_CLASS + " " + READER_CARD_CLASS + " mb-4 lg:mb-0"}>
         <button
           type="button"
@@ -230,25 +236,28 @@ export function ReaderView({
         </button>
         <div className={(navOpen ? "block" : "hidden") + " lg:block"}>
           {/* The nest's name heads the nav; with a home page it is also the way back to it. */}
-          <button
-            type="button"
-            onClick={() => homeNode && setSelectedId(homeNode.id)}
-            disabled={!homeNode}
-            aria-current={homeNode && selectedId === homeNode.id ? "page" : undefined}
-            className={
-              "mb-3 flex w-full items-center gap-2 text-left text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-sm disabled:cursor-default " +
-              (homeNode && selectedId !== homeNode.id ? "text-foreground/80 hover:text-foreground" : "text-foreground")
-            }
-          >
-            <BookOpen className="h-4 w-4 shrink-0 text-muted-foreground" />
-            <span className="truncate">{nestName}</span>
-          </button>
+          <h2 className="mb-3 border-b pb-3">
+            <button
+              type="button"
+              onClick={() => homeNode && setSelectedId(homeNode.id)}
+              disabled={!homeNode}
+              aria-current={homeNode && selectedId === homeNode.id ? "page" : undefined}
+              title={nestName}
+              className={
+                "flex w-full items-center gap-2 text-left text-base font-bold tracking-tight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-sm disabled:cursor-default " +
+                (homeNode && selectedId !== homeNode.id ? "text-foreground/80 hover:text-foreground" : "text-foreground")
+              }
+            >
+              <BookOpen className="h-5 w-5 shrink-0 text-primary" />
+              <span className="truncate">{nestName}</span>
+            </button>
+          </h2>
           {nav}
         </div>
       </aside>
 
       {/* Article — page-scrolled, reading width. */}
-      <article className={"min-w-0 " + READER_CARD_CLASS + " px-6 py-6 lg:min-h-[calc(100vh-5rem)] lg:px-8"}>
+      <article className={"min-w-0 " + READER_CARD_CLASS + " px-6 py-6 lg:min-h-0 lg:overflow-y-auto lg:px-8"}>
         {notice && (
           <p role="status" className="mb-4 text-sm text-amber-800 dark:text-amber-300">
             {notice}
@@ -265,7 +274,7 @@ export function ReaderView({
         {selectedNode && (
           <header className="mb-6">
             {crumbs.length > 0 && (
-              <nav aria-label="Breadcrumb" className="mb-2 text-[13px] text-muted-foreground">
+              <nav aria-label="Breadcrumb" className="mb-2 truncate text-[13px] text-muted-foreground" title={crumbs.join(" / ")}>
                 {crumbs.map((c, i) => (
                   <span key={i}>
                     {i > 0 && <span aria-hidden className="mx-1.5 text-muted-foreground/60">/</span>}
@@ -274,7 +283,7 @@ export function ReaderView({
                 ))}
               </nav>
             )}
-            <h1 className="text-[2rem] leading-[1.15] font-semibold tracking-tight text-foreground">{title}</h1>
+            <h1 className="break-words text-[2rem] leading-[1.15] font-semibold tracking-tight text-foreground">{title}</h1>
             <Provenance node={selectedNode} />
           </header>
         )}
@@ -289,20 +298,36 @@ export function ReaderView({
           />
         )}
         {(prev || next) && (
-          <nav aria-label="Previous and next pages" className="mt-14 flex flex-wrap justify-between gap-4 border-t pt-6 text-sm">
-            <div>
+          <nav aria-label="Previous and next pages" className="mt-14 grid grid-cols-2 gap-4 border-t pt-6 text-sm">
+            <div className="min-w-0">
               {prev && (
-                <button type="button" onClick={() => setSelectedId(prev.id)} className="group text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-sm">
-                  <span className="block text-[12px] text-muted-foreground">Previous</span>
-                  <span className="text-foreground group-hover:underline">{prev.title || prev.id}</span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedId(prev.id)}
+                  title={prev.title || prev.id}
+                  className="group flex w-full items-center gap-3 rounded-lg border px-4 py-3 text-left hover:border-primary/60 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                >
+                  <ChevronLeft className="h-4 w-4 shrink-0 text-muted-foreground group-hover:text-primary" />
+                  <span className="min-w-0">
+                    <span className="block text-[12px] text-muted-foreground">Previous</span>
+                    <span className="block truncate font-medium text-foreground group-hover:text-primary">{prev.title || prev.id}</span>
+                  </span>
                 </button>
               )}
             </div>
-            <div className="text-right">
+            <div className="min-w-0">
               {next && (
-                <button type="button" onClick={() => setSelectedId(next.id)} className="group text-right focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded-sm">
-                  <span className="block text-[12px] text-muted-foreground">Next</span>
-                  <span className="text-foreground group-hover:underline">{next.title || next.id}</span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedId(next.id)}
+                  title={next.title || next.id}
+                  className="group flex w-full items-center justify-end gap-3 rounded-lg border px-4 py-3 text-right hover:border-primary/60 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                >
+                  <span className="min-w-0">
+                    <span className="block text-[12px] text-muted-foreground">Next</span>
+                    <span className="block truncate font-medium text-foreground group-hover:text-primary">{next.title || next.id}</span>
+                  </span>
+                  <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground group-hover:text-primary" />
                 </button>
               )}
             </div>
@@ -314,12 +339,12 @@ export function ReaderView({
       <aside className={"hidden lg:block " + READER_SIDE_COLUMN_CLASS + " " + READER_CARD_CLASS}>
         <nav aria-label="On this page">
           <p className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-muted-foreground">On this page</p>
-          {outline.length <= 1 ? (
-            <p className="text-[13px] text-muted-foreground/70">{selectedId ? "No sections on this page." : "Open a page to see its sections."}</p>
+          {outline.length === 0 ? (
+            <p className="text-[13px] text-muted-foreground/70">{selectedId ? "No headings yet." : "Open a page to see its headings."}</p>
           ) : (
             <ul className="space-y-1">
               {outline.map((h) => (
-                <li key={h.id} className={h.level === 3 ? "pl-3" : ""}>
+                <li key={h.id} style={{ paddingLeft: (h.level - 1) * 12 }}>
                   <button
                     type="button"
                     onClick={() => jumpTo(h.id)}

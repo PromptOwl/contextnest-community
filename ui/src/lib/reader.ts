@@ -140,13 +140,13 @@ export function foldersCoveredBy(nodes: { id?: string }[]): Set<string> {
 }
 
 /**
- * The nav and the outline are the same height — one viewport-based size,
- * scrolled internally — so the two hairlines framing the article end at
- * the same point on every page rather than wherever each column's content
- * happened to stop.
+ * The nav and the outline fill their grid row and scroll internally — the
+ * same height as each other and as the article — so the three cards end
+ * at the same point on every page rather than wherever each column's
+ * content happened to stop. min-h-0 is what lets a grid item shrink to
+ * its row and overflow instead of stretching the page.
  */
-export const READER_SIDE_COLUMN_CLASS =
-  "lg:sticky lg:top-6 lg:self-start lg:h-[calc(100vh-5rem)] lg:overflow-y-auto";
+export const READER_SIDE_COLUMN_CLASS = "lg:min-h-0 lg:overflow-y-auto";
 
 /** The card every reader panel sits in — the app's standard card surface. */
 export const READER_CARD_CLASS = "rounded-lg border border-border bg-card p-4";
