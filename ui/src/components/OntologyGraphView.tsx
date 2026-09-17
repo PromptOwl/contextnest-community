@@ -17,6 +17,7 @@ import {
 import { AlertTriangle, Info, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, Copy, Check, FolderTree } from "lucide-react";
 import { getNestGraph, type NestGraph } from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
+import { categoryCoverageEmpty } from "../lib/coverage-gaps";
 import { Button } from "./ui/button";
 import { NestPageHeader } from "./NestPageHeader";
 
@@ -639,7 +640,7 @@ export function OntologyGraphView({
                 <GapRow
                   label="Categories with no steward"
                   items={signals.unstewardedTags.map((t) => `#${t.name} (${t.count})`)}
-                  empty="Every category has a steward."
+                  empty={categoryCoverageEmpty(graph?.tags.length ?? 0, graph?.stewards.length ?? 0)}
                   onSelect={
                     onOpenTag &&
                     ((i) => onOpenTag(signals.unstewardedTags[i].name))
