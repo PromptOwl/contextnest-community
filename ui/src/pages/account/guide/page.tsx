@@ -11,12 +11,10 @@ import {
   MessageSquare,
   ShieldCheck,
 } from "lucide-react";
-import { Button } from "./ui/button";
-import { BetaBadge } from "./ui/beta-badge";
+import { Button } from "@/components/ui/button";
+import { BetaBadge } from "@/components/ui/beta-badge";
+import { useAppNav } from "../../../lib/app-nav";
 
-interface Props {
-  onBack: () => void;
-}
 
 /**
  * How it works — the in-app manual: concepts, the governed loop, every API
@@ -126,7 +124,8 @@ const API_ROWS: [string, string][] = [
   ["GET /me/work · /me/notifications", "Your cross-nest inbox: reviews waiting on you, handoffs, watcher notifications."],
 ];
 
-export function GuidePage({ onBack }: Props) {
+export default function GuidePage() {
+  const { openDashboard: onBack } = useAppNav();
   return (
     <div className="w-full">
       <Button variant="ghost" size="sm" onClick={onBack} className="mb-4 -ml-2">
