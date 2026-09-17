@@ -70,6 +70,17 @@ describe("nest archive", () => {
     );
     nodeId = node.node.id;
 
+    // A document share, so the archived-sharing cases below have a roster
+    // to show.
+    const shared = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/grants`,
+      { target_type: "document", target: nodeId, email: "viewer@acme.com", role: "read" },
+      owner.apiKey,
+    );
+    expect(shared.status).toBe(201);
+
     // An agent node with a live webhook trigger and an enabled schedule — the
     // two ways a nest keeps working with nobody logged in.
     await jsonRequest(
@@ -181,6 +192,43 @@ describe("nest archive", () => {
     expect(write.data.archived).toBe(true);
   });
 
+  // Archiving caps everyone at 'read', which used to 403 the owner out of the
+  // sharing roster entirely — the Share dialog opened empty. The roster stays
+  // readable for those who could manage it live; changes are refused with the
+  // archive named (CU-wdqcq02a1d).
+  it("the owner still sees who a document is shared with, but cannot change it", async () => {
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/grants`,
+      null,
+      owner.apiKey,
+    );
+    expect(list.status).toBe(200);
+    expect(list.data.grants.map((g: any) => g.email)).toContain("viewer@acme.com");
+
+    const share = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/grants`,
+      { target_type: "document", target: nodeId, email: "someone-new@acme.com", role: "read" },
+      owner.apiKey,
+    );
+    expect(share.status).toBe(403);
+    expect(share.data.error).toMatch(/archived/i);
+
+    // A write collaborator was never allowed to manage sharing; archiving
+    // must not turn that refusal into an "archived" one either.
+    const asEditor = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/grants`,
+      null,
+      editor.apiKey,
+    );
+    expect(asEditor.status).toBe(403);
+    expect(asEditor.data.error).toMatch(/Only a nest admin/);
+  });
 
   it("drops out of cross-nest search while archived", async () => {
     const { data } = await jsonRequest(
