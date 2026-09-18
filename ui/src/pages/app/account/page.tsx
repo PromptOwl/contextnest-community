@@ -69,6 +69,7 @@ export default function AccountPage() {
           <div className="flex items-center gap-2">
             <Input
               value={name}
+              aria-label="Name"
               maxLength={80}
               placeholder="Your name"
               autoFocus

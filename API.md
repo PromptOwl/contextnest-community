@@ -83,7 +83,7 @@ Revoke one key. 404 if the id isn't the caller's. Anything still using it stops 
 ```
 
 ### PATCH `/auth/profile` (auth required)
-Set the caller's display name (≤ 80 chars, trimmed). An empty string clears it, so the UI shows the email. Not available to the anonymous OPEN-mode user.
+Set the caller's display name (≤ 80 chars, trimmed). An empty string clears it, so the UI shows the email. Needs a session or API key even under `AUTH_MODE=open` — the anonymous caller gets `401`.
 ```json
 { "name": "Alan" }
 ```

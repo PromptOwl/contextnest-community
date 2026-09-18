@@ -24,7 +24,7 @@ import { track } from "./lib/analytics";
 import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
 import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { NestPageProvider } from "./lib/nest-page-context";
-import { appPage, appPageIdFromPath, appPath, DEFAULT_PAGE_ID, isPageVisible } from "./lib/pages";
+import { appPageIdFromPath, appPath, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
 import { useBreadcrumbTail, type Crumb } from "./lib/breadcrumb";
 import {
@@ -686,7 +686,7 @@ export default function App() {
   const crumbs = useMemo<Crumb[]>(() => {
     const home: Crumb = { label: "Home", go: () => setView({ page: "dashboard" }) };
     if (view.page === "dashboard") {
-      const page = appPage(view.tab);
+      const page = visibleAppPage(view.tab, { isAdmin });
       if (pageTail.length) return [home, ...pageTail];
       return page.id === DEFAULT_PAGE_ID ? [{ label: page.label }] : [home, { label: page.label }];
     }
@@ -1042,7 +1042,7 @@ export default function App() {
                       : setDocSidebarCollapsed(true)
                   }
                   onOpenDashboard={() => setView({ page: "dashboard" })}
-                  dashboardTab={cur.page === "dashboard" ? (cur.tab ?? DEFAULT_PAGE_ID) : null}
+                  dashboardTab={cur.page === "dashboard" ? visibleAppPage(cur.tab, { isAdmin }).id : null}
                   onOpenDashboardTab={(tab) => setView({ page: "dashboard", tab })}
                   onOpenNest={(t) =>
                     setView({
@@ -1359,8 +1359,7 @@ export default function App() {
         {view.page === "dashboard" && (() => {
           // A gated page (admin-only) reached by URL falls back to the default
           // page — the server would refuse it anyway; this keeps the shell whole.
-          const picked = appPage(view.tab);
-          const Page = isPageVisible(picked, { isAdmin }) ? picked.Component : appPage(DEFAULT_PAGE_ID).Component;
+          const Page = visibleAppPage(view.tab, { isAdmin }).Component;
           return (
             <AppNavProvider value={appNav}>
               <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>

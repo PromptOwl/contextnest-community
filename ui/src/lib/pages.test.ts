@@ -7,6 +7,7 @@ import {
   appPath,
   appRail,
   PAGE_GROUPS,
+  visibleAppPage,
 } from "./pages";
 
 // The registry is built from pages/app/*/meta.ts — these guard the
@@ -62,5 +63,11 @@ describe("dashboard rail groups", () => {
     const listed = [...admin.top, ...admin.groups.flatMap((g) => g.pages)].map((p) => p.id);
     expect(listed).not.toContain("account");
     expect(appPageIdFromPath("/account")).toBe("account");
+  });
+
+  it("resolves a gated page to the default for a member, itself for an admin", () => {
+    expect(visibleAppPage("settings", { isAdmin: true }).id).toBe("settings");
+    expect(visibleAppPage("settings", { isAdmin: false }).id).toBe(DEFAULT_PAGE_ID);
+    expect(visibleAppPage("teams", { isAdmin: false }).id).toBe("teams");
   });
 });

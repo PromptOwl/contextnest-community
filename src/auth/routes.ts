@@ -946,10 +946,10 @@ authRoutes.get("/admin-status", async (c) => {
 });
 
 // PATCH /auth/profile — change own display name. Empty clears it (UI falls
-// back to the email); the anonymous open-mode user has no profile to edit.
+// back to the email). authMiddleware wants a session or key, so the open-mode
+// anonymous caller never reaches here — it gets 401.
 authRoutes.patch("/profile", authMiddleware, async (c) => {
   const userId = c.get("userId");
-  if (userId === ANON_USER_ID) throw new ValidationError("Anonymous user has no profile");
   const body = await c.req.json<{ name?: unknown }>();
   if (typeof body.name !== "string") throw new ValidationError("name is required");
   const name = body.name.trim();

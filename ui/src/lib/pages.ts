@@ -95,6 +95,14 @@ export function appPageIdFromPath(pathname: string): string | null {
 export const isPageVisible = (page: PageMeta, caps: PageCaps): boolean =>
   !page.visible || page.visible(caps);
 
+/** The page to actually show for `id`: a gated page the caller may not see
+ *  (admin-only, reached by URL) resolves to the default page, so header,
+ *  rail and body all agree. */
+export function visibleAppPage(id: string | undefined, caps: PageCaps): AppPage {
+  const page = appPage(id);
+  return isPageVisible(page, caps) ? page : appPage(DEFAULT_PAGE_ID);
+}
+
 /** The rail's rows: ungrouped pages first, then each group that has a visible page. */
 export function appRail(caps: PageCaps): {
   top: AppPage[];

@@ -1325,7 +1325,8 @@ export function DocumentEditor({
     // Local until Save — say so, or "added" reads as persisted.
     toast.success(
       accepted.length === 1 ? `Tag "${accepted[0]}" added` : `${accepted.length} tags added`,
-      { description: "Save the document to keep it." },
+      // One toast slot: adding tags one after another updates it instead of stacking.
+      { id: "tag-added", description: "Save the document to keep it." },
     );
   }, [tagPreview, tags]);
 

@@ -40,3 +40,12 @@ describe("PATCH /auth/profile", () => {
     expect((await jsonRequest(app, "PATCH", "/auth/profile", { name: "Nope" })).status).toBe(401);
   });
 });
+
+describe("PATCH /auth/profile in open mode", () => {
+  it("still needs credentials — the anonymous caller has no account to rename", async () => {
+    const openEnv = setupTestEnv();
+    const openApp = await createTestApp("open");
+    expect((await jsonRequest(openApp, "PATCH", "/auth/profile", { name: "Anon" })).status).toBe(401);
+    openEnv.cleanup();
+  });
+});
