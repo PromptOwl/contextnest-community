@@ -712,6 +712,7 @@ export default function App() {
           : nestPageForView(view.page)?.label ?? "";
       return [home, nest, { label: leaf }];
     }
+    if (view.page === "docs") return [home, { label: "Docs" }];
     return pageTail.length ? [home, ...pageTail] : [];
   }, [view, setView, pageTail]);
 
@@ -986,7 +987,8 @@ export default function App() {
   const inNest = "nestId" in view && nestIsReaderView !== true;
   // The dashboard gets the same rail (every nest, none expanded) — it's the
   // app's navigation, not the nest's.
-  const withSidebar = inNest || view.page === "dashboard";
+  // Docs (header button) is an app page too — same rail, full width.
+  const withSidebar = inNest || view.page === "dashboard" || view.page === "docs";
   const showSidebar = withSidebar && (!docSidebarCollapsed || docSidebarDrawer);
   const pageWidth =
     view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
@@ -1350,7 +1352,7 @@ export default function App() {
           </div>
         </div>
         ) : (
-        <div className={withSidebar && !isDocPage ? "px-4 py-4" : ""}>
+        <div className={withSidebar && !isDocPage ? "px-8 py-6" : ""}>
         {/* One boundary for every lazily loaded page: the shell (header, rail)
             stays put while a page chunk arrives. */}
         <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
