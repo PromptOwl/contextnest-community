@@ -78,6 +78,15 @@ interface Props {
   onNewDocument?: (folder?: string) => void;
 }
 
+/* One row style for both rails (app pages and a nest's views / tree) so the
+   sidebar reads the same wherever you are: same text size, icon, height. */
+const ROW = "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm hover:bg-muted";
+const ROW_IDLE = "text-foreground/80 hover:text-foreground";
+const ROW_ACTIVE = "bg-muted font-medium text-foreground";
+const ROW_ICON = "h-4 w-4 shrink-0";
+/* Group / nest-name headings above a set of rows. */
+const HEADING = "flex w-full items-center gap-1.5 rounded px-2.5 py-1 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground";
+
 const nestTarget = (n: any): SidebarNestTarget => ({
   nestId: n.id,
   nestName: n.name,
@@ -170,10 +179,10 @@ export function DocumentSidebar({
         <button
           type="button"
           onClick={onOpenDashboard}
-          className="mx-2 mt-3 flex items-center gap-2 rounded px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+          className={cn(ROW, ROW_IDLE, "mx-2 mt-3 w-auto")}
           title="All nests"
         >
-          <LayoutGrid className="h-3.5 w-3.5" />
+          <LayoutGrid className={ROW_ICON} />
           All nests
         </button>
       )}
@@ -186,7 +195,7 @@ export function DocumentSidebar({
             onChange={(e) => setNestFilter(e.target.value)}
             placeholder="Filter nests"
             aria-label="Filter nests"
-            className="h-7 w-full rounded border border-border bg-background pl-7 pr-2 text-xs outline-none focus:ring-1 focus:ring-ring"
+            className="h-8 w-full rounded-md border border-border bg-background pl-7 pr-2 text-sm outline-none focus:ring-1 focus:ring-ring"
             data-testid="document-sidebar-nest-filter"
           />
         </div>
@@ -210,7 +219,7 @@ export function DocumentSidebar({
             <div key={n.id} className={cn("mb-1", current && "mb-3")}>
               <div
                 className={cn(
-                  "group flex items-center gap-1 rounded px-1 py-1",
+                  "group flex items-center gap-1 rounded px-1.5 py-1",
                   current ? "text-foreground" : "text-muted-foreground",
                 )}
               >
@@ -306,7 +315,7 @@ function AppPagesNav({
     writeDocPagePrefs(localStorage, { closedGroups: next });
   };
   return (
-    <div className="mt-3 space-y-1" data-testid="document-sidebar-dashboard">
+    <div className="mt-3 space-y-0.5" data-testid="document-sidebar-dashboard">
       {rail.top.map((page) => (
         <AppPageRow key={page.id} page={page} active={page.id === active} onOpen={onOpen} />
       ))}
@@ -319,7 +328,7 @@ function AppPagesNav({
               type="button"
               onClick={() => toggle(g.id, !open)}
               aria-expanded={open}
-              className="flex w-full items-center gap-1.5 rounded px-3 py-1 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground"
+              className={HEADING}
               data-testid={`document-sidebar-group-${g.id}`}
             >
               {open ? (
@@ -330,7 +339,7 @@ function AppPagesNav({
               <span className="truncate">{g.label}</span>
             </button>
             {open && (
-              <div className="space-y-1">
+              <div className="space-y-0.5">
                 {g.pages.map((page) => (
                   <AppPageRow key={page.id} page={page} active={page.id === active} onOpen={onOpen} indent />
                 ))}
@@ -368,13 +377,13 @@ function AppPageRow({
       onClick={() => onOpen?.(page.id)}
       aria-current={active ? "page" : undefined}
       className={cn(
-        "flex w-full items-center gap-2.5 rounded-md py-2 text-left text-sm hover:bg-muted",
-        indent ? "pl-7 pr-3" : "px-3",
-        active ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground",
+        ROW,
+        indent && "pl-7",
+        active ? ROW_ACTIVE : ROW_IDLE,
       )}
       data-testid={`document-sidebar-dashboard-${page.id}`}
     >
-      <Icon className="h-4 w-4 shrink-0" />
+      <Icon className={ROW_ICON} />
       <span className="truncate">{page.label}</span>
       {count > 0 && (
         <span
@@ -484,15 +493,13 @@ function NestViews({
         onClick={() => onOpen(v)}
         aria-current={active ? "page" : undefined}
         className={cn(
-          "flex w-full items-center gap-1.5 rounded py-1 text-left hover:bg-muted",
-          indent ? "pl-6 pr-1.5" : "px-1.5",
-          active
-            ? "bg-muted font-medium text-foreground"
-            : "text-muted-foreground hover:text-foreground",
+          ROW,
+          indent && "pl-7",
+          active ? ROW_ACTIVE : ROW_IDLE,
         )}
         data-testid={`document-sidebar-view-${v.id}`}
       >
-        <Icon className="h-3.5 w-3.5 shrink-0" />
+        <Icon className={ROW_ICON} />
         <span className="truncate">{v.label}</span>
         {/* Something to review: a dot you can see from across the room,
             with the count — like an unread badge. Nothing at zero. */}
@@ -519,13 +526,13 @@ function NestViews({
             type="button"
             onClick={() => setViewsOpen(!groupShown)}
             aria-expanded={groupShown}
-            className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-muted-foreground hover:bg-muted hover:text-foreground"
+            className={cn(ROW, ROW_IDLE)}
             data-testid="document-sidebar-views-group"
           >
             {groupShown ? (
-              <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+              <ChevronDown className={ROW_ICON} />
             ) : (
-              <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+              <ChevronRight className={ROW_ICON} />
             )}
             <span className="truncate">Views</span>
           </button>
@@ -536,11 +543,11 @@ function NestViews({
         <button
           type="button"
           onClick={onConnect}
-          className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-muted-foreground hover:bg-muted hover:text-foreground"
+          className={cn(ROW, ROW_IDLE)}
           title="Connect a CLI, MCP client or API caller to this nest"
           data-testid="document-sidebar-connect"
         >
-          <Plug className="h-3.5 w-3.5 shrink-0" />
+          <Plug className={ROW_ICON} />
           <span className="truncate">Connect</span>
         </button>
       )}
@@ -623,14 +630,14 @@ function NestTree({
           onClick={() =>
             setToggled((prev) => new Map(prev).set(node.path, !collapsed))
           }
-          className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-muted-foreground hover:bg-muted hover:text-foreground"
+          className={cn(ROW, ROW_IDLE)}
           aria-expanded={!collapsed}
           title={node.path}
         >
           {collapsed ? (
-            <Folder className="h-3.5 w-3.5 shrink-0" />
+            <Folder className={ROW_ICON} />
           ) : (
-            <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+            <FolderOpen className={ROW_ICON} />
           )}
           <span className="truncate">{node.label}</span>
           {node.total > 0 && (
@@ -659,15 +666,13 @@ function NestTree({
             onClick={() => onOpen(doc.id)}
             aria-current={active ? "page" : undefined}
             className={cn(
-              "flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left hover:bg-muted",
-              active
-                ? "bg-muted font-medium text-foreground"
-                : "text-muted-foreground hover:text-foreground",
+              ROW,
+              active ? ROW_ACTIVE : ROW_IDLE,
             )}
             title={doc.title}
             data-testid="document-sidebar-doc"
           >
-            <FileText className="h-3.5 w-3.5 shrink-0" />
+            <FileText className={ROW_ICON} />
             <span className="truncate">{doc.title || "Untitled"}</span>
           </button>
         );
