@@ -416,6 +416,36 @@ export function assertAcceptedType(type: string): void {
   }
 }
 
+/**
+ * The update-side counterpart of the create gate, for nodes that predate it.
+ *
+ * A node written before `assertAcceptedType` existed (or imported from a vault
+ * with its own vocabulary) can carry a `type` this server never accepts, e.g.
+ * `policy`. The engine re-validates the WHOLE frontmatter on every write, so
+ * every update of such a node — even a no-op PATCH echoing its current body —
+ * died inside the engine (`Document validation failed: Invalid enum value …
+ * received 'policy'`) and reached the caller as the generic 500 from
+ * toSafeError, with no hint that the stored type was the problem.
+ *
+ * Refuse the write here instead, as a 400 that names the type and the way
+ * out: re-type the node in the same PATCH. A patch that carries a `type` is
+ * left to assertAcceptedType (the engine accepts a re-type from an unknown
+ * type: it sets `frontmatter.type` before validating). Read paths are not
+ * touched — existing legacy nodes still list, render and version as before.
+ */
+function assertUpdatableType(storedType: string | undefined): void {
+  const type = storedType || "document";
+  // The soft-disable of artifact/table is create-only by design (see
+  // createNode): existing nodes of a disabled type still save. Only a type
+  // outside the accepted set can never reach the engine.
+  if (ACCEPTED_NODE_TYPES.has(type)) return;
+  throw new ValidationError(
+    `node has legacy type "${type}" which this server no longer accepts; ` +
+      `include "type": "<accepted type>" in the same PATCH to migrate it ` +
+      `(allowed: ${[...ACCEPTED_NODE_TYPES].sort().join(", ")})`,
+  );
+}
+
 export function toNodeResponse(node: ContextNode): NodeResponse {
   const fm = node.frontmatter;
   // Coerce string-ish fields. YAML parses bare values by type, so a
@@ -1870,6 +1900,16 @@ export async function updateNode(
         node = await storage.readDocument(nodeId);
       } catch {
         throw new NotFoundError(`Node not found: ${nodeId}`);
+      }
+      // A stored type this server no longer accepts fails engine validation
+      // on ANY write (content, append, tags, status, revert, the MCP
+      // context_update — all land here). Unless this patch re-types the node,
+      // refuse now with a message that says so, instead of the opaque 500 the
+      // engine fault used to become. A patch WITH a different type is gated
+      // below by assertAcceptedType like any other convert; one that echoes
+      // the stored type back is not a re-type, so it is refused here too.
+      if (patch.type === undefined || patch.type === node.frontmatter.type) {
+        assertUpdatableType(node.frontmatter.type);
       }
       // Kept for the mention fan-out at the end: only names this save ADDS
       // notify, so the same @name surviving many saves is one event.
