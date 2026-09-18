@@ -67,7 +67,15 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // a community-edition governance concern like context_approve and context_stewards. The
 // upstream catalog was checked and carries no comment/annotation operation to import. They
 // mirror the REST annotation routes 1:1.
-const BASELINE = 52;
+//
+// Raised 52 -> 56 for server-level write tools (`context_update`, `context_delete`,
+// `context_move`, `context_submit_review`) on the /mcp endpoint (CU-wdqcq02cxu). These are
+// nest-parameterized mirrors of the existing per-nest tools — same schemas with an added
+// `nest` argument. This is community-edition MCP wiring, not new engine operations. The
+// per-nest tools already exist inline (same baseline exception), and these server-level
+// variants enable cross-nest workflows without multiple MCP connections. Authorization is
+// handled per-call by the same handleToolCall gates the per-nest endpoint uses.
+const BASELINE = 56;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 
