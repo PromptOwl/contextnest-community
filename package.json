@@ -36,7 +36,9 @@
     "dist",
     "LICENSE.md",
     "README.md",
-    "CONFIGURATION.md"
+    "CONFIGURATION.md",
+    "API.md",
+    "STEWARDSHIP.md"
   ],
   "publishConfig": {
     "access": "public"

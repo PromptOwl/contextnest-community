@@ -12,13 +12,8 @@ import { DocumentSidebar } from "./components/DocumentSidebar";
 import { ConnectModal } from "./components/ConnectModal";
 import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
 import { AdminLoginModal } from "./components/AdminLoginModal";
-const TeammatesPage = lazyNamed(() => import("./components/TeammatesPage"), "TeammatesPage");
-const ApiKeysPage = lazyNamed(() => import("./components/ApiKeysPage"), "ApiKeysPage");
-const TeamsPage = lazyNamed(() => import("./components/TeamsPage"), "TeamsPage");
-const SettingsPage = lazyNamed(() => import("./components/SettingsPage"), "SettingsPage") as unknown as typeof import("./components/SettingsPage").SettingsPage;
-const GuidePage = lazyNamed(() => import("./components/GuidePage"), "GuidePage");
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
-import { getLicenseStatus, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
+import { getLicenseStatus, type LicenseStatus } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { useQueryClient } from "@tanstack/react-query";
@@ -29,7 +24,7 @@ import { track } from "./lib/analytics";
 import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
 import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { NestPageProvider } from "./lib/nest-page-context";
-import { dashboardPage, dashboardPageIdFromPath, dashboardPath, DEFAULT_PAGE_ID } from "./lib/pages";
+import { appPageIdFromPath, appPath, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
 import { useBreadcrumbTail, type Crumb } from "./lib/breadcrumb";
 import {
@@ -38,7 +33,7 @@ import {
   isViewBlockedInReaderMode,
 } from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, BookOpen, ScrollText, Activity, Search, FileText, Keyboard, PanelLeft, ChevronRight } from "lucide-react";
+import { Shield, Info, ChevronDown, LogOut, BookOpen, Activity, Search, FileText, Keyboard, PanelLeft, ChevronRight, UserRound } from "lucide-react";
 const AgentDocsPage = lazyNamed(() => import("./components/AgentDocsPage"), "AgentDocsPage");
 const ActivityTracePage = lazyNamed(() => import("./components/ActivityTracePage"), "ActivityTracePage");
 import { Input } from "@/components/ui/input";
@@ -78,7 +73,7 @@ export interface BreadcrumbEntry {
 type View =
   | {
       page: "dashboard";
-      /** A dashboard page id (its folder under pages/dashboard); omitted = nests. */
+      /** A dashboard page id (its folder under pages/app); omitted = nests. */
       tab?: string;
     }
   | {
@@ -125,12 +120,6 @@ type View =
        *  also arrives via the ?thread= URL param). */
       initialThreadId?: string;
     }
-  | { page: "api-keys" }
-  | { page: "teammates" }
-  | { page: "teams" }
-  | { page: "settings" }
-  | { page: "guide" }
-  | { page: "trace" }
   | { page: "docs" }
   | {
       page: "ontology-graph";
@@ -230,16 +219,15 @@ export default function App() {
     isAdmin,
     workflowPlaneEnabled,
     subagentRunsEnabled,
-    refreshHealth,
     loading,
     error,
     logout,
   } = useAuth();
   const [view, setViewNow] = useState<View>(() => ({
     page: "dashboard",
-    // /my-work and /my-drafts open straight onto their page.
+    // /my-work, /teammates, … open straight onto their page.
     ...(typeof window !== "undefined"
-      ? { tab: dashboardPageIdFromPath(window.location.pathname) ?? DEFAULT_PAGE_ID }
+      ? { tab: appPageIdFromPath(window.location.pathname) ?? DEFAULT_PAGE_ID }
       : {}),
   }));
   // Every view change asks the mounted screen first — an editor holding
@@ -283,37 +271,6 @@ export default function App() {
   // screen mounts when authenticated flips false in key mode).
   const [logoutConfirm, setLogoutConfirm] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
-  const [showChangePassword, setShowChangePassword] = useState(false);
-  // Server-wide settings for the admin Settings page. Loaded once for admins.
-  const [serverSettings, setServerSettings] = useState<AdminSettings | null>(null);
-  useEffect(() => {
-    if (!isAdmin) return;
-    getAdminSettings()
-      .then(setServerSettings)
-      .catch(() => {});
-  }, [isAdmin]);
-  const updateServerSettings = useCallback(async (
-    patch: Partial<AdminSettings> & { anthropic_api_key?: string | null },
-  ) => {
-    try {
-      const res = await updateAdminSettings(patch);
-      setServerSettings(res.settings);
-      // Feature flags gate other views (workflow-plane nav, sub-agent picker,
-      // PromptOwl teams …) off the /health-sourced AuthContext state, not
-      // serverSettings. Always re-read health after a save so ANY flag exposed
-      // there takes effect live — no page reload, and no per-key allowlist to
-      // keep in sync as new flags are added.
-      await refreshHealth();
-      toast.success("Settings saved");
-    } catch (e: any) {
-      toast.error(e?.message || "Failed to save settings");
-      // A rejected save (validation / SMTP verify) persisted nothing server-side,
-      // so DON'T re-sync — that would reset the draft and wipe what the admin
-      // typed. Re-throw the original error (with its `body.fieldErrors`) so the
-      // Settings page can focus the offending field's tab and show the message.
-      throw e;
-    }
-  }, [refreshHealth]);
   // Cmd/Ctrl+K quick-open — active anywhere inside a nest context.
   const [showQuickOpen, setShowQuickOpen] = useState(false);
   // The document page's index rail. Per-browser; the page itself offers the
@@ -626,7 +583,7 @@ export default function App() {
     }
     const qs = params.toString();
     const path =
-      view.page === "dashboard" ? dashboardPath(view.tab) : nestPath(pathNestId, pathView);
+      view.page === "dashboard" ? appPath(view.tab) : nestPath(pathNestId, pathView);
     const next = path + (qs ? `?${qs}` : "") + window.location.hash;
     const current =
       window.location.pathname + window.location.search + window.location.hash;
@@ -729,7 +686,7 @@ export default function App() {
   const crumbs = useMemo<Crumb[]>(() => {
     const home: Crumb = { label: "Home", go: () => setView({ page: "dashboard" }) };
     if (view.page === "dashboard") {
-      const page = dashboardPage(view.tab);
+      const page = visibleAppPage(view.tab, { isAdmin });
       if (pageTail.length) return [home, ...pageTail];
       return page.id === DEFAULT_PAGE_ID ? [{ label: page.label }] : [home, { label: page.label }];
     }
@@ -755,6 +712,7 @@ export default function App() {
           : nestPageForView(view.page)?.label ?? "";
       return [home, nest, { label: leaf }];
     }
+    if (view.page === "docs") return [home, { label: "Docs" }];
     return pageTail.length ? [home, ...pageTail] : [];
   }, [view, setView, pageTail]);
 
@@ -766,7 +724,7 @@ export default function App() {
         setView({ page: "nest", nestId: id, nestName: name, isOwner, isAnonOwned, isArchived }),
       openReview: (nestId, nestName, nodeId) =>
         setView({ page: "document", nestId, nestName, nodeId, isOwner: true, isAnonOwned: true }),
-      manageKeys: () => setView({ page: "api-keys" }),
+      manageKeys: () => setView({ page: "dashboard", tab: "api-keys" }),
     }),
     [setView],
   );
@@ -958,11 +916,6 @@ export default function App() {
         </DialogContent>
       </Dialog>
 
-      <ChangePasswordDialog
-        open={showChangePassword}
-        onClose={() => setShowChangePassword(false)}
-      />
-
       {/* One palette for both scopes: inside a nest it starts scoped to that
           nest and can widen to every nest, so the pick has to open whichever
           nest the row came from — openSearchHit does that for both. */}
@@ -1034,7 +987,8 @@ export default function App() {
   const inNest = "nestId" in view && nestIsReaderView !== true;
   // The dashboard gets the same rail (every nest, none expanded) — it's the
   // app's navigation, not the nest's.
-  const withSidebar = inNest || view.page === "dashboard";
+  // Docs (header button) is an app page too — same rail, full width.
+  const withSidebar = inNest || view.page === "dashboard" || view.page === "docs";
   const showSidebar = withSidebar && (!docSidebarCollapsed || docSidebarDrawer);
   const pageWidth =
     view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
@@ -1088,7 +1042,7 @@ export default function App() {
                       : setDocSidebarCollapsed(true)
                   }
                   onOpenDashboard={() => setView({ page: "dashboard" })}
-                  dashboardTab={cur.page === "dashboard" ? (cur.tab ?? DEFAULT_PAGE_ID) : null}
+                  dashboardTab={cur.page === "dashboard" ? visibleAppPage(cur.tab, { isAdmin }).id : null}
                   onOpenDashboardTab={(tab) => setView({ page: "dashboard", tab })}
                   onOpenNest={(t) =>
                     setView({
@@ -1276,14 +1230,8 @@ export default function App() {
               <UserMenu
                 me={adminStatus.me}
                 isAdmin={isAdmin}
-                onApiKeys={() => setView({ page: "api-keys" })}
-                onTeammates={() => setView({ page: "teammates" })}
-                onTeams={() => setView({ page: "teams" })}
-                onSettings={() => setView({ page: "settings" })}
-                onGuide={() => setView({ page: "guide" })}
                 onShortcuts={() => setShowShortcuts(true)}
-                onTrace={() => setView({ page: "trace" })}
-                onChangePassword={() => setShowChangePassword(true)}
+                onAccount={() => setView({ page: "dashboard", tab: "account" })}
                 onLogout={requestLogout}
               />
             ) : (
@@ -1404,12 +1352,14 @@ export default function App() {
           </div>
         </div>
         ) : (
-        <div className={withSidebar && !isDocPage ? "px-4 py-4" : ""}>
+        <div className={withSidebar && !isDocPage ? "px-8 py-6" : ""}>
         {/* One boundary for every lazily loaded page: the shell (header, rail)
             stays put while a page chunk arrives. */}
         <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
         {view.page === "dashboard" && (() => {
-          const Page = dashboardPage(view.tab).Component;
+          // A gated page (admin-only) reached by URL falls back to the default
+          // page — the server would refuse it anyway; this keeps the shell whole.
+          const Page = visibleAppPage(view.tab, { isAdmin }).Component;
           return (
             <AppNavProvider value={appNav}>
               <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
@@ -1431,7 +1381,7 @@ export default function App() {
             initialTab={view.tab}
             initialDoc={view.readerDoc ?? null}
             onReaderDocChange={(nodeId) => setView({ ...view, readerDoc: nodeId ?? undefined })}
-            onManageKeys={() => setView({ page: "api-keys" })}
+            onManageKeys={() => setView({ page: "dashboard", tab: "api-keys" })}
             onTabChange={(tab) => setView({ ...view, tab })}
             onBack={leaveNest}
             onOpenDocument={(nodeId, opts) =>
@@ -1637,32 +1587,8 @@ export default function App() {
             </NestPageProvider>
           );
         })()}
-        {view.page === "api-keys" && (
-          <ApiKeysPage onBack={() => setView({ page: "dashboard" })} />
-        )}
-        {view.page === "teammates" && (
-          <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
-        )}
-        {view.page === "teams" && (
-          <TeamsPage onBack={() => setView({ page: "dashboard" })} />
-        )}
-
-        {view.page === "settings" && (
-          <SettingsPage
-            onBack={() => setView({ page: "dashboard" })}
-            settings={serverSettings}
-            onUpdate={updateServerSettings}
-          />
-        )}
-        {view.page === "trace" && (
-          <ActivityTracePage onBack={() => setView({ page: "dashboard" })} />
-        )}
         {view.page === "docs" && (
-          <AgentDocsPage onBack={() => setView({ page: "dashboard" })} />
-        )}
-
-        {view.page === "guide" && (
-          <GuidePage onBack={() => setView({ page: "dashboard" })} />
+          <AgentDocsPage onOpenGuide={() => setView({ page: "dashboard", tab: "guide" })} />
         )}
 
         </Suspense>
@@ -1690,7 +1616,7 @@ export default function App() {
           nestName={view.nestName}
           onManageKeys={() => {
             setShowConnect(false);
-            setView({ page: "api-keys" });
+            setView({ page: "dashboard", tab: "api-keys" });
           }}
         />
       )}
@@ -1708,28 +1634,16 @@ export default function App() {
 interface UserMenuProps {
   me: { email: string; name: string | null; is_admin: boolean };
   isAdmin: boolean;
-  onApiKeys: () => void;
-  onTeammates: () => void;
-  onTeams: () => void;
-  onSettings: () => void;
-  onGuide: () => void;
   onShortcuts: () => void;
-  onTrace: () => void;
-  onChangePassword: () => void;
+  onAccount: () => void;
   onLogout: () => void;
 }
 
 function UserMenu({
   me,
   isAdmin,
-  onApiKeys,
-  onTeammates,
-  onTeams,
-  onSettings,
-  onGuide,
   onShortcuts,
-  onTrace,
-  onChangePassword,
+  onAccount,
   onLogout,
 }: UserMenuProps) {
   const displayName = me.name?.trim() || me.email;
@@ -1776,52 +1690,19 @@ function UserMenu({
             </div>
           </div>
         </div>
-        {isAdmin && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={onTeammates} className="cursor-pointer">
-              <Users className="h-3.5 w-3.5 mr-2" />
-              Teammates
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={onSettings} className="cursor-pointer">
-              <Shield className="h-3.5 w-3.5 mr-2" />
-              Server settings
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={onTrace} className="cursor-pointer">
-              <ScrollText className="h-3.5 w-3.5 mr-2" />
-              Activity trace
-            </DropdownMenuItem>
-          </>
-        )}
+        {/* Pages live in the rail (grouped); the menu is identity only. */}
         <DropdownMenuSeparator />
         <DropdownMenuItem
-          onSelect={onApiKeys}
+          onSelect={onAccount}
           className="cursor-pointer"
-          data-testid="user-menu-api-keys"
+          data-testid="user-menu-account"
         >
-          <KeyRound className="h-3.5 w-3.5 mr-2" />
-          API keys
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={onTeams} className="cursor-pointer">
-          <Users className="h-3.5 w-3.5 mr-2" />
-          Teams
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={onGuide} className="cursor-pointer">
-          <BookOpen className="h-3.5 w-3.5 mr-2" />
-          How it works
+          <UserRound className="h-3.5 w-3.5 mr-2" />
+          Account
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onShortcuts} className="cursor-pointer">
           <Keyboard className="h-3.5 w-3.5 mr-2" />
           Keyboard shortcuts
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          onSelect={onChangePassword}
-          className="cursor-pointer"
-          data-testid="user-menu-change-password"
-        >
-          <KeyRound className="h-3.5 w-3.5 mr-2" />
-          Change password
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem
@@ -1837,204 +1718,3 @@ function UserMenu({
   );
 }
 
-// Self-service password change — usable by anyone signed in, including a user
-// who logged in with an admin-issued temporary password. Calls /auth/password,
-// which verifies the current password and invalidates other sessions.
-// Eye toggle pinned inside a password field to reveal/hide the value.
-function PasswordToggle({
-  shown,
-  onToggle,
-}: {
-  shown: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      tabIndex={-1}
-      aria-label={shown ? "Hide password" : "Show password"}
-      title={shown ? "Hide password" : "Show password"}
-      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-    >
-      {shown ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-    </button>
-  );
-}
-
-function ChangePasswordDialog({
-  open,
-  onClose,
-}: {
-  open: boolean;
-  onClose: () => void;
-}) {
-  const [current, setCurrent] = useState("");
-  const [next, setNext] = useState("");
-  const [confirm, setConfirm] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  // Reveal toggles per field so a user can verify what they typed.
-  const [showCurrent, setShowCurrent] = useState(false);
-  const [showNext, setShowNext] = useState(false);
-  const [showConfirm, setShowConfirm] = useState(false);
-
-  const reset = () => {
-    setCurrent("");
-    setNext("");
-    setConfirm("");
-    setError(null);
-    setShowCurrent(false);
-    setShowNext(false);
-    setShowConfirm(false);
-  };
-
-  const submit = async () => {
-    setError(null);
-    if (next.trim().length === 0) {
-      setError("New password cannot be empty or only whitespace.");
-      return;
-    }
-    if (next.length < 8) {
-      setError("New password must be at least 8 characters.");
-      return;
-    }
-    if (next !== confirm) {
-      setError("New passwords don't match.");
-      return;
-    }
-    if (next === current) {
-      setError("New password must be different from the current password.");
-      return;
-    }
-    setSaving(true);
-    try {
-      await changePassword(current, next);
-      toast.success("Password changed. Your other sessions were signed out.");
-      reset();
-      onClose();
-    } catch (e: any) {
-      setError(e?.message || "Could not change password.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        if (!o && !saving) {
-          reset();
-          onClose();
-        }
-      }}
-    >
-      <DialogContent className="sm:max-w-[400px]">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <KeyRound className="h-4 w-4 text-muted-foreground" />
-            Change password
-          </DialogTitle>
-          <DialogDescription>
-            If an admin gave you a temporary password, set your own here. This
-            signs out your other sessions.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-3 py-1">
-          <div className="space-y-1">
-            <label
-              htmlFor="cp-current"
-              className="block text-sm font-medium"
-            >
-              Current password
-            </label>
-            <div className="relative">
-              <Input
-                id="cp-current"
-                type={showCurrent ? "text" : "password"}
-                placeholder="Enter your current password"
-                value={current}
-                onChange={(e) => setCurrent(e.target.value)}
-                autoComplete="current-password"
-                className="pr-10"
-              />
-              <PasswordToggle
-                shown={showCurrent}
-                onToggle={() => setShowCurrent((s) => !s)}
-              />
-            </div>
-          </div>
-          <div className="space-y-1">
-            <label htmlFor="cp-next" className="block text-sm font-medium">
-              New password
-            </label>
-            <div className="relative">
-              <Input
-                id="cp-next"
-                type={showNext ? "text" : "password"}
-                placeholder="At least 8 characters"
-                value={next}
-                onChange={(e) => setNext(e.target.value)}
-                autoComplete="new-password"
-                className="pr-10"
-              />
-              <PasswordToggle
-                shown={showNext}
-                onToggle={() => setShowNext((s) => !s)}
-              />
-            </div>
-          </div>
-          <div className="space-y-1">
-            <label
-              htmlFor="cp-confirm"
-              className="block text-sm font-medium"
-            >
-              Confirm new password
-            </label>
-            <div className="relative">
-              <Input
-                id="cp-confirm"
-                type={showConfirm ? "text" : "password"}
-                placeholder="Re-enter your new password"
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-                autoComplete="new-password"
-                aria-invalid={confirm.length > 0 && confirm !== next}
-                className="pr-10"
-              />
-              <PasswordToggle
-                shown={showConfirm}
-                onToggle={() => setShowConfirm((s) => !s)}
-              />
-            </div>
-            {confirm.length > 0 && confirm !== next && (
-              <p className="text-sm text-destructive">
-                Passwords don't match.
-              </p>
-            )}
-          </div>
-          {error && <p className="text-sm text-destructive">{error}</p>}
-        </div>
-        <DialogFooter className="gap-2">
-          <Button
-            variant="outline"
-            onClick={() => {
-              reset();
-              onClose();
-            }}
-            disabled={saving}
-          >
-            Cancel
-          </Button>
-          <Button
-            onClick={submit}
-            disabled={saving || !current || !next || !confirm || next !== confirm}
-          >
-            {saving ? "Saving..." : "Change password"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}

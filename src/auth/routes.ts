@@ -945,6 +945,19 @@ authRoutes.get("/admin-status", async (c) => {
   });
 });
 
+// PATCH /auth/profile — change own display name. Empty clears it (UI falls
+// back to the email). authMiddleware wants a session or key, so the open-mode
+// anonymous caller never reaches here — it gets 401.
+authRoutes.patch("/profile", authMiddleware, async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json<{ name?: unknown }>();
+  if (typeof body.name !== "string") throw new ValidationError("name is required");
+  const name = body.name.trim();
+  if (name.length > 80) throw new ValidationError("name must be 80 characters or fewer");
+  await getDb().run("UPDATE users SET name = ? WHERE id = ?", [name || null, userId]);
+  return c.json({ ok: true, name: name || null });
+});
+
 // POST /auth/password — change own password and invalidate all sessions
 authRoutes.post("/password", authMiddleware, async (c) => {
   const body = await c.req.json<{ current?: string; next?: string }>();

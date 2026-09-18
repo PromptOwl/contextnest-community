@@ -28,6 +28,7 @@ import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { PageTitle } from "@/components/ui/page-title";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -64,7 +65,7 @@ const NEST_PAGE_SIZE = 24;
 // as UTC with no zone, which new Date() would read as local time.
 
 export default function NestsPage() {
-  const { openNest: onSelectNest, openReview: onOpenReview, manageKeys: onManageKeys } = useAppNav();
+  const { openNest: onSelectNest, manageKeys: onManageKeys } = useAppNav();
   const { adminStatus, authMode, isAdmin } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
   // Served from the shared read cache: coming back to the dashboard paints the
@@ -390,27 +391,26 @@ export default function NestsPage() {
       </Card>
 
       <div className="space-y-6">
-          {/* Nests header */}
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-xl font-semibold">Nests</h2>
-              <p className="text-sm text-muted-foreground">
-                Shared knowledge vaults for your team
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              {/* Search lives in the header on every page — one entry point,
-                  not a second one styled differently here (CU-wdqcq012uv). */}
-              <Button variant="outline" onClick={() => setShowImport(true)}>
-                <FolderInput className="h-4 w-4 mr-2" />
-                Import Folder
-              </Button>
-              <Button onClick={() => setShowCreate(true)}>
-                <Plus className="h-4 w-4 mr-2" />
-                New Nest
-              </Button>
-            </div>
-          </div>
+          <PageTitle
+            icon={Database}
+            title="Nests"
+            description="Shared knowledge vaults for your team"
+            className="mb-0"
+            actions={
+              <>
+                {/* Search lives in the header on every page — one entry point,
+                    not a second one styled differently here (CU-wdqcq012uv). */}
+                <Button variant="outline" onClick={() => setShowImport(true)}>
+                  <FolderInput className="h-4 w-4 mr-2" />
+                  Import Folder
+                </Button>
+                <Button onClick={() => setShowCreate(true)}>
+                  <Plus className="h-4 w-4 mr-2" />
+                  New Nest
+                </Button>
+              </>
+            }
+          />
 
           {/* Whole-brain landing: frame every nest as one connectable brain. */}
           {allNests.length > 0 && (

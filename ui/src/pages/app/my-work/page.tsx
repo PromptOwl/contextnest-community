@@ -14,12 +14,13 @@ import { reads } from "../../../lib/queries";
 import { useAuth } from "../../../auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
 import {
-  Check, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle,
+  Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle,
 } from "lucide-react";
 import { BULK_REVIEW_LIMIT } from "../../../lib/constants";
 import { toast } from "sonner";
 import { relTime, formatServerDate } from "../../../lib/dates";
 import { Button } from "@/components/ui/button";
+import { PageTitle } from "@/components/ui/page-title";
 import { APPROVE_BUTTON_CLASS, REJECT_BUTTON_CLASS } from "@/lib/review-actions-style";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ReasonDialog, ReviewActions } from "../../../components/governance";
@@ -282,6 +283,7 @@ export default function MyWorkPage() {
 
   return (
     <div className="space-y-4">
+      <PageTitle icon={Inbox} title="My Work" description="Reviews and requests waiting on you, and what you handed off." className="mb-0" />
       <div>
           {/* My Work — cross-nest inbox. Slack/CRM-clean: two tight lists, every
           row clicks straight to the document (circular nav), approve/reject

@@ -461,6 +461,14 @@ export async function removeCommunitySite(id: string) {
   );
 }
 
+// Logged-in user renames themselves; empty clears the name (email shows).
+export async function updateProfile(name: string) {
+  return request<{ ok: boolean; name: string | null }>("/auth/profile", {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+}
+
 // Logged-in user changes their own password (e.g., after an admin reset
 // handed them a temporary one). Invalidates other sessions server-side.
 export async function changePassword(current: string, next: string) {

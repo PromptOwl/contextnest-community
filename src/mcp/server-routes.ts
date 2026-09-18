@@ -597,12 +597,26 @@ Other read endpoints (all under \`${B}/nests/<nest-id>\`):
 - \`GET /nodes/<node-id>?format=raw\` — direct consumption path: the node BODY as plain text (no JSON envelope; add \`&frontmatter=1\` for the stored YAML block)
 - \`GET /export?format=markdown\` — whole nest as one markdown file (optional \`selector\`, \`max_tokens\`)
 - \`GET /graph\` — ontology graph (nodes, links, tags, stewards)
+- \`GET /folders\` — folder tree; \`GET /nodes?folder=<path>\` — one folder level
+- \`POST /table-query\` — exact rows from a table node: \`{ "table": "[[Title]]", "query": "where <col> <op> <value> [select cols] [limit N]" }\`
+- \`GET /nodes/<node-id>/versions\` — history (who, when, approval state); \`/versions/<n>\` — one version
+- \`GET /nodes/<node-id>/comments\` — review threads (anchored quotes, replies, open/resolved)
 
 Write endpoints (need write permission):
 - \`POST /nodes\` — \`{ "title", "content", "tags"?, "type"?, "folder"? }\`
 - \`PATCH /nodes/<node-id>\` — \`{ "content"? , "append"?, "tags"?, "title"? }\`
-- \`DELETE /nodes/<node-id>\`
-- Governance: \`POST /nodes/<id>/submit-review\`, \`/approve\`, \`/reject\`
+- \`DELETE /nodes/<node-id>\`; \`POST /nodes/<id>/request-deletion\` when you lack delete rights
+- \`POST /nodes/<id>/move\` — \`{ "folder" }\`; history and comments follow
+- \`POST /nodes/<id>/revert\` — \`{ "targetVersion" }\` restores a past version as a new one
+- \`POST /nodes/<id>/comments\` — leave or reply to a review comment
+- Governance: \`POST /nodes/<id>/submit-review\`, \`/approve\`, \`/reject\`, \`/cancel-review\`
+- \`GET /review-queue\` — what is waiting on a steward in this nest
+
+## Your inbox (server-level)
+
+- \`GET ${B}/me/work\` — reviews waiting on you and handoffs, across every nest
+- \`GET ${B}/me/drafts\` — your documents never submitted for review
+- \`GET ${B}/me/notifications\` — watcher and review notifications
 
 ## MCP (Model Context Protocol)
 
@@ -610,13 +624,20 @@ Streamable HTTP, stateless. Two endpoints:
 
 - \`${B}/mcp\` — server-level, one connection for everything readable.
   Tools: \`nest_index\` (call first), then \`context_query\`, \`context_search\`,
-  \`context_get\`, \`context_list\`, \`context_overview\`, \`context_resolve\` —
-  each takes a \`nest\` argument (id or exact name) plus the same
-  selector/hops/max_tokens parameters as the REST API. Two bootstrap writes:
-  \`nest_create\` (new nest owned by the caller) and \`context_create\`
+  \`context_get\`, \`context_list\`, \`context_overview\`, \`context_resolve\`,
+  \`context_comments\` — each takes a \`nest\` argument (id or exact name) plus
+  the same selector/hops/max_tokens parameters as the REST API. Two bootstrap
+  writes: \`nest_create\` (new nest owned by the caller) and \`context_create\`
   (new document in a writable nest; a \`folder\` path creates the folder).
-- \`${B}/nests/<nest-id>/mcp\` — per-nest, full toolset including writes and
-  governance (create/update, submit/approve/reject, stewards, sharing).
+- \`${B}/nests/<nest-id>/mcp\` — per-nest, the full toolset. Same names as the
+  server-level tools without the \`nest\` argument, plus:
+  - read: \`context_init\` (operating instructions — call first), \`context_export\`, \`context_table_query\`, \`context_versions\`
+  - write: \`context_update\`, \`context_delete\`, \`context_move\`, \`context_request_deletion\`
+  - review: \`context_submit_review\`, \`context_approve\`, \`context_reject\`, \`context_review_queue\`, \`context_my_drafts\`
+  - comments: \`context_comment\`, \`context_resolve_comment\`
+  - people: \`context_stewards\`, \`context_assign_steward\`, \`context_share_nest\`, \`context_grant\`
+  - admin: \`context_deletion_queue\`, \`context_resolve_deletion\`, \`context_unsynced_list\`, \`context_sync_folder\`
+  - \`workflow_*\` (runs, edges, edge types) when the nest's workflow plane is on
   Sharing a slice is one call: \`context_grant\` with
   \`{ "email", "target_type": "document" | "folder", "target", "role": "read" | "write" }\`
   — \`target\` is a node id (\`nodes/win-loss-log\`) or a folder prefix

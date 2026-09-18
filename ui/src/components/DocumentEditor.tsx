@@ -1322,6 +1322,12 @@ export function DocumentEditor({
     setTags([...tags, ...accepted]);
     setTagInput("");
     setTouched(true);
+    // Local until Save — say so, or "added" reads as persisted.
+    toast.success(
+      accepted.length === 1 ? `Tag "${accepted[0]}" added` : `${accepted.length} tags added`,
+      // One toast slot: adding tags one after another updates it instead of stacking.
+      { id: "tag-added", description: "Save the document to keep it." },
+    );
   }, [tagPreview, tags]);
 
   const removeTag = (t: string) => {
@@ -2656,24 +2662,27 @@ export function DocumentEditor({
               document grantees, server-resolved). Hidden entirely for docs
               with no recorded author (old imports) and no collaborators. */}
                 {!isNew && (author || collaborators.length > 0) && (
-                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
                     {author && (
                       <span className="inline-flex items-center gap-1.5">
                         Created by <span className="font-medium text-foreground/80">{author}</span>
                       </span>
                     )}
+                    {author && collaborators.length > 0 && <span aria-hidden>·</span>}
                     {collaborators.length > 0 && (
                       <span
                         className="inline-flex items-center gap-1.5"
                         title={collaborators.join(", ")}
                       >
+                        Collaborators:
                         <AuthorshipChips
                           collaborators={collaborators}
                           max={5}
                           size="md"
                         />
-                        {collaborators.length} collaborator
-                        {collaborators.length !== 1 ? "s" : ""}
+                        <span className="font-medium text-foreground/80">
+                          {collaborators.length}
+                        </span>
                       </span>
                     )}
                   </div>

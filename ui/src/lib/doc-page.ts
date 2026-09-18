@@ -72,6 +72,8 @@ export interface DocPagePrefs {
   commentsOpen: boolean;
   /** The sidebar's "Views" group (board, graph, definitions, workflows). */
   viewsOpen: boolean;
+  /** Dashboard rail groups the user folded (Work, Admin, …). Open by default. */
+  closedGroups: string[];
 }
 
 export const DOC_PAGE_PREFS_KEY = "contextnest:doc-page";
@@ -80,6 +82,7 @@ const DEFAULT_PREFS: DocPagePrefs = {
   sidebarCollapsed: false,
   commentsOpen: false,
   viewsOpen: false,
+  closedGroups: [],
 };
 
 type StorageLike = {
@@ -107,6 +110,9 @@ export function readDocPagePrefs(storage: StorageLike): DocPagePrefs {
         typeof parsed?.viewsOpen === "boolean"
           ? parsed.viewsOpen
           : DEFAULT_PREFS.viewsOpen,
+      closedGroups: Array.isArray(parsed?.closedGroups)
+        ? parsed.closedGroups.filter((g: unknown) => typeof g === "string")
+        : [...DEFAULT_PREFS.closedGroups],
     };
   } catch {
     return { ...DEFAULT_PREFS };
