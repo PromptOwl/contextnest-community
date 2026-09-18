@@ -1,11 +1,11 @@
 import { ScrollText } from "lucide-react";
-import type { AccountPageMeta } from "../../../lib/account-pages";
+import type { PageMeta } from "../../../lib/pages";
 
-export const meta: AccountPageMeta = {
+export const meta: PageMeta = {
   path: "/trace",
   label: "Activity trace",
   icon: ScrollText,
-  order: 12,
-  viewPage: "trace",
+  order: 22,
+  group: "admin",
   visible: ({ isAdmin }) => isAdmin,
 };

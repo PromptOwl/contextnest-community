@@ -41,8 +41,7 @@ import {
   type NestSidebarView,
 } from "../lib/doc-page";
 import { FolderTree, type KnownFolder } from "./FolderTree";
-import { dashboardPages, type DashboardPage } from "../lib/pages";
-import { visibleAccountPages, type AccountPage } from "../lib/account-pages";
+import { appRail, type AppPage } from "../lib/pages";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 
@@ -74,9 +73,6 @@ interface Props {
   /** Dashboard only: the open page and how to switch. */
   dashboardTab?: string | null;
   onOpenDashboardTab?: (id: string) => void;
-  /** Account pages (user menu) only: the open page and how to switch. */
-  accountTab?: string | null;
-  onOpenAccountTab?: (page: AccountPage) => void;
   /** New document, optionally inside a folder. Omit when the caller can't
    *  author in this nest. */
   onNewDocument?: (folder?: string) => void;
@@ -104,8 +100,6 @@ export function DocumentSidebar({
   logoUrl,
   dashboardTab = null,
   onOpenDashboardTab,
-  accountTab = null,
-  onOpenAccountTab,
   onNewDocument,
 }: Props) {
   // Only inside a nest — the dashboard rail is app pages, not nests.
@@ -199,17 +193,11 @@ export function DocumentSidebar({
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
-        {nestId === null && accountTab === null && (
-          <DashboardNav
+        {nestId === null && (
+          <AppPagesNav
             active={dashboardTab}
-            onOpen={onOpenDashboardTab}
-          />
-        )}
-        {nestId === null && accountTab !== null && (
-          <AccountNav
-            active={accountTab}
             isAdmin={isAdmin}
-            onOpen={onOpenAccountTab}
+            onOpen={onOpenDashboardTab}
           />
         )}
         {nestId !== null && nests.isLoading && (
@@ -294,68 +282,77 @@ export function DocumentSidebar({
   );
 }
 
-/** The dashboard's pages, straight from the registry — what its tab strip
- *  used to be. Same row style as a nest's views so the rail reads as one. */
-function DashboardNav({
-  active,
-  onOpen,
-}: {
-  active: string | null;
-  onOpen?: (id: string) => void;
-}) {
-  return (
-    <div className="mt-3 space-y-1" data-testid="document-sidebar-dashboard">
-      {dashboardPages.map((page) => (
-        <DashboardRow key={page.id} page={page} active={page.id === active} onOpen={onOpen} />
-      ))}
-    </div>
-  );
-}
-
-/** The user menu's pages, from their registry — admin-only ones gated the
- *  same way the menu gates them. Same row style as the dashboard's. */
-function AccountNav({
+/** The dashboard's pages, straight from the registry, in their rail groups
+ *  (Work, Workspace, Admin, Help). Ungrouped pages (Nests) sit on top. A
+ *  group folds on click (remembered per browser) and opens itself when the
+ *  page on screen is inside it, so the highlight is visible. Same row style
+ *  as a nest's views so the rail reads as one. */
+function AppPagesNav({
   active,
   isAdmin,
   onOpen,
 }: {
-  active: string;
+  active: string | null;
   isAdmin: boolean;
-  onOpen?: (page: AccountPage) => void;
+  onOpen?: (id: string) => void;
 }) {
+  const rail = appRail({ isAdmin });
+  const [closed, setClosedState] = useState<string[]>(
+    () => readDocPagePrefs(localStorage).closedGroups,
+  );
+  const toggle = (id: string, open: boolean) => {
+    const next = open ? closed.filter((g) => g !== id) : [...closed, id];
+    setClosedState(next);
+    writeDocPagePrefs(localStorage, { closedGroups: next });
+  };
   return (
-    <div className="mt-3 space-y-1" data-testid="document-sidebar-account">
-      {visibleAccountPages({ isAdmin }).map((page) => {
-        const Icon = page.icon;
+    <div className="mt-3 space-y-1" data-testid="document-sidebar-dashboard">
+      {rail.top.map((page) => (
+        <AppPageRow key={page.id} page={page} active={page.id === active} onOpen={onOpen} />
+      ))}
+      {rail.groups.map((g) => {
+        const activeInGroup = g.pages.some((p) => p.id === active);
+        const open = !closed.includes(g.id) || activeInGroup;
         return (
-          <button
-            key={page.id}
-            type="button"
-            onClick={() => onOpen?.(page)}
-            aria-current={page.id === active ? "page" : undefined}
-            className={cn(
-              "flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm hover:bg-muted",
-              page.id === active ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground",
+          <div key={g.id} className="pt-2">
+            <button
+              type="button"
+              onClick={() => toggle(g.id, !open)}
+              aria-expanded={open}
+              className="flex w-full items-center gap-1.5 rounded px-3 py-1 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground"
+              data-testid={`document-sidebar-group-${g.id}`}
+            >
+              {open ? (
+                <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+              ) : (
+                <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+              )}
+              <span className="truncate">{g.label}</span>
+            </button>
+            {open && (
+              <div className="space-y-1">
+                {g.pages.map((page) => (
+                  <AppPageRow key={page.id} page={page} active={page.id === active} onOpen={onOpen} indent />
+                ))}
+              </div>
             )}
-            data-testid={`document-sidebar-account-${page.id}`}
-          >
-            <Icon className="h-4 w-4 shrink-0" />
-            <span className="truncate">{page.label}</span>
-          </button>
+          </div>
         );
       })}
     </div>
   );
 }
-
-function DashboardRow({
+function AppPageRow({
   page,
   active,
+  indent = false,
   onOpen,
 }: {
-  page: DashboardPage;
+  page: AppPage;
   active: boolean;
   onOpen?: (id: string) => void;
+  /** Inside a group: rows sit under the group header. */
+  indent?: boolean;
 }) {
   // Badge: a one-row read whose total is the number — the page fetches its
   // own list when opened. Pages without a badge skip the query.
@@ -371,7 +368,8 @@ function DashboardRow({
       onClick={() => onOpen?.(page.id)}
       aria-current={active ? "page" : undefined}
       className={cn(
-        "flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm hover:bg-muted",
+        "flex w-full items-center gap-2.5 rounded-md py-2 text-left text-sm hover:bg-muted",
+        indent ? "pl-7 pr-3" : "px-3",
         active ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground",
       )}
       data-testid={`document-sidebar-dashboard-${page.id}`}

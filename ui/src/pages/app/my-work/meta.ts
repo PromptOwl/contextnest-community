@@ -7,6 +7,7 @@ export const meta: PageMeta = {
   label: "My Work",
   icon: Inbox,
   order: 2,
+  group: "work",
   // Things waiting on the user — the one-row read's total is the badge.
   badge: {
     options: () => reads.myWork({ limit: 1 }),

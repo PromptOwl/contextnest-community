@@ -118,6 +118,7 @@ describe("doc page prefs", () => {
       sidebarCollapsed: false,
       commentsOpen: false,
       viewsOpen: false,
+      closedGroups: [],
     });
   });
 
@@ -128,23 +129,30 @@ describe("doc page prefs", () => {
       sidebarCollapsed: false,
       commentsOpen: true,
       viewsOpen: false,
+      closedGroups: [],
     });
     writeDocPagePrefs(s, { sidebarCollapsed: true });
     expect(readDocPagePrefs(s)).toEqual({
       sidebarCollapsed: true,
       commentsOpen: true,
       viewsOpen: false,
+      closedGroups: [],
     });
+    writeDocPagePrefs(s, { closedGroups: ["admin"] });
+    expect(readDocPagePrefs(s).closedGroups).toEqual(["admin"]);
     expect(s.map.has(DOC_PAGE_PREFS_KEY)).toBe(true);
   });
 
   it("ignores garbage in storage and a storage that throws", () => {
     const s = memory();
+    s.setItem(DOC_PAGE_PREFS_KEY, JSON.stringify({ closedGroups: "admin" }));
+    expect(readDocPagePrefs(s).closedGroups).toEqual([]);
     s.setItem(DOC_PAGE_PREFS_KEY, "{not json");
     expect(readDocPagePrefs(s)).toEqual({
       sidebarCollapsed: false,
       commentsOpen: false,
       viewsOpen: false,
+      closedGroups: [],
     });
     const throwing = {
       getItem: () => {
@@ -158,6 +166,7 @@ describe("doc page prefs", () => {
       sidebarCollapsed: false,
       commentsOpen: false,
       viewsOpen: false,
+      closedGroups: [],
     });
     expect(() => writeDocPagePrefs(throwing, { commentsOpen: true })).not.toThrow();
   });

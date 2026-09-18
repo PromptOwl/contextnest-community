@@ -24,8 +24,7 @@ import { track } from "./lib/analytics";
 import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
 import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { NestPageProvider } from "./lib/nest-page-context";
-import { dashboardPage, dashboardPageIdFromPath, dashboardPath, DEFAULT_PAGE_ID } from "./lib/pages";
-import { accountPageForPath, accountPageForView } from "./lib/account-pages";
+import { appPage, appPageIdFromPath, appPath, DEFAULT_PAGE_ID, isPageVisible } from "./lib/pages";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
 import { useBreadcrumbTail, type Crumb } from "./lib/breadcrumb";
 import {
@@ -34,7 +33,7 @@ import {
   isViewBlockedInReaderMode,
 } from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, BookOpen, ScrollText, Activity, Search, FileText, Keyboard, PanelLeft, ChevronRight, UserRound } from "lucide-react";
+import { Shield, Info, ChevronDown, LogOut, BookOpen, Activity, Search, FileText, Keyboard, PanelLeft, ChevronRight, UserRound } from "lucide-react";
 const AgentDocsPage = lazyNamed(() => import("./components/AgentDocsPage"), "AgentDocsPage");
 const ActivityTracePage = lazyNamed(() => import("./components/ActivityTracePage"), "ActivityTracePage");
 import { Input } from "@/components/ui/input";
@@ -74,7 +73,7 @@ export interface BreadcrumbEntry {
 type View =
   | {
       page: "dashboard";
-      /** A dashboard page id (its folder under pages/dashboard); omitted = nests. */
+      /** A dashboard page id (its folder under pages/app); omitted = nests. */
       tab?: string;
     }
   | {
@@ -121,13 +120,6 @@ type View =
        *  also arrives via the ?thread= URL param). */
       initialThreadId?: string;
     }
-  | { page: "api-keys" }
-  | { page: "teammates" }
-  | { page: "account" }
-  | { page: "teams" }
-  | { page: "settings" }
-  | { page: "guide" }
-  | { page: "trace" }
   | { page: "docs" }
   | {
       page: "ontology-graph";
@@ -231,18 +223,13 @@ export default function App() {
     error,
     logout,
   } = useAuth();
-  const [view, setViewNow] = useState<View>(() => {
-    // /account, /teammates, … open straight onto their page.
-    const account = typeof window !== "undefined" ? accountPageForPath(window.location.pathname) : undefined;
-    if (account) return { page: account.viewPage } as View;
-    return {
-      page: "dashboard",
-      // /my-work and /my-drafts open straight onto their page.
-      ...(typeof window !== "undefined"
-        ? { tab: dashboardPageIdFromPath(window.location.pathname) ?? DEFAULT_PAGE_ID }
-        : {}),
-    };
-  });
+  const [view, setViewNow] = useState<View>(() => ({
+    page: "dashboard",
+    // /my-work, /teammates, … open straight onto their page.
+    ...(typeof window !== "undefined"
+      ? { tab: appPageIdFromPath(window.location.pathname) ?? DEFAULT_PAGE_ID }
+      : {}),
+  }));
   // Every view change asks the mounted screen first — an editor holding
   // unsaved edits answers with its leave dialog instead of losing them. The
   // guard is a no-op anywhere that registered none, so call sites are unchanged.
@@ -596,11 +583,7 @@ export default function App() {
     }
     const qs = params.toString();
     const path =
-      view.page === "dashboard"
-        ? dashboardPath(view.tab)
-        : accountPageForView(view.page)
-          ? accountPageForView(view.page)!.path
-          : nestPath(pathNestId, pathView);
+      view.page === "dashboard" ? appPath(view.tab) : nestPath(pathNestId, pathView);
     const next = path + (qs ? `?${qs}` : "") + window.location.hash;
     const current =
       window.location.pathname + window.location.search + window.location.hash;
@@ -703,7 +686,7 @@ export default function App() {
   const crumbs = useMemo<Crumb[]>(() => {
     const home: Crumb = { label: "Home", go: () => setView({ page: "dashboard" }) };
     if (view.page === "dashboard") {
-      const page = dashboardPage(view.tab);
+      const page = appPage(view.tab);
       if (pageTail.length) return [home, ...pageTail];
       return page.id === DEFAULT_PAGE_ID ? [{ label: page.label }] : [home, { label: page.label }];
     }
@@ -729,8 +712,6 @@ export default function App() {
           : nestPageForView(view.page)?.label ?? "";
       return [home, nest, { label: leaf }];
     }
-    const account = accountPageForView(view.page);
-    if (account) return pageTail.length ? [home, ...pageTail] : [home, { label: account.label }];
     return pageTail.length ? [home, ...pageTail] : [];
   }, [view, setView, pageTail]);
 
@@ -742,7 +723,7 @@ export default function App() {
         setView({ page: "nest", nestId: id, nestName: name, isOwner, isAnonOwned, isArchived }),
       openReview: (nestId, nestName, nodeId) =>
         setView({ page: "document", nestId, nestName, nodeId, isOwner: true, isAnonOwned: true }),
-      manageKeys: () => setView({ page: "api-keys" }),
+      manageKeys: () => setView({ page: "dashboard", tab: "api-keys" }),
       openDashboard: () => setView({ page: "dashboard" }),
     }),
     [setView],
@@ -1006,9 +987,7 @@ export default function App() {
   const inNest = "nestId" in view && nestIsReaderView !== true;
   // The dashboard gets the same rail (every nest, none expanded) — it's the
   // app's navigation, not the nest's.
-  // Account pages (user menu) get their own rail: the pages the caller may open.
-  const accountPage = accountPageForView(view.page);
-  const withSidebar = inNest || view.page === "dashboard" || !!accountPage;
+  const withSidebar = inNest || view.page === "dashboard";
   const showSidebar = withSidebar && (!docSidebarCollapsed || docSidebarDrawer);
   const pageWidth =
     view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
@@ -1064,8 +1043,6 @@ export default function App() {
                   onOpenDashboard={() => setView({ page: "dashboard" })}
                   dashboardTab={cur.page === "dashboard" ? (cur.tab ?? DEFAULT_PAGE_ID) : null}
                   onOpenDashboardTab={(tab) => setView({ page: "dashboard", tab })}
-                  accountTab={accountPage?.id ?? null}
-                  onOpenAccountTab={(p) => setView({ page: p.viewPage } as View)}
                   onOpenNest={(t) =>
                     setView({
                       page: "nest",
@@ -1252,14 +1229,8 @@ export default function App() {
               <UserMenu
                 me={adminStatus.me}
                 isAdmin={isAdmin}
-                onApiKeys={() => setView({ page: "api-keys" })}
-                onTeammates={() => setView({ page: "teammates" })}
-                onTeams={() => setView({ page: "teams" })}
-                onSettings={() => setView({ page: "settings" })}
-                onGuide={() => setView({ page: "guide" })}
                 onShortcuts={() => setShowShortcuts(true)}
-                onTrace={() => setView({ page: "trace" })}
-                onAccount={() => setView({ page: "account" })}
+                onAccount={() => setView({ page: "dashboard", tab: "account" })}
                 onLogout={requestLogout}
               />
             ) : (
@@ -1385,7 +1356,10 @@ export default function App() {
             stays put while a page chunk arrives. */}
         <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
         {view.page === "dashboard" && (() => {
-          const Page = dashboardPage(view.tab).Component;
+          // A gated page (admin-only) reached by URL falls back to the default
+          // page — the server would refuse it anyway; this keeps the shell whole.
+          const picked = appPage(view.tab);
+          const Page = isPageVisible(picked, { isAdmin }) ? picked.Component : appPage(DEFAULT_PAGE_ID).Component;
           return (
             <AppNavProvider value={appNav}>
               <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
@@ -1407,7 +1381,7 @@ export default function App() {
             initialTab={view.tab}
             initialDoc={view.readerDoc ?? null}
             onReaderDocChange={(nodeId) => setView({ ...view, readerDoc: nodeId ?? undefined })}
-            onManageKeys={() => setView({ page: "api-keys" })}
+            onManageKeys={() => setView({ page: "dashboard", tab: "api-keys" })}
             onTabChange={(tab) => setView({ ...view, tab })}
             onBack={leaveNest}
             onOpenDocument={(nodeId, opts) =>
@@ -1613,18 +1587,6 @@ export default function App() {
             </NestPageProvider>
           );
         })()}
-        {/* Account pages (user menu) — whichever registry page matches. */}
-        {(() => {
-          const page = accountPageForView(view.page);
-          if (!page) return null;
-          return (
-            <AppNavProvider value={appNav}>
-              <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
-                <page.Component />
-              </Suspense>
-            </AppNavProvider>
-          );
-        })()}
         {view.page === "docs" && (
           <AgentDocsPage onBack={() => setView({ page: "dashboard" })} />
         )}
@@ -1654,7 +1616,7 @@ export default function App() {
           nestName={view.nestName}
           onManageKeys={() => {
             setShowConnect(false);
-            setView({ page: "api-keys" });
+            setView({ page: "dashboard", tab: "api-keys" });
           }}
         />
       )}
@@ -1672,13 +1634,7 @@ export default function App() {
 interface UserMenuProps {
   me: { email: string; name: string | null; is_admin: boolean };
   isAdmin: boolean;
-  onApiKeys: () => void;
-  onTeammates: () => void;
-  onTeams: () => void;
-  onSettings: () => void;
-  onGuide: () => void;
   onShortcuts: () => void;
-  onTrace: () => void;
   onAccount: () => void;
   onLogout: () => void;
 }
@@ -1686,13 +1642,7 @@ interface UserMenuProps {
 function UserMenu({
   me,
   isAdmin,
-  onApiKeys,
-  onTeammates,
-  onTeams,
-  onSettings,
-  onGuide,
   onShortcuts,
-  onTrace,
   onAccount,
   onLogout,
 }: UserMenuProps) {
@@ -1740,44 +1690,7 @@ function UserMenu({
             </div>
           </div>
         </div>
-        {isAdmin && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={onTeammates} className="cursor-pointer">
-              <Users className="h-3.5 w-3.5 mr-2" />
-              Teammates
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={onSettings} className="cursor-pointer">
-              <Shield className="h-3.5 w-3.5 mr-2" />
-              Server settings
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={onTrace} className="cursor-pointer">
-              <ScrollText className="h-3.5 w-3.5 mr-2" />
-              Activity trace
-            </DropdownMenuItem>
-          </>
-        )}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          onSelect={onApiKeys}
-          className="cursor-pointer"
-          data-testid="user-menu-api-keys"
-        >
-          <KeyRound className="h-3.5 w-3.5 mr-2" />
-          API keys
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={onTeams} className="cursor-pointer">
-          <Users className="h-3.5 w-3.5 mr-2" />
-          Teams
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={onGuide} className="cursor-pointer">
-          <BookOpen className="h-3.5 w-3.5 mr-2" />
-          How it works
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={onShortcuts} className="cursor-pointer">
-          <Keyboard className="h-3.5 w-3.5 mr-2" />
-          Keyboard shortcuts
-        </DropdownMenuItem>
+        {/* Pages live in the rail (grouped); the menu is identity only. */}
         <DropdownMenuSeparator />
         <DropdownMenuItem
           onSelect={onAccount}
@@ -1786,6 +1699,10 @@ function UserMenu({
         >
           <UserRound className="h-3.5 w-3.5 mr-2" />
           Account
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={onShortcuts} className="cursor-pointer">
+          <Keyboard className="h-3.5 w-3.5 mr-2" />
+          Keyboard shortcuts
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem

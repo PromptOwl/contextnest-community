@@ -7,6 +7,7 @@ export const meta: PageMeta = {
   label: "My Drafts",
   icon: Pencil,
   order: 3,
+  group: "work",
   badge: {
     options: () => reads.myDrafts({ limit: 1 }),
     count: (d) => d?.pagination?.total ?? 0,

@@ -1,11 +1,11 @@
 import { Shield } from "lucide-react";
-import type { AccountPageMeta } from "../../../lib/account-pages";
+import type { PageMeta } from "../../../lib/pages";
 
-export const meta: AccountPageMeta = {
+export const meta: PageMeta = {
   path: "/settings",
   label: "Server settings",
   icon: Shield,
-  order: 11,
-  viewPage: "settings",
+  order: 21,
+  group: "admin",
   visible: ({ isAdmin }) => isAdmin,
 };

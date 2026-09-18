@@ -1,7 +1,7 @@
 /**
  * Nest view registry — the pages that live beside a nest's own page
  * (/nest/<id>): Board, Graph, Definitions, Workflows. Same shape as the
- * dashboard registry (pages.ts): one folder per page,
+ * app page registry (pages.ts): one folder per page,
  *
  *   ui/src/pages/nest/<slug>/meta.ts   — path segment, label, icon, order, gate
  *   ui/src/pages/nest/<slug>/page.tsx  — default export; reads useNestPage()
