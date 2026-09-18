@@ -1886,25 +1886,24 @@ async function runTool(
     }
 
     case "context_submit_review": {
-      const docs = await storage.discoverDocuments();
-      const node = docs.find(
-        (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
-      );
-      if (!node) return toolError(`Node not found: ${args.title}`, "DOCUMENT_NOT_FOUND");
+      const resolved = await resolveTargetNode(storage, args);
+      if (typeof resolved === "string") return toolError(resolved, "DOCUMENT_NOT_FOUND");
+      const node = resolved;
+      const nodeLabel = args.title || args.id;
 
       // Defense-in-depth: submitting a draft for review is an edit-level
       // action — gate it with the same per-node edit check.
       const submitCheck = await stewardship.canUserEdit(ctx.nestId, node.id, userEmail);
       if (!submitCheck.allowed) {
         return toolError(
-          `You don't have permission to submit "${args.title}" for review: ${submitCheck.reason}`,
+          `You don't have permission to submit "${nodeLabel}" for review: ${submitCheck.reason}`,
           "UNAUTHORIZED_ACTION",
         );
       }
 
       const currentVersion = await versions.getCurrentVersion(ctx.nestId, node.id);
       if (currentVersion === 0)
-        return toolError(`No versions found for "${args.title}"`, "VERSION_NOT_FOUND");
+        return toolError(`No versions found for "${nodeLabel}"`, "VERSION_NOT_FOUND");
 
       try {
         const request = await reviews.submitForReview({
@@ -1927,7 +1926,7 @@ async function runTool(
           : "";
 
         return {
-          text: `Submitted "${args.title}" v${currentVersion} for review (${request.priority} priority).${stewardList}`,
+          text: `Submitted "${nodeLabel}" v${currentVersion} for review (${request.priority} priority).${stewardList}`,
           // No catalog shape to conform to — `context_submit_review` is a
           // governance-namespace operation and that namespace is declared but
           // unimplemented in the engine (`api/index.ts`, NAMESPACES). So this

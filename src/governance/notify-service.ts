@@ -224,6 +224,8 @@ export interface Notification {
   read_at: string | null;
   /** Document the row is about, when there is one — the inbox links to it. */
   node_id: string | null;
+  /** The nest's display name, so the inbox can navigate without a nest list. */
+  nest_name: string;
 }
 
 export async function listNotifications(
@@ -241,8 +243,11 @@ export async function listNotifications(
               CASE WHEN dr.target_type = 'document' THEN dr.node_id END,
               -- A mention names the document directly; there's no request row.
               CASE WHEN n.kind = 'mention' THEN n.subject_id END
-            ) AS node_id
+            ) AS node_id,
+            -- Name resolved here so the inbox never fetches the nest list for it.
+            COALESCE(ns.name, n.nest_id) AS nest_name
        FROM notifications n
+       LEFT JOIN nests ns ON ns.id = n.nest_id
        LEFT JOIN review_requests rr ON rr.id = n.subject_id
        LEFT JOIN deletion_requests dr ON dr.id = n.subject_id
       WHERE LOWER(n.user_email) = LOWER(?)${opts.unreadOnly ? " AND n.read_at IS NULL" : ""}

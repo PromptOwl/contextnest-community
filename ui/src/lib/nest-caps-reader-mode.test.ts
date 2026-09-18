@@ -50,6 +50,18 @@ describe("deriveNestCaps — reader mode", () => {
     expect(caps.isReaderView).toBe(false);
   });
 
+  // "Preview as reader" (CU-wdqcq027fw): an owner opts into the visitor
+  // presentation without giving up any right — and only while reader mode is
+  // actually on, or the preview would show a view no visitor gets.
+  it("previewReader shows an owner the reader view while keeping their rights", () => {
+    const owner = { roles: ["owner"], permission: "owner", myStewards: [], isOwner: true, isAdmin: false };
+    const caps = deriveNestCaps({ ...owner, readerMode: true, previewReader: true });
+    expect(caps.isReaderView).toBe(true);
+    expect(caps.canManage).toBe(true);
+    expect(caps.isReadOnly).toBe(false);
+    expect(deriveNestCaps({ ...owner, readerMode: false, previewReader: true }).isReaderView).toBe(false);
+  });
+
   it("isReaderView is false for a write collaborator even when reader mode is on", () => {
     const caps = deriveNestCaps({
       roles: [],

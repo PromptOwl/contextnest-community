@@ -21,7 +21,7 @@
  * from: `discoverDocuments()`.
  */
 
-import type { ContextNode } from "@promptowl/contextnest-engine";
+import { listSuggestions, type ContextNode, type SuggestionMeta } from "@promptowl/contextnest-engine";
 import { getDb } from "../db/client.js";
 import { insertOrIgnore, insertOrReplace, nowExpr } from "../db/sql.js";
 import type { Querier, SqlParam } from "../db/adapter.js";
@@ -205,8 +205,19 @@ export async function rebuildNodeIndex(nestId: string): Promise<number> {
   const startedAt = writeGeneration.get(nestId) ?? 0;
   const documents = await storage.discoverDocuments({ includeRetired: true });
   // The one place the whole-vault suggestion walk still runs: once per rebuild,
-  // reconciling the badge flags against disk, instead of once per listing.
+  // reconciling the suggestion rows against disk, instead of once per listing.
+  // The walk names the documents; their metas are read only for those.
   const staged = await documentsWithSuggestions(nestId);
+  const stagedMetas: SuggestionMeta[] = (
+    await Promise.all(
+      [...staged].map((id) =>
+        listSuggestions(storage, id).catch((err) => {
+          console.error("[node-index] listSuggestions failed", nestId, id, err);
+          return [] as SuggestionMeta[];
+        }),
+      ),
+    )
+  ).flat();
 
   const db = getDb();
   const insertSql = insertOrReplace(
@@ -215,18 +226,15 @@ export async function rebuildNodeIndex(nestId: string): Promise<number> {
     ["nest_id", "node_id"],
     UPSERT_SET,
   );
-  const stagedSql = insertOrIgnore(
-    db,
-    "INSERT INTO node_suggestions (nest_id, node_id) VALUES (?, ?)",
-  );
+  const stagedSql = insertOrIgnore(db, SUGGESTION_INSERT);
   await db.transaction(async (tx: Querier) => {
     await tx.run("DELETE FROM node_index WHERE nest_id = ?", [nestId]);
     for (const doc of documents) {
       await tx.run(insertSql, [nestId, ...rowValues(doc)]);
     }
     await tx.run("DELETE FROM node_suggestions WHERE nest_id = ?", [nestId]);
-    for (const id of staged) {
-      await tx.run(stagedSql, [nestId, id]);
+    for (const m of stagedMetas) {
+      await tx.run(stagedSql, suggestionValues(nestId, m));
     }
     // Stamped inside the transaction: a crash between the rows and the stamp
     // would otherwise leave a complete mirror flagged stale forever, or —
@@ -247,52 +255,83 @@ export async function rebuildNodeIndex(nestId: string): Promise<number> {
   return documents.length;
 }
 
+/** A staged external edit as the DB mirrors it (node_suggestions). */
+export interface SuggestionRow {
+  nest_id: string;
+  node_id: string;
+  suggestion_id: string;
+  source: string;
+  actor: string;
+  detected_at: string;
+  target_hash: string;
+  proposed_hash: string;
+  note: string | null;
+  /** When this row was written — differs from detected_at only for rows a
+   *  rebuild re-created from disk. */
+  created_at: string;
+}
+
+const SUGGESTION_INSERT =
+  "INSERT INTO node_suggestions (nest_id, node_id, suggestion_id, source, actor, detected_at, target_hash, proposed_hash, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+const suggestionValues = (nestId: string, m: SuggestionMeta) => [
+  nestId,
+  m.document_id,
+  m.suggestion_id,
+  m.source,
+  m.actor,
+  m.detected_at,
+  m.target_hash,
+  m.proposed_hash,
+  m.note ?? null,
+];
+
 /**
- * Record (or clear) the fact that a document has an external edit staged.
- *
- * Called from the three points that stage, approve or reject a suggestion.
- * Never throws — a wrong badge must not fail a governance write, and the next
- * rebuild reconciles the whole nest against disk anyway.
+ * Make the DB's rows for one document match the suggestions staged on disk:
+ * everything it had for the document goes, `metas` come in. Called from the
+ * three points that stage, approve or reject a suggestion, with the list the
+ * engine returns afterwards. Never throws — a wrong badge must not fail a
+ * governance write, and the next rebuild reconciles the nest against disk.
  */
-export async function setSuggestionFlag(
+export async function syncSuggestionRows(
   nestId: string,
   nodeId: string,
-  present: boolean,
+  metas: SuggestionMeta[],
 ): Promise<void> {
   try {
     const db = getDb();
-    if (!present) {
-      await db.run(
+    const insertSql = insertOrIgnore(db, SUGGESTION_INSERT);
+    await db.transaction(async (tx: Querier) => {
+      await tx.run(
         "DELETE FROM node_suggestions WHERE nest_id = ? AND node_id = ?",
         [nestId, nodeId],
       );
-      return;
-    }
-    await db.run(
-      insertOrIgnore(
-        db,
-        "INSERT INTO node_suggestions (nest_id, node_id) VALUES (?, ?)",
-      ),
-      [nestId, nodeId],
-    );
+      for (const m of metas) await tx.run(insertSql, suggestionValues(nestId, m));
+    });
   } catch (err) {
-    console.error("[node-index] suggestion flag failed", nestId, nodeId, err);
+    console.error("[node-index] suggestion rows failed", nestId, nodeId, err);
   }
 }
 
 /**
- * The documents in this nest with an external edit staged.
- *
- * The DB twin of `documentsWithSuggestions`, which answers the same question
- * by walking the whole vault — including one `.versions/<doc>/` directory per
- * document — and did so on EVERY listing request, for a condition that is
- * empty on almost every row.
+ * Every staged external edit in the nest, newest first — the External Edits
+ * list and its badge, straight from the DB. The DB twin of the vault walk
+ * (`documentsWithSuggestions`), which the rebuild still runs once per nest to
+ * reconcile these rows against disk.
  */
+export async function listSuggestionRows(nestId: string): Promise<SuggestionRow[]> {
+  return (await getDb().all(
+    "SELECT * FROM node_suggestions WHERE nest_id = ? ORDER BY detected_at DESC",
+    [nestId],
+  )) as SuggestionRow[];
+}
+
+/** The documents in this nest with an external edit staged. */
 export async function nodesWithSuggestions(
   nestId: string,
 ): Promise<Set<string>> {
   const rows = (await getDb().all(
-    "SELECT node_id FROM node_suggestions WHERE nest_id = ?",
+    "SELECT DISTINCT node_id FROM node_suggestions WHERE nest_id = ?",
     [nestId],
   )) as Array<{ node_id: string }>;
   return new Set(rows.map((r) => r.node_id));

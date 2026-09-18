@@ -30,7 +30,8 @@ import {
 } from "@promptowl/contextnest-engine";
 import { engineCache } from "../nodes/engine.js";
 import {
-  setSuggestionFlag,
+  syncSuggestionRows,
+  listSuggestionRows,
   markIndexStale,
   indexedNodeIds,
 } from "../nodes/node-index.js";
@@ -207,9 +208,9 @@ async function scanDocumentForDriftInternal(
   const existing = await listSuggestions(storage, documentId);
   const dup = existing.find((s) => s.proposed_hash === drift.actualHash);
   if (dup) {
-    // Already staged — but the flag may predate this table (or a rebuild that
-    // never ran), so assert it rather than assume it.
-    await setSuggestionFlag(nestId, documentId, true);
+    // Already staged — but the rows may predate this table (or a rebuild that
+    // never ran), so assert them rather than assume.
+    await syncSuggestionRows(nestId, documentId, existing);
     return { meta: dup, created: false };
   }
 
@@ -222,9 +223,9 @@ async function scanDocumentForDriftInternal(
     actor,
     docTier: "standard",
   });
-  // The listing reads this flag instead of walking the vault for
-  // `_suggestions/` directories, so staging has to record it.
-  await setSuggestionFlag(nestId, documentId, true);
+  // The listing reads these rows instead of walking the vault for
+  // `_suggestions/` directories, so staging has to record the suggestion.
+  await syncSuggestionRows(nestId, documentId, [...existing, result.meta]);
   return { meta: result.meta, created: true };
 }
 
@@ -242,7 +243,7 @@ async function refreshSuggestionFlag(
 ): Promise<void> {
   try {
     const remaining = await listSuggestions(storage, documentId);
-    await setSuggestionFlag(nestId, documentId, remaining.length > 0);
+    await syncSuggestionRows(nestId, documentId, remaining);
   } catch (err) {
     console.error("[external-edit] flag refresh failed", nestId, documentId, err);
   }
@@ -369,40 +370,43 @@ export async function getPendingChange(
 
 /** List every pending external edit across all documents in a nest.
  *
+ * Straight from node_suggestions — one row per staged suggestion, written
+ * at stage/approve/reject and reconciled against disk by the index rebuild —
+ * so this is a SELECT, not a walk of every document in the vault (which on a
+ * deep folder tree was the slowest read on the nest page).
+ *
  * Filters stale suggestions whose proposed body matches the document's
- * latest version — those are recorded history, not real out-of-band
- * edits, so showing them in the admin queue is misleading.
+ * latest version — those are recorded history, not real out-of-band edits,
+ * so showing them in the admin queue is misleading. That check reads the
+ * chain head from storage, for the rows returned only.
  */
 export async function listNestExternalEdits(
   nestId: string,
 ): Promise<ExternalEditEntry[]> {
+  const rows = await listSuggestionRows(nestId);
+  if (rows.length === 0) return [];
   const { storage } = await engineCache.get(nestId);
-  const docs = await storage.discoverDocuments();
-  const lists = await Promise.all(
-    docs.map(async (doc) => {
-      const metas = await listSuggestions(storage, doc.id);
-      const fresh: SuggestionMeta[] = [];
-      for (const meta of metas) {
-        if (await bodyMatchesLatestVersion(storage, doc.id, meta.proposed_hash)) {
-          continue;
-        }
-        fresh.push(meta);
-      }
-      return fresh;
-    }),
+  const kept = await Promise.all(
+    rows.map(async (r) =>
+      (await bodyMatchesLatestVersion(storage, r.node_id, r.proposed_hash)) ? null : r,
+    ),
   );
-  const entries: ExternalEditEntry[] = lists.flat().map((meta) => ({
-    suggestion_id: meta.suggestion_id,
-    nest_id: nestId,
-    document_id: meta.document_id,
-    source: meta.source,
-    detected_at: meta.detected_at,
-    actor: meta.actor,
-    target_hash: meta.target_hash,
-    proposed_hash: meta.proposed_hash,
-    note: meta.note,
-  }));
-  return entries.sort((a, b) => b.detected_at.localeCompare(a.detected_at));
+  // Already newest-first from the query.
+  return kept.flatMap((r) =>
+    r
+      ? [{
+          suggestion_id: r.suggestion_id,
+          nest_id: nestId,
+          document_id: r.node_id,
+          source: r.source as SuggestionMeta["source"],
+          detected_at: r.detected_at,
+          actor: r.actor,
+          target_hash: r.target_hash,
+          proposed_hash: r.proposed_hash,
+          note: r.note ?? undefined,
+        }]
+      : [],
+  );
 }
 
 /** Read a single suggestion's full patch + meta for UI diff render. */

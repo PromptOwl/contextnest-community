@@ -14,7 +14,7 @@ Every nest is either **ungoverned** or **governed**, controlled by the `stewards
 | Stewards | Not shown | Assignable by scope |
 | Reads gated by permission | No | Yes (in key mode) |
 
-Flip the flag any time via **Settings → Stewardship**. Existing approved docs stay approved; existing drafts remain drafts.
+Flip the flag any time via the nest's **Settings → Stewardship**. Existing approved docs stay approved; existing drafts remain drafts.
 
 ## What a steward is
 
@@ -43,8 +43,8 @@ If nothing matches and no steward resolves, the **nest owner** is the implicit s
 ## The approval flow
 
 1. **Author** creates or edits a doc. In governed mode it saves as a **draft**.
-2. **Author** clicks **Submit for Review**. The doc becomes **pending** and appears in the review queue for anyone whose scope resolves to that doc.
-3. A **Reviewer steward** opens the review queue, reads the doc, clicks **Approve** or **Reject**. Rejecting requires a note.
+2. **Author** clicks **Submit for Review**. The doc becomes **pending** and appears in the review queue for anyone whose scope resolves to that doc — and in their **My Work** page across nests. Until someone acts the author can withdraw it back to draft.
+3. A **Reviewer steward** opens the review queue (or My Work), reads the doc, clicks **Approve** or **Reject**. Rejecting requires a note.
 4. On approve, the doc becomes **approved** and is now AI-readable. The approved version number is pinned (`approvedVersion`), so subsequent drafts don't automatically replace it — AI keeps getting the last blessed version until a new one is approved.
 
 ### Auto-publish owner & admin edits (`allow_self_approve`)
@@ -117,7 +117,7 @@ A super-admin can:
 - Add, remove, and re-role collaborators
 - Add, remove, and re-role stewards
 - Approve and reject pending versions in any nest's review queue
-- Manage the official community sites trusted for SSO auto-login (**Settings → Community sites**, or `GET/POST /admin/community-sites` — see `API.md`)
+- Manage the official community sites trusted for SSO auto-login (**Server settings → Community sites**, or `GET/POST /admin/community-sites` — see `API.md`)
 
 What a super-admin **cannot** do (owner-only operations):
 

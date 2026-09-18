@@ -549,13 +549,28 @@ describe("node_index — staying in sync with disk", () => {
     );
     expect(scan.data.staged).toBe(1);
 
-    // Staging recorded it in the DB, so the listing's pending badge is a
-    // SELECT rather than a recursive readdir of the whole nest.
-    const flagged = (await getDb().all(
-      "SELECT node_id FROM node_suggestions WHERE nest_id = ?",
+    // Staging recorded the suggestion itself in the DB — id, who, when, the
+    // hashes — so the External Edits list and its badge are a SELECT rather
+    // than a recursive readdir of the whole nest.
+    const rows = (await getDb().all(
+      "SELECT * FROM node_suggestions WHERE nest_id = ?",
       [nestId],
-    )) as Array<{ node_id: string }>;
-    expect(flagged.map((r) => r.node_id)).toContain(doc.id);
+    )) as Array<Record<string, unknown>>;
+    const row = rows.find((r) => r.node_id === doc.id)!;
+    expect(row).toBeTruthy();
+    expect(String(row.suggestion_id)).toMatch(/^s_/);
+    expect(row.source).toBe("out-of-band-edit");
+    expect(typeof row.actor).toBe("string");
+    expect(String(row.detected_at)).toMatch(/^[0-9]{4}-[0-9]{2}-[0-9]{2}T/);
+    expect(String(row.proposed_hash)).toMatch(/^sha256:/);
+    expect(String(row.target_hash)).toMatch(/^sha256:/);
+    expect(row.created_at).toBeTruthy();
+
+    // And the list endpoint serves exactly those rows.
+    const edits = await jsonRequest(
+      app, "GET", `/nests/${nestId}/external-edits`, undefined, owner.apiKey,
+    );
+    expect(edits.data.entries.map((e: any) => e.suggestion_id)).toContain(row.suggestion_id);
 
     const list = await jsonRequest(
       app,
@@ -581,17 +596,21 @@ describe("node_index — staying in sync with disk", () => {
     expect(still.map((r) => r.node_id)).toContain("nodes/beta/drifty");
   });
 
-  it("a rebuild reconciles the flag against disk", async () => {
+  it("a rebuild reconciles the rows against disk, details included", async () => {
     await getDb().run("DELETE FROM node_suggestions WHERE nest_id = ?", [
       nestId,
     ]);
     await jsonRequest(app, "POST", `/nests/${nestId}/reindex`, {}, owner.apiKey);
 
     const restored = (await getDb().all(
-      "SELECT node_id FROM node_suggestions WHERE nest_id = ?",
+      "SELECT node_id, suggestion_id, actor, detected_at FROM node_suggestions WHERE nest_id = ?",
       [nestId],
-    )) as Array<{ node_id: string }>;
-    expect(restored.map((r) => r.node_id)).toContain("nodes/beta/drifty");
+    )) as Array<{ node_id: string; suggestion_id: string; actor: string; detected_at: string }>;
+    const row = restored.find((r) => r.node_id === "nodes/beta/drifty")!;
+    expect(row).toBeTruthy();
+    expect(row.suggestion_id).toMatch(/^s_/);
+    expect(row.actor).toBeTruthy();
+    expect(row.detected_at).toBeTruthy();
   });
 
   it("POST /reindex restores an index emptied behind its back", async () => {

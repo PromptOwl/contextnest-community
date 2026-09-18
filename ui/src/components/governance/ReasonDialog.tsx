@@ -68,7 +68,10 @@ export function ReasonDialog({
   onConfirm,
 }: ReasonDialogProps) {
   const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
+  // Which action is in flight, so the spinner sits on the button that was
+  // pressed — with two actions a single flag put it on "confirm" either way.
+  const [running, setRunning] = useState<"confirm" | "secondary" | null>(null);
+  const busy = running !== null;
   const [error, setError] = useState<string | null>(null);
 
   const close = (next: boolean) => {
@@ -80,8 +83,8 @@ export function ReasonDialog({
     onOpenChange(next);
   };
 
-  const run = async (action: (reason: string) => Promise<void>) => {
-    setBusy(true);
+  const run = async (which: "confirm" | "secondary", action: (reason: string) => Promise<void>) => {
+    setRunning(which);
     setError(null);
     try {
       await action(reason.trim());
@@ -90,11 +93,11 @@ export function ReasonDialog({
     } catch (err: any) {
       setError(err?.message || "Something went wrong");
     } finally {
-      setBusy(false);
+      setRunning(null);
     }
   };
 
-  const confirm = () => run(onConfirm);
+  const confirm = () => run("confirm", onConfirm);
   // A required reason gates both actions — the whole point of the flow is that
   // nothing is raised unexplained, whichever outcome is asked for.
   const blocked = busy || (!!label && !optionalReason && !reason.trim());
@@ -159,10 +162,11 @@ export function ReasonDialog({
           {secondaryLabel && onSecondary && (
             <Button
               variant="outline"
-              onClick={() => run(onSecondary)}
+              onClick={() => run("secondary", onSecondary)}
               disabled={blocked}
               data-testid="reason-dialog-secondary"
             >
+              {running === "secondary" && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               {secondaryLabel}
             </Button>
           )}
@@ -172,7 +176,7 @@ export function ReasonDialog({
             variant={destructive ? "destructive" : "default"}
             data-testid="reason-dialog-confirm"
           >
-            {busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+            {running === "confirm" && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
             {confirmLabel}
           </Button>
         </DialogFooter>

@@ -390,6 +390,27 @@ export const ACCEPTED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
   "table",
 ]);
 
+/** The type gate shared by create and convert: the feature flags for the
+ *  artifact/table kinds, then the accepted set. Unknown types must fail as a
+ *  clean 400 here — otherwise they slip through and throw an opaque 500 from
+ *  deeper in the write path (the message gave a caller no idea the real
+ *  problem was the `type` field). */
+export function assertAcceptedType(type: string): void {
+  if (type === "artifact" && !config.TYPE_ARTIFACT_ENABLED) {
+    throw new ValidationError("Artifact nodes are disabled on this server");
+  }
+  if (type === "table" && !config.TYPE_TABLE_ENABLED) {
+    throw new ValidationError("Table nodes are disabled on this server");
+  }
+  if (!ACCEPTED_NODE_TYPES.has(type)) {
+    throw new ValidationError(
+      `unknown node type "${type}"; allowed: ${[...ACCEPTED_NODE_TYPES]
+        .sort()
+        .join(", ")}`,
+    );
+  }
+}
+
 export function toNodeResponse(node: ContextNode): NodeResponse {
   const fm = node.frontmatter;
   // Coerce string-ish fields. YAML parses bare values by type, so a
@@ -1246,6 +1267,9 @@ export interface UpdateNodePatch {
   schedule?: string;
   /** Document-scope prime flag. `null` clears it back to tag/nest inheritance. */
   prime?: boolean | null;
+  /** Re-type the node (the editor's "Convert to…"). Same accepted set and
+   *  feature flags as create; leaving a runnable type drops its schedule. */
+  type?: string;
 }
 
 /**
@@ -1404,23 +1428,7 @@ async function createNodeOnce(
   // version untouched. Runnable types (agent/skill/tool) are gated by
   // FEATURE_WORKFLOW_PLANE at the plane routes, not here.
   const requestedType = input.type || "document";
-  if (requestedType === "artifact" && !config.TYPE_ARTIFACT_ENABLED) {
-    throw new ValidationError("Artifact nodes are disabled on this server");
-  }
-  if (requestedType === "table" && !config.TYPE_TABLE_ENABLED) {
-    throw new ValidationError("Table nodes are disabled on this server");
-  }
-
-  // Unknown types must fail as a clean 400 here — otherwise they slip through
-  // and throw an opaque 500 from deeper in the write path (the message gave a
-  // caller no idea the real problem was the `type` field).
-  if (!ACCEPTED_NODE_TYPES.has(requestedType)) {
-    throw new ValidationError(
-      `unknown node type "${requestedType}"; allowed: ${[...ACCEPTED_NODE_TYPES]
-        .sort()
-        .join(", ")}`,
-    );
-  }
+  assertAcceptedType(requestedType);
 
   if (input.schedule !== undefined && !isRunnableType(input.type)) {
     throw new ValidationError(
@@ -1863,6 +1871,28 @@ export async function updateNode(
           frontmatter: { ...node.frontmatter, title: patch.title },
         };
         opInput.title = patch.title;
+      }
+      // Re-type BEFORE the schedule gate below, so "turn this document into
+      // an agent and schedule it" is one call — the gate reads the type the
+      // node is becoming, as create does.
+      if (patch.type !== undefined && patch.type !== node.frontmatter.type) {
+        assertAcceptedType(patch.type);
+        // A skill node is invalid without a skill block and this surface has
+        // no field for one — default the trigger from the title, as create
+        // does. The engine requires the block in the same call as the re-type.
+        if (patch.type === "skill") {
+          opInput.trigger = `when asked to ${String(node.frontmatter.title || nodeId).toLowerCase()}`;
+        }
+        // A schedule only means something on a runnable node; converting
+        // away from one would otherwise leave an orphan the scheduler ignores.
+        if (isRunnableType(node.frontmatter.type) && !isRunnableType(patch.type)) {
+          const metadata = { ...(node.frontmatter.metadata as any) };
+          delete metadata.schedule;
+          node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+          opInput.metadata = { ...(opInput.metadata as object), schedule: null };
+        }
+        node = { ...node, frontmatter: { ...node.frontmatter, type: patch.type as any } };
+        opInput.type = patch.type;
       }
       if (patch.schedule !== undefined) {
         if (!isRunnableType(node.frontmatter.type)) {

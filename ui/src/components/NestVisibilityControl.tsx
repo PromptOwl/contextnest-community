@@ -35,17 +35,40 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Globe, Lock, Loader2, Building2 } from "lucide-react";
+import { Globe, Lock, Loader2, Building2, ChevronDown, Check } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import * as api from "../lib/api";
+import { useNestMeta } from "../lib/queries";
 
 interface Props {
   nestId: string;
   /** Fired after a successful change so the parent can refresh its state. */
   onChanged: () => void;
   onError?: (message: string | null) => void;
+  /** "card" (default): the explained control the Collaborators tab and Share
+   *  dialog show. "compact": one small button for a top bar — the current
+   *  tier as its label, the three tiers in a menu. Same fetch, same apply,
+   *  same going-public acknowledgement. */
+  variant?: "card" | "compact";
 }
 
-export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
+const TIERS: Array<{ value: api.NestVisibility; label: string; hint: string }> = [
+  { value: "private", label: "Private", hint: "Only people added to the nest" },
+  { value: "org", label: "Organization", hint: "Everyone signed in here can read" },
+  { value: "public", label: "Public", hint: "Anyone with the URL can read" },
+];
+
+export function NestVisibilityControl({
+  nestId,
+  onChanged,
+  onError,
+  variant = "card",
+}: Props) {
   const [visibility, setVisibility] = useState<api.NestVisibility>("private");
   const isPublic = visibility === "public";
   const isOrg = visibility === "org";
@@ -54,16 +77,16 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
   // becomes readable by anyone on the internet, outside your organization.
   const [confirmPublic, setConfirmPublic] = useState(false);
 
+  // The same cached GET /nests/:id every nest screen reads — the compact
+  // variant sits on every document page, so a second fetch per view would
+  // add up, and the cache is what onChanged invalidates.
+  const meta = useNestMeta(nestId);
+  const serverVisibility = (meta.data as any)?.nest?.visibility as
+    | api.NestVisibility
+    | undefined;
   useEffect(() => {
-    // Read current visibility straight from the server so the toggle
-    // reflects truth without the parent having to thread it through.
-    api
-      .getNest(nestId)
-      .then((res) => setVisibility(res.nest?.visibility ?? "private"))
-      .catch(() => {
-        /* leave default; the roster below surfaces any real error */
-      });
-  }, [nestId]);
+    if (serverVisibility) setVisibility(serverVisibility);
+  }, [serverVisibility]);
 
   const apply = async (target: api.NestVisibility, acknowledgePublic?: boolean) => {
     // Optimistic change, reverting to the PREVIOUS value on failure — never
@@ -103,6 +126,86 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
     }
     await apply(next);
   };
+
+  const confirmDialog = (
+    <AlertDialog open={confirmPublic} onOpenChange={setConfirmPublic}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Make this nest public?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This makes the nest readable by anyone on the internet, outside
+            your organization. Anyone with the URL will be able to read it.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={() => {
+              setConfirmPublic(false);
+              void apply("public", true);
+            }}
+          >
+            Make public
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+
+  if (variant === "compact") {
+    // Until the nest read lands the local state is the "private" default —
+    // showing it would flash a Lock on a public nest. The read is the cached
+    // one every nest screen shares, so this is a frame on a cold load only.
+    if (!serverVisibility) return null;
+    const Icon = isPublic ? Globe : isOrg ? Building2 : Lock;
+    const current = TIERS.find((t) => t.value === visibility) ?? TIERS[0];
+    return (
+      <>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              disabled={saving}
+              className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
+              title={`${current.label} — ${current.hint}. Click to change.`}
+              aria-label={`Nest visibility: ${current.label}`}
+              data-testid="nest-visibility-compact"
+            >
+              {saving ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Icon
+                  className={`h-3.5 w-3.5 ${isPublic ? "text-green-600" : isOrg ? "text-blue-600" : ""}`}
+                />
+              )}
+              <span className="hidden sm:inline">{current.label}</span>
+              <ChevronDown className="h-3 w-3 opacity-60" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-64">
+            {TIERS.map((t) => (
+              <DropdownMenuItem
+                key={t.value}
+                onClick={() => void choose(t.value)}
+                className="flex items-start gap-2"
+              >
+                {t.value === visibility ? (
+                  <Check className="mt-0.5 h-4 w-4 shrink-0" />
+                ) : (
+                  <span className="w-4 shrink-0" />
+                )}
+                <span className="flex flex-col">
+                  <span className="text-sm">{t.label}</span>
+                  <span className="text-xs text-muted-foreground">{t.hint}</span>
+                </span>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+        {confirmDialog}
+      </>
+    );
+  }
 
   return (
     <div className="rounded-lg border p-4 space-y-3">
@@ -147,28 +250,7 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
         </div>
       </div>
 
-      <AlertDialog open={confirmPublic} onOpenChange={setConfirmPublic}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Make this nest public?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This makes the nest readable by anyone on the internet, outside
-              your organization. Anyone with the URL will be able to read it.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                setConfirmPublic(false);
-                void apply("public", true);
-              }}
-            >
-              Make public
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      {confirmDialog}
     </div>
   );
 }

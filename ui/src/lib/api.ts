@@ -461,6 +461,14 @@ export async function removeCommunitySite(id: string) {
   );
 }
 
+// Logged-in user renames themselves; empty clears the name (email shows).
+export async function updateProfile(name: string) {
+  return request<{ ok: boolean; name: string | null }>("/auth/profile", {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+}
+
 // Logged-in user changes their own password (e.g., after an admin reset
 // handed them a temporary one). Invalidates other sessions server-side.
 export async function changePassword(current: string, next: string) {
@@ -1004,8 +1012,10 @@ export async function listFolderNodes(nestId: string, folder: string) {
  * and never read a body: using listNodes here would force the `content=1`
  * vault crawl for bytes that are thrown away, on every load and refresh.
  */
-export async function listNodesMeta(nestId: string) {
-  return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
+export async function listNodesMeta(nestId: string, approvedOnly = false) {
+  return request<{ count: number; nodes: any[] }>(
+    `/nests/${nestId}/nodes${approvedOnly ? "?approved_only=1" : ""}`,
+  );
 }
 
 /** The nest-wide shape — one per nest, not per folder level. */
@@ -1020,8 +1030,11 @@ export async function getCommentCounts(nestId: string) {
   }>(`/nests/${nestId}/comment-counts`);
 }
 
-export async function getNode(nestId: string, nodeId: string) {
-  return request<{ node: any }>(`/nests/${nestId}/nodes/${nodeId}`);
+/** approvedOnly serves the approved body, as a public reader would get it. */
+export async function getNode(nestId: string, nodeId: string, approvedOnly = false) {
+  return request<{ node: any }>(
+    `/nests/${nestId}/nodes/${nodeId}${approvedOnly ? "?approved_only=1" : ""}`,
+  );
 }
 
 export async function createNode(
@@ -1056,6 +1069,8 @@ export async function updateNode(
     schedule?: string;
     /** Owner/admin only; `null` clears the flag back to tag/nest inheritance. */
     prime?: boolean | null;
+    /** Re-type the node ("Turn into…"). Same accepted set as create. */
+    type?: string;
   },
   baseVersion?: number,
 ) {
@@ -1779,6 +1794,11 @@ export async function listExternalEdits(nestId: string, refresh = false) {
   );
 }
 
+/** Pending external edits, as a number — the badge read. */
+export async function countExternalEdits(nestId: string) {
+  return request<{ total: number }>(`/nests/${nestId}/external-edits?count=1`);
+}
+
 export async function scanExternalEdits(nestId: string) {
   return request<{ scanned: number; staged: number }>(
     `/nests/${nestId}/external-edits/scan`,
@@ -2265,6 +2285,8 @@ export interface WatcherNotification {
   read_at: string | null;
   /** Document the row is about, when there is one — null for nest-level rows. */
   node_id?: string | null;
+  /** Resolved server-side; the inbox navigates on it without a nest list. */
+  nest_name: string;
 }
 
 export interface WorkPagination {

@@ -2,17 +2,18 @@
  * TeammatesPage — admin-only view for inviting teammates and managing their keys.
  */
 import React, { useState, useEffect } from "react";
-import * as api from "../lib/api";
+import * as api from "../../../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
-import { reads } from "../lib/queries";
-import { parseServerDate } from "../lib/dates";
-import { useAuth } from "../auth/AuthContext";
-import { copyTextWithToast } from "../lib/clipboard";
+import { reads } from "../../../lib/queries";
+import { parseServerDate } from "../../../lib/dates";
+import { useAuth } from "../../../auth/AuthContext";
+import { copyTextWithToast } from "../../../lib/clipboard";
 import {
-  ArrowLeft, UserPlus, Shield, ShieldCheck, ShieldOff, Users, Copy, Check,
+  UserPlus, Shield, ShieldCheck, ShieldOff, Users, Copy, Check,
   AlertCircle, Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { PageTitle } from "@/components/ui/page-title";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -26,9 +27,6 @@ import {
 } from "@/components/ui/dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 
-interface TeammatesPageProps {
-  onBack: () => void;
-}
 
 interface Teammate {
   id: string;
@@ -40,7 +38,7 @@ interface Teammate {
   last_active: string | null;
 }
 
-export function TeammatesPage({ onBack }: TeammatesPageProps) {
+export default function TeammatesPage() {
   const { adminStatus } = useAuth();
   const myEmail = adminStatus?.me?.email?.toLowerCase() ?? null;
   const [teammates, setTeammates] = useState<Teammate[]>([]);
@@ -128,21 +126,17 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
 
   return (
     <div>
-      <div className="flex items-center gap-3 mb-4">
-        <Button variant="ghost" size="icon" onClick={onBack}>
-          <ArrowLeft className="h-4 w-4" />
-        </Button>
-        <div className="flex-1">
-          <h2 className="text-2xl font-semibold">Teammates</h2>
-          <p className="text-sm text-muted-foreground">
-            Add teammates and manage their access
-          </p>
-        </div>
-        <Button onClick={() => setShowInvite(true)}>
-          <UserPlus className="h-4 w-4 mr-2" />
-          Invite Teammate
-        </Button>
-      </div>
+      <PageTitle
+        icon={Users}
+        title="Teammates"
+        description="Add teammates and manage their access"
+        actions={
+          <Button onClick={() => setShowInvite(true)}>
+            <UserPlus className="h-4 w-4 mr-2" />
+            Invite Teammate
+          </Button>
+        }
+      />
 
       {error && (
         <Alert variant="destructive" className="mb-4">
