@@ -5,20 +5,22 @@
  *   GET  /llms.txt  — public agent manual: endpoints, MCP, selector grammar,
  *                     hop/skip retrieval semantics, npm packages
  *   GET  /index     — the caller's grounded nest index (markdown or json)
- *   ALL  /mcp       — stateless MCP endpoint: nest_index + cross-nest read
- *                     tools that take a `nest` (id or name) argument
+ *   ALL  /mcp       — stateless MCP endpoint: nest_index + cross-nest tools
+ *                     that take a `nest` (id or name) argument
  *
- * Write tools stay on the per-nest endpoint (/nests/:id/mcp) — cross-nest
- * mutation through one socket makes authz mistakes easy; reads are gated
- * per call via resolveNestPermission. Nest-scoped API keys are honored:
- * the index and every cross-nest call are restricted to the scoped nest.
+ * Fan-out reads: `context_search`, `context_list`, `context_query`,
+ * `context_overview` accept `nest` as optional — omit to query ALL accessible
+ * nests and get combined results. Targeted reads (`context_get`, etc.) and
+ * all writes require an explicit `nest` argument.
  *
- * Two narrow exceptions to read-only, so single-connection clients (the
- * PromptOwl native tool) can bootstrap content: `nest_create` (caller owns
- * the new nest — no cross-nest authz to get wrong) and `context_create`
- * (gated by handleToolCall's own stewardship.canCreateInNest check, the
- * same PRIMARY write gate the per-nest endpoint uses). Everything else —
- * updates, governance, sharing — still requires the per-nest endpoint.
+ * Writes available here: `nest_create`, `context_create`, `context_update`,
+ * `context_delete`, `context_move`, `context_submit_review`. Each is gated
+ * per-call by the same permission checks the per-nest endpoint uses
+ * (handleToolCall's canCreateInNest / canUserEdit / canUserApprove).
+ *
+ * Governance tools that manage people or nest settings (`context_approve`,
+ * `context_reject`, `context_share_nest`, `context_stewards`, etc.) stay on
+ * the per-nest endpoint only.
  */
 import { Hono } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";

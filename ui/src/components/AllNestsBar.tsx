@@ -152,9 +152,9 @@ export function AllNestsBar({
               <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span>
                 Search and list across all nests at once, or target a specific
-                nest. Create, update, delete, and move documents — just name the
-                nest. Governance tools (approve, share) stay in each nest's
-                Connect panel.
+                nest. Create, update, delete, move, and submit for review — just
+                name the nest. Approval and sharing stay in each nest's Connect
+                panel.
               </span>
             </div>
           </div>

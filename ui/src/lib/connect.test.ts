@@ -349,10 +349,12 @@ describe("write honesty (ticket AC: no false read-only claims)", () => {
     const p = allNestsChatPrompt("https://x.ai");
     expect(p).not.toMatch(/does ?n'?t write|read-only/i);
     // server-routes.ts exposes writes on /mcp — prompt mentions them
+    expect(p).toContain("nest_create");
     expect(p).toContain("context_create");
     expect(p).toContain("update");
     expect(p).toContain("delete");
     expect(p).toContain("move");
+    expect(p).toContain("submit_review");
     expect(p).toMatch(/asking me first/i);
   });
 });

@@ -64,7 +64,7 @@ export function allNestsChatPrompt(
     "",
     "SEARCH/LIST: Omit `nest` to search across ALL nests at once, or specify a nest to target one.",
     "READS: context_get/context_resolve need a `nest` argument — specify which nest.",
-    "WRITES: context_create/update/delete/move need a `nest` — name the target nest.",
+    "WRITES: nest_create (no nest needed), context_create/update/delete/move/submit_review need a `nest`.",
     "",
     "Cite what you use as `nest:id`. Never write without asking me first.",
   ].join("\n");
