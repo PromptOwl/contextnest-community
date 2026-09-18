@@ -1,5 +1,89 @@
 # @promptowl/contextnest-community
 
+## 1.24.0
+
+### Minor Changes
+
+- d367e2f: Account page. The account menu's single **Account** entry opens `/account`: your avatar initial, name (edit in place), email with the Admin badge, and password (opens the change dialog). It replaces the Change password menu item. Backed by `PATCH /auth/profile { name }` — trimmed, ≤ 80 characters, empty clears the name so the email shows.
+- 4bf6f98: `POST /nests/:id/context` with a `prompt` returns the documents relevant to it, ranked — not the neighbourhood, and not the nest.
+
+  **Bodies count.** The prompt compiler matched tokens against tag names and titles only, so a natural-language question ("how do I run a conflict check?") usually compiled to nothing and came back empty — which pushed callers into dumping the whole nest as a stand-in — or compiled to one weak title while the real answer sat in another document's body. Every document is now scored against the prompt (title hits weigh most, then tags, then body words), unioned with the compiled matches, and anything under half the top score is dropped as noise. A prompt that matches nothing — a greeting — returns `nodes: []`. `trace.compiled.fallback` is `"fulltext"` when body scoring alone produced the answer.
+
+  **No hop noise by default.** A prompt used to inherit `hops: 2`, so every keyword match dragged in two hops of wikilink neighbours as full nodes, indistinguishable from the match — and a caller citing every node returned cited them all. The prompt path now defaults to `hops: 0`; pass `hops` to expand. Explicit `selector` requests keep their `hops: 2` default.
+
+  **Per-node relevance.** On the prompt path each entry in `nodes` carries `score` (0–1) and `via` (`"title"`, `"tag"`, `"fulltext"`, or `"hop"` for a neighbour pulled in by an explicit `hops`). `nodes` and the `context` blocks are ordered by score. Additive: selector-path responses are unchanged.
+
+  **The budget fills instead of stopping.** Budget-fitting used to stop at the first document that didn't fit, so one large document early in the list left the rest of `max_tokens` unused — a 38-document match could come back as one. A document that doesn't fit is now skipped and the next is tried; only when nothing fits at all does the best match go through oversized, so a non-empty result is never an empty answer. `GET /nests/:id/export?max_tokens=` fills the same way.
+
+- 75f6147: The document page reads like a page, not a form.
+
+  **An index beside the document.** Every nest you can see sits in a collapsible rail on the left, the current one opened into its views — Overview, Review queue (with its pending count), Board, Graph, Definitions, Workflows, gated the same way as the nest view switcher — and its folder → document tree with the open document highlighted, the same tree the nest's Documents tab shows. Moving between documents is one click; hide the rail and it stays hidden (per browser). On a phone the rail is a drawer.
+
+  **One top bar.** Where you are (nest › folder, status) on the left; what you can do on the right: last-edited time, the nest's visibility — an owner or admin flips private / organization / public right there, with the same going-public acknowledgement as the Share dialog — Share, Comments, Compare, Submit for review, Save, and everything else in ⋮ (version history, markdown source, copy link, move, share this document, publish, discard draft, delete). The sticky footer and the Title / Tags / Content labels and boxes are gone: the title is the heading, tags are a quiet row under it, and the body is the page.
+
+  **Click to write, select to format.** The body is prose until you click into it; the block toolbar appears with the caret and leaves with it, and highlighting text brings up the formatting bubble. The window scrolls, not a box inside the page.
+
+  **Comments stay out of the way.** The comments rail starts closed instead of taking a third of the width to say "No comments yet", and opens from the top bar (with the open-thread count), for a deep link to a thread, on entering comment mode, or when you pin a comment to a selection. Its state is remembered per browser.
+
+  **Fix: opening a document no longer says "Unsaved changes".** A document whose markdown didn't round-trip byte-for-byte through the editor — any document with a table — opened already dirty and wrote a spurious version on the first click-out. The editor normalising a freshly parsed table is no longer reported as an edit.
+
+  **Turn into.** A document can now become an agent, skill, tool, table or hosted artifact after the fact — ⋮ → _Turn into…_ on the document page, and _Turn into a document_ on an artifact's page — where the type used to be fixed at creation. `PATCH /nests/:id/nodes/:nodeId` accepts `type` with the same gate as create; converting to a skill defaults its trigger from the title, and converting away from a runnable type drops its schedule.
+
+  **The sidebar stays.** Leaving a document for the board, graph, review queue or definitions kept the index — it wraps every page inside a nest now, with the current view highlighted and Connect one row down, and the old tab strip only shows on phones or when the sidebar is hidden.
+
+  **Definitions is just the table.** Rows edit in place (click one; Enter or Ctrl+Enter saves, Escape cancels), a new term is the last row, and the duplicate-term warning appears under the row you're on. No form above the table.
+
+  On the dashboard the sidebar is the app's navigation — **Nests**, **My Work** and **My Drafts**, badges included — and each is its own page (`/`, `/my-work`, `/my-drafts`), so the tab strip above the nest grid is gone and a page can be bookmarked or shared. Each is its own component and chunk: opening `/` no longer fetches the inbox and drafts, and opening `/my-work` no longer fetches every nest — a page loads its own data when it opens, and the sidebar badges come from two one-row reads. Archived nests are a switch at the end of the Nests filter row instead of a fourth tab; the list, its filter/sort and restore are unchanged. Under a nest the sidebar keeps Overview and Review queue — with a badge when something is waiting — at the top, with Board · Graph · Definitions · Workflows folded under **Views** (remembered per browser, opened when you're on one of them).
+
+  **Nest views have their own URLs.** Board, Graph, Definitions and Workflows are `/nest/<id>/board` … (the old `?view=` links still open), each its own page behind the same folder registry the dashboard uses. The header shows a breadcrumb — Home › nest › page, or the document's title — everywhere.
+
+  **The nest page paints tab by tab.** Overview, Documents, Review, External Edits, Stewards and Collaborators each load their own data and show their own loader, so a slow disk scan for external edits no longer holds the whole page on one spinner. Each tab is its own chunk, loaded when first opened; so are the nest page, the editor and the settings pages.
+
+  **External edits come from the database.** Staged external edits are recorded as they are staged (who, when, source, hashes) and the External Edits list and its badge read that table instead of walking every document in the vault — on a deep folder tree that walk was the slowest request on the page. Existing installs rebuild the table on the nest's next index refresh (migration 043). `GET /nests/:id/external-edits?count=1` returns the total only.
+
+  **Fewer requests per page.** Opening a nest fetches its metadata once (it was four times), the sidebar tree loads one folder level at a time instead of the whole nest, comment counts load with the Documents tab rather than the Overview, and the Review-tab gate reads the comment feed only when nothing else already shows the tab. `/me/work` notification rows carry `nest_name`, so opening one needs no nest list.
+
+  **Editing.** The toolbar is always visible in edit mode and sticks under the top bar; the Type control (Document · Artifact · Table · Agent · Skill · Tool) sits on the page for existing documents too — picking another type is "Turn into", with a one-step confirmation. Markdown source moved to the toolbar, Discard draft to the bottom bar beside Save. The artifact page shares the document page's layout: same top bar, padded column, and a comments rail that opens on demand.
+
+  **Nest header.** Rename is a pencil beside the name; Import and New Document sit with New Folder on the tab row; a `+` on every sidebar folder creates a document there.
+
+### Patch Changes
+
+- 808d1d4: Archive requests in My Work use the same Approve / Reject buttons as review items. The two actions were a small outline button and a ghost link next to the green/red pair on review rows; both workflows now render the one shared pair.
+- cfeb7b2: An archived nest hides the controls that could only fail. In the nest view: Connect, the Reader Mode switch, Activity trace, and Assign / Remove / Edit steward. In a document: the visibility dropdown becomes a read-only badge, and Share, Share this document and Publish are gone. Everything read-only — version history, copy link, compare, comments — stays.
+- 56169a8: Sharing on an archived nest says it is archived. Opening a document's Share dialog in an archived nest showed the owner "Required permission: 'write', your permission: 'read'" — the archive cap in a permission's clothing — and offered a form that could only fail. Refusals on an archived nest now name the archive, and the dialog shows an archived notice with the add and remove controls gone; the existing roster stays visible for reference.
+- 960b5cd: An archived nest still shows who its documents are shared with. The archive cap dropped the owner to read-only, which also locked them out of the sharing roster, so the Share dialog opened empty. Owners and admins can read the roster of an archived nest again; sharing and unsharing stay refused until the nest is restored.
+- 9126dd0: An archived nest's owner is no longer told they cannot manage stewards. The steward gate read the archive-capped permission, so the owner (and the server admin) saw "You don't have permission to manage stewards" on their own archived nest. Standing is unchanged by archiving: the steward roster and the activity trace stay readable, and a change is refused as "This nest is archived".
+- 4e5dfdd: Community sites say Enabled / Disabled instead of Active / Inactive. The badge only ever reflected the admin switch — the server never contacts a site (SSO tickets are verified locally with the shared secret), so "Active" implied a reachability it could not know. The switch's tooltip says the same.
+- 3f32d34: `contextnest://` links in a document open like wiki links. A bare `contextnest://nodes/gtm/deals` in the text, or a `[label](contextnest://nodes/…)` link, now renders as a link to that page in the reader and the document view — click opens it, hover previews it. A `@checkpoint` pin or `#anchor` on the URI is ignored for resolution; tag, search and folder URIs have no page to open and stay plain text.
+- 2ddfb74: Coverage Gaps no longer reports "Every category has a steward" for a nest with no categories. With nothing tagged there is no coverage to evaluate, so the row now says "No categories yet" (or "No categories or stewards yet" when the nest has no stewards either) instead of a clean bill of health.
+- d18c3d6: Every nest now has its own URL: `/nest/<id>`.
+
+  Until now a nest — public or private — was only reachable as `/?nest=<id>`, a query-string deep link into the app shell, so there was nothing clean to share, embed, or bookmark. The app now writes the path form for every nest-scoped view (documents, graph, workflows, board, trace keep their `?doc=` / `?view=` / `?tab=` parameters after it), and the document "Copy link" action produces it too. Old `?nest=<id>` links and the links in notification emails keep working: they resolve the same way and are rewritten to the path form on load.
+
+- d367e2f: The document meta row separates creator and collaborators — `Created by <author> · Collaborators: <chips> N` — instead of running email, chips and count together. Adding a tag now confirms with a toast that names the tag and reminds that Save persists it. The comments rail header stays on one line so the Comment mode switch no longer sits below a wrapped label.
+- 8244e5e: Document and nest page polish. The app header's breadcrumb row stays pinned while a page scrolls, with the document and artifact toolbars sitting flush under it. A document's outline moves from a card above the body to the right rail, giving way to Comments when they are opened. The comments rail has more room and a header rule; related-document lists separate titles with a dot. The nest Overview waits for the document tree before it can say "No documents yet". Artifacts stored as markdown or plain text keep their line breaks in Annotate and render as formatted markdown in Preview.
+- 263665a: Three folder fixes in the nest view.
+
+  **New Document lands in the folder you're looking at.** With the Documents tab scoped to a folder, the header's New Document button always filed the document under the nest root. It now defaults to that folder; the editor's folder picker still lets you change it.
+
+  **Folder names keep their casing in the New Document picker.** The create-form breadcrumb and subfolder list rendered the raw storage slug (`a`) while every other surface showed `A`. They now use the same display name.
+
+  **Empty folders show on the Overview.** The Contents card hid the folder tree until the nest had at least one document, so folders created first were invisible even though the folder count had moved.
+
+- f571fd9: The Graph tab only offers layer toggles that have something to toggle. A nest with no stewards no longer shows a Stewardship switch or legend row, and the same goes for Categories and Links; Structure is always there.
+- b3218ad: How it works is now a page-by-page tour of the app (nests, documents, review, views, workspace, admin) instead of a workflow-plane manual; the Docs page frames the agent manual for people and points them at How it works; /llms.txt covers folders, tables, versions, comments, the /me inbox and the full per-nest MCP toolset.
+- 06d746f: Server Settings rejects a malformed product analytics key and says why. The PostHog key field saved any string, so a typo silently turned analytics on with a key that could never send an event. A key must now look like a PostHog project API key (`phc_` plus a long run of letters and digits); the inline message names the rule that failed — wrong prefix, stray characters, or too short — and nothing is written. Clearing the field still turns analytics off.
+- 3f13e09: "Preview as reader" for nests with Reader Mode on. Owners and editors always saw the authoring view, so checking what visitors get meant a logged-out browser. The Reader Mode dialog now has a Preview as reader button that shows the visitor-facing reader in place — approved documents and approved text only, exactly as a visitor sees them — with an Exit preview bar to return to the authoring view. Rights are unchanged while previewing.
+- c0a0911: Reader Mode shows the whole nest on first load. The public reader fetched only the root level and the first top-level folder, so every other folder sat collapsed until a visitor clicked it, and a home page that lived in a later folder never resolved — the reader opened empty. It now reads the nest's document list in one metadata-only request, lists every folder expanded, and opens the designated home page wherever it lives.
+- fe47446: Reader Mode is laid out as three cards that scroll on their own. The contents, article and "On this page" panels fill the window below the header and each scrolls internally, so the page never scrolls as a whole; the nest name heads the contents as a proper heading with a search box under it; the outline lists every heading of the open page, indented by level, exactly as the editor's outline does; Previous / Next are proper buttons after the article; and long nest, page and folder names truncate with a tooltip instead of stretching the layout.
+- 04bc5b3: Reader Mode's contents panel has a search box. Type part of a page title or a tag (with or without the `#`) and the tree gives way to the matching pages with their folder; clear it to get the tree back.
+- c0a2e6b: Reader Mode's contents and "On this page" columns share one height. Each column sized to its own content, so the hairlines framing the article ended at different points on every page. Both now take the same viewport-based height and scroll internally.
+- 9b9b250: "Request archive" shows its own spinner. In the nest removal dialog, pressing Request archive spun the Request deletion button instead — the dialog had one busy flag and always drew the spinner on the primary action. The spinner now follows the button that was pressed.
+- d367e2f: The document sidebar filters nests by name. The rail listed every nest flat with no way to narrow it; a small filter above the list (shown when there is more than one nest) does what the dashboard's filter already did. The current nest is never filtered out.
+- 68eb09b: UI neutrals move from warm stone to zinc so the sidebar and cards sit in the same family as the navy primary; both sidebar rails (app pages and a nest's views and tree) share one row style — same text size, icon size, height and spacing — and idle rows read darker.
+- 283b90d: Wiki links inserted from the editor carry the document's full path. The `[[` picker and the link dialog wrote `[[nodes/<slug>|Title]]` with the folder dropped, so a link to a page inside a folder pointed at a path that did not exist and only resolved by luck of the slug. They now write the full node id; existing short links still open through the slug fallback.
+
 ## 1.23.0
 
 ### Minor Changes
