@@ -235,7 +235,8 @@ Pins are per `(user, nest)` in the `nest_pins` table and cascade with the nest. 
   "stewardship_enabled": false,
   "allow_self_approve": false,
   "prime_only_review": false,
-  "prime_tags": ["prime-document"]
+  "prime_tags": ["prime-document"],
+  "creator_is_reviewer": false
 }
 ```
 
@@ -249,6 +250,7 @@ Every field is optional; only the ones present are changed.
 - `allow_self_approve` — owner/admin writes publish immediately instead of drafting.
 - `prime_only_review` — in a governed nest, only **prime** documents need approval; everything else self-publishes. Off by default.
 - `prime_tags` — tags that mark a document prime. Accepts an array or a comma-separated string; stored and returned normalized (no leading `#`, lowercased, deduped). See `STEWARDSHIP.md → Prime documents`.
+- `creator_is_reviewer` — in a governed nest, whoever creates a document becomes its document-scope `reviewer` and v1 publishes immediately; later changes go through review as usual (the creator approves teammates' changes, another reviewer approves the creator's). Prime documents still draft. Future creates only. Off by default. See `STEWARDSHIP.md → Creators review their own documents`.
 
 Turning stewardship **off** wipes stewards and pending reviews and is owner-only; the other fields are non-destructive and never change the state of anything already published.
 

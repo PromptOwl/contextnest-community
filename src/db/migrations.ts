@@ -205,6 +205,13 @@ export function runMigrations(db: Database.Database): void {
     db.exec("ALTER TABLE nests ADD COLUMN prime_tags TEXT NOT NULL DEFAULT 'prime-document'");
   }
 
+  // Creator reviews their documents: on create, the author becomes the
+  // document's reviewer steward and v1 publishes. Off by default so a governed
+  // nest keeps routing new documents to its assigned reviewers on upgrade.
+  if (!nestCols.includes("creator_is_reviewer")) {
+    db.exec("ALTER TABLE nests ADD COLUMN creator_is_reviewer INTEGER NOT NULL DEFAULT 0");
+  }
+
   // Freshness stamp for node_index (migration 036). NULL means "rebuild before
   // answering" — the state every existing nest starts in on upgrade, and the
   // state any write we could not mirror puts it back into.

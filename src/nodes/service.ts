@@ -37,11 +37,16 @@ import {
   resolveNestPath,
   nestAllowsSelfApprove,
   nestReviewsPrimeOnly,
+  nestCreatorIsReviewer,
 } from "../nests/service.js";
 import { isPrimeDocument, documentPrimeFlag } from "../governance/prime-service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
 import { notifyMentions } from "../governance/mention-notify.js";
-import { resolveUserRoles } from "../governance/stewardship-service.js";
+import {
+  resolveUserRoles,
+  stewardDocumentCreator,
+  removeSteward,
+} from "../governance/stewardship-service.js";
 import { canApproveWith } from "../governance/roles.js";
 import {
   resolveCallerEmail,
@@ -1285,6 +1290,13 @@ export interface UpdateNodePatch {
  */
 export interface WriteOptions {
   notifyMentions?: boolean;
+  /**
+   * False keeps a create out of the nest's creator-reviews posture: the
+   * author is not stewarded and v1 is not published on their authority. For
+   * documents the system derives (the annotations projection), which nobody
+   * authored.
+   */
+  creatorReviews?: boolean;
 }
 
 export interface NodeMutationResult {
@@ -1344,11 +1356,19 @@ async function assertMayFlagPrime(
 async function autoPublishReason(
   nestId: string,
   userEmail: string,
-  doc: { tags?: readonly unknown[]; metadata?: unknown }
+  doc: { tags?: readonly unknown[]; metadata?: unknown },
+  opts: { creatorReviews?: boolean; governed?: boolean } = {},
 ): Promise<string | null> {
-  // Ungoverned nest: nothing to review, nobody to review it.
-  if (!(await isStewardshipEnabled(nestId))) return "no stewards configured";
+  // Ungoverned nest: nothing to review, nobody to review it. A caller that
+  // already looked this up passes it in — create is a hot path.
+  const governed = opts.governed ?? (await isStewardshipEnabled(nestId));
+  if (!governed) return "no stewards configured";
   if (await isPrimeDocument(nestId, doc.tags, doc.metadata)) return null;
+  // Creator-reviews (a create, in a nest with the posture on): the author is
+  // this document's reviewer, so v1 is theirs to publish. Only v1 — every
+  // later edit, theirs included, is a change to a reviewed document and goes
+  // through the queue.
+  if (opts.creatorReviews) return "creator is the document's reviewer";
   // Prime-only posture: everything that isn't prime self-publishes.
   if (await nestReviewsPrimeOnly(nestId)) {
     return "prime-only review, document is not prime";
@@ -1494,56 +1514,100 @@ async function createNodeOnce(
       ...(input.schedule ? { schedule: input.schedule } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
     };
-    const publishReason = await autoPublishReason(nestId, userEmail, {
-      tags,
-      metadata,
-    });
-    // Same note in the engine history and the governance row: the version
-    // history an admin reads in the UI comes from node_versions, so leaving the
-    // reason only in history.yaml hides it from the audit that matters.
-    const publishNote =
-      publishReason === null ? undefined : `Auto-published on create (${publishReason})`;
+    // Creator-reviews: steward the author BEFORE deciding to publish, since v1
+    // publishes on the strength of that row. A failure here fails the create
+    // with nothing written — never a document published on a false premise.
+    // The id is reserved by the lock and free (checked above), so the row
+    // can't name someone else's document. Not atomic with the engine write
+    // (a separate filesystem + DB path this can't join in one transaction), so
+    // it is compensated instead: everything from here until the document is on
+    // disk runs under one guard that takes the row back on any failure. A row
+    // left behind on a free id would attach to whoever creates that id next.
+    const governed = await isStewardshipEnabled(nestId);
+    const creatorReviews =
+      opts.creatorReviews !== false &&
+      governed &&
+      (await nestCreatorIsReviewer(nestId));
+    const creatorSteward = creatorReviews
+      ? await stewardDocumentCreator(nestId, id, userEmail)
+      : null;
 
-    // Write — and publish, when the gate allows — through the engine's canonical
-    // create. Governance stays here; the engine owns frontmatter assembly,
-    // validation, version assignment and the index regen, so a document created
-    // here is identical to one created by the CLI or mcp-server.
-    let published = publishReason !== null;
+    let published = false;
+    let publishNote: string | undefined;
     try {
-      await engineApi.run(
-        "context_create",
-        {
-          id,
-          title: input.title,
-          content: input.content,
-          type: requestedType,
-          // A skill node is invalid without a skill block, and this surface has
-          // no field for one — default the trigger from the title, same as the
-          // CLI and mcp-server do.
-          ...(requestedType === "skill"
-            ? { trigger: `when asked to ${input.title.toLowerCase()}` }
-            : {}),
-          ...(tags.length ? { tags } : {}),
-          ...(input.status ? { status: input.status } : {}),
-          metadata,
-          publish: published,
-          ...(publishNote ? { note: publishNote } : {}),
-        },
-        await opContext(nestId, userEmail),
+      const publishReason = await autoPublishReason(
+        nestId,
+        userEmail,
+        { tags, metadata },
+        { creatorReviews: creatorSteward?.canApprove === true, governed },
       );
-    } catch (err) {
-      // The op writes the node before publishing it. If the write landed and
-      // only the publish failed, register the document as a draft instead of
-      // throwing and stranding a file that has no governance rows.
-      let onDisk = true;
+      // Same note in the engine history and the governance row: the version
+      // history an admin reads in the UI comes from node_versions, so leaving
+      // the reason only in history.yaml hides it from the audit that matters.
+      publishNote =
+        publishReason === null
+          ? undefined
+          : `Auto-published on create (${publishReason})`;
+      published = publishReason !== null;
+
+      // Write — and publish, when the gate allows — through the engine's
+      // canonical create. Governance stays here; the engine owns frontmatter
+      // assembly, validation, version assignment and the index regen, so a
+      // document created here is identical to one created by the CLI or
+      // mcp-server.
       try {
-        await storage.readDocument(id);
-      } catch {
-        onDisk = false;
+        await engineApi.run(
+          "context_create",
+          {
+            id,
+            title: input.title,
+            content: input.content,
+            type: requestedType,
+            // A skill node is invalid without a skill block, and this surface
+            // has no field for one — default the trigger from the title, same
+            // as the CLI and mcp-server do.
+            ...(requestedType === "skill"
+              ? { trigger: `when asked to ${input.title.toLowerCase()}` }
+              : {}),
+            ...(tags.length ? { tags } : {}),
+            ...(input.status ? { status: input.status } : {}),
+            metadata,
+            publish: published,
+            ...(publishNote ? { note: publishNote } : {}),
+          },
+          await opContext(nestId, userEmail),
+        );
+      } catch (err) {
+        // The op writes the node before publishing it. If the write landed and
+        // only the publish failed, register the document as a draft instead of
+        // throwing and stranding a file that has no governance rows.
+        let onDisk = true;
+        try {
+          await storage.readDocument(id);
+        } catch {
+          onDisk = false;
+        }
+        if (!onDisk) throw err;
+        console.error("publishDocument failed (node create auto-publish)", err);
+        published = false;
       }
-      if (!onDisk) throw err;
-      console.error("publishDocument failed (node create auto-publish)", err);
-      published = false;
+    } catch (err) {
+      // Nothing is on disk (the inner catch only rethrows when the write never
+      // landed), so the steward row would name a document that never existed.
+      // The original failure is what the caller needs to see; a failed
+      // compensation is logged, not substituted for it.
+      if (creatorSteward?.insertedId) {
+        try {
+          await removeSteward(creatorSteward.insertedId);
+        } catch (cleanupErr) {
+          console.error(
+            "removeSteward failed while compensating a failed create",
+            id,
+            cleanupErr,
+          );
+        }
+      }
+      throw err;
     }
 
     const node = await storage.readDocument(id);
