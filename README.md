@@ -8,17 +8,19 @@
 
 ## What it is
 
-ContextNest Community Edition is a self-hosted server that lets you:
+A shared knowledge base for your team **and** your AI agents, running on your own machine or infrastructure. Documents live in **nests**; every save is a version; in a stewarded nest a change waits for a reviewer before agents can read it. People write in the browser, agents read and write the same documents over MCP, HTTP or the `ctx` CLI.
 
-- Store, version, and govern markdown-based context documents ("nests"), filed in folders you can reorganize as the vault grows
-- Import an existing folder or vault of markdown files in one step
-- Export a nest as a portable bundle and re-import it on another self-hosted host
-- Apply stewardship workflows — draft, pending review, approved
-- Share nests with collaborators or publish them read-only to the public
-- Serve approved context to AI agents via MCP or HTTP — connect one by pasting a generated setup prompt or downloading a ready `.env`, or register the nest in the ctx CLI (`ctx vault add <alias> --url <server>/nests/<id>/mcp --bearer-env CONTEXTNEST_API_KEY`, then `ctx query "#tag" --vault <alias>`)
-- Sync with the PromptOwl hosted platform for multi-user collaboration
+Concretely, it lets you:
 
-The server runs locally or on your own infrastructure. Your PromptOwl account handles authentication, entitlement, and governance metadata.
+- Write Markdown documents — plus hosted HTML artifacts and CSV tables agents can query row by row — filed in folders, linked with `[[Title]]`, tagged, commented on, and versioned
+- Import an existing folder of Markdown in one step; export a nest as a portable bundle
+- Govern changes — draft → pending review → approved — with stewards per nest, tag or document, and a cross-nest inbox (My Work, My Drafts) for what is waiting on you
+- Share a nest with people or teams, share a single document or folder, or publish read-only to the public
+- Give agents deterministic reads: the same selector returns the same context every time, with a trace of what was pulled
+- Run agents against a nest (Workflows, Beta): an agent is a document whose body is instructions; its output lands as a pending review
+- Sync with the PromptOwl hosted platform for accounts, licensing and teams
+
+Your PromptOwl account handles authentication, entitlement, and governance metadata.
 
 ## Quickstart
 
@@ -73,6 +75,40 @@ The key is read at boot. The server validates against PromptOwl on startup; if v
 
 For redistribution, hosted-service, OEM, or regulated-industry licensing, contact **hoot@promptowl.ai**.
 
+## First five minutes
+
+1. **Create a nest** on the Nests page — or **Import folder** to bring in Markdown you already have.
+2. **Write a document.** `[[Title]]` links another document, `@name` mentions a person, tags go under the title. Every save is a version.
+3. **Turn on stewardship** (nest Settings) if you want review. Saves become drafts; **Submit for review**; a steward approves or rejects. Alone? Allow self-approve and you get the history without the ceremony.
+4. **Connect an agent.** Inside a nest, **Connect** (bottom of the sidebar) gives you the MCP URL and a REST snippet; **Add with AI** (nest overview) is a prompt that has an agent write context in. Mint a key under Workspace → API keys.
+5. **Share.** The whole nest with a person or team, one document or folder, or make it public with a read-only Reader mode.
+
+The in-app **How it works** page (sidebar → Help) is the full tour; **Docs** (header) is the agent manual.
+
+## Around the app
+
+One sidebar, grouped:
+
+| Group | Pages | Who |
+|---|---|---|
+| — | **Nests** — every nest you can see, pinned first | everyone |
+| Work | **My Work** (reviews and handoffs waiting on you, across nests) · **My Drafts** (yours, never submitted) | everyone |
+| Workspace | **Teams** · **API keys** | everyone |
+| Admin | **Teammates** · **Server settings** · **Activity trace** | server admins |
+| Help | **How it works** | everyone |
+
+Inside a nest: the document tree, plus **Board** (documents as cards by folder, status or tag), **Graph** (documents, links, tags, stewards), **Definitions** (the nest's glossary) and **Workflows** (Beta). The user menu (top right) holds **Account** (name, password), keyboard shortcuts and logout. `Ctrl`/`⌘` `K` searches every nest and document; `?` lists shortcuts.
+
+## Connect an agent
+
+Point any agent at `<server>/llms.txt` — it is the complete manual (endpoints, MCP tools, selector grammar). The short version:
+
+- **MCP** — `<server>/mcp` for everything the key can read, `<server>/nests/<id>/mcp` for one nest with the full toolset. Claude Code, Cursor and VS Code connect over HTTP with `Authorization: Bearer cnst_…`; Claude Desktop goes through `npx -y mcp-remote`.
+- **REST** — `POST /nests/<id>/context` with a selector (`#tag`, `[[Title]]`, `type:document`, combined with `+ | -`) returns assembled context plus a trace. Full reference: [API.md](./API.md).
+- **ctx CLI** — `ctx vault add <alias> --url <server>/nests/<id>/mcp --bearer-env CONTEXTNEST_API_KEY`, then `ctx query "#tag" --vault <alias>`.
+
+Keys are minted in the app (Workspace → API keys, or the Connect dialog) — one per client, user-wide or scoped to a nest. Servers in `AUTH_MODE=open` need none.
+
 ## System requirements
 
 - **Node.js** 20.x or later
@@ -105,6 +141,14 @@ For redistribution, hosted-service, OEM, or regulated-industry licensing, contac
 | MCP server for AI agents | ✅ | ✅ |
 | One-shot agent setup — generated connect prompt + `.env` download | ✅ | ✅ |
 | Several API keys per account — one credential per client, rotate one at a time | ✅ | ✅ |
+| Comments on documents — anchored threads, resolve / reopen, same threads over MCP | ✅ | ✅ |
+| Table nodes — CSV facts with deterministic row queries (`POST /table-query`, `context_table_query`) | ✅ | ✅ |
+| Teams — share a nest with a group once; import rosters from PromptOwl | ✅ | ✅ |
+| Cross-nest inbox — My Work (reviews, handoffs) and My Drafts | ✅ | ✅ |
+| Nest views — Board (kanban by folder / status / tag), Graph, Definitions glossary | ✅ | ✅ |
+| Workflow plane (Beta) — agents as documents, runs, schedules, inbound hooks, Slack / Teams / webhook connectors | ✅ | ✅ |
+| Activity trace — every governance action, per nest and server-wide | ✅ | ✅ |
+| Notifications — Slack, Microsoft Teams, email | ✅ | ✅ |
 | Centralized multi-tenant admin console | — | ✅ |
 | Single sign-on (OIDC — Entra ID, Google, Okta, Keycloak) | ✅ | ✅ |
 | SAML / SCIM provisioning | — | ✅ |
@@ -117,6 +161,14 @@ For Enterprise pricing and features, contact **hoot@promptowl.ai** or visit <htt
 ## What's new
 
 Release notes live in [CHANGELOG.md](./CHANGELOG.md).
+
+## Documentation
+
+- [CONFIGURATION.md](./CONFIGURATION.md) — every environment variable (port, auth mode, storage, notifications, telemetry)
+- [API.md](./API.md) — complete REST reference with request and response bodies
+- [STEWARDSHIP.md](./STEWARDSHIP.md) — the governance model: modes, stewards, scopes, prime documents, teams, super-admins
+- `<server>/llms.txt` — the agent manual the running server publishes; rendered as **Docs** in the app
+- **How it works** inside the app — a page-by-page tour
 
 ## Licensing
 
