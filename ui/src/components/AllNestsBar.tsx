@@ -151,9 +151,10 @@ export function AllNestsBar({
             <div className="flex items-start gap-2 rounded-md border border-emerald-200 bg-emerald-50 p-2.5 text-xs text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-200">
               <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span>
-                Reads across every nest you can see. It can also start a new
-                nest or add a document when you ask — everything else (editing,
-                approving, publishing) stays inside a nest's own Connect panel.
+                Search and list across all nests at once, or target a specific
+                nest. Create, update, delete, and move documents — just name the
+                nest. Governance tools (approve, share) stay in each nest's
+                Connect panel.
               </span>
             </div>
           </div>

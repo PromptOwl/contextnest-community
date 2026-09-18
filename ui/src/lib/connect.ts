@@ -60,12 +60,13 @@ export function allNestsChatPrompt(
       ? "This server needs no credential — connect directly."
       : "Authenticate with my ContextNest API key when your client asks for it — never print it back.",
     "",
-    "Call nest_index first to see every nest (name, description, size), then pull from",
-    "whichever nest fits each question. Search before answering; cite what you use as",
-    "`nest:id`; say plainly when something isn't covered.",
+    "Call nest_index first to see every nest (name, description, size).",
     "",
-    "This connection is read-first: it can also create a new nest or a new document",
-    "(nest_create, context_create). Never write, publish, or share anything without asking me first.",
+    "SEARCH/LIST: Omit `nest` to search across ALL nests at once, or specify a nest to target one.",
+    "READS: context_get/context_resolve need a `nest` argument — specify which nest.",
+    "WRITES: context_create/update/delete/move need a `nest` — name the target nest.",
+    "",
+    "Cite what you use as `nest:id`. Never write without asking me first.",
   ].join("\n");
 }
 

@@ -348,9 +348,11 @@ describe("write honesty (ticket AC: no false read-only claims)", () => {
   it("does not claim the server-level connection is read-only", () => {
     const p = allNestsChatPrompt("https://x.ai");
     expect(p).not.toMatch(/does ?n'?t write|read-only/i);
-    // server-routes.ts exposes nest_create + context_create on /mcp
-    expect(p).toContain("nest_create");
+    // server-routes.ts exposes writes on /mcp — prompt mentions them
     expect(p).toContain("context_create");
+    expect(p).toContain("update");
+    expect(p).toContain("delete");
+    expect(p).toContain("move");
     expect(p).toMatch(/asking me first/i);
   });
 });
