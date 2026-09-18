@@ -175,15 +175,15 @@ export function AnnotationsPanel({
     : threads;
 
   return (
-    <section className="flex flex-col flex-1 min-h-0 max-h-[calc(100vh-2rem)] rounded-lg border border-border bg-card p-4" data-testid="annotations-panel">
-      <div className="flex items-center gap-2 mb-3 shrink-0">
+    <section className="flex flex-col flex-1 min-h-0 max-h-[calc(100vh-2rem)] rounded-lg border border-border bg-card p-5" data-testid="annotations-panel">
+      <div className="flex items-center gap-2 mb-4 border-b pb-3 shrink-0">
         <MessageSquare className="h-4 w-4 text-muted-foreground" />
-        <h3 className="text-sm font-semibold">
+        <h3 className="text-sm font-semibold whitespace-nowrap">
           Comments{threads ? ` (${count})` : ""}
         </h3>
         {/* Single, obvious control: comment mode lives in the comment box. */}
         {!readOnly && hasModeToggle && (
-          <label className="ml-auto flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+          <label className="ml-auto flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-muted-foreground cursor-pointer">
             Comment mode
             <Switch
               checked={!!commentMode}

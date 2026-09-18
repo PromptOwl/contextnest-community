@@ -28,6 +28,12 @@ export interface NestCapsInput {
    * keep the full authoring UI.
    */
   readerMode?: boolean;
+  /**
+   * An owner/editor asked to see the visitor-facing reader ("Preview as
+   * reader"). Only meaningful with readerMode on; it flips the presentation,
+   * never the caller's rights.
+   */
+  previewReader?: boolean;
   isArchived?: boolean;
 }
 
@@ -73,6 +79,7 @@ export function deriveNestCaps({
   isOwner,
   isAdmin,
   readerMode,
+  previewReader,
   isArchived,
 }: NestCapsInput): NestCaps {
   // If the nest is archived, enforce read-only
@@ -98,7 +105,7 @@ export function deriveNestCaps({
     collabCanWrite ||
     myStewards.some((s) => s.role === "editor" && s.scope === "nest");
   const isReadOnly = !canEditDocs && !canReviewDocs && !canManage;
-  const isReaderView = !!readerMode && isReadOnly;
+  const isReaderView = !!readerMode && (isReadOnly || !!previewReader);
 
   return {
     canManage,
@@ -110,20 +117,6 @@ export function deriveNestCaps({
   };
 }
 
-
-/**
- * Reader Mode has no tab strip whose click triggers a folder fetch, so a nest
- * whose docs all live one level down (the common docs-site shape) opens with
- * only the empty root level loaded — ReaderView would render nothing until a
- * folder row is clicked. Picks the first top-level folder (no "/" in its
- * path) so NestView can eagerly fetch it alongside root, giving Reader Mode
- * something to show without a click.
- */
-export function firstTopLevelFolder<T extends { path: string }>(
-  knownFolders: T[],
-): T | undefined {
-  return knownFolders.find((f) => !f.path.includes("/"));
-}
 
 /**
  * Whether a non-deleting caller may ask for a nest to be archived or deleted

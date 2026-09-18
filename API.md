@@ -82,6 +82,13 @@ Revoke one key. 404 if the id isn't the caller's. Anything still using it stops 
 { "current_password": "...", "new_password": "..." }
 ```
 
+### PATCH `/auth/profile` (auth required)
+Set the caller's display name (≤ 80 chars, trimmed). An empty string clears it, so the UI shows the email. Needs a session or API key even under `AUTH_MODE=open` — the anonymous caller gets `401`.
+```json
+{ "name": "Alan" }
+```
+Response: `{ "ok": true, "name": "Alan" }`
+
 ### POST `/auth/invite` (admin only)
 Creates an invited user and returns a **temporary password** (once) for the admin to hand off. No API key is minted — teammates sign in with the temp password, then mint their own key from the Connect modal.
 ```json
@@ -705,6 +712,7 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
 ```
 Requires nest write permission.
 - `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
+- `type` — re-type the node in place (the editor's "Turn into…"): `document`, `artifact`, `table`, `agent`, `skill`, `tool`, or any other engine type. Same gate as create — the artifact/table feature flags and the accepted set (`400` otherwise). The body is kept as-is. Converting to `skill` defaults the trigger from the title; converting away from a runnable type drops its `schedule`.
 - `prime` — owner/admin only (`403` otherwise). `true`/`false` set the document-scope flag, `null` clears it back to tag/nest inheritance. An edit that makes the document prime is itself gated, so it lands as a draft awaiting approval.
 
 ### DELETE `/nests/:nestId/nodes/:nodeId`
@@ -728,6 +736,9 @@ SVG is deliberately not accepted (stored-XSS surface). Returns `201` with `{ fil
 
 ### GET `/nests/:nestId/assets/:file`
 Serves the asset bytes with the correct content-type and immutable caching. Read permission. Only server-minted `<uuid>.<ext>` names are accepted.
+
+### Watchers — GET/POST/DELETE `/nests/:nestId/nodes/:nodeId/watchers`
+"Tag a person to this node." Watchers of a document are notified when it changes or lands for review; watchers of an agent hear when its output does. `POST` body `{ email }` (write); `DELETE …/watchers?email=` (write). All three return `{ "watchers": [ … ] }`. Watchers follow a `move` and are purged by a `DELETE` of the node.
 
 ---
 
@@ -852,6 +863,14 @@ Cancels the pending review. Returns node to `draft`.
 Allowed for the person who submitted it (withdrawing your own submission) and
 for anyone with approve rights on the node. Anyone else gets 403 — read access
 to the nest alone is not enough.
+
+### GET `/nests/:nestId/external-edits`
+Query: `?refresh=true` to rescan the disk first; `?count=1` to get the total only.
+
+Pending external (on-disk) edits awaiting approval, newest first. The list is computed by scanning every document's suggestions, so `?count=1` saves bytes (`{ "total": n }`), not server time — the UI uses it for the tab badge.
+```json
+{ "entries": [{ "suggestion_id": "...", "document_id": "nodes/foo", "source": "out-of-band-edit", "detected_at": "...", "actor": "..." }], "total": 1 }
+```
 
 ### GET `/nests/:nestId/review-queue`
 Query: `?status=pending&limit=50&offset=0`
@@ -1019,6 +1038,10 @@ steward scope honored). Change items mirror the queue (not access-filtered).
 tab badge binds to `counts.changes` (actionable items), not the feed length.
 The UI deep-links a comment item to its document with the thread focused via
 `?nest=<id>&doc=<nodeId>&thread=<threadId>`.
+
+### Notification rows (`GET /me/work` → `notifications`, `GET /me/notifications`)
+
+Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review verdicts, document deletion flags, mentions); nest-level rows have `node_id: null`.
 
 ### GET `/me/drafts`
 
@@ -1230,6 +1253,17 @@ suggestions ("proposed an edit", read from nest storage) + reviews
 `{ type, nodeId, actor, at, detail?, refId? }` where `type` ∈
 `comment | comment_resolved | edit | edit_proposed | review_requested | review_resolved`.
 
+
+### Annotations — anchored threads the editor's Comment mode shows
+
+The comments above are flat per-node threads. **Annotations** are the highlight-anchored threads the editor's Comment mode and the artifact viewer show; MCP's `context_comments` / `context_comment` / `context_resolve_comment` operate on these. Read permission to view, write to post.
+
+- `GET /nests/:nestId/nodes/:nodeId/annotations` — list threads with their replies and `open` / `resolved` status.
+- `POST /nests/:nestId/nodes/:nodeId/annotations` — open a thread. Body: `{ body, anchor?: { start, end, text }, snapshotVersion? }`. No `anchor` = a whole-document (or whole-artifact) thread.
+- `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/comments` — reply. Body: `{ body }`.
+- `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/resolve` · `/reopen`.
+- `GET /nests/:nestId/comment-counts` — `{ "<nodeId>": <open thread count>, … }` for the whole nest in one call (the UI's "most commented" sort).
+
 ---
 
 ## 8b. Glossary definitions
@@ -1399,20 +1433,23 @@ Body (give `prompt` OR `selector`; everything else optional):
   "include_drafts": false
 }
 ```
-- `prompt` — natural language, compiled to a selector server-side.
+- `prompt` — natural language. Tokens are matched against tag names and titles, and every document is scored against them (title hits weigh most, then tags, then body words); documents under half the top score are dropped as noise. A prompt that matches nothing returns `nodes: []` — never the whole nest. `trace.compiled.fallback` is `"fulltext"` when body scoring alone produced the answer.
 - `selector` — explicit selector grammar (e.g. `#auth`). Wins over `prompt`.
-- `max_tokens` — budget, floored at 50, default 4000. Nodes past the budget are dropped (`trace.truncated_by_budget`).
+- `hops` — wikilink expansion depth. Defaults to `0` for a `prompt` (neighbours of a keyword match are not answers to the question) and `2` for a `selector`.
+- `max_tokens` — budget, floored at 50, default 4000. A node that doesn't fit is skipped and the next tried (`trace.truncated_by_budget` counts the skips); only when nothing fits does the first node go through oversized.
 - 400 `prompt or selector is required` if both missing.
 - Each node carries a `url` deep link, and its context block a matching `_source: <url>_` line, so answers can cite sources. Built from `PUBLIC_BASE_URL`, falling back to the request origin; omitted when neither resolves.
+- On the `prompt` path each node also carries `score` (0–1; title hits weigh most, then tags, then body) and `via` (`"title"` | `"tag"` | `"fulltext"` | `"hop"`). `nodes` and the `context` blocks are ordered by score, so the budget keeps the best matches. Cite `via != "hop"`. Selector-path responses omit both fields.
 
 Response (200):
 ```json
 {
   "context": "# Auth Overview\n\n_tags: #auth #security_\n_source: http://localhost:3838/?nest=<nestId>&doc=nodes/auth-overview_\n\n# Auth\n\n...",
-  "nodes": [{ "id": "nodes/auth-overview", "title": "Auth Overview", "url": "http://localhost:3838/?nest=<nestId>&doc=nodes/auth-overview", "tags": ["#auth"], "type": "document" }],
+  "nodes": [{ "id": "nodes/auth-overview", "title": "Auth Overview", "url": "http://localhost:3838/?nest=<nestId>&doc=nodes/auth-overview", "tags": ["#auth"], "type": "document", "score": 0.67, "via": "tag" }],
   "trace": {
     "selector_used": "#auth",
     "from_prompt": "how does auth work",
+    "compiled": { "matched_tags": ["auth"], "matched_titles": [], "unmatched_tokens": ["work"], "fallback": null },
     "included": 1,
     "permission_filtered": 0,
     "truncated_by_budget": 0,
@@ -1501,6 +1538,17 @@ Identities/attribution and the governance overlay (stewards, reviews, comments, 
 curl -OJ 'http://localhost:3838/nests/<nestId>/export?format=bundle'
 curl -OJ 'http://localhost:3838/nests/<nestId>/export?format=bundle&includeDrafts=1'
 ```
+
+### POST `/nests/:nestId/table-query`
+Deterministic fact lookup against a **table** node (CSV body): fetch the exact rows instead of dragging the whole table into context. Same query against the same version always returns the same rows. Read permission; drafts excluded unless `include_drafts: true`.
+```json
+{ "table": "[[Price List]]", "query": "where region = \"EU\" and price > 100 select sku, price limit 5" }
+```
+`table` is a `[[Title]]` or a node id (`nodes/price-list`). Grammar: `where <col> <op> <value> [and …] [select <cols>] [limit N]`. Response:
+```json
+{ "table": "nodes/price-list", "version": 3, "columns": ["sku", "price"], "rows": [["A-1", "120"]], "matched": 7, "returned": 5, "total": 1000 }
+```
+Same operation over MCP: `context_table_query`.
 
 ### POST `/nests/:nestId/query`
 Graph query (Cypher-ish).
@@ -1762,6 +1810,39 @@ every route above with the same HTML notice, never a hint about which it was.
 
 > The `/runs/:id*` family mounts outside the per-nest gate, so it re-checks nest-scope keys, suspension and license itself before any write — the same guarantees the `/nests/:nestId/*` gate provides.
 
+### Schedules — run an agent on a timer
+
+- `GET /nests/:nestId/schedules` (read) — list.
+- `POST /nests/:nestId/schedules` (write) — Body: `{ agent_node, every_minutes, enabled?, max_runs? }`. `max_runs` stops the schedule after that many runs.
+- `PATCH /nests/:nestId/schedules/:id` (write) — `{ every_minutes?, enabled? }`.
+- `DELETE /nests/:nestId/schedules/:id` (write).
+
+Archived nests are skipped by the scheduler tick; restoring the nest resumes them.
+
+### Inbound hooks — let the outside world trigger a run
+
+- `GET /nests/:nestId/hooks?agent=` (read) — list, tokens masked.
+- `POST /nests/:nestId/hooks` (write) — Body: `{ agent_node, preset }` with `preset` = `slack` | `teams` | `webhook`. Returns the secret URL once.
+- `DELETE /nests/:nestId/hooks/:id` (write) — accepts the full token or the masked id.
+- `POST /hooks/:token` (public — the token is the auth) — fire it. The Slack and Teams presets verify the request signature against `SLACK_SIGNING_SECRET` / `TEAMS_WEBHOOK_SECRET` in the nest's env store; the message text becomes the run's `inputs`. `404` while the nest is archived.
+
+### Env — per-nest secrets for tools and the runner
+
+- `GET /nests/:nestId/env` (write+) — names and masked tails only; values are never read back.
+- `PUT /nests/:nestId/env` (write+) — `{ key, value }` creates or replaces.
+- `DELETE /nests/:nestId/env/:key` (write+).
+
+Values ride to the runner inside the run bundle. `ANTHROPIC_API_KEY` here overrides the server-wide default from Settings.
+
+### Connectors — governance events out to a channel
+
+Not behind the workflow-plane flag: connectors fire on review events too.
+
+- `GET /nests/:nestId/connectors` (read).
+- `POST /nests/:nestId/connectors` (write) — Body: `{ channel, url, events }`. `channel` = `slack` | `teams` | `webhook`; `url` is a literal `https://…` or `env:KEY` to pull it from the env store; `events` is a non-empty array of `review_requested`, `review_approved`, `review_rejected`, `run_failed`, `mention`, or `["*"]`.
+- `PATCH /nests/:nestId/connectors/:id` (write) — `{ enabled?, events?, url? }`.
+- `DELETE /nests/:nestId/connectors/:id` (write).
+
 ---
 
 ## 9. MCP
@@ -1845,6 +1926,9 @@ enforced on both sides, not by trusting the issuer.
 ---
 
 ## 10. Admin / operator
+
+### GET `/health` (no auth)
+`{ "status": "ok" | "suspended", "version": "<server version>", … }`. Needs no key (like `/llms.txt` and public `/p/:slug` pages) — use it for liveness probes. `suspended` means the license was revoked and writes are refused until a valid key is installed.
 
 ### Superadmins — GET/POST `/admin/super-admins`, DELETE `/admin/super-admins/:email` (server-admin only)
 Grant and revoke **superadmins** (server-wide admins) from the API/UI instead of only via `access.yaml`. The effective superadmin set is the union of three sources, surfaced per row as `source`:

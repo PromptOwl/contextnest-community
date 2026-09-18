@@ -1274,7 +1274,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
 
         {/* Trace / editor — right-hand pane, appears when a run is selected. */}
         {selected && (
-          <div className="rounded-lg border p-4 min-w-0 lg:sticky lg:top-4">
+          <div className="rounded-lg border p-4 min-w-0 lg:sticky lg:top-20">
             <RunTrace
               run={selected}
               children={runs.filter((r) => r.parent_run_id === selected.id)}

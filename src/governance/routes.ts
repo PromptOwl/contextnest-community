@@ -555,6 +555,8 @@ governanceRoutes.get("/feed", async (c) => {
 
 // GET /nests/:nestId/external-edits
 // List pending external (direct filesystem) edits awaiting approval.
+// ?count=1 answers with the total only — for the tab badge, which has no use
+// for the entries (the list is ~40 kB on a busy nest).
 governanceRoutes.get("/external-edits", async (c) => {
   const nestId = c.req.param("nestId")!;
   const refresh = c.req.query("refresh") === "true";
@@ -562,6 +564,7 @@ governanceRoutes.get("/external-edits", async (c) => {
     await externalEdits.scanNestForDrift(nestId, "user:refresh");
   }
   const entries = await externalEdits.listNestExternalEdits(nestId);
+  if (c.req.query("count") === "1") return c.json({ total: entries.length });
   return c.json({ entries, total: entries.length });
 });
 

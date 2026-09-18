@@ -43,7 +43,8 @@ export const keys = {
     [...keys.nodes(nestId), "folder", folder] as const,
   // Nest-wide, metadata only (no body) — the Board's read. Under keys.nodes so
   // every write that drops the listing drops this with it, same as folderNodes.
-  nodesMeta: (nestId: string) => [...keys.nodes(nestId), "meta"] as const,
+  nodesMeta: (nestId: string, approvedOnly = false) =>
+    [...keys.nodes(nestId), "meta", approvedOnly ? "approved" : "all"] as const,
   // Describes the whole nest, so it is keyed per nest and NOT per folder —
   // expanding a second folder reuses the first's copy. Under keys.nodes so
   // every write that drops the listing drops this with it.
@@ -72,6 +73,9 @@ export const keys = {
   nestTeams: (nestId: string) => [...keys.nest(nestId), "teams"] as const,
   externalEdits: (nestId: string) =>
     [...keys.nest(nestId), "external-edits"] as const,
+  // Under keys.externalEdits so whatever drops the list drops the count.
+  externalEditCount: (nestId: string) =>
+    [...keys.externalEdits(nestId), "count"] as const,
   hooks: (nestId: string, agent?: string) =>
     [...keys.nest(nestId), "hooks", agent ?? "all"] as const,
   reviewQueue: (nestId: string, status: string) =>
@@ -487,10 +491,10 @@ export const reads = {
     }),
   // Nest-wide, body-free listing (DB index, no vault crawl) — for a dimension
   // board that buckets every node by tag/folder/status and never reads a body.
-  nodesMeta: (nestId: string) =>
+  nodesMeta: (nestId: string, approvedOnly = false) =>
     queryOptions({
-      queryKey: keys.nodesMeta(nestId),
-      queryFn: () => api.listNodesMeta(nestId),
+      queryKey: keys.nodesMeta(nestId, approvedOnly),
+      queryFn: () => api.listNodesMeta(nestId, approvedOnly),
       staleTime: STALE.listing,
     }),
   census: (nestId: string) =>
@@ -614,6 +618,12 @@ export const reads = {
     queryOptions({
       queryKey: keys.externalEdits(nestId),
       queryFn: () => api.listExternalEdits(nestId),
+      staleTime: STALE.governance,
+    }),
+  externalEditCount: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.externalEditCount(nestId),
+      queryFn: () => api.countExternalEdits(nestId),
       staleTime: STALE.governance,
     }),
   reviewQueue: (nestId: string, status = "pending") =>

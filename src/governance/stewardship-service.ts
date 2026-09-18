@@ -11,7 +11,7 @@ import { isSuperAdmin } from "./access-service.js";
 import { ConflictError, ValidationError } from "../shared/errors.js";
 import { buildTitleMap, nestName, docLink } from "./title-resolver.js";
 import { sendEmailToRecipient } from "../notify/email.js";
-import { resolveNestPermission } from "../shared/access.js";
+import { resolveNestAccess, resolveNestPermission } from "../shared/access.js";
 import { resolveTeamRolesForUser } from "./teams-service.js";
 import { nestAllowsSelfApprove } from "../nests/service.js";
 import { config, isEmailish } from "../config.js";
@@ -828,11 +828,14 @@ export async function canManageStewards(
   userId: string,
 ): Promise<boolean> {
   if (config.AUTH_MODE === "open") return true;
-  // resolveNestPermission already folds the license admin and access.yaml
+  // resolveNestAccess already folds the license admin and access.yaml
   // super_admins into nest-level "admin", so one lookup covers server admins,
   // the nest owner, and admin collaborators — no separate email round-trip.
-  const perm = await resolveNestPermission(nestId, userId);
-  return perm === "owner" || perm === "admin";
+  // This is a question of STANDING, so it reads the permission before the
+  // archive cap: an archived nest's owner still manages it (may read its
+  // rosters, trace, and restore it); the cap refuses writes separately.
+  const { rawPermission } = await resolveNestAccess(nestId, userId);
+  return rawPermission === "owner" || rawPermission === "admin";
 }
 
 /**

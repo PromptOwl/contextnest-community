@@ -10,8 +10,9 @@
  */
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { PageTitle } from "@/components/ui/page-title";
 import { Input } from "@/components/ui/input";
-import { PersonCombobox } from "./PersonCombobox";
+import { PersonCombobox } from "../../../components/PersonCombobox";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -28,18 +29,18 @@ import {
   Tabs, TabsContent, TabsList, TabsTrigger,
 } from "@/components/ui/tabs";
 import {
-  ArrowLeft, Users, Plus, Trash2, Loader2, AlertCircle, UserPlus,
+  Users, Plus, Trash2, Loader2, AlertCircle, UserPlus,
   CheckCircle2, XCircle, Pencil, X,
 } from "lucide-react";
 import { toast } from "sonner";
-import { PromptowlTeamsPanel } from "./PromptowlTeamsPanel";
-import * as api from "../lib/api";
+import { PromptowlTeamsPanel } from "../../../components/PromptowlTeamsPanel";
+import * as api from "../../../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
-import { reads } from "../lib/queries";
-import type { Team, TeamMember, TeamRole } from "../lib/api";
-import { TEAM_ROLES } from "../lib/api";
-import { useAuth } from "../auth/AuthContext";
-import { isEmailish } from "../lib/utils";
+import { reads } from "../../../lib/queries";
+import type { Team, TeamMember, TeamRole } from "../../../lib/api";
+import { TEAM_ROLES } from "../../../lib/api";
+import { useAuth } from "../../../auth/AuthContext";
+import { isEmailish } from "../../../lib/utils";
 
 const MAX_VISIBLE_MEMBERS = 5;
 const roleLabel = (role: string) =>
@@ -59,11 +60,8 @@ function myTeamRank(team: Team, myEmail: string, isServerAdmin: boolean): number
   return m ? ROLE_RANK[m.role] ?? 0 : 0;
 }
 
-interface TeamsPageProps {
-  onBack: () => void;
-}
 
-export function TeamsPage({ onBack }: TeamsPageProps) {
+export default function TeamsPage() {
   const { adminStatus, isAdmin, promptowlTeamsEnabled } = useAuth();
   const myEmail = (adminStatus?.me?.email || "").toLowerCase();
   // Importing needs the PromptOwl token from a PromptOwl sign-in, so the tab is
@@ -144,27 +142,23 @@ export function TeamsPage({ onBack }: TeamsPageProps) {
   return (
     <TooltipProvider delayDuration={150}>
       <div className="w-full mx-auto space-y-4">
-        <div className="flex items-center gap-3">
-          <Button variant="ghost" size="icon" onClick={onBack} aria-label="Back">
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
-          <h2 className="text-lg font-semibold flex items-center gap-2">
-            <Users className="h-5 w-5" />
-            Teams
-          </h2>
-          <div className="ml-auto">
+        <PageTitle
+          icon={Users}
+          title="Teams"
+          description={
+            <>
+              A team is a reusable group. Give each member a role, then share the
+              team with a nest from its <strong>Share</strong> dialog — every member
+              gets their role on that nest.
+            </>
+          }
+          actions={
             <Button size="sm" onClick={() => setShowCreate(true)}>
               <Plus className="h-4 w-4 mr-1" />
               New Team
             </Button>
-          </div>
-        </div>
-
-        <p className="text-sm text-muted-foreground">
-          A team is a reusable group. Give each member a role, then share the
-          team with a nest from its <strong>Share</strong> dialog — every member
-          gets their role on that nest.
-        </p>
+          }
+        />
 
         {error && (
           <Alert variant="destructive">

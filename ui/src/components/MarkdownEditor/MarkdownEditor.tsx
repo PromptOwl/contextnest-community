@@ -125,12 +125,14 @@ function normalizeLinkUrl(
   return { url: parsed.toString(), error: null };
 }
 
-// Obsidian wiki link: `[[nodes/<slug>|Title]]` — full path + alias.
-function formatWikiLink(slug: string, title: string): string {
-  const safeSlug = (slug || title).trim();
-  const display = (title || slug).trim();
-  if (!safeSlug) return "";
-  const target = safeSlug.startsWith("nodes/") ? safeSlug : `nodes/${safeSlug}`;
+// Obsidian wiki link: `[[nodes/<folder>/<slug>|Title]]` — the full node id
+// as the target (a bare slug would resolve wrong once two folders share
+// one), plus the title as the alias.
+function formatWikiLink(nodeId: string, title: string): string {
+  const safeId = (nodeId || title).trim();
+  const display = (title || nodeId).trim();
+  if (!safeId) return "";
+  const target = safeId.startsWith("nodes/") ? safeId : `nodes/${safeId}`;
   return `[[${target}|${display}]] `;
 }
 import {
@@ -241,8 +243,10 @@ import "./editor-styles.css";
 import { useAuth } from "../../auth/AuthContext";
 
 export interface MarkdownEditorHandle {
-  /** Insert `[[nodes/<slug>|Title]]` at cursor. */
-  insertWikiLink: (slug: string, title: string) => void;
+  /** Insert `[[<node id>|Title]]` at cursor. */
+  insertWikiLink: (nodeId: string, title: string) => void;
+  /** Put the caret at the start of the body (Enter from the title). */
+  focus: () => void;
 }
 
 interface MarkdownEditorProps {
@@ -274,6 +278,15 @@ interface MarkdownEditorProps {
    *  brand-new document wants focus on the Title field first. Default
    *  preserves the existing Notion/Obsidian-style caret-ready feel. */
   autofocus?: "end" | false;
+  /** "boxed" (default): a bordered field with its own scroll viewport and an
+   *  always-on toolbar — a form control. "page": the document IS the page
+   *  (Notion-style) — no border, the window scrolls, and the block toolbar
+   *  only appears while the editor has focus; inline formatting comes from
+   *  the selection bubble. */
+  variant?: "boxed" | "page";
+  /** Rendered at the toolbar's right end — the document page puts its
+   *  document-level switches (source view, Turn into) there. */
+  toolbarEnd?: React.ReactNode;
 }
 
 export const MarkdownEditor = forwardRef<
@@ -295,6 +308,8 @@ export const MarkdownEditor = forwardRef<
     editable = true,
     className,
     autofocus = "end",
+    variant = "boxed",
+    toolbarEnd,
   }: MarkdownEditorProps,
   ref: ForwardedRef<MarkdownEditorHandle>,
 ) {
@@ -304,6 +319,9 @@ export const MarkdownEditor = forwardRef<
   // source and the preview lied about how the document would render.
   // The editor stays mounted, hidden, so toggling back keeps caret and undo.
   const [previewing, setPreviewing] = useState(false);
+  // Page mode shows the block toolbar only while writing. Toolbar buttons
+  // preventDefault on mousedown, so clicking one never blurs the editor.
+  const isPage = variant === "page";
   const [previewMarkdown, setPreviewMarkdown] = useState("");
   const qc = useQueryClient();
   const effectiveEditable = editable && !previewing;
@@ -565,7 +583,16 @@ export const MarkdownEditor = forwardRef<
     // instead (see DocumentEditor's initial-focus effect).
     autofocus,
     immediatelyRender: false,
-    onUpdate: ({ editor }) => {
+    onUpdate: ({ editor, transaction }) => {
+      // Only a transaction the USER made counts as an edit. Plugins append
+      // their own doc-changing transactions to any dispatch — prosemirror-
+      // tables' fixTables normalises a freshly parsed table on the first
+      // transaction after load, even an empty one (the mention repaint
+      // below) or a click that only moves the selection. tiptap still emits
+      // `update` for those, and re-serialising then reported markdown that
+      // never round-trips byte-for-byte (`|---|` → `| --- |`) as "Unsaved
+      // changes" on open, with a spurious version on the first blur.
+      if (!transaction.docChanged) return;
       const md = getEditorMarkdown(editor);
       const isEmpty =
         editor.isEmpty || editor.getText().trim().length === 0;
@@ -573,8 +600,9 @@ export const MarkdownEditor = forwardRef<
     },
     editorProps: {
       attributes: {
-        class:
-          "prose prose-sm dark:prose-invert max-w-none focus:outline-none min-h-[300px] px-6 py-4",
+        class: isPage
+          ? "prose dark:prose-invert max-w-none focus:outline-none min-h-[40vh] py-2"
+          : "prose prose-sm dark:prose-invert max-w-none focus:outline-none min-h-[300px] px-6 py-4",
       },
       // CSV/TSV paste → markdown table. Deliberately conservative: only
       // fires on plain-text clipboards that look unambiguously tabular
@@ -688,7 +716,12 @@ export const MarkdownEditor = forwardRef<
 
   useEffect(() => {
     if (editor && editor.isEditable !== effectiveEditable) {
-      editor.setEditable(effectiveEditable);
+      // emitUpdate=false: tiptap's setEditable emits a synthetic `update`
+      // by default, which re-serialized the (unchanged) document and reported
+      // it as an edit — any markdown that doesn't round-trip byte-for-byte
+      // (a `|---|` table row comes back as `| --- |`) opened as "Unsaved
+      // changes" and wrote a spurious version on the first blur.
+      editor.setEditable(effectiveEditable, false);
     }
   }, [editor, effectiveEditable]);
 
@@ -835,7 +868,7 @@ export const MarkdownEditor = forwardRef<
           key: n.id,
           primary: n.title,
           secondary: n.id,
-          insert: formatWikiLink(slugFromNodeId(n.id), n.title),
+          insert: formatWikiLink(n.id, n.title),
         })),
     );
   }, [
@@ -859,9 +892,12 @@ export const MarkdownEditor = forwardRef<
   useImperativeHandle(
     ref,
     (): MarkdownEditorHandle => ({
-      insertWikiLink: (slug, title) => {
+      insertWikiLink: (nodeId, title) => {
         if (!editor) return;
-        editor.chain().focus().insertContent(formatWikiLink(slug, title)).run();
+        editor.chain().focus().insertContent(formatWikiLink(nodeId, title)).run();
+      },
+      focus: () => {
+        editor?.chain().focus("start").run();
       },
     }),
     [editor],
@@ -1252,7 +1288,9 @@ export const MarkdownEditor = forwardRef<
   };
 
   if (!editor) {
-    return (
+    return isPage ? (
+      <div className="animate-pulse bg-muted/20 h-[40vh] rounded-md" />
+    ) : (
       <div className="border rounded-lg bg-background shadow-sm">
         <div className="h-12 bg-muted/40 rounded-t-lg border-b" />
         <div className="animate-pulse bg-muted/20 h-[300px] rounded-b-lg" />
@@ -1264,12 +1302,25 @@ export const MarkdownEditor = forwardRef<
     <div
       ref={wrapperRef}
       className={cn(
-        "relative border rounded-lg bg-background shadow-sm",
+        "relative",
+        isPage ? "" : "border rounded-lg bg-background shadow-sm",
         className,
       )}
+      data-variant={variant}
     >
+      {/* Page mode: the toolbar is always there in edit mode — it is what says
+          "this is an editor". It sticks a little under the document top bar
+          (h-12) so the two bars read as separate surfaces while scrolling. */}
       {editable && (
-        <div className="sticky top-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/75 border-b">
+        <div
+          className={cn(
+            "sticky z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/75",
+            isPage
+              ? "top-14 -mx-2 mb-3 rounded-md border shadow-sm"
+              : "top-0 border-b",
+          )}
+          data-testid="markdown-editor-toolbar"
+        >
           <Toolbar
             editor={editor}
             onLink={setLink}
@@ -1287,13 +1338,19 @@ export const MarkdownEditor = forwardRef<
                 return !p;
               })
             }
+            end={toolbarEnd}
           />
         </div>
       )}
 
       {/* Find/replace bar (Cmd+F). Sticky under the toolbar. */}
       {editable && searchOpen && (
-        <div className="sticky top-0 z-30 flex flex-wrap items-center gap-1 border-b bg-background/95 px-2 py-1 backdrop-blur">
+        <div
+          className={cn(
+            "sticky z-30 flex flex-wrap items-center gap-1 border-b bg-background/95 px-2 py-1 backdrop-blur",
+            isPage ? "top-[6.75rem]" : "top-0",
+          )}
+        >
           <Search className="h-3.5 w-3.5 text-muted-foreground" />
           <Input
             autoFocus
@@ -1367,8 +1424,8 @@ export const MarkdownEditor = forwardRef<
           // top-edge selection overflow the boundary and flip to `bottom`, where
           // it's fully visible; z-50 on the menu keeps it above the toolbar.
           options={{
-            flip: { boundary: scrollRef.current ?? undefined, padding: 8 },
-            shift: { boundary: scrollRef.current ?? undefined, padding: 8 },
+            flip: { boundary: (isPage ? undefined : scrollRef.current) ?? undefined, padding: 8 },
+            shift: { boundary: (isPage ? undefined : scrollRef.current) ?? undefined, padding: 8 },
           }}
           className="z-50 flex items-center gap-0.5 rounded-md border bg-popover p-1 shadow-md"
         >
@@ -1489,7 +1546,7 @@ export const MarkdownEditor = forwardRef<
         ref={scrollRef}
         editor={editor}
         className={cn(
-          "min-h-[60vh] max-h-[60vh] overflow-y-auto",
+          isPage ? "min-h-[40vh]" : "min-h-[60vh] max-h-[60vh] overflow-y-auto",
           previewing && "hidden",
         )}
         // Click the empty area below the last block → caret to doc end.
@@ -1514,7 +1571,12 @@ export const MarkdownEditor = forwardRef<
 
       {/* Footer: word/char count + outline toggle. */}
       {editable && (
-        <div className="flex items-center gap-3 border-t px-3 py-1 text-xs text-muted-foreground">
+        <div
+          className={cn(
+            "flex items-center gap-3 py-1 text-xs text-muted-foreground",
+            isPage ? "mt-4 opacity-60 hover:opacity-100" : "border-t px-3",
+          )}
+        >
           <button
             type="button"
             onMouseDown={(e) => e.preventDefault()}
@@ -1972,6 +2034,7 @@ function Toolbar({
   uploading,
   previewing,
   onTogglePreview,
+  end,
 }: {
   editor: Editor;
   onLink: () => void;
@@ -1982,6 +2045,7 @@ function Toolbar({
   uploading: boolean;
   previewing: boolean;
   onTogglePreview: () => void;
+  end?: React.ReactNode;
 }) {
   const roving = useRovingFocus<HTMLDivElement>();
   // Hidden file input driven by the "Insert table from CSV" toolbar button.
@@ -2244,10 +2308,13 @@ function Toolbar({
         <Eye className="h-3.5 w-3.5" />
       </ToolbarButton>
 
-      <div className="ml-auto text-xs text-muted-foreground hidden sm:flex items-center gap-2 px-1">
-        <span>[[wiki]]</span>
-        <span>@mention</span>
-        <span>[ ] task</span>
+      <div className="ml-auto flex items-center gap-1">
+        <div className="hidden items-center gap-2 px-1 text-xs text-muted-foreground lg:flex">
+          <span>[[wiki]]</span>
+          <span>@mention</span>
+          <span>[ ] task</span>
+        </div>
+        {end}
       </div>
     </div>
   );

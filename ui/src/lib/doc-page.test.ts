@@ -1,0 +1,221 @@
+/**
+ * The document page's chrome rules — what the sidebar tree shows for the
+ * open document, and when the comments rail is on screen.
+ *
+ * Written before the page was rebuilt, so the rail rule pins the one
+ * behaviour the rebuild could break: a deep link to a thread, comment mode,
+ * and pinning a comment to a selection all still put the rail on screen even
+ * though it now starts closed.
+ */
+import { describe, it, expect } from "vitest";
+import {
+  groupNodesByFolder,
+  folderAncestors,
+  nextCommentsOpen,
+  readDocPagePrefs,
+  writeDocPagePrefs,
+  DOC_PAGE_PREFS_KEY,
+  nestSidebarViews,
+} from "./doc-page";
+import { buildFolderTree, type FolderTreeNode } from "../components/FolderTree";
+
+const node = (id: string) => ({ id, title: id.split("/").pop()! });
+
+/** Every folder row, depth-first, as "path count", then the doc ids under it. */
+function outline(n: FolderTreeNode): string[] {
+  return [
+    ...n.docs.map((d) => `  ${d.id}`),
+    ...n.children.flatMap((c) => [`${c.path} ${c.count}`, ...outline(c)]),
+  ];
+}
+
+describe("groupNodesByFolder", () => {
+  it("files each node under the folder its id sits in, loose docs at the root", () => {
+    const groups = groupNodesByFolder([
+      node("nodes/getting-started"),
+      node("nodes/gtm/questions"),
+      node("nodes/gtm/pricing/tiers"),
+      node("nodes/personal/cv"),
+    ]);
+    expect(groups.map((g) => [g.folder, g.items.map((i) => i.id)])).toEqual([
+      ["", ["nodes/getting-started"]],
+      ["gtm", ["nodes/gtm/questions"]],
+      ["gtm/pricing", ["nodes/gtm/pricing/tiers"]],
+      ["personal", ["nodes/personal/cv"]],
+    ]);
+  });
+
+  it("feeds buildFolderTree so a nested doc lands under its full folder chain", () => {
+    // The sidebar reuses the nest page's tree. A regression here would show
+    // "gtm/pricing/tiers" as a loose root doc, or lose the gtm row entirely.
+    const tree = buildFolderTree(
+      groupNodesByFolder([node("nodes/gtm/pricing/tiers"), node("nodes/readme")]),
+      "",
+      // Known folders keep every level expandable (no chain compaction).
+      [{ path: "gtm", total: 1 }, { path: "gtm/pricing", total: 1 }],
+    );
+    expect(outline(tree)).toEqual([
+      "  nodes/readme",
+      "gtm 0",
+      "gtm/pricing 1",
+      "  nodes/gtm/pricing/tiers",
+    ]);
+  });
+
+  it("sorts docs by title within a folder, case-insensitively", () => {
+    const groups = groupNodesByFolder([
+      { id: "nodes/b", title: "beta" },
+      { id: "nodes/a", title: "Alpha" },
+      { id: "nodes/c", title: "charlie" },
+    ]);
+    expect(groups[0].items.map((i) => i.title)).toEqual(["Alpha", "beta", "charlie"]);
+  });
+});
+
+describe("folderAncestors", () => {
+  it("lists every folder on the way to the document, so the tree can open them", () => {
+    expect(folderAncestors("nodes/gtm/pricing/tiers")).toEqual(["gtm", "gtm/pricing"]);
+  });
+  it("is empty for a loose root document and for a new one", () => {
+    expect(folderAncestors("nodes/readme")).toEqual([]);
+    expect(folderAncestors("new")).toEqual([]);
+  });
+});
+
+describe("nextCommentsOpen — the rail starts closed but never hides a thread you asked for", () => {
+  it("stays closed by default when nothing asks for it", () => {
+    expect(nextCommentsOpen(false, {})).toBe(false);
+  });
+  it("respects an explicit open", () => {
+    expect(nextCommentsOpen(true, {})).toBe(true);
+  });
+  it("opens for a deep link to a thread", () => {
+    expect(nextCommentsOpen(false, { initialThreadId: "t1" })).toBe(true);
+  });
+  it("opens when comment mode is switched on", () => {
+    expect(nextCommentsOpen(false, { commentMode: true })).toBe(true);
+  });
+  it("opens when a comment is pinned to a selection", () => {
+    expect(nextCommentsOpen(false, { pendingAnchor: true })).toBe(true);
+  });
+  it("opens when a thread is focused from the document body", () => {
+    expect(nextCommentsOpen(false, { activeThreadId: "t9" })).toBe(true);
+  });
+});
+
+describe("doc page prefs", () => {
+  const memory = () => {
+    const m = new Map<string, string>();
+    return {
+      getItem: (k: string) => m.get(k) ?? null,
+      setItem: (k: string, v: string) => void m.set(k, v),
+      map: m,
+    };
+  };
+
+  it("defaults to sidebar open, comments closed, views group folded", () => {
+    expect(readDocPagePrefs(memory())).toEqual({
+      sidebarCollapsed: false,
+      commentsOpen: false,
+      viewsOpen: false,
+      closedGroups: [],
+    });
+  });
+
+  it("round-trips a change and merges partial writes", () => {
+    const s = memory();
+    writeDocPagePrefs(s, { commentsOpen: true });
+    expect(readDocPagePrefs(s)).toEqual({
+      sidebarCollapsed: false,
+      commentsOpen: true,
+      viewsOpen: false,
+      closedGroups: [],
+    });
+    writeDocPagePrefs(s, { sidebarCollapsed: true });
+    expect(readDocPagePrefs(s)).toEqual({
+      sidebarCollapsed: true,
+      commentsOpen: true,
+      viewsOpen: false,
+      closedGroups: [],
+    });
+    writeDocPagePrefs(s, { closedGroups: ["admin"] });
+    expect(readDocPagePrefs(s).closedGroups).toEqual(["admin"]);
+    expect(s.map.has(DOC_PAGE_PREFS_KEY)).toBe(true);
+  });
+
+  it("ignores garbage in storage and a storage that throws", () => {
+    const s = memory();
+    s.setItem(DOC_PAGE_PREFS_KEY, JSON.stringify({ closedGroups: "admin" }));
+    expect(readDocPagePrefs(s).closedGroups).toEqual([]);
+    s.setItem(DOC_PAGE_PREFS_KEY, "{not json");
+    expect(readDocPagePrefs(s)).toEqual({
+      sidebarCollapsed: false,
+      commentsOpen: false,
+      viewsOpen: false,
+      closedGroups: [],
+    });
+    const throwing = {
+      getItem: () => {
+        throw new Error("blocked");
+      },
+      setItem: () => {
+        throw new Error("blocked");
+      },
+    };
+    expect(readDocPagePrefs(throwing)).toEqual({
+      sidebarCollapsed: false,
+      commentsOpen: false,
+      viewsOpen: false,
+      closedGroups: [],
+    });
+    expect(() => writeDocPagePrefs(throwing, { commentsOpen: true })).not.toThrow();
+  });
+});
+
+describe("nestSidebarViews — the nest's views under its name in the sidebar", () => {
+  const ids = (v: ReturnType<typeof nestSidebarViews>) => v.map((x) => x.id);
+  const full = { isReadOnly: false, isReaderView: false, canEditDocs: true };
+  const governed = { workflowPlaneEnabled: true, stewardshipEnabled: true };
+
+  it("gives an editor every view, workflows only when the plane is on", () => {
+    expect(ids(nestSidebarViews(full, governed))).toEqual([
+      "overview", "review", "board", "graph", "definitions", "workflows",
+    ]);
+    expect(ids(nestSidebarViews(full, { ...governed, workflowPlaneEnabled: false }))).not.toContain("workflows");
+  });
+
+  it("shows the review queue only where NestView shows its tab: governed, or something pending", () => {
+    // Same rule as NestView's showReviewTab — an editor on an ungoverned nest
+    // with nothing waiting would otherwise get a row that lands on the overview.
+    expect(ids(nestSidebarViews(full, { workflowPlaneEnabled: true }))).not.toContain("review");
+    expect(ids(nestSidebarViews(full, { workflowPlaneEnabled: true, hasPending: true }))).toContain("review");
+    expect(ids(nestSidebarViews(full, { workflowPlaneEnabled: true, stewardshipEnabled: true }))).toContain("review");
+  });
+
+  it("hides the review queue and workflows from a read-only caller", () => {
+    const v = ids(nestSidebarViews({ ...full, isReadOnly: true, canEditDocs: false }, governed));
+    expect(v).toEqual(["overview", "board", "graph", "definitions"]);
+  });
+
+  it("leaves a public reader in reader mode with the overview only", () => {
+    // Same set App hides via isReaderHiddenView — the sidebar must not be a
+    // back door into the board / graph / definitions for a docs-site reader.
+    const v = ids(nestSidebarViews({ isReadOnly: true, isReaderView: true, canEditDocs: false }, governed));
+    expect(v).toEqual(["overview"]);
+  });
+
+  it("keeps overview and the review queue at the top and folds the rest under Views", () => {
+    const v = nestSidebarViews(full, governed);
+    expect(v.filter((x) => !x.group).map((x) => x.id)).toEqual(["overview", "review"]);
+    expect(v.filter((x) => x.group === "views").map((x) => x.id)).toEqual([
+      "board", "graph", "definitions", "workflows",
+    ]);
+  });
+
+  it("targets the nest page tabs and the top-level pages App knows", () => {
+    const v = nestSidebarViews(full, governed);
+    expect(v.find((x) => x.id === "review")).toMatchObject({ page: "nest", tab: "review" });
+    expect(v.find((x) => x.id === "graph")).toMatchObject({ page: "ontology-graph" });
+    expect(v.find((x) => x.id === "board")).toMatchObject({ page: "board" });
+  });
+});
