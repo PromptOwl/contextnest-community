@@ -1589,7 +1589,7 @@ export default function App() {
           );
         })()}
         {view.page === "docs" && (
-          <AgentDocsPage />
+          <AgentDocsPage onOpenGuide={() => setView({ page: "dashboard", tab: "guide" })} />
         )}
 
         </Suspense>
