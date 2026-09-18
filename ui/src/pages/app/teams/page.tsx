@@ -10,6 +10,7 @@
  */
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { PageTitle } from "@/components/ui/page-title";
 import { Input } from "@/components/ui/input";
 import { PersonCombobox } from "../../../components/PersonCombobox";
 import { Badge } from "@/components/ui/badge";
@@ -28,7 +29,7 @@ import {
   Tabs, TabsContent, TabsList, TabsTrigger,
 } from "@/components/ui/tabs";
 import {
-  ArrowLeft, Users, Plus, Trash2, Loader2, AlertCircle, UserPlus,
+  Users, Plus, Trash2, Loader2, AlertCircle, UserPlus,
   CheckCircle2, XCircle, Pencil, X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -39,7 +40,6 @@ import { reads } from "../../../lib/queries";
 import type { Team, TeamMember, TeamRole } from "../../../lib/api";
 import { TEAM_ROLES } from "../../../lib/api";
 import { useAuth } from "../../../auth/AuthContext";
-import { useAppNav } from "../../../lib/app-nav";
 import { isEmailish } from "../../../lib/utils";
 
 const MAX_VISIBLE_MEMBERS = 5;
@@ -62,7 +62,6 @@ function myTeamRank(team: Team, myEmail: string, isServerAdmin: boolean): number
 
 
 export default function TeamsPage() {
-  const { openDashboard: onBack } = useAppNav();
   const { adminStatus, isAdmin, promptowlTeamsEnabled } = useAuth();
   const myEmail = (adminStatus?.me?.email || "").toLowerCase();
   // Importing needs the PromptOwl token from a PromptOwl sign-in, so the tab is
@@ -143,27 +142,23 @@ export default function TeamsPage() {
   return (
     <TooltipProvider delayDuration={150}>
       <div className="w-full mx-auto space-y-4">
-        <div className="flex items-center gap-3">
-          <Button variant="ghost" size="icon" onClick={onBack} aria-label="Back">
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
-          <h2 className="text-lg font-semibold flex items-center gap-2">
-            <Users className="h-5 w-5" />
-            Teams
-          </h2>
-          <div className="ml-auto">
+        <PageTitle
+          icon={Users}
+          title="Teams"
+          description={
+            <>
+              A team is a reusable group. Give each member a role, then share the
+              team with a nest from its <strong>Share</strong> dialog — every member
+              gets their role on that nest.
+            </>
+          }
+          actions={
             <Button size="sm" onClick={() => setShowCreate(true)}>
               <Plus className="h-4 w-4 mr-1" />
               New Team
             </Button>
-          </div>
-        </div>
-
-        <p className="text-sm text-muted-foreground">
-          A team is a reusable group. Give each member a role, then share the
-          team with a nest from its <strong>Share</strong> dialog — every member
-          gets their role on that nest.
-        </p>
+          }
+        />
 
         {error && (
           <Alert variant="destructive">

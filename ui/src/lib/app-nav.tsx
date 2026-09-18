@@ -17,8 +17,6 @@ export interface AppNav {
   openReview: (nestId: string, nestName: string, nodeId: string) => void;
   /** Keys are minted and rotated on their own page, never inline. */
   manageKeys: () => void;
-  /** Back to the dashboard — what the account pages' back arrows do. */
-  openDashboard: () => void;
 }
 
 const AppNavContext = createContext<AppNav | null>(null);

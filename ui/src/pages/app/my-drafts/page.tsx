@@ -8,11 +8,12 @@ import { reads } from "../../../lib/queries";
 import { useAuth } from "../../../auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
 import {
-  Trash2, Loader2, CheckCircle2, Folder, ChevronRight, ChevronLeft,
+  Pencil, Trash2, Loader2, CheckCircle2, Folder, ChevronRight, ChevronLeft,
 } from "lucide-react";
 import { toast } from "sonner";
 import { relTime } from "../../../lib/dates";
 import { Button } from "@/components/ui/button";
+import { PageTitle } from "@/components/ui/page-title";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { SubmitForReviewModal } from "../../../components/governance";
@@ -201,6 +202,7 @@ export default function MyDraftsPage() {
   // Optimistic drop + reconcile, same as approveReviewItem.
   return (
     <div className="space-y-4">
+      <PageTitle icon={Pencil} title="My Drafts" description="Everything you started and never handed off." className="mb-0" />
 
         {/* My Drafts — everything you started and never handed off. A draft
             that was never submitted has no review request, so before this it

@@ -6,10 +6,10 @@
 import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowLeft, ExternalLink, Loader2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { BookOpen, ExternalLink, Loader2 } from "lucide-react";
+import { PageTitle } from "@/components/ui/page-title";
 
-export function AgentDocsPage({ onBack }: { onBack: () => void }) {
+export function AgentDocsPage() {
   const [manual, setManual] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -29,20 +29,23 @@ export function AgentDocsPage({ onBack }: { onBack: () => void }) {
 
   return (
     <div className="w-full space-y-4">
-      <div className="flex items-center justify-between gap-2">
-        <Button variant="ghost" size="sm" onClick={onBack}>
-          <ArrowLeft className="h-4 w-4 mr-1" /> Back
-        </Button>
-        <a
-          href="/llms.txt"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-        >
-          Raw llms.txt (for agents)
-          <ExternalLink className="h-3 w-3" />
-        </a>
-      </div>
+      <PageTitle
+        icon={BookOpen}
+        title="Docs"
+        description="The agent manual (llms.txt), rendered for the humans setting those agents up."
+        className="mb-0"
+        actions={
+          <a
+            href="/llms.txt"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          >
+            Raw llms.txt (for agents)
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        }
+      />
 
       {error && <p className="text-sm text-red-500">{error}</p>}
       {!manual && !error && (
@@ -51,7 +54,7 @@ export function AgentDocsPage({ onBack }: { onBack: () => void }) {
         </div>
       )}
       {manual && (
-        <article className="prose prose-sm dark:prose-invert max-w-none border border-border rounded-lg bg-card p-6">
+        <article className="prose prose-sm dark:prose-invert max-w-none">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{manual}</ReactMarkdown>
         </article>
       )}

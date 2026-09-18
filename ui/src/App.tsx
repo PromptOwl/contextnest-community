@@ -724,7 +724,6 @@ export default function App() {
       openReview: (nestId, nestName, nodeId) =>
         setView({ page: "document", nestId, nestName, nodeId, isOwner: true, isAnonOwned: true }),
       manageKeys: () => setView({ page: "dashboard", tab: "api-keys" }),
-      openDashboard: () => setView({ page: "dashboard" }),
     }),
     [setView],
   );
@@ -1588,7 +1587,7 @@ export default function App() {
           );
         })()}
         {view.page === "docs" && (
-          <AgentDocsPage onBack={() => setView({ page: "dashboard" })} />
+          <AgentDocsPage />
         )}
 
         </Suspense>

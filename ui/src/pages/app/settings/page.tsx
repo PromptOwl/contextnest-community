@@ -8,8 +8,9 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil } from "lucide-react";
+import { Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { PageTitle } from "@/components/ui/page-title";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -42,11 +43,9 @@ import { reads } from "../../../lib/queries";
 import { copyTextWithToast } from "../../../lib/clipboard";
 import { getAdminSettings, updateAdminSettings } from "../../../lib/api";
 import { useAuth } from "../../../auth/AuthContext";
-import { useAppNav } from "../../../lib/app-nav";
 import { toast } from "sonner";
 
 interface SettingsPageProps {
-  onBack: () => void;
   settings: AdminSettings | null;
   onUpdate: (
     patch: Partial<AdminSettings> & { anthropic_api_key?: string | null },
@@ -268,7 +267,7 @@ function NumField({
   );
 }
 
-function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) {
+function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   // Local editable copy. Re-synced whenever the server value changes (initial
   // load, and after a successful save — which clears the dirty state). Extends
   // AdminSettings with the write-only `anthropic_api_key`: the server returns it
@@ -492,39 +491,35 @@ function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) {
 
   return (
     <div>
-      <div className="flex items-center gap-3 mb-6">
-        <Button variant="ghost" size="icon" onClick={onBack}>
-          <ArrowLeft className="h-4 w-4" />
-        </Button>
-        <div className="flex-1">
-          <h2 className="text-2xl font-semibold">Server settings</h2>
-          <p className="text-sm text-muted-foreground">
-            Server-wide options. Changes apply on Save and persist across
-            restarts.
-          </p>
-        </div>
-        {settings && (
-          <div className="flex items-center gap-2 shrink-0">
-            {isDirty && (
-              <span className="text-xs text-muted-foreground mr-1">
-                Unsaved changes
-              </span>
-            )}
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={discard}
-              disabled={!isDirty || saving}
-            >
-              Discard
-            </Button>
-            <Button size="sm" onClick={save} disabled={!isDirty || saving}>
-              {saving && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
-              Save changes
-            </Button>
-          </div>
-        )}
-      </div>
+      <PageTitle
+        icon={Shield}
+        title="Server settings"
+        description="Server-wide options. Changes apply on Save and persist across restarts."
+        className="mb-6"
+        actions={
+          settings && (
+            <>
+              {isDirty && (
+                <span className="text-xs text-muted-foreground mr-1">
+                  Unsaved changes
+                </span>
+              )}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={discard}
+                disabled={!isDirty || saving}
+              >
+                Discard
+              </Button>
+              <Button size="sm" onClick={save} disabled={!isDirty || saving}>
+                {saving && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
+                Save changes
+              </Button>
+            </>
+          )
+        }
+      />
 
       {saveError && (
         <div
@@ -1832,7 +1827,6 @@ function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) {
 /** The route: owns the server-settings load + save (moved out of App), and
  *  hands the form the same props it always took. */
 export default function SettingsRoute() {
-  const { openDashboard } = useAppNav();
   const { isAdmin, refreshHealth } = useAuth();
   // Server-wide settings for the admin Settings page. Loaded once for admins.
   const [serverSettings, setServerSettings] = useState<AdminSettings | null>(null);
@@ -1866,7 +1860,6 @@ export default function SettingsRoute() {
   }, [refreshHealth]);
   return (
     <SettingsPage
-      onBack={openDashboard}
       settings={serverSettings}
       onUpdate={updateServerSettings}
     />

@@ -1,6 +1,5 @@
 import type React from "react";
 import {
-  ArrowLeft,
   BookOpen,
   Boxes,
   Repeat,
@@ -11,9 +10,8 @@ import {
   MessageSquare,
   ShieldCheck,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { BetaBadge } from "@/components/ui/beta-badge";
-import { useAppNav } from "../../../lib/app-nav";
+import { PageTitle } from "@/components/ui/page-title";
 
 
 /**
@@ -125,27 +123,14 @@ const API_ROWS: [string, string][] = [
 ];
 
 export default function GuidePage() {
-  const { openDashboard: onBack } = useAppNav();
   return (
     <div className="w-full">
-      <Button variant="ghost" size="sm" onClick={onBack} className="mb-4 -ml-2">
-        <ArrowLeft className="h-4 w-4 mr-1" /> Back
-      </Button>
-
-      {/* Hero */}
-      <div className="mb-10 overflow-hidden rounded-xl border bg-gradient-to-br from-primary/10 via-primary/5 to-transparent p-6">
-        <div className="flex items-center gap-3">
-          <span className="flex h-11 w-11 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
-            <BookOpen className="h-6 w-6" />
-          </span>
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">How it works</h1>
-            <p className="text-sm text-muted-foreground">
-              Concepts, the governed loop, every surface, and step-by-step builds.
-            </p>
-          </div>
-        </div>
-      </div>
+      <PageTitle
+        icon={BookOpen}
+        title="How it works"
+        description="Concepts, the governed loop, every surface, and step-by-step builds."
+        className="mb-10"
+      />
 
       <div className="space-y-10 text-sm leading-relaxed">
         <Section title="What this is">

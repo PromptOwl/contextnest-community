@@ -11,7 +11,6 @@ import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
-  ArrowLeft,
   KeyRound,
   Loader2,
   Plus,
@@ -20,17 +19,10 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { PageTitle } from "@/components/ui/page-title";
 import * as api from "../../../lib/api";
 import { reads, useApiKeys } from "../../../lib/queries";
 import { parseServerDate } from "../../../lib/dates";
-import { useAppNav } from "../../../lib/app-nav";
 import { KeyRevealModal } from "../../../components/ConnectModal";
 
 function when(value: string | null): string {
@@ -40,7 +32,6 @@ function when(value: string | null): string {
 }
 
 export default function ApiKeysPage() {
-  const { openDashboard: onBack } = useAppNav();
   const qc = useQueryClient();
   const { data, isLoading } = useApiKeys();
   const keys = data?.keys ?? [];
@@ -106,133 +97,119 @@ export default function ApiKeysPage() {
 
   return (
     <div className="space-y-4">
-      <Button variant="ghost" size="sm" onClick={onBack} className="-ml-2">
-        <ArrowLeft className="mr-2 h-4 w-4" />
-        Back
-      </Button>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-lg">
-            <KeyRound className="h-4 w-4" />
-            API keys
-          </CardTitle>
-          <CardDescription>
-            Each key authenticates every nest you can see, plus the
-            server-level MCP endpoint. Make one per place you connect from —
-            then rotating the key for one client leaves the others alone.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <form
-            className="flex flex-col gap-2 sm:flex-row"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!canGenerate) return;
-              run(
-                "new",
-                () => api.createApiKey({ label: trimmedLabel }),
-                "generated",
-              );
-            }}
-          >
-            <div className="flex-1">
-              <Input
-                value={label}
-                onChange={(e) => setLabel(e.target.value)}
-                maxLength={60}
-                placeholder="What's this key for? e.g. Claude Desktop, laptop CLI"
-                aria-label="Key name"
-                aria-invalid={duplicateName || undefined}
-              />
-              {duplicateName && (
-                <p className="mt-1 text-xs text-destructive">
-                  You already have a key with this name.
-                </p>
-              )}
-            </div>
-            <Button
-              type="submit"
-              disabled={busy === "new" || !canGenerate}
-              className="shrink-0"
-            >
-              {busy === "new" ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Plus className="mr-2 h-4 w-4" />
-              )}
-              Generate key
-            </Button>
-          </form>
-
-          {isLoading ? (
-            <p className="py-6 text-center text-sm text-muted-foreground">
-              Loading your keys…
+      <PageTitle
+        icon={KeyRound}
+        title="API keys"
+        description="Each key authenticates every nest you can see, plus the server-level MCP endpoint. Make one per place you connect from — then rotating the key for one client leaves the others alone."
+        className="mb-0"
+      />
+      <form
+        className="flex flex-col gap-2 sm:flex-row"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!canGenerate) return;
+          run(
+            "new",
+            () => api.createApiKey({ label: trimmedLabel }),
+            "generated",
+          );
+        }}
+      >
+        <div className="flex-1">
+          <Input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            maxLength={60}
+            placeholder="What's this key for? e.g. Claude Desktop, laptop CLI"
+            aria-label="Key name"
+            aria-invalid={duplicateName || undefined}
+          />
+          {duplicateName && (
+            <p className="mt-1 text-xs text-destructive">
+              You already have a key with this name.
             </p>
-          ) : keys.length === 0 ? (
-            <p className="rounded-md border border-dashed py-6 text-center text-sm text-muted-foreground">
-              No keys yet. Generate one above to connect an AI client.
-            </p>
-          ) : (
-            <ul className="divide-y rounded-md border">
-              {keys.map((k) => {
-                const name = k.label || "Unnamed key";
-                return (
-                  <li
-                    key={k.id}
-                    className="flex flex-col gap-2 p-3 sm:flex-row sm:items-center sm:justify-between"
-                  >
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium">{name}</p>
-                      <p className="text-xs text-muted-foreground">
-                        <code className="font-mono">{k.key_prefix}</code> ·
-                        created {when(k.created_at)} · last used{" "}
-                        {when(k.last_used_at)}
-                      </p>
-                    </div>
-                    <div className="flex shrink-0 gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={busy === k.id}
-                        onClick={() =>
-                          run(
-                            k.id,
-                            () => api.rotateApiKey({ key_id: k.id }),
-                            "rotated",
-                          )
-                        }
-                      >
-                        {busy === k.id ? (
-                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-                        )}
-                        Rotate
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        disabled={busy === k.id}
-                        onClick={() => revoke(k.id, name)}
-                        aria-label={`Revoke ${name}`}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
           )}
+        </div>
+        <Button
+          type="submit"
+          disabled={busy === "new" || !canGenerate}
+          className="shrink-0"
+        >
+          {busy === "new" ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : (
+            <Plus className="mr-2 h-4 w-4" />
+          )}
+          Generate key
+        </Button>
+      </form>
 
-          <p className="text-xs text-muted-foreground">
-            A key is shown once, when it's created. There's no way to read it
-            back — if you lose one, rotate that key (its client needs the new
-            value) or revoke it and make another.
-          </p>
-        </CardContent>
-      </Card>
+      {isLoading ? (
+        <p className="py-6 text-center text-sm text-muted-foreground">
+          Loading your keys…
+        </p>
+      ) : keys.length === 0 ? (
+        <p className="rounded-md border border-dashed py-6 text-center text-sm text-muted-foreground">
+          No keys yet. Generate one above to connect an AI client.
+        </p>
+      ) : (
+        <ul className="divide-y rounded-md border">
+          {keys.map((k) => {
+            const name = k.label || "Unnamed key";
+            return (
+              <li
+                key={k.id}
+                className="flex flex-col gap-2 p-3 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">{name}</p>
+                  <p className="text-xs text-muted-foreground">
+                    <code className="font-mono">{k.key_prefix}</code> ·
+                    created {when(k.created_at)} · last used{" "}
+                    {when(k.last_used_at)}
+                  </p>
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={busy === k.id}
+                    onClick={() =>
+                      run(
+                        k.id,
+                        () => api.rotateApiKey({ key_id: k.id }),
+                        "rotated",
+                      )
+                    }
+                  >
+                    {busy === k.id ? (
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                    )}
+                    Rotate
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy === k.id}
+                    onClick={() => revoke(k.id, name)}
+                    aria-label={`Revoke ${name}`}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      <p className="text-xs text-muted-foreground">
+        A key is shown once, when it's created. There's no way to read it
+        back — if you lose one, rotate that key (its client needs the new
+        value) or revoke it and make another.
+      </p>
 
       {reveal && (
         <KeyRevealModal

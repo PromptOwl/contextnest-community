@@ -4,18 +4,17 @@
  */
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
-import { ArrowLeft, Shield } from "lucide-react";
+import { Shield, UserRound } from "lucide-react";
 import { useAuth } from "../../../auth/AuthContext";
-import { useAppNav } from "../../../lib/app-nav";
 import { updateProfile } from "../../../lib/api";
 import { ChangePasswordDialog } from "../../../components/ChangePasswordDialog";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PageTitle } from "@/components/ui/page-title";
 
 export default function AccountPage() {
-  const { openDashboard: onBack } = useAppNav();
   const { adminStatus, isAdmin, refresh } = useAuth();
   const me = adminStatus?.me ?? null;
   const [editing, setEditing] = useState(false);
@@ -47,13 +46,8 @@ export default function AccountPage() {
   };
 
   return (
-    <div className="mx-auto max-w-2xl" data-testid="account-page">
-      <div className="flex items-center gap-3 mb-4">
-        <Button variant="ghost" size="icon" onClick={onBack}>
-          <ArrowLeft className="h-4 w-4" />
-        </Button>
-        <h2 className="text-2xl font-semibold">Your Account</h2>
-      </div>
+    <div data-testid="account-page">
+      <PageTitle icon={UserRound} title="Your Account" description="Who you are on this server." />
 
       <Row label="Profile photo">
         <Avatar className="h-20 w-20">
