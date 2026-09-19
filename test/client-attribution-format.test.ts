@@ -13,6 +13,16 @@ describe("formatClient", () => {
     ).toBe("claude-code · s-9f2 · run=7");
   });
 
+  it("renders an integer-like custom key rather than dropping it", () => {
+    // JS hoists integer-like keys to the front of property order whatever the
+    // caller sent — so the order claim above holds only for ordinary names.
+    // What matters for an audit line is that every key the caller recorded
+    // still shows up.
+    expect(formatClient({ agent: "a", "2": "two", foo: "bar" })).toBe(
+      "a · 2=two · foo=bar",
+    );
+  });
+
   it("renders a partial block without leaving empty separators", () => {
     expect(formatClient({ agent: "claude-code" })).toBe("claude-code");
     expect(formatClient({ session_id: "s-1" })).toBe("s-1");

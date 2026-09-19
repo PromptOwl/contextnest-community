@@ -19,6 +19,7 @@ import {
   registerUser,
   jsonRequest,
   authed,
+  resetAuthRateLimit,
 } from "./helpers";
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -246,6 +247,109 @@ describe("every path that seals a version carries it", () => {
         session_id: "imp-1",
       });
     }
+  });
+});
+
+describe("an approval seals its own version, with its own client", () => {
+  // The one write path the rest of this file cannot reach: publishing through
+  // review. The engine bumps the version the approval publishes, so the row it
+  // seals is the REVIEWER's, not the author's — and each row has to keep the
+  // attribution of the call that made it.
+  let govNest: string;
+  let author: { apiKey: string; email: string };
+  let reviewer: { apiKey: string; email: string };
+
+  beforeAll(async () => {
+    await resetAuthRateLimit();
+    author = await registerUser(app, "approval-author@example.com");
+    await resetAuthRateLimit();
+    reviewer = await registerUser(app, "approval-reviewer@example.com");
+    const nest = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Approval Nest" },
+      apiKey,
+    );
+    govNest = nest.data.nest.id;
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${govNest}/settings`,
+      { stewardship_enabled: true },
+      apiKey,
+    );
+    for (const [email, permission] of [
+      [author.email, "write"],
+      [reviewer.email, "read"],
+    ]) {
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${govNest}/collaborators`,
+        { email, permission },
+        apiKey,
+      );
+    }
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/stewards`,
+      { scope: "nest", users: [{ email: reviewer.email, role: "reviewer" }] },
+      apiKey,
+    );
+  });
+
+  it("records the approver's client, and leaves the author's untouched", async () => {
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/nodes`,
+      {
+        title: "Needs Approval",
+        content: "body",
+        client: { agent: "author-agent" },
+      },
+      author.apiKey,
+    );
+    const nodeId = created.data.node.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/nodes/${nodeId}/submit-review`,
+      { note: "please review" },
+      author.apiKey,
+    );
+    const approved = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/nodes/${nodeId}/approve`,
+      {
+        note: "looks right",
+        client: { agent: "approving-agent", session_id: "appr-1" },
+      },
+      reviewer.apiKey,
+    );
+    expect(approved.status).toBe(200);
+
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${govNest}/nodes/${nodeId}/versions`,
+      undefined,
+      apiKey,
+    );
+    const versions = data.versions as Array<Record<string, any>>;
+    // The version the approval published carries the approver.
+    expect(versions[0].editedBy).toBe(reviewer.email);
+    expect(versions[0].client).toMatchObject({
+      agent: "approving-agent",
+      session_id: "appr-1",
+    });
+    // A later write never rewrites an earlier row's attribution.
+    expect(versions[versions.length - 1].client).toEqual({
+      agent: "author-agent",
+    });
   });
 });
 

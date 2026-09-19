@@ -138,6 +138,12 @@ export function derivedClient(
  *
  * `clientInfo.name` is the client's self-report, the same trust level as a
  * caller-supplied `agent` — which is why neither is ever used to authorize.
+ *
+ * Both reads lean on `@modelcontextprotocol/sdk` internals (`Server`'s
+ * `getClientVersion()` and the transport's `sessionId`). An SDK bump that moves
+ * either one degrades this to "reports nothing" rather than throwing — the same
+ * shape as a stateless connection, which is the honest fallback, but it means a
+ * bump cannot be assumed safe here: re-check these two when the SDK moves.
  */
 export function connectionClient(server: {
   server: { getClientVersion(): { name?: string } | undefined; transport?: { sessionId?: string } };

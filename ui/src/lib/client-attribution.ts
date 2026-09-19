@@ -9,7 +9,9 @@
 export type ClientAttribution = Record<string, string | number | boolean>;
 
 /** "claude-code · s-9f2 · run=7" — agent first, then session, then any custom
- *  keys in the order the caller sent them. */
+ *  keys in JS property order. That is insertion order for ordinary names, but
+ *  integer-like keys ("2", "10") come first in ascending numeric order however
+ *  the caller sent them; nothing is dropped either way, only reordered. */
 export function formatClient(client: ClientAttribution): string {
   const { agent, session_id, ...custom } = client;
   return [

@@ -1682,7 +1682,6 @@ export function widenNestVisibilityCheck(db: Database.Database): void {
     ALTER TABLE nests_new RENAME TO nests;
     ${indexes.join("\n    ")}
   `);
-
 }
 
 /**

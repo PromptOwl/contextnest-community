@@ -544,6 +544,11 @@ async function handleServerToolCall(
           userId,
           userEmail,
           baseUrl,
+          // Same attribution the single-nest branch below passes (§9.4). A
+          // fan-out read is still one call per nest on the trace, and each row
+          // has to name the caller — without this the derived agent/session is
+          // dropped and only an explicit `client` in the args survives.
+          client,
         });
         return { nest: n, result };
       }),
