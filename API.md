@@ -32,7 +32,9 @@ an optional `client` object that does ([spec §9.4](https://github.com/PromptOwl
   structured payload). Every path that seals a version takes it: create, edit,
   approve, revert, and import (`POST /nests/import`, `POST /nests/unsynced/sync`,
   which stamp every row they seed), plus `POST /review-queue/bulk`, whose one
-  block rides every approval in the batch. Every MCP tool call, and every REST
+  block rides every approval in the batch. `POST .../submit-review` seals it
+  into the engine's own version chain (`history.yaml`), which is the entry that
+  submission appends. Every MCP tool call, and every REST
   call that accepts `client`, records it on the activity trace
   (`GET /admin/trace`, `GET /nests/:nestId/trace`, where it comes back as a
   parsed `client` object) — which is where a call that seals no version is

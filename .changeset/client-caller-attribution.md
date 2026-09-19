@@ -6,7 +6,7 @@
 
 Every node write and every MCP tool call now accepts an optional `client` object
 naming the calling agent and its session, plus any custom scalar keys — create,
-edit, approve, reject, revert, import (`POST /nests/import`,
+edit, submit for review, approve, reject, revert, import (`POST /nests/import`,
 `POST /nests/unsynced/sync`) and bulk review on the REST side, every tool on the
 MCP side:
 
@@ -15,7 +15,9 @@ MCP side:
   "client": { "agent": "claude-code", "session_id": "s-9f2" } }
 ```
 
-A write that seals a version records it on that version, so version history —
+Submitting for review seals it into the engine's own version chain, since that
+is the entry a submission appends. Every other write that seals a version
+records it on that version, so version history —
 the REST list, `context_versions` (prose and structured payload alike), and the
 history panel in the UI — answers "which agent wrote v7, in which session".
 Every MCP tool call, and every REST call that accepts `client`, records it on the

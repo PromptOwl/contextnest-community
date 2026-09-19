@@ -1954,6 +1954,7 @@ async function runTool(
           note: args.note,
           priority: args.priority as any,
           baseUrl: ctx.baseUrl,
+          client: ctx.client,
         });
 
         const resolved = await stewardship.resolveStewardsForNode(

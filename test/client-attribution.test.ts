@@ -332,6 +332,71 @@ describe("an approval seals its own version, with its own client", () => {
     return row ? JSON.parse(row.client_json) : undefined;
   }
 
+  it("seals the submission's client into the engine's version chain", async () => {
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/nodes`,
+      { title: "Submitted With Client", content: "body", client: { agent: "author-agent" } },
+      author.apiKey,
+    );
+    const nodeId = created.data.node.id;
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/nodes/${nodeId}/submit-review`,
+      {
+        note: "please review",
+        client: { agent: "submitting-agent", session_id: "sub-1" },
+      },
+      author.apiKey,
+    );
+    expect(status).toBe(201);
+    // Submitting is the moment a draft reaches the engine's append-only
+    // chain, and the engine models `client` on VersionEntry — so it lands on
+    // the entry, not only on the request's trace row.
+    const { readFileSync } = await import("fs");
+    const { join } = await import("path");
+    // `.versions` mirrors the node id's folder, so `nodes/<slug>` seals under
+    // `nodes/.versions/<slug>/history.yaml`.
+    const history = readFileSync(
+      join(
+        env.dataDir,
+        "nests",
+        govNest,
+        "nodes",
+        ".versions",
+        "submitted-with-client",
+        "history.yaml",
+      ),
+      "utf-8",
+    );
+    expect(history).toContain("submitting-agent");
+    expect(history).toContain("sub-1");
+    expect(await tracedClient("/submit-review")).toMatchObject({
+      agent: "submitting-agent",
+      session_id: "sub-1",
+    });
+  });
+
+  it("refuses an out-of-bounds client on submit-review", async () => {
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/nodes`,
+      { title: "Bad Client On Submit", content: "body" },
+      author.apiKey,
+    );
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/nodes/${created.data.node.id}/submit-review`,
+      { note: "x", client: { Agent: "nope" } },
+      author.apiKey,
+    );
+    expect(status).toBe(400);
+  });
+
   it("records a rejection's client on the trace, the only place it can land", async () => {
     const nodeId = await submitted("Gets Rejected");
     const { status } = await jsonRequest(

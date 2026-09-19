@@ -871,7 +871,11 @@ governanceNodeRoutes.get("/:nodeId{.+}/activity", async (c) => {
 governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const body = await c.req.json<{ note?: string; priority?: string }>();
+  const body = await c.req.json<{
+    note?: string;
+    priority?: string;
+    client?: unknown;
+  }>();
 
   const currentVersion = await versions.getCurrentVersion(nestId, nodeId);
   if (currentVersion === 0) {
@@ -890,6 +894,9 @@ governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
       note: body.note,
       priority: body.priority as any,
       baseUrl: requestBaseUrl(c.req.url),
+      // Submitting seals the draft into the engine's append-only chain, so the
+      // block lands on that entry as well as on this request's trace row.
+      client: attributeRequest(c, body.client),
     });
   } catch (err) {
     // The service throws a plain Error for duplicate submissions —
