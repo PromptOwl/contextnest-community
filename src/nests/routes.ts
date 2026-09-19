@@ -379,6 +379,7 @@ nestRoutes.post("/:nestId", async (c) => {
     nestId?: string;
     partial?: boolean;
     finalize?: boolean;
+    client?: unknown;
   }>();
   const files = Array.isArray(body.files) ? body.files : [];
   const userId = c.get("userId");
@@ -403,7 +404,7 @@ nestRoutes.post("/:nestId", async (c) => {
         documents: await registerImportedDocuments(
           target,
           email,
-          attributeRequest(c, (body as { client?: unknown }).client),
+          attributeRequest(c, body.client),
         ),
       });
     }
@@ -448,7 +449,7 @@ nestRoutes.post("/:nestId", async (c) => {
     const documents = await registerImportedDocuments(
       nest.id,
       email,
-      attributeRequest(c, (body as { client?: unknown }).client),
+      attributeRequest(c, body.client),
     );
     return c.json({ nest, documents, rejected }, 201);
   } catch (err) {

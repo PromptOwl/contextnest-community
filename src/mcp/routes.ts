@@ -74,6 +74,10 @@ function createMcpServerForNest(
       // was built: the `initialize` handshake completes inside the transport,
       // so `clientInfo` only exists once a call is being served. A `client`
       // sent with the tool call itself still wins, per key, in handleToolCall.
+      // `attributeRequest` also stashes this on the request for the REST trace
+      // middleware; that is inert here, since app.ts skips `/mcp` paths and the
+      // MCP row is written by the tool logger with the FULLY merged client (the
+      // tool call's own `client` wins over what is derived here).
       const client = attributeRequest(c, undefined, connectionClient(server));
       // Audit logging happens inside handleToolCall (covers per-nest +
       // server-level MCP, and thrown calls).

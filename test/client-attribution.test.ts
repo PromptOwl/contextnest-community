@@ -454,6 +454,32 @@ describe("escaping — `client` is untrusted caller data", () => {
     },
   );
 
+  it("trims a derived value without leaving half a character", async () => {
+    // The 512th code unit lands mid-emoji. A plain slice would store the lone
+    // high surrogate; the whole character is dropped instead. The bound itself
+    // is in code units, so the result must still be <= 512.
+    process.env.CONTEXTNEST_AGENT = "a".repeat(511) + "\u{1F642}";
+    try {
+      const { status, data } = await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes`,
+        { title: "Surrogate Boundary", content: "body" },
+        apiKey,
+      );
+      expect(status).toBe(201);
+      const [latest] = await versionsOf(data.node.id);
+      expect(latest.client.agent).toBe("a".repeat(511));
+      expect(latest.client.agent.length).toBeLessThanOrEqual(512);
+      // No unpaired surrogate survived into the stored record.
+      expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(latest.client.agent)).toBe(
+        false,
+      );
+    } finally {
+      delete process.env.CONTEXTNEST_AGENT;
+    }
+  });
+
   it("never lets a derived value break an otherwise valid call", async () => {
     // An operator can name an API key anything. A label past the engine's bound
     // is truncated, not turned into a 400 on every write that key makes.

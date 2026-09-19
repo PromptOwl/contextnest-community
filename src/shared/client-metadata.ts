@@ -41,6 +41,22 @@ export const clientToolField = {
   client: z.any().optional().describe(clientField.client.description ?? ""),
 };
 
+/**
+ * Trim a derived value to the engine's bound without leaving half a character.
+ *
+ * The bound is in UTF-16 code units (zod's `.max` counts `String.length`), so
+ * the slice has to come first — trimming by code point could still exceed it,
+ * and an over-long derived value must never be the reason a call fails. What a
+ * plain slice can do is cut between a surrogate pair, storing a lone surrogate
+ * in an append-only audit record; drop that trailing half instead.
+ */
+function boundedValue(raw: string): string {
+  const cut = raw.slice(0, CLIENT_METADATA_MAX_VALUE_LENGTH);
+  const last = cut.charCodeAt(cut.length - 1);
+  // High surrogate with nothing after it: its pair was cut off.
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
+
 /** Drop a `client` with nothing in it. "Not attributed" and "attributed to
  *  nobody" are different claims, and only the first one is ever true — so an
  *  empty object is stored as absence, not as `{}` (§9.4.2). */
@@ -104,10 +120,8 @@ export function derivedClient(
   return {
     // Truncated to the engine's bound, not rejected: a derived value must never
     // be the reason an otherwise valid call fails validation.
-    ...(agent ? { agent: String(agent).slice(0, CLIENT_METADATA_MAX_VALUE_LENGTH) } : {}),
-    ...(session
-      ? { session_id: String(session).slice(0, CLIENT_METADATA_MAX_VALUE_LENGTH) }
-      : {}),
+    ...(agent ? { agent: boundedValue(String(agent)) } : {}),
+    ...(session ? { session_id: boundedValue(String(session)) } : {}),
   };
 }
 

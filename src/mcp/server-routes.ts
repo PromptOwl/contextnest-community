@@ -624,6 +624,7 @@ function createServerMcp(
     server.tool(tool.name, tool.description, shape, async (args) => {
       // See mcp/routes.ts: resolved per call, because the handshake that
       // reports `clientInfo` completes inside the transport.
+      // Its stash on the request is inert here too — see mcp/routes.ts.
       const out = await handleServerToolCall(
         tool.name,
         args,
