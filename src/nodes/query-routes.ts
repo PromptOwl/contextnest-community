@@ -18,7 +18,7 @@ import {
   resolveCallerEmail,
   filterAccessible,
 } from "../governance/access-guard.js";
-import { compilePrompt } from "./prompt-compiler.js";
+import { compilePrompt, scorePrompt, tokenizePrompt } from "./prompt-compiler.js";
 import { resolveNodeUrl } from "../governance/title-resolver.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
@@ -284,7 +284,11 @@ queryRoutes.post("/context", async (c) => {
   // Floor at 50 tokens — anything smaller returns nothing useful. Default
   // is 4000, a typical system-prompt budget.
   const maxTokens = Math.max(50, body.max_tokens ?? 4000);
-  const hops = body.hops ?? 2;
+  // A prompt is a relevance question, so it defaults to no hop expansion —
+  // neighbours of a keyword match are not answers to the prompt, and callers
+  // cite every node returned. Explicit selectors keep the engine's default.
+  const promptPath = !body.selector?.trim() && !!body.prompt;
+  const hops = body.hops ?? (promptPath ? 0 : 2);
   const includeDrafts = body.include_drafts === true;
 
   // Mirror the engine's draft rule (isPublished: status === "published") so the
@@ -339,8 +343,9 @@ queryRoutes.post("/context", async (c) => {
       const matchedLower = new Set(
         compileDetail.matchedTitles.map((t) => t.toLowerCase()),
       );
-      titleMatches = allDocs.filter((d: ContextNode) =>
-        matchedLower.has(d.frontmatter.title.toLowerCase()),
+      titleMatches = allDocs.filter(
+        (d: ContextNode) =>
+          matchedLower.has(d.frontmatter.title.toLowerCase()) && isVisible(d),
       );
     }
   }
@@ -423,6 +428,39 @@ queryRoutes.post("/context", async (c) => {
     }
   }
 
+  // ── 2b. Rank the prompt path ──
+  // Tag/title compilation is exact-token only: a natural-language question
+  // often compiles to nothing, or to one weak title while the real answer
+  // sits in another document's body. So every visible document is scored
+  // against the prompt and unioned with the compiled set, best first so the
+  // budget keeps the right ones. Of the body hits, anything under half the
+  // top score is noise (a stray "run" in a body) and dropped; compiled
+  // matches are what the caller's tag or title named and always stay, as do
+  // hop neighbours — the caller asked for them. Every node carries score +
+  // via so a caller can cite matches and skip hops. An empty answer stays
+  // empty: callers dump the whole nest otherwise.
+  const relevance = new Map<string, { score: number; via: string }>();
+  let fallback: "fulltext" | null = null;
+  if (compileDetail) {
+    const tokens = tokenizePrompt(body.prompt!);
+    const compiled = new Set(documents.map((d) => d.id));
+    for (const d of allDocs) {
+      const { score, via } = scorePrompt(d, tokens);
+      if (compiled.has(d.id)) relevance.set(d.id, { score, via: via ?? "hop" });
+      else if (score > 0 && isVisible(d)) {
+        relevance.set(d.id, { score, via: via! });
+        documents.push(d);
+      }
+    }
+    if (compiled.size === 0 && documents.length > 0) fallback = "fulltext";
+    const top = Math.max(0, ...documents.map((d) => relevance.get(d.id)!.score));
+    documents = documents.filter((d) => {
+      const r = relevance.get(d.id)!;
+      return compiled.has(d.id) || r.via === "hop" || r.score >= top / 2;
+    });
+    documents.sort((a, b) => relevance.get(b.id)!.score - relevance.get(a.id)!.score);
+  }
+
   // ── 3. Permission gate (no-op when stewardship is disabled) ──
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
@@ -442,14 +480,22 @@ queryRoutes.post("/context", async (c) => {
   );
 
   // ── 4. Budget-fit within max_tokens ──
+  // Skip a block that doesn't fit and keep going: one large document early in
+  // the list must not empty the rest of the budget. Only when nothing at all
+  // fits does the best match go through oversized — never an empty answer
+  // for a non-empty result.
   const included: (ContextNode & { url?: string })[] = [];
   let tokenCount = 0;
   for (const doc of readable) {
     const block = formatContextBlock(doc, doc.url);
     const blockTokens = approxTokens(block);
-    if (tokenCount + blockTokens > maxTokens && included.length > 0) break;
+    if (tokenCount + blockTokens > maxTokens) continue;
     included.push(doc);
     tokenCount += blockTokens;
+  }
+  if (included.length === 0 && readable.length > 0) {
+    included.push(readable[0]);
+    tokenCount = approxTokens(formatContextBlock(readable[0], readable[0].url));
   }
   const truncatedByBudget = accessible.length - included.length;
 
@@ -474,6 +520,7 @@ queryRoutes.post("/context", async (c) => {
       url: n.url,
       tags: n.frontmatter.tags || [],
       type: n.frontmatter.type || "document",
+      ...relevance.get(n.id),
     })),
     trace: {
       selector_used: selector,
@@ -483,6 +530,7 @@ queryRoutes.post("/context", async (c) => {
             matched_tags: compileDetail.matchedTags,
             matched_titles: compileDetail.matchedTitles,
             unmatched_tokens: compileDetail.unmatched,
+            fallback,
           }
         : null,
       total_matched: documents.length,
@@ -755,7 +803,8 @@ queryRoutes.get("/export", async (c) => {
   );
 
   // Optional token budget — full set by default; an agent can cap a fetch
-  // with ?max_tokens= (same estimator as POST /context).
+  // with ?max_tokens= (same estimator and fill rule as POST /context: a
+  // document that doesn't fit is skipped, not the end of the list).
   const maxParam = parseInt(c.req.query("max_tokens") ?? "", 10);
   const maxTokens = Number.isFinite(maxParam) && maxParam > 0 ? maxParam : null;
   let included = fields;
@@ -764,11 +813,11 @@ queryRoutes.get("/export", async (c) => {
     let tokens = 0;
     for (const f of fields) {
       const t = approxTokens(nodeToMarkdown(f));
-      if (tokens + t > maxTokens && kept.length > 0) break;
+      if (tokens + t > maxTokens) continue;
       kept.push(f);
       tokens += t;
     }
-    included = kept;
+    included = kept.length > 0 ? kept : fields.slice(0, 1);
   }
 
   trackEvent("nest.export", {

@@ -2,67 +2,29 @@
  * NestView — governance dashboard for a single nest.
  * Uses ported PromptOwl components for the UI, wired to REST API.
  */
-import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { Suspense, useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { lazyChunk } from "../lib/lazy-chunk";
 import * as api from "../lib/api";
-import { BULK_REVIEW_LIMIT } from "../lib/constants";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
-import { visibleDocuments, documentsTabIsEmpty } from "../lib/visible-documents";
 import { resolveWikiTarget } from "../lib/wiki-preview";
-import { activityTimestamp } from "../lib/node-sort";
-import { linkHealth } from "../lib/link-health";
-import { folderGrantTarget } from "../lib/folder-target";
 import { checkFolderPath } from "../lib/folder-path";
-import { parseServerDate, formatServerDate } from "../lib/dates";
+import { createConsumeOnceFlag } from "../lib/consume-once-flag";
 import {
-  datePresetToEpoch, upsertFilter, removeFilter,
-  parseSavedFilters, serializeSavedFilters,
-  type DatePreset, type SavedFilter,
-} from "../lib/saved-filters";
-import {
-  FileText, FileCode2, Plus, ArrowLeft, History, Shield, Search, Upload, Sparkles,
-  Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
-  Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
-  LayoutGrid, List as ListIcon, Star, X, MoreVertical,
-  FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus, Wrench, Table2,
-  Activity, Share2, BookOpen, Archive,
+  FileText, Plus, ArrowLeft, Shield, Upload, Sparkles,
+  Clock, CheckCircle2, Loader2, Link2, Settings as SettingsIcon,
+  Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
+  FileStack, FolderPlus, X,
+  Activity, BookOpen, Archive, Eye,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
-import { FolderTree, prettyFolder, prettyFolderPath } from "./FolderTree";
-import { AuthorshipChips } from "./AuthorshipChips";
+import { prettyFolderPath } from "./FolderTree";
 
 /** One icon per node type — agent/skill/artifact/document each read distinctly. */
-export function NodeTypeIcon({
-  type,
-  className = "h-4 w-4",
-}: {
-  type?: string;
-  className?: string;
-}) {
-  // Tinted chip per node type so the type reads at a glance in dense lists —
-  // a bare gray glyph wasn't distinguishable when most rows are documents.
-  const spec =
-    type === "agent"
-      ? { Icon: Bot, cls: "text-violet-600 dark:text-violet-400 bg-violet-500/10", label: "Agent" }
-      : type === "skill"
-        ? { Icon: Zap, cls: "text-blue-600 dark:text-blue-400 bg-blue-500/10", label: "Skill" }
-        : type === "artifact"
-          ? { Icon: FileCode2, cls: "text-amber-600 dark:text-amber-400 bg-amber-500/10", label: "Artifact" }
-          : type === "tool"
-            ? { Icon: Wrench, cls: "text-teal-600 dark:text-teal-400 bg-teal-500/10", label: "Tool" }
-            : type === "table"
-              ? { Icon: Table2, cls: "text-cyan-600 dark:text-cyan-400 bg-cyan-500/10", label: "Table" }
-              : { Icon: FileText, cls: "text-slate-500 dark:text-slate-400 bg-slate-500/10", label: "Document" };
-  return (
-    <span
-      className={`inline-flex items-center justify-center rounded-md p-1 shrink-0 ${spec.cls}`}
-      title={spec.label}
-    >
-      <spec.Icon className={className} />
-    </span>
-  );
-}
+// Kept as a re-export: WorkflowsView imports it from here.
+export { NodeTypeIcon } from "./nest/NodeTypeIcon";
+import { byPathSegments, folderOfNode } from "./nest/node-display";
 import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ReaderView } from "./ReaderView";
@@ -78,27 +40,32 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { ShareNestDialog } from "./ShareNestDialog";
-import { PublishDialog } from "./PublishDialog";
-import { NestVisibilityControl } from "./NestVisibilityControl";
-import { ShareTargetDialog } from "./ShareTargetDialog";
 import { NestPageHeader } from "./NestPageHeader";
-import { deriveNestCaps } from "../lib/nest-caps";
+import {
+  deriveNestCaps,
+  isNestArchived,
+} from "../lib/nest-caps";
+import { foldersCoveredBy } from "../lib/reader";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
+// Each tab is its own chunk, loaded when first opened.
+const ExternalEditsTab = lazyChunk(() => import("./nest/ExternalEditsTab").then((m) => ({ default: m.ExternalEditsTab })));
+const StewardsTab = lazyChunk(() => import("./nest/StewardsTab").then((m) => ({ default: m.StewardsTab })));
+const CollaboratorsTab = lazyChunk(() => import("./nest/CollaboratorsTab").then((m) => ({ default: m.CollaboratorsTab })));
+const ReviewTab = lazyChunk(() => import("./nest/ReviewTab").then((m) => ({ default: m.ReviewTab })));
+const OverviewTab = lazyChunk(() => import("./nest/OverviewTab").then((m) => ({ default: m.OverviewTab })));
+const DocumentsTab = lazyChunk(() => import("./nest/DocumentsTab").then((m) => ({ default: m.DocumentsTab })));
+import { useFeedComments } from "./nest/feed-query";
 import { Button } from "@/components/ui/button";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
-  Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
-import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import {
   Tabs, TabsList, TabsTrigger, TabsContent,
@@ -106,52 +73,28 @@ import {
 import { Badge } from "@/components/ui/badge";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem,
-  DropdownMenuSeparator, DropdownMenuTrigger,
+  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { CountSkeleton } from "@/components/ui/count-skeleton";
 import {
-  StewardList, StewardModal,
-  ReviewQueue, ReviewActions,
-  SubmitForReviewModal, ReasonDialog, VersionHistoryModal, LifecycleStatusBadge,
-  type Steward, type StewardRole, type ReviewRequest, type Version,
-  type DocumentLifecycleStatus,
+  StewardModal,
+  ReviewActions,
+  ReasonDialog,
+  type Steward, type StewardRole, type ReviewRequest,
 } from "./governance";
 import { useAuth } from "../auth/AuthContext";
 import { MarkdownEditor } from "./MarkdownEditor";
-import { CollaboratorManager } from "./CollaboratorManager";
 import { toast } from "sonner";
 
-function timeAgo(dateStr: string) {
-  // See lib/dates — SQL-default timestamps carry no zone.
-  const date = parseServerDate(dateStr);
-  if (!date) return "";
-  const diff = Date.now() - date.getTime();
-  if (diff < 60_000) return "just now";
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
-  if (diff < 604_800_000) return `${Math.floor(diff / 86_400_000)}d ago`;
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
-/** Compare paths segment-by-segment (not as flat strings) so children always
- *  sort directly under their parent — a sibling like "nodes-extra" would
- *  otherwise wedge between "nodes" and "nodes/a". */
-function byPathSegments(a: string, b: string) {
-  const as = a.split("/");
-  const bs = b.split("/");
-  for (let i = 0; i < Math.min(as.length, bs.length); i++) {
-    const cmp = as[i].localeCompare(bs[i]);
-    if (cmp !== 0) return cmp;
-  }
-  return as.length - bs.length;
-}
 
 interface NestViewProps {
   nestId: string;
   nestName: string;
   isOwner: boolean;
   isAnonOwned: boolean;
+  /** Nest is archived — opened from the Archived section, forces read-only. */
+  isArchived?: boolean;
   onBack: () => void;
   onOpenDocument: (
     nodeId: string | "new",
@@ -172,6 +115,10 @@ interface NestViewProps {
    *  a folder breadcrumb segment elsewhere in the app. */
   initialTags?: string[];
   initialFolder?: string;
+  /** Reader mode: the page to open first (a `?doc=` deep link). */
+  initialDoc?: string | null;
+  /** Reader mode: the open page changed — the shell mirrors it to the URL. */
+  onReaderDocChange?: (nodeId: string | null) => void;
   /** Tab to open on mount, from ?tab= — falls back to overview when the
    *  slug names a tab this user can't see. */
   initialTab?: string;
@@ -184,7 +131,10 @@ export function NestView({
   nestName,
   isOwner,
   isAnonOwned,
+  isArchived,
   onBack,
+  initialDoc,
+  onReaderDocChange,
   onOpenDocument,
   onOpenTrace,
   onManageKeys,
@@ -213,6 +163,11 @@ export function NestView({
   }, [nestName, nestId]);
   const renameTimer = useRef<number | null>(null);
   const renameRef = useRef<() => void>(() => { });
+  // Escape reverts editableName via setState, which is batched and hasn't
+  // applied yet when the input's own blur (triggered synchronously by the
+  // Escape handler) fires flushRename — so flushRename would still see the
+  // stale, edited value. This flag tells that one flush to no-op instead.
+  const skipNextFlush = useRef(createConsumeOnceFlag()).current;
   const [renameError, setRenameError] = useState<string | null>(null);
   renameRef.current = async () => {
     const trimmed = editableName.trim();
@@ -239,6 +194,7 @@ export function NestView({
       window.clearTimeout(renameTimer.current);
       renameTimer.current = null;
     }
+    if (skipNextFlush.consume()) return;
     void renameRef.current();
   }, []);
   useEffect(
@@ -255,78 +211,20 @@ export function NestView({
   // counts, tags, types, authors. Without it every filter and stat tile would
   // describe only the folders the user happened to open.
   const [census, setCensus] = useState<api.NestCensus | null>(null);
-  // A filter, a search, and link health are all questions about the WHOLE
-  // nest, which the folder levels on screen cannot answer. Fetch the full
-  // listing once, only when one of those is actually asked.
-  const [fullNodes, setFullNodes] = useState<any[] | null>(null);
-  const [fullLoading, setFullLoading] = useState(false);
+  // The first census read has answered (either way). Until it has, the
+  // Overview must not judge the nest empty — the nest meta lands first and
+  // cleared initialLoad while the tree was still on the wire.
+  const [censusSettled, setCensusSettled] = useState(false);
   // Full roster — admin-only (listStewards 403s for non-admins → stays []).
-  const [stewards, setStewards] = useState<Steward[]>([]);
   // Caller's OWN steward rows (scoped), from GET /nests/:id. Drives per-node
   // affordances for non-admin reviewers/editors who can't read the roster.
   const [myStewards, setMyStewards] = useState<Steward[]>([]);
   const [reviewQueue, setReviewQueue] = useState<ReviewRequest[]>([]);
-  // Bulk review selection, by node id. A reviewer clearing a folder import
-  // makes the same call on every item, so let them say it once.
-  const [bulkSelected, setBulkSelected] = useState<Set<string>>(new Set());
-  const [bulkAction, setBulkAction] = useState<"approve" | "reject" | null>(
-    null,
-  );
-  // This component is reused across nests (jumping between nests from the
-  // search palette keeps the same page), so a selection has to be dropped when
-  // the nest under it changes — otherwise node ids from the nest you left ride
-  // along into a batch aimed at the one you arrived in.
-  useEffect(() => {
-    setBulkSelected(new Set());
-    setBulkAction(null);
-  }, [nestId]);
   // Pending "please delete this" flags raised by people below admin.
   const [deletionRequests, setDeletionRequests] = useState<api.DeletionRequest[]>([]);
-  // Node being flagged (dialog open when set), and the queue row being resolved
-  // — `action` picks between the confirm and the decline-with-note dialog.
-  const [deletionTarget, setDeletionTarget] = useState<any | null>(null);
-  // Node pending a plain delete confirm (for callers who can delete outright).
-  const [deleteNodeTarget, setDeleteNodeTarget] = useState<any | null>(null);
   const [removeStewardId, setRemoveStewardId] = useState<string | null>(null);
-  // Folder pending deletion (admin) or a deletion request (everyone else).
-  const [folderTarget, setFolderTarget] = useState<
-    { path: string; label: string; total: number } | null
-  >(null);
-  // Folder being shared with one person (a grant, not a collaborator).
-  const [shareFolder, setShareFolder] = useState<
-    { path: string; label: string } | null
-  >(null);
   // Non-owner asking for the whole nest to be deleted.
   const [nestFlagOpen, setNestFlagOpen] = useState(false);
-  // Latest flag per node (the list arrives newest-first, so the first wins).
-  // Pending drops the flag action and badges red; declined badges amber with
-  // the resolver's note, and the doc can be flagged again. Document targets
-  // only — a folder path could otherwise collide with a node id.
-  const flagByNode = useMemo(() => {
-    const map = new Map<string, api.DeletionRequest>();
-    for (const r of deletionRequests)
-      if ((r.targetType ?? "document") === "document" && !map.has(r.nodeId))
-        map.set(r.nodeId, r);
-    return map;
-  }, [deletionRequests]);
-  const pendingFolderFlags = useMemo(
-    () =>
-      new Set(
-        deletionRequests
-          .filter((r) => r.targetType === "folder" && r.status === "pending")
-          .map((r) => r.nodeId),
-      ),
-    [deletionRequests],
-  );
-  const folderFlagPending = (path: string) => pendingFolderFlags.has(path);
-  // Map folder paths to their pending deletion request objects for withdraw.
-  const folderFlagByPath = useMemo(() => {
-    const map = new Map<string, api.DeletionRequest>();
-    for (const r of deletionRequests)
-      if (r.targetType === "folder" && r.status === "pending" && !map.has(r.nodeId))
-        map.set(r.nodeId, r);
-    return map;
-  }, [deletionRequests]);
   // Either whole-nest ask counts as "already flagged" — the affordance is one
   // dialog offering both outcomes, so a pending archive request should not sit
   // beside a fresh "request removal" button.
@@ -343,25 +241,13 @@ export function NestView({
   const [resolveTarget, setResolveTarget] = useState<
     { request: api.DeletionRequest; action: "delete" | "decline" } | null
   >(null);
-  // Comment activity (annotation threads + replies) for the feed, already
-  // access-filtered server-side to docs the caller can read. Paged: the array
-  // holds the pages fetched so far; feedCommentsTotal is the server's
-  // authoritative counts.comments (array length undercounts once a nest
-  // outgrows one page — the default limit caps a page at 50).
-  const [feedComments, setFeedComments] = useState<api.FeedCommentItem[]>([]);
-  const [feedCommentsTotal, setFeedCommentsTotal] = useState(0);
-  const [feedLoadingMore, setFeedLoadingMore] = useState(false);
-  // Feed filter chips: All (default) / Changes / Comments.
-  const [feedFilter, setFeedFilter] = useState<"all" | "changes" | "comments">(
-    "all",
-  );
-  const [externalEdits, setExternalEdits] = useState<api.ExternalEditEntry[]>([]);
-  const [externalEditsLoading, setExternalEditsLoading] = useState(false);
+  // A grant-only nest offers no governance reads (external edits, queue…).
+  const [grantOnly, setGrantOnly] = useState(false);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   const [allowSelfApprove, setAllowSelfApprove] = useState(false);
   const [primeOnlyReview, setPrimeOnlyReview] = useState(false);
   const [primeTags, setPrimeTags] = useState<string[]>([]);
-  const [visibility, setVisibility] = useState<"private" | "public">("private");
+  const [visibility, setVisibility] = useState<api.NestVisibility>("private");
   const [visibilitySaving, setVisibilitySaving] = useState(false);
   // Publishing (→ public) is guarded by an acknowledgement dialog: the nest
   // becomes readable by anyone on the internet, outside your organization.
@@ -373,12 +259,20 @@ export function NestView({
   const [readerHomeNode, setReaderHomeNode] = useState<string | null>(null);
   const [readerModeSaving, setReaderModeSaving] = useState(false);
   const [readerDialogOpen, setReaderDialogOpen] = useState(false);
+  // "Preview as reader": an owner/editor looking at the visitor-facing reader
+  // from inside the authoring UI. Presentation only — rights are unchanged.
+  const [previewReader, setPreviewReader] = useState(false);
   const [homeNodePickerOpen, setHomeNodePickerOpen] = useState(false);
   // Title of the saved home node — the stored value is an id, and an id is not
   // what people recognise. Resolved from the full document list, which the
   // picker has usually already cached.
   const [readerHomeTitle, setReaderHomeTitle] = useState<string | null>(null);
   const [isImported, setIsImported] = useState(false);
+  // Fetched straight off GET /nests/:id, independent of the isArchived prop
+  // threaded down from App's View state — a deep link or a page refresh
+  // lands here without that prop ever being set, so the caps below fall back
+  // to whichever of the two actually has the answer.
+  const [nestArchivedAt, setNestArchivedAt] = useState<string | null>(null);
   // Caller's nest-level permission (from GET /nests/:id).
   const [permission, setPermission] = useState<string | null>(null);
   // Stewardship is governance of the commons / one's own nests, not a tool
@@ -397,113 +291,23 @@ export function NestView({
   const canManageGovernance =
     (isAdmin && (isOwner || isAnonOwned)) ||
     (!isAdmin && (isOwner || permission === "owner" || permission === "admin"));
+  // Public Docs Reader Mode: unlike governance above, the server admin keeps
+  // access on EVERY nest here (matches the handler's own gate in
+  // sharing-routes.ts — isServerAdminUserId is never narrowed to "your own
+  // nests"), on top of which the nest's own owner/admin collaborator can now
+  // also configure it without needing server-admin rights.
+  const canManageReaderMode =
+    isAdmin || isOwner || permission === "owner" || permission === "admin";
   // Caller's merged effective roles (collaborator + steward), nest-wide.
   const [roles, setRoles] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
-  const [stewardScope, setStewardScope] = useState<
-    "all" | "document" | "tag" | "nest"
-  >("all");
-  const [stewardRoleFilter, setStewardRoleFilter] = useState<
-    "all" | StewardRole
-  >("all");
   const [editingSteward, setEditingSteward] = useState<Steward | null>(null);
   const [loading, setLoading] = useState(true);
   // True only until the first successful fetch. Tab CONTENT gates on this, not
   // `loading`, so a background refetch (fired by the many mutation handlers)
   // never blanks already-rendered tabs back to a spinner.
   const [initialLoad, setInitialLoad] = useState(true);
-  const [search, setSearch] = useState(initialSearch ?? "");
-  // Multi-tag AND filter; toggled by clicking tag chips on list rows.
-  const [tagFilters, setTagFilters] = useState<string[]>(initialTags ?? []);
-  const toggleTagFilter = (tag: string) =>
-    setTagFilters((prev) =>
-      prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag],
-    );
-  const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [typeFilter, setTypeFilter] = useState<string>("all");
-  const [authorFilter, setAuthorFilter] = useState<string>("all");
-  const [dateFilter, setDateFilter] = useState<DatePreset>("any");
-  // Document list sort. Defaults to "activity" (most-recently-touched first) so
-  // the list opens on what changed, not an alphabetical wall.
-  const [sortMode, setSortMode] = useState<
-    "activity" | "name" | "edited" | "comments"
-  >("activity");
-  // Per-node comment (annotation thread) counts, for the "Most comments" sort.
-  const [commentCounts, setCommentCounts] = useState<
-    Record<string, { count: number; lastAt: string | null }>
-  >({});
-  // List vs cards, persisted per-browser (not per-nest — it's a reading pref).
-  const [viewMode, setViewMode] = useState<"list" | "cards">(() => {
-    try {
-      return localStorage.getItem("nest:viewMode") === "cards"
-        ? "cards"
-        : "list";
-    } catch {
-      return "list";
-    }
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem("nest:viewMode", viewMode);
-    } catch {
-      /* ignore quota/availability */
-    }
-  }, [viewMode]);
-  // Saved filters, persisted per nest.
-  const savedKey = `nest:${nestId}:savedFilters`;
-  const [savedFilters, setSavedFilters] = useState<SavedFilter[]>([]);
-  useEffect(() => {
-    try {
-      setSavedFilters(parseSavedFilters(localStorage.getItem(savedKey)));
-    } catch {
-      setSavedFilters([]);
-    }
-  }, [savedKey]);
-  const persistSaved = (next: SavedFilter[]) => {
-    setSavedFilters(next);
-    try {
-      localStorage.setItem(savedKey, serializeSavedFilters(next));
-    } catch {
-      /* ignore quota/availability */
-    }
-  };
-  const [showSaveFilter, setShowSaveFilter] = useState(false);
-  const [saveFilterName, setSaveFilterName] = useState("");
-  const saveCurrentFilter = () => {
-    const name = saveFilterName.trim();
-    if (!name) return;
-    persistSaved(
-      upsertFilter(savedFilters, {
-        name,
-        search: search || undefined,
-        status: statusFilter !== "all" ? statusFilter : undefined,
-        tags: tagFilters.length ? tagFilters : undefined,
-        author: authorFilter !== "all" ? authorFilter : undefined,
-        datePreset: dateFilter !== "any" ? dateFilter : undefined,
-        type: typeFilter !== "all" ? typeFilter : undefined,
-      }),
-    );
-    setSaveFilterName("");
-    setShowSaveFilter(false);
-  };
-  const applySavedFilter = (f: SavedFilter) => {
-    setSearch(f.search ?? "");
-    setStatusFilter(f.status ?? "all");
-    setTagFilters(f.tags ?? []);
-    setAuthorFilter(f.author ?? "all");
-    setDateFilter(f.datePreset ?? "any");
-    setTypeFilter(f.type ?? "all");
-  };
   const [reviewNode, setReviewNode] = useState<any | null>(null);
-  const [publishNode, setPublishNode] = useState<any | null>(null);
-  const [submitNode, setSubmitNode] = useState<any | null>(null);
-  const [versionNode, setVersionNode] = useState<any | null>(null);
-  const [versionData, setVersionData] = useState<{
-    versions: Version[];
-    approvedVersion: number | null;
-    currentVersion: number;
-    externalEditVerdicts?: api.ExternalEditVerdict[];
-  }>({ versions: [], approvedVersion: null, currentVersion: 0 });
   const [showAssignSteward, setShowAssignSteward] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
@@ -572,21 +376,20 @@ export function NestView({
   // first expand, so the default has to be closed.
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [loadingFolders, setLoadingFolders] = useState<Set<string>>(new Set());
-  const [dragNodeId, setDragNodeId] = useState<string | null>(null);
-  const [dropFolder, setDropFolder] = useState<string | null>(null);
 
-  /** Folder path of a node id ("" for docs directly under nodes/). */
-  const folderOfNode = (id: string) => {
-    const rel = id.startsWith("nodes/") ? id.slice(6) : id;
-    const slash = rel.lastIndexOf("/");
-    return slash > 0 ? rel.slice(0, slash) : "";
-  };
 
   const qc = useQueryClient();
 
   // Folder levels loaded so far, so a refetch after a mutation restores
   // exactly what is on screen. A ref, not state: it must not re-run fetchData.
   const loadedFolders = useRef<Set<string>>(new Set());
+  // Reactive mirror of the ref above, for Reader Mode only: it needs to know
+  // WHICH known folders already have their docs fetched so an unfetched
+  // folder can default to a collapsed row instead of showing an "expanded"
+  // chevron over nothing.
+  const [loadedFolderPaths, setLoadedFolderPaths] = useState<Set<string>>(
+    new Set(),
+  );
 
   /**
    * Fetch ONE folder level and fold it into `nodes`, replacing whatever was
@@ -602,6 +405,7 @@ export function NestView({
       try {
         const res = await qc.fetchQuery(reads.folderNodes(nestId, folder));
         loadedFolders.current.add(folder);
+        setLoadedFolderPaths((prev) => new Set(prev).add(folder));
         setNodes((prev) => [
           ...prev.filter((n) => folderOfNode(n.id || "") !== folder),
           ...res.nodes,
@@ -628,14 +432,14 @@ export function NestView({
       setCensus(fresh);
     } catch (e) {
       console.error("[NestView] getNestCensus failed", nestId, e);
+    } finally {
+      setCensusSettled(true);
     }
   }, [nestId, qc]);
 
   /** Re-read every level currently on screen — used after every mutation.
    *  A no-op before the first load, which the scope effect below owns. */
   const reloadLevels = useCallback(async () => {
-    // The whole-nest copy the filters use was read before this write.
-    setFullNodes(null);
     if (!loadedFolders.current.size) return;
     await Promise.all([
       fetchCensus(),
@@ -643,18 +447,16 @@ export function NestView({
     ]);
   }, [fetchLevel, fetchCensus]);
 
-  /** Node-id prefix for a folder share — see lib/folder-target.ts. */
-  const shareTargetForFolder = (folderPath: string): string => {
-    const inside = nodes.find((n) => {
-      const f = folderOfNode(n.id || "");
-      return f === folderPath || f.startsWith(`${folderPath}/`);
-    });
-    return folderGrantTarget(folderPath, inside?.id ?? null);
-  };
 
   const openFolderInDocuments = (folder: string) => {
     setFolderFilter(folder);
     setActiveTab("documents");
+  };
+
+  // Open a folder (and load its level) without toggling — drag-over uses it.
+  const expandFolder = (path: string) => {
+    setExpandedFolders((prev) => (prev.has(path) ? prev : new Set(prev).add(path)));
+    void fetchLevel(path);
   };
 
   const toggleFolderExpanded = (path: string) => {
@@ -669,111 +471,6 @@ export function NestView({
     if (opening) void fetchLevel(path);
   };
 
-  // Dragging over a collapsed folder header for a beat expands it, so a doc
-  // can be dropped into a subfolder without aborting the drag to click.
-  const dragExpandTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const cancelDragExpand = () => {
-    if (dragExpandTimer.current) {
-      clearTimeout(dragExpandTimer.current);
-      dragExpandTimer.current = null;
-    }
-  };
-  // Don't let a pending spring-open fire (and set state) after unmount.
-  useEffect(() => cancelDragExpand, []);
-  const scheduleDragExpand = (path: string) => {
-    cancelDragExpand();
-    dragExpandTimer.current = setTimeout(() => {
-      dragExpandTimer.current = null;
-      setExpandedFolders((prev) => {
-        if (prev.has(path)) return prev;
-        return new Set(prev).add(path);
-      });
-      void fetchLevel(path);
-    }, 600);
-  };
-
-  /**
-   * Move a document to another folder — the ONE mover behind both the
-   * drag-and-drop drop handlers and the "Move to folder" menu dialog. The
-   * server returns the node under its NEW id (moving rewrites the id); we
-   * refetch the list rather than patching state, same as every other
-   * mutation in this view, so the tree, folder groups, and counts all pick
-   * up the new id in one pass. Returns true on success so the dialog knows
-   * to close.
-   */
-  const handleMoveNode = async (nodeId: string, targetFolder: string) => {
-    if (folderOfNode(nodeId) === targetFolder) return true; // already there
-    const dest = targetFolder ? prettyFolderPath(targetFolder) : "nest root";
-    // Processing indicator while the move is in flight — the drop can take a
-    // beat (id rewrite + refetch), so show it on both the drop and dialog
-    // paths. Reuse the same toast id so it swaps to success/error in place.
-    const toastId = toast.loading(`Moving to ${dest}…`);
-    try {
-      const { node: moved, previousId } = await api.moveNode(
-        nestId,
-        nodeId,
-        targetFolder,
-      );
-      const previousFolder = folderOfNode(previousId);
-      toast.success(
-        targetFolder ? `Moved to ${dest}` : "Moved to nest root",
-        {
-          id: toastId,
-          // Undo = the same move call, back to where it came from. Must use
-          // the NEW id (moved.id) — the old id no longer exists.
-          action: {
-            label: "Undo",
-            onClick: async () => {
-              try {
-                await api.moveNode(nestId, moved.id, previousFolder);
-                toast.success("Move undone");
-                fetchData();
-              } catch (err: any) {
-                console.error("[NestView] undo move failed", nestId, moved.id, err);
-                toast.error(err?.message || "Undo failed");
-              }
-            },
-          },
-          duration: 6000,
-        },
-      );
-      fetchData();
-      return true;
-    } catch (err: any) {
-      console.error("[NestView] moveNode failed", nestId, nodeId, targetFolder, err);
-      toast.error(err?.message || "Move failed", { id: toastId });
-      return false;
-    }
-  };
-
-  const handleDropOnFolder = (targetFolder: string) => {
-    const nodeId = dragNodeId;
-    setDragNodeId(null);
-    setDropFolder(null);
-    cancelDragExpand();
-    if (!nodeId) return;
-    // Defer the move+refetch one tick. The move rewrites the node id, so the
-    // refetch unmounts the row we just dragged; if that happens before the
-    // browser fires `dragend` and tears down its drag session (which races
-    // the move on a fast/local server), Chrome leaves the session half-open
-    // and silently ignores the NEXT dragstart — drag "randomly" dies after a
-    // successful move. Letting the current event loop finish first makes it
-    // deterministic — a plain setTimeout(0) is enough; no drag library needed.
-    setTimeout(() => void handleMoveNode(nodeId, targetFolder), 0);
-  };
-
-  // "Move to folder" menu dialog — the accessible, keyboard-reachable path
-  // to the same move as drag-and-drop.
-  const [moveTarget, setMoveTarget] = useState<any | null>(null);
-  const [moveDest, setMoveDest] = useState("");
-  const [movingDoc, setMovingDoc] = useState(false);
-  // A nest with no folders yet has nowhere to move a document to, so the
-  // dialog can name a new destination itself — folders are path-derived, the
-  // move creates it. "" = not creating one.
-  const [moveNewFolder, setMoveNewFolder] = useState<string | null>(null);
-  const moveNewFolderCheck = checkFolderPath(moveNewFolder ?? "");
-  const moveResolvedDest =
-    moveNewFolder === null ? moveDest : moveNewFolderCheck.path;
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -788,12 +485,13 @@ export function NestView({
       return null;
     });
     const grantOnly = !!(nestMeta as any)?.grant_only;
+    setGrantOnly(grantOnly);
     // Each request is independently swallowed — if listNodes throws, we must
     // still apply stewardshipEnabled from the settings response. Previously a
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
     const empty = <T,>(v: T) => Promise.resolve(v);
-    const [, stewardsData, queueData, deletionData, settingsData, externalData, countsData, feedData] =
+    const [, queueData, deletionData, settingsData] =
       await Promise.all([
         // The five reads below go through the shared cache (same keys and
         // invalidation as the hook-based screens) so returning from a document
@@ -804,12 +502,6 @@ export function NestView({
         // Documents come from the folder levels currently on screen, not one
         // whole-nest listing — see fetchLevel.
         reloadLevels(),
-        grantOnly
-          ? empty({ stewards: [] as Steward[] })
-          : qc.fetchQuery(reads.stewards(nestId)).catch((e) => {
-              console.error("[NestView] listStewards failed", nestId, e);
-              return { stewards: [] };
-            }),
         grantOnly
           ? empty({ requests: [], total: 0 })
           : qc.fetchQuery(reads.reviewQueue(nestId)).catch((e) => {
@@ -841,57 +533,13 @@ export function NestView({
                 prime_tags: [] as string[],
               };
             }),
-        grantOnly
-          ? empty({ entries: [], total: 0 })
-          : qc.fetchQuery(reads.externalEdits(nestId)).catch((e) => {
-              console.error("[NestView] listExternalEdits failed", nestId, e);
-              return { entries: [], total: 0 };
-            }),
-        grantOnly
-          ? empty({ counts: {} as Record<string, number> })
-          : qc.fetchQuery(reads.commentCounts(nestId)).catch((e) => {
-              console.error("[NestView] getCommentCounts failed", nestId, e);
-              return { counts: {} };
-            }),
-        // Comment side of the activity feed — deliberately NOT filter=all.
-        // The server's change items are the RAW pending set, but this view
-        // renders reviewableQueue: the review-queue response post-filtered
-        // client-side by canReview + separation-of-duties (own submissions
-        // get their own card). Fetching filter=all would return change rows
-        // we'd have to re-filter and dedupe against that queue state, so the
-        // client pulls comments only and lets ReviewQueue interleave them
-        // with the already-filtered changes, using the same (createdAt, id)
-        // ordering as the server merge. If reviewable filtering ever moves
-        // server-side, collapse this into a single filter=all call.
-        grantOnly
-          ? empty({
-              items: [] as api.FeedItem[],
-              counts: { changes: 0, comments: 0 },
-            })
-          : qc.fetchQuery(reads.feed(nestId, "comments")).catch((e) => {
-              console.error("[NestView] getNestFeed failed", nestId, e);
-              return {
-                items: [] as api.FeedItem[],
-                counts: { changes: 0, comments: 0 },
-              };
-            }),
       ]);
-    setCommentCounts(countsData.counts);
-    setStewards(stewardsData.stewards);
     setReviewQueue(queueData.requests);
     setDeletionRequests(deletionData.requests);
-    const commentItems = feedData.items.filter(
-      (i): i is api.FeedCommentItem => i.type === "comment",
-    );
-    setFeedComments(commentItems);
-    // Authoritative total (an older server without counts falls back to the
-    // page length, which is at least not wrong for single-page nests).
-    setFeedCommentsTotal(feedData.counts?.comments ?? commentItems.length);
     setStewardshipEnabled(settingsData.stewardship_enabled);
     setAllowSelfApprove(settingsData.allow_self_approve);
     setPrimeOnlyReview(!!settingsData.prime_only_review);
     setPrimeTags(settingsData.prime_tags ?? []);
-    setExternalEdits(externalData.entries);
     if (nestMeta?.nest?.visibility) {
       setVisibility(nestMeta.nest.visibility);
     }
@@ -900,6 +548,7 @@ export function NestView({
       setNestDescription((nestMeta.nest as any).description ?? null);
       setReaderModeEnabled(!!(nestMeta.nest as any).reader_mode);
       setReaderHomeNode((nestMeta.nest as any).reader_home_node ?? null);
+      setNestArchivedAt((nestMeta.nest as any).archived_at ?? null);
     }
     if (nestMeta?.permission) {
       setPermission(nestMeta.permission);
@@ -913,45 +562,6 @@ export function NestView({
   // Next page of comment activity, appended under the feed. Offset by the
   // rows already shown; a dedupe guard drops any row that slid into the next
   // page because new comments landed above it between fetches.
-  const loadMoreComments = useCallback(async () => {
-    setFeedLoadingMore(true);
-    try {
-      const res = await api.getNestFeed(
-        nestId,
-        "comments",
-        50,
-        feedComments.length,
-      );
-      const fresh = res.items.filter(
-        (i): i is api.FeedCommentItem => i.type === "comment",
-      );
-      setFeedComments((prev) => {
-        const seen = new Set(prev.map((c) => c.id));
-        return [...prev, ...fresh.filter((c) => !seen.has(c.id))];
-      });
-      setFeedCommentsTotal(res.counts?.comments ?? res.total);
-    } catch (e: any) {
-      console.error("[NestView] getNestFeed load-more failed", nestId, e);
-      toast.error(e?.message || "Failed to load more comments");
-    } finally {
-      setFeedLoadingMore(false);
-    }
-  }, [nestId, feedComments.length]);
-
-  const refreshExternalEdits = useCallback(async () => {
-    setExternalEditsLoading(true);
-    try {
-      await api.scanExternalEdits(nestId).catch((e) => {
-        console.error("[NestView] scanExternalEdits failed", nestId, e);
-        return null;
-      });
-      const { entries } = await api.listExternalEdits(nestId);
-      setExternalEdits(entries);
-    } finally {
-      setExternalEditsLoading(false);
-    }
-  }, [nestId]);
-
   useEffect(() => { fetchData(); }, [fetchData]);
 
   // A different nest, or a different scoped folder, is a different tree:
@@ -960,7 +570,7 @@ export function NestView({
     loadedFolders.current = new Set();
     setExpandedFolders(new Set());
     setNodes([]);
-    setFullNodes(null);
+    setCensusSettled(false);
     void fetchLevel(folderFilter ?? "");
     void fetchCensus();
   }, [nestId, folderFilter, fetchLevel, fetchCensus]);
@@ -969,132 +579,7 @@ export function NestView({
   // Review Queue card can bind to the count the user can actually act
   // on — not the raw queue size.
 
-  // Full-text CONTENT hits from the server search endpoint, unioned with
-  // the instant client title/tag match below. Debounced; best-effort.
-  const [contentHits, setContentHits] = useState<Set<string>>(new Set());
-  useEffect(() => {
-    const q = search.trim();
-    if (q.length < 2) {
-      setContentHits(new Set());
-      return;
-    }
-    let cancelled = false;
-    const t = setTimeout(async () => {
-      try {
-        const { nodes: hits } = await api.searchNodes(nestId, q);
-        if (!cancelled) {
-          setContentHits(new Set((hits as any[]).map((n) => n.id)));
-        }
-      } catch {
-        /* fall back to client-side matching only */
-      }
-    }, 300);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
-  }, [nestId, search]);
 
-  const loadFullNest = useCallback(async () => {
-    if (fullNodes || fullLoading) return;
-    setFullLoading(true);
-    try {
-      const { nodes: all } = await qc.fetchQuery(reads.nodes(nestId));
-      setFullNodes(all);
-    } catch (e: any) {
-      console.error("[NestView] listNodes failed", nestId, e);
-      toast.error(e?.message || "Failed to search the whole nest");
-    } finally {
-      setFullLoading(false);
-    }
-  }, [nestId, qc, fullNodes, fullLoading]);
-
-
-  const hasActiveFilters =
-    !!search ||
-    statusFilter !== "all" ||
-    typeFilter !== "all" ||
-    tagFilters.length > 0 ||
-    authorFilter !== "all" ||
-    dateFilter !== "any";
-
-  useEffect(() => {
-    if (hasActiveFilters) void loadFullNest();
-  }, [hasActiveFilters, loadFullNest]);
-  const updatedAfter = datePresetToEpoch(dateFilter, Date.now());
-  // Status + tag filters always apply; with a query, a doc passes on an
-  // instant client title/tag match OR a server content hit. Semantics of
-  // the client match live in lib/node-filter (unit-tested).
-  //
-  // Unfiltered, the levels on screen ARE the answer; filtered, the answer
-  // spans the nest, so use the full listing as soon as it lands.
-  const filtered = visibleDocuments({
-    levelNodes: nodes,
-    fullNodes,
-    folderFilter,
-    search,
-    status: statusFilter,
-    type: typeFilter,
-    author: authorFilter,
-    tags: tagFilters,
-    updatedAfter,
-    contentHits,
-  });
-
-  // Sort the filtered list. "name" = title A–Z; "edited" = most-recently
-  // edited first (updated_at already on each node); "comments" = most comment
-  // threads first, tie-broken by most recent comment then title.
-  const sorted = [...filtered];
-  if (sortMode === "activity") {
-    // Recent activity = the later of last edit and last comment, newest first.
-    sorted.sort((a, b) =>
-      activityTimestamp(b.updated_at, commentCounts[b.id]?.lastAt).localeCompare(
-        activityTimestamp(a.updated_at, commentCounts[a.id]?.lastAt),
-      ),
-    );
-  } else if (sortMode === "edited") {
-    sorted.sort((a, b) =>
-      String(b.updated_at || "").localeCompare(String(a.updated_at || "")),
-    );
-  } else if (sortMode === "comments") {
-    sorted.sort((a, b) => {
-      const cb = commentCounts[b.id]?.count || 0;
-      const ca = commentCounts[a.id]?.count || 0;
-      if (cb !== ca) return cb - ca;
-      const lb = commentCounts[b.id]?.lastAt || "";
-      const la = commentCounts[a.id]?.lastAt || "";
-      if (lb !== la) return String(lb).localeCompare(String(la));
-      return String(a.title || "").localeCompare(String(b.title || ""));
-    });
-  } else {
-    sorted.sort((a, b) =>
-      String(a.title || "").localeCompare(String(b.title || "")),
-    );
-  }
-
-  // Folder tree for the Documents list: sorted docs grouped by their FULL
-  // folder path, groups ordered parent-before-child. depth drives indentation
-  // (relative to the scoped folder when one is set); rendering skips any
-  // group living under a collapsed ancestor.
-  const baseFolder = folderFilter ?? "";
-  const baseDepth = baseFolder ? baseFolder.split("/").length : 0;
-  const docGroups = (() => {
-    const groups = new Map<string, any[]>();
-    for (const n of sorted) {
-      const f = folderOfNode(n.id || "");
-      if (!groups.has(f)) groups.set(f, []);
-      groups.get(f)!.push(n);
-    }
-    return [...groups.entries()]
-      .map(([folder, items]) => ({
-        folder,
-        depth: folder ? folder.split("/").length - baseDepth : 0,
-        items,
-      }))
-      .sort((a, b) =>
-        a.folder === "" ? -1 : b.folder === "" ? 1 : byPathSegments(a.folder, b.folder),
-      );
-  })();
 
   // Every folder in the nest, so the tree can show one whose documents have
   // never been fetched. Memoised — FolderTree keys a useMemo on this.
@@ -1103,135 +588,11 @@ export function NestView({
     [census],
   );
 
-  // A folder level with no document of its own is normal — an imported nest
-  // commonly keeps everything one level down. The tab is only truly empty
-  // when there is no folder to open either, or when a filter matched nothing.
-  const nothingToShow = documentsTabIsEmpty({
-    visibleCount: filtered.length,
-    folderCount: knownFolders.length,
-    filtering: hasActiveFilters,
-  });
-
-  // Orphans + broken [[links]], client-side from the loaded list.
-  // Only meaningful over the whole nest: on a partial list every link into
-  // an unexpanded folder reads as broken, and every unloaded source makes a
-  // loaded document look orphaned.
-  const wikiHealth = useMemo(
-    () => (fullNodes ? linkHealth(fullNodes) : { orphans: [], broken: [] }),
-    [fullNodes],
-  );
-
-  // Every folder path in use (all prefixes, so intermediate levels with no
-  // direct docs still appear) — options for the Move-to-folder dialog.
-  const allFolders = useMemo(
-    () => (census?.folders ?? []).map((f) => f.path).sort(byPathSegments),
-    [census],
-  );
-
-  // Distinct authors for the author filter dropdown.
-  const authors = census?.authors ?? [];
-
-  // Distinct node types present (missing type = "document"), for the type
-  // filter dropdown. Only offered when the nest actually mixes types.
-  const typesPresent = useMemo(
-    () => Object.keys(census?.types ?? {}).sort((a, b) => a.localeCompare(b)),
-    [census],
-  );
-
-  const clearAllFilters = () => {
-    setSearch("");
-    setStatusFilter("all");
-    setTypeFilter("all");
-    setTagFilters([]);
-    setAuthorFilter("all");
-    setDateFilter("any");
-  };
 
   // Human-readable chips for every active filter, each with its own clear.
-  // Tags keep their dedicated bar below, so they're not duplicated here.
-  const STATUS_LABELS: Record<string, string> = {
-    draft: "Draft",
-    pending_review: "Pending",
-    approved: "Approved",
-    published: "Published",
-    rejected: "Rejected",
-  };
-  const DATE_LABELS: Record<string, string> = {
-    "7d": "Last 7 days",
-    "30d": "Last 30 days",
-    "90d": "Last 90 days",
-    "1y": "Last year",
-  };
-  const TYPE_LABELS: Record<string, string> = {
-    document: "Document",
-    artifact: "Artifact",
-    agent: "Agent",
-    skill: "Skill",
-    tool: "Tool",
-    table: "Table",
-  };
-  // Colored pill for a non-document node type, shown on each list/card row so
-  // the kind is scannable. `document` returns null (the default — no pill).
-  const typePill = (
-    t: string,
-  ): { label: string; cls: string; title: string } | null => {
-    switch (t) {
-      case "artifact":
-        return {
-          label: "HTML",
-          title: "Hosted HTML artifact",
-          cls: "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300",
-        };
-      case "agent":
-        return {
-          label: "Agent",
-          title: "Runnable agent node",
-          cls: "bg-violet-100 text-violet-800 dark:bg-violet-950/40 dark:text-violet-300",
-        };
-      case "skill":
-        return {
-          label: "Skill",
-          title: "Runnable skill node",
-          cls: "bg-sky-100 text-sky-800 dark:bg-sky-950/40 dark:text-sky-300",
-        };
-      default:
-        return null;
-    }
-  };
-  const activeFilterChips: Array<{ label: string; clear: () => void }> = [];
-  if (search)
-    activeFilterChips.push({ label: `Search: ${search}`, clear: () => setSearch("") });
-  if (statusFilter !== "all")
-    activeFilterChips.push({
-      label: `Status: ${STATUS_LABELS[statusFilter] ?? statusFilter}`,
-      clear: () => setStatusFilter("all"),
-    });
-  if (typeFilter !== "all")
-    activeFilterChips.push({
-      label: `Type: ${TYPE_LABELS[typeFilter] ?? typeFilter}`,
-      clear: () => setTypeFilter("all"),
-    });
-  if (authorFilter !== "all")
-    activeFilterChips.push({
-      label: `Author: ${authorFilter}`,
-      clear: () => setAuthorFilter("all"),
-    });
-  if (dateFilter !== "any")
-    activeFilterChips.push({
-      label: `Edited: ${DATE_LABELS[dateFilter] ?? dateFilter}`,
-      clear: () => setDateFilter("any"),
-    });
-
-  // All tags in the nest with usage counts — the always-visible filter bar.
-  const allTags = useMemo(
-    () =>
-      Object.entries(census?.tags ?? {})
-        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-        .map(([tag, count]) => ({ tag, count })),
-    [census],
-  );
-
   // Quick-access strip; shown on the Overview tab as recently-edited rows.
+  // Nest-wide on purpose — the Overview tab has no document filter of its
+  // own, so this reflects the whole nest, unlike documentsRecentlyEdited above.
   const recentlyEdited = census?.recent ?? [];
 
   // Genuine, non-capped metric for the Overview stat tile: how many documents
@@ -1253,6 +614,10 @@ export function NestView({
   //   isReadOnly     — no write/review/manage (public + plain 'read' collabs)
   // Rules live in lib/nest-caps so the board (and any later nest-scoped view)
   // gates on exactly the same derivation instead of a lookalike copy.
+  // Archived: every write is refused server-side, so the affordances that
+  // only lead to a refusal (or that configure a nest nobody can change) are
+  // withheld — Connect, the reader-mode switch, the trace, steward changes.
+  const nestArchived = isArchived || isNestArchived({ archived_at: nestArchivedAt });
   const caps = deriveNestCaps({
     roles,
     permission,
@@ -1260,20 +625,45 @@ export function NestView({
     isOwner,
     isAdmin,
     readerMode: readerModeEnabled,
+    previewReader,
+    isArchived: nestArchived,
   });
   // canReviewDocs is folded into isReadOnly inside caps; per-row review uses
   // canReviewNode for scope resolution, so it isn't destructured here.
   const { canManage, collabCanWrite, canEditDocs, isReadOnly, isReaderView } =
     caps;
 
-  // Map nodeId → submitter so the per-row Review button can hide on
-  // docs the current user submitted (separation-of-duties: authors must
-  // not approve their own work). The server already rejects the call,
-  // but hiding the affordance keeps the UI honest.
-  const submitterByNode = new Map<string, string>();
-  for (const r of reviewQueue) {
-    submitterByNode.set(r.nodeId, r.requestedBy.toLowerCase());
-  }
+  // Reader Mode shows the whole nest at once: the nav lists every folder's
+  // pages without a click, and a home page outside the first folder still
+  // resolves on load. One body-free nest-wide read replaces the per-level
+  // lazy fetches; every folder it covers is marked loaded so nav rows open.
+  useEffect(() => {
+    if (!isReaderView) return;
+    let cancelled = false;
+    // A preview lists only approved documents, exactly as a visitor sees it.
+    qc.fetchQuery(reads.nodesMeta(nestId, previewReader))
+      .then(({ nodes: all }) => {
+        if (cancelled) return;
+        const folders = foldersCoveredBy(all);
+        loadedFolders.current = folders;
+        setLoadedFolderPaths(folders);
+        setNodes(all);
+      })
+      .catch((e: any) => toast.error(e?.message || "Failed to load documents"));
+    return () => { cancelled = true; };
+  }, [isReaderView, previewReader, nestId, qc]);
+  // The preview swapped `nodes` for the approved-only set and marked every
+  // folder loaded; leaving it reopens the authoring tree from scratch, the
+  // same way a scope change does.
+  const exitPreview = () => {
+    setPreviewReader(false);
+    loadedFolders.current = new Set();
+    setLoadedFolderPaths(new Set());
+    setExpandedFolders(new Set());
+    setNodes([]);
+    void fetchLevel(folderFilter ?? "");
+  };
+
   // Does a steward row with `role` cover this node? Same scope-resolution
   // rules as the server: document scope matches by id, tag scope matches
   // when any of the node's tags match, nest scope matches everything.
@@ -1309,32 +699,6 @@ export function NestView({
     return false;
   };
 
-  // Per-node edit gate. Nest-wide writers (owner/admin or a write+
-  // collaborator) edit any node; a doc/tag-scoped editor steward only edits
-  // the nodes their scope covers — applying the coarse flag per row would
-  // wrongly show Submit/Edit/Delete everywhere. Server still enforces.
-  const canEditNode = (node: { id: string; tags?: string[]; myGrant?: string | null }) => {
-    if (!node) return false;
-    // A write share grant is edit rights on this document specifically — it is
-    // access, not stewardship, so it shows up in neither isReadOnly nor the
-    // steward rows below. Checked before the read-only bail: a grant-only
-    // caller always reads as "read" at nest level whatever their grant says.
-    if (node.myGrant === "write") return true;
-    if (isReadOnly) return false;
-    if (canManage || collabCanWrite) return true;
-    return myStewards.some((s) => {
-      if (s.role !== "editor") return false;
-      if (s.scope === "nest") return true;
-      if (s.scope === "document") return s.nodePattern === node.id;
-      if (s.scope === "tag") {
-        const target = (s.tagName || "").toLowerCase().replace(/^#+/, "");
-        return (node.tags || [])
-          .map((t) => t.toLowerCase().replace(/^#+/, ""))
-          .includes(target);
-      }
-      return false;
-    });
-  };
 
   // Review queue: who can act on each request. The server stamps each request
   // with `canReview` via the authoritative canUserApprove (admin/owner/steward
@@ -1353,13 +717,6 @@ export function NestView({
     return true;
   });
 
-  // Node ids the caller can review right now (authoritative, from the queue
-  // annotation). Drives the per-row Review button so it stays in lockstep with
-  // the in-document approve/reject affordance.
-  const reviewableNodeIds = new Set(
-    reviewableQueue.map((r) => r.nodeId),
-  );
-
   // The caller's own pending submissions. SoD keeps these out of the
   // actionable queue above (authors can't approve their own work), which made
   // it look like "submit for review did nothing." Surface them in their own
@@ -1373,16 +730,26 @@ export function NestView({
   // later disabled, the submitter has no reviewer role, or a reviewer-steward
   // reached the nest via public visibility where the settings flag reads
   // false client-side).
-  const showReviewTab =
+  // External Edits badge: the count endpoint (?count=1) — same server work as
+  // the list, a few bytes on the wire; the tab reads the entries itself.
+  const externalEditCount =
+    useQuery({ ...reads.externalEditCount(nestId), enabled: !grantOnly }).data?.total ?? 0;
+  // Review-tab gate: comment activity keeps the tab reachable with stewardship
+  // off. Read only when nothing else already shows the tab, and only after the
+  // cold load has said what those other reasons are.
+  const reviewTabShownAnyway =
     stewardshipEnabled ||
     caps.canReviewDocs ||
     reviewQueue.length > 0 ||
-    // Deletion flags land in this tab too, and are raised on ungoverned nests
-    // as often as governed ones.
-    (caps.canManage && pendingDeletions.length > 0) ||
-    // Comment activity renders in the same tab (the queue is now a feed) —
-    // discussion must stay reachable even with stewardship off.
-    feedCommentsTotal > 0;
+    (caps.canManage && pendingDeletions.length > 0);
+  const feedFirstPage = useFeedComments(
+    nestId,
+    !grantOnly && !initialLoad && !reviewTabShownAnyway,
+  ).data;
+  const feedCommentsTotal =
+    feedFirstPage?.counts?.comments ??
+    (feedFirstPage?.items ?? []).filter((i) => i.type === "comment").length;
+  const showReviewTab = reviewTabShownAnyway || feedCommentsTotal > 0;
 
   // A shared ?tab= link can name a tab this viewer doesn't get (Stewards on a
   // nest they only read, Review Queue while read-only). Radix would render an
@@ -1458,20 +825,22 @@ export function NestView({
   // folder, not a user-created folder, so it's excluded from the count.
   const folderCount = census?.folders.length ?? 0;
 
-  const openVersions = async (node: any) => {
-    setVersionNode(node);
-    try {
-      const data = await qc.fetchQuery(reads.nodeVersions(nestId, node.id));
-      setVersionData(data);
-    } catch (e) {
-      console.error("[NestView] getNodeVersions failed", nestId, node?.id, e);
-    }
-  };
 
   // Approve/reject/submit handlers used to await silently — a 403
   // (e.g. SoD block, no reviewer role, license required) threw past
   // setReviewNode(null), so the modal stayed open and the user saw
   // nothing happen. Surface the error via toast and refresh on success.
+  // Withdraw own pending deletion request — owner's "undo" before an admin acts.
+  const handleWithdrawDeletion = async (request: api.DeletionRequest) => {
+    try {
+      await api.withdrawDeletionRequest(nestId, request.id);
+      toast.success("Deletion request withdrawn");
+      fetchData();
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to withdraw deletion request");
+    }
+  };
+
   const handleApprove = async (note?: string) => {
     if (!reviewNode) return;
     try {
@@ -1511,18 +880,6 @@ export function NestView({
     }
   };
 
-  const handleSubmitReview = async (note: string, priority: string) => {
-    if (!submitNode) return;
-    try {
-      await api.submitForReview(nestId, submitNode.id, note, priority);
-      toast.success("Submitted for review");
-      setSubmitNode(null);
-      fetchData();
-    } catch (err: any) {
-      console.error("[NestView] submitForReview failed", nestId, submitNode?.id, err);
-      toast.error(err?.message || "Submit failed");
-    }
-  };
 
   const handleRemoveSteward = async () => {
     const stewardId = removeStewardId!;
@@ -1564,80 +921,6 @@ export function NestView({
     fetchData();
   };
 
-  // One decision over many documents. The server applies them item by item
-  // through the same approve/reject the single-document flow uses, so partial
-  // success is normal: report what failed and why, keep the successes, and
-  // leave the failures selected so a second attempt is one click away.
-  const runBulkReview = async (
-    action: "approve" | "reject",
-    note: string,
-  ) => {
-    const nodeIds = [...bulkSelected];
-    const { succeeded, failed, results } = await api.bulkReview(
-      nestId,
-      action,
-      nodeIds,
-      note || undefined,
-    );
-    const verb = action === "approve" ? "approved" : "rejected";
-    if (failed === 0) {
-      toast.success(`${succeeded} document${succeeded === 1 ? "" : "s"} ${verb}`);
-      setBulkSelected(new Set());
-    } else {
-      // Each distinct reason, not just the first — a mixed batch fails for
-      // more than one.
-      const reasons = [
-        ...new Set(
-          results.filter((r) => !r.ok).map((r) => r.error || "Unknown reason"),
-        ),
-      ];
-      toast.warning(`${succeeded} ${verb}, ${failed} could not be`, {
-        description: reasons.join(" "),
-        duration: 10000,
-      });
-      setBulkSelected(new Set(results.filter((r) => !r.ok).map((r) => r.nodeId)));
-    }
-    setBulkAction(null);
-    fetchData();
-  };
-
-  // Destructive and irreversible, so it confirms first — through the same
-  // ReasonDialog the deletion-request flows use. Throwing keeps the failure
-  // (423 review lock, 403) inside the dialog instead of a dead-end alert.
-  const handleDeleteNode = async () => {
-    const node = deleteNodeTarget;
-    try {
-      await api.deleteNode(nestId, node.id);
-      fetchData();
-    } catch (err: any) {
-      console.error("[NestView] deleteNode failed", nestId, node?.id, err);
-      throw err;
-    }
-  };
-
-  // Flag a doc for deletion when you can't delete it yourself. Each handler
-  // throws on failure so ReasonDialog shows the error and keeps the input.
-  const handleRequestDeletion = async (reason: string) => {
-    await api.requestNodeDeletion(nestId, deletionTarget!.id, reason);
-    toast.success("Deletion requested — a nest admin will review it");
-    fetchData();
-  };
-
-  // Folder: admins delete it outright (every doc under it), everyone else
-  // raises a request. One handler — the dialog it came from set the mode.
-  const handleFolderDeletion = async (reason: string) => {
-    const folder = folderTarget!;
-    if (canManage) {
-      const { deleted } = await api.deleteFolder(nestId, folder.path);
-      toast.success(
-        `Deleted ${folder.label} — ${deleted} document${deleted === 1 ? "" : "s"}`,
-      );
-    } else {
-      await api.requestTargetDeletion(nestId, "folder", folder.path, reason);
-      toast.success("Deletion requested — a nest admin will review it");
-    }
-    fetchData();
-  };
 
   const handleHonourDeletion = async () => {
     await api.approveDeletionRequest(nestId, resolveTarget!.request.id);
@@ -1651,23 +934,13 @@ export function NestView({
     fetchData();
   };
 
-  // Withdraw own pending deletion request — owner's "undo" before an admin acts.
-  const handleWithdrawDeletion = async (request: api.DeletionRequest) => {
-    try {
-      await api.withdrawDeletionRequest(nestId, request.id);
-      toast.success("Deletion request withdrawn");
-      fetchData();
-    } catch (err: any) {
-      toast.error(err?.message || "Failed to withdraw deletion request");
-    }
-  };
 
   // Inline visibility toggle from the header (owner/admin only). Optimistic
   // flip with revert on failure, mirroring ShareNestDialog so the control
   // never lies about server state. Surfaces the public/private switch outside
   // the Share dialog, where it was easy to miss. (CU-wdqcpztgwk)
   const applyVisibility = async (
-    next: "private" | "public",
+    next: api.NestVisibility,
     acknowledgePublic?: boolean,
   ) => {
     const prev = visibility;
@@ -1692,6 +965,13 @@ export function NestView({
     // Going public makes the nest readable by anyone on the internet, outside
     // your organization — confirm first (and send acknowledge_public). Going
     // back to private is unguarded.
+    // Minimal UX improvement: when the nest is Organization-visible, route to
+    // the full three-tier control on the Collaborators tab so callers discover
+    // the Private option too (org → private path). (Bugfix)
+    if (visibility === "org") {
+      setActiveTab("collaborators");
+      return;
+    }
     if (visibility !== "public") {
       setConfirmPublic(true);
       return;
@@ -1699,8 +979,9 @@ export function NestView({
     await applyVisibility("private");
   };
 
-  // Public Docs Reader Mode config (superadmin-only; the server hard-gates on
-  // isServerAdminUserId). Optimistic flip with revert on failure.
+  // Public Docs Reader Mode config (server admin, or this nest's own
+  // owner/admin — see canManageReaderMode below). Optimistic flip with
+  // revert on failure.
   const handleReaderModeToggle = async () => {
     const next = !readerModeEnabled;
     setReaderModeEnabled(next);
@@ -1817,22 +1098,38 @@ export function NestView({
   // caps.isReaderView (reader_mode && isReadOnly), so owners/editors/reviewers/
   // admins never lose the authoring UI.
   if (isReaderView) {
+    // No "Back" here: a public docs reader navigates with the page's own
+    // nav and the shell's header; a button back to the nest list is noise.
+    // The banner takes 3.5rem (row + margin) off the reader's viewport
+    // height so the three cards still end at the window's edge.
     return (
-      <div className="relative">
-        <div className="mb-3">
-          <Button variant="ghost" size="sm" onClick={onBack} className="gap-1.5">
-            <ArrowLeft className="h-4 w-4" />
-            Back
-          </Button>
-        </div>
-        <ReaderView
-          nestId={nestId}
-          nestName={editableName}
-          nodes={nodes}
-          tocGroups={tocGroups}
-          knownFolders={knownFolders}
-          readerHomeNode={readerHomeNode}
-        />
+      <div style={previewReader ? ({ "--reader-offset": "3.5rem" } as React.CSSProperties) : undefined}>
+        {previewReader && (
+          <div
+            role="status"
+            className="mb-4 flex items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200"
+          >
+            <span>Previewing as a reader — this is what visitors see.</span>
+            <Button variant="outline" size="sm" className="h-7" onClick={exitPreview}>
+              Exit preview
+            </Button>
+          </div>
+        )}
+      <ReaderView
+          key={previewReader ? "preview" : "reader"}
+        nestId={nestId}
+        nestName={editableName}
+        nodes={nodes}
+        tocGroups={tocGroups}
+        knownFolders={knownFolders}
+        readerHomeNode={readerHomeNode}
+        initialDoc={initialDoc}
+        onDocChange={onReaderDocChange}
+        onExpandFolder={fetchLevel}
+        loadingFolders={loadingFolders}
+        loadedFolders={loadedFolderPaths}
+          approvedOnly={previewReader}
+      />
       </div>
     );
   }
@@ -1887,6 +1184,7 @@ export function NestView({
         title={
           canManage ? (
             <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1">
               <input
                 value={editableName}
                 onChange={(e) => {
@@ -1902,6 +1200,7 @@ export function NestView({
                     (e.target as HTMLInputElement).blur();
                   }
                   if (e.key === "Escape") {
+                    skipNextFlush.arm();
                     setEditableName(lastSavedName.current);
                     setRenameError(null);
                     (e.target as HTMLInputElement).blur();
@@ -1911,6 +1210,28 @@ export function NestView({
                 title="Click to rename — saved automatically"
                 className="w-full min-w-0 truncate text-xl font-semibold bg-transparent outline-none border-b border-transparent hover:border-border focus:border-primary px-1 -ml-1 rounded-sm"
               />
+              {/* Same rename the overflow menu used to offer (name + description
+                  dialog), beside the name so it is discoverable; the input itself
+                  still edits inline. !loading: the description only lands with
+                  fetchData, so opening earlier would prefill it empty. */}
+              {!loading && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    // Flush a pending inline rename first so the dialog primes
+                    // from the latest text instead of racing the debounce.
+                    flushRename();
+                    setShowRename(true);
+                  }}
+                  className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  title="Rename nest"
+                  aria-label="Rename nest"
+                  data-testid="nest-rename"
+                >
+                  <Pencil className="h-4 w-4" />
+                </button>
+              )}
+              </div>
               {renameError && (
                 <p
                   role="alert"
@@ -1929,6 +1250,13 @@ export function NestView({
               private switch isn't buried in the Share dialog), a read-only
               badge for everyone else. */}
           {canManage ? (
+            // Two-state on purpose: a header shortcut for the common flip,
+            // private <-> public. An org nest routes to the full three-tier
+            // control on the Collaborators tab instead (see
+            // handleVisibilityToggle), since it can move either direction.
+            // Choosing among all three tiers lives in NestVisibilityControl
+            // (Collaborators tab / Share dialog), which is also where each
+            // tier is explained.
             <Button
               variant="outline"
               size="sm"
@@ -1941,41 +1269,62 @@ export function NestView({
               title={
                 visibility === "public"
                   ? "Public — anyone with the URL can read. Click to make private."
-                  : "Private. Click to make public (anyone with the URL can read)."
+                  : visibility === "org"
+                    ? "Organization — everyone signed in to this deployment can read. Click to manage sharing (Collaborators tab)."
+                    : "Private. Click to make public (anyone with the URL can read)."
               }
             >
               {visibilitySaving ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : visibility === "public" ? (
                 <Globe className="h-3.5 w-3.5" />
+              ) : visibility === "org" ? (
+                <Building2 className="h-3.5 w-3.5" />
               ) : (
                 <Lock className="h-3.5 w-3.5" />
               )}
-              {visibility === "public" ? "Public" : "Private"}
+              {visibility === "public"
+                ? "Public"
+                : visibility === "org"
+                  ? "Organization"
+                  : "Private"}
             </Button>
           ) : (
-            visibility === "public" && (
+            visibility !== "private" && (
               <Badge
                 variant="outline"
-                className="shrink-0 gap-1 border-blue-200 bg-blue-50 text-blue-700"
-                title="Anyone with the URL can read this nest"
+                // Green for public, blue for org — same pairing the dashboard
+                // card badge uses, so the two tiers never read as one colour.
+                  className={`shrink-0 gap-1 ${visibility === "public"
+                    ? "border-green-200 bg-green-50 text-green-700"
+                    : "border-blue-200 bg-blue-50 text-blue-700"
+                }`}
+                title={
+                  visibility === "public"
+                    ? "Anyone with the URL can read this nest"
+                    : "Everyone signed in to this deployment can read this nest"
+                }
               >
-                <Globe className="h-3 w-3" />
-                Public
+                {visibility === "public" ? (
+                  <Globe className="h-3 w-3" />
+                ) : (
+                  <Building2 className="h-3 w-3" />
+                )}
+                {visibility === "public" ? "Public" : "Organization"}
               </Badge>
             )
           )}
-          {/* Public Docs Reader Mode — superadmin-only config (isAdmin ==
-              server/super admin). A menu rather than a toggle: the landing
-              document is part of the same setting, and changing it must not
-              mean switching reader mode off and on again. */}
-          {isAdmin && (
+          {/* Public Docs Reader Mode config — server admin, or this nest's own
+              owner/admin (see canManageReaderMode). A menu rather than a
+              toggle: the landing document is part of the same setting, and
+              changing it must not mean switching reader mode off and on
+              again. */}
+            {canManageReaderMode && !nestArchived && (
             <Button
               variant="outline"
               size="sm"
               onClick={() => setReaderDialogOpen(true)}
-              className={`shrink-0 h-7 gap-1.5 ${
-                readerModeEnabled
+                className={`shrink-0 h-7 gap-1.5 ${readerModeEnabled
                   ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
                   : ""
               }`}
@@ -2010,8 +1359,7 @@ export function NestView({
             return (
               <Badge
                 variant="outline"
-                className={`shrink-0 gap-1 ${
-                  isArchiveAsk
+                  className={`shrink-0 gap-1 ${isArchiveAsk
                     ? "border-amber-200 bg-amber-50 text-amber-700"
                     : "border-red-200 bg-red-50 text-red-700"
                 } ${isOwn ? "cursor-pointer hover:opacity-80" : ""}`}
@@ -2039,10 +1387,12 @@ export function NestView({
           {/* Connect (external clients) and Add-with-AI (seed content) are
               distinct first-class actions — Connect wires tools, Add-with-AI
               generates context into the nest. */}
+        {!nestArchived && (
           <Button variant="outline" size="sm" onClick={() => setShowConnect(true)}>
             <Link2 className="h-3.5 w-3.5 mr-1.5" />
             Connect
           </Button>
+        )}
           {!isReadOnly && (
             <Button variant="outline" size="sm" onClick={() => setShowGenerate(true)}>
               <Sparkles className="h-3.5 w-3.5 mr-1.5" />
@@ -2088,26 +1438,6 @@ export function NestView({
                   e.target.value = "";
                 }}
               />
-              <DropdownMenu modal={false}>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" size="sm" data-testid="nest-import-files">
-                    <Upload className="h-3.5 w-3.5 mr-1.5" />
-                    Import
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onSelect={() => importInputRef.current?.click()}>
-                    Files (.md / .html)
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => importDirRef.current?.click()}>
-                    Whole vault (folder, keeps structure)
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-              <Button size="sm" onClick={() => onOpenDocument("new")}>
-                <Plus className="h-3.5 w-3.5 mr-1.5" />
-                New Document
-              </Button>
             </>
           )}
           {/* Secondary actions collapsed into an overflow menu at the end.
@@ -2116,24 +1446,6 @@ export function NestView({
               destructive, write+admin gated. */}
           {(() => {
             const actions: OverflowAction[] = [];
-            // Same tier as the inline header rename (owner/nest-admin —
-            // matches the server's PATCH /nests/:nestId guard); the dialog
-            // additionally covers the description. Also gated on !loading:
-            // isOwner is known synchronously (prop) but nestDescription only
-            // lands with fetchData, so opening the dialog earlier would
-            // prefill an empty description for a nest that has one.
-            if (!isReadOnly && canManage && !loading)
-              actions.push({
-                label: "Rename nest",
-                icon: Pencil,
-                onSelect: () => {
-                  // Flush any pending inline header rename first so the
-                  // dialog primes from (and the server holds) the user's
-                  // latest text instead of racing the 1200ms debounce.
-                  flushRename();
-                  setShowRename(true);
-                },
-              });
             if (!isReadOnly && canManageGovernance)
               actions.push({
                 label: "Nest settings",
@@ -2151,9 +1463,10 @@ export function NestView({
                 onSelect: () => setShowAssignSteward(true),
               });
             // Nest-scoped activity trace — a read-only audit view, so not
-            // gated on isReadOnly. Same owner/nest-admin rule as the server's
-            // GET /nests/:id/trace (canManageStewards).
-            if (canManageGovernance && onOpenTrace)
+          // gated on isReadOnly (a viewer may see it); withheld on an archived
+          // nest with the rest of its management. Same owner/nest-admin rule
+          // as the server's GET /nests/:id/trace (canManageStewards).
+          if (canManageGovernance && onOpenTrace && !nestArchived)
               actions.push({
                 label: "Activity trace",
                 icon: Activity,
@@ -2163,8 +1476,11 @@ export function NestView({
             // outright, an editor raises a request an owner/admin actions.
             // Hidden below owner once a nest flag is already pending, and
             // withheld from viewers and reviewer-only stewards — neither may
-            // ask for a nest to be destroyed (canRequestDeletion).
+            // ask for a nest to be destroyed (canRequestDeletion). Also
+            // withheld outright when read-only (e.g. an archived nest) —
+            // canDeleteNest/canEditDocs don't fold in isArchived themselves.
             if (
+              !isReadOnly &&
               (canDeleteNest || canEditDocs) &&
               (canDeleteNest || !nestFlagPending)
             )
@@ -2329,12 +1645,12 @@ export function NestView({
             {!isReadOnly && (
               <TabsTrigger value="external-edits" className="gap-2">
                 External Edits
-                {externalEdits.length > 0 && (
+                {externalEditCount > 0 && (
                   <Badge
                     variant="secondary"
                     className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
                   >
-                    {externalEdits.length}
+                    {externalEditCount}
                   </Badge>
                 )}
               </TabsTrigger>
@@ -2354,16 +1670,53 @@ export function NestView({
             )}
           </TabsList>
           {!isReadOnly && canEditDocs && (
+            <div className="ml-auto flex shrink-0 items-center gap-2">
             <Button
               variant="outline"
               size="sm"
-              className="ml-auto shrink-0 text-muted-foreground"
+              className="text-muted-foreground"
               onClick={() => setShowNewFolder(true)}
               title="Create a folder (nest with parent/child)"
             >
               <FolderPlus className="h-4 w-4 mr-1.5" />
               New Folder
             </Button>
+            {/* Import and New Document act on the content area too, so they
+                sit with New Folder rather than in the nest header. */}
+              <DropdownMenu modal={false}>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" data-testid="nest-import-files">
+                    <Upload className="h-3.5 w-3.5 mr-1.5" />
+                    Import
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => importInputRef.current?.click()}>
+                    Files (.md / .html)
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => importDirRef.current?.click()}>
+                    Whole vault (folder, keeps structure)
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <Button
+                size="sm"
+                // Default into the folder the Documents tab is scoped to, so a
+                // doc lands where the user is looking (CU-wdqcq0247w). The
+                // editor's folder picker still lets them change it.
+                onClick={() =>
+                  onOpenDocument("new", {
+                    folder:
+                      activeTab === "documents" && folderFilter
+                        ? folderFilter
+                        : undefined,
+                  })
+                }
+              >
+                <Plus className="h-3.5 w-3.5 mr-1.5" />
+                New Document
+              </Button>
+            </div>
           )}
         </div>
 
@@ -2371,1501 +1724,82 @@ export function NestView({
             rows, and a grouped table-of-contents grid so opening a nest
             presents an index rather than just the flat node list. */}
         <TabsContent value="overview" className="space-y-4">
-          {initialLoad ? (
-            <div className="flex items-center justify-center py-16">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            </div>
-          ) : (
-            <>
-              {/* Stat tiles — only the metrics NOT already in the top stat
-                  cards (Total Documents / AI Ready live there). This row adds
-                  folder + recency context, so nothing is repeated. */}
-              <div className="grid gap-3 grid-cols-2">
-                <Card className="border-muted/60">
-                  <CardContent className="p-4 flex items-center gap-3">
-                    <div className="rounded-md bg-blue-500/10 text-blue-600 p-2">
-                      <FolderOpen className="h-4 w-4" />
-                    </div>
-                    <div>
-                      <div className="text-2xl font-semibold leading-none">
-                        {folderCount}
-                      </div>
-                      <div className="text-xs text-muted-foreground mt-1">
-                        Folder{folderCount === 1 ? "" : "s"}
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-                <Card className="border-muted/60">
-                  <CardContent className="p-4 flex items-center gap-3">
-                    <div className="rounded-md bg-amber-500/10 text-amber-600 p-2">
-                      <Clock className="h-4 w-4" />
-                    </div>
-                    <div>
-                      <div className="text-2xl font-semibold leading-none">
-                        {recentlyEditedCount}
-                      </div>
-                      <div className="text-xs text-muted-foreground mt-1">
-                        Edited this week
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              </div>
-
-              {/* Recently edited */}
-              {recentlyEdited.length > 0 && (
-                <Card>
-                  <CardHeader className="pb-3">
-                    <CardTitle className="text-base flex items-center gap-2">
-                      <Clock className="h-4 w-4 text-muted-foreground" />
-                      Recently edited
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="pt-0">
-                    <ul className="divide-y">
-                      {recentlyEdited.map((n) => (
-                        <li key={n.id}>
-                          <button
-                            onClick={() => onOpenDocument(n.id)}
-                            className="w-full flex items-center gap-3 py-2 px-1 -mx-1 rounded hover:bg-muted/50 text-left group"
-                          >
-                            <NodeTypeIcon type={n.type} />
-                            <span className="text-sm truncate flex-1">
-                              {n.title || n.id}
-                            </span>
-                            {(() => {
-                              const p = typePill(n.type || "document");
-                              return p ? (
-                                <span
-                                  className={`shrink-0 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide ${p.cls}`}
-                                  title={p.title}
-                                >
-                                  {p.label}
-                                </span>
-                              ) : null;
-                            })()}
-                            {n.updated_at && (
-                              <span className="text-xs text-muted-foreground shrink-0">
-                                {timeAgo(n.updated_at)}
-                              </span>
-                            )}
-                            <ChevronRight className="h-4 w-4 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  </CardContent>
-                </Card>
-              )}
-
-              {/* Grouped table of contents */}
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-base flex items-center gap-2">
-                    <FolderOpen className="h-4 w-4 text-muted-foreground" />
-                    Contents
-                  </CardTitle>
-                  <CardDescription>
-                    Browse documents grouped by folder.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="pt-0">
-                  {stats.total === 0 ? (
-                    <div className="py-8 text-center">
-                      <FileText className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
-                      <p className="text-sm text-muted-foreground">
-                        No documents yet.
-                      </p>
-                      {/* The header's New Document button is right there, so
-                          offer the action itself rather than directions to it.
-                          Read-only callers get the bare line. */}
-                      {!isReadOnly && canEditDocs && (
-                        <Button
-                          className="mt-3"
-                          size="sm"
-                          onClick={() => onOpenDocument("new")}
-                        >
-                          <Plus className="h-4 w-4 mr-2" />
-                          New Document
-                        </Button>
-                      )}
-                    </div>
-                  ) : (
-                    <FolderTree
-                      className="space-y-1"
-                      groups={tocGroups}
-                      known={knownFolders}
-                      renderFolder={(node) => (
-                        // Overview folders navigate into the Documents tab scoped to
-                        // that folder — no collapse here; the whole tree stays open.
-                        <button
-                          type="button"
-                          onClick={() => openFolderInDocuments(node.path)}
-                          className="flex items-center gap-2 py-1 group/folder rounded px-1 -mx-1 hover:bg-muted/60 w-full text-left"
-                          title={`Browse ${prettyFolderPath(node.path)} in Documents`}
-                        >
-                          <FolderOpen className="h-4 w-4 text-muted-foreground shrink-0" />
-                          <span className="text-sm font-medium group-hover/folder:underline">
-                            {node.label}
-                          </span>
-                          <Badge
-                            variant="secondary"
-                            className="text-[10px] px-1.5 py-0 h-5"
-                          >
-                            {node.total}
-                          </Badge>
-                          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover/folder:text-muted-foreground" />
-                          {canEditDocs && (
-                            <span
-                              role="button"
-                              tabIndex={0}
-                              className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/folder:opacity-100 hover:text-primary hover:bg-primary/10"
-                              title={`New document in ${prettyFolderPath(node.path)}`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onOpenDocument("new", { folder: node.path });
-                              }}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                  e.stopPropagation();
-                                  onOpenDocument("new", { folder: node.path });
-                                }
-                              }}
-                            >
-                              <Plus className="h-3.5 w-3.5" />
-                            </span>
-                          )}
-                        </button>
-                      )}
-                      renderDoc={(n) => (
-                        <button
-                          onClick={() => onOpenDocument(n.id)}
-                          className="flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-muted/50 text-left group min-w-0 w-full"
-                          title={n.title || n.id}
-                        >
-                          <NodeTypeIcon type={n.type} className="h-3.5 w-3.5" />
-                          <span className="text-sm truncate flex-1">
-                            {n.title || n.id}
-                          </span>
-                          {(() => {
-                            const p = typePill(n.type || "document");
-                            return p ? (
-                              <span
-                                className={`shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${p.cls}`}
-                                title={p.title}
-                              >
-                                {p.label}
-                              </span>
-                            ) : null;
-                          })()}
-                          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
-                        </button>
-                      )}
-                    />
-                  )}
-                </CardContent>
-              </Card>
-            </>
-          )}
+          <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+          <OverviewTab
+              initialLoad={initialLoad || !censusSettled}
+            stats={stats}
+            recentlyEdited={recentlyEdited}
+            recentlyEditedCount={recentlyEditedCount}
+            folderCount={folderCount}
+            tocGroups={tocGroups}
+            knownFolders={knownFolders}
+            isReadOnly={isReadOnly}
+            canEditDocs={canEditDocs}
+            onOpenDocument={onOpenDocument}
+            onOpenFolder={openFolderInDocuments}
+          />
+          </Suspense>
         </TabsContent>
 
         <TabsContent value="documents" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <div className="flex flex-col gap-3">
-                <CardTitle className="text-lg">Documents</CardTitle>
-                <div className="flex flex-wrap items-center gap-2 w-full">
-                  <div className="relative flex-1 min-w-[12rem] sm:flex-none sm:w-80">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
-                    <Input
-                      placeholder="Search title, tags, content…"
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                      className="pl-9 pr-12 w-full h-8"
-                    />
-                    <kbd
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground border rounded px-1 pointer-events-none"
-                      title="Quick open"
-                    >
-                      ⌘K
-                    </kbd>
-                  </div>
-                  {stewardshipEnabled && (
-                    <Select value={statusFilter} onValueChange={setStatusFilter}>
-                      <SelectTrigger className="w-[140px] h-8">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="all">All Status</SelectItem>
-                        <SelectItem value="draft">Draft</SelectItem>
-                        <SelectItem value="pending_review">Pending</SelectItem>
-                        <SelectItem value="approved">Approved</SelectItem>
-                        <SelectItem value="published">Published</SelectItem>
-                        <SelectItem value="rejected">Rejected</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  )}
-                  {typesPresent.length > 1 && (
-                    <Select value={typeFilter} onValueChange={setTypeFilter}>
-                      <SelectTrigger className="w-[130px] h-8" title="Filter by type">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="all">All types</SelectItem>
-                        {typesPresent.map((t) => (
-                          <SelectItem key={t} value={t}>
-                            {TYPE_LABELS[t] ?? t}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  )}
-                  {authors.length > 1 && (
-                    <Select value={authorFilter} onValueChange={setAuthorFilter}>
-                      <SelectTrigger className="w-[150px] h-8" title="Filter by author">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="all">All authors</SelectItem>
-                        {authors.map((a) => (
-                          <SelectItem key={a} value={a}>
-                            {a}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  )}
-                  <Select
-                    value={dateFilter}
-                    onValueChange={(v) => setDateFilter(v as DatePreset)}
-                  >
-                    <SelectTrigger className="w-[140px] h-8" title="Filter by last edited">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="any">Any time</SelectItem>
-                      <SelectItem value="7d">Last 7 days</SelectItem>
-                      <SelectItem value="30d">Last 30 days</SelectItem>
-                      <SelectItem value="90d">Last 90 days</SelectItem>
-                      <SelectItem value="1y">Last year</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <Select
-                    value={sortMode}
-                    onValueChange={(v) =>
-                      setSortMode(v as "activity" | "name" | "edited" | "comments")
-                    }
-                  >
-                    <SelectTrigger className="w-[150px] h-8" title="Sort documents">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="activity">Recent activity</SelectItem>
-                      <SelectItem value="name">Name (A–Z)</SelectItem>
-                      <SelectItem value="edited">Recently edited</SelectItem>
-                      <SelectItem value="comments">Most comments</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  {/* List vs cards density toggle. */}
-                  <div className="flex items-center rounded-md border h-8">
-                    <button
-                      type="button"
-                      title="List view"
-                      aria-pressed={viewMode === "list"}
-                      className={`px-2 h-full rounded-l-md ${viewMode === "list" ? "bg-muted" : "hover:bg-muted/50"
-                        }`}
-                      onClick={() => setViewMode("list")}
-                    >
-                      <ListIcon className="h-4 w-4" />
-                    </button>
-                    <button
-                      type="button"
-                      title="Card view"
-                      aria-pressed={viewMode === "cards"}
-                      className={`px-2 h-full rounded-r-md ${viewMode === "cards" ? "bg-muted" : "hover:bg-muted/50"
-                        }`}
-                      onClick={() => setViewMode("cards")}
-                    >
-                      <LayoutGrid className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {/* Folder breadcrumb — shown when the list is scoped to a folder
-                  (via an Overview folder click). Each crumb re-scopes; the
-                  first crumb clears back to the whole nest. */}
-              {folderFilter !== null && (
-                <div className="flex items-center flex-wrap gap-1 mb-3 text-sm">
-                  <button
-                    type="button"
-                    className="text-primary hover:underline"
-                    onClick={() => setFolderFilter(null)}
-                  >
-                    All documents
-                  </button>
-                  {folderFilter.split("/").map((seg, i, arr) => {
-                    const path = arr.slice(0, i + 1).join("/");
-                    const isLast = i === arr.length - 1;
-                    return (
-                      <Fragment key={path}>
-                        <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50" />
-                        {isLast ? (
-                          <span className="font-medium flex items-center gap-1">
-                            <FolderOpen className="h-4 w-4 text-blue-500" />
-                            {prettyFolder(seg)}
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            className="text-primary hover:underline"
-                            onClick={() => setFolderFilter(path)}
-                          >
-                            {prettyFolder(seg)}
-                          </button>
-                        )}
-                      </Fragment>
-                    );
-                  })}
-                  <Badge variant="secondary" className="ml-1 text-[10px] px-1.5 py-0 h-5">
-                    {filtered.length}
-                  </Badge>
-                  {canEditDocs && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 px-2 text-xs text-muted-foreground ml-1"
-                      onClick={() => onOpenDocument("new", { folder: folderFilter })}
-                      title={`New document in this folder`}
-                    >
-                      <Plus className="h-3.5 w-3.5 mr-1" /> New here
-                    </Button>
-                  )}
-                </div>
-              )}
-              {/* Saved filters — one-click apply of a named filter snapshot.
-                  Persisted per nest in localStorage. */}
-              {savedFilters.length > 0 && (
-                <div className="flex items-center flex-wrap gap-1.5 mb-2 text-xs">
-                  <span className="text-muted-foreground">Saved:</span>
-                  {savedFilters.map((f) => (
-                    <span
-                      key={f.name}
-                      className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 hover:bg-muted"
-                    >
-                      <button
-                        type="button"
-                        className="inline-flex items-center gap-1"
-                        onClick={() => applySavedFilter(f)}
-                        title={`Apply saved filter "${f.name}"`}
-                      >
-                        <Star className="h-3 w-3 text-amber-500" />
-                        {f.name}
-                      </button>
-                      <button
-                        type="button"
-                        className="text-muted-foreground hover:text-foreground"
-                        onClick={() =>
-                          persistSaved(removeFilter(savedFilters, f.name))
-                        }
-                        title={`Delete saved filter "${f.name}"`}
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
-              {/* Active filters — what's currently narrowing the list, each
-                  removable. Save the whole set, or clear it. */}
-              {hasActiveFilters && (
-                <div className="flex items-center flex-wrap gap-1.5 mb-3 text-xs">
-                  <span className="text-muted-foreground">Active filters:</span>
-                  {activeFilterChips.map((c) => (
-                    <span
-                      key={c.label}
-                      className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5"
-                    >
-                      {c.label}
-                      <button
-                        type="button"
-                        className="text-muted-foreground hover:text-foreground"
-                        onClick={c.clear}
-                        title="Remove this filter"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </span>
-                  ))}
-                  {tagFilters.length > 0 && (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5">
-                      Tags: {tagFilters.join(", ")}
-                      <button
-                        type="button"
-                        className="text-muted-foreground hover:text-foreground"
-                        onClick={() => setTagFilters([])}
-                        title="Remove tag filters"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </span>
-                  )}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-6 px-2 text-xs"
-                    onClick={() => setShowSaveFilter(true)}
-                  >
-                    <Star className="h-3 w-3 mr-1" />
-                    Save filter
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-2 text-xs text-muted-foreground"
-                    onClick={clearAllFilters}
-                  >
-                    Clear all
-                  </Button>
-                </div>
-              )}
-              {/* Tag filter bar — every tag in the nest, clickable; active
-                  tags AND together. The primary filter surface. */}
-              {allTags.length > 0 && (
-                <div className="flex items-center flex-wrap gap-1.5 mb-3 text-xs">
-                  <span className="text-muted-foreground">Tags:</span>
-                  {allTags.slice(0, 14).map(({ tag, count }) => {
-                    const active = tagFilters.includes(tag);
-                    return (
-                      <button
-                        key={tag}
-                        type="button"
-                        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 transition-colors ${active
-                          ? "bg-primary text-primary-foreground border-primary"
-                          : "text-foreground/80 hover:bg-muted"
-                          }`}
-                        onClick={() => toggleTagFilter(tag)}
-                        title={
-                          active
-                            ? `Remove filter ${tag}`
-                            : `Filter by ${tag}`
-                        }
-                      >
-                        {tag}
-                        <span
-                          className={
-                            active
-                              ? "text-primary-foreground/80"
-                              : "text-muted-foreground"
-                          }
-                        >
-                          {active ? "×" : count}
-                        </span>
-                      </button>
-                    );
-                  })}
-                  {allTags.length > 14 && (
-                    <span className="text-muted-foreground">
-                      +{allTags.length - 14} more
-                    </span>
-                  )}
-                  {tagFilters.length > 0 && (
-                    <button
-                      type="button"
-                      className="text-muted-foreground hover:underline ml-1"
-                      onClick={() => setTagFilters([])}
-                    >
-                      clear
-                    </button>
-                  )}
-                </div>
-              )}
-              {recentlyEdited.length > 0 && (
-                <div className="flex items-center flex-wrap gap-1.5 mb-3 text-xs">
-                  <span className="text-muted-foreground">Recently edited:</span>
-                  {recentlyEdited.map((n) => (
-                    <button
-                      key={n.id}
-                      type="button"
-                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 hover:bg-muted truncate max-w-[180px] ${n.type === "artifact"
-                          ? "border-amber-300 text-amber-700 dark:text-amber-300"
-                          : "text-primary"
-                        }`}
-                      onClick={() => onOpenDocument(n.id)}
-                    >
-                      {n.type === "artifact" && (
-                        <FileCode2 className="h-3 w-3 shrink-0" />
-                      )}
-                      <span className="truncate">{n.title}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-              {initialLoad || loadingFolders.has(baseFolder) ? (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-                </div>
-              ) : nothingToShow ? (
-                hasActiveFilters || !canEditDocs ? (
-                  <div className="text-center py-8 text-sm text-muted-foreground">
-                    {hasActiveFilters ? "No matching documents" : "No documents yet"}
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => importInputRef.current?.click()}
-                    className="w-full flex flex-col items-center gap-2 rounded-lg border-2 border-dashed border-border py-10 text-muted-foreground hover:border-primary hover:text-primary transition-colors"
-                  >
-                    <Upload className="h-7 w-7" />
-                    <div className="text-sm font-medium">
-                      Drag files here, or click to import
-                    </div>
-                    <div className="text-xs">
-                      .md → document · .html → hosted artifact
-                    </div>
-                  </button>
-                )
-              ) : (() => {
-                // Shared row renderer: flat grid in cards mode, folder tree
-                // (with drag-and-drop moves) in list mode.
-                const renderDocRow = (node: any, indent = 0) => {
-                  const cards = viewMode === "cards";
-                  // Hosted HTML artifacts get a distinct icon + badge so they
-                  // read differently from markdown documents in the list.
-                  const nodeType = node.type || "document";
-                  const nodePill = typePill(nodeType);
-                  const canSubmit =
-                    stewardshipEnabled &&
-                    node.status === "draft" &&
-                    canEditNode(node);
-                  // Show Review when the server says this caller can review
-                  // this node (authoritative reviewable set, from the queue's
-                  // canUserApprove annotation — includes admin/owner/steward
-                  // scope + separation-of-duties). This replaced a client-side
-                  // steward-scope re-derivation that diverged for a reviewer-
-                  // steward reaching the nest via public visibility, hiding the
-                  // button even though the in-doc approve/reject showed it.
-                  // Fall back to the client check for an older server that
-                  // doesn't stamp canReview.
-                  const canReview = reviewableNodeIds.has(node.id)
-                    ? true
-                    : node.status === "pending_review" &&
-                    canReviewNode(node) &&
-                    (submitterByNode.get(node.id) !== currentEmail ||
-                      (isOwner && allowSelfApprove));
-                  const canEdit =
-                    node.status !== "pending_review" && canEditNode(node);
-                  // Deleting is a nest admin/owner call — an editor who can
-                  // write this doc still goes through the request queue. Same
-                  // tier the document view uses for its Delete/Request split.
-                  // Exception: your own document. Asking permission to delete
-                  // work you wrote is the wrong default; the queue is for
-                  // someone else's content.
-                  const authoredByMe =
-                    !!node.author &&
-                    !!currentEmail &&
-                    node.author.toLowerCase() === currentEmail;
-                  const canDelete = canManage || authoredByMe;
-                  const flag = flagByNode.get(node.id);
-                  const flagPending = flag?.status === "pending";
-                  // ONE Delete action for everyone who gets one. Admins get the
-                  // delete confirm, editors get the request dialog — which one
-                  // opens is the dialog's job to explain, not two menu items'.
-                  // Hidden below admin once a flag is open (a second 409s), and
-                  // hidden outright for viewers of any kind: proposing a
-                  // deletion is an editor's act, and the server refuses them
-                  // (canRequestDeletion), so the affordance would only lead to
-                  // a 403.
-                  const showDeleteAction =
-                    (canDelete || canEditNode(node)) && (canDelete || !flagPending);
-                  const openDeleteFlow = () =>
-                    canDelete ? setDeleteNodeTarget(node) : setDeletionTarget(node);
-                  // Move (drag OR menu) mirrors the edit gate's stewardship
-                  // scope. The pending-review freeze is NOT absolute: the
-                  // server's move guard lets anyone approve-capable through
-                  // (owner/admin/reviewer on the node, no self-approve check),
-                  // so reorganizing an under-review doc stays possible.
-                  const canMove =
-                    canEditNode(node) &&
-                    (node.status !== "pending_review" ||
-                      isOwner ||
-                      isAdmin ||
-                      roles.includes("admin") ||
-                      hasRoleOnNode(node, "reviewer"));
-                  const openMoveDialog = () => {
-                    setMoveDest(folderOfNode(node.id));
-                    setMoveNewFolder(null);
-                    setMoveTarget(node);
-                  };
-                  // A doc row is a drop proxy for the folder it sits in: drag
-                  // active, not onto itself, and the dragged doc isn't already
-                  // in this row's folder. List mode only (cards aren't draggable).
-                  const dropOntoRowValid = () =>
-                    !cards &&
-                    !!dragNodeId &&
-                    dragNodeId !== node.id &&
-                    folderOfNode(dragNodeId) !== folderOfNode(node.id);
-                  // Cards: collapse every row action into a 3-dot menu kept on
-                  // the title line. List keeps inline hover buttons below.
-                  const actionMenu = (
-                    <div onClick={(e) => e.stopPropagation()}>
-                      <DropdownMenu modal={false}>
-                        <DropdownMenuTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 w-7 p-0 flex-shrink-0"
-                            title="Actions"
-                          >
-                            <MoreVertical className="h-4 w-4" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" className="min-w-40">
-                          {canEdit && (
-                            <DropdownMenuItem onSelect={() => onOpenDocument(node.id)}>
-                              <Pencil className="h-3.5 w-3.5 mr-2" />
-                              Edit
-                            </DropdownMenuItem>
-                          )}
-                          {canMove && (
-                            <DropdownMenuItem onSelect={openMoveDialog}>
-                              <FolderInput className="h-3.5 w-3.5 mr-2" />
-                              Move to folder
-                            </DropdownMenuItem>
-                          )}
-                          {canSubmit && (
-                            <DropdownMenuItem onSelect={() => setSubmitNode(node)}>
-                              <Send className="h-3.5 w-3.5 mr-2" />
-                              Submit for review
-                            </DropdownMenuItem>
-                          )}
-                          {canReview && (
-                            <DropdownMenuItem onSelect={() => setReviewNode(node)}>
-                              <CheckCircle2 className="h-3.5 w-3.5 mr-2" />
-                              Review
-                            </DropdownMenuItem>
-                          )}
-                          <DropdownMenuItem onSelect={() => openVersions(node)}>
-                            <History className="h-3.5 w-3.5 mr-2" />
-                            History
-                          </DropdownMenuItem>
-                          {canManage && (
-                            <DropdownMenuItem onSelect={() => setPublishNode(node)}>
-                              <Share2 className="h-3.5 w-3.5 mr-2" />
-                              Publish
-                            </DropdownMenuItem>
-                          )}
-                          <DropdownMenuSeparator />
-                          {showDeleteAction && (
-                            <DropdownMenuItem
-                              onSelect={openDeleteFlow}
-                              className={
-                                canDelete
-                                  ? "text-destructive focus:text-destructive"
-                                  : undefined
-                              }
-                            >
-                              <Trash2 className="h-3.5 w-3.5 mr-2" />
-                              Delete
-                            </DropdownMenuItem>
-                          )}
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
-                  );
-                  return (
-                    <div
-                      key={node.id}
-                      onClick={() => onOpenDocument(node.id)}
-                      className={`${cards
-                        ? "flex flex-col gap-2"
-                        : "flex items-center gap-3"
-                        } p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer ${dragNodeId === node.id ? "opacity-40" : ""
-                        }`}
-                      style={!cards && indent ? { marginLeft: `${indent * 1.25}rem` } : undefined}
-                      draggable={!cards && canMove}
-                      onDragStart={(e) => {
-                        e.dataTransfer.setData("text/plain", node.id);
-                        e.dataTransfer.effectAllowed = "move";
-                        setDragNodeId(node.id);
-                      }}
-                      onDragEnd={() => {
-                        setDragNodeId(null);
-                        setDropFolder(null);
-                        cancelDragExpand();
-                      }}
-                      onDragOver={(e) => {
-                        // Dropping onto a document means "into the folder that
-                        // holds it" — a doc row is a proxy target for its own
-                        // folder, so the drop zone isn't just the folder header.
-                        if (!dropOntoRowValid()) return;
-                        e.preventDefault();
-                        e.dataTransfer.dropEffect = "move";
-                      }}
-                      onDragEnter={() => {
-                        if (dropOntoRowValid()) setDropFolder(folderOfNode(node.id));
-                      }}
-                      onDrop={(e) => {
-                        if (!dropOntoRowValid()) return;
-                        e.preventDefault();
-                        e.stopPropagation();
-                        handleDropOnFolder(folderOfNode(node.id));
-                      }}
-                      data-testid={`document-row-${node.id}`}
-                    >
-                      {!cards && <NodeTypeIcon type={node.type} className="h-5 w-5" />}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          {cards && <NodeTypeIcon type={node.type} className="h-4 w-4" />}
-                          <span
-                            className="font-medium truncate min-w-0"
-                            title={node.title}
-                          >
-                            {node.title}
-                          </span>
-                          {nodePill && (
-                            <span
-                              className={`shrink-0 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide ${nodePill.cls}`}
-                              title={nodePill.title}
-                            >
-                              {nodePill.label}
-                            </span>
-                          )}
-                          <LifecycleStatusBadge
-                            status={(node.status as DocumentLifecycleStatus) || "draft"}
-                            size="sm"
-                            className="shrink-0 whitespace-nowrap"
-                          />
-                          {/* Pending only — see the note in DocumentEditor: a
-                              declined flag is history, and history belongs in
-                              the notification (dismissible), not a permanent
-                              badge on a document that was kept. */}
-                          {/* Prime — the doc always needs approval, whoever
-                              edits it. Only meaningful in a governed nest. */}
-                          {stewardshipEnabled &&
-                            api.isPrimeNode(node, primeTags) && (
-                            <span
-                              className="shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide border bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:border-amber-500/30"
-                              title={
-                                typeof node.prime === "boolean"
-                                  ? "Prime: flagged on this document. Always requires steward approval."
-                                  : "Prime: inherited from a prime tag. Always requires steward approval."
-                              }
-                              data-testid={`prime-badge-${node.id}`}
-                            >
-                              <Star className="h-3 w-3" />
-                              Prime
-                            </span>
-                          )}
-                          {flagPending && (() => {
-                            const isOwnFlag = flag!.requestedBy.toLowerCase() === currentEmail;
-                            return (
-                              <span
-                                className={`shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide border bg-red-50 text-red-700 border-red-200 ${isOwnFlag ? "cursor-pointer hover:bg-red-100" : ""}`}
-                                title={
-                                  isOwnFlag
-                                    ? "Click to withdraw your deletion request"
-                                    : `${flag!.requestedBy} asked for this to be deleted: "${flag!.reason}". A nest admin decides.`
-                                }
-                                data-testid={`deletion-flag-${node.id}`}
-                                onClick={
-                                  isOwnFlag
-                                    ? (e) => {
-                                        e.stopPropagation();
-                                        handleWithdrawDeletion(flag!);
-                                      }
-                                    : undefined
-                                }
-                              >
-                                <Trash2 className="h-3 w-3" />
-                                Deletion requested
-                                {isOwnFlag && <X className="h-3 w-3 ml-0.5" />}
-                              </span>
-                            );
-                          })()}
-                          {cards && <div className="ml-auto">{actionMenu}</div>}
-                        </div>
-                        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                          <span>v{node.version || 1}</span>
-                          {node.tags?.length > 0 && (
-                            <>
-                              <span>·</span>
-                              <span className="flex items-center gap-1 truncate">
-                                {node.tags.slice(0, 3).map((t: string) => (
-                                  <button
-                                    key={t}
-                                    type="button"
-                                    title={
-                                      tagFilters.includes(t)
-                                        ? `Remove filter ${t}`
-                                        : `Filter by ${t}`
-                                    }
-                                    className={`rounded-full border px-1.5 py-px transition-colors ${tagFilters.includes(t)
-                                      ? "bg-primary text-primary-foreground border-primary"
-                                      : "hover:bg-muted"
-                                      }`}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      toggleTagFilter(t);
-                                    }}
-                                  >
-                                    {t}
-                                  </button>
-                                ))}
-                              </span>
-                            </>
-                          )}
-                          {(node.author || node.collaborators?.length > 0) && (
-                            <>
-                              <span>·</span>
-                              <AuthorshipChips
-                                author={node.author}
-                                collaborators={node.collaborators}
-                              />
-                            </>
-                          )}
-                        </div>
-                      </div>
-                      {!cards && (
-                        <div
-                          className="flex items-center gap-1 transition-opacity opacity-0 group-hover:opacity-100"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          {canSubmit && (
-                            <Button variant="outline" size="sm" onClick={() => setSubmitNode(node)}>
-                              <Send className="h-3.5 w-3.5 mr-1" />
-                              Submit
-                            </Button>
-                          )}
-                          {canReview && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => setReviewNode(node)}
-                              className="border-green-200 text-green-700 hover:bg-green-50"
-                            >
-                              Review
-                            </Button>
-                          )}
-                          {canEdit && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => onOpenDocument(node.id)}
-                              title="Edit"
-                            >
-                              <Pencil className="h-3.5 w-3.5" />
-                            </Button>
-                          )}
-                          {canMove && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={openMoveDialog}
-                              title="Move to folder"
-                              data-testid={`move-node-${node.id}`}
-                            >
-                              <FolderInput className="h-3.5 w-3.5" />
-                            </Button>
-                          )}
-                          <Button variant="ghost" size="sm" onClick={() => openVersions(node)} title="History">
-                            <History className="h-3.5 w-3.5" />
-                          </Button>
-                          {showDeleteAction && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={openDeleteFlow}
-                              title={canDelete ? "Delete" : "Delete (needs admin approval)"}
-                              data-testid={`delete-node-${node.id}`}
-                              className={
-                                canDelete
-                                  ? "text-destructive hover:text-destructive hover:bg-destructive/10"
-                                  : undefined
-                              }
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                };
-
-                if (viewMode === "cards") {
-                  return (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                      {sorted.map((n) => renderDocRow(n))}
-                    </div>
-                  );
-                }
-
-                // List mode: nested folder tree. Folder headers collapse and
-                // accept drops; doc rows drag. Groups under a collapsed
-                // ancestor are skipped wholesale.
-                return (
-                  <div className="space-y-1">
-                    {dragNodeId && folderOfNode(dragNodeId) !== baseFolder && (
-                      <div
-                        className={`flex items-center gap-2 rounded-md border-2 border-dashed px-3 py-2 text-sm ${dropFolder === baseFolder
-                            ? "border-primary bg-primary/10 text-primary"
-                            : "border-border text-muted-foreground"
-                          }`}
-                        onDragOver={(e) => {
-                          e.preventDefault();
-                          e.dataTransfer.dropEffect = "move";
-                        }}
-                        onDragEnter={() => setDropFolder(baseFolder)}
-                        onDragLeave={() =>
-                          setDropFolder((d) => (d === baseFolder ? null : d))
-                        }
-                        onDrop={(e) => {
-                          e.preventDefault();
-                          handleDropOnFolder(baseFolder);
-                        }}
-                      >
-                        <FolderInput className="h-4 w-4" />
-                        Move to {baseFolder ? prettyFolderPath(baseFolder) : "nest root"}
-                      </div>
-                    )}
-                    <FolderTree
-                      className="space-y-1"
-                      groups={docGroups}
-                      baseFolder={baseFolder}
-                      // Unfiltered, the tree is seeded with every folder in the
-                      // nest so one whose documents were never fetched still has
-                      // a row to expand. Under a filter that seeding is wrong
-                      // twice over: it lists folders holding no match, and it
-                      // suppresses chain compaction, so a single hit four levels
-                      // down costs four rows of empty scaffolding. A filtered
-                      // list already answers from the whole nest, so drop the
-                      // seed and let the tree show only folders that matched —
-                      // as one "F1 / F2 / F3" row per chain.
-                      known={hasActiveFilters ? undefined : knownFolders}
-                      isCollapsed={(p) =>
-                        // A filtered list shows every match, wherever it lives.
-                        hasActiveFilters ? false : !expandedFolders.has(p)
-                      }
-                      renderFolder={(node, { collapsed }) => {
-                        // Valid drop = a doc is being dragged and this isn't
-                        // its current folder. Invalid targets get no
-                        // highlight and skip preventDefault, so the browser
-                        // shows the no-drop cursor and the drop is a no-op.
-                        // Folder rows themselves are NOT draggable: the
-                        // server has no folder-move/rename endpoint (the
-                        // move API relocates one document per call), so
-                        // folder-onto-folder would be N non-atomic moves —
-                        // document moves only until that lands server-side.
-                        const validDrop =
-                          !!dragNodeId && folderOfNode(dragNodeId) !== node.path;
-                        const isDropTarget = validDrop && dropFolder === node.path;
-                        // Anything with documents under it opens — the subtree
-                        // total, not the loaded count, because a folder's own
-                        // documents are only fetched once it is expanded. A
-                        // genuinely empty folder stays a static row, no chevron.
-                        const collapsible = node.total > 0;
-                        const loadingHere = loadingFolders.has(node.path);
-                        return (
-                          <div
-                            className={`group/fh flex items-center gap-1.5 py-1.5 px-2 rounded-md select-none transition-colors ${collapsible ? "cursor-pointer" : ""
-                              } ${isDropTarget
-                                ? "bg-primary/10 ring-1 ring-primary"
-                                : "hover:bg-muted/50"
-                              }`}
-                            onClick={
-                              collapsible
-                                ? () => toggleFolderExpanded(node.path)
-                                : undefined
-                            }
-                            onDragOver={(e) => {
-                              if (!validDrop) return;
-                              e.preventDefault();
-                              e.dataTransfer.dropEffect = "move";
-                            }}
-                            onDragEnter={(e) => {
-                              // dragenter/dragleave bubble from the header's own
-                              // children (count badge, "+" button). Ignore those
-                              // inner crossings — relatedTarget still inside the
-                              // header — so the 600ms spring-open timer isn't
-                              // cancelled + rescheduled on every child hover.
-                              if (
-                                e.currentTarget.contains(e.relatedTarget as Node)
-                              )
-                                return;
-                              // Spring a collapsed folder open on hover so its
-                              // subfolders become reachable — even when this
-                              // folder is the dragged doc's OWN folder (not a
-                              // valid drop target itself). Otherwise a doc in a
-                              // collapsed parent can never be dragged into one
-                              // of that parent's subfolders: hovering the parent
-                              // wouldn't expand it, so the subfolders never show.
-                              if (dragNodeId && collapsible && collapsed)
-                                scheduleDragExpand(node.path);
-                              if (!validDrop) return;
-                              setDropFolder(node.path);
-                            }}
-                            onDragLeave={(e) => {
-                              // Only a true leave of the whole header counts —
-                              // moving onto a child fires a spurious leave.
-                              if (
-                                e.currentTarget.contains(e.relatedTarget as Node)
-                              )
-                                return;
-                              setDropFolder((d) => (d === node.path ? null : d));
-                              cancelDragExpand();
-                            }}
-                            onDrop={(e) => {
-                              if (!validDrop) return;
-                              e.preventDefault();
-                              handleDropOnFolder(node.path);
-                            }}
-                            data-testid={`folder-header-${node.path}`}
-                          >
-                            {loadingHere ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                            ) : collapsible ? (
-                              <ChevronRight
-                                className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${collapsed ? "" : "rotate-90"
-                                  }`}
-                              />
-                            ) : (
-                              // Spacer so names still line up under sibling
-                              // collapsible folders.
-                              <span className="h-3.5 w-3.5 shrink-0" />
-                            )}
-                            <FolderOpen className="h-4 w-4 text-blue-500" />
-                            <span className="text-sm font-medium">
-                              {node.label}
-                            </span>
-                            {/* Recursive subtree total (this folder + all
-                                  descendants), matching the Overview Contents
-                                  card. Direct-count-only made a folder holding
-                                  hundreds of nested docs read as "3", so the
-                                  Documents tab looked like it was hiding docs. */}
-                            {node.total > 0 && (
-                              <Badge
-                                variant="secondary"
-                                className="text-[10px] px-1.5 py-0 h-5"
-                                title={
-                                  node.count !== node.total
-                                    ? `${node.count} here · ${node.total} in this folder`
-                                    : undefined
-                                }
-                              >
-                                {node.total}
-                              </Badge>
-                            )}
-                            {canEditDocs && (
-                              <button
-                                type="button"
-                                className="ml-1 rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 hover:text-primary hover:bg-primary/10"
-                                title={`New document in ${prettyFolderPath(node.path)}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onOpenDocument("new", { folder: node.path });
-                                }}
-                              >
-                                <Plus className="h-3.5 w-3.5" />
-                              </button>
-                            )}
-                            {/* Share the folder with one person — they reach
-                                everything under it and nothing else in the
-                                nest. Owner/admin only, matching /grants. */}
-                            {canManage && (
-                              <button
-                                type="button"
-                                className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 hover:text-primary hover:bg-primary/10"
-                                title={`Share ${prettyFolderPath(node.path)} with someone`}
-                                data-testid={`share-folder-${node.path}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setShareFolder({
-                                    // The row's own label, not the whole path:
-                                    // an imported nest's paths can be long and
-                                    // id-prefixed, which made the title
-                                    // unreadable. The exact target is shown in
-                                    // the dialog body instead.
-                                    path: shareTargetForFolder(node.path),
-                                    label: node.label || prettyFolder(node.name),
-                                  });
-                                }}
-                              >
-                                <Share2 className="h-3.5 w-3.5" />
-                              </button>
-                            )}
-                            {/* Same split as a document: admins/owners delete
-                                the folder (and everything under it), editors
-                                raise a request. Hidden while one is already
-                                pending, and withheld from viewers — the server
-                                refuses a folder flag below editor, and a
-                                folder-scope editor row isn't enough for it
-                                either (canRequestDeletion wants nest scope). */}
-                            {(canManage || canEditDocs) &&
-                              (canManage || !folderFlagPending(node.path)) && (
-                              <button
-                                type="button"
-                                className={`rounded p-0.5 opacity-0 group-hover/fh:opacity-100 ${
-                                  canManage
-                                    ? "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                                    : "text-muted-foreground hover:text-primary hover:bg-primary/10"
-                                }`}
-                                title={
-                                  canManage
-                                    ? `Delete ${prettyFolderPath(node.path)} and everything in it`
-                                    : "Delete (needs admin approval)"
-                                }
-                                data-testid={`delete-folder-${node.path}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setFolderTarget({
-                                    path: node.path,
-                                    label: prettyFolderPath(node.path),
-                                    total: node.total,
-                                  });
-                                }}
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
-                            )}
-                            {folderFlagPending(node.path) && (() => {
-                              const folderFlag = folderFlagByPath.get(node.path);
-                              const isOwnFlag = folderFlag?.requestedBy.toLowerCase() === currentEmail;
-                              return (
-                                <span
-                                  className={`inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide bg-red-50 text-red-700 border border-red-200 ${isOwnFlag ? "cursor-pointer hover:bg-red-100" : ""}`}
-                                  title={
-                                    isOwnFlag
-                                      ? "Click to withdraw your deletion request"
-                                      : "Someone asked for this folder to be deleted. A nest admin decides."
-                                  }
-                                  onClick={
-                                    isOwnFlag && folderFlag
-                                      ? (e) => {
-                                          e.stopPropagation();
-                                          handleWithdrawDeletion(folderFlag);
-                                        }
-                                      : undefined
-                                  }
-                                >
-                                  <Trash2 className="h-3 w-3" />
-                                  Deletion requested
-                                  {isOwnFlag && <X className="h-3 w-3 ml-0.5" />}
-                                </span>
-                              );
-                            })()}
-                          </div>
-                        );
-                      }}
-                      renderDoc={(n) => renderDocRow(n, 0)}
-                    />
-                  </div>
-                );
-              })()}
-
-              {/* Wiki link health — orphans + broken [[links]]. Answering it
-                  needs every document's body, so opening the block is what
-                  fetches the whole nest. */}
-              {!loading && stats.total > 0 && (
-                  <details
-                    className="mt-4 text-xs text-muted-foreground"
-                    onToggle={(e) => {
-                      if (e.currentTarget.open) void loadFullNest();
-                    }}
-                  >
-                    <summary className="cursor-pointer select-none">
-                      {fullLoading
-                        ? "Link health: checking the whole nest…"
-                        : !fullNodes
-                          ? "Link health — check the whole nest"
-                          : `Link health: ${wikiHealth.broken.length} broken link${wikiHealth.broken.length !== 1 ? "s" : ""} · ${wikiHealth.orphans.length} orphan doc${wikiHealth.orphans.length !== 1 ? "s" : ""}`}
-                    </summary>
-                    <div className="mt-2 space-y-2 pl-1">
-                      {fullNodes &&
-                        wikiHealth.broken.length === 0 &&
-                        wikiHealth.orphans.length === 0 && (
-                          <div>No broken links or orphan documents.</div>
-                        )}
-                      {wikiHealth.broken.length > 0 && (
-                        <div>
-                          <div className="font-medium mb-1">
-                            Broken links (target doesn't exist):
-                          </div>
-                          {wikiHealth.broken.slice(0, 10).map((b, i) => (
-                            <div key={i}>
-                              <button
-                                type="button"
-                                className="text-primary hover:underline"
-                                onClick={() => onOpenDocument(b.sourceId)}
-                              >
-                                {b.sourceTitle}
-                              </button>{" "}
-                              → [[{b.target}]]
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {wikiHealth.orphans.length > 0 && (
-                        <div>
-                          <div className="font-medium mb-1">
-                            Orphans (nothing links to them):
-                          </div>
-                          <div className="flex flex-wrap gap-x-3 gap-y-1">
-                            {wikiHealth.orphans.slice(0, 15).map((o) => (
-                              <button
-                                key={o.id}
-                                type="button"
-                                className="text-primary hover:underline"
-                                onClick={() => onOpenDocument(o.id)}
-                              >
-                                {o.title}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </details>
-                )}
-            </CardContent>
-          </Card>
+          <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+          <DocumentsTab
+            nestId={nestId}
+            initialSearch={initialSearch}
+            initialTags={initialTags}
+            initialLoad={initialLoad}
+            loading={loading}
+            nodes={nodes}
+            census={census}
+            knownFolders={knownFolders}
+            folderFilter={folderFilter}
+            setFolderFilter={setFolderFilter}
+            expandedFolders={expandedFolders}
+            loadingFolders={loadingFolders}
+            toggleFolderExpanded={toggleFolderExpanded}
+            expandFolder={expandFolder}
+            caps={caps}
+            isAdmin={isAdmin}
+            isOwner={isOwner}
+            roles={roles}
+            permission={permission}
+            currentEmail={currentEmail}
+            myStewards={myStewards}
+            stewardshipEnabled={stewardshipEnabled}
+            allowSelfApprove={allowSelfApprove}
+            primeTags={primeTags}
+            visibility={visibility}
+            hasRoleOnNode={hasRoleOnNode}
+            canReviewNode={canReviewNode}
+            reviewQueue={reviewQueue}
+            reviewableQueue={reviewableQueue}
+            deletionRequests={deletionRequests}
+            stats={stats}
+            onOpenDocument={onOpenDocument}
+            onReview={setReviewNode}
+            onRefresh={fetchData}
+            onWithdrawDeletion={(r) => void handleWithdrawDeletion(r)}
+            importInputRef={importInputRef}
+          />
+          </Suspense>
         </TabsContent>
 
         {showReviewTab && (
           <TabsContent value="review" className="space-y-4">
-            {/* Feed filter chips — All shows changes + comments interleaved;
-                Changes is the legacy queue; Comments is discussion only. */}
-            <div className="flex items-center gap-1.5" data-testid="feed-filter-chips">
-              {(
-                [
-                  { key: "all", label: "All" },
-                  { key: "changes", label: `Changes (${reviewableQueue.length})` },
-                  // Authoritative server count — the loaded array is paged.
-                  { key: "comments", label: `Comments (${feedCommentsTotal})` },
-                ] as const
-              ).map((chip) => (
-                <button
-                  key={chip.key}
-                  type="button"
-                  onClick={() => setFeedFilter(chip.key)}
-                  className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${feedFilter === chip.key
-                      ? "border-primary bg-primary text-primary-foreground"
-                      : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
-                    }`}
-                  data-testid={`feed-filter-${chip.key}`}
-                >
-                  {chip.label}
-                </button>
-              ))}
-            </div>
-            {/* The caller's own submissions, kept out of the actionable queue
-                by separation-of-duties. Shown read-only so "submit for review"
-                visibly lands somewhere. */}
-            {feedFilter !== "comments" && myPendingSubmissions.length > 0 && (
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-lg flex items-center gap-2">
-                    <Send className="h-4 w-4 text-blue-600" />
-                    Submitted by you — awaiting review
-                  </CardTitle>
-                  <CardDescription>
-                    Your edits are awaiting review by another user. You can't
-                    approve your own work due to separation of duties.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-2">
-                  {myPendingSubmissions.map((r) => (
-                    <div
-                      key={r.id}
-                      className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted/50"
-                    >
-                      <button
-                        onClick={() => onOpenDocument(r.nodeId)}
-                        className="flex-1 min-w-0 text-left truncate"
-                      >
-                        {r.title || r.nodeId}
-                      </button>
-                      <Badge variant="secondary" className="text-[10px] shrink-0">
-                        Awaiting review
-                      </Badge>
-                      {/* Your own submission, so the non-destructive exit
-                          belongs here too (CU-wdqcq007pe). */}
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="shrink-0 h-7 px-2 text-muted-foreground"
-                        title="Withdraw this submission and return the document to Draft"
-                        onClick={() => void withdrawSubmission(r.nodeId)}
-                      >
-                        Withdraw
-                      </Button>
-                    </div>
-                  ))}
-                </CardContent>
-              </Card>
-            )}
-            {/* Deletion flags raised by everyone below admin. Only nest
-                admins/owners — the tier that deletes — resolve them. */}
-            {canManage && pendingDeletions.length > 0 && (
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-lg flex items-center gap-2">
-                    <Trash2 className="h-4 w-4 text-destructive" />
-                    Deletion requests
-                  </CardTitle>
-                  <CardDescription>
-                    Documents flagged as stale. Delete them, or reject with a
-                    note.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-2">
-                  {pendingDeletions.map((r) => (
-                    <div
-                      key={r.id}
-                      data-testid="deletion-request-item"
-                      className="flex items-center gap-3 rounded-md border px-3 py-2 text-sm"
-                    >
-                      <button
-                        className="flex-1 min-w-0 text-left"
-                        onClick={() => onOpenDocument(r.nodeId)}
-                      >
-                        <span className="font-medium truncate block">
-                          {r.title || r.nodeId}
-                          {r.targetType && r.targetType !== "document" && (
-                            <span className="ml-2 rounded bg-muted px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                              {r.targetType === "folder"
-                                ? "Folder"
-                                : r.targetType === "nest_archive"
-                                  ? "Archive nest"
-                                  : "Nest"}
-                            </span>
-                          )}
-                        </span>
-                        <span className="text-xs text-muted-foreground">
-                          {r.requestedBy} — &ldquo;{r.reason}&rdquo;
-                        </span>
-                      </button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() =>
-                          setResolveTarget({ request: r, action: "decline" })
-                        }
-                      >
-                        Reject
-                      </Button>
-                      {/* Honouring an archive ask archives — reversible, so it
-                          is an approval, not a destructive action. */}
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className={
-                          r.targetType === "nest_archive"
-                            ? ""
-                            : "text-destructive hover:text-destructive hover:bg-destructive/10"
-                        }
-                        onClick={() =>
-                          setResolveTarget({ request: r, action: "delete" })
-                        }
-                      >
-                        {r.targetType === "nest_archive" ? "Approve" : "Delete"}
-                      </Button>
-                    </div>
-                  ))}
-                </CardContent>
-              </Card>
-            )}
-            {/* Bulk bar — only with something selectable, and it stays out of
-                the way until the first row is picked. */}
-            {feedFilter !== "comments" && reviewableQueue.length > 1 && (
-              <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm">
-                <Checkbox
-                  // Partial selections read as "some", not "none".
-                  checked={
-                    bulkSelected.size === 0
-                      ? false
-                      : bulkSelected.size === reviewableQueue.length
-                        ? true
-                        : "indeterminate"
-                  }
-                  onCheckedChange={(next: boolean | "indeterminate") =>
-                    setBulkSelected(
-                      next === true
-                        ? new Set(reviewableQueue.map((r) => r.nodeId))
-                        : new Set(),
-                    )
-                  }
-                  aria-label="Select every document you can review"
-                  data-testid="review-queue-select-all"
-                />
-                <span className="text-muted-foreground">
-                  {bulkSelected.size > 0
-                    ? `${bulkSelected.size} selected`
-                    : `Select all ${reviewableQueue.length}`}
-                </span>
-                {bulkSelected.size > BULK_REVIEW_LIMIT && (
-                  <span className="text-destructive">
-                    Up to {BULK_REVIEW_LIMIT} at a time — deselect{" "}
-                    {bulkSelected.size - BULK_REVIEW_LIMIT}.
-                  </span>
-                )}
-                {bulkSelected.size > 0 && (
-                  <div className="ml-auto flex items-center gap-2">
-                    <Button
-                      size="sm"
-                      disabled={bulkSelected.size > BULK_REVIEW_LIMIT}
-                      onClick={() => setBulkAction("approve")}
-                      data-testid="bulk-approve"
-                    >
-                      Approve {bulkSelected.size}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={bulkSelected.size > BULK_REVIEW_LIMIT}
-                      onClick={() => setBulkAction("reject")}
-                      data-testid="bulk-reject"
-                    >
-                      Reject {bulkSelected.size}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setBulkSelected(new Set())}
-                    >
-                      Clear
-                    </Button>
-                  </div>
-                )}
-              </div>
-            )}
-            <ReviewQueue
-              requests={feedFilter === "comments" ? [] : reviewableQueue}
-              selectedNodeIds={bulkSelected}
-              // Rows only offer a checkbox when there is a batch to make — one
-              // reviewable document has no bar to act on the selection, so a
-              // box there is a dead end.
-              onToggleSelect={
-                reviewableQueue.length > 1
-                  ? (nodeId) =>
-                      setBulkSelected((prev) => {
-                        const next = new Set(prev);
-                        next.has(nodeId) ? next.delete(nodeId) : next.add(nodeId);
-                        return next;
-                      })
-                  : undefined
-              }
-              // Feed mode (interleaved comment rows) except on the Changes
-              // chip, which renders the legacy changes-only queue untouched.
-              comments={feedFilter === "changes" ? undefined : feedComments}
-              onSelectComment={(cm) =>
-                onOpenDocument(cm.nodeId, { thread: cm.threadId })
-              }
+          <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+            <ReviewTab
+              key={nestId}
+              nestId={nestId}
+              enabled={!grantOnly}
+              reviewQueue={reviewQueue}
+              reviewableQueue={reviewableQueue}
+              myPendingSubmissions={myPendingSubmissions}
+              pendingDeletions={pendingDeletions}
+              canManage={canManage}
               loading={loading}
               onRefresh={fetchData}
-              onSelect={(req) => {
+              onOpenDocument={onOpenDocument}
+              onSelectRequest={(req) => {
                 const node = nodes.find((n) => n.id === req.nodeId);
                 if (node) {
                   setReviewNode(node);
@@ -3876,322 +1810,54 @@ export function NestView({
                 // document itself rather than calling it missing.
                 onOpenDocument(req.nodeId);
               }}
+              onResolveDeletion={(request, action) => setResolveTarget({ request, action })}
+              onWithdrawSubmission={(id) => void withdrawSubmission(id)}
             />
-            {/* Comment activity is paged (50/page) — fetch the next page when
-                more exists than what's loaded. Changes need no pager: they're
-                the actionable pending set the queue already shows in full. */}
-            {feedFilter !== "changes" &&
-              feedComments.length < feedCommentsTotal && (
-                <div className="flex justify-center">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={loadMoreComments}
-                    disabled={feedLoadingMore}
-                    data-testid="feed-load-more"
-                  >
-                    {feedLoadingMore ? (
-                      <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
-                    ) : null}
-                    Load more comments (
-                    {feedCommentsTotal - feedComments.length} remaining)
-                  </Button>
-                </div>
-              )}
-            {/* When the raw queue has entries but the reviewable filter
-                emptied it, the queue card says "All caught up!" — which
-                is wrong. Surface the gap so the user knows items exist
-                but aren't actionable by them (scope or SoD). */}
-            {feedFilter !== "comments" &&
-              reviewQueue.length > 0 && reviewableQueue.length === 0 && (
-                <p className="text-xs text-muted-foreground text-center">
-                  {reviewQueue.length === 1
-                    ? "1 pending review in this nest, but it doesn't require your action — it's either outside your steward scope or was submitted by you."
-                    : `${reviewQueue.length} pending reviews in this nest, but none require your action — they're either outside your steward scope or were submitted by you.`}
-                </p>
-              )}
+          </Suspense>
           </TabsContent>
         )}
 
         <TabsContent value="external-edits" className="space-y-4">
-          <Card>
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <CardTitle className="text-lg flex items-center gap-2">
-                    <FileWarning className="h-4 w-4 text-orange-600" />
-                    External Edits
-                  </CardTitle>
-                  <CardDescription>
-                    Files edited directly on disk, awaiting your approval.
-                  </CardDescription>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={refreshExternalEdits}
-                  disabled={externalEditsLoading}
-                  className="h-8 w-8"
-                  data-testid="external-edits-refresh"
-                >
-                  {externalEditsLoading ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <RefreshCw className="h-4 w-4" />
-                  )}
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {initialLoad ? (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-                </div>
-              ) : externalEdits.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-8 text-center">
-                  <CheckCircle2 className="h-10 w-10 text-green-500 mb-3" />
-                  <p className="text-sm font-medium">No pending external edits</p>
-                  <p className="text-xs text-muted-foreground">
-                    All files on disk match their last approved state.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {externalEdits.map((entry) => {
-                    // Resolve the human-readable title; fall back to the bare
-                    // doc name so internal `nodes/` paths never leak to the UI.
-                    const docTitle =
-                      nodes.find((n) => n.id === entry.document_id)?.title ||
-                      entry.document_id.split("/").pop();
-                    return (
-                      <div
-                        key={entry.suggestion_id}
-                        className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors"
-                        onClick={() => onOpenDocument(entry.document_id)}
-                        data-testid={`external-edit-row-${entry.suggestion_id}`}
-                      >
-                        <FileWarning className="h-5 w-5 text-orange-600 flex-shrink-0" />
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium truncate">
-                              {docTitle}
-                            </span>
-                            <Badge
-                              variant="secondary"
-                              className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
-                            >
-                              {entry.source}
-                            </Badge>
-                          </div>
-                          <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                            <Clock className="h-3 w-3" />
-                            <span>
-                              {formatServerDate(entry.detected_at)}
-                            </span>
-                            <span>•</span>
-                            <span>by {entry.actor}</span>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+          <ExternalEditsTab
+            nestId={nestId}
+            enabled={!grantOnly}
+            onOpenDocument={onOpenDocument}
+            titleOf={(id) => nodes.find((n) => n.id === id)?.title}
+          />
+          </Suspense>
         </TabsContent>
 
         {stewardshipEnabled && canManageGovernance && (
           <TabsContent value="stewards" className="space-y-4">
-            <Card className="border-blue-200 bg-blue-50/40">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <Shield className="h-4 w-4 text-blue-700" />
-                  How stewardship works
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="text-xs text-muted-foreground space-y-2 leading-relaxed">
-                <p>
-                  <strong className="text-foreground">New documents start as drafts.</strong>{" "}
-                  They're not available to AI queries until a steward approves them.
-                </p>
-                <p>
-                  <strong className="text-foreground">Stewards</strong> are
-                  people you name to govern content by scope. Resolution
-                  priority (first match wins):
-                </p>
-                <ol className="list-decimal list-inside ml-2 space-y-0.5">
-                  <li><strong>Document</strong> — this exact doc</li>
-                  <li><strong>Tag</strong> — everything with #tag</li>
-                  <li><strong>Nest</strong> — anything not matched above</li>
-                </ol>
-                <p>
-                  <strong className="text-foreground">Reviewers</strong> can
-                  approve/reject; <strong className="text-foreground">editors</strong> can edit;{" "}
-                  <strong className="text-foreground">viewers</strong> have read access.
-                  Authors can't approve their own work.
-                </p>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="pb-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <CardTitle className="text-lg">Stewards</CardTitle>
-                    <CardDescription>
-                      {stewards.length === 0
-                        ? "Nobody's governing content yet"
-                        : "Who governs what"}
-                    </CardDescription>
-                  </div>
-                  {stewards.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-2">
-                      {(["all", "document", "tag", "nest"] as const).map(
-                        (s) => (
-                          <button
-                            key={s}
-                            onClick={() => setStewardScope(s)}
-                            className={`text-xs px-2 py-1 rounded border ${stewardScope === s
-                              ? "bg-primary text-primary-foreground border-primary"
-                              : "bg-background text-muted-foreground border-border hover:bg-secondary"
-                              }`}
-                          >
-                            {s === "all" ? "All" : s.charAt(0).toUpperCase() + s.slice(1)}
-                          </button>
-                        ),
-                      )}
-                      <span className="w-px h-4 bg-border" />
-                      <Select
-                        value={stewardRoleFilter}
-                        onValueChange={(v) =>
-                          setStewardRoleFilter(v as "all" | StewardRole)
-                        }
-                      >
-                        <SelectTrigger className="w-[120px] h-7 text-xs">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="all">All</SelectItem>
-                          <SelectItem value="editor">Editor</SelectItem>
-                          <SelectItem value="reviewer">Reviewer</SelectItem>
-                          <SelectItem value="viewer">Viewer</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  )}
-                </div>
-              </CardHeader>
-              <CardContent>
-                {stewards.length === 0 ? (
-                  <div className="text-sm space-y-3 py-2">
-                    <p className="text-muted-foreground leading-relaxed">
-                      Without stewards, every draft needs the nest owner to
-                      approve. Add an editor/reviewer to delegate approvals
-                      for a tag or specific doc.
-                    </p>
-                    {canManageGovernance && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="w-full"
-                        onClick={() => setShowAssignSteward(true)}
-                      >
-                        <Shield className="h-3.5 w-3.5 mr-2" />
-                        Assign your first steward
-                      </Button>
-                    )}
-                  </div>
-                ) : (
-                  <StewardList
-                    stewards={stewards.filter(
-                      (s) =>
-                        (stewardScope === "all" || s.scope === stewardScope) &&
-                        (stewardRoleFilter === "all" ||
-                          s.role === stewardRoleFilter),
-                    )}
-                    showScope
-                    onAddSteward={
-                      canManageGovernance ? () => setShowAssignSteward(true) : undefined
-                    }
-                    onRemove={
-                      canManageGovernance
-                        ? async (stewardId: string) => setRemoveStewardId(stewardId)
-                        : undefined
-                    }
-                    onEditRole={canManageGovernance ? setEditingSteward : undefined}
-                    currentUserEmail={currentEmail}
-                  />
-                )}
-              </CardContent>
-            </Card>
+          <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+            <StewardsTab
+              nestId={nestId}
+                canManage={canManageGovernance && !caps.isReadOnly}
+              currentUserEmail={currentEmail}
+              onAssign={() => setShowAssignSteward(true)}
+              onRemove={setRemoveStewardId}
+              onEditRole={setEditingSteward}
+            />
+          </Suspense>
           </TabsContent>
         )}
 
         {(canManage || collabCanWrite) && (
           <TabsContent value="collaborators" className="space-y-4">
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-lg">Collaborators</CardTitle>
-                {/* Two lines, not one paragraph — the stewardship caveat read
-                    as an aside and was missed (CU-wdqcq018qu). */}
-                <CardDescription className="space-y-1">
-                  <span className="block">
-                    <strong className="font-medium text-foreground">
-                      Who can access this nest
-                    </strong>{" "}
-                    — visibility and access for people and teams. Sharing
-                    grants viewer, editor or admin access.
-                  </span>
-                  <span className="block">
-                    <strong className="font-medium text-foreground">
-                      Stewardship
-                    </strong>{" "}
-                    — sharing does not make anyone a steward.
-                    {stewardshipEnabled ? (
-                      " Stewards are assigned on the Stewards tab."
-                    ) : canManageGovernance ? (
-                      // Naming the setting without a way to reach it left the
-                      // reader hunting through a menu (CU-wdqcq01e75). Only
-                      // owner/admin can open it, so only they get the link.
-                      <>
-                        {" "}
-                        Turn on Stewardship &amp; Approval Workflow in{" "}
-                        <button
-                          type="button"
-                          onClick={() => setShowSettings(true)}
-                          className="font-medium text-foreground underline underline-offset-2 hover:no-underline"
-                        >
-                          Nest settings
-                        </button>{" "}
-                        to use stewards.
-                      </>
-                    ) : (
-                      " Stewardship & Approval Workflow is off for this nest — an owner or admin can turn it on in Nest settings."
-                    )}
-                  </span>
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {/* Visibility lives here rather than only in the Share dialog,
-                    so access management is one surface (CU-wdqcpzzzy6). */}
-                {canManage && (
-                  <NestVisibilityControl
-                    nestId={nestId}
-                    onChanged={fetchData}
-                    onError={(msg) => msg && toast.error(msg)}
-                  />
-                )}
-                <CollaboratorManager
-                  nestId={nestId}
-                  nestName={nestName}
-                  onChanged={fetchData}
-                  currentUserEmail={currentEmail}
-                  callerPermission={permission ?? undefined}
-                  showTeams
-                />
-              </CardContent>
-            </Card>
+          <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+            <CollaboratorsTab
+              nestId={nestId}
+              nestName={nestName}
+              canManage={canManage}
+              canManageGovernance={canManageGovernance}
+              stewardshipEnabled={stewardshipEnabled}
+              currentUserEmail={currentEmail}
+              callerPermission={permission ?? undefined}
+              onOpenSettings={() => setShowSettings(true)}
+              onChanged={fetchData}
+            />
+          </Suspense>
           </TabsContent>
         )}
       </Tabs>
@@ -4252,15 +1918,6 @@ export function NestView({
         />
       )}
 
-      {shareFolder && (
-        <ShareTargetDialog
-          nestId={nestId}
-          targetType="folder"
-          target={shareFolder.path}
-          label={shareFolder.label}
-          onClose={() => setShareFolder(null)}
-        />
-      )}
 
       {showSettings && (
         <NestSettingsModal
@@ -4457,6 +2114,19 @@ export function NestView({
           )}
 
           <DialogFooter>
+            {readerModeEnabled && (
+              <Button
+                variant="outline"
+                className="mr-auto gap-1.5"
+                onClick={() => {
+                  setReaderDialogOpen(false);
+                  setPreviewReader(true);
+                }}
+              >
+                <Eye className="h-3.5 w-3.5" />
+                Preview as reader
+              </Button>
+            )}
             <Button variant="outline" onClick={() => setReaderDialogOpen(false)}>
               Done
             </Button>
@@ -4507,156 +2177,6 @@ export function NestView({
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Move to folder — the keyboard-accessible path to the same move the
-          drag-and-drop performs; both funnel through handleMoveNode. */}
-      <Dialog
-        open={!!moveTarget}
-        onOpenChange={(open) => {
-          // No Escape/overlay dismissal mid-request — same gating as the
-          // disabled Cancel button.
-          if (!open && !movingDoc) setMoveTarget(null);
-        }}
-      >
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Move to folder</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground">
-            Move <strong>{moveTarget?.title}</strong> to another folder.
-            Version history, review state, and [[wiki links]] follow the
-            document.
-          </p>
-          <Select
-            value={
-              moveNewFolder !== null
-                ? "__new__"
-                : moveDest === ""
-                  ? "__root__"
-                  : moveDest
-            }
-            onValueChange={(v) => {
-              if (v === "__new__") {
-                setMoveNewFolder("");
-                return;
-              }
-              setMoveNewFolder(null);
-              setMoveDest(v === "__root__" ? "" : v);
-            }}
-          >
-            <SelectTrigger data-testid="move-folder-select">
-              <SelectValue placeholder="Choose a folder" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__root__">Nest root</SelectItem>
-              {allFolders.map((f) => (
-                <SelectItem key={f} value={f}>
-                  {prettyFolderPath(f)}
-                </SelectItem>
-              ))}
-              {/* Below the rule: the entries above are destinations, this one
-                  starts a different flow. Undifferentiated, it read as one
-                  more existing folder. */}
-              <SelectSeparator />
-              <SelectItem value="__new__">
-                <span className="inline-flex items-center gap-1.5">
-                  <FolderPlus className="h-3.5 w-3.5" />
-                  New folder…
-                </span>
-              </SelectItem>
-            </SelectContent>
-          </Select>
-          {moveNewFolder !== null && (
-            <>
-              <Input
-                autoFocus
-                value={moveNewFolder}
-                onChange={(e) => setMoveNewFolder(e.target.value)}
-                placeholder="e.g. gtm/deals"
-                className="font-mono"
-                data-testid="move-folder-new-path"
-              />
-              {moveNewFolderCheck.error ? (
-                <p className="text-xs text-destructive">
-                  {moveNewFolderCheck.error}
-                </p>
-              ) : moveNewFolderCheck.rewritten && moveNewFolderCheck.path ? (
-                <p className="text-xs text-muted-foreground">
-                  Will be created as{" "}
-                  <code className="font-mono">{moveNewFolderCheck.path}</code>
-                </p>
-              ) : (
-                <p className="text-xs text-muted-foreground">
-                  The folder is created by the move — nest it with a slash.
-                </p>
-              )}
-            </>
-          )}
-          <DialogFooter>
-            <Button
-              variant="ghost"
-              disabled={movingDoc}
-              onClick={() => setMoveTarget(null)}
-            >
-              Cancel
-            </Button>
-            <Button
-              disabled={
-                movingDoc ||
-                !moveTarget ||
-                folderOfNode(moveTarget.id) === moveResolvedDest ||
-                (moveNewFolder !== null &&
-                  (!moveNewFolderCheck.path || !!moveNewFolderCheck.error))
-              }
-              onClick={async () => {
-                if (!moveTarget) return;
-                setMovingDoc(true);
-                const ok = await handleMoveNode(moveTarget.id, moveResolvedDest);
-                setMovingDoc(false);
-                if (ok) setMoveTarget(null);
-              }}
-              data-testid="move-folder-confirm"
-            >
-              {movingDoc ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <FolderInput className="h-4 w-4 mr-2" />
-              )}
-              Move
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={showSaveFilter} onOpenChange={setShowSaveFilter}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Save this filter</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground">
-            Saved filters remember your current search, tags, status, author and
-            date range. Pick one from the <strong>Saved</strong> row to re-apply
-            the whole set in one click — handy for views you return to, like
-            “My drafts” or “Edited this week”.
-          </p>
-          <Input
-            autoFocus
-            placeholder="Filter name (e.g. My drafts)"
-            value={saveFilterName}
-            onChange={(e) => setSaveFilterName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") saveCurrentFilter();
-            }}
-          />
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setShowSaveFilter(false)}>
-              Cancel
-            </Button>
-            <Button onClick={saveCurrentFilter} disabled={!saveFilterName.trim()}>
-              Save filter
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {showAssignSteward && (
         <StewardModal
@@ -4681,15 +2201,6 @@ export function NestView({
         />
       )}
 
-      {submitNode && (
-        <SubmitForReviewModal
-          isOpen={!!submitNode}
-          onClose={() => setSubmitNode(null)}
-          documentTitle={submitNode.title}
-          currentVersion={submitNode.version || 1}
-          onSubmit={handleSubmitReview}
-        />
-      )}
 
       {reviewNode && (
         <ReviewDocumentModal
@@ -4705,14 +2216,6 @@ export function NestView({
         />
       )}
 
-      {publishNode && (
-        <PublishDialog
-          nestId={nestId}
-          nodeId={publishNode.id}
-          nodeTitle={publishNode.title || publishNode.id}
-          onClose={() => setPublishNode(null)}
-        />
-      )}
 
       {removeStewardId && (
         <ReasonDialog
@@ -4723,32 +2226,6 @@ export function NestView({
           confirmLabel="Remove steward"
           destructive
           onConfirm={handleRemoveSteward}
-        />
-      )}
-
-      {bulkAction && (
-        <ReasonDialog
-          open
-          onOpenChange={(o) => !o && setBulkAction(null)}
-          title={
-            bulkAction === "approve"
-              ? `Approve ${bulkSelected.size} document${bulkSelected.size === 1 ? "" : "s"}?`
-              : `Reject ${bulkSelected.size} document${bulkSelected.size === 1 ? "" : "s"}?`
-          }
-          description={
-            bulkAction === "approve"
-              ? "Approving publishes each one. Anything you can't review, or that changed since this queue loaded, is reported back and left alone."
-              : "Each author gets the same reason and the work goes back to them."
-          }
-          // Reject demands a reason in bulk exactly as it does one at a time.
-          // Approve offers the same comment field the one-at-a-time flow has —
-          // shared across the batch — without demanding one.
-          label={bulkAction === "reject" ? "Why?" : "Comment (optional)"}
-          optionalReason={bulkAction === "approve"}
-          placeholder="Shared with every author in this batch"
-          confirmLabel={bulkAction === "approve" ? "Approve all" : "Reject all"}
-          destructive={bulkAction === "reject"}
-          onConfirm={(reason) => runBulkReview(bulkAction, reason)}
         />
       )}
 
@@ -4775,58 +2252,8 @@ export function NestView({
         />
       )}
 
-      {folderTarget && (
-        <ReasonDialog
-          open
-          onOpenChange={(o) => !o && setFolderTarget(null)}
-          title={
-            canManage
-              ? `Delete "${folderTarget.label}"?`
-              : `Request deletion of "${folderTarget.label}"`
-          }
-          description={
-            canManage
-              ? `This deletes all ${folderTarget.total} document${folderTarget.total === 1 ? "" : "s"} in this folder and its subfolders, with their history, comments and annotations. It cannot be undone.`
-              : `A nest admin reviews this. Honouring it deletes all ${folderTarget.total} document${folderTarget.total === 1 ? "" : "s"} in this folder. Nothing is removed yet.`
-          }
-          // Admins confirm; a request must say why.
-          label={canManage ? undefined : "Why should it be deleted?"}
-          placeholder="e.g. superseded by the new API docs"
-          confirmLabel={canManage ? "Delete folder" : "Request deletion"}
-          destructive={canManage}
-          onConfirm={handleFolderDeletion}
-        />
-      )}
 
-      {deleteNodeTarget && (
-        <ReasonDialog
-          open
-          onOpenChange={(o) => !o && setDeleteNodeTarget(null)}
-          title={`Delete "${deleteNodeTarget.title}"?`}
-          description="This removes the document, its version history, comments and annotations. It cannot be undone."
-          confirmLabel="Delete document"
-          destructive
-          onConfirm={handleDeleteNode}
-        />
-      )}
 
-      {deletionTarget && (
-        <ReasonDialog
-          open
-          onOpenChange={(o) => !o && setDeletionTarget(null)}
-          title={`Request deletion of "${deletionTarget.title}"`}
-          description="A nest admin reviews this and either deletes the document or rejects with a note. Nothing is removed yet."
-          label="Why should it be deleted?"
-          placeholder="e.g. superseded by the new runbook"
-          confirmLabel="Request deletion"
-          priorDecline={
-            flagByNode.get(deletionTarget.id)?.status === "declined"
-              ? flagByNode.get(deletionTarget.id)
-              : null
-          }
-          onConfirm={handleRequestDeletion}
-        />
-      )}
 
       {resolveTarget && (
         <ReasonDialog
@@ -4874,39 +2301,6 @@ export function NestView({
         />
       )}
 
-      {versionNode && (
-        <VersionHistoryModal
-          open
-          onClose={() => setVersionNode(null)}
-          title={versionNode.title}
-          versionData={versionData}
-          onLoadContent={async (v) =>
-            (await api.getNodeVersionContent(nestId, versionNode.id, v)).content
-          }
-          onRestore={async (v) => {
-            if (!versionNode) return;
-            try {
-              await api.revertToVersion(nestId, versionNode.id, v);
-              toast.success(`Reverted to version ${v}`);
-              await openVersions(versionNode);
-              fetchData();
-            } catch (e: any) {
-              toast.error(e?.message || "Revert failed");
-            }
-          }}
-          onDiscard={async () => {
-            if (!versionNode) return;
-            try {
-              const { version } = await api.discardDraft(nestId, versionNode.id);
-              toast.success(`Draft discarded — back to version ${version}`);
-              await openVersions(versionNode);
-              fetchData();
-            } catch (e: any) {
-              toast.error(e?.message || "Discard failed");
-            }
-          }}
-        />
-      )}
     </div>
   );
 }

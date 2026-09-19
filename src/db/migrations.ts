@@ -18,7 +18,7 @@ export function runMigrations(db: Database.Database): void {
       slug TEXT NOT NULL,
       description TEXT,
       visibility TEXT NOT NULL DEFAULT 'private'
-        CHECK(visibility IN ('private', 'public')),
+        CHECK(visibility IN ('private', 'org', 'public')),
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE(user_id, slug)
     );
@@ -1467,12 +1467,82 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("039_nest_pins");
   }
 
-  // 040: caller attribution (spec §9.4). One nullable JSON column per audit
+  // 041: widen nests.visibility to accept 'org'. 040 is skipped on purpose —
+  // 040_push_confirmation is in flight on another branch, and ids are matched
+  // by string, so the gap costs nothing and reusing 040 would collide.
+  //
+  // See widenNestVisibilityCheck for why this is a table rebuild and why the
+  // pragma is toggled out here —
+  // PRAGMA foreign_keys is a no-op inside a transaction, so doing it any other
+  // way silently leaves enforcement ON and cascades the database away.
+  if (!hasMigration("041_nest_visibility_org")) {
+    widenNestVisibilityWithGuard(db);
+    recordMigration("041_nest_visibility_org");
+  }
+
+  // 042: official community site connections (CU-wdqcq0247t). Extends the
+  // single OFFICIAL_COMMUNITY_SSO_SECRET / PUBLIC_BASE_URL env-var pair to a
+  // DB-backed list so an operator can trust SSO tickets from multiple
+  // official sites, each with its own name/url/secret and an active flag.
+  // Managed from Server Settings via /admin/community-sites; see
+  // src/auth/community-sites.ts.
+  if (!hasMigration("042_community_sites")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS community_sites (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          url TEXT NOT NULL UNIQUE,
+          secret TEXT NOT NULL,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      recordMigration("042_community_sites");
+    })();
+  }
+
+  // 043: node_suggestions carries the suggestion itself, not just a flag —
+  // one row per staged external edit (id, who, when, source, hashes, note),
+  // so the External Edits list and its badge are a SELECT and the UI can
+  // tell an old suggestion from a new one. The old flag rows carried no id,
+  // so the table is rebuilt empty and every nest's index is marked stale:
+  // the next rebuild re-fills it from disk (node-index rebuild).
+  if (!hasMigration("043_node_suggestion_details")) {
+    db.transaction(() => {
+      db.exec(`
+        DROP TABLE IF EXISTS node_suggestions;
+        CREATE TABLE node_suggestions (
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          suggestion_id TEXT NOT NULL,
+          source TEXT NOT NULL,
+          actor TEXT NOT NULL,
+          detected_at TEXT NOT NULL,
+          target_hash TEXT NOT NULL,
+          proposed_hash TEXT NOT NULL,
+          note TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (nest_id, node_id, suggestion_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_node_suggestions_nest_detected
+          ON node_suggestions(nest_id, detected_at DESC);
+        UPDATE nests SET index_synced_at = NULL;
+      `);
+      recordMigration("043_node_suggestion_details");
+    })();
+  }
+
+  // 044: caller attribution (spec §9.4). One nullable JSON column per audit
   //   surface — the version a write sealed, and the activity trace every call
   //   lands on. Nullable and unindexed on purpose: `client` is an annotation
   //   nobody queries by, and NULL is the whole "not attributed" story, so every
   //   existing row is already correct. Never part of any hash.
-  if (!hasMigration("040_client_attribution")) {
+  //
+  //   Numbered 044, not 040: 040 is reserved for 040_push_confirmation, in
+  //   flight on another branch (see the note on 041), and ids match by string.
+  if (!hasMigration("044_client_attribution")) {
     for (const [table, col] of [
       ["node_versions", "client_json"],
       ["api_events", "client_json"],
@@ -1484,8 +1554,135 @@ export function runMigrations(db: Database.Database): void {
         db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
       }
     }
-    recordMigration("040_client_attribution");
+    recordMigration("044_client_attribution");
   }
+}
+
+/**
+ * `foreign_key_check` violations, counted per (child table, parent table,
+ * constraint) — deliberately WITHOUT rowid, because the rebuild reassigns
+ * rowids in `nests` and keying on them would report every pre-existing
+ * violation there as newly introduced.
+ */
+function fkViolationCounts(db: Database.Database): Map<string, number> {
+  const rows = db.pragma("foreign_key_check") as Array<{
+    table: string;
+    parent: string;
+    fkid: number;
+  }>;
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    const key = `${r.table}|${r.parent}|${r.fkid}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * Run the `nests` rebuild with foreign keys disabled, and verify it introduced
+ * no new dangling rows.
+ *
+ * The comparison is before-vs-after, not "are there any violations at all".
+ * `PRAGMA foreign_key_check` with no argument scans the WHOLE database, and
+ * runMigrations is called uncaught from openSqlite() at startup — so failing
+ * on any violation would wedge boot permanently for a deployment carrying
+ * unrelated pre-existing corruption (a hand-edited database, a restore taken
+ * with foreign_keys off, a historic bug). That deployment's data is not this
+ * migration's doing and re-running cannot fix it: the rebuild is idempotent,
+ * so every subsequent boot would re-find the same violations and throw again.
+ * Only violations this rebuild ADDED are its business.
+ *
+ * Still a detection net rather than a rollback: the rebuild's transaction has
+ * necessarily committed by the time the check runs, because foreign_keys can
+ * only be toggled outside a transaction. A throw leaves the new table in place
+ * and the migration unrecorded; the retry is harmless because
+ * widenNestVisibilityCheck returns early once 'org' is in the constraint.
+ */
+export function widenNestVisibilityWithGuard(db: Database.Database): void {
+  const before = fkViolationCounts(db);
+  const fkWasOn = db.pragma("foreign_keys", { simple: true }) === 1;
+  if (fkWasOn) db.pragma("foreign_keys = OFF");
+  try {
+    db.transaction(() => {
+      widenNestVisibilityCheck(db);
+    })();
+    const after = fkViolationCounts(db);
+    const introduced = [...after].filter(
+      ([key, n]) => n > (before.get(key) ?? 0),
+    );
+    if (introduced.length > 0) {
+      throw new Error(
+        `041_nest_visibility_org introduced foreign-key violations: ${introduced
+          .map(([key]) => key)
+          .join(", ")}`,
+      );
+    }
+  } finally {
+    if (fkWasOn) db.pragma("foreign_keys = ON");
+  }
+}
+
+/**
+ * Widen the `nests.visibility` CHECK constraint to allow 'org'.
+ *
+ * SQLite cannot alter a CHECK in place, so the table has to be rebuilt — and
+ * `nests` is the most-referenced table in the schema: 27 tables point at
+ * `nests(id)`, every one of them ON DELETE CASCADE. The connection runs with
+ * `foreign_keys = ON` (db/client.ts), so a plain `DROP TABLE nests` would take
+ * every node-index row, version, steward, grant and run with it. The caller
+ * MUST disable foreign keys around this, outside any transaction.
+ *
+ * The replacement table is derived from the LIVE schema rather than a literal
+ * column list: `nests` grows columns from plain ALTERs on other branches
+ * (marketplace adds is_pack/pack_meta/installed_from_pack), and a hardcoded
+ * list would quietly drop whichever ones this file had not heard about.
+ *
+ * Idempotent — returns immediately once 'org' is already in the constraint.
+ */
+export function widenNestVisibilityCheck(db: Database.Database): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'nests'")
+    .get() as { sql?: string } | undefined;
+  const ddl = row?.sql;
+  if (!ddl) return; // fresh database — the CREATE TABLE above already has 'org'
+
+  const checkRe = /CHECK\s*\(\s*visibility\s+IN\s*\([^)]*\)\s*\)/i;
+  const current = ddl.match(checkRe);
+  if (!current) return; // no visibility CHECK to widen — nothing to do
+  if (/'org'/i.test(current[0])) return; // already widened
+
+  const newDdl = ddl
+    .replace(
+      /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["'`\[]?nests["'`\]]?/i,
+      "CREATE TABLE nests_new",
+    )
+    .replace(checkRe, "CHECK(visibility IN ('private', 'org', 'public'))");
+  if (!newDdl.startsWith("CREATE TABLE nests_new")) {
+    throw new Error("041: could not rewrite the nests CREATE TABLE statement");
+  }
+
+  const cols = (db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>)
+    .map((c) => `"${c.name}"`)
+    .join(", ");
+
+  // Indexes die with the DROP, so replay the live ones for the same reason the
+  // columns are derived rather than hardcoded: other branches add them.
+  const indexes = (
+    db
+      .prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'nests' AND sql IS NOT NULL",
+      )
+      .all() as Array<{ sql: string }>
+  ).map((r) => `${r.sql};`);
+
+  db.exec(`
+    ${newDdl};
+    INSERT INTO nests_new (${cols}) SELECT ${cols} FROM nests;
+    DROP TABLE nests;
+    ALTER TABLE nests_new RENAME TO nests;
+    ${indexes.join("\n    ")}
+  `);
+
 }
 
 /**

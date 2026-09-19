@@ -14,6 +14,7 @@
 
 import { getDb } from "../db/client.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
+import { titleScore } from "./search.js";
 
 const STOPWORDS = new Set<string>([
   "the", "a", "an", "and", "or", "but", "if", "then", "else", "so", "as",
@@ -32,6 +33,9 @@ const STOPWORDS = new Set<string>([
   "got", "make", "made", "need", "want", "like", "help", "show", "tell",
   "give", "take", "find", "look", "know", "think", "say", "mean", "tell",
   "not", "no", "yes", "okay", "ok", "please", "thanks", "thank",
+  // Greetings and fillers a chat turn opens with — never a topic.
+  "hello", "hi", "hey", "there", "good", "morning", "afternoon", "evening",
+  "bye", "cheers",
 ]);
 
 /** Normalize + tokenize the prompt into distinct lowercase keywords. */
@@ -120,4 +124,51 @@ export async function compilePrompt(
     matchedTitles: Array.from(matchedTitles),
     unmatched,
   };
+}
+
+export type PromptMatchVia = "title" | "tag" | "fulltext";
+
+/**
+ * How well one document answers the prompt's tokens, and where the best hit
+ * landed. Per token: title scores 0–4 via titleScore (exact > starts the title
+ * > starts a word > mid-word), a tag 2, a body word 1. The sum over the best
+ * possible (every token an exact title) gives 0–1, comparable across prompts.
+ * `via` is null when nothing hit.
+ *
+ * ponytail: prefix match on words, no stemming. "migration" finds
+ * "migrations"; "sales" also finds "Salesforce", just lower.
+ */
+export function scorePrompt(
+  doc: { frontmatter: { title: string; tags?: string[] }; body?: string },
+  tokens: string[],
+): { score: number; via: PromptMatchVia | null } {
+  if (tokens.length === 0) return { score: 0, via: null };
+  const title = doc.frontmatter.title || "";
+  const tags = (doc.frontmatter.tags || []).map(normalizeTag);
+  const body = (doc.body || "").toLowerCase();
+
+  let sum = 0;
+  let via: PromptMatchVia | null = null;
+  for (const t of tokens) {
+    const inTitle = titleScore(title, t);
+    if (inTitle > 0) {
+      sum += inTitle;
+      via = "title";
+    } else if (tags.some((tag) => tag.startsWith(t))) {
+      sum += 2;
+      if (via !== "title") via = "tag";
+    } else if (startsWord(body, t)) {
+      sum += 1;
+      via ??= "fulltext";
+    }
+  }
+  return { score: sum / (4 * tokens.length), via };
+}
+
+/** True when `term` begins a word in `text` (both lowercase). */
+function startsWord(text: string, term: string): boolean {
+  for (let i = text.indexOf(term); i !== -1; i = text.indexOf(term, i + 1)) {
+    if (i === 0 || !/[a-z0-9]/.test(text[i - 1]!)) return true;
+  }
+  return false;
 }

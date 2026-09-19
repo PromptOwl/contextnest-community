@@ -22,6 +22,7 @@ import { resolveBody } from "./version-body";
 import { DocumentViewer } from "../DocumentViewer";
 import { parseServerDate } from "@/lib/dates";
 import { formatClient, type ClientAttribution } from "@/lib/client-attribution";
+import { NEVER_PUBLISHED_HINT } from "./version-hints";
 
 export interface Version {
   version: number;
@@ -361,8 +362,9 @@ export function VersionHistory({
             Say which state it is actually in and how to leave it. */}
         {currentVersionStatus === "draft" && approvedVersion == null && (
           <p className="text-xs text-muted-foreground pt-1">
-            Never published — no approved version exists yet. Saving keeps this
-            document a draft; Submit for review to publish it.
+            {NEVER_PUBLISHED_HINT.status}
+            <br />
+            {NEVER_PUBLISHED_HINT.guidance}
           </p>
         )}
       </CardHeader>

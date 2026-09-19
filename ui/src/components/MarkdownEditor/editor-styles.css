@@ -19,6 +19,16 @@
   user-select: none;
 }
 
+/* Mention decoration (extensions/Mention.ts): for an email-shaped
+   `@user@example.com` mention, hides the `@domain` remainder so the editor
+   shows the same bare `@user` chip the read-only viewer renders, instead of
+   exposing the full address while editing. */
+.mention-domain-hidden {
+  font-size: 0;
+  color: transparent;
+  user-select: none;
+}
+
 .cn-video-embed {
   display: block;
   max-width: 100%;

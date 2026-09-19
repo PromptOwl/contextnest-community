@@ -39,20 +39,32 @@ export function extractText(html: string): string {
   const doc = new DOMParser().parseFromString(html, "text/html");
   doc.querySelectorAll("script,style,noscript,template").forEach((n) => n.remove());
 
+  // No markup at all — a markdown or plain-text file stored as an artifact.
+  // Its line breaks ARE its structure; collapsing them turns a document into
+  // one paragraph. Same treatment as <pre> below.
+  if (!doc.body.querySelector("*")) {
+    return (doc.body.textContent || "")
+      .replace(/[ \t]+/g, " ")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
   let out = "";
-  const walk = (node: Node) => {
+  const walk = (node: Node, pre: boolean) => {
     if (node.nodeType === Node.TEXT_NODE) {
-      out += (node.textContent || "").replace(/\s+/g, " ");
+      const text = node.textContent || "";
+      out += pre ? text : text.replace(/\s+/g, " ");
       return;
     }
     if (node.nodeType !== Node.ELEMENT_NODE) return;
     const tag = (node as Element).tagName;
     const block = BLOCK_TAGS.has(tag);
     if (block && out && !out.endsWith("\n")) out += "\n";
-    node.childNodes.forEach(walk);
+    node.childNodes.forEach((child) => walk(child, pre || tag === "PRE"));
     if (block && !out.endsWith("\n")) out += "\n";
   };
-  walk(doc.body);
+  walk(doc.body, false);
   return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 

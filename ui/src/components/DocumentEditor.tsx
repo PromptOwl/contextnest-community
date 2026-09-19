@@ -10,10 +10,12 @@ import {
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
-import { reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
+import { invalidateForPath, keys, reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { setNavGuard, bypassNavGuard } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
+import { nestPath } from "../lib/nest-url";
+import { useBreadcrumb } from "../lib/breadcrumb";
 import {
   clampTagInput,
   newTags,
@@ -24,6 +26,13 @@ import {
 import { relTime, formatServerDate } from "../lib/dates";
 import { useRovingFocus } from "../lib/use-roving-focus";
 import { resolveEditorAccess } from "../lib/editor-access";
+import { isNestArchived } from "../lib/nest-caps";
+import {
+  nextCommentsOpen,
+  readDocPagePrefs,
+  writeDocPagePrefs,
+} from "../lib/doc-page";
+import { NestVisibilityControl } from "./NestVisibilityControl";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -66,13 +75,16 @@ import {
   Copy,
   Star,
   Undo2,
+  PanelLeft,
+  Globe,
+  Building2,
+  Lock,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { toast } from "sonner";
 import {
   MarkdownEditor,
-  slugFromNodeId,
   type MarkdownEditorHandle,
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
@@ -82,6 +94,7 @@ import { tableDiffSides } from "../lib/csv-table";
 import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { CodeHighlight } from "./CodeHighlight";
+import { prettyFolder, prettyFolderPath } from "./FolderTree";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { PublishDialog } from "./PublishDialog";
 import { ShareTargetDialog } from "./ShareTargetDialog";
@@ -194,6 +207,9 @@ interface DocumentEditorProps {
   breadcrumb?: BreadcrumbEntry[];
   /** Jump to ancestor at `index`; drops entries after it. */
   onJumpBreadcrumb?: (index: number) => void;
+  /** The page's index rail is hidden; the top bar offers to bring it back. */
+  sidebarCollapsed?: boolean;
+  onToggleSidebar?: () => void;
 }
 
 export function DocumentEditor({
@@ -213,6 +229,8 @@ export function DocumentEditor({
   initialTitle,
   breadcrumb,
   onJumpBreadcrumb,
+  sidebarCollapsed = false,
+  onToggleSidebar,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
   // Type picker: one tab stop, arrows between the choices (see the radiogroup).
@@ -225,6 +243,9 @@ export function DocumentEditor({
   // /collaborators and /visibility). New, unsaved docs have no shareable
   // nest target distinct from the nest list, so only offer it once we're
   // looking at a real nest the caller can administer.
+  // Folded with !isArchived at each use below (isArchived resolves later,
+  // off the nest fetch): an archived nest's visibility, sharing and
+  // publishing are frozen, so the controls that change them are withheld.
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
   const [showPublish, setShowPublish] = useState(false);
@@ -268,6 +289,8 @@ export function DocumentEditor({
   }>;
 
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
+  // Header breadcrumb: Home › nest › this document (App adds the front).
+  useBreadcrumb([{ label: isNew ? "New document" : title.trim() || "Untitled" }]);
   // Folder path under nodes/ for new docs (e.g. "gtm/deals"). Create-only:
   // moving an existing doc is a rename with backlink fallout, handled elsewhere.
   const [folder, setFolder] = useState(initialFolder ?? "");
@@ -305,6 +328,7 @@ export function DocumentEditor({
   // Creator + everyone else with a hand in the doc (version authors ∪
   // document-scope grantees) — server-resolved on GET /nodes/:id.
   const [author, setAuthor] = useState<string | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [collaborators, setCollaborators] = useState<string[]>([]);
   const [pendingChange, setPendingChange] = useState<PendingChange | null>(null);
   // Submitter of the active pending review (null when not pending).
@@ -321,6 +345,13 @@ export function DocumentEditor({
   // (public reader OR a read-only collaborator); 'write'/'admin'/'owner' can
   // edit. null until loaded.
   const permission = (nestMeta.data?.permission ?? null) as string | null;
+  // Read straight off the same GET /nests/:id response `permission` above
+  // comes from, rather than a prop threaded down through App.tsx's View
+  // state — the document page is reachable via wiki-link nav, a board/graph
+  // card click, quick-open, and deep links, none of which forwarded an
+  // isArchived flag, so an archived nest's editor stayed writable everywhere
+  // except the one path (Dashboard → nest → doc) that happened to pass it.
+  const isArchived = isNestArchived(nestMeta.data?.nest);
   // Every edit/approve affordance below gates on these — see editor-access.ts
   // for the rules and ui/src/lib/editor-access.test.ts for the role matrix.
   const {
@@ -337,6 +368,7 @@ export function DocumentEditor({
     nestStewards: myStewards,
     nodeRoles: myNodeRoles,
     grant: myGrant,
+    isArchived,
   });
   // Who deletes outright: the nest admin/owner tier, plus the person who wrote
   // the document — asking permission to delete your own work is the wrong
@@ -347,23 +379,28 @@ export function DocumentEditor({
     !!author &&
     !!adminStatus?.me?.email &&
     author.toLowerCase() === adminStatus.me.email.toLowerCase();
+  // !isArchived guards both: an owner/admin caretaker reopening an archived
+  // nest still can't delete (or ask to delete) from it, matching the
+  // isReadOnly-gated Delete affordances on the nest/document list (NestView).
   const canDeleteDirectly =
-    isOwner ||
-    isAdmin ||
-    permission === "owner" ||
-    permission === "admin" ||
-    authoredByMe;
+    !isArchived &&
+    (isOwner ||
+      isAdmin ||
+      permission === "owner" ||
+      permission === "admin" ||
+      authoredByMe);
   // Even ASKING for a deletion is an editor's act — a viewer of any kind (a
   // read collaborator, a viewer steward, a read share grantee) doesn't get the
   // action at all. Mirrors canRequestDeletion on the server, which refuses
   // them; hiding it means nobody clicks through a 403 for a request they were
   // never allowed to make.
   const canRequestDeletion =
-    canDeleteDirectly ||
-    permission === "write" ||
-    grantCanWrite ||
-    myNodeRoles.includes("editor") ||
-    myStewards.some((s) => s.role === "editor" && s.scope === "nest");
+    !isArchived &&
+    (canDeleteDirectly ||
+      permission === "write" ||
+      grantCanWrite ||
+      myNodeRoles.includes("editor") ||
+      myStewards.some((s) => s.role === "editor" && s.scope === "nest"));
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDeletionModal, setShowDeletionModal] = useState(false);
   // Latest deletion flag on this doc. Pending hides the request button (a
@@ -450,8 +487,44 @@ export function DocumentEditor({
   // Anchor snapshotted at mouseup (selection is live then); consumed on click.
   const stagedAnchorRef = useRef<api.AnnotationAnchor | null>(null);
   const docViewRef = useRef<HTMLDivElement | null>(null);
+  // The body wrapper, whichever control is inside it (rich editor, raw
+  // markdown, source, artifact HTML) — Enter from the title lands here.
+  const bodyRef = useRef<HTMLDivElement | null>(null);
   const [anchoredThreads, setAnchoredThreads] = useState<api.AnnotationThread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  // The comments rail starts closed — an empty panel beside every document
+  // was a third of the width spent on nothing — and remembers the last
+  // choice per browser. It opens itself for anything that needs it on
+  // screen (see nextCommentsOpen); the panel stays MOUNTED while hidden so
+  // thread loading, body highlights and deep-link focus keep working.
+  const [commentsOpen, setCommentsOpenState] = useState(
+    () => readDocPagePrefs(localStorage).commentsOpen,
+  );
+  const setCommentsOpen = (open: boolean) => {
+    setCommentsOpenState(open);
+    writeDocPagePrefs(localStorage, { commentsOpen: open });
+  };
+  // Outline for the right rail: view mode, markdown body, real structure.
+  const outlineHeadings = useMemo(
+    () => (mode === "view" && !looksLikeHtml(content) ? extractHeadings(content) : []),
+    [mode, content],
+  );
+  const showOutline = !isNew && outlineHeadings.length >= 3;
+  // The deep link forces the rail open only until it has been acted on (the
+  // thread focused, or the user closed the rail) — the prop itself lives as
+  // long as the page, and re-applying it after a close snapped the rail back.
+  const initialThreadConsumedRef = useRef(false);
+  useEffect(() => {
+    setCommentsOpenState((open) =>
+      nextCommentsOpen(open, {
+        initialThreadId: initialThreadConsumedRef.current ? null : initialThreadId,
+        commentMode,
+        pendingAnchor: !!pendingAnchor,
+        activeThreadId,
+      }),
+    );
+  }, [initialThreadId, commentMode, pendingAnchor, activeThreadId]);
+  const openThreadCount = anchoredThreads.filter((t) => t.status === "open").length;
   const anchorRangesRef = useRef<{ id: string; range: Range }[]>([]);
   const pendingFocusRef = useRef<string | null>(null);
 
@@ -461,7 +534,6 @@ export function DocumentEditor({
   // into view; pendingFocusRef scrolls the doc to its anchored quote once the
   // rendered view builds highlight ranges. Consumed once — later thread churn
   // (replies, resolves) must not re-yank the view.
-  const initialThreadConsumedRef = useRef(false);
   useEffect(() => {
     if (!initialThreadId || initialThreadConsumedRef.current) return;
     const hit = anchoredThreads.find((t) => t.id === initialThreadId);
@@ -790,10 +862,7 @@ export function DocumentEditor({
     return raw.map((seg, i) => ({
       // Raw cumulative path (matches NestView's folderFilter) + prettified label.
       path: raw.slice(0, i + 1).join("/"),
-      label: seg
-        .split("-")
-        .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
-        .join(" "),
+      label: prettyFolder(seg),
     }));
   }, [isNew, nodeId]);
 
@@ -801,6 +870,47 @@ export function DocumentEditor({
   // offers, so nobody has to navigate back out to relocate what they're
   // reading. `null` = dialog closed.
   const [moveTo, setMoveTo] = useState<string | null>(null);
+  // "Turn into…" — re-type an existing node. The picked type is staged in
+  // the dialog until confirmed; the body is kept as-is, so the dialog says
+  // what each target kind expects of it.
+  const [turnInto, setTurnInto] = useState<string | null>(null);
+  const [turningInto, setTurningInto] = useState(false);
+  const turnIntoOptions = useMemo(() => {
+    const all: Array<{ value: string; label: string; Icon: typeof FileText; expects: string }> = [
+      { value: "document", label: "Document", Icon: FileText, expects: "Markdown prose." },
+      ...(typeArtifactEnabled
+        ? [{ value: "artifact", label: "Artifact", Icon: Code2, expects: "An HTML page — the body is hosted and rendered as-is." }]
+        : []),
+      ...(typeTableEnabled
+        ? [{ value: "table", label: "Table", Icon: Table2, expects: "CSV — one header row, then data rows." }]
+        : []),
+      ...(workflowPlaneEnabled
+        ? [
+          { value: "agent", label: "Agent", Icon: Bot, expects: "Markdown instructions an orchestrator runs; can carry a schedule." },
+          { value: "skill", label: "Skill", Icon: Zap, expects: "Markdown instructions with a trigger (defaulted from the title)." },
+          { value: "tool", label: "Tool", Icon: Wrench, expects: "Source code, shown and edited as code." },
+        ]
+        : []),
+    ];
+    return all.filter((o) => o.value !== (nodeType ?? "document"));
+  }, [typeArtifactEnabled, typeTableEnabled, workflowPlaneEnabled, nodeType]);
+  const handleTurnInto = async () => {
+    if (!turnInto || isNew) return;
+    setTurningInto(true);
+    try {
+      await api.updateNode(nestId, nodeId, { type: turnInto });
+      invalidateForPath(qc, `/nests/${nestId}/nodes/${nodeId}`);
+      toast.success(`Turned into ${turnIntoOptions.find((o) => o.value === turnInto)?.label ?? turnInto}`);
+      setTurnInto(null);
+      // Reload so the page re-renders as the new kind (an artifact opens in
+      // the artifact viewer; a table in the grid).
+      await loadNode();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to convert");
+    } finally {
+      setTurningInto(false);
+    }
+  };
   const [moving, setMoving] = useState(false);
   const currentFolder = useMemo(() => {
     if (isNew || !nodeId) return "";
@@ -894,6 +1004,7 @@ export function DocumentEditor({
       setBaseVersion(node?.version);
       setStatus(node?.status ?? null);
       setAuthor(node?.author ?? null);
+      setUpdatedAt(node?.updated_at ?? null);
       setCollaborators(
         Array.isArray(node?.collaborators)
           ? node.collaborators.map((e: unknown) => String(e))
@@ -1040,6 +1151,9 @@ export function DocumentEditor({
     !!currentEmail &&
     pendingReviewBy.toLowerCase() === currentEmail;
   const isLocked = status === "pending_review" && !isOwnPendingReview;
+  // Existing document: the Type control is the Turn into entry point.
+  const canTurnIntoHere = !isNew && !isLocked && turnIntoOptions.length > 0;
+  const currentTypeValue = isNew ? newType : (nodeType ?? "document");
 
   // Fields read-only when locked or outside edit mode; "Start Editing" or
   // dblclick opts in (drafts only — a locked doc can't enter edit).
@@ -1208,6 +1322,12 @@ export function DocumentEditor({
     setTags([...tags, ...accepted]);
     setTagInput("");
     setTouched(true);
+    // Local until Save — say so, or "added" reads as persisted.
+    toast.success(
+      accepted.length === 1 ? `Tag "${accepted[0]}" added` : `${accepted.length} tags added`,
+      // One toast slot: adding tags one after another updates it instead of stacking.
+      { id: "tag-added", description: "Save the document to keep it." },
+    );
   }, [tagPreview, tags]);
 
   const removeTag = (t: string) => {
@@ -1268,6 +1388,8 @@ export function DocumentEditor({
       const nextVersion =
         (res as any)?.version ?? (res as any)?.node?.version;
       if (typeof nextVersion === "number") setBaseVersion(nextVersion);
+      // The top bar's "Edited …" reads this; the save just moved it.
+      setUpdatedAt((res as any)?.node?.updated_at ?? new Date().toISOString());
       savedId = nodeId;
     }
     initialSnapshotRef.current = {
@@ -1516,7 +1638,7 @@ export function DocumentEditor({
     !isNew && stewardshipEnabled && status === "draft" && !isReviewerOnly;
 
   const handleDocLinkInsert = (node: { id: string; title: string }) => {
-    editorRef.current?.insertWikiLink(slugFromNodeId(node.id), node.title);
+    editorRef.current?.insertWikiLink(node.id, node.title);
   };
 
   const handleWikiLinkClick = async (linkTitle: string, id: string | null) => {
@@ -1599,25 +1721,52 @@ export function DocumentEditor({
         reviewerOnly={isReviewerOnly}
         initialThreadId={initialThreadId}
         onBack={onBack}
+        onTurnedInto={() => {
+          invalidateForPath(qc, `/nests/${nestId}/nodes/${nodeId}`);
+          void loadNode();
+        }}
       />
     );
   }
 
   return (
-    <div>
-      {/* Header */}
-      <div className="flex items-center justify-between gap-3 mb-4 mt-14 md:mt-0">
-        <div className="flex items-center gap-2 min-w-0 flex-1">
+    <div className="flex min-h-full flex-col" data-testid="document-page">
+      {/* Top bar — one row, Notion-style: where you are on the left, what you
+          can do with the document on the right. Sticky so the actions stay
+          reachable at any scroll depth; the body scrolls with the window. */}
+      <div
+        className="sticky top-16 z-30 flex h-12 items-center gap-2 border-b bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-3"
+        data-testid="document-editor-topbar"
+      >
+        <div className="flex items-center gap-1 min-w-0 flex-1">
+          {/* Bring the index back once it has been hidden. (On a phone the
+              app header carries the drawer toggle for every page.) */}
+          {sidebarCollapsed && onToggleSidebar && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 shrink-0"
+              onClick={onToggleSidebar}
+              title="Show sidebar"
+              aria-label="Show sidebar"
+              data-testid="document-sidebar-expand"
+            >
+              <PanelLeft className="h-4 w-4" />
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="icon"
+            className="h-8 w-8 shrink-0"
             onClick={() => confirmLeave("go back", onBack)}
+            title="Back to documents"
             data-testid="document-editor-back"
           >
-            <ArrowLeft className="h-5 w-5" />
+            <ArrowLeft className="h-4 w-4" />
           </Button>
           {/* Chain: nest > ancestors… > doc. Chip click truncates chain. */}
-          <div className="flex items-center gap-2 min-w-0 flex-wrap">
+          {/* One line: the trail truncates rather than wrapping the bar. */}
+          <div className="flex items-center gap-2 min-w-0 flex-nowrap overflow-hidden">
             <button
               type="button"
               onClick={() =>
@@ -1679,7 +1828,7 @@ export function DocumentEditor({
                 and anyone re-flagging sees it in the request dialog. */}
             {!isNew && deletionRequested && (
               <span
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-red-50 text-red-700 border-red-200"
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-red-50 text-red-700 border-red-200 whitespace-nowrap"
                 title={`${deletionRequest!.requestedBy} asked for this to be deleted: "${deletionRequest!.reason}". A nest admin decides.`}
                 data-testid="deletion-requested-badge"
               >
@@ -1689,7 +1838,7 @@ export function DocumentEditor({
             )}
             {!isNew && !stewardshipEnabled && status === "published" && (
               <span
-                className="px-1.5 py-0.5 rounded text-xs bg-green-50 text-green-700 border border-green-200"
+                className="hidden sm:inline px-1.5 py-0.5 rounded text-xs bg-green-50 text-green-700 border border-green-200 whitespace-nowrap"
                 title="Stewardship off — saving auto-publishes."
               >
                 Auto-published
@@ -1699,12 +1848,43 @@ export function DocumentEditor({
                 where it sits beside the Save button it is about. */}
           </div>
         </div>
-        {/* Save, Submit for review and Discard live in the sticky footer at the
-            bottom of this page — the write actions belong at the end of the
-            form the user is filling in, not above it. What stays here is what
-            is ABOUT the document rather than a change to it: the review verdict,
-            the comparison picker, and the secondary menu. */}
-        <div className="flex items-center gap-2 shrink-0">
+        {/* Right side: state, then every action. The write actions (Save,
+            Submit, Discard) used to sit in a sticky footer under the form;
+            with the document as the page there is no form, and the top bar
+            is where every editor keeps them. */}
+        <div
+          className="flex items-center gap-1 shrink-0"
+          data-testid="document-editor-actions"
+        >
+          {(() => {
+            // One line of state: unsaved > saving > just saved > last edit.
+            if (isDirty)
+              return (
+                <span
+                  className="hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900"
+                  title="These edits are parked locally and not yet saved to the nest."
+                  data-testid="document-editor-dirty-badge"
+                >
+                  <Pencil className="h-3 w-3" />
+                  Unsaved changes
+                </span>
+              );
+            const text = saving
+              ? "Saving…"
+              : justSaved
+                ? "Saved"
+                : updatedAt
+                  ? `Edited ${relTime(updatedAt)}`
+                  : null;
+            return text ? (
+              <span
+                className="hidden sm:inline px-1.5 text-xs text-muted-foreground"
+                title={updatedAt ? formatServerDate(updatedAt) : undefined}
+              >
+                {text}
+              </span>
+            ) : null;
+          })()}
           {/* NOT gated on isViewOnly: that flag answers "may this caller
               author?", and a reviewer-only steward is view-only by definition
               yet is exactly the person meant to act here. Gating approval on it
@@ -1719,6 +1899,88 @@ export function DocumentEditor({
               onReject={handleReject}
             />
           )}
+          {/* Visibility — the nest's tier, right where Notion puts it. An
+              owner/admin flips it in place (same control as the Share dialog
+              and Collaborators tab); everyone else sees a read-only badge. */}
+          {!isNew &&
+            (canShare && !isArchived ? (
+              <NestVisibilityControl
+                nestId={nestId}
+                variant="compact"
+                onChanged={() => void qc.invalidateQueries({ queryKey: keys.nest(nestId) })}
+                onError={(m) => {
+                  if (m) toast.error(m);
+                }}
+              />
+            ) : (
+              nestMeta.data?.nest?.visibility && (
+                <span
+                  className="hidden sm:inline-flex items-center gap-1 px-1.5 text-xs text-muted-foreground"
+                  title={
+                    nestMeta.data.nest.visibility === "public"
+                      ? "Public — anyone with the URL can read"
+                      : nestMeta.data.nest.visibility === "org"
+                        ? "Organization — everyone signed in here can read"
+                        : "Private"
+                  }
+                  data-testid="document-editor-visibility"
+                >
+                  {nestMeta.data.nest.visibility === "public" ? (
+                    <Globe className="h-3.5 w-3.5" />
+                  ) : nestMeta.data.nest.visibility === "org" ? (
+                    <Building2 className="h-3.5 w-3.5" />
+                  ) : (
+                    <Lock className="h-3.5 w-3.5" />
+                  )}
+                  {nestMeta.data.nest.visibility === "public"
+                    ? "Public"
+                    : nestMeta.data.nest.visibility === "org"
+                      ? "Organization"
+                      : "Private"}
+                </span>
+              )
+            ))}
+          {canShare && !isArchived && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8"
+              onClick={() => setShowShare(true)}
+              title="Share this nest — people, teams, visibility"
+              data-testid="document-editor-share"
+            >
+              <Users className="h-4 w-4 sm:mr-1.5" />
+              <span className="hidden sm:inline">Share</span>
+            </Button>
+          )}
+          {/* Comments — toggles the rail. The count is open threads. Closing
+              also leaves comment mode, or the rail would reopen itself. */}
+          {!isNew && (
+            <Button
+              variant={commentsOpen ? "secondary" : "ghost"}
+              size="sm"
+              className="h-8"
+              aria-pressed={commentsOpen}
+              onClick={() => {
+                if (commentsOpen) {
+                  // A user close beats the deep link from here on.
+                  initialThreadConsumedRef.current = true;
+                  setCommentMode(false);
+                  setActiveThreadId(null);
+                  setPendingAnchor(null);
+                  setSelPopover(null);
+                }
+                setCommentsOpen(!commentsOpen);
+              }}
+              title={commentsOpen ? "Hide comments" : "Show comments"}
+              data-testid="document-editor-comments-toggle"
+            >
+              <MessageSquare className="h-4 w-4" />
+              {openThreadCount > 0 && (
+                <span className="ml-1 text-xs tabular-nums">{openThreadCount}</span>
+              )}
+            </Button>
+          )}
           {/* Compare ▾ — pick a past version; the doc area renders an
               ever-present current↔vN diff inline (no modal). */}
           {!isNew && (
@@ -1729,14 +1991,17 @@ export function DocumentEditor({
             >
               <DropdownMenuTrigger asChild>
                 <Button
-                  variant={compareVersion != null ? "secondary" : "outline"}
+                  variant={compareVersion != null ? "secondary" : "ghost"}
                   size="sm"
+                  className="h-8"
                   title="Compare with a past version"
                   data-testid="document-editor-compare"
                 >
-                  <GitCompare className="h-4 w-4 mr-1" />
-                  {compareVersion != null ? `Comparing v${compareVersion}` : "Compare"}
-                  <ChevronDown className="h-4 w-4 ml-1" />
+                  <GitCompare className="h-4 w-4" />
+                  <span className={compareVersion != null ? "ml-1" : "hidden xl:inline ml-1"}>
+                    {compareVersion != null ? `Comparing v${compareVersion}` : "Compare"}
+                  </span>
+                  <ChevronDown className="h-3.5 w-3.5 ml-0.5 opacity-60" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56 max-h-80 overflow-y-auto">
@@ -1802,8 +2067,6 @@ export function DocumentEditor({
                 testId: "document-editor-history",
                 onSelect: openVersions,
               });
-            // The markdown-source toggle lives on the Content label instead —
-            // it is a writing control, not a document action.
             if (!isNew)
               moreActions.push({
                 label: "Copy link",
@@ -1811,7 +2074,7 @@ export function DocumentEditor({
                 separatorBefore: true,
                 testId: "document-editor-copy-link",
                 onSelect: () => {
-                  const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
+                  const url = `${window.location.origin}${nestPath(nestId)}?doc=${encodeURIComponent(nodeId)}`;
                   void copyTextWithToast(
                     url,
                     "Link copied — recipient needs access to this nest",
@@ -1827,24 +2090,19 @@ export function DocumentEditor({
               });
             // Share THIS doc first — it's the narrower, more common ask.
             // Meaningless on an unsaved doc: there's no node id to grant on.
-            if (canShare && !isNew)
+            // Sharing the whole nest is the top bar's Share button; only the
+            // narrower per-document grant lives here.
+            if (canShare && !isNew && !isArchived)
               moreActions.push({
                 label: "Share this document",
                 icon: Share2,
+                separatorBefore: true,
                 testId: "document-editor-share-doc",
                 onSelect: () => setShowShareDoc(true),
               });
-            if (canShare)
-              moreActions.push({
-                label: "Share nest",
-                icon: Users,
-                separatorBefore: !isNew ? false : true,
-                testId: "document-editor-share",
-                onSelect: () => setShowShare(true),
-              });
             // Publishing hosts THIS document on the open web, so it sits with
             // sharing rather than with the editing actions above.
-            if (canShare && !isNew)
+            if (canShare && !isNew && !isArchived)
               moreActions.push({
                 label: "Publish",
                 icon: Share2,
@@ -1897,1206 +2155,1366 @@ export function DocumentEditor({
             return moreActions.length ? (
               <OverflowMenu
                 actions={moreActions}
-                variant="outline"
+                variant="ghost"
                 testId="document-editor-more"
               />
             ) : null;
           })()}
+          {/* View mode: Submit for review and Edit up here. In edit mode the
+              sticky bar at the bottom of the document carries Submit + Save. */}
+          {mode !== "edit" && (
+            <>
+              {!isViewOnly && canSubmitForReview && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() => setShowSubmitModal(true)}
+                  data-testid="document-editor-submit"
+                  title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
+                >
+                  <Send className="h-4 w-4 sm:mr-1.5" />
+                  <span className="hidden sm:inline">Submit for review</span>
+                </Button>
+              )}
+              {!isViewOnly && !isReviewerOnly && !isLocked && (
+                <Button
+                  size="sm"
+                  className="h-8"
+                  onClick={() => setMode("edit")}
+                  data-testid="document-editor-start-edit"
+                >
+                  <Pencil className="h-4 w-4 mr-1.5" />
+                  Edit
+                </Button>
+              )}
+            </>
+          )}
         </div>
       </div>
 
-      {error && (
-        <Alert variant="destructive" className="mb-4">
-          <AlertCircle className="h-4 w-4" />
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
+      {/* Body: a reading-width column (the document) with the comments rail
+          beside it when open. */}
+      <div className="flex flex-1 flex-col items-stretch lg:flex-row lg:items-start">
+        {/* The column is at least a window tall so the action bar sits at the
+            window bottom on a short document too (mt-auto), and sticks there
+            while a long one scrolls under it. 7rem = app header + top bar. */}
+        <div className="flex min-w-0 flex-1 flex-col min-h-[calc(100vh-7rem)]">
+          <div className="w-full px-5 py-6 sm:px-10 sm:py-8">
 
-      {restoredDraftAt !== null && (
-        <Alert className="mb-4 border-amber-300 bg-amber-50 text-amber-800">
-          <AlertCircle className="h-4 w-4 text-amber-600" />
-          <AlertDescription className="flex flex-wrap items-center gap-x-2 gap-y-1 text-amber-800">
-            <span>
-              Unsaved edits from this browser
-              {" ("}
-              {new Date(restoredDraftAt).toLocaleString()}
-              {") "}
-              were restored — the saved document still says something else.
-            </span>
-            <button
-              type="button"
-              onClick={revertToSaved}
-              className="font-medium underline underline-offset-2 hover:no-underline"
-              data-testid="discard-restored-draft"
-            >
-              Discard them
-            </button>
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {draftUnbacked && isDirty && (
-        <Alert className="mb-4 border-amber-300 bg-amber-50 text-amber-800">
-          <AlertCircle className="h-4 w-4 text-amber-600" />
-          <AlertDescription className="text-amber-800">
-            This browser couldn't store a local backup of your unsaved edits
-            (storage is full or blocked). Save the document — a page reload
-            would lose them.
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {loading ? (
-        <div className="flex items-center justify-center py-20 text-muted-foreground">
-          <Loader2 className="h-5 w-5 animate-spin mr-2" />
-          Loading document...
-        </div>
-      ) : (
-        <div className="space-y-4">
-          {!isNew && pendingChange && (
-            <ExternalEditBanner
-              nestId={nestId}
-              nodeId={nodeId}
-              pending={pendingChange}
-              onResolved={() => {
-                setPendingChange(null);
-                loadNode();
-              }}
-            />
-          )}
-
-          {isLocked && (
-            <Alert>
-              <AlertCircle className="h-4 w-4" />
-              <AlertDescription>
-                This document is locked while it awaits steward review. Editing
-                is disabled until the review is approved or rejected.
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {isOwnPendingReview && (
-            <Alert>
-              <AlertCircle className="h-4 w-4" />
-              <AlertDescription className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                <span className="flex-1 min-w-[16rem]">
-                  This is still under review. Your edits update the same pending
-                  submission — no need to withdraw and resubmit — and the steward
-                  reviews your latest version.
-                </span>
-                {/* Withdraw belongs with the sentence explaining the state, not
-                    in the header's action row (CU-wdqcq007pe). */}
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="shrink-0"
-                  onClick={() => void handleWithdrawSubmission()}
-                  data-testid="document-editor-withdraw"
-                  title="Withdraw this submission and return the document to Draft"
-                >
-                  <Undo2 className="h-3.5 w-3.5 mr-1.5" />
-                  Withdraw
-                </Button>
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {/* Notion-style h1 in view mode; Input in edit mode. */}
-          <div>
-            {mode === "view" && !isNew ? (
-              <h1
-                className="text-3xl font-bold leading-tight text-foreground"
-                data-testid="document-editor-title"
-              >
-                {title || (loading ? "Loading…" : "Untitled")}
-              </h1>
-            ) : (
-              // Labeled, outlined title field — required like Content, and
-              // visibly a field before it's clicked. Sized like the other
-              // inputs, only a notch heavier, so the form reads as one rhythm.
-              <>
-                <label
-                  htmlFor="document-editor-title"
-                  className="block text-sm font-medium mb-1"
-                >
-                  Title <span className="text-destructive">*</span>
-                </label>
-                <Input
-                  id="document-editor-title"
-                  ref={titleInputRef}
-                  value={title}
-                  onChange={(e) => {
-                    setTitle(e.target.value);
-                    setTouched(true);
-                  }}
-                  onBlur={saveOnBlur}
-                  placeholder="Give this document a name"
-                  // Mirrors MAX_TITLE_LENGTH in src/nodes/service.ts — a hard
-                  // stop here so the server's 400 is unreachable from the UI.
-                  // maxLength never truncates an existing longer value, so
-                  // grandfathered titles still load and save.
-                  maxLength={120}
-                  disabled={fieldsDisabled}
-                  required
-                  aria-required="true"
-                  aria-invalid={touched && !title.trim() ? true : undefined}
-                  data-testid="document-editor-title"
-                  className={`h-10 text-base font-medium placeholder:font-normal placeholder:text-muted-foreground/60${touched && !title.trim()
-                    ? " border-destructive focus-visible:ring-destructive"
-                    : ""
-                    }`}
-                />
-                {((touched && !title.trim()) || title.length >= 90) && (
-                  <div className="mt-1 flex items-start justify-between gap-2 text-xs">
-                    <span className="text-destructive">
-                      {touched && !title.trim() ? "Title is required" : ""}
-                    </span>
-                    <span className="text-muted-foreground tabular-nums">
-                      {title.length >= 90 ? `${title.length}/120` : ""}
-                    </span>
-                  </div>
-                )}
-              </>
+            {error && (
+              <Alert variant="destructive" className="mb-4">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
             )}
-            {/* Rename safety: links referencing this doc by its old title
+
+            {restoredDraftAt !== null && (
+              <Alert className="mb-4 border-amber-300 bg-amber-50 text-amber-800">
+                <AlertCircle className="h-4 w-4 text-amber-600" />
+                <AlertDescription className="flex flex-wrap items-center gap-x-2 gap-y-1 text-amber-800">
+                  <span>
+                    Unsaved edits from this browser
+                    {" ("}
+                    {new Date(restoredDraftAt).toLocaleString()}
+                    {") "}
+                    were restored — the saved document still says something else.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={revertToSaved}
+                    className="font-medium underline underline-offset-2 hover:no-underline"
+                    data-testid="discard-restored-draft"
+                  >
+                    Discard them
+                  </button>
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {draftUnbacked && isDirty && (
+              <Alert className="mb-4 border-amber-300 bg-amber-50 text-amber-800">
+                <AlertCircle className="h-4 w-4 text-amber-600" />
+                <AlertDescription className="text-amber-800">
+                  This browser couldn't store a local backup of your unsaved edits
+                  (storage is full or blocked). Save the document — a page reload
+                  would lose them.
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {loading ? (
+              <div className="flex items-center justify-center py-20 text-muted-foreground">
+                <Loader2 className="h-5 w-5 animate-spin mr-2" />
+                Loading document...
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {!isNew && pendingChange && (
+                  <ExternalEditBanner
+                    nestId={nestId}
+                    nodeId={nodeId}
+                    pending={pendingChange}
+                    onResolved={() => {
+                      setPendingChange(null);
+                      loadNode();
+                    }}
+                  />
+                )}
+
+                {isLocked && (
+                  <Alert>
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>
+                      This document is locked while it awaits steward review. Editing
+                      is disabled until the review is approved or rejected.
+                    </AlertDescription>
+                  </Alert>
+                )}
+
+                {isOwnPendingReview && (
+                  <Alert>
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                      <span className="flex-1 min-w-[16rem]">
+                        This is still under review. Your edits update the same pending
+                        submission — no need to withdraw and resubmit — and the steward
+                        reviews your latest version.
+                      </span>
+                      {/* Withdraw belongs with the sentence explaining the state, not
+                    in the header's action row (CU-wdqcq007pe). */}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="shrink-0"
+                        onClick={() => void handleWithdrawSubmission()}
+                        data-testid="document-editor-withdraw"
+                        title="Withdraw this submission and return the document to Draft"
+                      >
+                        <Undo2 className="h-3.5 w-3.5 mr-1.5" />
+                        Withdraw
+                      </Button>
+                    </AlertDescription>
+                  </Alert>
+                )}
+
+                {/* Title — the page's h1, and the field that edits it, are one
+              thing (Notion-style): a borderless heading that takes the caret.
+              Read-only sessions get a plain h1. */}
+                <div>
+                  {mode === "view" && !isNew ? (
+                    <h1
+                      className="text-4xl font-bold leading-tight tracking-tight text-foreground"
+                      data-testid="document-editor-title"
+                    >
+                      {title || (loading ? "Loading…" : "Untitled")}
+                    </h1>
+                  ) : (
+                    <>
+                      <input
+                        id="document-editor-title"
+                        ref={titleInputRef}
+                        value={title}
+                        onChange={(e) => {
+                          setTitle(e.target.value);
+                          setTouched(true);
+                        }}
+                        onBlur={saveOnBlur}
+                        onKeyDown={(e) => {
+                          // Enter moves on to the body, like a heading would. The
+                          // rich editor when it's mounted; otherwise whatever body
+                          // control is (raw markdown, tool/table source, artifact
+                          // HTML).
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            if (editorRef.current) editorRef.current.focus();
+                            else
+                              bodyRef.current
+                                ?.querySelector<HTMLElement>(
+                                  'textarea, [contenteditable="true"], input',
+                                )
+                                ?.focus();
+                          }
+                        }}
+                        placeholder="Untitled"
+                        // Mirrors MAX_TITLE_LENGTH in src/nodes/service.ts — a hard
+                        // stop here so the server's 400 is unreachable from the UI.
+                        // maxLength never truncates an existing longer value, so
+                        // grandfathered titles still load and save.
+                        maxLength={120}
+                        disabled={fieldsDisabled}
+                        required
+                        aria-required="true"
+                        aria-label="Title"
+                        aria-invalid={touched && !title.trim() ? true : undefined}
+                        data-testid="document-editor-title"
+                        className={`block w-full bg-transparent text-4xl font-bold leading-tight tracking-tight text-foreground outline-none border-b border-border pb-1 focus:border-primary placeholder:text-muted-foreground/50 disabled:opacity-100${touched && !title.trim() ? " placeholder:text-destructive/60" : ""
+                          }`}
+                      />
+                      {((touched && !title.trim()) || title.length >= 90) && (
+                        <div className="mt-1 flex items-start justify-between gap-2 text-xs">
+                          <span className="text-destructive">
+                            {touched && !title.trim() ? "Title is required" : ""}
+                          </span>
+                          <span className="text-muted-foreground tabular-nums">
+                            {title.length >= 90 ? `${title.length}/120` : ""}
+                          </span>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {/* Rename safety: links referencing this doc by its old title
                 either break ([[Old Title]]) or go stale ([[slug|Old Title]] —
                 still resolves but keeps showing the old name). Compare against
                 the LAST LOADED title (loadedTitleRef), not the saved snapshot —
                 autosave keeps moving the snapshot, which would dismiss the
                 warning ~1.2s after typing. */}
-            {!isNew &&
-              mode === "edit" &&
-              title.trim() !== loadedTitleRef.current.trim() &&
-              (() => {
-                const affected = renameImpactBacklinks(nestNodes, {
-                  id: nodeId,
-                  title: loadedTitleRef.current,
-                });
-                if (affected.length === 0) return null;
-                return (
-                  <Alert className="mt-2 border-amber-300 bg-amber-50 text-amber-800">
+                  {!isNew &&
+                    mode === "edit" &&
+                    title.trim() !== loadedTitleRef.current.trim() &&
+                    (() => {
+                      const affected = renameImpactBacklinks(nestNodes, {
+                        id: nodeId,
+                        title: loadedTitleRef.current,
+                      });
+                      if (affected.length === 0) return null;
+                      return (
+                        <Alert className="mt-2 border-amber-300 bg-amber-50 text-amber-800">
+                          <div className="flex items-center gap-2">
+                            <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
+                            <AlertDescription className="text-amber-800">
+                              Renaming affects {affected.length} wiki link
+                              {affected.length !== 1 ? "s" : ""} in other documents that
+                              reference this one by its old title (
+                              {affected
+                                .slice(0, 3)
+                                .map((a) => a.title)
+                                .join(", ")}
+                              {affected.length > 3 ? ", …" : ""}
+                              ). Links by slug still resolve, but their visible label
+                              keeps the old name; plain [[title]] links break.
+                            </AlertDescription>
+                          </div>
+                        </Alert>
+                      );
+                    })()}
+                </div>
+
+                {/* Stale outgoing-link labels: a doc this one links to was renamed,
+              so the [[slug|Old Name]] label here lags. Link still resolves. */}
+                {!isNew && staleLinks.length > 0 && (
+                  <Alert className="border-amber-300 bg-amber-50 text-amber-800">
                     <div className="flex items-center gap-2">
                       <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
                       <AlertDescription className="text-amber-800">
-                        Renaming affects {affected.length} wiki link
-                        {affected.length !== 1 ? "s" : ""} in other documents that
-                        reference this one by its old title (
-                        {affected
+                        {staleLinks.length} link{staleLinks.length !== 1 ? "s" : ""} in
+                        this document show an outdated name — the target document
+                        {staleLinks.length !== 1 ? "s were" : " was"} renamed (
+                        {staleLinks
                           .slice(0, 3)
-                          .map((a) => a.title)
+                          .map((s) => `"${s.shownAs}" → "${s.currentTitle}"`)
                           .join(", ")}
-                        {affected.length > 3 ? ", …" : ""}
-                        ). Links by slug still resolve, but their visible label
-                        keeps the old name; plain [[title]] links break.
+                        {staleLinks.length > 3 ? ", …" : ""}
+                        ). The links still work; only the visible label is out of date.
                       </AlertDescription>
                     </div>
                   </Alert>
-                );
-              })()}
-          </div>
+                )}
 
-          {/* Stale outgoing-link labels: a doc this one links to was renamed,
-              so the [[slug|Old Name]] label here lags. Link still resolves. */}
-          {!isNew && staleLinks.length > 0 && (
-            <Alert className="border-amber-300 bg-amber-50 text-amber-800">
-              <div className="flex items-center gap-2">
-                <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
-                <AlertDescription className="text-amber-800">
-                  {staleLinks.length} link{staleLinks.length !== 1 ? "s" : ""} in
-                  this document show an outdated name — the target document
-                  {staleLinks.length !== 1 ? "s were" : " was"} renamed (
-                  {staleLinks
-                    .slice(0, 3)
-                    .map((s) => `"${s.shownAs}" → "${s.currentTitle}"`)
-                    .join(", ")}
-                  {staleLinks.length > 3 ? ", …" : ""}
-                  ). The links still work; only the visible label is out of date.
-                </AlertDescription>
-              </div>
-            </Alert>
-          )}
-
-          {/* Folder (create-only): files the doc under nodes/<path>/.
+                {/* Folder (create-only): files the doc under nodes/<path>/.
               Breadcrumbed selector — walk into existing folders level by
               level or add a new subfolder at the current level; no raw path
               typing. */}
-          {isNew && (
-            <div>
-              <label className="block mb-1 text-sm font-medium">Folder</label>
-              <div
-                className="flex items-center flex-wrap gap-1 rounded-md border px-2 py-1.5 min-h-9"
-                data-testid="document-editor-folder-input"
-              >
-                <button
-                  type="button"
-                  disabled={fieldsDisabled}
-                  onClick={() => {
-                    setFolder("");
-                    setTouched(true);
-                  }}
-                  className={`text-sm rounded px-1.5 py-0.5 ${folder ? "text-primary hover:bg-muted" : "font-medium bg-muted"
-                    }`}
-                  title="File directly under the nest root"
-                >
-                  Root
-                </button>
-                {folder.split("/").filter(Boolean).map((seg, i, arr) => {
-                  const path = arr.slice(0, i + 1).join("/");
-                  const parent = arr.slice(0, i).join("/");
-                  const isLast = i === arr.length - 1;
-                  return (
-                    <span key={path} className="flex items-center gap-1">
-                      <span className="text-muted-foreground/50 text-sm">/</span>
-                      <span
-                        className={`flex items-center rounded ${isLast ? "bg-muted" : ""
+                {isNew && (
+                  <div>
+                    <label className="block mb-1 text-sm font-medium">Folder</label>
+                    <div
+                      className="flex items-center flex-wrap gap-1 rounded-md border px-2 py-1.5 min-h-9"
+                      data-testid="document-editor-folder-input"
+                    >
+                      <button
+                        type="button"
+                        disabled={fieldsDisabled}
+                        onClick={() => {
+                          setFolder("");
+                          setTouched(true);
+                        }}
+                        className={`text-sm rounded px-1.5 py-0.5 ${folder ? "text-primary hover:bg-muted" : "font-medium bg-muted"
                           }`}
+                        title="File directly under the nest root"
                       >
+                        Root
+                      </button>
+                      {folder.split("/").filter(Boolean).map((seg, i, arr) => {
+                        const path = arr.slice(0, i + 1).join("/");
+                        const parent = arr.slice(0, i).join("/");
+                        const isLast = i === arr.length - 1;
+                        return (
+                          <span key={path} className="flex items-center gap-1">
+                            <span className="text-muted-foreground/50 text-sm">/</span>
+                            <span
+                              className={`flex items-center rounded ${isLast ? "bg-muted" : ""
+                                }`}
+                            >
+                              <button
+                                type="button"
+                                disabled={fieldsDisabled}
+                                onClick={() => {
+                                  setFolder(path);
+                                  setTouched(true);
+                                }}
+                                className={`text-sm rounded px-1.5 py-0.5 ${isLast
+                                  ? "font-medium"
+                                  : "text-primary hover:bg-muted"
+                                  }`}
+                                title={`Scope to ${path}`}
+                              >
+                                {prettyFolder(seg)}
+                              </button>
+                              {/* Step OUT one level — pops just this (current) segment
+                            to its parent, so a deep path can be walked back up
+                            without jumping all the way to Root via the X. */}
+                              {isLast && (
+                                <button
+                                  type="button"
+                                  disabled={fieldsDisabled}
+                                  onClick={() => {
+                                    setFolder(parent);
+                                    setTouched(true);
+                                  }}
+                                  className="mr-0.5 rounded p-0.5 text-muted-foreground hover:text-foreground hover:bg-background"
+                                  title={
+                                    parent
+                                      ? `Go up to ${parent}`
+                                      : "Go up to the nest root"
+                                  }
+                                  data-testid="folder-step-up"
+                                >
+                                  <X className="h-3 w-3" />
+                                </button>
+                              )}
+                            </span>
+                          </span>
+                        );
+                      })}
+                      <FolderStepPicker
+                        folder={folder}
+                        folderOptions={folderOptions}
+                        disabled={fieldsDisabled}
+                        onPick={(next) => {
+                          setFolder(next);
+                          setTouched(true);
+                        }}
+                      />
+                      {folder && (
                         <button
                           type="button"
                           disabled={fieldsDisabled}
                           onClick={() => {
-                            setFolder(path);
+                            setFolder("");
                             setTouched(true);
                           }}
-                          className={`text-sm rounded px-1.5 py-0.5 ${isLast
-                            ? "font-medium"
-                            : "text-primary hover:bg-muted"
-                            }`}
-                          title={`Scope to ${path}`}
+                          className="ml-auto text-muted-foreground hover:text-foreground"
+                          title="Clear folder (file under the nest root)"
                         >
-                          {seg}
+                          <X className="h-3.5 w-3.5" />
                         </button>
-                        {/* Step OUT one level — pops just this (current) segment
-                            to its parent, so a deep path can be walked back up
-                            without jumping all the way to Root via the X. */}
-                        {isLast && (
-                          <button
-                            type="button"
-                            disabled={fieldsDisabled}
-                            onClick={() => {
-                              setFolder(parent);
-                              setTouched(true);
-                            }}
-                            className="mr-0.5 rounded p-0.5 text-muted-foreground hover:text-foreground hover:bg-background"
-                            title={
-                              parent
-                                ? `Go up to ${parent}`
-                                : "Go up to the nest root"
-                            }
-                            data-testid="folder-step-up"
-                          >
-                            <X className="h-3 w-3" />
-                          </button>
-                        )}
-                      </span>
-                    </span>
-                  );
-                })}
-                <FolderStepPicker
-                  folder={folder}
-                  folderOptions={folderOptions}
-                  disabled={fieldsDisabled}
-                  onPick={(next) => {
-                    setFolder(next);
-                    setTouched(true);
-                  }}
-                />
-                {folder && (
-                  <button
-                    type="button"
-                    disabled={fieldsDisabled}
-                    onClick={() => {
-                      setFolder("");
-                      setTouched(true);
-                    }}
-                    className="ml-auto text-muted-foreground hover:text-foreground"
-                    title="Clear folder (file under the nest root)"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
+                      )}
+                    </div>
+                  </div>
                 )}
-              </div>
-            </div>
-          )}
 
-          {/* Tags — hide the editor controls (input + Add) for anyone who
+                {/* Tags — hide the editor controls (input + Add) for anyone who
               can't author here (view-only, plus reviewer/viewer stewards);
               they see only the existing tag chips. */}
-          {(canEditContent || tags.length > 0) && (
-            <div>
-              {canEditContent && (
-                <>
-                  <label className="block mb-1 text-sm font-medium">Tags</label>
-                  <div className="flex items-center gap-2">
-                    <Input
-                      value={tagInput}
-                      onChange={(e) => setTagInput(clampTagInput(e.target.value))}
-                      onKeyDown={(e) => {
-                        // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
-                        if (e.key === "Enter" || e.key === "," || e.key === " ") {
-                          e.preventDefault();
-                          addTag();
-                        }
-                      }}
-                      placeholder='Press Enter or space. Try "#api #v2" or "api, v2"'
-                      disabled={fieldsDisabled}
-                      // A hard stop the way Title has one — several tags fit,
-                      // a pasted paragraph does not.
-                      maxLength={TAG_INPUT_MAX_LENGTH}
-                      data-testid="document-editor-tag-input"
-                    />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={addTag}
-                      disabled={fieldsDisabled || !tagInput.trim()}
-                    >
-                      Add
-                    </Button>
-                  </div>
-                  {tagInput.trim() && (
-                    <p
-                      className="mt-1 text-xs text-muted-foreground"
-                      data-testid="document-editor-tag-preview"
-                    >
-                      {tagPreview.tags.length > 0
-                        ? `Will add: ${tagPreview.tags.join(", ")}`
-                        : "Nothing new to add"}
-                      {tagPreview.notes.length > 0 &&
-                        ` — ${tagPreview.notes.join(" ")}`}
-                    </p>
-                  )}
-                </>
-              )}
-              {tags.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 mt-2">
-                  {tags.map((t) => {
-                    // View mode: chip click → filter nest by tag. Edit mode: X removes.
-                    const tagClickable = mode === "view" && !!onTagClick;
-                    return (
-                      <span
-                        key={t}
-                        onClick={
-                          tagClickable
-                            ? (e) => {
-                              e.stopPropagation();
-                              onTagClick!(t);
+                {(canEditContent || tags.length > 0) && (
+                  <div>
+                    {/* Tags: an underlined "Add a tag" field (Enter, space or comma
+                  commit, as the old input did), then the chips on their own row
+                  beneath it. */}
+                    <div className="space-y-2">
+                      {canEditContent && !fieldsDisabled && (
+                        <input
+                          value={tagInput}
+                          onChange={(e) => setTagInput(clampTagInput(e.target.value))}
+                          onKeyDown={(e) => {
+                            // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
+                            if (e.key === "Enter" || e.key === "," || e.key === " ") {
+                              e.preventDefault();
+                              addTag();
                             }
-                            : undefined
-                        }
-                        className={
-                          "inline-flex items-center gap-1 rounded bg-secondary px-2 py-0.5 text-xs" +
-                          (tagClickable ? " cursor-pointer hover:bg-secondary/80" : "")
-                        }
-                        title={tagClickable ? `Filter nest by ${t}` : t}
-                      >
-                        {/* Long tags truncate rather than eat the row; the
+                          }}
+                          onBlur={() => {
+                            if (tagInput.trim()) addTag();
+                          }}
+                          placeholder={tags.length ? "Add a tag" : "Add a tag…"}
+                          // A hard stop the way Title has one — several tags fit,
+                          // a pasted paragraph does not.
+                          maxLength={TAG_INPUT_MAX_LENGTH}
+                          aria-label="Add a tag"
+                          className="block h-8 w-full border-b border-border bg-transparent px-1 text-sm outline-none focus:border-primary placeholder:text-muted-foreground/70 focus:placeholder:text-muted-foreground"
+                          data-testid="document-editor-tag-input"
+                        />
+                      )}
+                      {tags.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {tags.map((t) => {
+                            // View mode: chip click → filter nest by tag. Edit mode: X removes.
+                            const tagClickable = mode === "view" && !!onTagClick;
+                            return (
+                              <span
+                                key={t}
+                                onClick={
+                                  tagClickable
+                                    ? (e) => {
+                                      e.stopPropagation();
+                                      onTagClick!(t);
+                                    }
+                                    : undefined
+                                }
+                                className={
+                                  "inline-flex items-center gap-1 rounded bg-secondary px-2 py-0.5 text-xs" +
+                                  (tagClickable ? " cursor-pointer hover:bg-secondary/80" : "")
+                                }
+                                title={tagClickable ? `Filter nest by ${t}` : t}
+                              >
+                                {/* Long tags truncate rather than eat the row; the
                             full value stays in the chip's title. */}
-                        <span className="truncate max-w-[16rem]">{t}</span>
-                        {!fieldsDisabled && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              removeTag(t);
-                            }}
-                            className="hover:text-destructive"
-                            aria-label={`Remove ${t}`}
-                          >
-                            <X className="h-3 w-3" />
-                          </button>
-                        )}
-                      </span>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
+                                <span className="truncate max-w-[16rem]">{t}</span>
+                                {!fieldsDisabled && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      removeTag(t);
+                                    }}
+                                    className="hover:text-destructive"
+                                    aria-label={`Remove ${t}`}
+                                  >
+                                    <X className="h-3 w-3" />
+                                  </button>
+                                )}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                    {tagInput.trim() && (
+                      <p
+                        className="mt-1 text-xs text-muted-foreground"
+                        data-testid="document-editor-tag-preview"
+                      >
+                        {tagPreview.tags.length > 0
+                          ? `Will add: ${tagPreview.tags.join(", ")}`
+                          : "Nothing new to add"}
+                        {tagPreview.notes.length > 0 &&
+                          ` — ${tagPreview.notes.join(" ")}`}
+                      </p>
+                    )}
+                  </div>
+                )}
 
-          {/* Prime — governed nests only, and only for the roles allowed to
+                {/* Prime — governed nests only, and only for the roles allowed to
               set it. Everyone else just sees the badge next to the title. */}
-          {stewardshipEnabled && canFlagPrime && (
-            <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
-              <div className="space-y-0.5">
-                <span className="flex items-center gap-1.5 text-sm font-medium">
-                  <Star className="h-4 w-4" />
-                  Prime document
-                </span>
-                <p className="text-xs text-muted-foreground">
-                  {primeByTag && prime === null
-                    ? "Inherited from a prime tag on this document — it always needs steward approval."
-                    : "Always require steward approval for this document, even from an owner or admin with auto-publish on."}
-                </p>
-                {primeByTag && prime === false && (
-                  <p className="text-xs text-amber-600 dark:text-amber-400">
-                    Exempted from its prime tag.
-                  </p>
-                )}
-                {/* The one case people get wrong: an owner with auto-publish on
+                {stewardshipEnabled && canFlagPrime && (
+                  <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
+                    <div className="space-y-0.5">
+                      <span className="flex items-center gap-1.5 text-sm font-medium">
+                        <Star className="h-4 w-4" />
+                        Prime document
+                      </span>
+                      <p className="text-xs text-muted-foreground">
+                        {primeByTag && prime === null
+                          ? "Inherited from a prime tag on this document — it always needs steward approval."
+                          : "Always require steward approval for this document, even from an owner or admin with auto-publish on."}
+                      </p>
+                      {primeByTag && prime === false && (
+                        <p className="text-xs text-amber-600 dark:text-amber-400">
+                          Exempted from its prime tag.
+                        </p>
+                      )}
+                      {/* The one case people get wrong: an owner with auto-publish on
                     expects their edit to go live, and on a prime doc it won't. */}
-                {effectivePrime && allowSelfApprove && (
-                  <p className="text-xs text-amber-600 dark:text-amber-400">
-                    Overrides auto-publish — your edits here queue for review
-                    like everyone else&rsquo;s.
-                  </p>
+                      {effectivePrime && allowSelfApprove && (
+                        <p className="text-xs text-amber-600 dark:text-amber-400">
+                          Overrides auto-publish — your edits here queue for review
+                          like everyone else&rsquo;s.
+                        </p>
+                      )}
+                    </div>
+                    <Switch
+                      checked={effectivePrime}
+                      disabled={fieldsDisabled}
+                      onCheckedChange={(next) => {
+                        // Turning the switch back to whatever the tags already imply
+                        // clears the override rather than pinning a redundant flag.
+                        setPrime(next === primeByTag ? null : next);
+                        setTouched(true);
+                      }}
+                      aria-label="Prime document"
+                      data-testid="document-editor-prime"
+                    />
+                  </div>
                 )}
-              </div>
-              <Switch
-                checked={effectivePrime}
-                disabled={fieldsDisabled}
-                onCheckedChange={(next) => {
-                  // Turning the switch back to whatever the tags already imply
-                  // clears the override rather than pinning a redundant flag.
-                  setPrime(next === primeByTag ? null : next);
-                  setTouched(true);
-                }}
-                aria-label="Prime document"
-                data-testid="document-editor-prime"
-              />
-            </div>
-          )}
 
-          {/* People — "Created by" + collaborator chips (version authors ∪
+                {/* People — "Created by" + collaborator chips (version authors ∪
               document grantees, server-resolved). Hidden entirely for docs
               with no recorded author (old imports) and no collaborators. */}
-          {!isNew && (author || collaborators.length > 0) && (
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-              {author && (
-                <span className="inline-flex items-center gap-1.5">
-                  Created by <span className="font-medium text-foreground/80">{author}</span>
-                </span>
-              )}
-              {collaborators.length > 0 && (
-                <span
-                  className="inline-flex items-center gap-1.5"
-                  title={collaborators.join(", ")}
-                >
-                  <AuthorshipChips
-                    collaborators={collaborators}
-                    max={5}
-                    size="md"
-                  />
-                  {collaborators.length} collaborator
-                  {collaborators.length !== 1 ? "s" : ""}
-                </span>
-              )}
-            </div>
-          )}
-
-          {/* Outline/TOC — view mode, only when the doc has real structure. */}
-          {mode === "view" &&
-            !looksLikeHtml(content) &&
-            (() => {
-              const headings = extractHeadings(content);
-              if (headings.length < 3) return null;
-              return (
-                <nav className="border rounded-lg bg-muted/20 px-3 py-2">
-                  <div className="text-xs font-medium text-muted-foreground mb-1">
-                    Outline
-                  </div>
-                  <div className="space-y-0.5">
-                    {headings.map((h) => (
-                      <button
-                        key={h.id}
-                        type="button"
-                        className="block w-full text-left text-sm text-primary hover:underline truncate"
-                        style={{ paddingLeft: `${(h.level - 1) * 12}px` }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          document
-                            .getElementById(h.id)
-                            ?.scrollIntoView({ behavior: "smooth", block: "start" });
-                        }}
+                {!isNew && (author || collaborators.length > 0) && (
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                    {author && (
+                      <span className="inline-flex items-center gap-1.5">
+                        Created by <span className="font-medium text-foreground/80">{author}</span>
+                      </span>
+                    )}
+                    {author && collaborators.length > 0 && <span aria-hidden>·</span>}
+                    {collaborators.length > 0 && (
+                      <span
+                        className="inline-flex items-center gap-1.5"
+                        title={collaborators.join(", ")}
                       >
-                        {h.text}
-                      </button>
-                    ))}
+                        Collaborators:
+                        <AuthorshipChips
+                          collaborators={collaborators}
+                          max={5}
+                          size="md"
+                        />
+                        <span className="font-medium text-foreground/80">
+                          {collaborators.length}
+                        </span>
+                      </span>
+                    )}
                   </div>
-                </nav>
-              );
-            })()}
+                )}
 
-          {/* Type + Schedule share one row: Type (new-doc kind, icon segmented
+
+                {/* Type + Schedule share one row: Type (new-doc kind, icon segmented
               control) on the left, Schedule (runnable orchestrator hint) on the
               right. Each takes half when both show; a lone field spans the row.
               Existing artifacts open straight into the ArtifactViewer (handled
-              above), so Type is create-only; Schedule shows for any agent/skill
-              node. */}
-          {canEditContent && (isNew || isRunnable) && (
-            <div className="flex flex-col sm:flex-row gap-4 w-full">
-              {isNew && (
-                <div className="flex-1 min-w-0">
-                  <label className="block text-sm font-medium mb-1">Type</label>
-                  {/* Icon segmented control, not a dropdown: all choices are
+              above). On an existing document the same control is "Turn into":
+              picking another type opens the re-type confirmation (through the
+              leave guard — the server re-types the SAVED body). Schedule shows
+              for any agent/skill node. */}
+                {canEditContent && (isNew || isRunnable || canTurnIntoHere) && (
+                  <div className="flex flex-col sm:flex-row gap-4 w-full">
+                    {(isNew || canTurnIntoHere) && (
+                      <div className="flex-1 min-w-0">
+                        <label className="block text-sm font-medium mb-1">Type</label>
+                        {/* Icon segmented control, not a dropdown: all choices are
                   visible at once and carry the same type color language as
                   the list icons (document slate / artifact amber / agent
                   violet / skill blue). Built from the enabled set: document
                   always on; artifact/table only when their content-type
                   toggle is on; runnable types only when the workflow plane
                   is on. */}
-                  {/* A radiogroup is one tab stop by contract: Tab reaches the
+                        {/* A radiogroup is one tab stop by contract: Tab reaches the
                       checked type, arrows move between the rest. */}
-                  <div
-                    className="inline-flex rounded-md border overflow-hidden"
-                    role="radiogroup"
-                    aria-label="Document type"
-                    data-testid="document-editor-type"
-                    {...typeRoving}
-                  >
-                    {(
-                      [
-                        {
-                          value: "document", label: "Document", Icon: FileText,
-                          on: "bg-slate-500/15 text-slate-700 dark:text-slate-300"
-                        },
-                        ...(typeArtifactEnabled
-                          ? [
-                            {
-                              value: "artifact", label: "Artifact", Icon: Code2,
-                              on: "bg-amber-500/15 text-amber-700 dark:text-amber-300"
-                            },
-                          ]
-                          : []),
-                        ...(typeTableEnabled
-                          ? [
-                            {
-                              value: "table", label: "Table", Icon: Table2,
-                              on: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-300"
-                            },
-                          ]
-                          : []),
-                        ...(workflowPlaneEnabled
-                          ? [
-                            {
-                              value: "agent", label: "Agent", Icon: Bot,
-                              on: "bg-violet-500/15 text-violet-700 dark:text-violet-300"
-                            },
-                            {
-                              value: "skill", label: "Skill", Icon: Zap,
-                              on: "bg-blue-500/15 text-blue-700 dark:text-blue-300"
-                            },
-                            {
-                              value: "tool", label: "Tool", Icon: Wrench,
-                              on: "bg-teal-500/15 text-teal-700 dark:text-teal-300"
-                            },
-                          ]
-                          : []),
-                      ] as const
-                    ).map(({ value, label, Icon, on }, i) => {
-                      const active = newType === value;
-                      return (
-                        <button
-                          key={value}
-                          type="button"
-                          role="radio"
-                          aria-checked={active}
-                          title={
-                            value === "document"
-                              ? "Markdown document"
-                              : value === "artifact"
-                                ? "Hosted HTML artifact"
-                                : value === "table"
-                                  ? "Table — CSV fact store, queryable deterministically"
-                                  : value === "tool"
-                                    ? "Tool — the body is code an agent can call"
-                                    : `${label} (runnable)`
-                          }
-                          onClick={() =>
-                            requestTypeChange(
-                              value as "document" | "artifact" | "agent" | "skill" | "tool" | "table",
-                              label,
-                            )
-                          }
-                          className={`flex items-center gap-1.5 px-3 py-1.5 text-sm transition-colors ${i > 0 ? "border-l" : ""
-                            } ${active ? `${on} font-medium` : "text-muted-foreground hover:bg-muted/60"}`}
-                          data-testid={`document-editor-type-${value}`}
+                        <div
+                          className="inline-flex rounded-md border overflow-hidden"
+                          role="radiogroup"
+                          aria-label="Document type"
+                          data-testid="document-editor-type"
+                          {...typeRoving}
                         >
-                          <Icon className="h-4 w-4" />
-                          {label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  {newType === "artifact" && (
-                    <p className="mt-1 text-[11px] text-muted-foreground">
-                      Hosted HTML — the body is served as a sandboxed page.
-                    </p>
-                  )}
-                  {(newType === "agent" || newType === "skill") && (
-                    <p className="mt-1 text-[11px] text-muted-foreground">
-                      The body is the instructions. Add flow edges from it in the
-                      Workflows tab, then trigger a run.
-                    </p>
-                  )}
-                  {newType === "table" && (
-                    <p className="mt-1 text-[11px] text-muted-foreground">
-                      The body is CSV — header first, directives welcome
-                      (<code>sku:key, price:number, region</code>). Agents fetch
-                      exact rows with table-query instead of reading it whole.
-                    </p>
-                  )}
-                  {newType === "tool" && (
-                    <p className="mt-1 text-[11px] text-muted-foreground">
-                      The body is code. Wire it to an agent on the canvas and the
-                      runner ships it (plus the nest's env vars) in the run bundle.
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {isRunnable && (
-                <div className="flex-1 min-w-0">
-                  <label
-                    htmlFor="document-editor-schedule"
-                    className="block text-sm font-medium mb-1"
-                  >
-                    Schedule{" "}
-                    <span className="font-normal text-muted-foreground">
-                      (cron / interval — optional)
-                    </span>
-                  </label>
-                  <input
-                    id="document-editor-schedule"
-                    data-testid="document-editor-schedule"
-                    type="text"
-                    value={schedule}
-                    placeholder="e.g. 0 6 * * *  or  @daily  or  @every 15m"
-                    aria-invalid={scheduleCheck.kind === "invalid"}
-                    onChange={(e) => {
-                      setSchedule(e.target.value);
-                      setTouched(true);
-                    }}
-                    onBlur={saveOnBlur}
-                    className={`w-full rounded-md border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring ${scheduleCheck.kind === "invalid"
-                      ? "border-destructive focus:ring-destructive"
-                      : ""
-                      }`}
-                  />
-                  <p
-                    data-testid="document-editor-schedule-feedback"
-                    className={`mt-1 text-xs ${scheduleCheck.kind === "invalid"
-                      ? "text-destructive"
-                      : "text-muted-foreground"
-                      }`}
-                  >
-                    {scheduleCheck.kind === "invalid" ? (
-                      <>Doesn't look like a cron/interval schedule — {scheduleCheck.error}.</>
-                    ) : scheduleCheck.kind === "valid" ? (
-                      <>{scheduleCheck.description}. Opaque to this server — an external orchestrator parses it and runs the{" "}
-                        {newType === "skill" || nodeType === "skill" ? "skill" : "agent"}.</>
-                    ) : (
-                      <>Opaque to this server — an external orchestrator parses it
-                        and runs the{" "}
-                        {newType === "skill" || nodeType === "skill"
-                          ? "skill"
-                          : "agent"}
-                        . Leave blank for none.</>
+                          {(
+                            [
+                              {
+                                value: "document", label: "Document", Icon: FileText,
+                                on: "bg-slate-500/15 text-slate-700 dark:text-slate-300"
+                              },
+                              ...(typeArtifactEnabled
+                                ? [
+                                  {
+                                    value: "artifact", label: "Artifact", Icon: Code2,
+                                    on: "bg-amber-500/15 text-amber-700 dark:text-amber-300"
+                                  },
+                                ]
+                                : []),
+                              ...(typeTableEnabled
+                                ? [
+                                  {
+                                    value: "table", label: "Table", Icon: Table2,
+                                    on: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-300"
+                                  },
+                                ]
+                                : []),
+                              ...(workflowPlaneEnabled
+                                ? [
+                                  {
+                                    value: "agent", label: "Agent", Icon: Bot,
+                                    on: "bg-violet-500/15 text-violet-700 dark:text-violet-300"
+                                  },
+                                  {
+                                    value: "skill", label: "Skill", Icon: Zap,
+                                    on: "bg-blue-500/15 text-blue-700 dark:text-blue-300"
+                                  },
+                                  {
+                                    value: "tool", label: "Tool", Icon: Wrench,
+                                    on: "bg-teal-500/15 text-teal-700 dark:text-teal-300"
+                                  },
+                                ]
+                                : []),
+                            ] as const
+                          ).map(({ value, label, Icon, on }, i) => {
+                            const active = currentTypeValue === value;
+                            return (
+                              <button
+                                key={value}
+                                type="button"
+                                role="radio"
+                                aria-checked={active}
+                                title={
+                                  value === "document"
+                                    ? "Markdown document"
+                                    : value === "artifact"
+                                      ? "Hosted HTML artifact"
+                                      : value === "table"
+                                        ? "Table — CSV fact store, queryable deterministically"
+                                        : value === "tool"
+                                          ? "Tool — the body is code an agent can call"
+                                          : `${label} (runnable)`
+                                }
+                                onClick={() => {
+                                  if (isNew) {
+                                    requestTypeChange(
+                                      value as "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+                                      label,
+                                    );
+                                    return;
+                                  }
+                                  if (value === currentTypeValue) return;
+                                  confirmLeave("turn it into another kind", () => setTurnInto(value));
+                                }}
+                                className={`flex items-center gap-1.5 px-3 py-1.5 text-sm transition-colors ${i > 0 ? "border-l" : ""
+                                  } ${active ? `${on} font-medium` : "text-muted-foreground hover:bg-muted/60"}`}
+                                data-testid={`document-editor-type-${value}`}
+                              >
+                                <Icon className="h-4 w-4" />
+                                {label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {currentTypeValue === "artifact" && (
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            Hosted HTML — the body is served as a sandboxed page.
+                          </p>
+                        )}
+                        {(currentTypeValue === "agent" || currentTypeValue === "skill") && (
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            The body is the instructions. Add flow edges from it in the
+                            Workflows tab, then trigger a run.
+                          </p>
+                        )}
+                        {currentTypeValue === "table" && (
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            The body is CSV — header first, directives welcome
+                            (<code>sku:key, price:number, region</code>). Agents fetch
+                            exact rows with table-query instead of reading it whole.
+                          </p>
+                        )}
+                        {currentTypeValue === "tool" && (
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            The body is code. Wire it to an agent on the canvas and the
+                            runner ships it (plus the nest's env vars) in the run bundle.
+                          </p>
+                        )}
+                      </div>
                     )}
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
 
-          {/* Runnable-node discovery hint: where an orchestrator fetches this
+                    {isRunnable && (
+                      <div className="flex-1 min-w-0">
+                        <label
+                          htmlFor="document-editor-schedule"
+                          className="block text-sm font-medium mb-1"
+                        >
+                          Schedule{" "}
+                          <span className="font-normal text-muted-foreground">
+                            (cron / interval — optional)
+                          </span>
+                        </label>
+                        <input
+                          id="document-editor-schedule"
+                          data-testid="document-editor-schedule"
+                          type="text"
+                          value={schedule}
+                          placeholder="e.g. 0 6 * * *  or  @daily  or  @every 15m"
+                          aria-invalid={scheduleCheck.kind === "invalid"}
+                          onChange={(e) => {
+                            setSchedule(e.target.value);
+                            setTouched(true);
+                          }}
+                          onBlur={saveOnBlur}
+                          className={`w-full rounded-md border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring ${scheduleCheck.kind === "invalid"
+                            ? "border-destructive focus:ring-destructive"
+                            : ""
+                            }`}
+                        />
+                        <p
+                          data-testid="document-editor-schedule-feedback"
+                          className={`mt-1 text-xs ${scheduleCheck.kind === "invalid"
+                            ? "text-destructive"
+                            : "text-muted-foreground"
+                            }`}
+                        >
+                          {scheduleCheck.kind === "invalid" ? (
+                            <>Doesn't look like a cron/interval schedule — {scheduleCheck.error}.</>
+                          ) : scheduleCheck.kind === "valid" ? (
+                            <>{scheduleCheck.description}. Opaque to this server — an external orchestrator parses it and runs the{" "}
+                              {newType === "skill" || nodeType === "skill" ? "skill" : "agent"}.</>
+                          ) : (
+                            <>Opaque to this server — an external orchestrator parses it
+                              and runs the{" "}
+                              {newType === "skill" || nodeType === "skill"
+                                ? "skill"
+                                : "agent"}
+                              . Leave blank for none.</>
+                          )}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Runnable-node discovery hint: where an orchestrator fetches this
               node (+ every other agent/skill in the nest). Shown for agent/skill
               nodes, including read-only viewers, so the API surface is
               discoverable from the doc itself. */}
-          {isRunnable && (
-            <div className="w-full rounded-md border border-dashed bg-muted/40 px-3 py-2.5">
-              <div className="flex items-center justify-between gap-2 mb-1">
-                <span className="text-xs font-medium text-muted-foreground">
-                  Orchestrator fetch — this {nodeType === "skill" || newType === "skill" ? "skill" : "agent"} appears here
-                </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 px-2 shrink-0"
-                  onClick={copyRunnablesUrl}
-                  title="Copy URL"
-                >
-                  {copiedRunnables ? (
-                    <Check className="h-3 w-3 text-green-600" />
-                  ) : (
-                    <Copy className="h-3 w-3" />
-                  )}
-                </Button>
-              </div>
-              <code className="block text-[11px] font-mono break-all text-foreground/80">
-                GET {runnablesUrl}
-              </code>
-              <p className="mt-1 text-[11px] text-muted-foreground">
-                Returns every runnable node (approved agent/skill) with its
-                schedule + content, so an external scheduler can discover what to
-                run and when.
-              </p>
-            </div>
-          )}
-
-          {/* Document + ever-present comments rail (Notion/Docs-style):
-              editor left, comments a sticky panel on the right. */}
-          <div className="flex flex-col lg:flex-row gap-6 items-start">
-            <div className="flex-1 min-w-0">
-              {commentMode && compareVersion == null && (
-                <div className="mb-2 flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50/70 dark:bg-amber-950/20 px-3 py-1.5 text-xs text-amber-900 dark:text-amber-200">
-                  <MessageSquare className="h-3.5 w-3.5 shrink-0" />
-                  Comment mode — select any text to pin a comment, or click a
-                  highlighted phrase to open its thread. Editing is paused.
-                </div>
-              )}
-              {/* Dblclick → edit unless commenting/locked/reviewer/public-viewer. */}
-              <div
-                onClick={() => {
-                  if (commentMode || isViewOnly || isLocked || isArtifactDraft) return;
-                  // Table read view is interactive (query box + buttons), so a
-                  // stray click must not yank the grid away — entering edit is
-                  // explicit via "Start Editing".
-                  if (effectiveType === "table") return;
-                  if (mode === "view" && !isReviewerOnly) {
-                    setMode("edit");
-                  }
-                }}
-              >
-                <div className="flex items-center justify-between gap-2 mb-1">
-                  <label className="block text-sm font-medium">
-                    {isArtifactDraft
-                      ? "Artifact HTML"
-                      : effectiveType === "tool"
-                        ? "Tool source (code)"
-                        : effectiveType === "table"
-                          ? "Table data (CSV)"
-                          : "Content"}
-                    {canEditContent && <span className="text-destructive"> *</span>}
-                  </label>
-                  {/* Rich editor ↔ raw markdown. It belongs on the field it
-                      switches, not buried in the header's ⋮ menu — it is used
-                      while writing, and the label names the mode you get. The
-                      click must not reach the wrapper, which enters edit mode. */}
-                  {!isSourceOnly && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setRawMode((v) => !v);
-                      }}
-                      className="inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
-                      title={
-                        rawMode
-                          ? "Back to the rich editor"
-                          : "Edit the raw markdown source"
-                      }
-                      data-testid="document-editor-markdown-toggle"
-                    >
-                      <Code2 className="h-3 w-3" />
-                      {rawMode ? "Rich editor" : "Markdown source"}
-                    </button>
-                  )}
-                </div>
-                {compareVersion != null ? (
-                  /* Ever-present inline diff: current vs a chosen past version. */
-                  <div data-testid="document-editor-inline-diff">
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="text-sm font-medium flex items-center gap-2">
-                        <GitCompare className="h-4 w-4" />
-                        Diff: v{compareVersion} → current (v
-                        {versionData?.currentVersion ?? baseVersion ?? "?"})
-                        {isDirty && (
-                          <span className="rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-px text-[10px] font-semibold uppercase">
-                            incl. unsaved edits
-                          </span>
+                {isRunnable && (
+                  <div className="w-full rounded-md border border-dashed bg-muted/40 px-3 py-2.5">
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <span className="text-xs font-medium text-muted-foreground">
+                        Orchestrator fetch — this {nodeType === "skill" || newType === "skill" ? "skill" : "agent"} appears here
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-2 shrink-0"
+                        onClick={copyRunnablesUrl}
+                        title="Copy URL"
+                      >
+                        {copiedRunnables ? (
+                          <Check className="h-3 w-3 text-green-600" />
+                        ) : (
+                          <Copy className="h-3 w-3" />
                         )}
-                      </label>
-                      <div className="flex items-center gap-1">
-                        {/* Source = exact line changes; Rendered = formatted markdown. */}
-                        <div className="flex rounded-md border overflow-hidden text-xs">
-                          <button
-                            type="button"
-                            className={`px-2 py-1 ${!diffRendered ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
-                            onClick={() => setDiffRendered(false)}
-                          >
-                            Source
-                          </button>
-                          <button
-                            type="button"
-                            className={`px-2 py-1 ${diffRendered ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
-                            onClick={() => setDiffRendered(true)}
-                          >
-                            Rendered
-                          </button>
+                      </Button>
+                    </div>
+                    <code className="block text-[11px] font-mono break-all text-foreground/80">
+                      GET {runnablesUrl}
+                    </code>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      Returns every runnable node (approved agent/skill) with its
+                      schedule + content, so an external scheduler can discover what to
+                      run and when.
+                    </p>
+                  </div>
+                )}
+
+                {/* Document + ever-present comments rail (Notion/Docs-style):
+              editor left, comments a sticky panel on the right. */}
+                <div className="flex flex-col lg:flex-row gap-6 items-start">
+                  <div className="flex-1 min-w-0">
+                    {commentMode && compareVersion == null && (
+                      <div className="mb-2 flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50/70 dark:bg-amber-950/20 px-3 py-1.5 text-xs text-amber-900 dark:text-amber-200">
+                        <MessageSquare className="h-3.5 w-3.5 shrink-0" />
+                        Comment mode — select any text to pin a comment, or click a
+                        highlighted phrase to open its thread. Editing is paused.
+                      </div>
+                    )}
+                    {/* Dblclick → edit unless commenting/locked/reviewer/public-viewer. */}
+                    <div
+                      ref={bodyRef}
+                      onClick={() => {
+                        if (commentMode || isViewOnly || isLocked || isArtifactDraft) return;
+                        // Table read view is interactive (query box + buttons), so a
+                        // stray click must not yank the grid away — entering edit is
+                        // explicit via "Start Editing".
+                        if (effectiveType === "table") return;
+                        if (mode === "view" && !isReviewerOnly) {
+                          setMode("edit");
+                        }
+                      }}
+                    >
+                      {/* Source-only kinds keep a label: code and CSV are not prose,
+                    and the label says which raw form the box expects. Documents
+                    get none — the body is the page. */}
+                      {(isArtifactDraft || effectiveType === "tool" || effectiveType === "table") && (
+                        <div className="mb-1 text-xs font-medium text-muted-foreground">
+                          {isArtifactDraft
+                            ? "Artifact HTML"
+                            : effectiveType === "tool"
+                              ? "Tool source (code)"
+                              : "Table data (CSV)"}
                         </div>
+                      )}
+                      {compareVersion != null ? (
+                        /* Ever-present inline diff: current vs a chosen past version. */
+                        <div data-testid="document-editor-inline-diff">
+                          <div className="flex items-center justify-between mb-2">
+                            <label className="text-sm font-medium flex items-center gap-2">
+                              <GitCompare className="h-4 w-4" />
+                              Diff: v{compareVersion} → current (v
+                              {versionData?.currentVersion ?? baseVersion ?? "?"})
+                              {isDirty && (
+                                <span className="rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-px text-[10px] font-semibold uppercase">
+                                  incl. unsaved edits
+                                </span>
+                              )}
+                            </label>
+                            <div className="flex items-center gap-1">
+                              {/* Source = exact line changes; Rendered = formatted markdown. */}
+                              <div className="flex rounded-md border overflow-hidden text-xs">
+                                <button
+                                  type="button"
+                                  className={`px-2 py-1 ${!diffRendered ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
+                                  onClick={() => setDiffRendered(false)}
+                                >
+                                  Source
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`px-2 py-1 ${diffRendered ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
+                                  onClick={() => setDiffRendered(true)}
+                                >
+                                  Rendered
+                                </button>
+                              </div>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7"
+                                onClick={() => void compareWith(null)}
+                              >
+                                <X className="h-4 w-4 mr-1" /> Exit diff
+                              </Button>
+                            </div>
+                          </div>
+                          {(() => {
+                            const past =
+                              compareBody && compareBody.version === compareVersion
+                                ? compareBody
+                                : null;
+                            if (!past) {
+                              return (
+                                <div className="flex items-center gap-2 text-sm text-muted-foreground p-4 border rounded-lg">
+                                  <Loader2 className="h-4 w-4 animate-spin" /> Loading version{" "}
+                                  {compareVersion}…
+                                </div>
+                              );
+                            }
+                            if (diffRendered) {
+                              // A table's body is CSV: rendered as markdown it
+                              // collapses into one run-on paragraph, so each side
+                              // gets the same grid the reader sees, with the rows
+                              // the other version doesn't have tinted.
+                              const tableSides =
+                                effectiveType === "table"
+                                  ? tableDiffSides(past.content || "", content)
+                                  : null;
+                              const renderPane = (
+                                side: "past" | "current",
+                                body: string,
+                              ) =>
+                                tableSides ? (
+                                  <TableGrid
+                                    columns={tableSides[side].columns}
+                                    rows={tableSides[side].rows}
+                                    rowClassName={(i) =>
+                                      tableSides[side].changed[i]
+                                        ? side === "past"
+                                          ? "bg-red-50 dark:bg-red-950/30"
+                                          : "bg-emerald-50 dark:bg-emerald-950/30"
+                                        : ""
+                                    }
+                                  />
+                                ) : (
+                                  <DocumentViewer content={body} className="px-4 py-3" />
+                                );
+                              return (
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                  <div className="border rounded-lg overflow-hidden">
+                                    <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                                      v{compareVersion}
+                                    </div>
+                                    {renderPane("past", past.content || "")}
+                                  </div>
+                                  <div className="border rounded-lg overflow-hidden">
+                                    <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                                      current (v{versionData?.currentVersion ?? baseVersion ?? "?"})
+                                    </div>
+                                    {renderPane("current", content)}
+                                  </div>
+                                </div>
+                              );
+                            }
+                            return (
+                              <DiffViewer
+                                patch={unifiedDiff(past.content || "", content)}
+                                className="max-h-none border rounded-lg"
+                              />
+                            );
+                          })()}
+                        </div>
+                      ) : isSourceOnly && mode === "edit" && !commentMode ? (
+                        /* Tool/table edit is ALWAYS raw source — no TipTap, no
+                           markdown round-trip. Tables get the CSV affordances
+                           (file replace + grid-paste conversion) on top. */
+                        effectiveType === "table" ? (
+                          <TableSourceEditor
+                            value={content}
+                            onChange={(next) => {
+                              if (fieldsDisabled) return;
+                              setContent(next);
+                              setTouched(true);
+                            }}
+                            onBlur={saveOnBlur}
+                            readOnly={fieldsDisabled}
+                          />
+                        ) : (
+                          /* Source beside a highlighted rendering of itself, reusing
+                             the read view's lowlight output — flat plain text is hard
+                             to scan while writing a tool.
+                             ponytail: a preview pane, not highlighting under the
+                             caret; swap in CodeMirror if tool authoring grows. */
+                          <div
+                            className={
+                              content.trim() ? "grid gap-3 lg:grid-cols-2" : ""
+                            }
+                          >
+                            <textarea
+                              value={content}
+                              onChange={(e) => {
+                                if (fieldsDisabled) return;
+                                setContent(e.target.value);
+                                setTouched(true);
+                              }}
+                              onBlur={saveOnBlur}
+                              readOnly={fieldsDisabled}
+                              spellCheck={false}
+                              placeholder={
+                                "The body is code — paste or write the tool's source."
+                              }
+                              className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+                              data-testid="tool-source-editor"
+                            />
+                            {content.trim() && (
+                              <div className="min-w-0 flex flex-col min-h-[400px] rounded-lg border bg-background shadow-sm overflow-hidden">
+                                <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                                  Preview
+                                </div>
+                                <CodeHighlight
+                                  code={deferredContent}
+                                  className="flex-1 text-sm"
+                                  data-testid="tool-source-preview"
+                                />
+                              </div>
+                            )}
+                          </div>
+                        )
+                      ) : rawMode ? (
+                        <div className="space-y-2">
+                          <div className="flex justify-end">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 px-2 text-xs"
+                              onClick={() => setRawMode(false)}
+                              title="Back to the rich editor"
+                              data-testid="document-editor-rich-toggle"
+                            >
+                              <Code2 className="h-3.5 w-3.5 mr-1.5" />
+                              Rich editor
+                            </Button>
+                          </div>
+                          <textarea
+                            value={content}
+                            onChange={(e) => {
+                              if (fieldsDisabled) return;
+                              setContent(e.target.value);
+                              setTouched(true);
+                            }}
+                            onBlur={saveOnBlur}
+                            readOnly={fieldsDisabled}
+                            spellCheck={false}
+                            placeholder="# Raw markdown"
+                            className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+                            data-testid="document-editor-raw-markdown"
+                          />
+                        </div>
+                      ) : isArtifactDraft ? (
+                        <div className="grid gap-3 lg:grid-cols-2">
+                          <textarea
+                            value={content}
+                            onChange={(e) => {
+                              setContent(e.target.value);
+                              setTouched(true);
+                            }}
+                            onBlur={saveOnBlur}
+                            placeholder="Paste the artifact's HTML (a self-contained slide deck, dashboard, infographic)…"
+                            spellCheck={false}
+                            className="w-full min-h-[360px] rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                          />
+                          <div className="rounded-lg border overflow-hidden flex flex-col min-h-[360px]">
+                            <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                              Preview
+                            </div>
+                            {artifactPreview.trim() ? (
+                              <iframe
+                                srcDoc={artifactPreview}
+                                title="Artifact preview"
+                                // Same isolation as the hosted viewer: no
+                                // allow-same-origin → opaque origin, no host storage.
+                                sandbox="allow-scripts allow-popups allow-modals"
+                                className="w-full flex-1 bg-white"
+                                data-testid="artifact-draft-preview"
+                              />
+                            ) : (
+                              <p className="flex-1 flex items-center justify-center text-xs text-muted-foreground">
+                                Paste HTML to see it render here.
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      ) : (commentMode || mode === "view") &&
+                        (isSourceOnly || !looksLikeHtml(content)) ? (
+                        /* isSourceOnly bypasses the looksLikeHtml guard: a tool body
+                           may legitimately start with `<` (HTML/XML/JSX code) and must
+                           still render as source, never fall through to TipTap. */
+                        <div
+                          ref={docViewRef}
+                          onMouseUp={isNew ? undefined : onDocMouseUp}
+                          onClick={isNew ? undefined : onDocClick}
+                          onMouseMove={isNew ? undefined : onDocMouseMove}
+                          className="min-h-[300px] cursor-text"
+                          data-testid="document-view-surface"
+                        >
+                          {effectiveType === "table" && !isNew ? (
+                            <div className="p-4">
+                              <TableViewer nestId={nestId} nodeId={nodeId} csv={content} />
+                            </div>
+                          ) : effectiveType === "tool" ? (
+                            /* Highlighted with lowlight (language auto-detected) —
+                               same tokens the editor's code blocks use. */
+                            <CodeHighlight code={content} data-testid="tool-source-view" />
+                          ) : (
+                            <DocumentViewer
+                              content={content}
+                              onWikiLinkClick={(title) =>
+                                handleWikiLinkClick(title, null)
+                              }
+                              previewFor={previewFor}
+                            />
+                          )}
+                        </div>
+                      ) : (
+                        <MarkdownEditor
+                          ref={editorRef}
+                          content={content}
+                          onChange={(next) => {
+                            setContent(next);
+                            // TipTap onUpdate fires only on real user input here.
+                            setTouched(true);
+                          }}
+                          onSave={handleSave}
+                          onBlur={saveOnBlur}
+                          nestId={nestId}
+                          currentNodeId={isNew ? undefined : nodeId}
+                          editable={!fieldsDisabled}
+                          onRequestDocLink={() => setShowDocPicker(true)}
+                          onUploadImage={async (file) => {
+                            const { url } = await api.uploadAsset(nestId, file);
+                            return url;
+                          }}
+                          onWikiLinkClick={handleWikiLinkClick}
+                          placeholder="Start writing, or select text to format it…"
+                          // Nobody gets the caret on open: a new document focuses
+                          // Title (see the effect below), an existing one reads as
+                          // a page until you click into it — "end" would also
+                          // scroll a long document to its last line on arrival.
+                          autofocus={false}
+                          variant="page"
+                          toolbarEnd={
+                            <>
+                              {/* Rich ↔ raw markdown at the editor's own right end, where the
+                                  writer already is (it used to hide in ⋮). */}
+                              {!isSourceOnly && compareVersion == null && !isArtifactDraft && (
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 px-2 text-xs"
+                                  onClick={() => setRawMode(true)}
+                                  title="Edit the raw markdown"
+                                  data-testid="document-editor-markdown-toggle"
+                                >
+                                  <Code2 className="h-3.5 w-3.5 sm:mr-1.5" />
+                                  <span className="hidden sm:inline">Markdown</span>
+                                </Button>
+                              )}
+                            </>
+                          }
+                        />
+                      )}
+                    </div>
+                  </div>
+
+                </div>
+
+                {/* Floating "Comment" button on text selection — pins a comment to
+              the highlighted quote (Notion/Docs-style). */}
+                {selPopover && !isViewOnly && (
+                  <button
+                    type="button"
+                    data-testid="selection-comment-button"
+                    onMouseDown={(e) => e.preventDefault() /* keep the selection */}
+                    onClick={stageAnchorFromSelection}
+                    style={{
+                      position: "fixed",
+                      left: selPopover.x,
+                      top: selPopover.y - 40,
+                      transform: "translateX(-50%)",
+                      zIndex: 50,
+                    }}
+                    className="flex items-center gap-1 rounded-md bg-foreground text-background px-2.5 py-1.5 text-xs font-medium shadow-lg hover:opacity-90"
+                  >
+                    <MessageSquarePlus className="h-3.5 w-3.5" /> Comment
+                  </button>
+                )}
+
+                {/* Backlinks — "what links here". View mode only; hidden when empty. */}
+                {mode === "view" && backlinks.length > 0 && (
+                  <div className="border rounded-lg bg-muted/20 p-3">
+                    <div className="text-xs font-medium text-muted-foreground mb-2">
+                      Linked from {backlinks.length} document
+                      {backlinks.length !== 1 ? "s" : ""}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {backlinks.map((b) => (
+                        <button
+                          key={b.id}
+                          type="button"
+                          className="text-sm text-primary hover:underline text-left"
+                          onClick={() =>
+                            confirmLeave(
+                              `open "${b.title}"`,
+                              () => onNavigateDocument?.(nestId, b.id, title),
+                            )
+                          }
+                        >
+                          {b.title}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Related docs — shared tags / links. View mode only. */}
+                {mode === "view" && related.length > 0 && (
+                  <div className="border rounded-lg bg-muted/20 p-3">
+                    <div className="text-xs font-medium text-muted-foreground mb-2">
+                      Related documents
+                    </div>
+                    {/* A dot between titles: a run of "Weekly Sync — April 13"
+                        style titles is otherwise one unbroken line. */}
+                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                      {related.map((r, i) => (
+                        <Fragment key={r.id}>
+                        {i > 0 && <span aria-hidden className="text-muted-foreground/50">·</span>}
+                        <button
+                          type="button"
+                          className="text-sm text-primary hover:underline text-left"
+                          title={
+                            r.sharedTags.length
+                              ? `Shared tags: ${r.sharedTags.join(", ")}`
+                              : "Shared links"
+                          }
+                          onClick={() =>
+                            confirmLeave(
+                              `open "${r.title}"`,
+                              () => onNavigateDocument?.(nestId, r.id, title),
+                            )
+                          }
+                        >
+                          {r.title}
+                        </button>
+                        </Fragment>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Link discovery — docs that mention this one but don't link it. */}
+                {mode === "view" && unlinked.length > 0 && (
+                  <div className="border rounded-lg bg-muted/20 p-3">
+                    <div className="text-xs font-medium text-muted-foreground mb-2">
+                      Mentioned in {unlinked.length} document
+                      {unlinked.length !== 1 ? "s" : ""} without a link
+                    </div>
+                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                      {unlinked.map((m, i) => (
+                        <Fragment key={m.id}>
+                        {i > 0 && <span aria-hidden className="text-muted-foreground/50">·</span>}
+                        <button
+                          type="button"
+                          className="text-sm text-primary hover:underline text-left"
+                          onClick={() =>
+                            confirmLeave(
+                              `open "${m.title}"`,
+                              () => onNavigateDocument?.(nestId, m.id, title),
+                            )
+                          }
+                        >
+                          {m.title}
+                        </button>
+                        </Fragment>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+              </div>
+            )}
+
+          </div>
+          {/* Sticky action bar, edit mode only — Submit / Create·Save sit at the
+            bottom of the document column so they stay in reach at the end of
+            a long body. In view mode Submit and Edit live in the top bar. */}
+          {mode === "edit" && (
+            <div
+              className="sticky bottom-0 z-20 mt-auto flex items-center justify-center gap-2 border-t bg-background/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/80"
+              data-testid="document-editor-actions-bottom"
+            >
+              {(() => {
+                const canWrite = !isViewOnly && !isReviewerOnly && !isLocked;
+                const showSubmit = !isViewOnly && canSubmitForReview;
+                return (
+                  <>
+                    {/* Discard only where there is unreviewed work to throw away —
+                    a draft or rejected status — beside Save, its opposite. */}
+                    {canWrite &&
+                      !isNew &&
+                      canEditContent &&
+                      (status === "draft" || status === "rejected") && (
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-7"
-                          onClick={() => void compareWith(null)}
+                          className="h-8 text-muted-foreground"
+                          disabled={discarding}
+                          onClick={() => setConfirmDiscard(true)}
+                          data-testid="document-editor-discard"
                         >
-                          <X className="h-4 w-4 mr-1" /> Exit diff
+                          <Undo2 className="h-4 w-4 sm:mr-1.5" />
+                          <span className="hidden sm:inline">{discarding ? "Discarding…" : "Discard draft"}</span>
                         </Button>
-                      </div>
-                    </div>
-                    {(() => {
-                      const past =
-                        compareBody && compareBody.version === compareVersion
-                          ? compareBody
-                          : null;
-                      if (!past) {
-                        return (
-                          <div className="flex items-center gap-2 text-sm text-muted-foreground p-4 border rounded-lg">
-                            <Loader2 className="h-4 w-4 animate-spin" /> Loading version{" "}
-                            {compareVersion}…
-                          </div>
-                        );
-                      }
-                      if (diffRendered) {
-                        // A table's body is CSV: rendered as markdown it
-                        // collapses into one run-on paragraph, so each side
-                        // gets the same grid the reader sees, with the rows
-                        // the other version doesn't have tinted.
-                        const tableSides =
-                          effectiveType === "table"
-                            ? tableDiffSides(past.content || "", content)
-                            : null;
-                        const renderPane = (
-                          side: "past" | "current",
-                          body: string,
-                        ) =>
-                          tableSides ? (
-                            <TableGrid
-                              columns={tableSides[side].columns}
-                              rows={tableSides[side].rows}
-                              rowClassName={(i) =>
-                                tableSides[side].changed[i]
-                                  ? side === "past"
-                                    ? "bg-red-50 dark:bg-red-950/30"
-                                    : "bg-emerald-50 dark:bg-emerald-950/30"
-                                  : ""
-                              }
-                            />
-                          ) : (
-                            <DocumentViewer content={body} className="px-4 py-3" />
-                          );
-                        return (
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            <div className="border rounded-lg overflow-hidden">
-                              <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
-                                v{compareVersion}
-                              </div>
-                              {renderPane("past", past.content || "")}
-                            </div>
-                            <div className="border rounded-lg overflow-hidden">
-                              <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
-                                current (v{versionData?.currentVersion ?? baseVersion ?? "?"})
-                              </div>
-                              {renderPane("current", content)}
-                            </div>
-                          </div>
-                        );
-                      }
-                      return (
-                        <DiffViewer
-                          patch={unifiedDiff(past.content || "", content)}
-                          className="max-h-none border rounded-lg"
-                        />
-                      );
-                    })()}
-                  </div>
-                ) : isSourceOnly && mode === "edit" && !commentMode ? (
-                  /* Tool/table edit is ALWAYS raw source — no TipTap, no
-                     markdown round-trip. Tables get the CSV affordances
-                     (file replace + grid-paste conversion) on top. */
-                  effectiveType === "table" ? (
-                    <TableSourceEditor
-                      value={content}
-                      onChange={(next) => {
-                        if (fieldsDisabled) return;
-                        setContent(next);
-                        setTouched(true);
-                      }}
-                      onBlur={saveOnBlur}
-                      readOnly={fieldsDisabled}
-                    />
-                  ) : (
-                    /* Source beside a highlighted rendering of itself, reusing
-                       the read view's lowlight output — flat plain text is hard
-                       to scan while writing a tool.
-                       ponytail: a preview pane, not highlighting under the
-                       caret; swap in CodeMirror if tool authoring grows. */
-                    <div
-                      className={
-                        content.trim() ? "grid gap-3 lg:grid-cols-2" : ""
-                      }
-                    >
-                      <textarea
-                        value={content}
-                        onChange={(e) => {
-                          if (fieldsDisabled) return;
-                          setContent(e.target.value);
-                          setTouched(true);
-                        }}
-                        onBlur={saveOnBlur}
-                        readOnly={fieldsDisabled}
-                        spellCheck={false}
-                        placeholder={
-                          "The body is code — paste or write the tool's source."
-                        }
-                        className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
-                        data-testid="tool-source-editor"
-                      />
-                      {content.trim() && (
-                        <div className="min-w-0 flex flex-col min-h-[400px] rounded-lg border bg-background shadow-sm overflow-hidden">
-                          <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
-                            Preview
-                          </div>
-                          <CodeHighlight
-                            code={deferredContent}
-                            className="flex-1 text-sm"
-                            data-testid="tool-source-preview"
-                          />
-                        </div>
                       )}
-                    </div>
-                  )
-                ) : rawMode ? (
-                  <textarea
-                    value={content}
-                    onChange={(e) => {
-                      if (fieldsDisabled) return;
-                      setContent(e.target.value);
-                      setTouched(true);
-                    }}
-                    onBlur={saveOnBlur}
-                    readOnly={fieldsDisabled}
-                    spellCheck={false}
-                    placeholder="# Raw markdown"
-                    className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
-                    data-testid="document-editor-raw-markdown"
-                  />
-                ) : isArtifactDraft ? (
-                  <div className="grid gap-3 lg:grid-cols-2">
-                    <textarea
-                      value={content}
-                      onChange={(e) => {
-                        setContent(e.target.value);
-                        setTouched(true);
-                      }}
-                      onBlur={saveOnBlur}
-                      placeholder="Paste the artifact's HTML (a self-contained slide deck, dashboard, infographic)…"
-                      spellCheck={false}
-                      className="w-full min-h-[360px] rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
-                    />
-                    <div className="rounded-lg border overflow-hidden flex flex-col min-h-[360px]">
-                      <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
-                        Preview
-                      </div>
-                      {artifactPreview.trim() ? (
-                        <iframe
-                          srcDoc={artifactPreview}
-                          title="Artifact preview"
-                          // Same isolation as the hosted viewer: no
-                          // allow-same-origin → opaque origin, no host storage.
-                          sandbox="allow-scripts allow-popups allow-modals"
-                          className="w-full flex-1 bg-white"
-                          data-testid="artifact-draft-preview"
-                        />
-                      ) : (
-                        <p className="flex-1 flex items-center justify-center text-xs text-muted-foreground">
-                          Paste HTML to see it render here.
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                ) : (commentMode || mode === "view") &&
-                  (isSourceOnly || !looksLikeHtml(content)) ? (
-                  /* isSourceOnly bypasses the looksLikeHtml guard: a tool body
-                     may legitimately start with `<` (HTML/XML/JSX code) and must
-                     still render as source, never fall through to TipTap. */
-                  <div
-                    ref={docViewRef}
-                    onMouseUp={isNew ? undefined : onDocMouseUp}
-                    onClick={isNew ? undefined : onDocClick}
-                    onMouseMove={isNew ? undefined : onDocMouseMove}
-                    className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text"
-                  >
-                    {effectiveType === "table" && !isNew ? (
-                      <div className="p-4">
-                        <TableViewer nestId={nestId} nodeId={nodeId} csv={content} />
-                      </div>
-                    ) : effectiveType === "tool" ? (
-                      /* Highlighted with lowlight (language auto-detected) —
-                         same tokens the editor's code blocks use. */
-                      <CodeHighlight code={content} data-testid="tool-source-view" />
-                    ) : (
-                      <DocumentViewer
-                        content={content}
-                        onWikiLinkClick={(title) =>
-                          handleWikiLinkClick(title, null)
-                        }
-                        previewFor={previewFor}
-                      />
+                    {showSubmit && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8"
+                        onClick={() => setShowSubmitModal(true)}
+                        data-testid="document-editor-submit"
+                        title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
+                      >
+                        <Send className="h-4 w-4 sm:mr-1.5" />
+                        <span className="hidden sm:inline">Submit for review</span>
+                      </Button>
                     )}
-                  </div>
-                ) : (
-                  <MarkdownEditor
-                    ref={editorRef}
-                    content={content}
-                    onChange={(next) => {
-                      setContent(next);
-                      // TipTap onUpdate fires only on real user input here.
-                      setTouched(true);
-                    }}
-                    onSave={handleSave}
-                    onBlur={saveOnBlur}
-                    nestId={nestId}
-                    currentNodeId={isNew ? undefined : nodeId}
-                    editable={!fieldsDisabled}
-                    onRequestDocLink={() => setShowDocPicker(true)}
-                    onUploadImage={async (file) => {
-                      const { url } = await api.uploadAsset(nestId, file);
-                      return url;
-                    }}
-                    onWikiLinkClick={handleWikiLinkClick}
-                    placeholder="Start writing..."
-                    // New document: Title is the first required field, so it
-                    // gets focus instead (see the effect below), not the body.
-                    autofocus={isNew ? false : "end"}
-                  />
-                )}
-              </div>
-            </div>
-
-            {/* Ever-present comments rail — beside the doc, not stacked below. */}
-            {!isNew && (
-              <aside className="w-full lg:w-80 shrink-0 self-start lg:sticky lg:top-4 flex flex-col min-h-0 max-h-[70vh]">
-                <AnnotationsPanel
-                  nestId={nestId}
-                  nodeId={nodeId}
-                  readOnly={isViewOnly}
-                  pendingAnchor={pendingAnchor}
-                  onClearAnchor={() => setPendingAnchor(null)}
-                  onFocusAnchor={focusAnchor}
-                  onThreadsChange={setAnchoredThreads}
-                  activeThreadId={activeThreadId}
-                  commentMode={commentMode}
-                  onSetCommentMode={(on) => {
-                    setCommentMode(on);
-                    if (on) setMode("view");
-                    setSelPopover(null);
-                    if (!on) setActiveThreadId(null);
-                  }}
-                />
-              </aside>
-            )}
-          </div>
-
-          {/* Floating "Comment" button on text selection — pins a comment to
-              the highlighted quote (Notion/Docs-style). */}
-          {selPopover && !isViewOnly && (
-            <button
-              type="button"
-              data-testid="selection-comment-button"
-              onMouseDown={(e) => e.preventDefault() /* keep the selection */}
-              onClick={stageAnchorFromSelection}
-              style={{
-                position: "fixed",
-                left: selPopover.x,
-                top: selPopover.y - 40,
-                transform: "translateX(-50%)",
-                zIndex: 50,
-              }}
-              className="flex items-center gap-1 rounded-md bg-foreground text-background px-2.5 py-1.5 text-xs font-medium shadow-lg hover:opacity-90"
-            >
-              <MessageSquarePlus className="h-3.5 w-3.5" /> Comment
-            </button>
-          )}
-
-          {/* Backlinks — "what links here". View mode only; hidden when empty. */}
-          {mode === "view" && backlinks.length > 0 && (
-            <div className="border rounded-lg bg-muted/20 p-3">
-              <div className="text-xs font-medium text-muted-foreground mb-2">
-                Linked from {backlinks.length} document
-                {backlinks.length !== 1 ? "s" : ""}
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {backlinks.map((b) => (
-                  <button
-                    key={b.id}
-                    type="button"
-                    className="text-sm text-primary hover:underline text-left"
-                    onClick={() =>
-                      confirmLeave(
-                        `open "${b.title}"`,
-                        () => onNavigateDocument?.(nestId, b.id, title),
-                      )
-                    }
-                  >
-                    {b.title}
-                  </button>
-                ))}
-              </div>
+                    {canWrite && (
+                      <Button
+                        size="sm"
+                        className="h-8"
+                        // Keep focus in the editor field so clicking Save doesn't
+                        // fire the field's blur (which would trigger a second,
+                        // concurrent save alongside this click). One save per click.
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={handleSave}
+                        disabled={!canSave}
+                        data-testid="document-editor-save"
+                      >
+                        {saving ? (
+                          <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                        ) : justSaved && !isDirty ? (
+                          <Check className="h-4 w-4 mr-1.5" />
+                        ) : (
+                          <Save className="h-4 w-4 mr-1.5" />
+                        )}
+                        {saving
+                          ? "Saving…"
+                          : justSaved && !isDirty
+                            ? "Saved"
+                            : isNew
+                              ? "Create"
+                              : "Save"}
+                      </Button>
+                    )}
+                  </>
+                );
+              })()}
             </div>
           )}
-
-          {/* Related docs — shared tags / links. View mode only. */}
-          {mode === "view" && related.length > 0 && (
-            <div className="border rounded-lg bg-muted/20 p-3">
-              <div className="text-xs font-medium text-muted-foreground mb-2">
-                Related documents
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {related.map((r) => (
-                  <button
-                    key={r.id}
-                    type="button"
-                    className="text-sm text-primary hover:underline text-left"
-                    title={
-                      r.sharedTags.length
-                        ? `Shared tags: ${r.sharedTags.join(", ")}`
-                        : "Shared links"
-                    }
-                    onClick={() =>
-                      confirmLeave(
-                        `open "${r.title}"`,
-                        () => onNavigateDocument?.(nestId, r.id, title),
-                      )
-                    }
-                  >
-                    {r.title}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Link discovery — docs that mention this one but don't link it. */}
-          {mode === "view" && unlinked.length > 0 && (
-            <div className="border rounded-lg bg-muted/20 p-3">
-              <div className="text-xs font-medium text-muted-foreground mb-2">
-                Mentioned in {unlinked.length} document
-                {unlinked.length !== 1 ? "s" : ""} without a link
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {unlinked.map((m) => (
-                  <button
-                    key={m.id}
-                    type="button"
-                    className="text-sm text-primary hover:underline text-left"
-                    onClick={() =>
-                      confirmLeave(
-                        `open "${m.title}"`,
-                        () => onNavigateDocument?.(nestId, m.id, title),
-                      )
-                    }
-                  >
-                    {m.title}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
         </div>
-      )}
+        {/* Right rail — the outline while reading, the comments once they
+            are opened. A long outline stacked above the body pushed the
+            document off the first screen; beside it, both stay in view.
+            The comments panel stays mounted while hidden so its threads
+            keep the in-text highlights alive. */}
+        {!isNew && (
+          <aside
+            className={`w-full shrink-0 border-t lg:w-80 lg:border-t-0 lg:border-l lg:sticky lg:top-28 lg:self-start lg:max-h-[calc(100vh-7rem)] flex flex-col min-h-0 max-h-[70vh] px-4 py-4${commentsOpen || showOutline ? "" : " hidden"}`}
+            data-testid="document-comments-rail"
+            aria-hidden={!commentsOpen && !showOutline}
+          >
+            {!commentsOpen && showOutline && (
+              <nav className="flex flex-col min-h-0 rounded-lg border border-border bg-card p-5" aria-label="Outline">
+                <div className="mb-4 border-b pb-3 text-sm font-semibold">Outline</div>
+                <div className="space-y-0.5 overflow-y-auto min-h-0">
+                  {outlineHeadings.map((h) => (
+                    <button
+                      key={h.id}
+                      type="button"
+                      className="block w-full text-left text-sm text-primary hover:underline truncate"
+                      style={{ paddingLeft: `${(h.level - 1) * 12}px` }}
+                      title={h.text}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        document
+                          .getElementById(h.id)
+                          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                      }}
+                    >
+                      {h.text}
+                    </button>
+                  ))}
+                </div>
+              </nav>
+            )}
+            <div className={commentsOpen ? "flex flex-col flex-1 min-h-0" : "hidden"}>
+            <AnnotationsPanel
+              nestId={nestId}
+              nodeId={nodeId}
+              readOnly={isViewOnly}
+              pendingAnchor={pendingAnchor}
+              onClearAnchor={() => setPendingAnchor(null)}
+              onFocusAnchor={focusAnchor}
+              onThreadsChange={setAnchoredThreads}
+              activeThreadId={activeThreadId}
+              commentMode={commentMode}
+              onSetCommentMode={(on) => {
+                setCommentMode(on);
+                if (on) setMode("view");
+                setSelPopover(null);
+                if (!on) setActiveThreadId(null);
+              }}
+            />
+            </div>
+          </aside>
+        )}
+      </div>
 
       {showVersions && !isNew && (
         <VersionHistoryModal
@@ -3190,6 +3608,58 @@ export function DocumentEditor({
       />
 
       <Dialog
+        open={turnInto !== null}
+        onOpenChange={(open) => {
+          if (!open && !turningInto) setTurnInto(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-[480px]">
+          {/* The type was picked on the page (the Type control); this is the
+              confirmation step only — what the new kind expects of the body. */}
+          {(() => {
+            const picked = turnIntoOptions.find((o) => o.value === turnInto);
+            const Icon = picked?.Icon;
+            return (
+              <>
+                <DialogHeader>
+                  <DialogTitle>Turn into {picked?.label ?? ""}?</DialogTitle>
+                </DialogHeader>
+                <p className="text-sm text-muted-foreground">
+                  Changes what kind of node this is. The body is kept as it is —
+                  edit it afterwards if the new kind expects something else.
+                </p>
+                {picked && Icon && (
+                  <div
+                    className="flex items-start gap-3 rounded-md border bg-muted/40 px-3 py-2 text-sm"
+                    data-testid={`document-editor-turn-into-${picked.value}`}
+                  >
+                    <Icon className="mt-0.5 h-4 w-4 shrink-0" />
+                    <span className="flex flex-col">
+                      <span className="font-medium">{picked.label}</span>
+                      <span className="text-xs text-muted-foreground">{picked.expects}</span>
+                    </span>
+                  </div>
+                )}
+              </>
+            );
+          })()}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTurnInto(null)} disabled={turningInto}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleTurnInto()}
+              disabled={turningInto || !turnInto}
+              data-testid="document-editor-turn-into-confirm"
+            >
+              {turningInto ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+              Turn into {turnIntoOptions.find((o) => o.value === turnInto)?.label ?? ""}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
         open={moveTo !== null}
         onOpenChange={(open) => {
           if (!open && !moving) setMoveTo(null);
@@ -3214,7 +3684,7 @@ export function DocumentEditor({
               <SelectItem value="__root__">Nest root</SelectItem>
               {folderOptions.map((f) => (
                 <SelectItem key={f} value={f}>
-                  {f}
+                  {prettyFolderPath(f)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -3263,6 +3733,7 @@ export function DocumentEditor({
           targetType="document"
           target={nodeId}
           label={title || nodeId}
+          archived={isArchived}
           onClose={() => setShowShareDoc(false)}
         />
       )}
@@ -3385,108 +3856,6 @@ export function DocumentEditor({
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Sticky action bar. The write actions sit at the END of the form the
-          user is filling in and stay reachable at any scroll depth — this
-          document is long, and Save used to scroll off the top of a page that
-          takes minutes to fill in. `-mx-4 px-4` spans the padding <main> owns
-          so the bar reads as a bar rather than an indented box. */}
-      {(() => {
-        const canWrite = !isViewOnly && !isReviewerOnly && !isLocked;
-        const showSubmit = !isViewOnly && canSubmitForReview;
-        // Discard only where there is unreviewed work to throw away — which is
-        // exactly what a draft or rejected status means.
-        const showDiscard =
-          canWrite &&
-          !isNew &&
-          canEditContent &&
-          (status === "draft" || status === "rejected");
-        if (!canWrite && !showSubmit) return null;
-        return (
-          <div
-            // -mb-4 cancels the py-4 <main> puts below every page, so at full
-            // scroll the bar ends flush with the window instead of floating
-            // above a strip of padding.
-            className="sticky bottom-0 z-20 -mx-4 -mb-4 mt-6 px-4 py-3 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 flex items-center gap-2"
-            data-testid="document-editor-actions"
-          >
-            {isDirty && (
-              <span
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900"
-                title="These edits are parked locally and not yet saved to the nest."
-                data-testid="document-editor-dirty-badge"
-              >
-                <Pencil className="h-3 w-3" />
-                Unsaved changes
-              </span>
-            )}
-            <div className="ml-auto flex items-center gap-2">
-              {showDiscard && (
-                <Button
-                  variant="ghost"
-                  onClick={() => setConfirmDiscard(true)}
-                  disabled={discarding}
-                  className="text-muted-foreground hover:text-destructive"
-                  title="Throw away the unreviewed edits and go back to the last approved version"
-                  data-testid="document-editor-discard"
-                >
-                  {discarding ? (
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  ) : (
-                    <Trash2 className="h-4 w-4 mr-2" />
-                  )}
-                  Discard draft
-                </Button>
-              )}
-              {showSubmit && (
-                <Button
-                  variant="outline"
-                  onClick={() => setShowSubmitModal(true)}
-                  data-testid="document-editor-submit"
-                  title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
-                >
-                  <Send className="h-4 w-4 mr-2" />
-                  Submit for review
-                </Button>
-              )}
-              {canWrite &&
-                (mode === "edit" ? (
-                  <Button
-                    // Keep focus in the editor field so clicking Save doesn't
-                    // fire the field's blur (which would trigger a second,
-                    // concurrent save alongside this click). One save per click.
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={handleSave}
-                    disabled={!canSave}
-                    data-testid="document-editor-save"
-                  >
-                    {saving ? (
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    ) : justSaved && !isDirty ? (
-                      <Check className="h-4 w-4 mr-2 text-green-600" />
-                    ) : (
-                      <Save className="h-4 w-4 mr-2" />
-                    )}
-                    {saving
-                      ? "Saving…"
-                      : justSaved && !isDirty
-                        ? "Saved"
-                        : isNew
-                          ? "Create"
-                          : "Save"}
-                  </Button>
-                ) : (
-                  <Button
-                    onClick={() => setMode("edit")}
-                    data-testid="document-editor-start-edit"
-                  >
-                    <Pencil className="h-4 w-4 mr-2" />
-                    Start Editing
-                  </Button>
-                ))}
-            </div>
-          </div>
-        );
-      })()}
     </div>
   );
 }
@@ -3605,7 +3974,7 @@ function FolderStepPicker({
                 onSelect={() => onPick(folder ? `${folder}/${k}` : k)}
               >
                 <FolderOpen className="h-3.5 w-3.5 mr-2 text-blue-500" />
-                {k}
+                {prettyFolder(k)}
               </DropdownMenuItem>
             ))}
             <DropdownMenuSeparator />

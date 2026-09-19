@@ -18,6 +18,10 @@ export interface NestCountRow {
   document_count?: number | string | null;
 }
 
+/** The Connect modal never shows a real key — every snippet carries this
+ *  placeholder instead, so a copied snippet is a reusable template. */
+export const KEY_PLACEHOLDER = "<paste-your-api-key-here>";
+
 /** Totals across a user's nests — powers the "your whole brain" summary line. */
 export function nestSummary(nests: NestCountRow[]): {
   nestCount: number;
@@ -56,12 +60,13 @@ export function allNestsChatPrompt(
       ? "This server needs no credential — connect directly."
       : "Authenticate with my ContextNest API key when your client asks for it — never print it back.",
     "",
-    "Call nest_index first to see every nest (name, description, size), then pull from",
-    "whichever nest fits each question. Search before answering; cite what you use as",
-    "`nest:id`; say plainly when something isn't covered.",
+    "Call nest_index first to see every nest (name, description, size).",
     "",
-    "This connection is read-first: it can also create a new nest or a new document",
-    "(nest_create, context_create). Never write, publish, or share anything without asking me first.",
+    "SEARCH/LIST: Omit `nest` to search across ALL nests at once, or specify a nest to target one.",
+    "READS: context_get/context_resolve need a `nest` argument — specify which nest.",
+    "WRITES: nest_create (no nest needed), context_create/update/delete/move/submit_review need a `nest`.",
+    "",
+    "Cite what you use as `nest:id`. Never write without asking me first.",
   ].join("\n");
 }
 
@@ -109,15 +114,18 @@ export function nestChatPrompt(nestName: string, description?: string): string {
 }
 
 /**
- * A `ctx` vault alias must be a plain token; nest names are free text. Same
- * shape the Connect modal uses for file names: lowercase, dashes, nothing else.
+ * A nest name reduced to a plain token: lowercase, dashes, nothing else.
+ * Shared by every identifier the Connect modal derives from a nest name — a
+ * `ctx` vault alias, an `mcpServers` key, a downloaded file name — so the
+ * same nest maps to the same token everywhere.
  */
-function ctxAlias(raw: string): string {
-  const alias = raw
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return alias || "nest";
+export function slugify(raw: string): string {
+  return (
+    raw
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "nest"
+  );
 }
 
 /**
@@ -136,7 +144,7 @@ export function ctxCliConnectSnippet(
   openMode = false,
 ): string {
   const base = serverUrl.replace(/\/+$/, "");
-  const a = ctxAlias(alias);
+  const a = slugify(alias);
   const auth = openMode ? "" : " --bearer-env CONTEXTNEST_API_KEY";
   return [
     `ctx vault add ${a} --url ${base}/nests/${nestId}/mcp${auth}`,
@@ -145,10 +153,27 @@ export function ctxCliConnectSnippet(
 }
 
 /**
- * The one-shot bootstrap brief for wiring an agent to ONE nest. Self-provisioning:
- * a capable agent installs the CLI or adds the MCP server itself, ASKS the user
- * for the key, then connects, orients, and starts. Keyless in the text — the key
- * is handed over by the user when the agent asks.
+ * The one-shot bootstrap brief for wiring an agent to ONE nest.
+ *
+ * The status-code branches are the load-bearing part of this text. An agent
+ * whose first read fails and is told only to stop, stops; one told which
+ * endpoint still answers, recovers. Hence each branch names a concrete next
+ * call rather than a diagnosis.
+ *
+ * Three rules this text has to keep, all of them earned the hard way:
+ *   - Never claim a capability the caller's current state contradicts. On an
+ *     unlicensed server every non-GET is blocked — writes, MCP and /context
+ *     alike — so saying otherwise makes an agent distrust the rest of the
+ *     brief, correctly. Every GET this prompt uses stays open, but that is not
+ *     true of GETs in general: see `isGovernance` in app.ts for the exceptions
+ *     before adding another.
+ *   - Any signal a branch dispatches on must be visible in the command that
+ *     produces it — hence -w on every curl, not just the first.
+ *   - Never tell the agent to add or strip a `nodes/` id prefix. It exists on
+ *     structured nests and not on imported ones (see storagePrefix), so the
+ *     only portable instruction is to reuse the id exactly as returned.
+ *
+ * Keyless by construction: the key travels in the environment, never here.
  */
 export function nestSetupPrompt(
   nestName: string,
@@ -158,40 +183,171 @@ export function nestSetupPrompt(
 ): string {
   const base = serverUrl.replace(/\/+$/, "");
   const mcp = `${base}/nests/${nestId}/mcp`;
+  // One definition of the auth header, used by every curl in the brief. STEP 1
+  // built its own copy with a separate ternary, which is exactly how the two
+  // drift apart if the header format ever changes.
+  const authHeader = openMode
+    ? ""
+    : '-H "Authorization: Bearer $CONTEXTNEST_API_KEY" ';
+  const auth = openMode ? "" : ` ${authHeader.trimEnd()}`;
   return [
-    `Connect to my ContextNest nest "${nestName}" and treat it as my source of truth. Set it up yourself where you can;${openMode ? " it needs no credential." : " ask me only for the API key."}`,
-    "",
-    "RULE — do NOT claim you're connected until you've pulled LIVE data: prove it by showing the nest's real node count and a few real node titles. If you can't retrieve anything, STOP — don't guess, don't summarise — and give me the manual steps below instead.",
-    "",
-    "WHAT IT IS — a governed, cited knowledge graph of my context. Read from it; never guess.",
-    "",
-    "CONNECT — pick what fits you:",
-    "• Shell / coding agent (Claude Code, Codex, Cursor): the fastest working read is a direct call —",
-    `    curl -s -X POST ${base}/nests/${nestId}/context \\`,
-    openMode
-      ? '      -H "Content-Type: application/json" \\'
-      : '      -H "Authorization: Bearer <key>" -H "Content-Type: application/json" \\',
-    "      -d '{\"selector\":\"type:document\",\"hops\":1,\"max_tokens\":2000}'",
-    `  You can also add an MCP server "contextnest" at ${mcp}${openMode ? "" : " (Bearer header)"} — but its tools don't load until you RESTART the session, so use the curl above to confirm now.`,
-    // The key travels in CONTEXTNEST_API_KEY, never on argv (the CLI README's
-    // rule; a --key flag also lands in shell history).
-    `  Push a local folder of notes up: ${openMode ? "" : "CONTEXTNEST_API_KEY=<key> "}npx -y @promptowl/contextnest-cli@latest push --server ${base} --nest ${nestId}`,
-    "  Or register the nest as a ctx vault (CLI 2.2+) and read it straight from the shell —",
-    ...ctxCliConnectSnippet(base, nestId, nestName, openMode)
-      .split("\n")
-      .map((line) => `    ${line}`),
-    "• Claude Desktop / claude.ai / ChatGPT (no shell): you can't connect yourself from chat. Tell me to do this: Settings → Connectors → Add custom connector →",
-    openMode
-      ? `    URL ${mcp}, then restart.`
-      : `    URL ${mcp}  ·  header "Authorization: Bearer <key>", then restart.`,
-    openMode ? null : "  Put the key in that config — never in our chat.",
+    `Connect to my ContextNest nest "${nestName}" and treat it as my source of truth.`,
     "",
     openMode
       ? null
-      : "KEY — ask me for my ContextNest API key. Put it in the env/config above; don't print it back.",
+      : "KEY — it is in the environment variable CONTEXTNEST_API_KEY. If that variable is empty, ask me for it and stop: minting a key needs a credential you do not have yet.",
     openMode ? null : "",
-    "THEN (only after the proof above) — search before answering, cite what you use as `nest:id`, remember durable learnings as small linked nodes, and always ask before publishing anything public.",
+    "RULE — do NOT claim you're connected until a call has returned real documents you can name. If nothing works, tell me which step failed and stop. Never guess, never summarise.",
+    "",
+    "STEP 1 — read the nest:",
+    `    curl -s -w '\\nHTTP_STATUS:%{http_code}\\n' -X POST ${base}/nests/${nestId}/context \\`,
+    `      ${authHeader}-H "Content-Type: application/json" \\`,
+    "      -d '{\"selector\":\"type:document\",\"hops\":1,\"max_tokens\":2000}'",
+    "",
+    "  Documents back? You're connected. Name them, then read WHAT YOU CAN DO below.",
+    "",
+    "  Otherwise the status code tells you which problem you have:",
+    // /context is a POST, and every non-GET is license-gated. These two reads
+    // are GETs, so they are the only ones that answer on an unlicensed server
+    // — which is the state of every trial and every fresh self-host.
+    // /export is a GET, so the license gate misses it, and with no selector it
+    // returns every accessible document's frontmatter AND body in ONE call —
+    // strictly better than list-then-read (1 call vs 1+N) and it sidesteps the
+    // doubled-id shape below entirely. The per-document path stays as the
+    // escape hatch for a nest too large to swallow whole.
+    "    503  the server has no PromptOwl license, which blocks that endpoint. This one is a",
+    "         GET, so it still works, and returns every document WITH its text in one call:",
+    `           curl -s -w '\\nHTTP_STATUS:%{http_code}\\n' "${base}/nests/${nestId}/export?format=markdown"${auth}`,
+    "         If the nest is too big to take in one go, list it and read what you need instead.",
+    "         Append the id EXACTLY as the list returned it — for a nest created in the app that",
+    "         id already starts with `nodes/`, so the path looks doubled and that is correct; a",
+    "         nest imported from a folder has no such prefix. Do not add or strip one yourself:",
+    `           curl -s -w '\\nHTTP_STATUS:%{http_code}\\n' "${base}/nests/${nestId}/nodes"${auth}`,
+    `           curl -s -w '\\nHTTP_STATUS:%{http_code}\\n' "${base}/nests/${nestId}/nodes/<id-from-the-list>"${auth}`,
+    "         Documents back from either call count as connected — the proof is real documents,",
+    "         not which endpoint served them. Tell me the server is unlicensed, and note the same",
+    "         gate covers every non-GET, so WRITES ARE ALSO UNAVAILABLE until a licence is installed.",
+    openMode
+      ? null
+      : "    401  the key is missing or wrong. Also check you did not send the literal text",
+    openMode
+      ? null
+      : "         `$CONTEXTNEST_API_KEY`: that happens when the command runs without a shell to",
+    openMode
+      ? null
+      : "         expand it, and you must substitute the value yourself. Otherwise ask me for the key.",
+    "    403  read the body. JSON with an `error` field is the server refusing you, and it says",
+    "         which: a `required_permission` field means my key lacks the tier for that action",
+    "         (a read-only key does this on any write); a scope message means the key belongs to",
+    "         a different nest. Tell me which one; neither is a network problem.",
+    "         A 403 with NO JSON body came from something between you and the server, not from us.",
+    // A blocked CONNECT never reaches the server at all, so retrying and
+    // re-authenticating are both useless. Cloud sandboxes, CI runners and
+    // corporate egress proxies all land here.
+    "    that bodyless 403, or no response at all / connection refused / a timeout",
+    "         something between you and the server is blocking this — a sandbox or network egress",
+    "         policy. Either nothing answered, or a gateway answered instead of ContextNest.",
+    "         Do not retry and do not tunnel around it. This one is mine to fix, not yours: ask me",
+    "         to add ContextNest as a custom connector in my client (Settings → Connectors), which",
+    "         is dialled server-side and is not subject to your egress rules.",
+    "",
+    "WHAT YOU CAN DO — if step 1 returned 503 this server is unlicensed: read it as above, and",
+    "do not attempt writes at all, they are blocked by the same gate. Otherwise this connection",
+    "reads, and writes IF my key carries write access — a read-only key reads perfectly well and",
+    "is refused on the first write. Assume nothing either way until you have my say-so to try.",
+    "Over MCP the write tools are",
+    "context_create, context_update, context_move and context_submit_review; over REST it is",
+    `POST ${base}/nests/${nestId}/nodes to create, and PATCH that same path with the document's`,
+    "id appended to update. Never write, publish or share without asking me first.",
+    "",
+    `THEN — answer from the nest, cite what you use as \`${nestName}:nodes/<slug>\` (that is the id shape the server returns), and say plainly when something is not covered.`,
+    "",
+    "LATER, optional, persists across sessions — ASK ME FIRST if setting either of these means",
+    "writing my key into a config file on this machine; that is my call, not a step you take in",
+    "passing. Both use the same credential:",
+    `    an MCP server "contextnest" at ${mcp}${openMode ? "" : " (Bearer header)"}`,
+    ...ctxCliConnectSnippet(base, nestId, nestName, openMode)
+      .split("\n")
+      .map((line) => `    ${line}`),
+    "  Both only take effect after you RESTART the session, so neither can prove anything now —",
+    "  and both go over MCP, which is POST, so on an unlicensed server (the 503 above) they are",
+    "  blocked by that same gate. On an unlicensed server the GET reads are all you have.",
   ]
     .filter((line): line is string => line !== null)
     .join("\n");
+}
+
+/**
+ * Claude Desktop only speaks stdio in `claude_desktop_config.json` — no
+ * native http/url/headers transport (that shape is for Claude Code / Cursor,
+ * see {@link mcpHttpConfig}). Bridges to the Streamable-HTTP endpoint with
+ * `mcp-remote`.
+ */
+export function claudeDesktopConfig(
+  nestName: string,
+  mcpUrl: string,
+  openMode = false,
+): string {
+  return JSON.stringify(
+    {
+      mcpServers: {
+        [slugify(nestName)]: {
+          command: "npx",
+          args: [
+            "-y",
+            "mcp-remote",
+            mcpUrl,
+            ...(openMode
+              ? []
+              : ["--header", `Authorization: Bearer ${KEY_PLACEHOLDER}`]),
+          ],
+        },
+      },
+    },
+    null,
+    2,
+  );
+}
+
+/**
+ * Claude Code (the CLI) speaks Streamable HTTP natively and registers a
+ * server with one command that it persists itself — no config file to open,
+ * no `mcp-remote` bridge (that bridge is only for Claude Desktop, which has
+ * no CLI). The one-shot path for Claude Code.
+ */
+export function claudeCodeCommand(
+  nestName: string,
+  mcpUrl: string,
+  openMode = false,
+): string {
+  return `claude mcp add --transport http ${slugify(nestName)} ${mcpUrl}${
+    openMode ? "" : ` --header "Authorization: Bearer ${KEY_PLACEHOLDER}"`
+  }`;
+}
+
+/**
+ * Native HTTP MCP clients (Cursor, VS Code, Claude Code) configure a server
+ * by its url + headers in one JSON stanza — same envelope shape as
+ * {@link claudeDesktopConfig}, so one paste lands both the endpoint and the
+ * auth placeholder instead of two separate copies spliced together by hand.
+ */
+export function mcpHttpConfig(
+  nestName: string,
+  mcpUrl: string,
+  openMode = false,
+): string {
+  return JSON.stringify(
+    {
+      mcpServers: {
+        [slugify(nestName)]: {
+          url: mcpUrl,
+          ...(openMode
+            ? {}
+            : { headers: { Authorization: `Bearer ${KEY_PLACEHOLDER}` } }),
+        },
+      },
+    },
+    null,
+    2,
+  );
 }

@@ -158,6 +158,50 @@ describe("registry", () => {
   });
 });
 
+describe("acyclicity backstop", () => {
+  it("rejects flipping a type to flow when an existing self-loop would become cyclic, with a two-line message", async () => {
+    // A self-loop is allowed while the type isn't flow — the per-edge cycle
+    // guard in edge-routes.ts only runs for flow types.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/edge-types`,
+      { name: "supersedes", description: "Not yet a flow type.", is_flow: false },
+      owner.apiKey,
+    );
+    const node = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Solo Step", content: "# Solo Step" },
+      owner.apiKey,
+    );
+    const nodeId = node.data.node.id;
+    const loop = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/edges`,
+      { from_node: nodeId, to_node: nodeId, type: "supersedes" },
+      owner.apiKey,
+    );
+    expect(loop.status).toBe(201);
+
+    // Flipping the type to flow re-validates the whole graph and must now
+    // reject the pre-existing self-loop.
+    const flip = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/edge-types`,
+      { name: "supersedes", description: "Now a flow type.", is_flow: true },
+      owner.apiKey,
+    );
+    expect(flip.status).toBe(409);
+    expect(flip.data.error).toContain(
+      'This step loops back on itself: "Solo Step".\n\nA flow can\'t return to a step it already ran.',
+    );
+  });
+});
+
 describe("concurrency", () => {
   // The lazy seed is a check-then-insert; two first-touch requests against a
   // brand-new nest (double-fetch, StrictMode, parallel processes) must NOT

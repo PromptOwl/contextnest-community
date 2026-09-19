@@ -315,7 +315,10 @@ describe("discovery — the grantee finds the nest by logging in", () => {
   });
 
   it("a user with no grant still doesn't see the nest at all", async () => {
-    resetAuthRateLimit();
+    // Awaited: the helper is async (it re-imports the post-resetModules
+    // rate-limiter), so firing it off left this registration inside the
+    // 3-per-IP window and `stranger` came back undefined.
+    await resetAuthRateLimit();
     const stranger = await registerUser(app, "stranger@acme.com", "Stranger");
     const res = await jsonRequest(app, "GET", "/nests", undefined, stranger.apiKey);
     expect(res.data.nests.map((n: any) => n.id)).not.toContain(nestId);

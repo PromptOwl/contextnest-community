@@ -9,7 +9,11 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
 import { ConflictError } from "../shared/errors.js";
-import { notifyReviewRequested, notifyReviewResolved } from "./notify-service.js";
+import {
+  notifyReviewRequested,
+  notifyReviewResolved,
+  markNotificationsReadBySubject,
+} from "./notify-service.js";
 import { dispatchEvent } from "../notify/dispatch.js";
 import { notifyNestEvent } from "../notify/notify.js";
 import { sendEmailToRecipient } from "../notify/email.js";
@@ -852,7 +856,13 @@ async function notifyDeletionRequested(
 ): Promise<void> {
   try {
     const ctx = await deletionTargetContext(request, baseUrl);
-    const line = `Deletion requested for ${ctx.noun} *${ctx.label}* by ${request.requestedBy} — "${request.reason}"`;
+    // A nest_archive request is an ask to ARCHIVE, not delete (CU-wdqcpzy80h) —
+    // the notification has to say so, mirroring the "archived" vs "deleted"
+    // verb split notifyDeletionResolved already makes for the verdict.
+    const isArchiveRequest = request.targetType === "nest_archive";
+    const line = isArchiveRequest
+      ? `Archive requested for ${ctx.noun} *${ctx.label}* by ${request.requestedBy} — "${request.reason}"`
+      : `Deletion requested for ${ctx.noun} *${ctx.label}* by ${request.requestedBy} — "${request.reason}"`;
     const admins = (await nestAdminEmails(request.nestId)).filter(
       (e) => e !== request.requestedBy.toLowerCase(),
     );
@@ -862,7 +872,9 @@ async function notifyDeletionRequested(
       admins,
       "deletion_requested",
       request.id,
-      `${ctx.noun === "document" ? "" : `${ctx.noun} `}"${ctx.docTitle}" was flagged for deletion by ${request.requestedBy} — "${request.reason}"`,
+      isArchiveRequest
+        ? `${ctx.noun} "${ctx.docTitle}" was requested to be archived by ${request.requestedBy} — "${request.reason}"`
+        : `${ctx.noun === "document" ? "" : `${ctx.noun} `}"${ctx.docTitle}" was flagged for deletion by ${request.requestedBy} — "${request.reason}"`,
     );
 
     void dispatchEvent({
@@ -930,13 +942,24 @@ export async function notifyDeletionResolved(params: {
     // verdict has to say so — the requester is told what actually happened.
     const archivedInstead =
       outcome === "deleted" && params.targetType === "nest_archive";
+    // A nest_archive request turned down is a "no" to an ARCHIVE ask, not a
+    // deletion — the rejection verdict has to say so too, mirroring the split
+    // notifyDeletionRequested already makes on the request side.
+    const isArchiveRequest = params.targetType === "nest_archive";
     const verb = archivedInstead
       ? "archived"
       : outcome === "deleted"
         ? "deleted"
-        : "rejected the deletion of";
+        : isArchiveRequest
+          ? "declined the archive request for"
+          : "rejected the deletion of";
     const line = `${resolvedBy} ${verb} *${params.docTitle}*${note ? ` — "${note}"` : ""}`;
     const recipient = params.requestedBy.toLowerCase();
+
+    // The "requested" inbox row(s) this resolves are done being actionable —
+    // clear them for every admin who got one, not just whoever clicked
+    // approve/decline, so the ask doesn't keep reading as still-open.
+    await markNotificationsReadBySubject(params.requestId, "deletion_requested");
 
     // An honoured NEST deletion has no inbox row to write: notifications are
     // nest-scoped and cascade with the nest that just went away. Email and the
@@ -952,7 +975,7 @@ export async function notifyDeletionResolved(params: {
         params.requestId,
         outcome === "deleted"
           ? `"${params.docTitle}" was ${archivedInstead ? "archived" : "deleted"} by ${resolvedBy} — your request was accepted`
-          : `Your deletion request for "${params.docTitle}" was rejected by ${resolvedBy}${note ? ` — "${note}"` : ""}`,
+          : `Your ${isArchiveRequest ? "archive" : "deletion"} request for "${params.docTitle}" was rejected by ${resolvedBy}${note ? ` — "${note}"` : ""}`,
       );
     }
 
@@ -1208,6 +1231,7 @@ export async function declineDeletion(params: {
       requestedBy: declined.requestedBy,
       resolvedBy: params.declinedBy,
       requestId: declined.id,
+      targetType: declined.targetType,
       note: params.note,
       baseUrl: params.baseUrl,
     });

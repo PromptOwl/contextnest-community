@@ -319,9 +319,9 @@ describe("MCP tools/call — context_comments", () => {
     expect(text).toMatch(/No comments on/);
   });
 
-  it("refuses comments on an unapproved draft node — no leak via anchor.quote", async () => {
+  it("returns comments on an unapproved draft to collaborators; context_get still refuses body", async () => {
     // Fresh nest with stewardship ON, so a newly created doc has no approved
-    // version and is invisible to AI (same gate as context_get/context_export).
+    // version and is invisible to AI for public readers (same gate as context_get/context_export).
     const created = await jsonRequest(app, "POST", "/nests", {
       name: "Gated Nest",
     });
@@ -354,16 +354,19 @@ describe("MCP tools/call — context_comments", () => {
     );
     expect(got).toMatch(/no approved version yet/i);
 
-    // The fix: context_comments must refuse identically and leak nothing.
+    // With the updated policy, collaborators/stewards who can read the node
+    // may read its comment threads over MCP even before approval. Public readers
+    // remain blocked elsewhere. Here (open mode), the creator acts as the
+    // collaborator/owner, so comments are visible.
     const text = await callTool(
       "context_comments",
       { id: "nodes/secret-draft" },
       502,
       sid,
     );
-    expect(text).toMatch(/no approved version yet/i);
-    expect(text).not.toContain("4242"); // draft excerpt must not leak
-    expect(text).not.toContain("verify this figure"); // comment body must not leak
+    expect(text).toContain("Comments on \"Secret Draft\"");
+    expect(text).toContain("verify this figure");
+    expect(text).toContain("Unreleased pricing: 4242.");
   });
 });
 

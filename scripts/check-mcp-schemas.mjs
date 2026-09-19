@@ -58,7 +58,24 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // Raised 47 -> 49 in 1.12.0 for the server-level `nest_create` / `context_create` bootstrap
 // writes — same exception as `context_table_query`: no importable engine module yet, and the
 // tools follow the existing pattern rather than introducing drift.
-const BASELINE = 49;
+//
+// Raised 49 -> 52 for the comment write tools (`context_comment`,
+// `context_resolve_comment`) and the server-level `context_comments` mirror
+// (CU-wdqcq01uqn). Same reason as move, the deletion trio and my_drafts: comments are NOT an
+// engine operation and are not meant to be — they are deliberately outside the engine's
+// version/hash chain (see the header of src/governance/comment-service.ts), which makes them
+// a community-edition governance concern like context_approve and context_stewards. The
+// upstream catalog was checked and carries no comment/annotation operation to import. They
+// mirror the REST annotation routes 1:1.
+//
+// Raised 52 -> 56 for server-level write tools (`context_update`, `context_delete`,
+// `context_move`, `context_submit_review`) on the /mcp endpoint (CU-wdqcq02cxu). These are
+// nest-parameterized mirrors of the existing per-nest tools — same schemas with an added
+// `nest` argument. This is community-edition MCP wiring, not new engine operations. The
+// per-nest tools already exist inline (same baseline exception), and these server-level
+// variants enable cross-nest workflows without multiple MCP connections. Authorization is
+// handled per-call by the same handleToolCall gates the per-nest endpoint uses.
+const BASELINE = 56;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

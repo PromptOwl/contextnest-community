@@ -30,7 +30,12 @@ import {
   nestPrimeTags,
   setPrimeTags,
 } from "./service.js";
-import { registerImportedDocuments, stageImportedFiles } from "../nodes/service.js";
+import {
+  registerImportedDocuments,
+  stageImportedFiles,
+  isDerivedAnnotationsNode,
+  DERIVED_ANNOTATIONS_SUFFIX,
+} from "../nodes/service.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
@@ -45,6 +50,7 @@ import {
   resolveGrantRoles,
 } from "../governance/stewardship-service.js";
 import { getDb } from "../db/client.js";
+import { suffixOf } from "../db/sql.js";
 import { config } from "../config.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
 import { ANON_USER_ID } from "../shared/constants.js";
@@ -243,9 +249,22 @@ nestRoutes.get("/", async (c) => {
   // The same grouped scan also yields the newest version timestamp per nest,
   // which is what "recent activity" means for a nest — the nests row itself
   // only carries created_at.
+  //
+  // The derived `— Annotations` projections are excluded from the COUNT but
+  // NOT from the rows: they are machine-maintained nodes that every listing
+  // hides (isDerivedAnnotationsNode), so counting them made a card read one
+  // document high per commented artifact — permanently, which is what a stale
+  // cache looks like. A conditional COUNT rather than a WHERE, because
+  // MAX(created_at) comes from the same scan and a comment IS activity on the
+  // nest: dropping those rows would make a just-discussed nest look untouched.
   const docRows = (await db.all(
-    `SELECT nest_id, COUNT(DISTINCT node_id) AS c, MAX(created_at) AS last_activity
+    `SELECT nest_id,
+            COUNT(DISTINCT CASE
+              WHEN ${suffixOf(db, "node_id", DERIVED_ANNOTATIONS_SUFFIX.length)} <> ?
+              THEN node_id END) AS c,
+            MAX(created_at) AS last_activity
        FROM node_versions GROUP BY nest_id`,
+    [DERIVED_ANNOTATIONS_SUFFIX],
   )) as Array<{ nest_id: string; c: number; last_activity: string | null }>;
   const docByNest = new Map(docRows.map((r) => [r.nest_id, Number(r.c)]));
   const activityByNest = new Map(docRows.map((r) => [r.nest_id, r.last_activity]));
@@ -294,6 +313,7 @@ nestRoutes.get("/", async (c) => {
     )) as Array<{ nest_id: string; node_id: string }>;
     for (const r of rows) {
       const targets = grantTargetsByNest.get(r.nest_id) ?? [];
+      if (isDerivedAnnotationsNode(r.node_id)) continue;
       if (grantCoversNode(targets, r.node_id)) {
         grantedDocsByNest.set(r.nest_id, (grantedDocsByNest.get(r.nest_id) ?? 0) + 1);
       }

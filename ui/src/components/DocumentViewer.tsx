@@ -15,6 +15,10 @@
  * GFM: tables, task lists, strikethrough, footnotes, and autolinks come
  * from `remark-gfm`.
  *
+ * Mentions: `@user@example.com` and `@(Name With Spaces)` render as an
+ * `@name` chip via `remarkMentions`, instead of the raw address `remark-gfm`
+ * would otherwise autolink.
+ *
  * Math: `$…$` / `$$…$$` parse via `remark-math` and typeset with KaTeX.
  * Invalid TeX renders in red instead of throwing.
  *
@@ -31,14 +35,20 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { remarkMathNoCurrency } from "@/lib/markdown-math";
+import { remarkMentions } from "@/lib/markdown-mentions";
 import type { Plugin } from "unified";
 import type { Root, Text } from "mdast";
 import { visit } from "unist-util-visit";
 import { cn } from "@/lib/utils";
+import { CONTEXT_URI_PREFIX, CONTEXT_URI_RE, contextUriDocPath, contextUriLabel } from "@/lib/context-uri";
 
-const wikiLinkRegex = /\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]/g;
+// `[[target]]`, `[[target|Display]]`, or a bare `contextnest://nodes/…` URI.
+const wikiLinkRegex = new RegExp(
+  `\\[\\[([^\\]|\\n]+)(?:\\|([^\\]\\n]+))?\\]\\]|(${CONTEXT_URI_RE.source})`,
+  "g",
+);
 
-// `[[Title]]` / `[[Title|Display]]` → synthetic `wikilink` hast element.
+// `[[Title]]` / `[[Title|Display]]` / `contextnest://…` → synthetic `wikilink` hast element.
 // Custom hName sidesteps react-markdown's urlTransform allowlist (no `wiki:` scheme to sanitize).
 const remarkWikiLinks: Plugin<[], Root> = () => (tree) => {
   visit(tree, "text", (node: Text, index, parent) => {
@@ -55,22 +65,23 @@ const remarkWikiLinks: Plugin<[], Root> = () => (tree) => {
       if (m.index > lastIndex) {
         newChildren.push({ type: "text", value: text.slice(lastIndex, m.index) });
       }
-      const target = m[1].trim();
-      const display = (m[2] ?? m[1]).trim();
-      newChildren.push({
-        type: "wikiLink",
-        data: {
-          hName: "wikilink",
-          hProperties: {
-            "data-wiki-target": target,
-            "data-wiki-display": display,
-          },
-          // «Title» is Hootie's wiki-link convention — the guillemets read as
-          // "this points at another document" without relying on link colour
-          // alone. The target and the hover preview use the bare title.
-          hChildren: [{ type: "text", value: `«${display}»` }],
-        },
-      });
+      let target: string;
+      let display: string;
+      if (m[3]) {
+        // A URI that names no document (tag/, search/, a folder) stays text.
+        const path = contextUriDocPath(m[3]);
+        if (!path) {
+          newChildren.push({ type: "text", value: m[3] });
+          lastIndex = wikiLinkRegex.lastIndex;
+          continue;
+        }
+        target = path;
+        display = contextUriLabel(path);
+      } else {
+        target = m[1].trim();
+        display = (m[2] ?? m[1]).trim();
+      }
+      newChildren.push(wikiLinkNode(target, display));
       lastIndex = wikiLinkRegex.lastIndex;
     }
     if (lastIndex < text.length) {
@@ -79,7 +90,38 @@ const remarkWikiLinks: Plugin<[], Root> = () => (tree) => {
     parent.children.splice(index, 1, ...newChildren);
     return index + newChildren.length;
   });
+  // `[label](contextnest://nodes/…)` — a real markdown link whose scheme
+  // react-markdown would otherwise strip; it is the same wiki link with the
+  // label as its display.
+  visit(tree, "link", (node: any, index, parent) => {
+    if (!parent || index === null || index === undefined) return;
+    if (typeof node.url !== "string" || !node.url.startsWith(CONTEXT_URI_PREFIX)) return;
+    const path = contextUriDocPath(node.url);
+    if (!path) return;
+    const label = (node.children ?? [])
+      .map((c: any) => (c.type === "text" ? c.value : ""))
+      .join("")
+      .trim();
+    parent.children.splice(index, 1, wikiLinkNode(path, label || contextUriLabel(path)));
+  });
 };
+
+function wikiLinkNode(target: string, display: string) {
+  return {
+    type: "wikiLink",
+    data: {
+      hName: "wikilink",
+      hProperties: {
+        "data-wiki-target": target,
+        "data-wiki-display": display,
+      },
+      // «Title» is Hootie's wiki-link convention — the guillemets read as
+      // "this points at another document" without relying on link colour
+      // alone. The target and the hover preview use the bare title.
+      hChildren: [{ type: "text", value: `«${display}»` }],
+    },
+  };
+}
 
 // `<span style="color: #rrggbb">…</span>` — the one raw-HTML shape the
 // editor itself writes (its text-color swatches). remark tokenizes raw HTML
@@ -179,6 +221,10 @@ export interface DocumentViewerProps {
    *  preview (unknown target). Synchronous — caller caches the list. */
   previewFor?: (target: string) => { title: string; snippet: string } | null;
   className?: string;
+  /** Render `[[wikilinks]]` as ordinary links (no «guillemets»). The
+   *  guillemets mark "points at another document" for authors; a public
+   *  docs reader expects links that read like links. */
+  plainLinks?: boolean;
 }
 
 export function DocumentViewer({
@@ -186,6 +232,7 @@ export function DocumentViewer({
   onWikiLinkClick,
   previewFor,
   className,
+  plainLinks = false,
 }: DocumentViewerProps) {
   // One hover-preview at a time; opens after a short debounce so quick
   // mouse passes don't flash popovers. Fixed-positioned at the cursor.
@@ -234,6 +281,7 @@ export function DocumentViewer({
       <ReactMarkdown
         remarkPlugins={[
           remarkGfm,
+          remarkMentions,
           remarkMath,
           remarkMathNoCurrency,
           remarkColorSpans,
@@ -247,12 +295,23 @@ export function DocumentViewer({
             h1: heading("h1"),
             h2: heading("h2"),
             h3: heading("h3"),
+            // `@user` mention chip — see remarkMentions above. Plain span,
+            // not a link: nothing to navigate to in the read-only viewer,
+            // and the full email stays out of the visible text.
+            mention: ({ children }: any) => (
+              <span className="mention mention-user">{children}</span>
+            ),
             wikilink: ({ children, ...props }: any) => {
               const target = (props["data-wiki-target"] ?? "") as string;
+              const display = (props["data-wiki-display"] ?? target) as string;
               return (
                 <button
                   type="button"
-                  className="wiki-link wiki-link-exists bg-transparent border-0 p-0 m-0 cursor-pointer"
+                  className={
+                    plainLinks
+                      ? "bg-transparent border-0 p-0 m-0 cursor-pointer text-primary underline underline-offset-2 decoration-primary/40 hover:decoration-primary font-normal"
+                      : "wiki-link wiki-link-exists bg-transparent border-0 p-0 m-0 cursor-pointer"
+                  }
                   title={previewFor ? undefined : `Open "${target}"`}
                   onClick={(e) => {
                     e.preventDefault();
@@ -265,7 +324,7 @@ export function DocumentViewer({
                   }
                   onMouseLeave={hidePreview}
                 >
-                  {children}
+                  {plainLinks ? display : children}
                 </button>
               );
             },

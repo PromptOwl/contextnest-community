@@ -27,6 +27,14 @@ import { engineApi, opContext } from "../nodes/engine.js";
 import { addCollaborator } from "../nests/sharing-service.js";
 import { queryTableNode } from "../tables/query.js";
 import {
+  addComment,
+  createThread,
+  getThread,
+  setThreadStatus,
+  syncAnnotationsNode,
+} from "../annotations/service.js";
+import { notifyCommentMentions } from "../governance/mention-notify.js";
+import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
 } from "../nests/unsynced-service.js";
@@ -335,6 +343,46 @@ export const TOOL_DEFINITIONS = [
         title: { type: "string", description: "Title of the node" },
         id: { type: "string", description: "ID of the node" },
       },
+    },
+  },
+  {
+    name: "context_comment",
+    description:
+      "Leave a comment on a document — the same threads the web UI's comments panel shows. Omit `thread` to open a new one; pass a thread id (from context_comments) to reply to it. Use this to answer feedback you were given, or to raise something you noticed while working. Anyone who can read the document may comment; `@name` in the body notifies that person.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the node" },
+        id: { type: "string", description: "ID of the node" },
+        body: { type: "string", description: "The comment text" },
+        thread: {
+          type: "string",
+          description:
+            "Thread id to reply to (from context_comments). Omit to open a new thread on the document.",
+        },
+      },
+      required: ["body"],
+    },
+  },
+  {
+    name: "context_resolve_comment",
+    description:
+      "Mark a comment thread resolved once you have addressed it, or reopen one that was closed too early. Records you as the resolver, exactly as the web UI does. Resolve only threads you actually acted on.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the node" },
+        id: { type: "string", description: "ID of the node" },
+        thread: {
+          type: "string",
+          description: "Thread id, from context_comments",
+        },
+        reopen: {
+          type: "boolean",
+          description: "Reopen the thread instead of resolving it",
+        },
+      },
+      required: ["thread"],
     },
   },
   {
@@ -1294,12 +1342,13 @@ async function runTool(
         node = docs.find((n) => n.id === args.id);
       }
       if (!node) return `Node not found: ${args.title || args.id}`;
-      // Gate the same way context_get/context_export do: under stewardship a
-      // node with no approved version is invisible to AI. Its threads embed
-      // draft body text (anchor.quote) and paraphrases in comment bodies, so
-      // serving them would leak unapproved content through the side door.
-      if ((await resolveLlmBody(ctx, node)) === null) {
-        return `Node "${node.frontmatter.title}" has no approved version yet — not available to AI.`;
+      // Gate by per-node read access. Collaborators/stewards who can read the
+      // node in the UI may also read its comment threads over MCP even when the
+      // document is not yet approved. Public readers remain blocked by
+      // canReadNode until approval. This preserves privacy while letting
+      // collaborators address feedback and resubmit.
+      if (!(await canReadNode(nestId, node.id, ctx.userId, userEmail))) {
+        return `Node not found: ${args.title || args.id}`;
       }
       const threads = await listThreads(nestId, node.id);
       if (!threads.length)
@@ -1319,6 +1368,116 @@ async function runTool(
         })
         .join("\n\n");
       return `# Comments on "${node.frontmatter.title}" — ${threads.length} thread(s), ${openCount} open\n\n${sections}`;
+    }
+
+    // ── Comments: write half of context_comments ──────────────────────────
+    //
+    // Both cases target the annotation store the UI's comments panel uses, so
+    // an agent's comment and a human's are the same object, and both carry the
+    // side effects the REST routes carry: the @mention fan-out and the derived
+    // `— Annotations` projection an artifact's agents read back.
+    //
+    // PRIMARY permission gate, like context_create's: the /mcp middleware
+    // admits read-tier callers (the transport is always POST), so the check
+    // here is the real one. Commenting is READ-tier — the same rule REST
+    // applies in app.ts (isAnnotationAction) — so canReadNode is the bar, not
+    // write access. Deliberately NOT gated on an approved version: a reviewer
+    // comments on a draft, and unlike reading a thread, writing one discloses
+    // nothing (the caller supplies the text).
+    case "context_comment":
+    case "context_resolve_comment": {
+      const body = String(args.body ?? "");
+      const isResolve = toolName === "context_resolve_comment";
+      // Plain strings, like every other missing-argument answer in this file
+      // (`folder is required — …`, `reason is required — …`): a toolError
+      // envelope carries a machine-readable `code`, and every code in that
+      // union describes a state of the vault, not a malformed call.
+      if (!isResolve && !body.trim()) {
+        return "body is required — the comment text.";
+      }
+      const threadId = args.thread ? String(args.thread) : "";
+      if (isResolve && !threadId) {
+        return "thread is required — the id from context_comments.";
+      }
+
+      const docs = await storage.discoverDocuments();
+      let node: ContextNode | undefined;
+      if (args.title) {
+        node = docs.find(
+          (n) =>
+            n.frontmatter.title.toLowerCase() ===
+            String(args.title).toLowerCase(),
+        );
+      } else if (args.id) {
+        node = docs.find((n) => n.id === String(args.id));
+      }
+      if (!node) {
+        return toolError(
+          `Node not found: ${args.title || args.id || "(no title or id given)"}`,
+          "DOCUMENT_NOT_FOUND",
+        );
+      }
+      if (!(await canReadNode(nestId, node.id, ctx.userId, userEmail))) {
+        // Same shape as the not-found above, and it never repeats the resolved
+        // title — otherwise the refusal confirms what the caller guessed.
+        return toolError(
+          `Node not found: ${args.title || args.id}`,
+          "DOCUMENT_NOT_FOUND",
+        );
+      }
+      const label = node.frontmatter.title || node.id;
+
+      // A thread id has to belong to THIS node: the services scope their own
+      // lookups, but saying so here turns an opaque failure into an
+      // instruction the agent can act on.
+      if (threadId) {
+        const existing = await getThread(threadId);
+        if (!existing || existing.nodeId !== node.id || existing.nestId !== nestId) {
+          return toolError(
+            `Thread ${threadId} is not a thread on "${label}". Call context_comments to list its threads.`,
+            "DOCUMENT_NOT_FOUND",
+          );
+        }
+      }
+
+      if (isResolve) {
+        const reopen = args.reopen === true;
+        const thread = await setThreadStatus(
+          nestId,
+          node.id,
+          threadId,
+          reopen ? "open" : "resolved",
+          userEmail,
+        );
+        await syncAnnotationsNode(nestId, node.id, userEmail);
+        return reopen
+          ? `Reopened the thread on "${label}". It is back in the open list for whoever picks it up.`
+          : `Resolved the thread on "${label}", recorded against ${thread.resolvedBy}.`;
+      }
+
+      const thread = threadId
+        ? await addComment(nestId, node.id, threadId, userEmail, body)
+        : await createThread(nestId, node.id, { body, anchor: null }, userEmail);
+      // The confirmation deliberately doesn't report the thread's comment
+      // count: writing is admitted on a node whose threads the caller may not
+      // be allowed to READ (the approval gate applies to context_comments, not
+      // here), so the reply should tell them what THEY did and nothing about
+      // what is already in the thread.
+      await notifyCommentMentions({
+        nestId,
+        nodeId: node.id,
+        body,
+        actorEmail: userEmail,
+        // Without this the notification still reaches the person, but its
+        // "Open document" link falls back to PUBLIC_BASE_URL and comes out
+        // empty when that isn't configured — every other notifying tool in
+        // this file passes it, and the REST route passes requestBaseUrl.
+        baseUrl: ctx.baseUrl,
+      });
+      await syncAnnotationsNode(nestId, node.id, userEmail);
+      return threadId
+        ? `Replied on "${label}", in thread ${thread.id}.`
+        : `Commented on "${label}" — opened thread ${thread.id}. Reply to it by passing that id as \`thread\`.`;
     }
 
     case "context_create": {
@@ -1767,25 +1926,24 @@ async function runTool(
     }
 
     case "context_submit_review": {
-      const docs = await storage.discoverDocuments();
-      const node = docs.find(
-        (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
-      );
-      if (!node) return toolError(`Node not found: ${args.title}`, "DOCUMENT_NOT_FOUND");
+      const resolved = await resolveTargetNode(storage, args);
+      if (typeof resolved === "string") return toolError(resolved, "DOCUMENT_NOT_FOUND");
+      const node = resolved;
+      const nodeLabel = args.title || args.id;
 
       // Defense-in-depth: submitting a draft for review is an edit-level
       // action — gate it with the same per-node edit check.
       const submitCheck = await stewardship.canUserEdit(ctx.nestId, node.id, userEmail);
       if (!submitCheck.allowed) {
         return toolError(
-          `You don't have permission to submit "${args.title}" for review: ${submitCheck.reason}`,
+          `You don't have permission to submit "${nodeLabel}" for review: ${submitCheck.reason}`,
           "UNAUTHORIZED_ACTION",
         );
       }
 
       const currentVersion = await versions.getCurrentVersion(ctx.nestId, node.id);
       if (currentVersion === 0)
-        return toolError(`No versions found for "${args.title}"`, "VERSION_NOT_FOUND");
+        return toolError(`No versions found for "${nodeLabel}"`, "VERSION_NOT_FOUND");
 
       try {
         const request = await reviews.submitForReview({
@@ -1808,7 +1966,7 @@ async function runTool(
           : "";
 
         return {
-          text: `Submitted "${args.title}" v${currentVersion} for review (${request.priority} priority).${stewardList}`,
+          text: `Submitted "${nodeLabel}" v${currentVersion} for review (${request.priority} priority).${stewardList}`,
           // No catalog shape to conform to — `context_submit_review` is a
           // governance-namespace operation and that namespace is declared but
           // unimplemented in the engine (`api/index.ts`, NAMESPACES). So this

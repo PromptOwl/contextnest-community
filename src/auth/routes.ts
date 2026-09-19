@@ -40,6 +40,7 @@ import { isSuperAdmin } from "../governance/access-service.js";
 import { isServerAdminUserId } from "../shared/access.js";
 import { tryConsume, isLimited, recordFailure, clear } from "../shared/rate-limit.js";
 import { verifySsoTicket, isValidTicketSub } from "./sso-token.js";
+import { ssoCandidates } from "./community-sites.js";
 import { oidcRoutes } from "./oidc.js";
 import { handleTokenExchange } from "./token-exchange.js";
 import { clientIp } from "../shared/request-ip.js";
@@ -766,27 +767,31 @@ authRoutes.post("/promptowl", async (c) => {
   });
 });
 
-// GET /auth/sso — one-click SSO auto-login from PromptOwl.
+// GET /auth/sso — one-click SSO auto-login from an official community site.
 //
-// THE DOMAIN LOCK. PromptOwl redirects a logged-in user here with a short-lived
-// JWT ticket signed with the shared OFFICIAL_COMMUNITY_SSO_SECRET. Only the ONE
-// official deployment holds that secret, so:
-//   - secret unset  → feature disabled (every self-hosted server); bounce to the
-//                     SPA with ?sso_error=not_supported so the user sees a clear
+// THE DOMAIN LOCK. A trusted site redirects a logged-in user here with a
+// short-lived JWT ticket signed with a shared secret. Only sites configured
+// as official community sites (DB-managed from Server Settings, plus the
+// legacy OFFICIAL_COMMUNITY_SSO_SECRET/PUBLIC_BASE_URL env-var pair for
+// backward compatibility — see auth/community-sites.ts) hold a secret this
+// server accepts, so:
+//   - no site configured → feature disabled; bounce to the SPA with
+//                     ?sso_error=not_supported so the user sees a clear
 //                     message instead of a bare 404. This does NOT weaken the
-//                     lock: without the secret no ticket can be verified, so
-//                     other domains still cannot auto-login.
-//   - secret set    → verify signature + audience + expiry + one-time jti, then
-//                     provision the user and start a session, exactly like the
-//                     manual /auth/promptowl flow.
+//                     lock: without a matching secret no ticket can be
+//                     verified, so other domains still cannot auto-login.
+//   - a site matches     → verify signature + audience + expiry + one-time jti,
+//                     then provision the user and start a session, exactly
+//                     like the manual /auth/promptowl flow.
 // On any failure the user is bounced to the app with ?sso_error=<code> so the
 // SPA can show a message and fall back to manual sign-in.
 authRoutes.get("/sso", async (c) => {
   const ssoError = (code: string) => c.redirect(`/?sso_error=${code}`, 302);
 
-  const secret = config.OFFICIAL_COMMUNITY_SSO_SECRET;
-  // Self-hosted servers (no shared secret) don't support one-click SSO.
-  if (!secret) return ssoError("not_supported");
+  const candidates = ssoCandidates();
+  // No official site configured (self-hosted, or an official deployment mid
+  // setup) doesn't support one-click SSO.
+  if (candidates.length === 0) return ssoError("not_supported");
 
   if (!tryConsume(`sso:ip:${clientIp(c)}`, DEVICE_LIMIT)) {
     return ssoError("rate_limited");
@@ -795,12 +800,23 @@ authRoutes.get("/sso", async (c) => {
   const ticket = c.req.query("ticket");
   if (!ticket) return ssoError("missing_ticket");
 
-  let claims;
-  try {
-    claims = verifySsoTicket(ticket, secret);
-  } catch {
-    return ssoError("invalid_ticket");
+  // Try the ticket against every configured site's secret — the same
+  // "signature + expiry" gate as before, just repeated per candidate. The
+  // first one whose secret verifies the signature wins; matches nothing when
+  // no site's secret produced a valid signature.
+  let claims: ReturnType<typeof verifySsoTicket> | undefined;
+  let matched: (typeof candidates)[number] | undefined;
+  for (const candidate of candidates) {
+    try {
+      claims = verifySsoTicket(ticket, candidate.secret);
+      matched = candidate;
+      break;
+    } catch {
+      // Try the next candidate — a signature mismatch here just means this
+      // wasn't the site that minted the ticket.
+    }
   }
+  if (!claims || !matched) return ssoError("invalid_ticket");
 
   // Reject an MCP bearer ticket here: this endpoint mints a full login
   // session, so a `scope: "mcp"` ticket (server-to-server, no jti) must never
@@ -809,18 +825,22 @@ authRoutes.get("/sso", async (c) => {
   // and neither side has to trust the issuer to keep the jti/scope invariant.
   if ((claims.scope || "") === "mcp") return ssoError("invalid_ticket");
 
-  // Audience binding — a ticket minted for a different server is rejected, so
-  // it can't be replayed elsewhere even if the secret were shared. When
-  // PUBLIC_BASE_URL is unset this binding is DISABLED (the secret is the only
-  // control left), so warn loudly — that's a misconfiguration on an official
-  // deployment, not an intended mode.
+  // Audience binding — a ticket minted for a different deployment is rejected,
+  // so it can't be replayed against this one even if the secret were shared.
+  // This checks the ticket's `aud` against THIS deployment's own
+  // PUBLIC_BASE_URL, not the matched site's `url` — a site's `url` is a
+  // display/uniqueness field for the admin list, not an audience value (see
+  // SsoCandidate.url in community-sites.ts). When PUBLIC_BASE_URL is unset
+  // this binding is DISABLED (the secret is the only control left), so warn
+  // loudly — that's a misconfiguration, not an intended mode.
   const expectedAud = config.PUBLIC_BASE_URL;
   if (!expectedAud && !warnedMissingSsoAudience) {
     warnedMissingSsoAudience = true;
     console.warn(
-      "[sso] OFFICIAL_COMMUNITY_SSO_SECRET is set but PUBLIC_BASE_URL is empty — " +
-        "ticket audience binding is DISABLED. Set PUBLIC_BASE_URL so a ticket minted " +
-        "for another server cannot be replayed against this one.",
+      `[sso] site "${matched.label}" has a secret but PUBLIC_BASE_URL is unset — ` +
+        "ticket audience binding is DISABLED. Set PUBLIC_BASE_URL to this " +
+        "deployment's own URL so a ticket minted for another deployment cannot " +
+        "be replayed against this one.",
     );
   }
   if (expectedAud) {
@@ -923,6 +943,19 @@ authRoutes.get("/admin-status", async (c) => {
     admin,
     me,
   });
+});
+
+// PATCH /auth/profile — change own display name. Empty clears it (UI falls
+// back to the email). authMiddleware wants a session or key, so the open-mode
+// anonymous caller never reaches here — it gets 401.
+authRoutes.patch("/profile", authMiddleware, async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json<{ name?: unknown }>();
+  if (typeof body.name !== "string") throw new ValidationError("name is required");
+  const name = body.name.trim();
+  if (name.length > 80) throw new ValidationError("name must be 80 characters or fewer");
+  await getDb().run("UPDATE users SET name = ? WHERE id = ?", [name || null, userId]);
+  return c.json({ ok: true, name: name || null });
 });
 
 // POST /auth/password — change own password and invalidate all sessions

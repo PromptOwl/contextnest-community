@@ -10,6 +10,7 @@ import { grantRoutes } from "./nests/grant-routes.js";
 import { publishRoutes } from "./nests/publish-routes.js";
 import { publishRenderRoutes } from "./nests/publish-render-routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
+import { peopleRoutes } from "./nests/people-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
 import { listVisibleNests, nestAllowsSelfApprove } from "./nests/service.js";
 import {
@@ -53,6 +54,7 @@ import {
   markNotificationsRead,
 } from "./governance/notify-service.js";
 import { definitionRoutes } from "./definitions/routes.js";
+import { isDerivedAnnotationsNode } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
 import {
@@ -61,6 +63,7 @@ import {
   getAccessConfig,
   loadGrantedSuperAdmins,
 } from "./governance/access-service.js";
+import { communitySiteRoutes } from "./auth/community-sites-routes.js";
 import {
   llmsTxtRoutes,
   nestIndexRoutes,
@@ -99,6 +102,7 @@ import {
   installLicenseKey,
 } from "./auth/license.js";
 import { persistSetting } from "./db/settings.js";
+import { posthogKeyError } from "./shared/posthog-key.js";
 import { isOidcReady } from "./auth/oidc.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
@@ -595,6 +599,7 @@ export function createApp(): Hono<AuthEnv> {
     oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
     oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
+    people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
     // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
     // presence is reported, never the value (same discipline as the OIDC secret).
     sso_token_exchange_enabled: config.SSO_TOKEN_EXCHANGE_ENABLED,
@@ -689,11 +694,15 @@ export function createApp(): Hono<AuthEnv> {
     if ("telemetry_enabled" in body) {
       pending.push({ name: "TELEMETRY_ENABLED", value: body.telemetry_enabled ? "true" : "false" });
     }
-    // PostHog: empty key clears the row and turns analytics off. The host is
-    // checked here because a typo'd one fails silently in the browser.
+    // PostHog: empty key clears the row and turns analytics off. Both fields
+    // are checked here because a typo'd key or host fails silently in the
+    // browser; a project key is "phc_" plus a long alphanumeric token. The
+    // message names the rule that failed so a near-miss is not a mystery.
     if ("posthog_key" in body) {
       const v = String(body.posthog_key ?? "").trim();
-      pending.push({ name: "POSTHOG_KEY", value: v || null });
+      const keyError = posthogKeyError(v);
+      if (keyError) addError("posthog_key", keyError);
+      else pending.push({ name: "POSTHOG_KEY", value: v || null });
     }
     if ("posthog_host" in body) {
       const v = String(body.posthog_host ?? "").trim().replace(/\/$/, "");
@@ -865,6 +874,16 @@ export function createApp(): Hono<AuthEnv> {
       pending.push({
         name: "OIDC_DEPARTMENT_TAGGING",
         value: body.oidc_department_tagging ? "true" : null,
+      });
+    }
+    // Add-a-person suggestions over the whole user table. Default off because
+    // this server may be multi-tenant (the PromptOwl-hosted deployment holds
+    // many customers), where "every registered account" means another
+    // customer's staff. false persists as null — unset already means off.
+    if ("people_suggest_all_users" in body) {
+      pending.push({
+        name: "PEOPLE_SUGGEST_ALL_USERS",
+        value: body.people_suggest_all_users ? "true" : null,
       });
     }
     // ── Agent SSO / token-exchange (POST /auth/token-exchange) ────────────
@@ -1308,6 +1327,14 @@ export function createApp(): Hono<AuthEnv> {
     return c.json({ ok: true, email });
   });
 
+  // ─── /admin/community-sites — manage official community site connections ──
+  // (CU-wdqcq0247t). CRUD lives in auth/community-sites-routes.ts, following
+  // the same routes-file + app.route() convention as /teams and the
+  // nest-scoped domains — auth is applied here at registration, same as them.
+  app.use("/admin/community-sites", flexAuthMiddleware);
+  app.use("/admin/community-sites/*", flexAuthMiddleware);
+  app.route("/admin/community-sites", communitySiteRoutes);
+
   // GET /stats — dashboard summary counts: nests visible to caller,
   // documents across those nests, total users on the server. Uses
   // ─── My Work — cross-nest inbox of things that need this person ──────────
@@ -1320,6 +1347,13 @@ export function createApp(): Hono<AuthEnv> {
   app.use("/teams/*", flexAuthMiddleware);
   app.use("/teams", flexAuthMiddleware);
   app.route("/teams", teamRoutes);
+
+  // People directory — the suggestions the add-a-person pickers autocomplete
+  // against. Global like /teams (the answer spans every nest and team the
+  // caller reaches), and scoped to what the caller already works with inside
+  // suggestPeopleForUser — never the deployment's whole member list.
+  app.use("/people/*", flexAuthMiddleware);
+  app.route("/people", peopleRoutes);
 
   app.use("/me/*", flexAuthMiddleware);
   app.get("/me/work", async (c) => {
@@ -1518,7 +1552,12 @@ export function createApp(): Hono<AuthEnv> {
     for (const nest of visibleNests) {
       try {
         const { storage } = await engineCache.get(nest.id);
-        const docs = await storage.discoverDocuments();
+        // Derived `— Annotations` projections are machine-maintained nodes
+        // that no listing shows, so they must not be counted as documents
+        // either — see isDerivedAnnotationsNode.
+        const docs = (await storage.discoverDocuments()).filter(
+          (d) => !isDerivedAnnotationsNode(d.id),
+        );
         documents += (await filterAccessible(nest.id, userId, userEmail, docs)).length;
       } catch {
         // Nest with filesystem issue — skip; don't break the whole count.
@@ -1982,17 +2021,30 @@ export function createApp(): Hono<AuthEnv> {
     // caller's per-node role.
     const isStewardRoster =
       path.includes("/stewards") && !path.includes("/nodes/");
-    // Reuse the permission already resolved above — resolveNestPermission
-    // folds the license/super admin into "admin", so owner/admin covers
-    // server admin, nest owner, and admin collaborators (same rule as the
-    // shared canManageStewards used by MCP).
-    if (isStewardRoster && permission !== "owner" && permission !== "admin") {
+    // Gate on the caller's UNCAPPED standing (rawPermission folds the
+    // license/super admin into "admin", so owner/admin covers server admin,
+    // nest owner, and admin collaborators — same rule as canManageStewards).
+    // The archive cap would otherwise turn the owner into "read" here and
+    // tell them they lack a permission they hold; an archived nest keeps its
+    // roster readable and refuses changes as archived, like everything else.
+    if (
+      isStewardRoster &&
+      access.rawPermission !== "owner" &&
+      access.rawPermission !== "admin"
+    ) {
       return c.json(
         {
           error:
             "You don't have permission to manage stewards. Only a nest admin, the nest owner, or the server admin can do this.",
         },
         403,
+      );
+    }
+    if (isStewardRoster && access.archived && c.req.method !== "GET") {
+      return deny(
+        403,
+        "This nest is archived, so it is read-only. Restore it to change stewards.",
+        { archived: true },
       );
     }
     // Match the resource as an exact path segment, NOT a substring: a node id
@@ -2002,10 +2054,10 @@ export function createApp(): Hono<AuthEnv> {
     // and 403 a write user editing that doc. parts[1] is the resource segment.
     const resource = parts[1];
     if (resource === "visibility" || resource === "reader-mode") {
-      // reader-mode is a superadmin-only surface, but the admin tier is as far
-      // as this middleware goes (resolveNestPermission maps the server/super
-      // admin to "admin"); its handler hard-gates on isServerAdminUserId so a
-      // plain nest-admin collaborator can't reach it.
+      // reader-mode: the nest owner/admin collaborator AND the server admin
+      // may configure it — this "admin" tier already covers both
+      // (resolveNestPermission maps the server/super admin to "admin" too),
+      // so the handler needs no further hard-gating past this middleware.
       required = "admin";
     } else if (resource === "collaborators") {
       // Viewing the roster (GET) and inviting (POST) are open to write+
@@ -2109,6 +2161,17 @@ export function createApp(): Hono<AuthEnv> {
       !stewardEditorBypass &&
       effectiveLevel < permissionLevel(required)
     ) {
+      // The archive cap is what refused this, not the caller's standing —
+      // an owner told "your permission: 'read'" on their own nest would go
+      // looking for a grant that can't help. Name the real reason, with the
+      // same {archived:true} marker the open-mode branch sends.
+      if (access.archived && permissionLevel(access.rawPermission) >= permissionLevel(required)) {
+        return deny(
+          403,
+          "This nest is archived, so it is read-only. Restore it to make changes.",
+          { archived: true },
+        );
+      }
       return deny(
         403,
         `You don't have access to perform this action on this nest. Required permission: '${required}', your permission: '${permission}'. Ask the nest owner or a server admin to grant you ${required} access.`,

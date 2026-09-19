@@ -1,17 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazyChunk } from "./lib/lazy-chunk";
+import type React from "react";
 import { Login } from "./components/Login";
-import { Dashboard } from "./components/Dashboard";
-import { NestView } from "./components/NestView";
-import { DocumentEditor } from "./components/DocumentEditor";
+// Page-sized components load on first use — one chunk each — so the shell
+// and the dashboard do not carry the editor or the nest page up front.
+const lazyNamed = <T extends Record<string, any>, K extends keyof T>(load: () => Promise<T>, name: K) =>
+  lazyChunk(() => load().then((m) => ({ default: m[name] as React.ComponentType<any> })));
+const NestView = lazyNamed(() => import("./components/NestView"), "NestView") as unknown as typeof import("./components/NestView").NestView;
+const DocumentEditor = lazyNamed(() => import("./components/DocumentEditor"), "DocumentEditor") as unknown as typeof import("./components/DocumentEditor").DocumentEditor;
+import { DocumentSidebar } from "./components/DocumentSidebar";
+import { ConnectModal } from "./components/ConnectModal";
+import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
 import { AdminLoginModal } from "./components/AdminLoginModal";
-import { TeammatesPage } from "./components/TeammatesPage";
-import { ApiKeysPage } from "./components/ApiKeysPage";
-import { TeamsPage } from "./components/TeamsPage";
-import { SettingsPage } from "./components/SettingsPage";
-import { WorkflowsView } from "./components/WorkflowsView";
-import { GuidePage } from "./components/GuidePage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
-import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
+import { getLicenseStatus, type LicenseStatus } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { useQueryClient } from "@tanstack/react-query";
@@ -19,18 +21,21 @@ import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
 import { navigateGuarded } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
+import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
+import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
+import { NestPageProvider } from "./lib/nest-page-context";
+import { appPageIdFromPath, appPath, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
+import { AppNavProvider, type AppNav } from "./lib/app-nav";
+import { useBreadcrumbTail, type Crumb } from "./lib/breadcrumb";
 import {
   deriveNestCaps,
   isReaderHiddenView,
   isViewBlockedInReaderMode,
 } from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText, Keyboard } from "lucide-react";
-import { OntologyGraphView } from "./components/OntologyGraphView";
-import { AgentDocsPage } from "./components/AgentDocsPage";
-import { ActivityTracePage } from "./components/ActivityTracePage";
-import { DefinitionsPage } from "./components/DefinitionsPage";
-import { MaturityBoard } from "./components/MaturityBoard";
+import { Shield, Info, ChevronDown, LogOut, BookOpen, Activity, Search, FileText, Keyboard, PanelLeft, ChevronRight, UserRound } from "lucide-react";
+const AgentDocsPage = lazyNamed(() => import("./components/AgentDocsPage"), "AgentDocsPage");
+const ActivityTracePage = lazyNamed(() => import("./components/ActivityTracePage"), "ActivityTracePage");
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -66,13 +71,19 @@ export interface BreadcrumbEntry {
 }
 
 type View =
-  | { page: "dashboard" }
+  | {
+      page: "dashboard";
+      /** A dashboard page id (its folder under pages/app); omitted = nests. */
+      tab?: string;
+    }
   | {
       page: "nest";
       nestId: string;
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
       /** Seed the nest list's search filter when arriving via a tag
        *  click on a document detail page. */
       initialSearch?: string;
@@ -87,6 +98,9 @@ type View =
        *  read-only — the shell hides the board/graph/definitions tabs and
        *  NestView renders the stripped ReaderView. */
       readerMode?: boolean;
+      /** Reader mode: the page open in the reader, mirrored to ?doc= so a
+       *  public page is a shareable link that lands inside the docs layout. */
+      readerDoc?: string;
     }
   | {
       page: "document";
@@ -106,12 +120,6 @@ type View =
        *  also arrives via the ?thread= URL param). */
       initialThreadId?: string;
     }
-  | { page: "api-keys" }
-  | { page: "teammates" }
-  | { page: "teams" }
-  | { page: "settings" }
-  | { page: "guide" }
-  | { page: "trace" }
   | { page: "docs" }
   | {
       page: "ontology-graph";
@@ -120,6 +128,8 @@ type View =
       isOwner: boolean;
       isAnonOwned: boolean;
       readerMode?: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
     }
   | {
       page: "workflows";
@@ -128,6 +138,8 @@ type View =
       isOwner: boolean;
       isAnonOwned: boolean;
       readerMode?: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
     }
   | {
       page: "definitions";
@@ -136,6 +148,8 @@ type View =
       isOwner: boolean;
       isAnonOwned: boolean;
       readerMode?: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
     }
   | {
       page: "board";
@@ -144,6 +158,8 @@ type View =
       isOwner: boolean;
       isAnonOwned: boolean;
       readerMode?: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
     }
   | {
       /** Nest-scoped activity trace (owner/nest-admin) — ActivityTracePage
@@ -156,18 +172,25 @@ type View =
       readerMode?: boolean;
     };
 
-/** The views of a single nest, in switcher order. "Nest" (not "Documents")
- *  because the nest page has its own Documents tab inside it. */
+/** The views of a single nest, in switcher order: the nest page ("Nest", not
+ *  "Documents" — it has its own Documents tab) then the registry pages. */
 const NEST_VIEWS = [
-  { page: "nest", label: "Nest", icon: FileText },
-  { page: "board", label: "Board", icon: LayoutGrid },
-  { page: "ontology-graph", label: "Graph", icon: Network },
-  { page: "definitions", label: "Definitions", icon: BookMarked },
-  { page: "workflows", label: "Workflows", icon: Workflow, beta: true },
-] as const;
+  { page: "nest" as const, label: "Nest", icon: FileText, beta: false },
+  ...nestPages.map((p) => ({ page: p.viewPage, label: p.label, icon: p.icon, beta: !!p.beta })),
+];
 
 /** NestView's own tab slugs — the whitelist for ?tab=. Some are permission
  *  gated inside NestView, which falls back to overview when one isn't shown. */
+/** Breadcrumb labels for those tabs. */
+const NEST_TAB_LABELS: Record<string, string> = {
+  overview: "Overview",
+  documents: "Documents",
+  review: "Review queue",
+  "external-edits": "External edits",
+  stewards: "Stewards",
+  collaborators: "Collaborators",
+};
+
 const NEST_TABS = [
   "overview",
   "documents",
@@ -177,7 +200,7 @@ const NEST_TABS = [
   "collaborators",
 ];
 
-type NestScopedView = Extract<View, { page: (typeof NEST_VIEWS)[number]["page"] }>;
+type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" }>;
 
 const isNestScoped = (view: View): view is NestScopedView =>
   NEST_VIEWS.some((v) => v.page === view.page);
@@ -196,12 +219,17 @@ export default function App() {
     isAdmin,
     workflowPlaneEnabled,
     subagentRunsEnabled,
-    refreshHealth,
     loading,
     error,
     logout,
   } = useAuth();
-  const [view, setViewNow] = useState<View>({ page: "dashboard" });
+  const [view, setViewNow] = useState<View>(() => ({
+    page: "dashboard",
+    // /my-work, /teammates, … open straight onto their page.
+    ...(typeof window !== "undefined"
+      ? { tab: appPageIdFromPath(window.location.pathname) ?? DEFAULT_PAGE_ID }
+      : {}),
+  }));
   // Every view change asks the mounted screen first — an editor holding
   // unsaved edits answers with its leave dialog instead of losing them. The
   // guard is a no-op anywhere that registered none, so call sites are unchanged.
@@ -215,7 +243,8 @@ export default function App() {
     track("$pageview", { page: view.page });
   }, [view.page]);
   const [showAdminLogin, setShowAdminLogin] = useState(false);
-  // ?nest=<id> deep-link probe; 200 → skip Login, mount NestView.
+  // /nest/<id> (or legacy ?nest=<id>) deep-link probe; 200 → skip Login,
+  // mount NestView.
   // "missing" is "no ?nest to open"; "unreachable" is "there was one and it
   // didn't resolve" — a deleted nest, a typo'd id, or access that was revoked.
   // They render differently: only the second one owes the user an explanation.
@@ -230,9 +259,7 @@ export default function App() {
     | { status: "unreachable"; nestId: string }
   >(() => {
     if (typeof window === "undefined") return { status: "idle" };
-    const params = new URLSearchParams(window.location.search);
-    const nestId = params.get("nest");
-    return nestId ? { status: "loading" } : { status: "idle" };
+    return nestIdFromLocation() ? { status: "loading" } : { status: "idle" };
   });
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(
     null,
@@ -244,39 +271,26 @@ export default function App() {
   // screen mounts when authenticated flips false in key mode).
   const [logoutConfirm, setLogoutConfirm] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
-  const [showChangePassword, setShowChangePassword] = useState(false);
-  // Server-wide settings for the admin Settings page. Loaded once for admins.
-  const [serverSettings, setServerSettings] = useState<AdminSettings | null>(null);
-  useEffect(() => {
-    if (!isAdmin) return;
-    getAdminSettings()
-      .then(setServerSettings)
-      .catch(() => {});
-  }, [isAdmin]);
-  const updateServerSettings = useCallback(async (
-    patch: Partial<AdminSettings> & { anthropic_api_key?: string | null },
-  ) => {
-    try {
-      const res = await updateAdminSettings(patch);
-      setServerSettings(res.settings);
-      // Feature flags gate other views (workflow-plane nav, sub-agent picker,
-      // PromptOwl teams …) off the /health-sourced AuthContext state, not
-      // serverSettings. Always re-read health after a save so ANY flag exposed
-      // there takes effect live — no page reload, and no per-key allowlist to
-      // keep in sync as new flags are added.
-      await refreshHealth();
-      toast.success("Settings saved");
-    } catch (e: any) {
-      toast.error(e?.message || "Failed to save settings");
-      // A rejected save (validation / SMTP verify) persisted nothing server-side,
-      // so DON'T re-sync — that would reset the draft and wipe what the admin
-      // typed. Re-throw the original error (with its `body.fieldErrors`) so the
-      // Settings page can focus the offending field's tab and show the message.
-      throw e;
-    }
-  }, [refreshHealth]);
   // Cmd/Ctrl+K quick-open — active anywhere inside a nest context.
   const [showQuickOpen, setShowQuickOpen] = useState(false);
+  // The document page's index rail. Per-browser; the page itself offers the
+  // toggle (sidebar header to hide, top bar to show).
+  const [docSidebarCollapsed, setDocSidebarCollapsedState] = useState(
+    () => readDocPagePrefs(localStorage).sidebarCollapsed,
+  );
+  const setDocSidebarCollapsed = (collapsed: boolean) => {
+    setDocSidebarCollapsedState(collapsed);
+    writeDocPagePrefs(localStorage, { sidebarCollapsed: collapsed });
+  };
+  // Below md the rail is a drawer over the document instead of a column
+  // beside it; that open/closed state is transient, never persisted.
+  const [docSidebarDrawer, setDocSidebarDrawer] = useState(false);
+  useEffect(() => {
+    setDocSidebarDrawer(false);
+  }, [view]);
+  // Connect (CLI / MCP / API setup for this nest) from the sidebar — the nest
+  // page has its own button; this one serves every other nest page.
+  const [showConnect, setShowConnect] = useState(false);
 
   const requestLogout = useCallback(() => setLogoutConfirm(true), []);
 
@@ -375,7 +389,7 @@ export default function App() {
     if (deepLinkProbe.status !== "loading") return;
     const params = new URLSearchParams(window.location.search);
     // A retry re-probes the id it failed on, which is no longer in the URL.
-    const nestId = deepLinkProbe.nestId ?? params.get("nest");
+    const nestId = deepLinkProbe.nestId ?? nestIdFromLocation();
     if (!nestId) {
       setDeepLinkProbe({ status: "missing" });
       return;
@@ -385,13 +399,13 @@ export default function App() {
     // and silently dropped the parameter — the probe then settled on "ok", so
     // the re-run below found nothing left to do and the link opened Overview.
     // Wait for health for that link only; every other view resolves at once.
-    if (loading && params.get("view") === "workflows") return;
+    if (loading && nestViewFromLocation() === "workflows") return;
     // Re-runs if workflowPlaneEnabled resolves mid-probe (health may land after
     // this effect first fires); the cancel guard drops the stale navigation.
     let cancelled = false;
     (async () => {
       try {
-        const { nest, permission, roles, myStewards } = await getNest(nestId);
+        const { nest, permission, roles, myStewards } = await qc.fetchQuery(reads.nest(nestId));
         if (cancelled) return;
         // Deep-link / refresh nav has no is_owner from a nest-list row, so
         // derive it from the authoritative permission — resolveNestPermission
@@ -417,6 +431,20 @@ export default function App() {
         // ?doc=<nodeId> → open that document directly (the doc view's own
         // load surfaces a not-found error if the id is stale).
         const docId = params.get("doc");
+        // In reader mode a doc link opens INSIDE the docs layout (nav +
+        // outline), not the bare document page a collaborator would get.
+        if (docId && docId !== "new" && readerMode) {
+          setView({
+            page: "nest",
+            nestId: nest.id,
+            nestName: nest.name,
+            isOwner,
+            isAnonOwned: false,
+            readerMode,
+            readerDoc: docId,
+          });
+          return;
+        }
         if (docId && docId !== "new") {
           setView({
             page: "document",
@@ -433,14 +461,18 @@ export default function App() {
         // ?view=<sub> → land on a nest-scoped sub-page (shareable deep link).
         // edge-types stays gated on the flag so a shared link can't reach a
         // plane the server has disabled — it falls back to the nest view.
-        const sub = params.get("view");
+        // The view rides in the path (/nest/<id>/<segment>), legacy ?view= still
+        // read. Registry pages resolve through their meta; a page whose gate
+        // fails (workflows without the flag) falls back to the nest view.
+        const sub = nestViewFromLocation();
+        const subMeta = nestPageForPath(sub);
         const subPage =
-          sub === "graph" ? "ontology-graph"
-          : sub === "workflows" && workflowPlaneEnabled ? "workflows"
-          : sub === "definitions" ? "definitions"
-          : sub === "board" ? "board"
-          : sub === "trace" ? "nest-trace"
-          : null;
+          subMeta
+            ? subMeta.visible && !subMeta.visible({ isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled })
+              ? null
+              : subMeta.viewPage
+            : sub === "trace" ? "nest-trace"
+            : null;
         // In reader mode the board / ontology-graph / definitions pages are
         // hidden — a deep link into one must not enter it (the tab is gone, but
         // the page state is top-level and would otherwise render the full
@@ -503,8 +535,13 @@ export default function App() {
     // any link copied off that screen — land back on the same dead end. The id
     // rides in the probe state instead, so "Try again" still has one.
     const params = new URLSearchParams(window.location.search);
+    // The nest rides in the path (/nest/<id>), never the query — a legacy
+    // ?nest= that got us here is dropped once the path form is written.
+    params.delete("nest");
+    let pathNestId: string | null = null;
+    let pathView: string | null = null;
     if (view.page === "document") {
-      params.set("nest", view.nestId);
+      pathNestId = view.nestId;
       if (view.nodeId && view.nodeId !== "new") params.set("doc", view.nodeId);
       else params.delete("doc");
       // Keep the focused-thread deep link shareable; drop it otherwise so a
@@ -514,8 +551,9 @@ export default function App() {
       params.delete("view");
       params.delete("tab");
     } else if (view.page === "nest") {
-      params.set("nest", view.nestId);
-      params.delete("doc");
+      pathNestId = view.nestId;
+      if (view.readerMode && view.readerDoc) params.set("doc", view.readerDoc);
+      else params.delete("doc");
       params.delete("thread");
       params.delete("view");
       // Overview is the default, so it stays out of the URL — a plain ?nest
@@ -523,40 +561,30 @@ export default function App() {
       if (view.tab && view.tab !== "overview") params.set("tab", view.tab);
       else params.delete("tab");
     } else if (
-      // Nest-scoped sub-pages: keep ?nest and tag the sub-view so the address
-      // bar stays shareable instead of dropping the nest context.
+      // Nest views ride in the path (/nest/<id>/<segment>) — the registry
+      // page owns its segment; trace is the one non-registry sub-page.
       view.page === "ontology-graph" ||
       view.page === "workflows" ||
       view.page === "definitions" ||
       view.page === "board" ||
       view.page === "nest-trace"
     ) {
-      params.set("nest", view.nestId);
+      pathNestId = view.nestId;
+      pathView = view.page === "nest-trace" ? "trace" : nestPageForView(view.page)?.path ?? null;
       params.delete("doc");
       params.delete("thread");
       params.delete("tab");
-      params.set(
-        "view",
-        view.page === "ontology-graph"
-          ? "graph"
-          : view.page === "workflows"
-            ? "workflows"
-            : view.page === "definitions"
-              ? "definitions"
-              : view.page === "board"
-                ? "board"
-                : "trace",
-      );
+      params.delete("view");
     } else {
-      params.delete("nest");
       params.delete("doc");
       params.delete("thread");
       params.delete("view");
       params.delete("tab");
     }
     const qs = params.toString();
-    const next =
-      window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
+    const path =
+      view.page === "dashboard" ? appPath(view.tab) : nestPath(pathNestId, pathView);
+    const next = path + (qs ? `?${qs}` : "") + window.location.hash;
     const current =
       window.location.pathname + window.location.search + window.location.hash;
     if (next !== current) {
@@ -600,15 +628,17 @@ export default function App() {
   // Workflows tab (an execution plane — every action inside it mutates).
   // null = not resolved yet; the tab stays hidden until we know, so a viewer
   // never sees it flash. getNest is cached, so this shares NestView's fetch.
-  const nestScopedId = isNestScoped(view) ? view.nestId : null;
-  const nestScopedIsOwner = isNestScoped(view) ? view.isOwner : false;
+  // "nestId" in view: the five switcher pages plus the document and trace
+  // pages — the sidebar shows on all of them and needs the same caps.
+  const nestScopedId = "nestId" in view ? view.nestId : null;
+  const nestScopedIsOwner = "nestId" in view ? view.isOwner : false;
   const [nestCanEdit, setNestCanEdit] = useState<boolean | null>(null);
   useEffect(() => {
     setNestCanEdit(null);
     setNestIsReaderView(null);
     if (!nestScopedId) return;
     let cancelled = false;
-    getNest(nestScopedId)
+    qc.fetchQuery(reads.nest(nestScopedId))
       .then((meta: any) => {
         if (cancelled) return;
         const caps = deriveNestCaps({
@@ -647,22 +677,72 @@ export default function App() {
     }
   }, [view, nestCanEdit]);
 
+  // Header breadcrumb. App owns the base — Home, and the nest when inside
+  // one — from the view; the page owns the tail through useBreadcrumb()
+  // (the document page passes its title). A page that set nothing gets an
+  // automatic leaf: the registry label on the dashboard, the view's name in
+  // a nest. Only the dashboard's root page has no "Home" in front of it.
+  const pageTail = useBreadcrumbTail();
+  const crumbs = useMemo<Crumb[]>(() => {
+    const home: Crumb = { label: "Home", go: () => setView({ page: "dashboard" }) };
+    if (view.page === "dashboard") {
+      const page = visibleAppPage(view.tab, { isAdmin });
+      if (pageTail.length) return [home, ...pageTail];
+      return page.id === DEFAULT_PAGE_ID ? [{ label: page.label }] : [home, { label: page.label }];
+    }
+    if ("nestId" in view) {
+      const nest: Crumb = {
+        label: view.nestName,
+        go: () =>
+          setView({
+            page: "nest",
+            nestId: view.nestId,
+            nestName: view.nestName,
+            isOwner: view.isOwner,
+            isAnonOwned: view.isAnonOwned,
+            tab: "overview",
+          }),
+      };
+      if (pageTail.length) return [home, nest, ...pageTail];
+      const leaf =
+        view.page === "nest"
+          ? NEST_TAB_LABELS[view.tab ?? "overview"] ?? "Overview"
+          : view.page === "document" ? "Document"
+          : view.page === "nest-trace" ? "Trace"
+          : nestPageForView(view.page)?.label ?? "";
+      return [home, nest, { label: leaf }];
+    }
+    if (view.page === "docs") return [home, { label: "Docs" }];
+    return pageTail.length ? [home, ...pageTail] : [];
+  }, [view, setView, pageTail]);
+
+  // What a dashboard page can do to the app. Pages read it with useAppNav()
+  // instead of props, so App renders every page the same way.
+  const appNav = useMemo<AppNav>(
+    () => ({
+      openNest: (id, name, isOwner, isAnonOwned, isArchived) =>
+        setView({ page: "nest", nestId: id, nestName: name, isOwner, isAnonOwned, isArchived }),
+      openReview: (nestId, nestName, nodeId) =>
+        setView({ page: "document", nestId, nestName, nodeId, isOwner: true, isAnonOwned: true }),
+      manageKeys: () => setView({ page: "dashboard", tab: "api-keys" }),
+    }),
+    [setView],
+  );
+
   // Back out of the nest entirely. Shared by all five nest-scoped pages —
   // their back arrows used to return to the nest page, but the view switcher
   // makes that a tab click, so back now means "leave this nest".
   const leaveNest = useCallback(() => {
-    // Drop ?nest from URL so refresh doesn't re-enter the nest.
-    if (typeof window !== "undefined") {
+    // Drop the nest from the URL so refresh doesn't re-enter it.
+    if (typeof window !== "undefined" && nestIdFromLocation()) {
       const params = new URLSearchParams(window.location.search);
-      if (params.has("nest")) {
-        params.delete("nest");
-        const qs = params.toString();
-        window.history.replaceState(
-          {},
-          "",
-          window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
-        );
-      }
+      params.delete("nest");
+      const qs = params.toString();
+      window.history.replaceState(
+        {},
+        "",
+        nestPath(null) + (qs ? `?${qs}` : "") + window.location.hash,
+      );
     }
     // Unauth → bounce to Login (Dashboard would 401).
     if (!authenticated && authMode === "key") {
@@ -836,11 +916,6 @@ export default function App() {
         </DialogContent>
       </Dialog>
 
-      <ChangePasswordDialog
-        open={showChangePassword}
-        onClose={() => setShowChangePassword(false)}
-      />
-
       {/* One palette for both scopes: inside a nest it starts scoped to that
           nest and can widen to every nest, so the pick has to open whichever
           nest the row came from — openSearchHit does that for both. */}
@@ -902,19 +977,169 @@ export default function App() {
   // Board columns are fixed-width and scroll sideways, so the 6xl shell forces
   // horizontal scrolling long before the viewport runs out. Widen the whole
   // shell (header, tabs, main, footer) on that page so they stay aligned.
-  const shellWidth = view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
+  // The document page is its own workspace — a sidebar and a document that
+  // manage their own width — so the shell goes edge to edge there.
+  const isDocPage = view.page === "document";
+  // The nest sidebar (nests → views → documents) wraps every page inside a
+  // nest — document, nest, board, graph, definitions, workflows, trace — so
+  // moving between them never drops the index. Reader mode keeps its own
+  // three-pane reader instead.
+  const inNest = "nestId" in view && nestIsReaderView !== true;
+  // The dashboard gets the same rail (every nest, none expanded) — it's the
+  // app's navigation, not the nest's.
+  // Docs (header button) is an app page too — same rail, full width.
+  const withSidebar = inNest || view.page === "dashboard" || view.page === "docs";
+  const showSidebar = withSidebar && (!docSidebarCollapsed || docSidebarDrawer);
+  const pageWidth =
+    view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
+  // Beside the sidebar the shell fills its flex column: `w-full`, and no
+  // `mx-auto` — auto margins on a flex-column item shrink it to its content.
+  // Without a sidebar the old centred page width applies.
+  const shellWidth = withSidebar ? "w-full max-w-none" : `${pageWidth} mx-auto`;
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className={withSidebar ? "flex min-h-screen items-stretch bg-background" : "min-h-screen bg-background"}>
+      {/* The sidebar is a full-height column beside the whole shell — header
+          included — with the brand at its top, so header and rail read as one
+          surface. It stays on the unreachable-nest screen too — that is exactly
+          where the user needs a way back. */}
+      {withSidebar && (
+        <>
+        {withSidebar && docSidebarDrawer && (
+          <button
+            type="button"
+            className="fixed inset-0 z-40 bg-black/30 md:hidden"
+            aria-label="Close sidebar"
+            onClick={() => setDocSidebarDrawer(false)}
+          />
+        )}
+        {showSidebar && (() => {
+          const cur = view;
+          const nestOf = (v: typeof cur) => ("nestId" in v ? v : null);
+          return (
+            <div
+              className={
+                docSidebarDrawer
+                  ? "fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] border-r bg-background shadow-xl md:static md:z-auto md:w-64 md:max-w-none md:shadow-none"
+                  : "hidden w-64 shrink-0 border-r md:block"
+              }
+            >
+              <div className="sticky top-0 h-screen max-h-screen">
+                <DocumentSidebar
+                  logoUrl={logoUrl ?? hootieIcon}
+                  nestId={nestOf(cur)?.nestId ?? null}
+                  nodeId={cur.page === "document" ? cur.nodeId : null}
+                  activeView={
+                    cur.page === "nest"
+                      ? cur.tab === "review"
+                        ? "review"
+                        : "overview"
+                      : nestPageForView(cur.page)?.id ?? null
+                  }
+                  onCollapse={() =>
+                    docSidebarDrawer
+                      ? setDocSidebarDrawer(false)
+                      : setDocSidebarCollapsed(true)
+                  }
+                  onOpenDashboard={() => setView({ page: "dashboard" })}
+                  dashboardTab={cur.page === "dashboard" ? visibleAppPage(cur.tab, { isAdmin }).id : null}
+                  onOpenDashboardTab={(tab) => setView({ page: "dashboard", tab })}
+                  onOpenNest={(t) =>
+                    setView({
+                      page: "nest",
+                      nestId: t.nestId,
+                      nestName: t.nestName,
+                      isOwner: t.isOwner,
+                      isAnonOwned: t.isAnonOwned,
+                      tab: "documents",
+                    })
+                  }
+                  onOpenView={(t, v) =>
+                    setView({
+                      page: v.page,
+                      nestId: t.nestId,
+                      nestName: t.nestName,
+                      isOwner: t.isOwner,
+                      isAnonOwned: t.isAnonOwned,
+                      readerMode,
+                      ...(v.page === "nest" && v.tab ? { tab: v.tab } : {}),
+                    } as View)
+                  }
+                  onConnect={() => setShowConnect(true)}
+                  onOpenDocument={(t) => {
+                    if (
+                      cur.page === "document" &&
+                      t.nestId === cur.nestId &&
+                      t.nodeId === cur.nodeId
+                    )
+                      return;
+                    setView({
+                      page: "document",
+                      nestId: t.nestId,
+                      nestName: t.nestName,
+                      nodeId: t.nodeId,
+                      isOwner: t.isOwner,
+                      isAnonOwned: t.isAnonOwned,
+                    });
+                  }}
+                  onNewDocument={
+                    !("nestId" in cur) || (cur.page === "document" && cur.nodeId === "new")
+                      ? undefined
+                      : (folder?: string) =>
+                          setView({
+                            page: "document",
+                            nestId: cur.nestId,
+                            nestName: cur.nestName,
+                            nodeId: "new",
+                            isOwner: cur.isOwner,
+                            isAnonOwned: cur.isAnonOwned,
+                            initialFolder: folder,
+                          })
+                  }
+                />
+              </div>
+            </div>
+          );
+        })()}
+        </>
+      )}
+      <div className={withSidebar ? "flex min-w-0 flex-1 flex-col" : ""}>
       {/* Header */}
-      <header className="bg-card">
+      {/* `contents`: a sticky child only sticks within its parent's box, and
+          <header> is exactly one row tall — so the row below must have the
+          page column as its containing block, not the header. */}
+      <header className="contents">
         {/* The divider sits under the top row, not under the tabs — the tab
             row reads as part of the page below it, not a second bar. */}
-        <div className="border-b border-border">
-        <div className={`${shellWidth} mx-auto px-4 py-3 flex items-center justify-between`}>
+        {/* Sticky: the breadcrumb and account row stay put while a page
+            scrolls, and every in-page sticky bar (document toolbar, artifact
+            toolbar, comment rails) offsets by this row's 4rem. */}
+        <div className="sticky top-0 z-40 border-b border-border bg-card">
+        <div className={`${shellWidth} h-16 px-4 flex items-center justify-between`}>
+          <div className="flex items-center gap-1">
+          {/* The sidebar toggle lives in the app header so it exists on every
+              page that has a sidebar: always on a phone (the rail is a drawer
+              there), on a desktop only once the rail has been hidden. */}
+          {withSidebar && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className={`h-8 w-8 shrink-0${showSidebar ? " md:hidden" : ""}`}
+              title="Show sidebar"
+              aria-label="Show sidebar"
+              data-testid="nest-sidebar-expand"
+              onClick={() => {
+                if (window.matchMedia("(max-width: 767px)").matches)
+                  setDocSidebarDrawer(true);
+                else setDocSidebarCollapsed(false);
+              }}
+            >
+              <PanelLeft className="h-4 w-4" />
+            </Button>
+          )}
           <button
             onClick={() => setView({ page: "dashboard" })}
-            className="flex items-center gap-2 hover:opacity-80"
+            className={`flex items-center gap-2 hover:opacity-80${showSidebar ? " md:hidden" : ""}`}
           >
             <img
               src={logoUrl ?? hootieIcon}
@@ -926,6 +1151,24 @@ export default function App() {
               Community
             </Badge>
           </button>
+          {withSidebar && crumbs.length > 0 && (
+            <nav aria-label="Breadcrumb" className="ml-1 flex min-w-0 items-center gap-1 text-sm" data-testid="header-breadcrumb">
+              {crumbs.map((c, i) => {
+                const last = i === crumbs.length - 1;
+                return (
+                  <span key={i} className="flex min-w-0 items-center gap-1">
+                    {i > 0 && <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" aria-hidden />}
+                    {last || !c.go ? (
+                      <span className={last ? "truncate text-base font-semibold" : "truncate text-muted-foreground"} aria-current={last ? "page" : undefined}>{c.label}</span>
+                    ) : (
+                      <button type="button" onClick={c.go} className="truncate text-muted-foreground hover:text-foreground">{c.label}</button>
+                    )}
+                  </span>
+                );
+              })}
+            </nav>
+          )}
+          </div>
 
           <div className="flex items-center gap-2">
             {/* The ONE search entry point, on every page the palette works on
@@ -987,14 +1230,8 @@ export default function App() {
               <UserMenu
                 me={adminStatus.me}
                 isAdmin={isAdmin}
-                onApiKeys={() => setView({ page: "api-keys" })}
-                onTeammates={() => setView({ page: "teammates" })}
-                onTeams={() => setView({ page: "teams" })}
-                onSettings={() => setView({ page: "settings" })}
-                onGuide={() => setView({ page: "guide" })}
                 onShortcuts={() => setShowShortcuts(true)}
-                onTrace={() => setView({ page: "trace" })}
-                onChangePassword={() => setShowChangePassword(true)}
+                onAccount={() => setView({ page: "dashboard", tab: "account" })}
                 onLogout={requestLogout}
               />
             ) : (
@@ -1018,8 +1255,16 @@ export default function App() {
             single bottom border, rather than two stacked bars.
             Nest context is read straight off the view: every page in
             NEST_VIEWS carries the same nestId/nestName/isOwner/isAnonOwned. */}
-        {isNestScoped(view) && (
-          <div className={`${shellWidth} mx-auto px-4 py-2 overflow-x-auto`}>
+        {/* Reader mode leaves a lone "Nest" tab once the authoring views are
+            filtered out — a one-tab strip is chrome, not navigation. readerMode
+            already implies a read-only caller (deriveNestCaps), so the
+            workflows tab can never join it. */}
+        {isNestScoped(view) && !readerMode && (
+           <div
+           className={`${shellWidth} px-4 py-2 overflow-x-auto flex items-center gap-2${
+             showSidebar ? " md:hidden" : ""
+           }`}
+         >
             <Tabs
               value={view.page}
               onValueChange={(page) =>
@@ -1030,15 +1275,16 @@ export default function App() {
                   isOwner: view.isOwner,
                   isAnonOwned: view.isAnonOwned,
                   readerMode,
+                  isArchived: view.isArchived,
                 } as View)
               }
             >
               <TabsList>
-                {NEST_VIEWS.filter(
-                  (v) =>
-                    v.page !== "workflows" ||
-                    (workflowPlaneEnabled && nestCanEdit === true),
-                )
+                {NEST_VIEWS.filter((v) => {
+                  // Each registry page carries its own gate (meta.visible).
+                  const meta = nestPageForView(v.page);
+                  return !meta?.visible || meta.visible({ isReadOnly: nestCanEdit === false, isReaderView: !!readerMode, canEditDocs: nestCanEdit === true, workflowPlaneEnabled });
+                })
                   // Public Docs Reader Mode presents a clean, read-only docs
                   // view — the board, ontology graph and definitions authoring
                   // surfaces are hidden so a public reader sees only the docs.
@@ -1049,7 +1295,7 @@ export default function App() {
                     <TabsTrigger key={v.page} value={v.page} className="gap-1.5">
                       <Icon className="h-3.5 w-3.5" />
                       {v.label}
-                      {"beta" in v && <BetaBadge />}
+                      {v.beta && <BetaBadge />}
                     </TabsTrigger>
                   );
                 })}
@@ -1067,7 +1313,9 @@ export default function App() {
           also drags fixed UI — toasts, dialogs — off the window, since their
           percentage boxes resolve against the wider block. `clip` (not
           `hidden`) keeps sticky headers inside pages working. */}
-      <main className={`${shellWidth} mx-auto px-4 py-4 min-w-0 overflow-x-clip`}>
+      <main
+        className={`${shellWidth} min-w-0 overflow-x-clip${withSidebar ? "" : " px-4 py-4"}`}
+      >
         {/* A ?nest link that didn't resolve. Falling through to the dashboard
             made a stale bookmark look like it had simply opened the app, with
             no way to tell "deleted" from "no access" from "bad link"
@@ -1104,42 +1352,36 @@ export default function App() {
           </div>
         </div>
         ) : (
-        <>
-        {view.page === "dashboard" && (
-          <Dashboard
-            onManageKeys={() => setView({ page: "api-keys" })}
-            onSelectNest={(id, name, isOwner, isAnonOwned) =>
-              setView({
-                page: "nest",
-                nestId: id,
-                nestName: name,
-                isOwner,
-                isAnonOwned,
-              })
-            }
-            onOpenReview={(nestId, nestName, nodeId) =>
-              setView({
-                page: "document",
-                nestId,
-                nestName,
-                nodeId,
-                isOwner: true,
-                isAnonOwned: true,
-              })
-            }
-          />
-        )}
+        <div className={withSidebar && !isDocPage ? "px-8 py-6" : ""}>
+        {/* One boundary for every lazily loaded page: the shell (header, rail)
+            stays put while a page chunk arrives. */}
+        <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+        {view.page === "dashboard" && (() => {
+          // A gated page (admin-only) reached by URL falls back to the default
+          // page — the server would refuse it anyway; this keeps the shell whole.
+          const Page = visibleAppPage(view.tab, { isAdmin }).Component;
+          return (
+            <AppNavProvider value={appNav}>
+              <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+                <Page />
+              </Suspense>
+            </AppNavProvider>
+          );
+        })()}
         {view.page === "nest" && (
           <NestView
             nestId={view.nestId}
             nestName={view.nestName}
             isOwner={view.isOwner}
             isAnonOwned={view.isAnonOwned}
+            isArchived={view.isArchived}
             initialSearch={view.initialSearch}
             initialTags={view.initialTags}
             initialFolder={view.initialFolder}
             initialTab={view.tab}
-            onManageKeys={() => setView({ page: "api-keys" })}
+            initialDoc={view.readerDoc ?? null}
+            onReaderDocChange={(nodeId) => setView({ ...view, readerDoc: nodeId ?? undefined })}
+            onManageKeys={() => setView({ page: "dashboard", tab: "api-keys" })}
             onTabChange={(tab) => setView({ ...view, tab })}
             onBack={leaveNest}
             onOpenDocument={(nodeId, opts) =>
@@ -1207,6 +1449,13 @@ export default function App() {
             });
           return (
             <DocumentEditor
+              sidebarCollapsed={docSidebarCollapsed}
+              onToggleSidebar={() => {
+                // Phone: open the drawer. Desktop: bring the column back.
+                if (window.matchMedia("(max-width: 767px)").matches)
+                  setDocSidebarDrawer(true);
+                else setDocSidebarCollapsed(false);
+              }}
               // Key by nest + node so React unmounts the editor when the
               // user hops to a different doc (wiki-link nav) or pivots
               // from an existing doc into a fresh "new" page via a
@@ -1312,97 +1561,38 @@ export default function App() {
             />
           );
         })()}
-        {view.page === "definitions" &&
-          !isViewBlockedInReaderMode(view.page, readerMode) && (
-          <DefinitionsPage
-            nestId={view.nestId}
-            nestName={view.nestName}
-            onBack={leaveNest}
-          />
-        )}
-        {view.page === "board" &&
-          !isViewBlockedInReaderMode(view.page, readerMode) && (
-          <MaturityBoard
-            nestId={view.nestId}
-            nestName={view.nestName}
-            isOwner={view.isOwner}
-            onBack={leaveNest}
-            onOpenDocument={(nodeId) =>
-              setView({
-                page: "document",
-                nestId: view.nestId,
-                nestName: view.nestName,
-                nodeId,
-                isOwner: view.isOwner,
-                isAnonOwned: view.isAnonOwned,
-              })
-            }
-          />
-        )}
-        {view.page === "api-keys" && (
-          <ApiKeysPage onBack={() => setView({ page: "dashboard" })} />
-        )}
-        {view.page === "teammates" && (
-          <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
-        )}
-        {view.page === "teams" && (
-          <TeamsPage onBack={() => setView({ page: "dashboard" })} />
-        )}
-
-        {view.page === "settings" && (
-          <SettingsPage
-            onBack={() => setView({ page: "dashboard" })}
-            settings={serverSettings}
-            onUpdate={updateServerSettings}
-          />
-        )}
-        {view.page === "trace" && (
-          <ActivityTracePage onBack={() => setView({ page: "dashboard" })} />
-        )}
+        {/* Nest views from the registry (Board, Graph, Definitions, Workflows):
+            one render for all, gated the same way the deep-link probe is. */}
+        {isNestScoped(view) && view.page !== "nest" && (() => {
+          const page = nestPageForView(view.page);
+          if (!page || isViewBlockedInReaderMode(view.page, readerMode)) return null;
+          const v = view;
+          const ctx = {
+            nestId: v.nestId,
+            nestName: v.nestName,
+            isOwner: v.isOwner,
+            isAnonOwned: v.isAnonOwned,
+            isArchived: v.isArchived,
+            openDocument: (nodeId: string) =>
+              setView({ page: "document", nestId: v.nestId, nestName: v.nestName, nodeId, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned }),
+            openNest: (opts?: { tags?: string[] }) =>
+              setView({ page: "nest", nestId: v.nestId, nestName: v.nestName, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, ...(opts?.tags ? { initialTags: opts.tags } : {}) }),
+            leaveNest,
+          };
+          return (
+            <NestPageProvider value={ctx}>
+              <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+                <page.Component />
+              </Suspense>
+            </NestPageProvider>
+          );
+        })()}
         {view.page === "docs" && (
-          <AgentDocsPage onBack={() => setView({ page: "dashboard" })} />
-        )}
-        {view.page === "ontology-graph" &&
-          !isViewBlockedInReaderMode(view.page, readerMode) && (
-          <OntologyGraphView
-            nestId={view.nestId}
-            nestName={view.nestName}
-            onOpenTag={(tag) =>
-              setView({
-                page: "nest",
-                nestId: view.nestId,
-                nestName: view.nestName,
-                isOwner: view.isOwner,
-                isAnonOwned: view.isAnonOwned,
-                initialTags: [tag],
-              })
-            }
-            onOpenDocument={(nodeId) =>
-              setView({
-                page: "document",
-                nestId: view.nestId,
-                nestName: view.nestName,
-                nodeId,
-                isOwner: view.isOwner,
-                isAnonOwned: view.isAnonOwned,
-              })
-            }
-            onBack={leaveNest}
-          />
+          <AgentDocsPage onOpenGuide={() => setView({ page: "dashboard", tab: "guide" })} />
         )}
 
-        {view.page === "guide" && (
-          <GuidePage onBack={() => setView({ page: "dashboard" })} />
-        )}
-
-        {view.page === "workflows" && (
-          <WorkflowsView
-            nestId={view.nestId}
-            nestName={view.nestName}
-            onBack={leaveNest}
-          />
-        )}
-        </>
+        </Suspense>
+        </div>
         )}
       </main>
 
@@ -1412,11 +1602,24 @@ export default function App() {
           the window at full scroll. The build version is a footnote; a write
           action reaching the edge of the screen is not. */}
       {view.page !== "document" && (
-        <footer className={`${shellWidth} mx-auto px-4 py-4 text-xs text-muted-foreground text-center`}>
+        <footer className={`${shellWidth} px-4 py-4 text-xs text-muted-foreground text-center`}>
           ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
         </footer>
       )}
 
+      </div>
+      {showConnect && "nestId" in view && (
+        <ConnectModal
+          isOpen
+          onClose={() => setShowConnect(false)}
+          nestId={view.nestId}
+          nestName={view.nestName}
+          onManageKeys={() => {
+            setShowConnect(false);
+            setView({ page: "dashboard", tab: "api-keys" });
+          }}
+        />
+      )}
       {showAdminLogin && (
         <AdminLoginModal
           existingAdmin={adminStatus?.admin?.email || null}
@@ -1431,28 +1634,16 @@ export default function App() {
 interface UserMenuProps {
   me: { email: string; name: string | null; is_admin: boolean };
   isAdmin: boolean;
-  onApiKeys: () => void;
-  onTeammates: () => void;
-  onTeams: () => void;
-  onSettings: () => void;
-  onGuide: () => void;
   onShortcuts: () => void;
-  onTrace: () => void;
-  onChangePassword: () => void;
+  onAccount: () => void;
   onLogout: () => void;
 }
 
 function UserMenu({
   me,
   isAdmin,
-  onApiKeys,
-  onTeammates,
-  onTeams,
-  onSettings,
-  onGuide,
   onShortcuts,
-  onTrace,
-  onChangePassword,
+  onAccount,
   onLogout,
 }: UserMenuProps) {
   const displayName = me.name?.trim() || me.email;
@@ -1499,52 +1690,19 @@ function UserMenu({
             </div>
           </div>
         </div>
-        {isAdmin && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={onTeammates} className="cursor-pointer">
-              <Users className="h-3.5 w-3.5 mr-2" />
-              Teammates
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={onSettings} className="cursor-pointer">
-              <Shield className="h-3.5 w-3.5 mr-2" />
-              Server settings
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={onTrace} className="cursor-pointer">
-              <ScrollText className="h-3.5 w-3.5 mr-2" />
-              Activity trace
-            </DropdownMenuItem>
-          </>
-        )}
+        {/* Pages live in the rail (grouped); the menu is identity only. */}
         <DropdownMenuSeparator />
         <DropdownMenuItem
-          onSelect={onApiKeys}
+          onSelect={onAccount}
           className="cursor-pointer"
-          data-testid="user-menu-api-keys"
+          data-testid="user-menu-account"
         >
-          <KeyRound className="h-3.5 w-3.5 mr-2" />
-          API keys
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={onTeams} className="cursor-pointer">
-          <Users className="h-3.5 w-3.5 mr-2" />
-          Teams
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={onGuide} className="cursor-pointer">
-          <BookOpen className="h-3.5 w-3.5 mr-2" />
-          How it works
+          <UserRound className="h-3.5 w-3.5 mr-2" />
+          Account
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onShortcuts} className="cursor-pointer">
           <Keyboard className="h-3.5 w-3.5 mr-2" />
           Keyboard shortcuts
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          onSelect={onChangePassword}
-          className="cursor-pointer"
-          data-testid="user-menu-change-password"
-        >
-          <KeyRound className="h-3.5 w-3.5 mr-2" />
-          Change password
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem
@@ -1560,204 +1718,3 @@ function UserMenu({
   );
 }
 
-// Self-service password change — usable by anyone signed in, including a user
-// who logged in with an admin-issued temporary password. Calls /auth/password,
-// which verifies the current password and invalidates other sessions.
-// Eye toggle pinned inside a password field to reveal/hide the value.
-function PasswordToggle({
-  shown,
-  onToggle,
-}: {
-  shown: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      tabIndex={-1}
-      aria-label={shown ? "Hide password" : "Show password"}
-      title={shown ? "Hide password" : "Show password"}
-      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-    >
-      {shown ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-    </button>
-  );
-}
-
-function ChangePasswordDialog({
-  open,
-  onClose,
-}: {
-  open: boolean;
-  onClose: () => void;
-}) {
-  const [current, setCurrent] = useState("");
-  const [next, setNext] = useState("");
-  const [confirm, setConfirm] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  // Reveal toggles per field so a user can verify what they typed.
-  const [showCurrent, setShowCurrent] = useState(false);
-  const [showNext, setShowNext] = useState(false);
-  const [showConfirm, setShowConfirm] = useState(false);
-
-  const reset = () => {
-    setCurrent("");
-    setNext("");
-    setConfirm("");
-    setError(null);
-    setShowCurrent(false);
-    setShowNext(false);
-    setShowConfirm(false);
-  };
-
-  const submit = async () => {
-    setError(null);
-    if (next.trim().length === 0) {
-      setError("New password cannot be empty or only whitespace.");
-      return;
-    }
-    if (next.length < 8) {
-      setError("New password must be at least 8 characters.");
-      return;
-    }
-    if (next !== confirm) {
-      setError("New passwords don't match.");
-      return;
-    }
-    if (next === current) {
-      setError("New password must be different from the current password.");
-      return;
-    }
-    setSaving(true);
-    try {
-      await changePassword(current, next);
-      toast.success("Password changed. Your other sessions were signed out.");
-      reset();
-      onClose();
-    } catch (e: any) {
-      setError(e?.message || "Could not change password.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        if (!o && !saving) {
-          reset();
-          onClose();
-        }
-      }}
-    >
-      <DialogContent className="sm:max-w-[400px]">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <KeyRound className="h-4 w-4 text-muted-foreground" />
-            Change password
-          </DialogTitle>
-          <DialogDescription>
-            If an admin gave you a temporary password, set your own here. This
-            signs out your other sessions.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-3 py-1">
-          <div className="space-y-1">
-            <label
-              htmlFor="cp-current"
-              className="block text-sm font-medium"
-            >
-              Current password
-            </label>
-            <div className="relative">
-              <Input
-                id="cp-current"
-                type={showCurrent ? "text" : "password"}
-                placeholder="Enter your current password"
-                value={current}
-                onChange={(e) => setCurrent(e.target.value)}
-                autoComplete="current-password"
-                className="pr-10"
-              />
-              <PasswordToggle
-                shown={showCurrent}
-                onToggle={() => setShowCurrent((s) => !s)}
-              />
-            </div>
-          </div>
-          <div className="space-y-1">
-            <label htmlFor="cp-next" className="block text-sm font-medium">
-              New password
-            </label>
-            <div className="relative">
-              <Input
-                id="cp-next"
-                type={showNext ? "text" : "password"}
-                placeholder="At least 8 characters"
-                value={next}
-                onChange={(e) => setNext(e.target.value)}
-                autoComplete="new-password"
-                className="pr-10"
-              />
-              <PasswordToggle
-                shown={showNext}
-                onToggle={() => setShowNext((s) => !s)}
-              />
-            </div>
-          </div>
-          <div className="space-y-1">
-            <label
-              htmlFor="cp-confirm"
-              className="block text-sm font-medium"
-            >
-              Confirm new password
-            </label>
-            <div className="relative">
-              <Input
-                id="cp-confirm"
-                type={showConfirm ? "text" : "password"}
-                placeholder="Re-enter your new password"
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-                autoComplete="new-password"
-                aria-invalid={confirm.length > 0 && confirm !== next}
-                className="pr-10"
-              />
-              <PasswordToggle
-                shown={showConfirm}
-                onToggle={() => setShowConfirm((s) => !s)}
-              />
-            </div>
-            {confirm.length > 0 && confirm !== next && (
-              <p className="text-sm text-destructive">
-                Passwords don't match.
-              </p>
-            )}
-          </div>
-          {error && <p className="text-sm text-destructive">{error}</p>}
-        </div>
-        <DialogFooter className="gap-2">
-          <Button
-            variant="outline"
-            onClick={() => {
-              reset();
-              onClose();
-            }}
-            disabled={saving}
-          >
-            Cancel
-          </Button>
-          <Button
-            onClick={submit}
-            disabled={saving || !current || !next || !confirm || next !== confirm}
-          >
-            {saving ? "Saving..." : "Change password"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}

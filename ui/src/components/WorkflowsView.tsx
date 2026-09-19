@@ -535,7 +535,7 @@ function EdgesPanel({ nestId }: { nestId: string }) {
       </div>
 
       {error && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive whitespace-pre-line">
           {error}
         </div>
       )}
@@ -1274,7 +1274,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
 
         {/* Trace / editor — right-hand pane, appears when a run is selected. */}
         {selected && (
-          <div className="rounded-lg border p-4 min-w-0 lg:sticky lg:top-4">
+          <div className="rounded-lg border p-4 min-w-0 lg:sticky lg:top-20">
             <RunTrace
               run={selected}
               children={runs.filter((r) => r.parent_run_id === selected.id)}
@@ -1853,7 +1853,7 @@ function CanvasPanel({ nestId }: { nestId: string }) {
           </Button>
         </div>
         {error && (
-          <div className="mx-3 mt-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <div className="mx-3 mt-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive whitespace-pre-line">
             {error}
           </div>
         )}
@@ -2982,6 +2982,7 @@ const CONNECTOR_EVENTS = [
   ["review_approved", "approved"],
   ["review_rejected", "rejected"],
   ["run_failed", "run failed"],
+  ["mention", "mentioned"],
 ] as const;
 
 function ConnectorsPanel({ nestId }: { nestId: string }) {

@@ -26,7 +26,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Input } from "@/components/ui/input";
 import {
   Loader2,
   UserPlus,
@@ -38,6 +37,7 @@ import {
 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { SearchableSelect } from "../SearchableSelect";
+import { PersonCombobox } from "../PersonCombobox";
 import type { Steward, StewardshipScope } from "./StewardList";
 
 export type StewardRole = "editor" | "reviewer" | "viewer";
@@ -237,13 +237,16 @@ export function StewardModal({
           {!isEdit && (
             <div className="space-y-2">
               <Label htmlFor="email">Steward Email</Label>
-              <Input
+              {/* Autocompletes people you already work with, and still takes
+                  an address that has no account yet — a steward can be invited
+                  by email before they sign up. */}
+              <PersonCombobox
                 id="email"
-                type="email"
-                placeholder="reviewer@acme.com"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={setEmail}
+                placeholder="reviewer@acme.com"
                 disabled={loading}
+                testId="steward-email-input"
               />
             </div>
           )}

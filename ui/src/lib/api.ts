@@ -14,6 +14,14 @@
 
 import { clearDraft } from "./draft";
 
+/**
+ * A nest's visibility tier. 'org' = every authenticated user of this
+ * deployment (a self-hosted install is one organization); 'public' = anyone,
+ * including anonymous callers. Nothing in the UI sets 'org' yet, but the API
+ * returns it, so every surface that renders visibility has to handle it.
+ */
+export type NestVisibility = "private" | "org" | "public";
+
 const API_BASE = "";
 const STALE_LOCAL_STORAGE_KEY = "cnst_token";
 
@@ -254,6 +262,10 @@ export interface AdminSettings {
   oidc_auto_provision: boolean;
   /** Tag new documents with the creator's directory department (dept:<slug>). */
   oidc_department_tagging: boolean;
+  /** Offer every registered account in the add-a-person pickers. Default OFF:
+   *  a server holding several unrelated customers would otherwise hand one
+   *  customer's staff another customer's email addresses. */
+  people_suggest_all_users: boolean;
   /** Server-computed readiness: enabled AND issuer+client id+secret present. */
   oidc_ready?: boolean;
   /** Write-only: string sets/replaces, null clears; never returned. */
@@ -399,6 +411,62 @@ export async function removeSuperAdmin(email: string) {
     `/admin/super-admins/${encodeURIComponent(email)}`,
     { method: "DELETE" },
   );
+}
+
+// ─── Community sites (official-site SSO connections) ───────────────────
+// Sites trusted for one-click SSO auto-login (GET /auth/sso). `secret` is
+// write-only — set it to change it, otherwise omit it; the server never
+// echoes the value back, only whether one is set.
+
+export interface CommunitySite {
+  id: string;
+  name: string;
+  url: string;
+  secret_set: boolean;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listCommunitySites() {
+  return request<{ community_sites: CommunitySite[] }>("/admin/community-sites");
+}
+
+export async function addCommunitySite(input: {
+  name: string;
+  url: string;
+  secret: string;
+  is_active?: boolean;
+}) {
+  return request<CommunitySite>("/admin/community-sites", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function updateCommunitySite(
+  id: string,
+  patch: Partial<{ name: string; url: string; secret: string; is_active: boolean }>,
+) {
+  return request<CommunitySite>(`/admin/community-sites/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function removeCommunitySite(id: string) {
+  return request<{ ok: boolean; id: string }>(
+    `/admin/community-sites/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
+// Logged-in user renames themselves; empty clears the name (email shows).
+export async function updateProfile(name: string) {
+  return request<{ ok: boolean; name: string | null }>("/auth/profile", {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
 }
 
 // Logged-in user changes their own password (e.g., after an admin reset
@@ -774,14 +842,14 @@ export async function deleteUnsyncedFolder(name: string) {
 
 export async function setNestVisibility(
   nestId: string,
-  visibility: "private" | "public",
+  visibility: NestVisibility,
   // Publishing (→ public) requires an explicit acknowledgement that the nest
   // becomes readable by anyone on the internet, outside your organization.
   // Without it the server returns 409 requires_acknowledgement. Going back to
   // private needs no acknowledgement, so this is optional.
   acknowledgePublic?: boolean,
 ) {
-  return request<{ visibility: "private" | "public" }>(
+  return request<{ visibility: NestVisibility }>(
     `/nests/${nestId}/visibility`,
     {
       method: "PATCH",
@@ -811,10 +879,12 @@ export async function getNest(nestId: string) {
     nest: {
       id: string;
       name: string;
-      visibility: "private" | "public";
+      visibility: NestVisibility;
       // Public Docs Reader Mode fields — surfaced straight off the SELECT *.
       reader_mode?: number;
       reader_home_node?: string | null;
+      // Set when the nest is archived — surfaced straight off the SELECT *.
+      archived_at?: string | null;
     };
     permission: string;
     // Caller's merged effective roles (collaborator + steward), nest-wide.
@@ -933,6 +1003,21 @@ export async function listFolderNodes(nestId: string, folder: string) {
   );
 }
 
+/**
+ * The whole nest, metadata only — no body, no `folder` scope. Same
+ * body-free/index-backed path as listFolderNodes (see its comment), just
+ * unscoped so every node in the nest comes back in one request.
+ *
+ * For consumers like the Board that bucket EVERY node by tag/folder/status
+ * and never read a body: using listNodes here would force the `content=1`
+ * vault crawl for bytes that are thrown away, on every load and refresh.
+ */
+export async function listNodesMeta(nestId: string, approvedOnly = false) {
+  return request<{ count: number; nodes: any[] }>(
+    `/nests/${nestId}/nodes${approvedOnly ? "?approved_only=1" : ""}`,
+  );
+}
+
 /** The nest-wide shape — one per nest, not per folder level. */
 export async function getNestCensus(nestId: string) {
   return request<{ census: NestCensus }>(`/nests/${nestId}/census`);
@@ -945,8 +1030,11 @@ export async function getCommentCounts(nestId: string) {
   }>(`/nests/${nestId}/comment-counts`);
 }
 
-export async function getNode(nestId: string, nodeId: string) {
-  return request<{ node: any }>(`/nests/${nestId}/nodes/${nodeId}`);
+/** approvedOnly serves the approved body, as a public reader would get it. */
+export async function getNode(nestId: string, nodeId: string, approvedOnly = false) {
+  return request<{ node: any }>(
+    `/nests/${nestId}/nodes/${nodeId}${approvedOnly ? "?approved_only=1" : ""}`,
+  );
 }
 
 export async function createNode(
@@ -981,6 +1069,8 @@ export async function updateNode(
     schedule?: string;
     /** Owner/admin only; `null` clears the flag back to tag/nest inheritance. */
     prime?: boolean | null;
+    /** Re-type the node ("Turn into…"). Same accepted set as create. */
+    type?: string;
   },
   baseVersion?: number,
 ) {
@@ -1704,6 +1794,11 @@ export async function listExternalEdits(nestId: string, refresh = false) {
   );
 }
 
+/** Pending external edits, as a number — the badge read. */
+export async function countExternalEdits(nestId: string) {
+  return request<{ total: number }>(`/nests/${nestId}/external-edits?count=1`);
+}
+
 export async function scanExternalEdits(nestId: string) {
   return request<{ scanned: number; staged: number }>(
     `/nests/${nestId}/external-edits/scan`,
@@ -1832,6 +1927,29 @@ export async function listCollaborators(nestId: string) {
       source: "owner" | "collaborator" | "team" | "steward" | "grant";
     }>;
   }>(`/nests/${nestId}/collaborators`);
+}
+
+/** The nest's people, for the `@mention` pickers. Read tier (see the route),
+ *  so a read-only reviewer's comment box can offer the roster too — unlike
+ *  listCollaborators, which needs write. */
+export async function listMentionablePeople(nestId: string) {
+  return request<{ people: Array<{ email: string; name: string | null }> }>(
+    `/nests/${nestId}/mentionable`,
+  );
+}
+
+/** People the caller already works with — what the add-a-person controls
+ *  autocomplete against. An address that appears nowhere here is still valid
+ *  to type: that's how you add someone who has no account yet. */
+export async function suggestPeople(q = "") {
+  const query = q.trim() ? `?q=${encodeURIComponent(q.trim())}` : "";
+  return request<{
+    people: Array<{
+      email: string;
+      name: string | null;
+      source: "nest" | "team" | "directory";
+    }>;
+  }>(`/people/suggest${query}`);
 }
 
 export async function addCollaborator(
@@ -2167,6 +2285,8 @@ export interface WatcherNotification {
   read_at: string | null;
   /** Document the row is about, when there is one — null for nest-level rows. */
   node_id?: string | null;
+  /** Resolved server-side; the inbox navigates on it without a nest list. */
+  nest_name: string;
 }
 
 export interface WorkPagination {
