@@ -34,6 +34,30 @@ export function resolveWikiTarget(
   );
 }
 
+export type WikiLinkAction =
+  | { kind: "navigate"; node: PreviewNode }
+  | { kind: "create"; title: string }
+  | { kind: "blocked"; title: string };
+
+/**
+ * Decide what a `[[Title]]` click should do. Deliberately takes no `id` —
+ * only ever consults the live node list — so a link never navigates on a
+ * stale, cached id (the WikiLink decoration's existence check can go stale
+ * between when it ran and when the link is clicked, e.g. the target was
+ * renamed or deleted). A target that doesn't resolve always falls through to
+ * "create" (or "blocked" for a non-authoring role) rather than a dead end
+ * (CU-wdqcq02g17).
+ */
+export function decideWikiLinkAction(
+  nodes: PreviewNode[],
+  target: string,
+  canAuthor: boolean,
+): WikiLinkAction {
+  const node = resolveWikiTarget(nodes, target);
+  if (node) return { kind: "navigate", node };
+  return canAuthor ? { kind: "create", title: target } : { kind: "blocked", title: target };
+}
+
 /** A short plain-text snippet of a markdown body for the preview card. */
 export function previewSnippet(content: string, maxLen = 280): string {
   const plain = (content ?? "")

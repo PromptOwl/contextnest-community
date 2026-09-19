@@ -8,7 +8,7 @@ import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
-import { resolveWikiTarget } from "../lib/wiki-preview";
+import { decideWikiLinkAction } from "../lib/wiki-preview";
 import { checkFolderPath } from "../lib/folder-path";
 import { createConsumeOnceFlag } from "../lib/consume-once-flag";
 import {
@@ -2345,29 +2345,26 @@ function ReviewDocumentModal({
   // Resolve `[[Title]]` clicks to a node id and jump straight to that
   // doc. Without this the wiki-link decoration renders but click does
   // nothing — `MarkdownEditor` only wires nav when `onWikiLinkClick`
-  // is provided. Cache miss (no id from the existence check) falls
-  // back to a fresh title→id lookup so links resolve even when the
-  // target was created after the reviewer opened the modal. Broken
-  // links are NOT routed to the create flow — the caller is acting
-  // as a reviewer here (read-only role for this surface), so silently
-  // dropping them into an authoring page would mislead them; instead
-  // we surface an inline note.
-  const handleWikiLinkClick = async (title: string, id: string | null) => {
+  // is provided. `id` (the decoration's cached existence check) is never
+  // trusted for navigation — it can go stale between when the decoration
+  // checked and when it's clicked — so every click re-resolves against the
+  // live node list via the shared decideWikiLinkAction (same rule as the
+  // editor), which also picks up a target created after the reviewer opened
+  // the modal. Broken links are NOT routed to the create flow (canAuthor:
+  // false) — the caller is acting as a reviewer here (read-only role for
+  // this surface), so silently dropping them into an authoring page would
+  // mislead them; instead we surface an inline note.
+  const handleWikiLinkClick = async (title: string, _id: string | null) => {
     setLinkError(null);
-    if (id) {
-      onOpenDocument(id);
-      return;
-    }
     try {
-      // Full list + shared id/title/slug resolver (same rule as the editor) so
-      // a [[nodes/slug]] or slug-form link resolves here too, not title-only.
       const { nodes } = await qc.fetchQuery(reads.nodes(nestId));
-      const exact = resolveWikiTarget(
+      const action = decideWikiLinkAction(
         nodes as Array<{ id: string; title: string }>,
         title,
+        false,
       );
-      if (exact) {
-        onOpenDocument(exact.id);
+      if (action.kind === "navigate") {
+        onOpenDocument(action.node.id);
         return;
       }
       setLinkError(
