@@ -26,7 +26,6 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { z } from "zod";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
@@ -34,10 +33,10 @@ import { config } from "../config.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
   attributeRequest,
-  clientToolField,
   connectionClient,
   type ClientMetadata,
 } from "../shared/client-metadata.js";
+import { toolShape } from "./tool-shape.js";
 import {
   resolveNestPermission,
   permissionLevel,
@@ -612,21 +611,7 @@ function createServerMcp(
   );
 
   for (const tool of SERVER_TOOL_DEFINITIONS) {
-    const props = (tool.inputSchema as any).properties || {};
-    const required = (tool.inputSchema as any).required || [];
-    const shape: Record<string, z.ZodTypeAny> = {};
-    for (const [key, def] of Object.entries(props) as Array<[string, any]>) {
-      let field: z.ZodTypeAny;
-      if (def.type === "string") field = z.string();
-      else if (def.type === "number") field = z.number();
-      else if (def.type === "array") field = z.array(z.string());
-      else field = z.any();
-      if (!required.includes(key)) field = field.optional();
-      shape[key] = field;
-    }
-    // Same §9.4 field the per-nest surface advertises.
-    Object.assign(shape, clientToolField);
-    server.tool(tool.name, tool.description, shape, async (args) => {
+    server.tool(tool.name, tool.description, toolShape(tool), async (args) => {
       // See mcp/routes.ts: resolved per call, because the handshake that
       // reports `clientInfo` completes inside the transport.
       // Its stash on the request is inert here too — see mcp/routes.ts.

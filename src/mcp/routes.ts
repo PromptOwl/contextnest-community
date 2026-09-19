@@ -10,11 +10,10 @@ import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
   attributeRequest,
-  clientToolField,
   connectionClient,
 } from "../shared/client-metadata.js";
+import { toolShape } from "./tool-shape.js";
 import { config } from "../config.js";
-import { z } from "zod";
 
 export const mcpRoutes = new Hono<AuthEnv>();
 
@@ -46,29 +45,7 @@ function createMcpServerForNest(
     : TOOL_DEFINITIONS;
 
   for (const tool of toolDefs) {
-    const props = (tool.inputSchema as any).properties || {};
-    const required = (tool.inputSchema as any).required || [];
-    const shape: Record<string, z.ZodTypeAny> = {};
-
-    for (const [key, def] of Object.entries(props) as Array<
-      [string, any]
-    >) {
-      let field: z.ZodTypeAny;
-      if (def.type === "string") field = z.string();
-      else if (def.type === "number") field = z.number();
-      else if (def.type === "array") field = z.array(z.string());
-      else field = z.any();
-
-      if (!required.includes(key)) field = field.optional();
-      shape[key] = field;
-    }
-    // Caller attribution rides on EVERY tool (spec §9.4) — declared here
-    // rather than in each tool's inputSchema, so no tool can be added without
-    // it and the divergence guard sees no new inline schema. Validated against
-    // the engine's own schema inside handleToolCall.
-    Object.assign(shape, clientToolField);
-
-    server.tool(tool.name, tool.description, shape, async (args) => {
+    server.tool(tool.name, tool.description, toolShape(tool), async (args) => {
       const engine = await engineCache.get(nestId);
       // Caller attribution (§9.4.2), resolved HERE rather than when the server
       // was built: the `initialize` handshake completes inside the transport,
