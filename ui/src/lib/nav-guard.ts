@@ -38,3 +38,26 @@ export function bypassNavGuard(run: () => void): void {
     bypassing = false;
   }
 }
+
+/**
+ * Push vs. replace for a history write, keyed by "which node this view is
+ * looking at" — null when it isn't looking at one (dashboard, a nest's own
+ * overview, …). App's URL-sync effect always used to replace, so a wiki-link
+ * hop from one document to another never earned its own history entry and
+ * the browser's Back button skipped straight past it to whatever real entry
+ * preceded the app session — sometimes the nest root, sometimes further back
+ * still, depending on what that entry happened to be (CU-wdqcq02g19).
+ *
+ * Push only when the key actually changes to a different node; every other
+ * write (same node again, or neither side is a node — a tab switch, leaving
+ * a doc for the nest overview, …) still just replaces, matching the app's
+ * existing one-entry-per-view default.
+ */
+export function historyWriteMode(
+  prevNodeKey: string | null,
+  nextNodeKey: string | null,
+): "push" | "replace" {
+  return prevNodeKey !== null && nextNodeKey !== null && nextNodeKey !== prevNodeKey
+    ? "push"
+    : "replace";
+}

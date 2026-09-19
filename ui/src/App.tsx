@@ -19,7 +19,7 @@ import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
-import { navigateGuarded } from "./lib/nav-guard";
+import { navigateGuarded, historyWriteMode } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
 import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
 import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
@@ -205,6 +205,20 @@ type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" 
 const isNestScoped = (view: View): view is NestScopedView =>
   NEST_VIEWS.some((v) => v.page === view.page);
 
+// Identity of the single node a view is reading — null for every view that
+// isn't "looking at one specific node" (dashboard, nest overview, board/
+// graph/…). The URL-sync effect below pushes a new history entry only when
+// this changes, so a wiki-link hop from one node to another earns its own
+// Back stop instead of overwriting the one entry the app was already
+// sitting on, which sent Back straight past every doc-to-doc hop to
+// whatever real (non-SPA) entry preceded the session (CU-wdqcq02g19).
+const nodeKey = (view: View): string | null => {
+  if (view.page === "document") return `${view.nestId}/${view.nodeId}`;
+  if (view.page === "nest" && view.readerMode && view.readerDoc)
+    return `${view.nestId}/${view.readerDoc}`;
+  return null;
+};
+
 // Runs the ?sso_error toast exactly once per page load (survives React
 // StrictMode's dev double-mount). Resets naturally on the next full navigation.
 let ssoErrorHandled = false;
@@ -237,6 +251,11 @@ export default function App() {
     (next: View) => navigateGuarded(() => setViewNow(next)),
     [],
   );
+  // The node key last written to history (see `nodeKey` below) — null both
+  // before the URL-sync effect has run at all and whenever the current view
+  // isn't looking at a node, so in either case the next node it lands on
+  // just replaces rather than pushing (nothing node-shaped to come "back" to).
+  const lastNodeKeyRef = useRef<string | null>(null);
   // Route views for product analytics. The SPA keeps one URL, so the view is
   // the event property; no-op unless the server configured a PostHog key.
   useEffect(() => {
@@ -587,10 +606,35 @@ export default function App() {
     const next = path + (qs ? `?${qs}` : "") + window.location.hash;
     const current =
       window.location.pathname + window.location.search + window.location.hash;
+    const key = nodeKey(view);
     if (next !== current) {
-      window.history.replaceState({}, "", next);
+      // `view` rides as the entry's state so the popstate handler below can
+      // restore it without re-deriving it from the URL.
+      if (historyWriteMode(lastNodeKeyRef.current, key) === "push") {
+        window.history.pushState(view, "", next);
+      } else {
+        window.history.replaceState(view, "", next);
+      }
     }
+    lastNodeKeyRef.current = key;
   }, [view, deepLinkProbe.status]);
+
+  // Browser Back/Forward past a pushed node entry: restore the view that was
+  // current when it was written, instead of leaving the address bar and the
+  // rendered page disagreeing. Entries without a `view`-shaped state (a fresh
+  // load, DocumentEditor's dirty-leave placeholder) are left for their own
+  // handler — DocumentEditor's popstate listener owns the leave-guard case.
+  useEffect(() => {
+    const onPopState = (e: PopStateEvent) => {
+      const state = e.state as View | null;
+      if (state && typeof state === "object" && "page" in state) {
+        lastNodeKeyRef.current = nodeKey(state);
+        setViewNow(state);
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
 
   // Reader mode is a property of the nest and the caller, not of how the user
   // navigated here. The deep-link probe seeds view.readerMode for the first
