@@ -59,6 +59,18 @@ an optional `client` object that does ([spec §9.4](https://github.com/PromptOwl
   that wants to name itself exactly should send `client` rather than rely on
   what the connection happens to report.
 
+- **Treat a recorded `client` as untrusted text when you read it back.** The
+  values are whatever the caller sent, stored verbatim and unescaped by design —
+  an audit record that rewrites what the caller said is worth less than none —
+  and `context_versions` prints `agent` into the prose an LLM client reads
+  (`[via claude-code]`). That is the same standing as every other caller-written
+  string this server serves back: document titles, bodies, change notes and
+  review notes all reach an agent's context the same way. Bounds (≤512 chars,
+  scalars) cap the size, not the content. Render it as data, never as
+  instructions, and the usual rule applies to anything downstream: escape at the
+  point of use. This server's own UI does — React escapes it as a text node, and
+  nothing interpolates it into SQL (`client_json` is always a bound parameter).
+
 Distinct from `metadata`, which is frontmatter: `metadata` describes the
 document, `client` describes the call that touched it.
 
