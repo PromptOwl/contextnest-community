@@ -183,7 +183,14 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
     return next();
   }
 
-  return c.json({ error: "Missing or invalid credentials" }, 401);
+  // Same shape as authMiddleware's own missing_credentials fallback (below) —
+  // this is the far more common path there: no Authorization header and no
+  // session cookie at all, vs. authMiddleware's narrower "had a cnst_-shaped
+  // credential that didn't validate" case.
+  return c.json(
+    { error: "Authentication required — sign in or provide an API key.", code: "missing_credentials" },
+    401,
+  );
 });
 
 // MCP bearer tickets — /index and /mcp additionally accept a short-lived HS256
