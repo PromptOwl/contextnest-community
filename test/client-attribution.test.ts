@@ -300,6 +300,102 @@ describe("an approval seals its own version, with its own client", () => {
     );
   });
 
+  /** A fresh draft under review, ready for a verdict. */
+  async function submitted(title: string): Promise<string> {
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/nodes`,
+      { title, content: "body", client: { agent: "author-agent" } },
+      author.apiKey,
+    );
+    const nodeId = created.data.node.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/nodes/${nodeId}/submit-review`,
+      { note: "please review" },
+      author.apiKey,
+    );
+    return nodeId;
+  }
+
+  /** The newest trace row for a path, with its attribution parsed. */
+  async function tracedClient(pathFragment: string) {
+    const { getDb } = await import("../src/db/client.js");
+    const row = (await getDb().get(
+      `SELECT client_json FROM api_events
+        WHERE path LIKE ? AND client_json IS NOT NULL
+        ORDER BY id DESC LIMIT 1`,
+      [`%${pathFragment}`],
+    )) as { client_json: string } | undefined;
+    return row ? JSON.parse(row.client_json) : undefined;
+  }
+
+  it("records a rejection's client on the trace, the only place it can land", async () => {
+    const nodeId = await submitted("Gets Rejected");
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/nodes/${nodeId}/reject`,
+      {
+        note: "not yet",
+        client: { agent: "rejecting-agent", session_id: "rej-1" },
+      },
+      reviewer.apiKey,
+    );
+    expect(status).toBe(200);
+    // A rejection commits no content, so it seals no version — the trace row
+    // is where "who rejected this, from what agent" has to be answerable.
+    expect(await tracedClient("/reject")).toMatchObject({
+      agent: "rejecting-agent",
+      session_id: "rej-1",
+    });
+  });
+
+  it("refuses an out-of-bounds client on reject, like every other route", async () => {
+    const nodeId = await submitted("Bad Client On Reject");
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/nodes/${nodeId}/reject`,
+      { note: "no", client: { sessionId: "s-1" } },
+      reviewer.apiKey,
+    );
+    expect(status).toBe(400);
+  });
+
+  it("carries the batch's client onto every version a bulk approval seals", async () => {
+    const ids = [await submitted("Bulk One"), await submitted("Bulk Two")];
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${govNest}/review-queue/bulk`,
+      {
+        nodeIds: ids,
+        action: "approve",
+        note: "batch ok",
+        client: { agent: "bulk-agent", session_id: "bulk-1" },
+      },
+      reviewer.apiKey,
+    );
+    expect(status).toBe(200);
+    expect(data.succeeded).toBe(2);
+    for (const nodeId of ids) {
+      const { data: v } = await jsonRequest(
+        app,
+        "GET",
+        `/nests/${govNest}/nodes/${nodeId}/versions`,
+        undefined,
+        apiKey,
+      );
+      expect(v.versions[0].client).toMatchObject({
+        agent: "bulk-agent",
+        session_id: "bulk-1",
+      });
+    }
+  });
+
   it("records the approver's client, and leaves the author's untouched", async () => {
     const created = await jsonRequest(
       app,

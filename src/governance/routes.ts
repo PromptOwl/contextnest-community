@@ -233,6 +233,7 @@ governanceRoutes.post("/review-queue/bulk", async (c) => {
     nodeIds?: string[];
     action?: "approve" | "reject";
     note?: string;
+    client?: unknown;
   }>();
   // Every route that turns a caller-supplied id into a storage read goes
   // through this chokepoint. The pending-review row lookup would refuse a
@@ -257,6 +258,9 @@ governanceRoutes.post("/review-queue/bulk", async (c) => {
 
   const userEmail = await getUserEmail(c);
   const baseUrl = requestBaseUrl(c.req.url);
+  // One batch is one call: validated once, recorded on the batch's trace row,
+  // and carried onto every version the approvals seal (§9.4).
+  const client = attributeRequest(c, body.client);
   const results: Array<{ nodeId: string; ok: boolean; error?: string }> = [];
   for (const nodeId of nodeIds) {
     try {
@@ -268,6 +272,7 @@ governanceRoutes.post("/review-queue/bulk", async (c) => {
           note: body.note,
           override: false,
           baseUrl,
+          client,
         });
       } else {
         await reviews.reject({
@@ -1068,13 +1073,19 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
 governanceNodeRoutes.post("/:nodeId{.+}/reject", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const body = await c.req.json<{ note?: string }>();
+  const body = await c.req.json<{ note?: string; client?: unknown }>();
 
   if (!body.note) {
     throw new ValidationError("Rejection note is required");
   }
 
   const userEmail = await getUserEmail(c);
+  // A rejection commits no content, so it seals no version to carry the block.
+  // The activity trace is the only place it can land — which is the reason to
+  // record it, not a reason to skip it: "who rejected this, from what agent"
+  // is exactly the question the trace exists to answer. Validated here too, so
+  // an out-of-bounds `client` is refused on this route like every other.
+  attributeRequest(c, body.client);
 
   try {
     const request = await reviews.reject({
