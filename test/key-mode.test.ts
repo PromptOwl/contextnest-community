@@ -29,6 +29,18 @@ describe("key mode (auth required)", () => {
     expect(data.error.toLowerCase()).toMatch(/credentials|api key/);
   });
 
+  it("rejects a bogus API key with a distinguishable message", async () => {
+    const { status, data } = await jsonRequest(
+      app,
+      "GET",
+      "/nests",
+      undefined,
+      "cnst_" + "0".repeat(64),
+    );
+    expect(status).toBe(401);
+    expect(data.code).toBe("invalid_key");
+  });
+
   it("accepts requests with valid API key", async () => {
     const { status, data } = await jsonRequest(
       app,
