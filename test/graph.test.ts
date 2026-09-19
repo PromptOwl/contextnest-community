@@ -343,3 +343,55 @@ describe("graph: steward gating and node dedup", () => {
     expect(data.stewardEdges).toHaveLength(0);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tag-based edges (CU-wdqcq02g16)
+//
+// A shared tag is a relationship, same as a [[wikilink]] — two docs with no
+// wikilink between them but a common tag should still produce a graph edge
+// and neither should read as an orphan.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("graph: tag-based edges", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("open");
+    owner = await registerUser(app, "owner@acme.com", "Owner");
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "TagEdges" }, owner.apiKey);
+    nestId = nest.data.nest.id;
+
+    // Delta and Epsilon share a tag but carry no [[wikilink]] to each other.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Delta", content: "No wikilinks here.", tags: ["market-z"] },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Epsilon", content: "No wikilinks here either.", tags: ["market-z"] },
+      owner.apiKey,
+    );
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("connects docs that share a tag, even with no [[wikilink]] between them", async () => {
+    const { data } = await jsonRequest(app, "GET", `/nests/${nestId}/graph`, undefined, owner.apiKey);
+    const edgeKeys = data.links.map((l: any) => `${l.source}->${l.target}`);
+    expect(edgeKeys).toContain("nodes/delta->nodes/epsilon");
+
+    // Tag-connected docs are not orphans.
+    const orphanIds = data.signals.orphans.map((n: any) => n.id);
+    expect(orphanIds).not.toContain("nodes/delta");
+    expect(orphanIds).not.toContain("nodes/epsilon");
+  });
+});

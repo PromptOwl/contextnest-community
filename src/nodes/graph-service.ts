@@ -1,8 +1,9 @@
 /**
  * Ontology graph assembly — a read-only view over data the nest already holds:
- * nodes, their resolved [[wikilink]] edges, the tags/categories they carry, and
- * the stewardship overlay (who owns which node / tag / nest). No new storage;
- * pure assembly so the UI can render the ontology and surface governance gaps.
+ * nodes, edges resolved from [[wikilinks]] and shared tags, the tags/categories
+ * they carry, and the stewardship overlay (who owns which node / tag / nest).
+ * No new storage; pure assembly so the UI can render the ontology and surface
+ * governance gaps.
  */
 
 import type { ContextNode } from "@promptowl/contextnest-engine";
@@ -57,7 +58,8 @@ export interface GraphTag {
  * is truncated for the hairball cap.
  */
 export interface GraphSignals {
-  /** Nodes with no inbound or outbound [[wikilink]]. */
+  /** Nodes with no inbound/outbound [[wikilink]] and no shared tag with
+   *  another node. */
   orphans: GraphNode[];
   /** Categories no tag-scope steward owns (a nest-wide steward does NOT
    *  count — that's the over-centralised case we want to surface, not hide). */
@@ -109,8 +111,10 @@ export function extractWikiTargets(body: string): string[] {
 
 /**
  * Build the ontology graph for a nest, gated to what the caller can read.
- * Links are de-duplicated, directed, and only kept when both ends resolve to an
+ * Links are de-duplicated and only kept when both ends resolve to an
  * accessible node (so the view never dangles into hidden/missing targets).
+ * [[wikilink]] edges are directed; tag-cooccurrence edges are inherently
+ * undirected and stored in one canonical (sorted) direction.
  */
 export async function buildNestGraph(
   nestId: string,
@@ -183,6 +187,23 @@ export async function buildNestGraph(
   const tags: GraphTag[] = [...tagCounts.entries()]
     .map(([name, count]) => ({ name, count }))
     .sort((a, b) => b.count - a.count);
+
+  // A shared tag is a relationship too, same as a [[wikilink]] — pair up every
+  // two docs that carry a tag in common and merge into the same edge set (so
+  // orphan detection and the rendered graph both see it). Reuses `seen` from
+  // the wikilink pass above so a pair already linked by wikilink doesn't get
+  // a redundant duplicate edge.
+  for (const docIds of tagToDocs.values()) {
+    const ids = [...docIds].sort();
+    for (let i = 0; i < ids.length; i++) {
+      for (let j = i + 1; j < ids.length; j++) {
+        const key = `${ids[i]}->${ids[j]}`;
+        if (seen.has(key) || seen.has(`${ids[j]}->${ids[i]}`)) continue;
+        seen.add(key);
+        allLinks.push({ source: ids[i], target: ids[j] });
+      }
+    }
+  }
 
   // ── Stewards (identity-masked for sub-write callers) ──
   // Skip the roster entirely for public/anon readers (even masked, the roster
