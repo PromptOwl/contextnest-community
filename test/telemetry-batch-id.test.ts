@@ -26,6 +26,7 @@ describe("flushTelemetry batch_id", () => {
     // Enable telemetry + supply a license key so flush actually POSTs.
     process.env.TELEMETRY_ENABLED = "true";
     process.env.PROMPTOWL_KEY = "pk_test";
+    delete process.env.POSTHOG_KEY;
     // First getDb() call inside the suite runs the schema migrations.
     getDb();
     fetchMock.mockReset();
@@ -83,5 +84,88 @@ describe("flushTelemetry batch_id", () => {
     const after = lastPayload().batch_id;
 
     expect(after).not.toBe(before);
+  });
+});
+
+describe("flushTelemetry → PostHog", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  const fetchMock = vi.fn();
+
+  beforeEach(() => {
+    env = setupTestEnv();
+    process.env.TELEMETRY_ENABLED = "true";
+    process.env.PROMPTOWL_KEY = "pk_test";
+    process.env.POSTHOG_KEY = "phc_test";
+    delete process.env.POSTHOG_HOST;
+    getDb();
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue({ ok: true, status: 200, statusText: "OK" });
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    env.cleanup();
+  });
+
+  async function insertEvent(name: string, data?: unknown): Promise<void> {
+    await getDb().run(
+      "INSERT INTO telemetry_events (event, data_json) VALUES (?, ?)",
+      [name, data ? JSON.stringify(data) : null],
+    );
+  }
+
+  function posthogBody(): { api_key: string; batch: Array<Record<string, any>> } {
+    const call = fetchMock.mock.calls.find((c) =>
+      String(c[0]).includes("posthog"),
+    );
+    if (!call) throw new Error("PostHog was not called");
+    return JSON.parse(call[1].body);
+  }
+
+  it("mirrors pending events and appends a heartbeat", async () => {
+    await insertEvent("nest.create", { nestId: "n1" });
+    await flushTelemetry();
+
+    const { api_key, batch } = posthogBody();
+    expect(api_key).toBe("phc_test");
+    expect(batch.map((e) => e.event)).toEqual(["nest.create", "server.heartbeat"]);
+    expect(batch[0].properties.nestId).toBe("n1");
+    expect(batch[1].properties).toMatchObject({ users: 0, nests: 0 });
+    // Same install, so both rows carry the same stable server id.
+    expect(batch[0].properties.server_id).toBe(batch[1].properties.server_id);
+  });
+
+  it("never sends email addresses, and keys the event on the user id", async () => {
+    await insertEvent("user.login", { userId: "u1", userEmail: "a@b.com" });
+    await flushTelemetry();
+
+    const [ev] = posthogBody().batch;
+    expect(ev.distinct_id).toBe("u1");
+    expect(JSON.stringify(ev)).not.toContain("a@b.com");
+  });
+
+  it("reuses the same event uuid across a retried batch so PostHog dedupes", async () => {
+    await insertEvent("node.create");
+    // PromptOwl 500 → events stay pending and the next flush resends them.
+    fetchMock.mockImplementation(async (url: string) =>
+      String(url).includes("posthog")
+        ? { ok: true, status: 200, statusText: "OK" }
+        : { ok: false, status: 500, statusText: "err" },
+    );
+    await flushTelemetry();
+    const first = posthogBody().batch[0].uuid;
+    fetchMock.mockClear();
+    await flushTelemetry();
+    expect(posthogBody().batch[0].uuid).toBe(first);
+  });
+
+  it("stays off when no project key is configured", async () => {
+    delete process.env.POSTHOG_KEY;
+    await insertEvent("nest.create");
+    await flushTelemetry();
+    expect(
+      fetchMock.mock.calls.some((c) => String(c[0]).includes("posthog")),
+    ).toBe(false);
   });
 });
