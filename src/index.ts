@@ -13,7 +13,11 @@ import {
   validateLicense,
   startLicenseSafetyPoll,
 } from "./auth/license.js";
-import { startTelemetryLoop, trackEvent } from "./telemetry/tracker.js";
+import {
+  startTelemetryLoop,
+  stopTelemetryLoop,
+  trackEvent,
+} from "./telemetry/tracker.js";
 import {
   loadAccessConfig,
   loadGrantedSuperAdmins,
@@ -206,7 +210,20 @@ ${config.AUTH_MODE === "key" ? `
 `);
   }
 
-  serve({ fetch: app.fetch, port: config.PORT });
+  const server = serve({ fetch: app.fetch, port: config.PORT });
+
+  // A container's PID 1 ignores any signal it has no handler for, so without
+  // this `docker stop` waits out its grace period and then SIGKILLs us.
+  // Pending telemetry is durable in SQLite and flushes on the next boot.
+  for (const sig of ["SIGTERM", "SIGINT"] as const) {
+    process.once(sig, () => {
+      console.log(`${sig} received — shutting down`);
+      stopTelemetryLoop();
+      server.close(() => process.exit(0));
+      // Don't let a lingering keep-alive connection hold the stop open.
+      setTimeout(() => process.exit(0), 5_000).unref();
+    });
+  }
 
   // Workflow-plane interval schedules → run rows (no-op unless the flag is on).
   startScheduler();

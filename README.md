@@ -37,6 +37,25 @@ npx @promptowl/contextnest-community
 
 The server listens on `http://localhost:3838` by default. Without a valid license the server still runs and serves reads, but write actions return `503` until you activate. See [CONFIGURATION.md](./CONFIGURATION.md) for all environment variables (port, auth mode, storage, telemetry).
 
+### Run with Docker
+
+```bash
+docker run -d --name contextnest \
+  -p 3838:3838 \
+  -v contextnest-data:/data \
+  -e PROMPTOWL_KEY=pk_... \
+  promptowl/contextnest-community
+```
+
+`/data` holds the SQLite DB, the document vault, and the `.env` the license
+setup page writes — keep it on a volume or nothing survives a container
+recreate. Everything in [CONFIGURATION.md](./CONFIGURATION.md) works as `-e`
+flags; the image defaults to `AUTH_MODE=key` and telemetry on.
+
+The server runs as the unprivileged `node` user (uid 1000). A named volume
+inherits that ownership automatically; if you bind-mount a host directory
+instead, `chown 1000:1000` it first or the server can't write.
+
 ## License setup
 
 ContextNest Community Edition requires a PromptOwl Community License key (`pk_...`). Getting and activating one:
