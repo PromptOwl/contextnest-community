@@ -1,0 +1,103 @@
+name: Publish Docker image
+
+# Pushes the server image to Docker Hub. Called by Release once changesets has
+# published to npm, so the image and the package always carry the same version;
+# also runnable by hand to re-push a version or after a Dockerfile-only fix.
+#
+# Requires two repo secrets:
+#   DOCKERHUB_USERNAME — the account/org the image lives under
+#   DOCKERHUB_TOKEN    — an access token with Read & Write (NOT the password)
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Image tag, e.g. 1.24.0. Blank = the version in package.json.
+        type: string
+        required: false
+      latest:
+        description: Also move the :latest tag.
+        type: boolean
+        default: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Image tag, e.g. 1.24.0. Blank = the version in package.json.
+        type: string
+        required: false
+      latest:
+        description: Also move the :latest tag.
+        type: boolean
+        default: true
+
+env:
+  IMAGE: promptowl/contextnest-community
+  # arm64 builds run under QEMU and are slow; add linux/arm64 here when that
+  # trade is worth it (better-sqlite3 does publish a linux-arm64 prebuild, so
+  # nothing has to compile from source).
+  PLATFORMS: linux/amd64
+
+concurrency: docker-publish-${{ inputs.version || github.ref }}
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check Docker Hub credentials
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$DOCKERHUB_USERNAME" ] || { echo "::error::missing secret DOCKERHUB_USERNAME"; exit 1; }
+          [ -n "$DOCKERHUB_TOKEN" ] || { echo "::error::missing secret DOCKERHUB_TOKEN"; exit 1; }
+
+      - name: Resolve version
+        id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_VERSION:-$(node -p "require('./package.json').version")}"
+          # Guard the tag: a stray space or slash here pushes garbage to a
+          # public registry, and the tag can't be deleted from CI afterwards.
+          case "$VERSION" in
+            *[!A-Za-z0-9._-]*|"") echo "::error::bad image tag '$VERSION'"; exit 1 ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing $IMAGE:$VERSION"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: ${{ env.PLATFORMS }}
+          build-args: VERSION=${{ steps.v.outputs.version }}
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.v.outputs.version }}
+            ${{ inputs.latest && format('{0}:latest', env.IMAGE) || '' }}
+
+      - name: Summary
+        run: |
+          echo "### Pushed \`$IMAGE:${{ steps.v.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "docker run -d -p 3838:3838 -v contextnest-data:/data -e PROMPTOWL_KEY=pk_... $IMAGE:${{ steps.v.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
