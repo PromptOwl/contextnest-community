@@ -82,6 +82,7 @@ import {
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
+import { documentActions } from "../lib/document-actions";
 import { toast } from "sonner";
 import {
   MarkdownEditor,
@@ -1681,6 +1682,211 @@ export function DocumentEditor({
   // A document that failed to load has nothing to edit. Rendering the editor
   // anyway gave a stale or mistyped link a blank, saveable document, which
   // quietly created a second document at that path.
+  // ── Header ⋮ menu + the dialogs it opens ───────────────────────────────
+  // Built here, above the early returns, because the artifact branch below
+  // returns a different page and still needs the same sharing actions
+  // (CU-wdqcq02gy8). Gating lives in document-actions.ts; this only maps a
+  // spec to its icon and handler.
+  const isOwnDeletionRequest =
+    deletionRequested &&
+    deletionRequest?.requestedBy?.toLowerCase() === currentEmail;
+  const buildMoreActions = (opts: { includeVersionHistory: boolean }): OverflowAction[] =>
+    documentActions({
+      isNew,
+      canShare,
+      isArchived,
+      canEditContent,
+      isLocked,
+      canRequestDeletion,
+      canDeleteDirectly,
+      deletionRequested,
+      isOwnDeletionRequest,
+      includeVersionHistory: opts.includeVersionHistory,
+    }).map((a) => {
+      const base = {
+        label: a.label,
+        testId: a.testId,
+        separatorBefore: a.separatorBefore,
+        destructive: a.destructive,
+      };
+      switch (a.key) {
+        case "history":
+          return { ...base, icon: History, onSelect: openVersions };
+        case "copy-link":
+          return {
+            ...base,
+            icon: LinkIcon,
+            onSelect: () => {
+              const url = `${window.location.origin}${nestPath(nestId)}?doc=${encodeURIComponent(nodeId)}`;
+              void copyTextWithToast(
+                url,
+                "Link copied — recipient needs access to this nest",
+              );
+            },
+          };
+        case "move":
+          return { ...base, icon: FolderInput, onSelect: () => setMoveTo(currentFolder) };
+        case "share-doc":
+          return { ...base, icon: Share2, onSelect: () => setShowShareDoc(true) };
+        case "publish":
+          return { ...base, icon: Share2, onSelect: () => setShowPublish(true) };
+        case "delete":
+        case "request-deletion":
+          return { ...base, icon: Trash2, onSelect: () => setShowDeletionModal(true) };
+        case "withdraw-deletion":
+          return {
+            ...base,
+            icon: X,
+            onSelect: async () => {
+              try {
+                await api.withdrawDeletionRequest(nestId, deletionRequest!.id);
+                setDeletionRequest(null);
+                toast.success("Deletion request withdrawn");
+              } catch (err) {
+                toast.error(err instanceof Error ? err.message : "Failed to withdraw request");
+              }
+            },
+          };
+      }
+    });
+
+  // Everything the ⋮ menu (and the top bar's Share) opens. Rendered on BOTH
+  // the markdown page and the artifact page — a menu item with no dialog
+  // behind it is a dead button.
+  const moreActionDialogs = (
+    <>
+      {!isNew && (
+        <ReasonDialog
+          open={showDeletionModal}
+          onOpenChange={setShowDeletionModal}
+          title={
+            canDeleteDirectly
+              ? `Delete "${title || nodeId}"?`
+              : `Request deletion of "${title || nodeId}"`
+          }
+          description={
+            canDeleteDirectly
+              ? "This removes the document, its version history, comments and annotations. It cannot be undone."
+              : "A nest admin reviews this and either deletes the document or rejects with a note. Nothing is removed yet."
+          }
+          // Deleting your own work needs no justification; asking for someone
+          // else's does.
+          label={canDeleteDirectly ? undefined : "Why should it be deleted?"}
+          placeholder="e.g. superseded by the new runbook"
+          confirmLabel={canDeleteDirectly ? "Delete document" : "Request deletion"}
+          destructive={canDeleteDirectly}
+          priorDecline={
+            !canDeleteDirectly && deletionRequest?.status === "declined"
+              ? deletionRequest
+              : null
+          }
+          onConfirm={
+            canDeleteDirectly ? handleDeleteDocument : handleRequestDeletion
+          }
+        />
+      )}
+
+      <Dialog
+        open={moveTo !== null}
+        onOpenChange={(open) => {
+          if (!open && !moving) setMoveTo(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-[440px]">
+          <DialogHeader>
+            <DialogTitle>Move to folder</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Move <strong>{title || nodeId}</strong> to another folder. Version
+            history, review state, and [[wiki links]] follow the document.
+          </p>
+          <Select
+            value={moveTo === "" ? "__root__" : (moveTo ?? "__root__")}
+            onValueChange={(v) => setMoveTo(v === "__root__" ? "" : v)}
+          >
+            <SelectTrigger data-testid="document-editor-move-select">
+              <SelectValue placeholder="Choose a folder" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__root__">Nest root</SelectItem>
+              {folderOptions.map((f) => (
+                <SelectItem key={f} value={f}>
+                  {prettyFolderPath(f)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <DialogFooter>
+            <Button variant="ghost" disabled={moving} onClick={() => setMoveTo(null)}>
+              Cancel
+            </Button>
+            <Button
+              disabled={moving || moveTo === null || moveTo === currentFolder}
+              data-testid="document-editor-move-confirm"
+              onClick={async () => {
+                if (moveTo === null) return;
+                setMoving(true);
+                try {
+                  const { node: moved } = await api.moveNode(nestId, nodeId, moveTo);
+                  toast.success(
+                    moveTo ? `Moved to ${moveTo}` : "Moved to nest root",
+                  );
+                  setMoveTo(null);
+                  // The move rewrites the node id, so this editor's id (and
+                  // every breadcrumb entry pointing at it) is stale — leave
+                  // for the list, where the document shows in its new folder.
+                  onSaved?.(moved.id);
+                } catch (err: any) {
+                  toast.error(err?.message || "Move failed");
+                } finally {
+                  setMoving(false);
+                }
+              }}
+            >
+              {moving ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <FolderInput className="h-4 w-4 mr-2" />
+              )}
+              Move
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {showShareDoc && (
+        <ShareTargetDialog
+          nestId={nestId}
+          targetType="document"
+          target={nodeId}
+          label={title || nodeId}
+          archived={isArchived}
+          onClose={() => setShowShareDoc(false)}
+        />
+      )}
+      {showShare && (
+        <ShareNestDialog
+          nestId={nestId}
+          nestName={nestName}
+          stewardshipEnabled={stewardshipEnabled}
+          onClose={() => setShowShare(false)}
+          onChanged={() => {
+            /* Sharing changes don't alter this document's content; nothing
+               to reload here. The nest list re-reads on next visit. */
+          }}
+        />
+      )}
+      {showPublish && (
+        <PublishDialog
+          nestId={nestId}
+          nodeId={nodeId}
+          nodeTitle={title || nodeId}
+          onClose={() => setShowPublish(false)}
+        />
+      )}
+    </>
+  );
+
   if (!isNew && !loading && loadFailed) {
     return (
       <div className="mt-14 md:mt-0" data-testid="document-not-found">
@@ -1711,21 +1917,28 @@ export function DocumentEditor({
   // so all hooks above still run unconditionally (rules-of-hooks).
   if (!isNew && !loading && nodeType === ARTIFACT_NODE_TYPE) {
     return (
-      <ArtifactViewer
-        nestId={nestId}
-        nodeId={nodeId}
-        title={title}
-        snapshotVersion={null}
-        currentEmail={currentEmail}
-        viewOnly={isViewOnly}
-        reviewerOnly={isReviewerOnly}
-        initialThreadId={initialThreadId}
-        onBack={onBack}
-        onTurnedInto={() => {
-          invalidateForPath(qc, `/nests/${nestId}/nodes/${nodeId}`);
-          void loadNode();
-        }}
-      />
+      <>
+        <ArtifactViewer
+          nestId={nestId}
+          nodeId={nodeId}
+          title={title}
+          snapshotVersion={null}
+          currentEmail={currentEmail}
+          viewOnly={isViewOnly}
+          reviewerOnly={isReviewerOnly}
+          initialThreadId={initialThreadId}
+          onBack={onBack}
+          onTurnedInto={() => {
+            invalidateForPath(qc, `/nests/${nestId}/nodes/${nodeId}`);
+            void loadNode();
+          }}
+          // Same Share button and ⋮ menu the markdown page has. The viewer
+          // keeps its own History button, so that entry is left out here.
+          onShareNest={canShare && !isArchived ? () => setShowShare(true) : undefined}
+          actions={buildMoreActions({ includeVersionHistory: false })}
+        />
+        {moreActionDialogs}
+      </>
     );
   }
 
@@ -2054,104 +2267,13 @@ export function DocumentEditor({
             </DropdownMenu>
           )}
           {/* Secondary actions collapse into one ⋮ menu to keep the header
-              uncluttered. Grouped by use: version history, then sharing
-              (copy link, share nest). Compare stays
-              a visible button because it carries active "Comparing vN" state
-              the flat menu can't surface. */}
+              uncluttered. The list itself comes from document-actions.ts —
+              shared with the artifact viewer so both pages offer the same
+              sharing/publishing set. Compare stays a visible button because
+              it carries active "Comparing vN" state the flat menu can't
+              surface. */}
           {(() => {
-            const moreActions: OverflowAction[] = [];
-            if (!isNew)
-              moreActions.push({
-                label: "Version history",
-                icon: History,
-                testId: "document-editor-history",
-                onSelect: openVersions,
-              });
-            if (!isNew)
-              moreActions.push({
-                label: "Copy link",
-                icon: LinkIcon,
-                separatorBefore: true,
-                testId: "document-editor-copy-link",
-                onSelect: () => {
-                  const url = `${window.location.origin}${nestPath(nestId)}?doc=${encodeURIComponent(nodeId)}`;
-                  void copyTextWithToast(
-                    url,
-                    "Link copied — recipient needs access to this nest",
-                  );
-                },
-              });
-            if (!isNew && canEditContent && !isLocked)
-              moreActions.push({
-                label: "Move to folder",
-                icon: FolderInput,
-                testId: "document-editor-move",
-                onSelect: () => setMoveTo(currentFolder),
-              });
-            // Share THIS doc first — it's the narrower, more common ask.
-            // Meaningless on an unsaved doc: there's no node id to grant on.
-            // Sharing the whole nest is the top bar's Share button; only the
-            // narrower per-document grant lives here.
-            if (canShare && !isNew && !isArchived)
-              moreActions.push({
-                label: "Share this document",
-                icon: Share2,
-                separatorBefore: true,
-                testId: "document-editor-share-doc",
-                onSelect: () => setShowShareDoc(true),
-              });
-            // Publishing hosts THIS document on the open web, so it sits with
-            // sharing rather than with the editing actions above.
-            if (canShare && !isNew && !isArchived)
-              moreActions.push({
-                label: "Publish",
-                icon: Share2,
-                testId: "document-editor-publish",
-                onSelect: () => setShowPublish(true),
-              });
-            // Below admin only: this opens the REQUEST dialog, not a delete.
-            // Admins delete from the nest list — this page has never carried a
-            // real delete. Hidden once a flag is already pending.
-            // One Delete entry: the author (and the admin/owner tier) deletes
-            // outright, everyone else raises a request. Hidden below that tier
-            // once a flag is already open.
-            const showDelete =
-              !isNew && canRequestDeletion && (canDeleteDirectly || !deletionRequested);
-            if (showDelete)
-              moreActions.push({
-                label: "Delete",
-                icon: Trash2,
-                separatorBefore: true,
-                destructive: canDeleteDirectly,
-                testId: canDeleteDirectly
-                  ? "document-editor-delete"
-                  : "document-editor-request-deletion",
-                onSelect: () => setShowDeletionModal(true),
-              });
-            // Withdraw: only shown to the original requester while the request
-            // is still pending — lets them undo an accidental flag without
-            // waiting for an admin to decline it.
-            const isOwnDeletionRequest =
-              deletionRequested &&
-              deletionRequest?.requestedBy?.toLowerCase() === currentEmail;
-            if (!isNew && isOwnDeletionRequest)
-              moreActions.push({
-                label: "Withdraw deletion request",
-                icon: X,
-                // Withdraw belongs with Delete in the destructive group, so it
-                // only opens that group when Delete isn't there to open it.
-                separatorBefore: !showDelete,
-                testId: "document-editor-withdraw-deletion",
-                onSelect: async () => {
-                  try {
-                    await api.withdrawDeletionRequest(nestId, deletionRequest!.id);
-                    setDeletionRequest(null);
-                    toast.success("Deletion request withdrawn");
-                  } catch (err) {
-                    toast.error(err instanceof Error ? err.message : "Failed to withdraw request");
-                  }
-                },
-              });
+            const moreActions = buildMoreActions({ includeVersionHistory: true });
             return moreActions.length ? (
               <OverflowMenu
                 actions={moreActions}
@@ -3568,36 +3690,6 @@ export function DocumentEditor({
         />
       )}
 
-      {!isNew && (
-        <ReasonDialog
-          open={showDeletionModal}
-          onOpenChange={setShowDeletionModal}
-          title={
-            canDeleteDirectly
-              ? `Delete "${title || nodeId}"?`
-              : `Request deletion of "${title || nodeId}"`
-          }
-          description={
-            canDeleteDirectly
-              ? "This removes the document, its version history, comments and annotations. It cannot be undone."
-              : "A nest admin reviews this and either deletes the document or rejects with a note. Nothing is removed yet."
-          }
-          // Deleting your own work needs no justification; asking for someone
-          // else's does.
-          label={canDeleteDirectly ? undefined : "Why should it be deleted?"}
-          placeholder="e.g. superseded by the new runbook"
-          confirmLabel={canDeleteDirectly ? "Delete document" : "Request deletion"}
-          destructive={canDeleteDirectly}
-          priorDecline={
-            !canDeleteDirectly && deletionRequest?.status === "declined"
-              ? deletionRequest
-              : null
-          }
-          onConfirm={
-            canDeleteDirectly ? handleDeleteDocument : handleRequestDeletion
-          }
-        />
-      )}
 
       <DocumentPickerModal
         isOpen={showDocPicker}
@@ -3659,104 +3751,8 @@ export function DocumentEditor({
         </DialogContent>
       </Dialog>
 
-      <Dialog
-        open={moveTo !== null}
-        onOpenChange={(open) => {
-          if (!open && !moving) setMoveTo(null);
-        }}
-      >
-        <DialogContent className="sm:max-w-[440px]">
-          <DialogHeader>
-            <DialogTitle>Move to folder</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground">
-            Move <strong>{title || nodeId}</strong> to another folder. Version
-            history, review state, and [[wiki links]] follow the document.
-          </p>
-          <Select
-            value={moveTo === "" ? "__root__" : (moveTo ?? "__root__")}
-            onValueChange={(v) => setMoveTo(v === "__root__" ? "" : v)}
-          >
-            <SelectTrigger data-testid="document-editor-move-select">
-              <SelectValue placeholder="Choose a folder" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__root__">Nest root</SelectItem>
-              {folderOptions.map((f) => (
-                <SelectItem key={f} value={f}>
-                  {prettyFolderPath(f)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <DialogFooter>
-            <Button variant="ghost" disabled={moving} onClick={() => setMoveTo(null)}>
-              Cancel
-            </Button>
-            <Button
-              disabled={moving || moveTo === null || moveTo === currentFolder}
-              data-testid="document-editor-move-confirm"
-              onClick={async () => {
-                if (moveTo === null) return;
-                setMoving(true);
-                try {
-                  const { node: moved } = await api.moveNode(nestId, nodeId, moveTo);
-                  toast.success(
-                    moveTo ? `Moved to ${moveTo}` : "Moved to nest root",
-                  );
-                  setMoveTo(null);
-                  // The move rewrites the node id, so this editor's id (and
-                  // every breadcrumb entry pointing at it) is stale — leave
-                  // for the list, where the document shows in its new folder.
-                  onSaved?.(moved.id);
-                } catch (err: any) {
-                  toast.error(err?.message || "Move failed");
-                } finally {
-                  setMoving(false);
-                }
-              }}
-            >
-              {moving ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <FolderInput className="h-4 w-4 mr-2" />
-              )}
-              Move
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
-      {showShareDoc && (
-        <ShareTargetDialog
-          nestId={nestId}
-          targetType="document"
-          target={nodeId}
-          label={title || nodeId}
-          archived={isArchived}
-          onClose={() => setShowShareDoc(false)}
-        />
-      )}
-      {showShare && (
-        <ShareNestDialog
-          nestId={nestId}
-          nestName={nestName}
-          stewardshipEnabled={stewardshipEnabled}
-          onClose={() => setShowShare(false)}
-          onChanged={() => {
-            /* Sharing changes don't alter this document's content; nothing
-               to reload here. The nest list re-reads on next visit. */
-          }}
-        />
-      )}
-      {showPublish && (
-        <PublishDialog
-          nestId={nestId}
-          nodeId={nodeId}
-          nodeTitle={title || nodeId}
-          onClose={() => setShowPublish(false)}
-        />
-      )}
+      {moreActionDialogs}
       {leaveIntent && (
         <Dialog open onOpenChange={() => setLeaveIntent(null)}>
           <DialogContent className="sm:max-w-[460px]">
