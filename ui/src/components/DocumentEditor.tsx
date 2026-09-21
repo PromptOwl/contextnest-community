@@ -134,7 +134,7 @@ import { copyTextWithToast } from "../lib/clipboard";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
 import { extractHeadings } from "../lib/toc";
 import { validateSchedule } from "../lib/schedule-validation";
-import { resolveWikiTarget, previewSnippet } from "../lib/wiki-preview";
+import { resolveWikiTarget, previewSnippet, decideWikiLinkAction } from "../lib/wiki-preview";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import { useAuth } from "../auth/AuthContext";
 import type { BreadcrumbEntry } from "../App";
@@ -1642,38 +1642,36 @@ export function DocumentEditor({
     editorRef.current?.insertWikiLink(node.id, node.title);
   };
 
-  const handleWikiLinkClick = async (linkTitle: string, id: string | null) => {
-    // Cached hit → leave-confirm then nav.
-    if (id) {
-      confirmLeave(
-        `open "${linkTitle}"`,
-        () => onNavigateDocument?.(nestId, id, title),
-      );
-      return;
-    }
-    // Resolve target as id, title, or slug.
+  // `id` (the WikiLink decoration's cached existence check) is deliberately
+  // NOT trusted here — it can go stale between when the decoration checked
+  // and when the link is clicked (the target renamed/deleted meanwhile), and
+  // a stale id blind-navigated straight to a 404'd "document not found" page
+  // with no way back to the create flow. Always re-resolve against the live
+  // node list and let decideWikiLinkAction decide navigate/create/blocked —
+  // a broken link then always falls through to create (or a permission
+  // message) instead of a dead end (CU-wdqcq02g17).
+  const handleWikiLinkClick = async (linkTitle: string, _id: string | null) => {
     try {
       const { nodes } = await qc.fetchQuery(reads.nodes(nestId));
       const list = nodes as Array<{ id: string; title: string }>;
-      const exact = resolveWikiTarget(list, linkTitle);
-      if (exact) {
+      const canAuthor = !isReviewerOnly && !isViewOnly;
+      const action = decideWikiLinkAction(list, linkTitle, canAuthor);
+      if (action.kind === "navigate") {
         confirmLeave(
-          `open "${exact.title}"`,
-          () => onNavigateDocument?.(nestId, exact.id, title),
+          `open "${action.node.title}"`,
+          () => onNavigateDocument?.(nestId, action.node.id, title),
         );
-        return;
-      }
-      // Block create for reviewer/viewer/public-reader (no authoring).
-      if (isReviewerOnly || isViewOnly) {
+      } else if (action.kind === "create") {
+        confirmLeave(
+          `create "${action.title}"`,
+          () => onCreateDocument?.(nestId, action.title),
+        );
+      } else {
+        // Block create for reviewer/viewer/public-reader (no authoring).
         setError(
-          `"${linkTitle}" doesn't exist in this nest. You only have view access — ask someone with edit rights to add it.`,
+          `"${action.title}" doesn't exist in this nest. You only have view access — ask someone with edit rights to add it.`,
         );
-        return;
       }
-      confirmLeave(
-        `create "${linkTitle}"`,
-        () => onCreateDocument?.(nestId, linkTitle),
-      );
     } catch {
       // Search failed; don't auto-create on top of error.
     }
