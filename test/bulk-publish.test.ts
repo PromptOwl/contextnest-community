@@ -107,4 +107,26 @@ describe("bulk publish — partial-batch reporting", () => {
     expect(doc.data.node.content).toContain("original");
     expect(doc.data.node.content).not.toContain("REPLACED");
   });
+
+  it("keeps a pushed document's folder instead of filing it flat at the nest root", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    const nestId = await makeNest(app, admin.apiKey);
+
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publish`,
+      {
+        documents: [
+          { title: "Nested Doc", content: "# nested", folder: "subteam" },
+        ],
+      },
+      admin.apiKey,
+    );
+
+    expect(res.status).toBe(201);
+    expect(res.data.published).toBe(1);
+    expect(res.data.node_ids).toEqual(["nodes/subteam/nested-doc"]);
+  });
 });
