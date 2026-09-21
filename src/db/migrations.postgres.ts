@@ -76,6 +76,7 @@ const HISTORICAL_MIGRATIONS = [
   "041_nest_visibility_org",
   "042_community_sites",
   "043_node_suggestion_details",
+  "044_client_attribution",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -259,9 +260,14 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
         CHECK(status IN ('draft', 'pending_review', 'approved', 'published', 'rejected')),
       change_note TEXT,
       tags_json TEXT,
+      -- Caller attribution (spec §9.4, migration 044): which agent/session made
+      -- the write that sealed this version. Annotation only — never hashed,
+      -- never authorized from, NULL when the call carried none.
+      client_json TEXT,
       created_at TEXT NOT NULL DEFAULT ${NOW},
       UNIQUE(nest_id, node_id, version)
     );
+    ALTER TABLE node_versions ADD COLUMN IF NOT EXISTS client_json TEXT;
     CREATE INDEX IF NOT EXISTS idx_versions_node ON node_versions(nest_id, node_id);
     -- Migration 034 (SQLite): the /me/drafts lookup — author + status.
     CREATE INDEX IF NOT EXISTS idx_versions_author_status
@@ -627,8 +633,10 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       user_id TEXT,
       user_email TEXT,
       status INTEGER,              -- HTTP status (api + mcp rows)
-      duration_ms INTEGER
+      duration_ms INTEGER,
+      client_json TEXT             -- caller attribution (§9.4, migration 044)
     );
+    ALTER TABLE api_events ADD COLUMN IF NOT EXISTS client_json TEXT;
     CREATE INDEX IF NOT EXISTS idx_api_events_ts ON api_events(ts);
     -- (nest_id, id) composite (migration 026): the per-nest trace view
     -- (GET /nests/:id/trace) filters by nest_id and pages newest-first by id.

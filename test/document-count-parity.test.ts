@@ -11,6 +11,8 @@
  * one that was already right (`/overview`).
  */
 import { describe, it, expect, beforeAll } from "vitest";
+import { join } from "path";
+import { writeFileSync } from "fs";
 import { setupTestEnv, createTestApp, jsonRequest } from "./helpers.js";
 
 let app: any;
@@ -163,13 +165,8 @@ describe("document counts on an imported nest", () => {
   let importedNest: string;
 
   beforeAll(async () => {
-    setupTestEnv();
+    const env = setupTestEnv();
     app = await createTestApp("open");
-    // An import takes each node id straight from the file path — no slugify,
-    // no lowercasing (flat-storage's crawl: `ids.push(rel.replace(/\.md$/, ""))`),
-    // unlike REST/MCP creation which slugifies the title. So this is how a
-    // document a person wrote can end up with an id ending in the derived
-    // suffix in another case.
     const created = await jsonRequest(app, "POST", "/nests/import", {
       name: "Imported",
       files: [
@@ -177,16 +174,30 @@ describe("document counts on an imported nest", () => {
           path: "Notes.md",
           content: "---\ntitle: Notes\ntype: document\nstatus: published\n---\n\nbody\n",
         },
-        {
-          path: "Deck--Annotations.md",
-          content:
-            "---\ntitle: Deck Annotations\ntype: document\nstatus: published\n---\n\nbody\n",
-        },
       ],
     });
     expect(created.status).toBe(201);
     importedNest = created.data.nest.id;
     nestId = importedNest;
+
+    // The mixed-case id is written STRAIGHT INTO the vault, then REGISTERED.
+    // Import used to preserve an uploaded path verbatim, but the engine
+    // slugifies `files[]` paths now (PromptOwl/ContextNest#101, import
+    // hygiene), which lowercases the id and collapses the `--` — destroying
+    // the very case this test exists for. Registration is the other half of
+    // import and takes its ids from disk discovery instead (flat-storage's
+    // crawl: `ids.push(rel.replace(/\.md$/, ""))`), so the case survives. That
+    // is also how this really happens: a folder sync, a CLI copy, or an
+    // out-of-band write, picked up by the registration pass.
+    writeFileSync(
+      join(env.dataDir, "nests", importedNest, "Deck--Annotations.md"),
+      "---\ntitle: Deck Annotations\ntype: document\nstatus: published\n---\n\nbody\n",
+    );
+    const registered = await jsonRequest(app, "POST", "/nests/import", {
+      nestId: importedNest,
+      finalize: true,
+    });
+    expect(registered.status).toBe(200);
   });
 
   it("counts a real document whose id ends in the suffix in another case", async () => {

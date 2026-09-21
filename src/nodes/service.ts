@@ -29,6 +29,7 @@ import {
   VaultBusyError,
   isVaultLockTimeout,
 } from "../shared/errors.js";
+import type { ClientMetadata } from "../shared/client-metadata.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
 import { syncNodeTags, removeNodeFromTagIndex } from "../governance/tag-index-service.js";
@@ -1289,6 +1290,9 @@ export interface CreateNodeInput {
    *  the nest's prime tags; `false` exempts this doc from an otherwise-prime
    *  tag. */
   prime?: boolean;
+  /** Caller attribution recorded on the version this create seals (§9.4).
+   *  Optional everywhere — an unattributed write is a valid write. */
+  client?: ClientMetadata;
 }
 
 export interface UpdateNodePatch {
@@ -1302,6 +1306,8 @@ export interface UpdateNodePatch {
   schedule?: string;
   /** Document-scope prime flag. `null` clears it back to tag/nest inheritance. */
   prime?: boolean | null;
+  /** See CreateNodeInput.client. */
+  client?: ClientMetadata;
   /** Re-type the node (the editor's "Convert to…"). Same accepted set and
    *  feature flags as create; leaving a runnable type drops its schedule. */
   type?: string;
@@ -1655,6 +1661,7 @@ async function createNodeOnce(
         status: "published",
         tags,
         changeNote: publishNote,
+        client: input.client,
       });
       await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
     } else {
@@ -1669,6 +1676,7 @@ async function createNodeOnce(
         author: userEmail,
         status: "draft",
         tags,
+        client: input.client,
       });
     }
 
@@ -1806,7 +1814,10 @@ export async function alignOnDiskStatus(
 
 export async function registerImportedDocuments(
   nestId: string,
-  userEmail: string
+  userEmail: string,
+  /** Caller attribution for the import (§9.4) — recorded on every version row
+   *  this registration seeds, so a folder an agent imported says so. */
+  client?: ClientMetadata,
 ): Promise<number> {
   const startedAt = Date.now();
   const tracked = await versions.getTrackedNodeIds(nestId);
@@ -1854,6 +1865,7 @@ export async function registerImportedDocuments(
           ? "Imported from existing folder"
           : "Imported from existing folder — could not be published, kept as a draft",
       tags,
+      client,
     });
     if (d.status === "published") {
       await versions.setApprovedVersion(nestId, d.id, d.version, userEmail);
@@ -2097,6 +2109,7 @@ export async function updateNode(
           status: "draft",
           tags: currentTags,
           changeNote: patch.changeNote,
+          client: patch.client,
         });
         // Author revised their own pending submission: move the open review
         // onto this fresh version so the steward approves the edited content.
@@ -2140,6 +2153,7 @@ export async function updateNode(
           status: "published",
           tags: currentTags,
           changeNote: publishNote,
+          client: patch.client,
         });
         await versions.setApprovedVersion(
           nestId,

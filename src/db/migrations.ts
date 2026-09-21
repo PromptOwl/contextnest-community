@@ -1540,6 +1540,29 @@ export function runMigrations(db: Database.Database): void {
       recordMigration("043_node_suggestion_details");
     })();
   }
+
+  // 044: caller attribution (spec §9.4). One nullable JSON column per audit
+  //   surface — the version a write sealed, and the activity trace every call
+  //   lands on. Nullable and unindexed on purpose: `client` is an annotation
+  //   nobody queries by, and NULL is the whole "not attributed" story, so every
+  //   existing row is already correct. Never part of any hash.
+  //
+  //   Numbered 044, not 040: 040 is reserved for 040_push_confirmation, in
+  //   flight on another branch (see the note on 041), and ids match by string.
+  if (!hasMigration("044_client_attribution")) {
+    for (const [table, col] of [
+      ["node_versions", "client_json"],
+      ["api_events", "client_json"],
+    ] as const) {
+      const cols = (
+        db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (cols.length && !cols.includes(col)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
+      }
+    }
+    recordMigration("044_client_attribution");
+  }
 }
 
 /**

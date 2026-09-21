@@ -5,6 +5,7 @@ import { nestStorageRoot } from "../shared/paths.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { importNest, uniqueNestName, deleteNest } from "./service.js";
 import { registerImportedDocuments, stageImportedFiles } from "../nodes/service.js";
+import type { ClientMetadata } from "../shared/client-metadata.js";
 import type { ImportedFile } from "../fs/vault-import.js";
 import type { Nest } from "../shared/types.js";
 import { rm } from "fs/promises";
@@ -211,6 +212,9 @@ export async function syncUnsyncedFolder(
   userId: string,
   folderName: string,
   callerEmail: string,
+  /** Caller attribution for the sync (§9.4), recorded on the version rows the
+   *  registration seeds — same as any other import. */
+  client?: ClientMetadata,
 ): Promise<{ nest: Nest; documents: number }> {
   console.log(
     `[unsynced] sync requested folder="${folderName}" user="${callerEmail}"`,
@@ -266,7 +270,7 @@ export async function syncUnsyncedFolder(
   let documents: number;
   try {
     await stageImportedFiles(nest.id, files, callerEmail);
-    documents = await registerImportedDocuments(nest.id, callerEmail);
+    documents = await registerImportedDocuments(nest.id, callerEmail, client);
   } catch (err) {
     await deleteNest(nest.id).catch(() => {});
     throw err;

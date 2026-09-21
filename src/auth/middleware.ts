@@ -11,6 +11,13 @@ export type AuthEnv = {
     userId: string;
     nestScope: string | null;
     nestPermission: NestPermission;
+    /** What the operator named the API key this call authenticated with, when
+     *  it did. The one agent name this transport can report without inventing
+     *  it — see `derivedClient` (spec §9.4.2). */
+    apiKeyLabel?: string;
+    /** Caller attribution for this request, once a route has validated it —
+     *  read by the activity-trace middleware. */
+    clientMetadata?: Record<string, string | number | boolean | undefined>;
   };
 };
 
@@ -46,9 +53,11 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   if (key) {
     const keyHash = hashApiKey(key);
     const record = await db.get(
-      "SELECT user_id, nest_id FROM api_keys WHERE key_hash = ?",
+      "SELECT user_id, nest_id, label FROM api_keys WHERE key_hash = ?",
       [keyHash],
-    ) as { user_id: string; nest_id: string | null } | undefined;
+    ) as
+      | { user_id: string; nest_id: string | null; label: string | null }
+      | undefined;
 
     if (record) {
       await db.run(
@@ -57,6 +66,7 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
       );
       c.set("userId", record.user_id);
       c.set("nestScope", record.nest_id);
+      if (record.label) c.set("apiKeyLabel", record.label);
       return next();
     }
   }

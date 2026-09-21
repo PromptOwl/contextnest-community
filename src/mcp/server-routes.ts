@@ -23,6 +23,7 @@
  * the per-nest endpoint only.
  */
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
@@ -31,6 +32,12 @@ import { engineCache } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { requestBaseUrl } from "../shared/base-url.js";
+import {
+  attributeRequest,
+  clientToolField,
+  connectionClient,
+  type ClientMetadata,
+} from "../shared/client-metadata.js";
 import {
   resolveNestPermission,
   permissionLevel,
@@ -474,6 +481,7 @@ async function handleServerToolCall(
   userEmail: string,
   nestScope: string | null,
   baseUrl: string,
+  client?: ClientMetadata,
 ): Promise<ToolResult> {
   if (toolName === "nest_index") {
     const nests = await buildNestIndex(userId, nestScope);
@@ -536,6 +544,11 @@ async function handleServerToolCall(
           userId,
           userEmail,
           baseUrl,
+          // Same attribution the single-nest branch below passes (§9.4). A
+          // fan-out read is still one call per nest on the trace, and each row
+          // has to name the caller — without this the derived agent/session is
+          // dropped and only an explicit `client` in the args survives.
+          client,
         });
         return { nest: n, result };
       }),
@@ -582,6 +595,7 @@ async function handleServerToolCall(
     userId,
     userEmail,
     baseUrl,
+    client,
   });
 }
 
@@ -590,6 +604,7 @@ function createServerMcp(
   userEmail: string,
   nestScope: string | null,
   baseUrl: string,
+  c: Context<AuthEnv>,
 ): McpServer {
   const server = new McpServer(
     { name: "contextnest-server", version: "1.0.0" },
@@ -609,7 +624,12 @@ function createServerMcp(
       if (!required.includes(key)) field = field.optional();
       shape[key] = field;
     }
+    // Same §9.4 field the per-nest surface advertises.
+    Object.assign(shape, clientToolField);
     server.tool(tool.name, tool.description, shape, async (args) => {
+      // See mcp/routes.ts: resolved per call, because the handshake that
+      // reports `clientInfo` completes inside the transport.
+      // Its stash on the request is inert here too — see mcp/routes.ts.
       const out = await handleServerToolCall(
         tool.name,
         args,
@@ -617,6 +637,7 @@ function createServerMcp(
         userEmail,
         nestScope,
         baseUrl,
+        attributeRequest(c, undefined, connectionClient(server)),
       );
       return toCallToolResult(out);
     });
@@ -636,6 +657,7 @@ serverMcpRoutes.all("/", async (c) => {
     userEmail,
     c.get("nestScope"),
     requestBaseUrl(c.req.url),
+    c,
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({
@@ -755,6 +777,20 @@ Write endpoints (need write permission):
 - \`GET ${B}/me/work\` — reviews waiting on you and handoffs, across every nest
 - \`GET ${B}/me/drafts\` — your documents never submitted for review
 - \`GET ${B}/me/notifications\` — watcher and review notifications
+
+## Say who you are: \`client\`
+
+Every write body and every MCP tool call takes an optional
+\`client\` object — \`{ "agent": "claude-code", "session_id": "s-9f2" }\`, plus any
+custom scalar keys. A write that seals a version records it on that version
+(\`GET /nodes/<id>/versions\` and \`context_versions\` serve it back); every call
+records it on this server's activity trace, which is how a READ gets attributed.
+
+Send it. Nothing requires it and no call is refused for omitting it, but a vault
+serving several agents cannot otherwise tell which of you wrote what. It is a
+label, never an identity claim: it is not authenticated, grants nothing, and is
+never part of a hash. Bounded — scalar values up to 512 chars, at most 16 custom
+keys beyond \`agent\` and \`session_id\`.
 
 ## MCP (Model Context Protocol)
 

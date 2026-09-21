@@ -9,6 +9,11 @@ import { createHash } from "crypto";
 import { getDb } from "../db/client.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { buildTitleMap } from "./title-resolver.js";
+import {
+  serializeClient,
+  deserializeClient,
+  type ClientMetadata,
+} from "../shared/client-metadata.js";
 import type { DocumentVersion, DocumentLifecycleStatus } from "./types.js";
 
 export function hashContent(content: string): string {
@@ -40,13 +45,16 @@ export async function createVersion(params: {
   status: DocumentLifecycleStatus;
   changeNote?: string;
   tags?: string[];
+  /** Caller attribution for the write that sealed this version (§9.4).
+   *  A label on the row, never hashed and never read by an access check. */
+  client?: ClientMetadata;
 }): Promise<DocumentVersion> {
   const db = getDb();
   const contentHash = hashContent(params.content);
 
   await db.run(
-    `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status, change_note, tags_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status, change_note, tags_json, client_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       params.nestId,
       params.nodeId,
@@ -56,6 +64,7 @@ export async function createVersion(params: {
       params.status,
       params.changeNote || null,
       params.tags ? JSON.stringify(params.tags) : null,
+      serializeClient(params.client),
     ],
   );
 
@@ -66,6 +75,7 @@ export async function createVersion(params: {
     editedAt: new Date().toISOString(),
     changeNote: params.changeNote,
     status: params.status,
+    client: params.client,
   };
 }
 
@@ -88,18 +98,20 @@ export async function upsertVersion(params: {
   status: DocumentLifecycleStatus;
   changeNote?: string;
   tags?: string[];
+  /** See createVersion. */
+  client?: ClientMetadata;
 }): Promise<DocumentVersion> {
   const db = getDb();
   const contentHash = hashContent(params.content);
   const sql = insertOrReplace(
     db,
-    `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status, change_note, tags_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status, change_note, tags_json, client_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ["nest_id", "node_id", "version"],
     // Reset created_at on conflict too: SQLite's INSERT OR REPLACE deletes+
     // reinserts (created_at → now), so mirror that on Postgres — otherwise a
     // draft edited in place would keep its original (import-time) "edited at".
-    `content_hash = excluded.content_hash, author = excluded.author, status = excluded.status, change_note = excluded.change_note, tags_json = excluded.tags_json, created_at = ${nowExpr(db)}`,
+    `content_hash = excluded.content_hash, author = excluded.author, status = excluded.status, change_note = excluded.change_note, tags_json = excluded.tags_json, client_json = excluded.client_json, created_at = ${nowExpr(db)}`,
   );
   await db.run(sql, [
     params.nestId,
@@ -110,6 +122,7 @@ export async function upsertVersion(params: {
     params.status,
     params.changeNote || null,
     params.tags ? JSON.stringify(params.tags) : null,
+    serializeClient(params.client),
   ]);
 
   return {
@@ -119,6 +132,7 @@ export async function upsertVersion(params: {
     editedAt: new Date().toISOString(),
     changeNote: params.changeNote,
     status: params.status,
+    client: params.client,
   };
 }
 
@@ -657,5 +671,6 @@ function rowToVersion(row: any): DocumentVersion {
     editedAt: row.created_at,
     changeNote: row.change_note || undefined,
     status: row.status,
+    client: deserializeClient(row.client_json),
   };
 }
