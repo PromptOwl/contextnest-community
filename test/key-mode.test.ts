@@ -22,11 +22,23 @@ describe("key mode (auth required)", () => {
   it("rejects requests without API key", async () => {
     const { status, data } = await jsonRequest(app, "GET", "/nests");
     expect(status).toBe(401);
-    // flexAuthMiddleware emits "Missing or invalid credentials" — that's
-    // the actual contract today. Earlier the message said "API key
-    // required" but the wording moved to a generic phrase when cookie
-    // sessions joined Bearer keys as a transport.
     expect(data.error.toLowerCase()).toMatch(/credentials|api key/);
+    // No Authorization header and no session cookie at all never reaches
+    // authMiddleware — flexAuthMiddleware's own fallback must carry the same
+    // missing_credentials code, not just a matching-ish message.
+    expect(data.code).toBe("missing_credentials");
+  });
+
+  it("rejects a bogus API key with a distinguishable message", async () => {
+    const { status, data } = await jsonRequest(
+      app,
+      "GET",
+      "/nests",
+      undefined,
+      "cnst_" + "0".repeat(64),
+    );
+    expect(status).toBe(401);
+    expect(data.code).toBe("invalid_key");
   });
 
   it("accepts requests with valid API key", async () => {
