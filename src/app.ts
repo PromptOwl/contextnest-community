@@ -74,6 +74,7 @@ import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
 import {
   verifySsoTicket,
   isValidTicketSub,
+  SsoTokenError,
   type SsoTicketClaims,
 } from "./auth/sso-token.js";
 import { assertSafeNodeId } from "./shared/node-id.js";
@@ -182,7 +183,14 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
     return next();
   }
 
-  return c.json({ error: "Missing or invalid credentials" }, 401);
+  // Same shape as authMiddleware's own missing_credentials fallback (below) —
+  // this is the far more common path there: no Authorization header and no
+  // session cookie at all, vs. authMiddleware's narrower "had a cnst_-shaped
+  // credential that didn't validate" case.
+  return c.json(
+    { error: "Authentication required — sign in or provide an API key.", code: "missing_credentials" },
+    401,
+  );
 });
 
 // MCP bearer tickets — /index and /mcp additionally accept a short-lived HS256
@@ -227,15 +235,29 @@ const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
     }
 
     let claims: SsoTicketClaims | null = null;
+    // A signature check can only find "expired" once it's already matched the
+    // signing secret, so seeing that reason from ANY candidate means this was
+    // a genuine ticket that aged out — not a forged/malformed one — even if a
+    // later candidate in the loop fails differently.
+    let expired = false;
     for (const secret of secrets) {
       try {
         claims = verifySsoTicket(token, secret);
         break;
-      } catch {
-        // Wrong secret (or malformed/expired) — try the next candidate.
+      } catch (err) {
+        if (err instanceof SsoTokenError && err.message === "Ticket expired") {
+          expired = true;
+        }
+        // Wrong secret (or malformed) — try the next candidate.
       }
     }
     if (!claims) {
+      if (expired) {
+        return c.json(
+          { error: "Service ticket expired — reconnect to refresh.", code: "ticket_expired" },
+          401,
+        );
+      }
       return c.json({ error: "Invalid service ticket" }, 401);
     }
     // Require the MCP scope AND reject a present jti. A one-time-use jti is the
