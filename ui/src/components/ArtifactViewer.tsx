@@ -17,7 +17,7 @@
  * artifact's *extracted text* (the same text the nest indexes), per the W3C
  * TextQuote anchor model.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
@@ -78,6 +78,9 @@ interface ArtifactViewerProps {
    * The viewer's own History button stays; callers leave that entry out.
    */
   actions?: OverflowAction[];
+  /** The nest's visibility tier (control or read-only badge), as the
+   *  markdown page's top bar shows it. Rendered before Share. */
+  visibilityControl?: ReactNode;
   /** Share the whole nest — the same top-bar Share the markdown page has.
    *  Undefined when the caller may not share (below admin, or archived). */
   onShareNest?: () => void;
@@ -100,6 +103,7 @@ export function ArtifactViewer({
   onBack,
   onTurnedInto,
   actions,
+  visibilityControl,
   onShareNest,
 }: ArtifactViewerProps) {
   const [mode, setMode] = useState<"preview" | "annotate" | "edit">("preview");
@@ -629,6 +633,7 @@ export function ArtifactViewer({
               <FileText className="h-4 w-4" />
             </Button>
           )}
+          {visibilityControl}
           {onShareNest && (
             <Button
               variant="outline"

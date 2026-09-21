@@ -1750,6 +1750,53 @@ export function DocumentEditor({
       }
     });
 
+  // Visibility — the nest's tier, right where Notion puts it. An owner/admin
+  // flips it in place (same control as the Share dialog and Collaborators
+  // tab); everyone else sees a read-only badge. Hoisted so the artifact page
+  // shows the same thing in its top bar (CU-wdqcq02gy8).
+  const visibilityControl = (
+    <>
+      {!isNew &&
+        (canShare && !isArchived ? (
+          <NestVisibilityControl
+            nestId={nestId}
+            variant="compact"
+            onChanged={() => void qc.invalidateQueries({ queryKey: keys.nest(nestId) })}
+            onError={(m) => {
+              if (m) toast.error(m);
+            }}
+          />
+        ) : (
+          nestMeta.data?.nest?.visibility && (
+            <span
+              className="hidden sm:inline-flex items-center gap-1 px-1.5 text-xs text-muted-foreground"
+              title={
+                nestMeta.data.nest.visibility === "public"
+                  ? "Public — anyone with the URL can read"
+                  : nestMeta.data.nest.visibility === "org"
+                    ? "Organization — everyone signed in here can read"
+                    : "Private"
+              }
+              data-testid="document-editor-visibility"
+            >
+              {nestMeta.data.nest.visibility === "public" ? (
+                <Globe className="h-3.5 w-3.5" />
+              ) : nestMeta.data.nest.visibility === "org" ? (
+                <Building2 className="h-3.5 w-3.5" />
+              ) : (
+                <Lock className="h-3.5 w-3.5" />
+              )}
+              {nestMeta.data.nest.visibility === "public"
+                ? "Public"
+                : nestMeta.data.nest.visibility === "org"
+                  ? "Organization"
+                  : "Private"}
+            </span>
+          )
+        ))}
+    </>
+  );
+
   // Everything the ⋮ menu (and the top bar's Share) opens. Rendered on BOTH
   // the markdown page and the artifact page — a menu item with no dialog
   // behind it is a dead button.
@@ -1935,6 +1982,7 @@ export function DocumentEditor({
           // Same Share button and ⋮ menu the markdown page has. The viewer
           // keeps its own History button, so that entry is left out here.
           onShareNest={canShare && !isArchived ? () => setShowShare(true) : undefined}
+          visibilityControl={visibilityControl}
           actions={buildMoreActions({ includeVersionHistory: false })}
         />
         {moreActionDialogs}
@@ -2112,47 +2160,7 @@ export function DocumentEditor({
               onReject={handleReject}
             />
           )}
-          {/* Visibility — the nest's tier, right where Notion puts it. An
-              owner/admin flips it in place (same control as the Share dialog
-              and Collaborators tab); everyone else sees a read-only badge. */}
-          {!isNew &&
-            (canShare && !isArchived ? (
-              <NestVisibilityControl
-                nestId={nestId}
-                variant="compact"
-                onChanged={() => void qc.invalidateQueries({ queryKey: keys.nest(nestId) })}
-                onError={(m) => {
-                  if (m) toast.error(m);
-                }}
-              />
-            ) : (
-              nestMeta.data?.nest?.visibility && (
-                <span
-                  className="hidden sm:inline-flex items-center gap-1 px-1.5 text-xs text-muted-foreground"
-                  title={
-                    nestMeta.data.nest.visibility === "public"
-                      ? "Public — anyone with the URL can read"
-                      : nestMeta.data.nest.visibility === "org"
-                        ? "Organization — everyone signed in here can read"
-                        : "Private"
-                  }
-                  data-testid="document-editor-visibility"
-                >
-                  {nestMeta.data.nest.visibility === "public" ? (
-                    <Globe className="h-3.5 w-3.5" />
-                  ) : nestMeta.data.nest.visibility === "org" ? (
-                    <Building2 className="h-3.5 w-3.5" />
-                  ) : (
-                    <Lock className="h-3.5 w-3.5" />
-                  )}
-                  {nestMeta.data.nest.visibility === "public"
-                    ? "Public"
-                    : nestMeta.data.nest.visibility === "org"
-                      ? "Organization"
-                      : "Private"}
-                </span>
-              )
-            ))}
+          {visibilityControl}
           {canShare && !isArchived && (
             <Button
               variant="ghost"
