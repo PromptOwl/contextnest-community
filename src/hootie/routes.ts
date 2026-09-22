@@ -427,6 +427,13 @@ async function deliverMentions(params: {
     "**Hootie answered:**",
     answer.trim(),
   ].join("\n");
+  // Only the comment itself decides "posted": once createThread returns, a
+  // comment exists on the document, and that is what the outcome reports.
+  // The fan-out and the annotations projection are best-effort by their own
+  // contracts (each swallows its failures), and they sit OUTSIDE this try so
+  // a future edit that lets one of them throw can't relabel a comment that
+  // is already on the page as "post_failed".
+  let threadId: string;
   try {
     const thread = await createThread(
       nestId,
@@ -434,23 +441,24 @@ async function deliverMentions(params: {
       { body, anchor: null, snapshotVersion: null },
       userEmail,
     );
-    const notified = await notifyCommentMentions({
-      nestId,
-      nodeId: anchor.id,
-      body,
-      actorEmail: userEmail,
-      baseUrl,
-    });
-    await syncAnnotationsNode(nestId, anchor.id, userEmail);
-    return {
-      status: "posted",
-      node_id: anchor.id,
-      node_title: anchor.title,
-      thread_id: thread.id,
-      notified,
-    };
+    threadId = thread.id;
   } catch (err) {
     console.error("[hootie] mention comment failed", nestId, anchor.id, err);
     return { status: "undeliverable", reason: "post_failed" };
   }
+  const notified = await notifyCommentMentions({
+    nestId,
+    nodeId: anchor.id,
+    body,
+    actorEmail: userEmail,
+    baseUrl,
+  });
+  await syncAnnotationsNode(nestId, anchor.id, userEmail);
+  return {
+    status: "posted",
+    node_id: anchor.id,
+    node_title: anchor.title,
+    thread_id: threadId,
+    notified,
+  };
 }
