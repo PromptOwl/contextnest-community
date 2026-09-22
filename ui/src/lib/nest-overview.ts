@@ -75,3 +75,19 @@ export function overviewFacts(input: {
   }
   return facts;
 }
+
+export type EmptyStateAction = "new" | "import" | "ai";
+
+/**
+ * The start actions an empty nest offers, each on the same gate as its
+ * counterpart in the nest header: New document and Import need edit rights
+ * (Import also needs the menu to exist), Add with AI follows the header's
+ * own `!isReadOnly` gate so the two entry points never disagree.
+ */
+export function emptyStateActions(input: { canWrite: boolean; canImport: boolean; canAddWithAI: boolean }): EmptyStateAction[] {
+  const actions: EmptyStateAction[] = [];
+  if (input.canWrite) actions.push("new");
+  if (input.canWrite && input.canImport) actions.push("import");
+  if (input.canAddWithAI) actions.push("ai");
+  return actions;
+}

@@ -4,7 +4,7 @@
  * summary under "Contents" says (the stat cards it replaces).
  */
 import { describe, it, expect } from "vitest";
-import { groupNodesByFolder, overviewFacts } from "./nest-overview";
+import { emptyStateActions, groupNodesByFolder, overviewFacts } from "./nest-overview";
 
 describe("groupNodesByFolder (the Overview / reader index)", () => {
   const nodes = [
@@ -110,5 +110,20 @@ describe("overviewFacts (the summary line that replaces the stat cards)", () => 
   it("every fact has a stable, unique key", () => {
     const facts = overviewFacts({ total: 5, folderCount: 2, editedThisWeek: 1, governance: { pending: 2, approved: 3, reviewable: 1 } });
     expect(new Set(facts.map((f) => f.key)).size).toBe(facts.length);
+  });
+});
+
+describe("emptyStateActions (who gets which start action on an empty nest)", () => {
+  it("an editor gets all three, New document first", () => {
+    expect(emptyStateActions({ canWrite: true, canImport: true, canAddWithAI: true })).toEqual(["new", "import", "ai"]);
+  });
+  it("Add with AI follows the header's own gate — a non-editor who sees it in the header sees it here too", () => {
+    expect(emptyStateActions({ canWrite: false, canImport: false, canAddWithAI: true })).toEqual(["ai"]);
+  });
+  it("import only where the Import menu exists", () => {
+    expect(emptyStateActions({ canWrite: true, canImport: false, canAddWithAI: false })).toEqual(["new"]);
+  });
+  it("a read-only caller gets none (the page says 'No documents yet')", () => {
+    expect(emptyStateActions({ canWrite: false, canImport: true, canAddWithAI: false })).toEqual([]);
   });
 });

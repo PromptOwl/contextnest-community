@@ -18,7 +18,7 @@ import { typePill } from "./node-display";
 import { NodeTypeIcon } from "./NodeTypeIcon";
 import { READER_CARD_CLASS, breadcrumbFor } from "@/lib/reader";
 import { relTime } from "@/lib/dates";
-import { overviewFacts } from "@/lib/nest-overview";
+import { emptyStateActions, overviewFacts } from "@/lib/nest-overview";
 
 interface Props {
   /** Cold load still in flight — shows a spinner instead of an empty index. */
@@ -43,6 +43,7 @@ interface Props {
   onOpenReview?: () => void;
   /** Open the nest's Import menu (files, whole vault — and whatever else it offers). */
   onImport?: () => void;
+  /** Omitted when the header doesn't offer Add with AI either (read-only). */
   onAddWithAI?: () => void;
 }
 
@@ -130,7 +131,6 @@ export function OverviewTab({
               className="max-w-2xl space-y-px"
               groups={tocGroups}
               known={knownFolders}
-              indentRem={1.25}
               renderFolder={(node) => (
                 // Folders navigate into the Documents tab scoped to that
                 // folder — no collapse here; the whole index stays open.
@@ -255,7 +255,8 @@ function EmptyNest({
   onImport?: () => void;
   onAddWithAI?: () => void;
 }) {
-  if (!canWrite) {
+  const actions = emptyStateActions({ canWrite, canImport: !!onImport, canAddWithAI: !!onAddWithAI });
+  if (actions.length === 0) {
     return (
       <div className="py-6">
         <h2 id="nest-overview-heading" className="text-xl font-semibold tracking-tight text-foreground">
@@ -271,24 +272,22 @@ function EmptyNest({
         Add the first page
       </h2>
       <p className="mt-1.5 text-[15px] leading-7 text-muted-foreground">
-        Write one from scratch, bring in files you already have, or have AI draft a starting set.
+        {canWrite
+          ? "Write one from scratch, bring in files you already have, or have AI draft a starting set."
+          : "Have AI draft a starting set of pages."}
       </p>
       <ul className="mt-6 grid gap-3">
-        <EmptyAction
-          icon={Plus}
-          title="New document"
-          detail="Write a page in the editor."
-          onClick={() => onOpenDocument("new")}
-          primary
-        />
-        {onImport && (
-          <EmptyAction icon={Upload} title="Import files" detail="Markdown or HTML files, or a whole vault folder with its structure." onClick={onImport} />
-        )}
-        {onAddWithAI && (
-          <EmptyAction icon={Sparkles} title="Add with AI" detail="Describe the nest and get draft pages to edit." onClick={onAddWithAI} />
+        {actions.map((a) =>
+          a === "new" ? (
+            <EmptyAction key={a} icon={Plus} title="New document" detail="Write a page in the editor." onClick={() => onOpenDocument("new")} primary />
+          ) : a === "import" ? (
+            <EmptyAction key={a} icon={Upload} title="Import files" detail="Markdown or HTML files, or a whole vault folder with its structure." onClick={onImport!} />
+          ) : (
+            <EmptyAction key={a} icon={Sparkles} title="Add with AI" detail="Describe the nest and get draft pages to edit." onClick={onAddWithAI!} />
+          ),
         )}
       </ul>
-      <p className="mt-5 text-[13px] text-muted-foreground max-sm:hidden">You can also drop files anywhere on this page.</p>
+      {canWrite && <p className="mt-5 text-[13px] text-muted-foreground max-sm:hidden">You can also drop files anywhere on this page.</p>}
     </div>
   );
 }

@@ -1725,8 +1725,9 @@ export function NestView({
             description={nestDescription}
             governance={stewardshipEnabled ? stats : undefined}
             onOpenReview={showReviewTab && !isReadOnly ? () => setActiveTab("review") : undefined}
-            onImport={() => setImportMenuOpen(true)}
-            onAddWithAI={() => setShowGenerate(true)}
+            onImport={canEditDocs && !isReadOnly ? () => setImportMenuOpen(true) : undefined}
+            // Same gate as the header's Add with AI button.
+            onAddWithAI={!isReadOnly ? () => setShowGenerate(true) : undefined}
           />
           </Suspense>
         </TabsContent>
