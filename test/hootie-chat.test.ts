@@ -435,6 +435,79 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
     }
   });
 
+  it("a citation whose title two retrieved documents share resolves to ONE node — the higher-ranked — and the mention lands there", async () => {
+    // Both "Runbook"s match the question (no open document), so both are in
+    // front of the model and it cites [[Runbook]]. That must not become two
+    // citations, and the comment must not land on a coin flip.
+    const own = (
+      await jsonRequest(app, "POST", "/nests", { name: "Hootie Twins Cite" }, owner.apiKey)
+    ).data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${own}/collaborators`, { email: reader.email, permission: "read" }, owner.apiKey);
+    const ops = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${own}/nodes`,
+      { title: "Runbook", content: "# Runbook\n\nRunbook runbook runbook: restart the ingest worker.", folder: "ops", tags: ["runbook"] },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${own}/nodes`,
+      { title: "Runbook", content: "# Runbook\n\nSales: send the discount sheet.", folder: "sales" },
+      owner.apiKey,
+    );
+    await jsonRequest(app, "POST", `/nests/${own}/context`, { selector: "#none" }, owner.apiKey);
+
+    scriptedAnswer = "See [[Runbook]].";
+    const { events } = await chat(
+      app,
+      own,
+      { message: `@${owner.email} what's in the runbook?` },
+      reader.apiKey,
+    );
+    const meta = events.find((e) => e.event === "meta")!;
+    const retrieved = meta.data.nodes.filter((n: any) => n.title === "Runbook");
+    expect(retrieved.length).toBe(2);
+    const done = events.find((e) => e.event === "done")!;
+    expect(done.data.cited.length).toBe(1);
+    // The first "Runbook" in retrieval order is the higher-ranked one.
+    expect(done.data.cited[0].id).toBe(retrieved[0].id);
+    expect(done.data.mention.status).toBe("posted");
+    expect(done.data.mention.node_id).toBe(retrieved[0].id);
+    expect(retrieved[0].id).toBe(ops.data.node.id);
+  });
+
+  it("malformed history still reaches the model as strictly alternating turns ending in the new question", async () => {
+    scriptedAnswer = "ok";
+    const { status } = await chat(
+      app,
+      nestId,
+      {
+        message: "and now?",
+        history: [
+          { role: "assistant", content: "leading assistant turn" },
+          { role: "user", content: "first" },
+          { role: "user", content: "second, same role" },
+          { role: "assistant", content: "reply" },
+          { role: "assistant", content: "" },
+          { role: "user", content: "trailing user turn never answered" },
+        ],
+      },
+      reader.apiKey,
+    );
+    expect(status).toBe(200);
+    const roles = lastModelCall!.turns.map((t: any) => t.role);
+    expect(roles[0]).toBe("user");
+    expect(roles.at(-1)).toBe("user");
+    for (let i = 1; i < roles.length; i++) expect(roles[i]).not.toBe(roles[i - 1]);
+    expect(lastModelCall!.turns.at(-1).content).toBe("and now?");
+    // Nothing the person said is lost: same-role turns are merged, not dropped.
+    const users = lastModelCall!.turns.filter((t: any) => t.role === "user").map((t: any) => t.content);
+    expect(users.join("\n")).toContain("first");
+    expect(users.join("\n")).toContain("second, same role");
+  });
+
   it("carries the conversation: prior turns reach the model in order", async () => {
     scriptedAnswer = "Still yes.";
     const { status } = await chat(

@@ -49,9 +49,11 @@ const MAX_HISTORY_CHARS = 8000;
 /** Retrieval budget per source (anchor document, question) — tokens. */
 const CONTEXT_BUDGET = 6000;
 /**
- * Chats one person may start per window. Each one is a paid external call
- * on the server's key, so a looping client must hit a ceiling — but the
- * ceiling has to be invisible to someone actually working through a topic.
+ * Chats one person may start per window, across ALL nests — the budget
+ * guards one server-wide key, so it is keyed per user, not per nest. Each
+ * chat is a paid external call, so a looping client must hit a ceiling — but
+ * the ceiling has to be invisible to someone actually working through a
+ * topic.
  */
 export const CHAT_BUDGET = { max: 30, windowMs: 5 * 60_000 };
 
@@ -283,14 +285,26 @@ function normalizeHistory(raw: unknown): ModelTurn[] | null {
     if (!text) continue;
     turns.push({ role, content: text });
   }
-  let kept = turns.slice(-MAX_HISTORY_TURNS);
+  // The Messages API wants strict user/assistant alternation. A client can
+  // send anything (this is a public route, not only the panel): adjacent
+  // same-role turns are MERGED rather than dropped — nothing the person
+  // said disappears — and the sequence must start with the user and end
+  // with the assistant, since the new question is appended as the user.
+  const merged: ModelTurn[] = [];
+  for (const t of turns) {
+    const last = merged[merged.length - 1];
+    if (last && last.role === t.role) last.content += "\n\n" + t.content;
+    else merged.push({ ...t });
+  }
+  let kept = merged.slice(-MAX_HISTORY_TURNS);
   let chars = kept.reduce((n, t) => n + t.content.length, 0);
   while (kept.length > 0 && chars > MAX_HISTORY_CHARS) {
     chars -= kept[0].content.length;
     kept = kept.slice(1);
   }
-  // The API wants the first turn to be the user's.
   while (kept.length > 0 && kept[0].role !== "user") kept = kept.slice(1);
+  while (kept.length > 0 && kept[kept.length - 1].role !== "assistant")
+    kept = kept.slice(0, -1);
   return kept;
 }
 
@@ -338,20 +352,32 @@ function buildSystemPrompt(params: {
  * Which of the retrieved nodes the answer cites, in order of first mention.
  * A citation is the node's exact title as a [[wiki link]] (case-insensitive),
  * which is what the system prompt asks for and what the panel turns into a
- * chip. Titles aren't unique, so two retrieved nodes sharing one are both
- * "cited" — both were in front of the model, and the chips carry ids, so the
- * reader can open either; the ambiguity is the nest's, not invented here.
+ * chip.
+ *
+ * Titles aren't unique. When two retrieved nodes share the cited title, the
+ * citation resolves to ONE of them — the first in `nodes` order, which is the
+ * open document if it is one, else the higher-ranked match — never both: a
+ * doubled citation would put two chips on one reference, and the mention
+ * anchor below would land on a coin flip. The pick is deterministic and the
+ * best-ranked candidate; the chip carries the id, so it is never a mystery
+ * which one it was.
  */
 function citedNodes(
   answer: string,
   nodes: ContextNodeSummary[],
 ): ContextNodeSummary[] {
   const lower = answer.toLowerCase();
-  return nodes
-    .map((n) => ({ n, at: lower.indexOf(`[[${n.title.toLowerCase()}]]`) }))
-    .filter((x) => x.at >= 0)
-    .sort((a, b) => a.at - b.at)
-    .map((x) => x.n);
+  const seenTitles = new Set<string>();
+  const hits: Array<{ n: ContextNodeSummary; at: number }> = [];
+  for (const n of nodes) {
+    const key = n.title.toLowerCase();
+    if (seenTitles.has(key)) continue;
+    const at = lower.indexOf(`[[${key}]]`);
+    if (at < 0) continue;
+    seenTitles.add(key);
+    hits.push({ n, at });
+  }
+  return hits.sort((a, b) => a.at - b.at).map((x) => x.n);
 }
 
 /**
