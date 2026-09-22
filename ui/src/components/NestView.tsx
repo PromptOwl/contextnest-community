@@ -24,8 +24,9 @@ import { prettyFolderPath } from "./FolderTree";
 /** One icon per node type — agent/skill/artifact/document each read distinctly. */
 // Kept as a re-export: WorkflowsView imports it from here.
 export { NodeTypeIcon } from "./nest/NodeTypeIcon";
-import { byPathSegments, folderOfNode } from "./nest/node-display";
+import { folderOfNode } from "./nest/node-display";
 import { GenerateContextModal } from "./GenerateContextModal";
+import { groupNodesByFolder } from "@/lib/nest-overview";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ReaderView } from "./ReaderView";
 import { DocumentPickerModal } from "./DocumentPickerModal";
@@ -792,38 +793,8 @@ export function NestView({
   // NOTE: the engine also generates a canonical INDEX.md via regenerateIndex()
   // (excluded from the node list as a meta-file); surfacing that engine-built
   // index is a deeper follow-up — this is the lightweight UI overview.
-  const tocGroups = (() => {
-    // Group by the FULL folder path (everything before the leaf), not just
-    // the first segment, so nested folders like nodes/gtm/deals each get
-    // their own group. Sorting by path keeps children right under parents;
-    // depth drives the header indent.
-    const groups = new Map<string, any[]>();
-    for (const n of nodes) {
-      const id: string = n.id || "";
-      // Strip the "nodes/" storage root — it's not a user folder. What's left
-      // is the real folder path; a doc directly under nodes/ has none → Root.
-      const rel = id.startsWith("nodes/") ? id.slice(6) : id;
-      const slash = rel.lastIndexOf("/");
-      const folder = slash > 0 ? rel.slice(0, slash) : "Root";
-      if (!groups.has(folder)) groups.set(folder, []);
-      groups.get(folder)!.push(n);
-    }
-    return [...groups.entries()]
-      .map(([folder, items]) => ({
-        folder,
-        depth: folder === "Root" ? 0 : folder.split("/").length,
-        items: [...items].sort((a, b) =>
-          String(a.title || a.id).localeCompare(String(b.title || b.id)),
-        ),
-      }))
-      .sort((a, b) =>
-        a.folder === "Root"
-          ? -1
-          : b.folder === "Root"
-            ? 1
-            : byPathSegments(a.folder, b.folder),
-      );
-  })();
+  // Grouping logic lives in lib/nest-overview (tested there).
+  const tocGroups = groupNodesByFolder(nodes);
 
   // Overview stat tile: Root is a synthetic tocGroups entry for docs with no
   // folder, not a user-created folder, so it's excluded from the count.
@@ -1040,6 +1011,7 @@ export function NestView({
   const [dragOver, setDragOver] = useState(false);
   const [importing, setImporting] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const [importMenuOpen, setImportMenuOpen] = useState(false);
 
   const kindForFile = (name: string): "document" | "artifact" | null => {
     const ext = name.toLowerCase().split(".").pop() || "";
@@ -1187,7 +1159,9 @@ export function NestView({
         onBack={onBack}
         title={
           canManage ? (
-            <div className="min-w-0 flex-1">
+            // A floor on the name's width so the header's chips wrap under it
+            // on a phone instead of truncating it to one letter.
+            <div className="min-w-[11rem] flex-1 sm:min-w-0">
               <div className="flex items-center gap-1">
               <input
                 value={editableName}
@@ -1508,7 +1482,9 @@ export function NestView({
 
       {/* Stats Cards — only governance-related stats when stewardship is on.
           In ungoverned mode every doc is auto-approved so the pending/review
-          columns are always zero and just add noise. */}
+          columns are always zero and just add noise. Not on Overview: it
+          carries the same numbers as its own summary line (CU-wdqcq02qb1). */}
+      {activeTab !== "overview" && (
       <div
         className={`grid grid-cols-1 gap-4 mb-4 ${stewardshipEnabled
           ? "md:grid-cols-4"
@@ -1620,6 +1596,7 @@ export function NestView({
           </>
         )}
       </div>
+      )}
 
       {/* Tabbed layout — Documents / Review Queue / Stewards.
           When stewardship is off the latter two tabs are hidden because
@@ -1631,7 +1608,7 @@ export function NestView({
             inside itself rather than making the whole page scroll sideways —
             page-level overflow drags fixed UI (toasts, dialogs) off-screen
             with it. */}
-        <div className="flex items-center gap-2 mb-4 min-w-0">
+        <div className="flex flex-wrap items-center gap-2 mb-4 min-w-0">
           <TabsList className="max-w-full justify-start overflow-x-auto">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="documents">Documents</TabsTrigger>
@@ -1681,13 +1658,17 @@ export function NestView({
               className="text-muted-foreground"
               onClick={() => setShowNewFolder(true)}
               title="Create a folder (nest with parent/child)"
+              aria-label="New Folder"
             >
-              <FolderPlus className="h-4 w-4 mr-1.5" />
-              New Folder
+              <FolderPlus className="h-4 w-4 sm:mr-1.5" />
+              {/* Icon-only on a phone so the three actions fit one row. */}
+              <span className="max-sm:hidden">New Folder</span>
             </Button>
             {/* Import and New Document act on the content area too, so they
                 sit with New Folder rather than in the nest header. */}
-              <DropdownMenu modal={false}>
+              {/* Controlled so the Overview's empty state can open this same
+                  menu rather than keep a second copy of its items. */}
+              <DropdownMenu modal={false} open={importMenuOpen} onOpenChange={setImportMenuOpen}>
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline" size="sm" data-testid="nest-import-files">
                     <Upload className="h-3.5 w-3.5 mr-1.5" />
@@ -1741,6 +1722,11 @@ export function NestView({
             canEditDocs={canEditDocs}
             onOpenDocument={onOpenDocument}
             onOpenFolder={openFolderInDocuments}
+            description={nestDescription}
+            governance={stewardshipEnabled ? stats : undefined}
+            onOpenReview={showReviewTab && !isReadOnly ? () => setActiveTab("review") : undefined}
+            onImport={() => setImportMenuOpen(true)}
+            onAddWithAI={() => setShowGenerate(true)}
           />
           </Suspense>
         </TabsContent>

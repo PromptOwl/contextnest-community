@@ -1159,8 +1159,10 @@ export default function App() {
             scrolls, and every in-page sticky bar (document toolbar, artifact
             toolbar, comment rails) offsets by this row's 4rem. */}
         <div className="sticky top-0 z-40 border-b border-border bg-card">
-        <div className={`${shellWidth} h-16 px-4 flex items-center justify-between`}>
-          <div className="flex items-center gap-1">
+        <div className={`${shellWidth} h-16 px-4 flex items-center justify-between gap-2`}>
+          {/* min-w-0 so the breadcrumb truncates on a phone instead of
+              pushing the account row past the window edge. */}
+          <div className="flex min-w-0 items-center gap-1">
           {/* The sidebar toggle lives in the app header so it exists on every
               page that has a sidebar: always on a phone (the rail is a drawer
               there), on a desktop only once the rail has been hidden. */}
@@ -1183,7 +1185,10 @@ export default function App() {
           )}
           <button
             onClick={() => setView({ page: "dashboard" })}
-            className={`flex items-center gap-2 hover:opacity-80${showSidebar ? " md:hidden" : ""}`}
+            // On a phone with a sidebar the mark lives in the drawer; the
+            // toggle beside it opens that, so the row keeps its room for the
+            // breadcrumb.
+            className={`flex shrink-0 items-center gap-2 hover:opacity-80${showSidebar ? " md:hidden" : ""}${withSidebar ? " max-sm:hidden" : ""}`}
           >
             <img
               src={logoUrl ?? hootieIcon}
@@ -1214,7 +1219,7 @@ export default function App() {
           )}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2">
             {/* The ONE search entry point, on every page the palette works on
                 — the Dashboard used to carry its own field-styled button, so
                 the same feature looked like two (CU-wdqcq012uv). What differs
@@ -1228,10 +1233,11 @@ export default function App() {
                     : "Search this nest (⌘K)"
                 }
                 className="flex items-center gap-2 h-8 pl-2.5 pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+                aria-label="Search"
                 data-testid="global-search-trigger"
               >
                 <Search className="h-3.5 w-3.5" />
-                <span>Search</span>
+                <span className="hidden sm:inline">Search</span>
                 <kbd className="ml-1 hidden sm:inline text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
                   ⌘K
                 </kbd>
@@ -1259,9 +1265,10 @@ export default function App() {
                 size="sm"
                 onClick={() => setView({ page: "docs" })}
                 title="API, MCP & CLI docs for agents"
+                aria-label="Docs"
               >
-                <BookOpen className="h-3.5 w-3.5 mr-1" />
-                Docs
+                <BookOpen className="h-3.5 w-3.5 sm:mr-1" />
+                <span className="hidden sm:inline">Docs</span>
               </Button>
             )}
 

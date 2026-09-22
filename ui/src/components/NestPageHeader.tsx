@@ -33,7 +33,9 @@ export function NestPageHeader({
 }: Props) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-      <div className="flex min-w-0 items-center gap-2">
+      {/* flex-wrap: on a phone the status chips drop under the name rather
+          than squeezing it to a single letter. */}
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         <Button
           variant="ghost"
           size="sm"
