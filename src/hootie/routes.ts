@@ -46,6 +46,9 @@ export const hootieRoutes = new Hono<AuthEnv>();
 const MAX_MESSAGE_CHARS = 4000;
 const MAX_HISTORY_TURNS = 20;
 const MAX_HISTORY_CHARS = 8000;
+/** Raw history entries examined at all — merging can only shrink a run of
+ *  turns, so nothing older than this could reach the model anyway. */
+const MAX_HISTORY_RAW = MAX_HISTORY_TURNS * 4;
 /** Retrieval budget per source (anchor document, question) — tokens. */
 const CONTEXT_BUDGET = 6000;
 /**
@@ -292,8 +295,12 @@ function isNodeIdShaped(id: string): boolean {
 function normalizeHistory(raw: unknown): ModelTurn[] | null {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) return null;
+  // Only the tail can survive the caps below, so only the tail is looked at:
+  // the work done on a request is bounded by what it can use, not by what
+  // the client chose to send (the global body cap bounds the rest).
+  const tail = raw.length > MAX_HISTORY_RAW ? raw.slice(-MAX_HISTORY_RAW) : raw;
   const turns: ModelTurn[] = [];
-  for (const t of raw) {
+  for (const t of tail) {
     if (!t || typeof t !== "object") return null;
     const role = (t as any).role;
     const content = (t as any).content;

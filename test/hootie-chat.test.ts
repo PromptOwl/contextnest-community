@@ -519,6 +519,20 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
     expect(users.join("\n")).toContain("second, same role");
   });
 
+  it("an absurdly long history is accepted and only its tail is used", async () => {
+    scriptedAnswer = "ok";
+    const history = [];
+    for (let i = 0; i < 5000; i++) {
+      history.push({ role: i % 2 === 0 ? "user" : "assistant", content: `turn ${i}` });
+    }
+    const { status } = await chat(app, nestId, { message: "latest?", history }, reader.apiKey);
+    expect(status).toBe(200);
+    const turns = lastModelCall!.turns;
+    expect(turns.length).toBeLessThanOrEqual(21);
+    expect(turns.at(-1).content).toBe("latest?");
+    expect(turns.at(-2).content).toBe("turn 4999");
+  });
+
   it("carries the conversation: prior turns reach the model in order", async () => {
     scriptedAnswer = "Still yes.";
     const { status } = await chat(
