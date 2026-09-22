@@ -122,6 +122,41 @@ describe("rendered instructions", () => {
     }
   });
 
+  /**
+   * The oauth-only body used to be a fixed string, so it asserted "this server
+   * authenticates with API keys" even on a deployment that has no credential
+   * at all. Every other harness branches on openMode; this one has to as well,
+   * or the panel tells an open-mode admin something false about their server.
+   */
+  it("does not claim an open-mode deployment uses API keys", () => {
+    for (const h of HARNESSES) {
+      expect(renderHarnessDoc(h, OPEN)).not.toMatch(/API key/i);
+    }
+  });
+
+  /**
+   * A conditional sentence plus an unconditional one that opens the same way —
+   * e.g. Hermes stating "Streamable HTTP is the default transport" twice in
+   * open mode. Whole-sentence equality misses it because the tails differ, so
+   * compare opening clauses.
+   */
+  it("does not open two sentences in one body the same way", () => {
+    for (const h of HARNESSES) {
+      for (const ctx of [KEYED, OPEN]) {
+        const openings = renderHarnessDoc(h, ctx)
+          .split("\n")
+          .filter((l) => !l.startsWith("    ") && !l.startsWith("```"))
+          .flatMap((l) => l.split(/(?<=[.;])\s+/))
+          .map((s) => s.trim().toLowerCase().split(/\s+/).slice(0, 5).join(" "))
+          .filter((s) => s.split(" ").length === 5);
+        expect(
+          new Set(openings).size,
+          `${h.id} opens two sentences identically`,
+        ).toBe(openings.length);
+      }
+    }
+  });
+
   it("tells a keyed deployment how to present the key", () => {
     // Every harness that can take a static credential must name one concrete
     // mechanism; an admin reading the panel should never have to guess.

@@ -79,11 +79,21 @@ const KEY_ENV = "CONTEXTNEST_API_KEY";
  * The stock paragraph for a surface that only drives an OAuth client. Says
  * what the admin can do instead, so the panel is never a dead end.
  */
-function oauthBlocked(name: string, detail: string, mcp: string): string {
+function oauthBlocked(
+  ctx: ConnectDocsContext,
+  name: string,
+  detail: string,
+  mcp: string,
+): string {
   return [
     `**Not connectable yet.** ${detail}`,
     "",
-    `This server authenticates with API keys and does not run an OAuth authorization server, so ${name} has nothing to complete its consent flow against. There is no header field to fall back to.`,
+    ctx.openMode
+      ? // Saying "this server authenticates with API keys" would be false here
+        // — an open-mode deployment has no credential at all. The blocker is
+        // the missing authorization server either way.
+        `This server needs no credential at all, but ${name} still wants an OAuth client to authorize against, and this server runs no authorization server to offer it. There is no header field to fall back to either.`
+      : `This server authenticates with API keys and does not run an OAuth authorization server, so ${name} has nothing to complete its consent flow against. There is no header field to fall back to.`,
     "",
     `The endpoint it would point at is \`${mcp}\`, so nothing here changes once an authorization server ships.`,
     "",
@@ -165,8 +175,9 @@ export const HARNESSES: Harness[] = [
     kind: "chat",
     where: "Settings → Connectors → Custom connector",
     support: "oauth-only",
-    body: (_ctx, mcp) =>
+    body: (ctx, mcp) =>
       oauthBlocked(
+        ctx,
         "Perplexity",
         "Perplexity's custom-connector form asks for an OAuth client ID over Streamable HTTP, on a paid plan.",
         mcp,
@@ -244,9 +255,9 @@ export const HARNESSES: Harness[] = [
         "```",
         "",
         ctx.openMode
-          ? "Streamable HTTP is the default transport; no credential is needed."
+          ? null
           : `Values support \`\${env:VAR}\` interpolation against \`~/.hermes/.env\`, so put the key in that file as \`${KEY_ENV}\` and keep it out of the YAML.`,
-        "",
+        ctx.openMode ? null : "",
         "Streamable HTTP is the default transport — only set `transport: \"sse\"` if you need the older one.",
       ]
         .filter(isLine)
@@ -307,6 +318,13 @@ export const HARNESSES: Harness[] = [
         .join("\n"),
   },
 ];
+
+/**
+ * The harness the panel opens on. HARNESSES is a non-empty literal, but the
+ * compiler can't know that from `Harness[]` — naming the default here keeps
+ * the non-null assertion in one place instead of at every call site.
+ */
+export const DEFAULT_HARNESS: Harness = HARNESSES[0]!;
 
 export function harnessById(id: string): Harness | undefined {
   return HARNESSES.find((h) => h.id === id);

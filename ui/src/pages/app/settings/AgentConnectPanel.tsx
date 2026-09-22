@@ -23,6 +23,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { copyTextWithToast } from "../../../lib/clipboard";
 import {
+  DEFAULT_HARNESS,
   HARNESSES,
   renderHarnessDoc,
   renderAllHarnessDocs,
@@ -45,7 +46,7 @@ export function AgentConnectPanel({
   publicBaseUrl: string;
   openMode: boolean;
 }) {
-  const [selectedId, setSelectedId] = useState(HARNESSES[0]!.id);
+  const [selectedId, setSelectedId] = useState(DEFAULT_HARNESS.id);
 
   // These instructions are copied and pasted into someone else's machine, so
   // they have to carry the URL the OUTSIDE world uses. window.location.origin
@@ -56,7 +57,8 @@ export function AgentConnectPanel({
   const serverUrl = configured || window.location.origin;
 
   const ctx = useMemo(() => ({ serverUrl, openMode }), [serverUrl, openMode]);
-  const selected = HARNESSES.find((h) => h.id === selectedId) ?? HARNESSES[0]!;
+  const selected =
+    HARNESSES.find((h) => h.id === selectedId) ?? DEFAULT_HARNESS;
   const body = useMemo(() => renderHarnessDoc(selected, ctx), [selected, ctx]);
 
   return (
@@ -138,6 +140,8 @@ export function AgentConnectPanel({
                     key={h.id}
                     size="sm"
                     variant={h.id === selectedId ? "default" : "outline"}
+                    // Selection is otherwise conveyed by colour alone.
+                    aria-pressed={h.id === selectedId}
                     onClick={() => setSelectedId(h.id)}
                   >
                     {h.name}
