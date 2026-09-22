@@ -104,6 +104,9 @@ export function OverviewTab({
   // Open the first few top-level folders on arrival, so the index shows
   // documents rather than a column of closed folders.
   const prefetch = useMemo(() => foldersToPrefetch(knownFolders, loadedFolders, PREFETCH_FOLDERS), [knownFolders, loadedFolders]);
+  // Keyed on the prefetch list only: loadingFolders / overrides are read
+  // inside, not deps — an in-flight folder is skipped here, and one the user
+  // has collapsed by hand is never reopened behind their back.
   useEffect(() => {
     if (initialLoad) return;
     for (const p of prefetch) if (!loadingFolders.has(p) && !overrides.has(p)) onExpandFolder(p);
@@ -286,7 +289,7 @@ function FolderRow({
       <button type="button" onClick={onOpenFolder} className={ROW_ACTION} title={`Open ${where} in Documents`} aria-label={`Open ${where} in Documents`}>
         <ArrowUpRight className="h-3.5 w-3.5" />
       </button>
-      <span className={META + " pr-2"} aria-label={`${total} documents`}>
+      <span className={META + " pr-2"} aria-label={`${total} document${total === 1 ? "" : "s"}`}>
         {total}
       </span>
     </div>
