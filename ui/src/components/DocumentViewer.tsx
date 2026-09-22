@@ -217,6 +217,12 @@ const AssetVideo = ({ src }: { src: string }) => (
 // player.vimeo.com/video, never the author's raw URL. Sandboxed: the player
 // needs scripts + its own origin to run, presentation for fullscreen, and
 // popups for "Watch on YouTube"; no top-navigation, no forms.
+// allow-scripts + allow-same-origin together would let a framed document
+// lift its own sandbox — that's only acceptable because the frame is
+// cross-origin to us and its src is pinned to those two provider origins by
+// toEmbedUrl's exact host allowlist. It's the standard trade-off every
+// YouTube/Vimeo embed makes (the player's JS and postMessage API need both).
+// Never reuse this sandbox string for an author-controlled URL.
 // stopPropagation: block parent click-to-edit around the player.
 const EmbedVideo = ({
   embedUrl,

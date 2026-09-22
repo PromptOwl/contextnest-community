@@ -18,7 +18,9 @@ function createVideoWidget(url: string): HTMLVideoElement {
 
 // YouTube / Vimeo player. Wrapped in a non-editable box so clicks and the
 // caret don't land "inside" the iframe as editor content. Same sandbox/allow
-// set as DocumentViewer's EmbedVideo.
+// set as DocumentViewer's EmbedVideo — see the note there on why
+// allow-scripts + allow-same-origin is acceptable only because embedUrl is
+// pinned to youtube-nocookie.com / player.vimeo.com by toEmbedUrl.
 function createIframeWidget(
   embedUrl: string,
   provider: string,
