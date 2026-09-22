@@ -129,23 +129,32 @@ export async function resolveContext(params: {
   // what the graph view's click-to-query and the API docs emit. The engine
   // grammar doesn't accept wiki syntax, so peel those parts off here: match
   // titles directly (case-insensitive) and hand the rest to the engine.
-  // Hop expansion for the title matches happens after the merge below, over
-  // the same wikilink graph the engine traverses.
+  // A part may also be an id ([[nodes/some-id]]) — the same id-style wiki
+  // target the graph resolves — which names exactly one document where a
+  // title may name several. Hop expansion for the matches happens after the
+  // merge below, over the same wikilink graph the engine traverses.
   if (selector && selector.includes("[[")) {
     const parts = selector.split("|").map((p) => p.trim()).filter(Boolean);
     const wantedTitles = new Set<string>();
+    const wantedIds = new Set<string>();
     const rest: string[] = [];
     for (const p of parts) {
       const m = /^\[\[(.+)\]\]$/.exec(p);
-      if (m) wantedTitles.add(m[1].trim().toLowerCase());
-      else rest.push(p);
+      if (!m) {
+        rest.push(p);
+        continue;
+      }
+      const inner = m[1].trim();
+      if (inner.startsWith("nodes/")) wantedIds.add(inner);
+      else wantedTitles.add(inner.toLowerCase());
     }
-    if (wantedTitles.size > 0) {
+    if (wantedTitles.size > 0 || wantedIds.size > 0) {
       selector = rest.join("|") || null;
       resolvedTitleSelector = true;
       titleMatches = allDocs.filter(
         (d: ContextNode) =>
-          wantedTitles.has(String(d.frontmatter.title || "").toLowerCase()) &&
+          (wantedIds.has(d.id) ||
+            wantedTitles.has(String(d.frontmatter.title || "").toLowerCase())) &&
           isVisible(d),
       );
     }

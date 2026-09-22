@@ -416,6 +416,14 @@ describe("POST /context — prompt relevance", () => {
     expect(data.nodes.map((n: any) => n.id)).toEqual(["nodes/zephyr-plan"]);
   });
 
+  it("[[nodes/id]] names one document by id, with the same hop expansion", async () => {
+    const { data } = await ctx({ selector: "[[nodes/hub-note]]" });
+    const ids = data.nodes.map((n: any) => n.id);
+    expect(ids).toContain("nodes/hub-note");
+    expect(ids).toContain("nodes/spoke-note");
+    expect(data.trace.selector_used).toBeNull();
+  });
+
   it("selector path carries no score/via and keeps hop default", async () => {
     const { data } = await ctx({ selector: "[[Hub Note]]" });
     const ids = data.nodes.map((n: any) => n.id);

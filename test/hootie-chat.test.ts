@@ -274,6 +274,80 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
     expect(lastModelCall!.system).toContain("Ship the zephyr in Q4.");
   });
 
+  it("anchors by id, not title: a same-titled sibling never leaks into the anchor context", async () => {
+    // Two "Runbook" documents in different folders. Only the one the person
+    // has open may lead the context — matching by title would pull both.
+    const own = (
+      await jsonRequest(app, "POST", "/nests", { name: "Hootie Twins" }, owner.apiKey)
+    ).data.nest.id;
+    const ops = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${own}/nodes`,
+      { title: "Runbook", content: "# Runbook\n\nOps: restart the ingest worker.", folder: "ops" },
+      owner.apiKey,
+    );
+    const sales = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${own}/nodes`,
+      { title: "Runbook", content: "# Runbook\n\nSales: send the discount sheet.", folder: "sales" },
+      owner.apiKey,
+    );
+    expect(ops.data.node.id).not.toBe(sales.data.node.id);
+    await jsonRequest(app, "POST", `/nests/${own}/context`, { selector: "#none" }, owner.apiKey);
+
+    scriptedAnswer = "Restart it.";
+    const { status, events } = await chat(
+      app,
+      own,
+      { message: "what do I do?", node_id: ops.data.node.id },
+      owner.apiKey,
+    );
+    expect(status).toBe(200);
+    const meta = events.find((e) => e.event === "meta")!;
+    expect(meta.data.anchor.id).toBe(ops.data.node.id);
+    expect(lastModelCall!.system).toContain("restart the ingest worker");
+    expect(lastModelCall!.system).not.toContain("send the discount sheet");
+  });
+
+  it("a node_id the caller can't read answers exactly like one that doesn't exist", async () => {
+    // Public nest, stewardship on: a stranger is a public reader and may see
+    // approved bodies only. A draft has none — to them it must not exist.
+    const own = (
+      await jsonRequest(app, "POST", "/nests", { name: "Hootie Oracle" }, owner.apiKey)
+    ).data.nest.id;
+    await jsonRequest(app, "PATCH", `/nests/${own}/settings`, { stewardship_enabled: true }, owner.apiKey);
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${own}/visibility`,
+      { visibility: "public", acknowledge_public: true },
+      owner.apiKey,
+    );
+    const draft = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${own}/nodes`,
+      { title: "Secret Plan", content: "# Secret\n\nUnreleased." },
+      owner.apiKey,
+    );
+    const draftId = draft.data.node.id;
+
+    lastModelCall = null;
+    const hidden = await chatRaw(app, own, { message: "what's this?", node_id: draftId }, stranger.apiKey);
+    const missing = await chatRaw(app, own, { message: "what's this?", node_id: "nodes/no-such-node" }, stranger.apiKey);
+    expect(hidden.status).toBe(404);
+    expect(missing.status).toBe(404);
+    expect(hidden.text).toBe(missing.text);
+    expect(lastModelCall).toBeNull();
+    // The owner, who can read the draft, gets it as the anchor.
+    scriptedAnswer = "Unreleased.";
+    const ok = await chat(app, own, { message: "what's this?", node_id: draftId }, owner.apiKey);
+    expect(ok.status).toBe(200);
+    expect(ok.events.find((e) => e.event === "meta")!.data.anchor.id).toBe(draftId);
+  });
+
   it("carries the conversation: prior turns reach the model in order", async () => {
     scriptedAnswer = "Still yes.";
     const { status } = await chat(

@@ -26,7 +26,6 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AuthEnv } from "../auth/middleware.js";
 import { config } from "../config.js";
-import { engineCache } from "../nodes/engine.js";
 import {
   resolveContext,
   type ContextNodeSummary,
@@ -143,30 +142,33 @@ hootieRoutes.post("/chat", async (c) => {
 
   let anchor: ContextNodeSummary | null = null;
   if (nodeId) {
-    const title = await nodeTitle(nestId, nodeId);
-    if (title === null) return c.json({ error: "Node not found" }, 404);
+    // Anchored by ID — `[[nodes/…]]` is the id-style wiki target — never by
+    // title: titles aren't unique, and a same-titled sibling must not lead
+    // the context for a document the person doesn't have open.
     // hops: 1 — the document plus what it links to and what links to it.
     // include_drafts: the person has this document OPEN — very often the
     // draft they are writing — and "is this right?" has to be about the text
-    // in front of them, not the last approved version. Gated like everything
-    // else: filterAccessible and resolveReadableBody still decide what this
-    // caller may see of it (a public reader gets the approved body), and if
-    // they can't read the node at all it is filtered out here and the panel
-    // simply has no anchor. The question path below keeps the default
-    // (published only), as /context does.
+    // in front of them, not the last approved version. filterAccessible and
+    // resolveReadableBody still decide what this caller may see of it (a
+    // public reader gets the approved body, or nothing).
     const r = await resolveContext({
       nestId,
       userId,
       baseUrl,
       body: {
-        selector: `[[${title}]]`,
+        selector: `[[${nodeId}]]`,
         hops: 1,
         max_tokens: CONTEXT_BUDGET,
         include_drafts: true,
       },
     });
+    anchor = r.nodes.find((n) => n.id === nodeId) ?? null;
+    // Not in the gated result = not a document this caller can ask about.
+    // One answer for "doesn't exist" and "exists, but not for you": the
+    // node_id is caller-supplied, and the gate must not double as an
+    // existence oracle. Checked before anything is retrieved for the model.
+    if (!anchor) return c.json({ error: "Node not found" }, 404);
     take(r);
-    anchor = nodes.find((n) => n.id === nodeId) ?? null;
   }
   // The question itself. @names are colleagues, not search terms — strip
   // them so a mention doesn't drag in every document that quotes an email.
@@ -245,17 +247,6 @@ hootieRoutes.post("/chat", async (c) => {
     });
   });
 });
-
-/** The node's title, or null when there is no such node. */
-async function nodeTitle(nestId: string, nodeId: string): Promise<string | null> {
-  try {
-    const { storage } = await engineCache.get(nestId);
-    const doc = await storage.readDocument(nodeId);
-    return doc?.frontmatter?.title ? String(doc.frontmatter.title) : null;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Validate the client's conversation so far. Null means malformed; an empty

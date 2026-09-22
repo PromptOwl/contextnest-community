@@ -1432,7 +1432,7 @@ Body (give `prompt` OR `selector`; everything else optional):
 }
 ```
 - `prompt` — natural language. Tokens are matched against tag names and titles, and every document is scored against them (title hits weigh most, then tags, then body words); documents under half the top score are dropped as noise. A prompt that matches nothing returns `nodes: []` — never the whole nest. `trace.compiled.fallback` is `"fulltext"` when body scoring alone produced the answer.
-- `selector` — explicit selector grammar (e.g. `#auth`). Wins over `prompt`.
+- `selector` — explicit selector grammar (e.g. `#auth`). Wins over `prompt`. May carry `[[Title]]` parts in an OR union (`#auth | [[Auth Overview]]`), and `[[nodes/auth-overview]]` names one document by id where a title may match several.
 - `hops` — wikilink expansion depth. Defaults to `0` for a `prompt` (neighbours of a keyword match are not answers to the question) and `2` for a `selector`.
 - `max_tokens` — budget, floored at 50, default 4000. A node that doesn't fit is skipped and the next tried (`trace.truncated_by_budget` counts the skips); only when nothing fits does the first node go through oversized.
 - 400 `prompt or selector is required` if both missing.
