@@ -91,3 +91,48 @@ export function emptyStateActions(input: { canWrite: boolean; canImport: boolean
   if (input.canAddWithAI) actions.push("ai");
   return actions;
 }
+
+/**
+ * Whether an index folder row is collapsed — the reader nav's rule: open once
+ * its documents are loaded, closed until then, and a click wins either way.
+ */
+export function folderCollapsed(path: string, overrides: Map<string, boolean>, loaded: Set<string>): boolean {
+  return overrides.get(path) ?? !loaded.has(path);
+}
+
+/**
+ * The top-level folders the Overview opens on arrival so the index shows
+ * documents, not a column of closed folders: non-empty, in path order, at most
+ * `limit` of them (already-loaded ones count toward it). One folder-level
+ * read each — the same read the Documents tab makes when a folder opens.
+ */
+export function foldersToPrefetch(known: { path: string; total: number }[], loaded: Set<string>, limit: number): string[] {
+  return known
+    .filter((f) => f.path && !f.path.includes("/") && f.total > 0)
+    .sort((a, b) => byPathSegments(a.path, b.path))
+    .slice(0, limit)
+    .map((f) => f.path)
+    .filter((p) => !loaded.has(p));
+}
+
+/** Marker row that stands in for a folder's documents past the cap. */
+export interface MoreMarker {
+  id: string;
+  more: { folder: string; hidden: number; total: number };
+}
+
+/**
+ * First `max` documents per folder, then a single "more" marker (rendered as
+ * "View all N"). The loose root documents are never capped — they are the
+ * top of the index. Returns new groups; the input is not touched.
+ */
+export function capFolderDocs<G extends { folder: string; items: any[] }>(groups: G[], max: number): G[] {
+  return groups.map((g) => {
+    if (g.folder === "Root" || g.items.length <= max) return g;
+    const marker: MoreMarker = {
+      id: `more:${g.folder}`,
+      more: { folder: g.folder, hidden: g.items.length - max, total: g.items.length },
+    };
+    return { ...g, items: [...g.items.slice(0, max), marker] };
+  });
+}

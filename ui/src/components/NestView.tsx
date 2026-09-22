@@ -27,6 +27,7 @@ export { NodeTypeIcon } from "./nest/NodeTypeIcon";
 import { folderOfNode } from "./nest/node-display";
 import { GenerateContextModal } from "./GenerateContextModal";
 import { groupNodesByFolder } from "@/lib/nest-overview";
+import { useMediaQuery } from "@/lib/use-media-query";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ReaderView } from "./ReaderView";
 import { DocumentPickerModal } from "./DocumentPickerModal";
@@ -126,6 +127,10 @@ interface NestViewProps {
   /** Reports tab changes up so App can mirror them into ?tab=. */
   onTabChange?: (tab: string) => void;
 }
+
+/** Nest tab strip, in the reader's text-tab style (CU-wdqcq02qb1). */
+const NEST_TAB =
+  "relative rounded-none px-0 pb-2.5 pt-1 text-muted-foreground hover:text-foreground data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:rounded-full after:bg-transparent data-[state=active]:after:bg-primary";
 
 export function NestView({
   nestId,
@@ -1012,6 +1017,8 @@ export function NestView({
   const [importing, setImporting] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [importMenuOpen, setImportMenuOpen] = useState(false);
+  // Phone width: Share folds into the ⋮ menu so the header actions keep one row.
+  const isPhone = useMediaQuery("(max-width: 639px)");
 
   const kindForFile = (name: string): "document" | "artifact" | null => {
     const ext = name.toLowerCase().split(".").pop() || "";
@@ -1377,9 +1384,10 @@ export function NestView({
               Add with AI
             </Button>
           )}
-          {canManage && (
+          {canManage && !isPhone && (
             // Inside the nest, Share IS the Collaborators tab — one surface
-            // for visibility, people and teams (CU-wdqcpzzzy6).
+            // for visibility, people and teams (CU-wdqcpzzzy6). On a phone it
+            // is the ⋮ menu's first item instead.
             <Button
               variant="outline"
               size="sm"
@@ -1424,6 +1432,12 @@ export function NestView({
               destructive, write+admin gated. */}
           {(() => {
             const actions: OverflowAction[] = [];
+            if (canManage && isPhone)
+              actions.push({
+                label: "Share",
+                icon: Users,
+                onSelect: () => setActiveTab("collaborators"),
+              });
             if (!isReadOnly && canManageGovernance)
               actions.push({
                 label: "Nest settings",
@@ -1608,13 +1622,18 @@ export function NestView({
             inside itself rather than making the whole page scroll sideways —
             page-level overflow drags fixed UI (toasts, dialogs) off-screen
             with it. */}
-        <div className="flex flex-wrap items-center gap-2 mb-4 min-w-0">
-          <TabsList className="max-w-full justify-start overflow-x-auto">
-            <TabsTrigger value="overview">Overview</TabsTrigger>
-            <TabsTrigger value="documents">Documents</TabsTrigger>
+        {/* The reader's quieter nav: text tabs over one hairline, the active
+            one underlined — not a grey pill strip. Styled here, not in
+            ui/tabs, so the other pages that use Tabs are unchanged. On a
+            phone the actions sit above the tabs so the underline meets the
+            rule. */}
+        <div className="flex flex-wrap items-end gap-x-2 gap-y-3 mb-5 min-w-0 border-b">
+          <TabsList className="h-auto min-h-0 max-w-full justify-start gap-5 overflow-x-auto rounded-none bg-transparent p-0">
+            <TabsTrigger value="overview" className={NEST_TAB}>Overview</TabsTrigger>
+            <TabsTrigger value="documents" className={NEST_TAB}>Documents</TabsTrigger>
             {/* Governance tabs hidden for view-only. */}
             {showReviewTab && !isReadOnly && (
-              <TabsTrigger value="review" className="gap-2">
+              <TabsTrigger value="review" className={NEST_TAB + " gap-2"}>
                 Review Queue
                 {reviewableQueue.length > 0 && (
                   <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
@@ -1624,7 +1643,7 @@ export function NestView({
               </TabsTrigger>
             )}
             {!isReadOnly && (
-              <TabsTrigger value="external-edits" className="gap-2">
+              <TabsTrigger value="external-edits" className={NEST_TAB + " gap-2"}>
                 External Edits
                 {externalEditCount > 0 && (
                   <Badge
@@ -1639,7 +1658,7 @@ export function NestView({
             {/* Steward roster is admin-only (list + manage), and hidden when
               the admin is viewing a real user's nest. */}
             {stewardshipEnabled && canManageGovernance && (
-              <TabsTrigger value="stewards">Stewards</TabsTrigger>
+              <TabsTrigger value="stewards" className={NEST_TAB}>Stewards</TabsTrigger>
             )}
             {/* Collaborators — plain access sharing, independent of
               stewardship. Owner/admin manage the full roster; write
@@ -1647,11 +1666,11 @@ export function NestView({
               they see the tab too. The roster controls cap themselves by the
               caller's permission (see CollaboratorManager). */}
             {(canManage || collabCanWrite) && (
-              <TabsTrigger value="collaborators">Collaborators</TabsTrigger>
+              <TabsTrigger value="collaborators" className={NEST_TAB}>Collaborators</TabsTrigger>
             )}
           </TabsList>
           {!isReadOnly && canEditDocs && (
-            <div className="ml-auto flex shrink-0 items-center gap-2">
+            <div className="ml-auto flex shrink-0 items-center gap-2 pb-2 max-sm:order-first max-sm:w-full max-sm:justify-end">
             <Button
               variant="outline"
               size="sm"
@@ -1722,6 +1741,10 @@ export function NestView({
             canEditDocs={canEditDocs}
             onOpenDocument={onOpenDocument}
             onOpenFolder={openFolderInDocuments}
+            nestName={editableName}
+            loadedFolders={loadedFolderPaths}
+            loadingFolders={loadingFolders}
+            onExpandFolder={fetchLevel}
             description={nestDescription}
             governance={stewardshipEnabled ? stats : undefined}
             onOpenReview={showReviewTab && !isReadOnly ? () => setActiveTab("review") : undefined}

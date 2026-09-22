@@ -1205,8 +1205,10 @@ export default function App() {
               {crumbs.map((c, i) => {
                 const last = i === crumbs.length - 1;
                 return (
-                  <span key={i} className="flex min-w-0 items-center gap-1">
-                    {i > 0 && <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" aria-hidden />}
+                  // On a phone only the current page shows: three crumbs cut to
+                  // "H… › Ac… › O…" said nothing, and the page names the nest.
+                  <span key={i} className={`flex min-w-0 items-center gap-1${last ? "" : " max-sm:hidden"}`}>
+                    {i > 0 && <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-muted-foreground/60${last ? " max-sm:hidden" : ""}`} aria-hidden />}
                     {last || !c.go ? (
                       <span className={last ? "truncate text-base font-semibold" : "truncate text-muted-foreground"} aria-current={last ? "page" : undefined}>{c.label}</span>
                     ) : (

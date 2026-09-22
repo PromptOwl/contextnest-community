@@ -4,7 +4,7 @@
  * summary under "Contents" says (the stat cards it replaces).
  */
 import { describe, it, expect } from "vitest";
-import { emptyStateActions, groupNodesByFolder, overviewFacts } from "./nest-overview";
+import { capFolderDocs, emptyStateActions, folderCollapsed, foldersToPrefetch, groupNodesByFolder, overviewFacts } from "./nest-overview";
 
 describe("groupNodesByFolder (the Overview / reader index)", () => {
   const nodes = [
@@ -125,5 +125,64 @@ describe("emptyStateActions (who gets which start action on an empty nest)", () 
   });
   it("a read-only caller gets none (the page says 'No documents yet')", () => {
     expect(emptyStateActions({ canWrite: false, canImport: true, canAddWithAI: false })).toEqual([]);
+  });
+});
+
+describe("folderCollapsed (the index's expandable tree, same rule as the reader nav)", () => {
+  const loaded = new Set(["", "guides"]);
+  it("a loaded folder starts open, an unloaded one closed", () => {
+    expect(folderCollapsed("guides", new Map(), loaded)).toBe(false);
+    expect(folderCollapsed("policies", new Map(), loaded)).toBe(true);
+  });
+  it("a click wins either way", () => {
+    expect(folderCollapsed("guides", new Map([["guides", true]]), loaded)).toBe(true);
+    expect(folderCollapsed("policies", new Map([["policies", false]]), loaded)).toBe(false);
+  });
+});
+
+describe("foldersToPrefetch (which folders the Overview opens on arrival)", () => {
+  const known = [
+    { path: "archive", total: 0 },
+    { path: "guides", total: 4 },
+    { path: "guides/engineering", total: 2 },
+    { path: "policies", total: 3 },
+    { path: "research", total: 1 },
+  ];
+  it("top-level, non-empty, not yet loaded, in path order, capped", () => {
+    expect(foldersToPrefetch(known, new Set(), 2)).toEqual(["guides", "policies"]);
+    expect(foldersToPrefetch(known, new Set(), 10)).toEqual(["guides", "policies", "research"]);
+  });
+  it("skips what is already loaded but still counts it toward the cap", () => {
+    expect(foldersToPrefetch(known, new Set(["guides"]), 2)).toEqual(["policies"]);
+  });
+  it("never nested folders, never empty ones, nothing for a nest without folders", () => {
+    expect(foldersToPrefetch(known, new Set(), 10)).not.toContain("guides/engineering");
+    expect(foldersToPrefetch(known, new Set(), 10)).not.toContain("archive");
+    expect(foldersToPrefetch([], new Set(), 5)).toEqual([]);
+  });
+});
+
+describe("capFolderDocs (first few documents per folder, then 'View all')", () => {
+  const docs = (n: number, folder: string) => Array.from({ length: n }, (_, i) => ({ id: `nodes/${folder}/d${i}`, title: `D${i}` }));
+  const groups = [
+    { folder: "Root", depth: 0, items: docs(7, "x").map((d, i) => ({ ...d, id: `nodes/r${i}` })) },
+    { folder: "guides", depth: 1, items: docs(7, "guides") },
+    { folder: "policies", depth: 1, items: docs(2, "policies") },
+  ];
+  it("caps a folder at max and appends one 'more' marker with the hidden count", () => {
+    const g = capFolderDocs(groups, 5).find((x) => x.folder === "guides")!;
+    expect(g.items).toHaveLength(6);
+    expect(g.items.slice(0, 5).map((d: any) => d.title)).toEqual(["D0", "D1", "D2", "D3", "D4"]);
+    expect(g.items[5]).toMatchObject({ more: { folder: "guides", hidden: 2, total: 7 } });
+  });
+  it("leaves a short folder alone", () => {
+    expect(capFolderDocs(groups, 5).find((x) => x.folder === "policies")!.items).toHaveLength(2);
+  });
+  it("never caps the loose root documents — they are the top of the index", () => {
+    expect(capFolderDocs(groups, 5).find((x) => x.folder === "Root")!.items).toHaveLength(7);
+  });
+  it("does not mutate the input groups", () => {
+    capFolderDocs(groups, 5);
+    expect(groups[1].items).toHaveLength(7);
   });
 });
