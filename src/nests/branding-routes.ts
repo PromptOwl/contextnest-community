@@ -11,8 +11,8 @@
  * What: the body REPLACES the nest's branding (the settings form always sends
  * its full state); `null` or `{}` clears it. One exception keeps an owner's
  * routine edit from silently undoing the server admin's decision: when a
- * non-admin's body doesn't mention `hide_powered_by`, the stored value is
- * carried over.
+ * non-admin's body doesn't mention `hide_powered_by` — a full clear included —
+ * the stored value is carried over.
  *
  * Read: there is no separate GET — the parsed branding rides GET /nests/:id,
  * which a public reader already fetches (and which 404s a private nest).
@@ -57,7 +57,7 @@ brandingRoutes.patch("/branding", async (c) => {
     | { branding_json: string | null }
     | undefined;
   if (!row) throw new NotFoundError("Nest not found");
-  const current = parseStoredBranding(row.branding_json);
+  const current = parseStoredBranding(row.branding_json, nestId);
 
   // An empty body is a clear, like null.
   const text = await c.req.text();
@@ -98,11 +98,13 @@ brandingRoutes.patch("/branding", async (c) => {
         'Only the server admin can hide the "Powered by ContextNest" line',
       );
     }
-    // Carry the admin's white-label choice across an edit that didn't touch it.
-    if (next && !mentionsHide && wasHidden) next = { ...next, hide_powered_by: true };
+    // Carry the admin's white-label choice across an edit that didn't touch
+    // it — including a full clear (null / {}), which resets everything the
+    // caller is allowed to set but not the one thing only the admin can.
+    if (!mentionsHide && wasHidden) next = { ...(next ?? {}), hide_powered_by: true };
   }
 
   const stored = next ? JSON.stringify(next) : null;
   await db.run("UPDATE nests SET branding_json = ? WHERE id = ?", [stored, nestId]);
-  return c.json({ branding: parseStoredBranding(stored) });
+  return c.json({ branding: parseStoredBranding(stored, nestId) });
 });

@@ -201,10 +201,16 @@ export async function validateBrandingInput(
 }
 
 /**
- * Read a stored row. Re-validates the shape (never trust a hand-edited row to
- * be CSS-safe) and returns null for anything that doesn't parse.
+ * Read a stored row for `nestId`. Re-validates it with the same rules as a
+ * write — never trust a hand-edited row: colors must still be hex (a bad one
+ * fails the whole parse), and a URL that no longer passes its write-time rule
+ * (https image / this nest's image asset / https link) is dropped rather than
+ * rendered. Returns null for anything that leaves nothing to show.
  */
-export function parseStoredBranding(raw: string | null | undefined): NestBranding | null {
+export function parseStoredBranding(
+  raw: string | null | undefined,
+  nestId: string,
+): NestBranding | null {
   if (!raw) return null;
   let data: unknown;
   try {
@@ -216,7 +222,14 @@ export function parseStoredBranding(raw: string | null | undefined): NestBrandin
   if (!parsed.success) return null;
   const b = compact(parsed.data as NestBranding);
   if (!b) return null;
-  return { ...b, hide_powered_by: b.hide_powered_by === true };
+  for (const f of IMAGE_FIELDS) {
+    const url = b[f];
+    if (url && !nestAssetName(url, nestId) && !isHttpsImageUrl(url)) delete b[f];
+  }
+  if (b.footer_link_url && !isHttpsLink(b.footer_link_url)) delete b.footer_link_url;
+  const kept = compact(b);
+  if (!kept) return null;
+  return { ...kept, hide_powered_by: kept.hide_powered_by === true };
 }
 
 // ── WCAG color math ───────────────────────────────────────────────────────

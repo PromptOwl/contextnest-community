@@ -388,13 +388,13 @@ Every field is optional. Rules (any violation → `400`, nothing saved):
 - **`footer_link_url`**: an `https://` URL.
 - **Text** (`site_title` ≤ 120, `banner_headline` ≤ 120, `banner_subtext` ≤ 280, `footer_text` ≤ 280, `footer_link_label` ≤ 80): plain text, no control characters; always rendered escaped.
 - **Unknown keys** are refused — there is no free-form CSS or JS.
-- **`hide_powered_by`** (boolean): hides "Powered by ContextNest" in the reader and "Secured by PromptOwl · ContextNest" on `/p`. Turning it on is **server-admin only** (`403` for a nest owner/admin). A non-admin edit that omits the field keeps the stored value; a non-admin may turn it off.
+- **`hide_powered_by`** (boolean): hides "Powered by ContextNest" in the reader and "Secured by PromptOwl · ContextNest" on `/p`. Turning it on is **server-admin only** (`403` for a nest owner/admin). A non-admin edit that omits the field keeps the stored value — a non-admin full clear (`null` / `{}`) included, which then stores `{ "hide_powered_by": true }`; a non-admin may turn it off explicitly.
 
 Gate: the access middleware requires the `admin` tier for this resource (owner, admin collaborator, or server admin); the handler re-checks it. Editors and viewers get `403`, anonymous callers `401`.
 
 Response (200): `{ "branding": { …normalised… } }` or `{ "branding": null }`.
 
-**Reading it.** There is no separate GET: `GET /nests/:nestId` returns `nest.branding` (parsed and re-validated; `null` when unbranded) in place of the raw `branding_json` column. It is therefore readable exactly by whoever can read the nest — an anonymous reader of a public nest sees it; a private nest still `404`s.
+**Reading it.** There is no separate GET: `GET /nests/:nestId` returns `nest.branding` (parsed and re-validated against the write rules — a stored URL that no longer passes is dropped; `null` when unbranded) in place of the raw `branding_json` column. It is therefore readable exactly by whoever can read the nest — an anonymous reader of a public nest sees it; a private nest still `404`s.
 
 **Where it applies.** The SPA reader (read-only callers in reader mode, and an owner's "Preview as reader") uses it for the header logo + title (falling back to the server `LOGO_URL` and the nest name), the banner on the home page, accent/header/page-tint colors, footer, favicon and tab title. On `/p`, the markdown document view, the gate page and the comment shell pick up the colors, title, logo, banner and footer; **the CSP is unchanged** — uploaded images are inlined as `data:` URIs (already allowed by `img-src data:`), and external https images are not rendered there. HTML/artifact publishes are served untouched.
 

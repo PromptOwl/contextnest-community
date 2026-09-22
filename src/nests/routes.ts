@@ -128,10 +128,10 @@ export const nestRoutes = new Hono<AuthEnv>();
  * a public reader already makes, so reader-mode branding needs no extra route
  * — and a nest the caller can't read 404s before this runs.
  */
-function withParsedBranding<T extends { branding_json?: string | null } | null>(nest: T) {
+function withParsedBranding<T extends { id: string; branding_json?: string | null } | null>(nest: T) {
   if (!nest) return nest;
   const { branding_json, ...rest } = nest as NonNullable<T>;
-  return { ...rest, branding: parseStoredBranding(branding_json) };
+  return { ...rest, branding: parseStoredBranding(branding_json, nest.id) };
 }
 
 // GET /nests[?archived=1]

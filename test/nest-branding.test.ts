@@ -234,6 +234,28 @@ describe("PATCH /nests/:id/branding", () => {
       expect(res.data.branding.site_title).toBe("Acme v2");
     });
 
+    // Review finding (PR #321): a non-admin's full clear used to drop the
+    // admin's white-label flag along with everything else.
+    it("an owner's full clear (null or {}) keeps the admin's hide_powered_by", async () => {
+      expect((await patch({ site_title: "Acme", hide_powered_by: true }, admin.apiKey)).status).toBe(200);
+      const viaNull = await patch(null as any, owner.apiKey);
+      expect(viaNull.status).toBe(200);
+      expect(viaNull.data.branding).toEqual({ hide_powered_by: true });
+      expect((await read(owner.apiKey)).data.nest.branding?.hide_powered_by).toBe(true);
+      const viaEmpty = await patch({}, owner.apiKey);
+      expect(viaEmpty.status).toBe(200);
+      expect(viaEmpty.data.branding?.hide_powered_by).toBe(true);
+      // Restore the state the next test expects.
+      expect((await patch({ site_title: "Acme v2", hide_powered_by: true }, owner.apiKey)).status).toBe(200);
+    });
+
+    it("the server admin's full clear really clears", async () => {
+      const res = await patch(null as any, admin.apiKey);
+      expect(res.status).toBe(200);
+      expect(res.data.branding).toBeNull();
+      expect((await patch({ site_title: "Acme v2", hide_powered_by: true }, admin.apiKey)).status).toBe(200);
+    });
+
     it("an owner may turn it back off (the less-privileged state)", async () => {
       const res = await patch({ site_title: "Acme v2", hide_powered_by: false }, owner.apiKey);
       expect(res.status).toBe(200);

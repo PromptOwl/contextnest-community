@@ -46,10 +46,40 @@ describe("server branding helpers", () => {
     expect(publishBrandCssVars({ accent_color: "red;}body{display:none" } as any)).toBe("");
   });
 
+  const NEST = "7f0c2a1e-1111-4222-8333-444455556666";
+  const ASSET = `/nests/${NEST}/assets/0b0f5a4e-9d1c-4e8b-a1d2-3c4d5e6f7a8b.png`;
+
   it("parseStoredBranding tolerates garbage and re-validates the row", () => {
-    expect(parseStoredBranding(null)).toBeNull();
-    expect(parseStoredBranding("not json")).toBeNull();
-    expect(parseStoredBranding(JSON.stringify({ accent_color: "red;x" }))).toBeNull();
-    expect(parseStoredBranding(JSON.stringify({ site_title: "Acme" }))).toMatchObject({ site_title: "Acme" });
+    expect(parseStoredBranding(null, NEST)).toBeNull();
+    expect(parseStoredBranding("not json", NEST)).toBeNull();
+    expect(parseStoredBranding(JSON.stringify({ accent_color: "red;x" }), NEST)).toBeNull();
+    expect(parseStoredBranding(JSON.stringify({ site_title: "Acme" }), NEST)).toMatchObject({ site_title: "Acme" });
+  });
+
+  // Review finding (PR #321): the read path must defend URLs the way it
+  // defends colors — a hand-edited row with a javascript: footer link would
+  // otherwise become a clickable href on /p.
+  it("parseStoredBranding drops stored URLs that break the write-time rules", () => {
+    const row = JSON.stringify({
+      site_title: "Acme",
+      footer_link_url: "javascript:alert(1)",
+      logo_url: "javascript:alert(1)",
+      banner_url: `/nests/some-other-nest/assets/0b0f5a4e-9d1c-4e8b-a1d2-3c4d5e6f7a8b.png`,
+      favicon_url: "http://cdn.example.com/x.png",
+    });
+    const b = parseStoredBranding(row, NEST)!;
+    expect(b.site_title).toBe("Acme");
+    expect(b).not.toHaveProperty("footer_link_url");
+    expect(b).not.toHaveProperty("logo_url");
+    expect(b).not.toHaveProperty("banner_url");
+    expect(b).not.toHaveProperty("favicon_url");
+    // Valid ones survive.
+    const ok = parseStoredBranding(
+      JSON.stringify({ logo_url: ASSET, banner_url: "https://cdn.example.com/b.jpg", footer_link_url: "https://acme.example.com/" }),
+      NEST,
+    )!;
+    expect(ok).toMatchObject({ logo_url: ASSET, banner_url: "https://cdn.example.com/b.jpg", footer_link_url: "https://acme.example.com/" });
+    // A row whose only content was a bad URL is unbranded.
+    expect(parseStoredBranding(JSON.stringify({ footer_link_url: "javascript:x" }), NEST)).toBeNull();
   });
 });

@@ -179,7 +179,7 @@ async function inlineAsset(nestId: string, url: string | null | undefined, cap: 
 async function loadBrand(row: PublishRow): Promise<PublishBrand | null> {
   let b: NestBranding | null = null;
   try {
-    b = parseStoredBranding((await getNest(row.nest_id))?.branding_json);
+    b = parseStoredBranding((await getNest(row.nest_id))?.branding_json, row.nest_id);
   } catch {
     b = null;
   }
