@@ -279,6 +279,77 @@ describe("POST /nests/:id/nodes/pdf — governed upload", () => {
     }
   });
 
+  it("an oversize upload streamed WITHOUT Content-Length is cut off at the cap, not buffered whole", async () => {
+    const prev = process.env.PDF_MAX_MB;
+    process.env.PDF_MAX_MB = "1";
+    try {
+      const boundary = "----pdfcap" + Date.now();
+      const head = new TextEncoder().encode(
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="big.pdf"\r\n` +
+          `Content-Type: application/pdf\r\n\r\n%PDF-1.4\n`,
+      );
+      const tail = new TextEncoder().encode(`\r\n--${boundary}--\r\n`);
+      const total = 8 * 1024 * 1024;
+      const chunk = new Uint8Array(64 * 1024).fill(0x41);
+      let pulled = 0;
+      let sentHead = false;
+      let sentTail = false;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (!sentHead) {
+            sentHead = true;
+            pulled += head.length;
+            controller.enqueue(head);
+          } else if (pulled < total) {
+            pulled += chunk.length;
+            controller.enqueue(chunk);
+          } else if (!sentTail) {
+            sentTail = true;
+            controller.enqueue(tail);
+            controller.close();
+          }
+        },
+      });
+      const res = await app.request(`/nests/${nestId}/nodes/pdf`, {
+        method: "POST",
+        headers: {
+          ...authed(editor.apiKey),
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+        },
+        body: stream,
+        duplex: "half",
+      } as RequestInit);
+      expect(res.status).toBe(413);
+      // Refused while reading: far less than the whole 8 MB was pulled.
+      expect(pulled).toBeLessThan(3 * 1024 * 1024);
+    } finally {
+      if (prev === undefined) delete process.env.PDF_MAX_MB;
+      else process.env.PDF_MAX_MB = prev;
+    }
+  });
+
+  it("a PDF whose bytes no longer match the recorded sha256 is refused, never served", async () => {
+    const created = await uploadPdf(app, nestId, owner.apiKey, textPdf({ title: "Tamper" }), {
+      title: "Tamper Target",
+    });
+    expect(created.status).toBe(201);
+    const { node } = await created.json();
+    // Swap the sidecar on disk for different (valid) PDF bytes.
+    const { writeFileSync } = await import("fs");
+    writeFileSync(
+      join(env.dataDir, "nests", nestId, "nodes", "tamper-target.pdf"),
+      buildPdf([{ lines: ["Forged contents"] }]),
+    );
+    const res = await app.request(`/nests/${nestId}/nodes/${node.id}/pdf`, {
+      headers: authed(owner.apiKey),
+    });
+    expect(res.status).toBe(500);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const body = await res.text();
+    expect(body.startsWith("%PDF")).toBe(false);
+    expect(body).toMatch(/no longer matches/);
+  });
+
   it("the PDF route is exempt from the global body cap up to PDF_MAX_MB", async () => {
     // 12 MB > MAX_BODY_BYTES (10 MB) but < the 25 MB PDF default.
     const big = buildPdf([{ lines: ["Twelve megabytes"] }], { padBytes: 12 * 1024 * 1024 });
