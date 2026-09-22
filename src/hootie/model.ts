@@ -19,8 +19,10 @@ export interface ModelTurn {
  *
  * Adaptive thinking stays on (the model's default); effort is capped at
  * `medium` because a grounded Q&A over a few documents doesn't need more, and
- * a chat panel is latency-sensitive. `max_tokens` is deliberately short: this
- * is a chat answer, not a document.
+ * a chat panel is latency-sensitive. `max_tokens` caps a runaway answer, not
+ * a normal one: a cited chat reply is a few hundred tokens, and 4096 leaves
+ * room for a long list without letting a loop run to the model's ceiling.
+ * `signal` cancels the stream when the client hangs up.
  */
 export async function* streamAnswer(params: {
   apiKey: string;
@@ -33,7 +35,7 @@ export async function* streamAnswer(params: {
   const stream = client.messages.stream(
     {
       model: params.model,
-      max_tokens: 8192,
+      max_tokens: 4096,
       // The system prompt carries the retrieved context, which is the bulk of
       // the request and identical across a conversation's turns — cache it.
       system: [

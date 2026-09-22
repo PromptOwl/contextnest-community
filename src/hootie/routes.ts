@@ -202,6 +202,15 @@ hootieRoutes.post("/chat", async (c) => {
   });
 
   return streamSSE(c, async (stream) => {
+    // A client that hangs up mid-answer (panel closed, nest switched, a new
+    // question fired) must stop the model too — every chat is a paid call,
+    // and nobody is listening. Both hang-up signals feed one controller: the
+    // SSE stream's own abort and the request's.
+    const cancel = new AbortController();
+    const hangUp = () => cancel.abort();
+    stream.onAbort(hangUp);
+    c.req.raw.signal.addEventListener("abort", hangUp, { once: true });
+
     await stream.writeSSE({
       event: "meta",
       data: JSON.stringify({ nodes, anchor }),
@@ -213,11 +222,16 @@ hootieRoutes.post("/chat", async (c) => {
         model: config.HOOTIE_MODEL,
         system,
         turns,
+        signal: cancel.signal,
       })) {
+        if (cancel.signal.aborted) return;
         answer += chunk;
         await stream.writeSSE({ event: "delta", data: JSON.stringify({ text: chunk }) });
       }
     } catch (err) {
+      // Our own cancellation surfaces as an abort error from the SDK: nothing
+      // to report, and nobody to report it to.
+      if (cancel.signal.aborted) return;
       const text =
         err instanceof ModelRefusedError
           ? err.message
@@ -227,6 +241,7 @@ hootieRoutes.post("/chat", async (c) => {
       return;
     }
 
+    if (cancel.signal.aborted) return;
     const cited = citedNodes(answer, nodes);
 
     let mention: MentionOutcome | null = null;

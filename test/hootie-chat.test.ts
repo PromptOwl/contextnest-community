@@ -52,6 +52,10 @@ function parseSse(text: string): SseEvent[] {
 let scriptedAnswer = "Hoot.";
 /** What the mocked model was asked; tests inspect the retrieved context. */
 let lastModelCall: { system: string; turns: any[] } | null = null;
+/** When set, the mock parks after its first chunk until the signal aborts
+ *  (or this many ms pass) and records which — the disconnect test. */
+let holdAfterFirstChunkMs = 0;
+let modelSawAbort: boolean | null = null;
 
 async function chatRaw(
   app: any,
@@ -96,11 +100,32 @@ function safeJson(text: string): any {
 // The model mock is file-wide: no describe in this file may reach the SDK.
 beforeAll(() => {
   vi.doMock("../src/hootie/model.js", () => ({
-    streamAnswer: async function* (params: { system: string; turns: any[] }) {
+    streamAnswer: async function* (params: {
+      system: string;
+      turns: any[];
+      signal?: AbortSignal;
+    }) {
       lastModelCall = { system: params.system, turns: params.turns };
       // Two chunks, so the route's delta framing is exercised.
       const mid = Math.ceil(scriptedAnswer.length / 2);
       yield scriptedAnswer.slice(0, mid);
+      if (holdAfterFirstChunkMs > 0) {
+        const signal = params.signal;
+        modelSawAbort = await new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => resolve(false), holdAfterFirstChunkMs);
+          if (!signal) return;
+          if (signal.aborted) {
+            clearTimeout(timer);
+            resolve(true);
+            return;
+          }
+          signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            resolve(true);
+          });
+        });
+        if (modelSawAbort) return;
+      }
       yield scriptedAnswer.slice(mid);
     },
   }));
@@ -371,6 +396,43 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
     // … but the name was not a search term: the Brand Guidelines document
     // was not pulled into the context by the mention.
     expect(lastModelCall!.system).not.toContain("Logo rules");
+  });
+
+  it("a client that disconnects mid-answer cancels the model call", async () => {
+    scriptedAnswer = "First half. Second half.";
+    holdAfterFirstChunkMs = 3000;
+    modelSawAbort = null;
+    try {
+      const res = await app.request(`/nests/${nestId}/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${reader.apiKey}`,
+        },
+        body: JSON.stringify({ message: "tell me everything" }),
+      });
+      expect(res.status).toBe(200);
+      const reader_ = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let seen = "";
+      // Read until the first delta has arrived, then hang up.
+      while (!seen.includes('"event: delta"') && !seen.includes("event: delta")) {
+        const { value, done } = await reader_.read();
+        if (done) break;
+        seen += decoder.decode(value, { stream: true });
+      }
+      await reader_.cancel();
+      // The mock resolves when the route's signal fires — or after 3s if it
+      // never does, which is the failure.
+      await new Promise((r) => setTimeout(r, 100));
+      const started = Date.now();
+      while (modelSawAbort === null && Date.now() - started < 3500) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(modelSawAbort).toBe(true);
+    } finally {
+      holdAfterFirstChunkMs = 0;
+    }
   });
 
   it("carries the conversation: prior turns reach the model in order", async () => {
