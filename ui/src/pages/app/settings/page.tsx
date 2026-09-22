@@ -7,7 +7,7 @@
  * list and to that tab's `keys` (so the unsaved-changes dot tracks it).
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PageTitle } from "@/components/ui/page-title";
@@ -285,9 +285,11 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   const [saving, setSaving] = useState(false);
   const qc = useQueryClient();
   // Auth mode isn't an admin setting — it's boot-time config, reported on
-  // /health. The Connecting-agents tab needs it so open-mode deployments
-  // aren't told to send a credential that doesn't exist.
-  const health = useQuery(reads.health());
+  // /health and already derived once in AuthContext. The Connecting-agents
+  // tab needs it so open-mode deployments aren't told to send a credential
+  // that doesn't exist; read it from there rather than mounting a second
+  // query, so there's one place that decides what "open mode" means.
+  const { authMode } = useAuth();
   // Error from the last failed save (shape validation or SMTP verify), shown
   // inline near the fields. Cleared on the next edit or a successful save.
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1742,7 +1744,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
           <TabsContent value="agents" className="space-y-4">
             <AgentConnectPanel
               publicBaseUrl={draft.public_base_url ?? ""}
-              openMode={health.data?.auth_mode === "open"}
+              openMode={authMode === "open"}
             />
           </TabsContent>
         </Tabs>

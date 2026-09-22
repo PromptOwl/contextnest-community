@@ -58,6 +58,20 @@ function mcpEndpoint(serverUrl: string): string {
   return `${serverUrl.replace(/\/+$/, "")}/mcp`;
 }
 
+/**
+ * The one predicate every harness body filters with.
+ *
+ * A body is an array of markdown lines where `null` means "this line does not
+ * apply to this deployment" and `""` is a real paragraph separator. Those look
+ * alike to `.filter(Boolean)`, which drops both — and losing the blank line
+ * silently folds a trailing note into the preceding list item, because
+ * CommonMark treats an unindented line right after a list item as a lazy
+ * continuation of it. Keep the empty strings; drop only the nulls.
+ */
+function isLine(l: string | null): l is string {
+  return l !== null;
+}
+
 const KEY_PLACEHOLDER = "<your ContextNest API key>";
 const KEY_ENV = "CONTEXTNEST_API_KEY";
 
@@ -101,7 +115,7 @@ export const HARNESSES: Harness[] = [
         "",
         "> The MCP client runs on Anthropic's servers, not the user's machine, so this URL must resolve on the public internet and present a valid TLS certificate. A `localhost` or internal-DNS address will not work here.",
       ]
-        .filter(Boolean)
+        .filter(isLine)
         .join("\n"),
   },
   {
@@ -122,7 +136,7 @@ export const HARNESSES: Harness[] = [
         "",
         "Developer mode is available on Plus, Pro, Business, Enterprise and Edu — not on the free tier. Public HTTPS is required.",
       ]
-        .filter(Boolean)
+        .filter(isLine)
         .join("\n"),
   },
   {
@@ -142,7 +156,7 @@ export const HARNESSES: Harness[] = [
         "",
         "The server must be reachable over the public internet; Grok has no tunnel of its own.",
       ]
-        .filter(Boolean)
+        .filter(isLine)
         .join("\n"),
   },
   {
@@ -180,7 +194,7 @@ export const HARNESSES: Harness[] = [
         "",
         "A session started before the server was added must be restarted; a fresh session picks it up automatically.",
       ]
-        .filter(Boolean)
+        .filter(isLine)
         .join("\n"),
   },
   {
@@ -209,7 +223,7 @@ export const HARNESSES: Harness[] = [
           ? null
           : "Codex reads the token from the environment and sends it as an `Authorization: Bearer` header, so the value never lands in the config file.",
       ]
-        .filter((l) => l !== null)
+        .filter(isLine)
         .join("\n"),
   },
   {
@@ -235,7 +249,7 @@ export const HARNESSES: Harness[] = [
         "",
         "Streamable HTTP is the default transport — only set `transport: \"sse\"` if you need the older one.",
       ]
-        .filter((l) => l !== null)
+        .filter(isLine)
         .join("\n"),
   },
   {
@@ -261,7 +275,7 @@ export const HARNESSES: Harness[] = [
         "",
         "Gemini CLI picks the transport from the property name: `httpUrl` is Streamable HTTP, `url` would be SSE, `command` would be stdio. Use `httpUrl` here.",
       ]
-        .filter((l) => l !== null)
+        .filter(isLine)
         .join("\n"),
   },
 
@@ -289,7 +303,7 @@ export const HARNESSES: Harness[] = [
         "",
         "Cursor expands variables inside `url` and `headers`, so the key can come from the environment rather than the file.",
       ]
-        .filter((l) => l !== null)
+        .filter(isLine)
         .join("\n"),
   },
 ];

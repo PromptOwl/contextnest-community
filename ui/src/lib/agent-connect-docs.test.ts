@@ -95,6 +95,33 @@ describe("rendered instructions", () => {
     }
   });
 
+  /**
+   * Bodies are arrays of markdown lines where `null` means "not on this
+   * deployment" and `""` is a paragraph separator. `.filter(Boolean)` drops
+   * both, and losing the blank line makes CommonMark treat the following note
+   * as a lazy continuation of the last list item — two paragraphs silently
+   * become one. Substring assertions can't see that, so check the structure.
+   */
+  it("keeps a blank line between a numbered list and the prose after it", () => {
+    for (const h of HARNESSES) {
+      for (const ctx of [KEYED, OPEN]) {
+        const lines = renderHarnessDoc(h, ctx).split("\n");
+        lines.forEach((line, i) => {
+          if (!/^\d+\.\s/.test(line)) return;
+          const next = lines[i + 1];
+          if (next === undefined) return;
+          // A list item may be followed by another item, a blank line, or an
+          // indented continuation. Anything else gets folded into this item.
+          const ok = next === "" || /^\d+\.\s/.test(next) || /^\s/.test(next);
+          expect(
+            ok,
+            `${h.id}: "${next}" would fold into the list item "${line}"`,
+          ).toBe(true);
+        });
+      }
+    }
+  });
+
   it("tells a keyed deployment how to present the key", () => {
     // Every harness that can take a static credential must name one concrete
     // mechanism; an admin reading the panel should never have to guess.
