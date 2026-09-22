@@ -590,3 +590,52 @@ describe("scope classification", () => {
       expect(serverToolNeedsWrite(n)).toBe(true);
   });
 });
+
+describe("MCP OAuth — read scope is enforced too", () => {
+  /**
+   * The mirror of the write check. `nests:write` alone was grantable, and
+   * nothing required `nests:read` for a read tool — so a grant whose consent
+   * screen listed only "Create and edit documents" could still read
+   * everything. Write implies read (a write grant that cannot read is
+   * useless), so the fix is to say so explicitly and show it on the consent
+   * screen rather than leave it implied.
+   */
+  it("grants read alongside write, and says so on the consent page", async () => {
+    enable();
+    const app = await createTestApp("key");
+    await registerUser(app, "alice@example.com");
+    const clientId = await register(app);
+    const cookie = await signIn(app, "alice@example.com", "testpass");
+    const { verifier, challenge } = pkce();
+
+    const authz = await app.request(
+      `/oauth/authorize?response_type=code&client_id=${clientId}` +
+        `&redirect_uri=${encodeURIComponent(REDIRECT)}&scope=nests%3Awrite` +
+        `&code_challenge=${challenge}&code_challenge_method=S256`,
+      { headers: { Cookie: cookie } },
+    );
+    const html = await authz.text();
+    // The person is told it can read, because it can.
+    expect(html).toContain("Read the nests you have access to");
+
+    const code = await getCode(
+      app, clientId, cookie, challenge, "nests:write",
+    );
+    const tok = await (await exchange(app, clientId, code, verifier)).json();
+    expect(tok.scope.split(" ")).toContain("nests:read");
+  });
+
+  /** A token carrying neither read nor write must reach no tool at all. */
+  it("refuses read tools to a grant with no read scope", async () => {
+    const { serverToolNeedsWrite } = await import("../src/mcp/server-routes.js");
+    // Sanity: the classifier still calls these reads...
+    expect(serverToolNeedsWrite("nest_index")).toBe(false);
+    // ...and the dispatch gate is what must also require read scope.
+    const { scopeAllows } = await import("../src/mcp/server-routes.js");
+    expect(scopeAllows(["offline_access"], "nest_index")).toBe(false);
+    expect(scopeAllows(["nests:read"], "nest_index")).toBe(true);
+    expect(scopeAllows(["nests:write"], "nest_index")).toBe(true);
+    expect(scopeAllows(["nests:read"], "nest_create")).toBe(false);
+    expect(scopeAllows(["nests:write"], "nest_create")).toBe(true);
+  });
+});

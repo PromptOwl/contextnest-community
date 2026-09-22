@@ -349,6 +349,20 @@ export function serverToolNeedsWrite(name: string): boolean {
   return !READ_ONLY_SERVER_TOOLS.has(name);
 }
 
+/**
+ * Does this grant reach this tool?
+ *
+ * `nests:write` implies `nests:read` — a grant that may create documents but
+ * not read them is useless, and treating them as disjoint let a write-only
+ * grant read everything while its consent screen mentioned only writing.
+ * Both directions are checked here so neither can be forgotten again.
+ */
+export function scopeAllows(granted: string[], toolName: string): boolean {
+  const canWrite = granted.includes("nests:write");
+  const canRead = canWrite || granted.includes("nests:read");
+  return serverToolNeedsWrite(toolName) ? canWrite : canRead;
+}
+
 async function handleServerToolCall(
   toolName: string,
   args: any,
@@ -560,9 +574,12 @@ function createServerMcp(
       // Scope check. Present only for OAuth callers; undefined means a key or
       // a ticket, which this must not restrict.
       const granted = c.get("oauthScope");
-      if (granted && serverToolNeedsWrite(tool.name) && !granted.includes("nests:write")) {
+      if (granted && !scopeAllows(granted, tool.name)) {
+        const needed = serverToolNeedsWrite(tool.name)
+          ? "nests:write"
+          : "nests:read";
         return toCallToolResult(
-          `This connection was authorized for reading only. "${tool.name}" needs the nests:write scope — reconnect and approve write access to use it.`,
+          `This connection wasn't authorized for that. "${tool.name}" needs the ${needed} scope — reconnect and approve it to use this tool.`,
         );
       }
       // See mcp/routes.ts: resolved per call, because the handshake that

@@ -35,7 +35,7 @@ import {
   issueTokens,
   rotateRefreshToken,
   revokeByToken,
-  revokeAllForUserClient,
+  revokeGrant,
   ACCESS_TTL_SECONDS,
   type OAuthClient,
 } from "./oauth-store.js";
@@ -232,6 +232,13 @@ async function parseAuthz(
   if (unknown.length)
     return fail("invalid_scope", `Unknown scope: ${unknown.join(", ")}`);
 
+  // Write implies read. Normalising here rather than at enforcement time
+  // means the consent screen LISTS the read permission the grant will really
+  // have, instead of quietly conferring it later — the screen and the token
+  // must describe the same thing.
+  if (scopes.includes(SCOPE_WRITE) && !scopes.includes(SCOPE_READ))
+    scopes.unshift(SCOPE_READ);
+
   return {
     ok: true,
     params: {
@@ -240,8 +247,10 @@ async function parseAuthz(
       scope: scopes.join(" "),
       state,
       codeChallenge,
-      // RFC 8707. Recorded so the token can be audience-bound to the resource
-      // the client actually asked for.
+      // RFC 8707. Recorded, but NOT yet enforced: nothing compares it against
+      // the resource being accessed, because this server is its own single
+      // resource. Kept so the binding can be added without a migration — do
+      // not read its presence as audience protection today.
       resource: q.resource ? String(q.resource) : null,
     },
     client,
@@ -431,10 +440,14 @@ oauthRoutes.post("/authorize/decision", async (c) => {
     return c.redirect(out.toString(), 302);
   }
 
-  const scope = String(form.scope ?? SCOPE_READ)
+  const granted = String(form.scope ?? SCOPE_READ)
     .split(/\s+/)
-    .filter((s) => GRANTABLE.has(s))
-    .join(" ");
+    .filter((s) => GRANTABLE.has(s));
+  // Same implication as the authorize step, so a hand-crafted POST cannot
+  // produce a write grant that skips read and lands somewhere inconsistent.
+  if (granted.includes(SCOPE_WRITE) && !granted.includes(SCOPE_READ))
+    granted.unshift(SCOPE_READ);
+  const scope = granted.join(" ");
   const codeChallenge = String(form.code_challenge ?? "");
   if (!scope || !codeChallenge) {
     out.searchParams.set("error", "invalid_request");
@@ -510,7 +523,7 @@ oauthRoutes.post("/token", async (c) => {
         [createHash("sha256").update(String(form.code ?? "")).digest("hex")],
       )) as { user_id?: string; client_id?: string } | undefined;
       if (row?.user_id && row?.client_id)
-        await revokeAllForUserClient(row.user_id, row.client_id);
+        await revokeGrant(row.user_id, row.client_id);
     }
     return oauthError(c, 400, "invalid_grant", "Authorization code is not valid.");
   }

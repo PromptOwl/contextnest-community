@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
+import { getSessionIdFromRequest } from "./auth/sessions.js";
 import { LinearRouter } from "hono/router/linear-router";
 import { createMiddleware } from "hono/factory";
 import { cors } from "hono/cors";
@@ -192,13 +194,21 @@ function isPublicReadEligiblePath(method: string, path: string): boolean {
  * - Never while MCP_OAUTH_ENABLED is off, so the flag-off behaviour of this
  *   endpoint is byte-identical to before.
  */
+/**
+ * Presence of a session cookie, not its value. Kept in one place so the two
+ * middlewares that ask cannot drift; extracting the id is
+ * getSessionIdFromRequest's job.
+ */
+function hasSessionCookie(c: Context<AuthEnv>): boolean {
+  return !!getSessionIdFromRequest(c);
+}
+
 const mcpOAuthChallenge = createMiddleware<AuthEnv>(async (c, next) => {
   if (!config.MCP_OAUTH_ENABLED || config.AUTH_MODE === "open")
     return next();
   if (!config.PUBLIC_BASE_URL) return next();
   const hasAuth = !!c.req.header("Authorization");
-  const hasCookie = !!c.req.header("Cookie")?.includes("cnst_session=");
-  if (hasAuth || hasCookie) return next();
+  if (hasAuth || hasSessionCookie(c)) return next();
   c.header("WWW-Authenticate", mcpChallenge(config.PUBLIC_BASE_URL));
   return c.json(
     {
@@ -248,8 +258,7 @@ const mcpOAuthBearer = createMiddleware<AuthEnv>(async (c, next) => {
 
 const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   const hasBearer = c.req.header("Authorization")?.startsWith("Bearer cnst_");
-  const hasCookie = !!c.req.header("Cookie")?.includes("cnst_session=");
-  if (hasBearer || hasCookie) {
+  if (hasBearer || hasSessionCookie(c)) {
     return authMiddleware(c, next);
   }
 

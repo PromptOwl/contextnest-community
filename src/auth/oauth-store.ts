@@ -13,7 +13,7 @@
  * means the code leaked, and OAuth 2.1 requires us to treat that as a
  * compromise of the whole grant, not merely to refuse the second exchange.
  */
-import { randomBytes, createHash, timingSafeEqual } from "crypto";
+import { randomBytes, createHash } from "crypto";
 import { getDb } from "../db/client.js";
 
 /** Access tokens are short by design; a leaked one should expire quickly. */
@@ -22,6 +22,8 @@ export const ACCESS_TTL_SECONDS = 60 * 60; // 1 hour
 export const REFRESH_TTL_SECONDS = 60 * 60 * 24 * 60; // 60 days
 /** An authorization code should be redeemed within seconds, not minutes. */
 export const CODE_TTL_SECONDS = 60;
+/** How stale last_used_at may get before a resolution bothers to refresh it. */
+const LAST_USED_THROTTLE_MINUTES = 5;
 
 function secret(): string {
   return randomBytes(32).toString("hex");
@@ -29,16 +31,6 @@ function secret(): string {
 
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
-}
-
-/** Constant-time compare of two hex digests of equal length. */
-export function sameHash(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  try {
-    return timingSafeEqual(Buffer.from(a, "hex"), Buffer.from(b, "hex"));
-  } catch {
-    return false;
-  }
 }
 
 function iso(secondsFromNow: number): string {
@@ -283,8 +275,15 @@ export async function resolveAccessToken(
       }
     | undefined;
   if (!row || row.revoked_at || expired(row.expires_at)) return null;
+  // last_used_at is for the connected-apps list, not accounting, so it does
+  // not need to be exact. Writing it on every resolution would put a write on
+  // the hot path of every tool call in a chatty MCP session; once every few
+  // minutes carries the same information.
   await getDb().run(
-    "UPDATE oauth_tokens SET last_used_at = datetime('now') WHERE id = ?",
+    `UPDATE oauth_tokens SET last_used_at = datetime('now')
+      WHERE id = ?
+        AND (last_used_at IS NULL
+             OR last_used_at < datetime('now', '-${LAST_USED_THROTTLE_MINUTES} minutes'))`,
     [row.id],
   );
   return {
@@ -414,16 +413,4 @@ export async function listConnectedApps(
     createdAt: r.created_at,
     lastUsedAt: r.last_used_at,
   }));
-}
-
-/**
- * A replayed authorization code means the code leaked. OAuth 2.1 says to treat
- * that as a compromise of the grant it produced, so every token descended from
- * it goes too — not just a refusal of the second exchange.
- */
-export async function revokeAllForUserClient(
-  userId: string,
-  clientId: string,
-): Promise<void> {
-  await revokeGrant(userId, clientId);
 }
