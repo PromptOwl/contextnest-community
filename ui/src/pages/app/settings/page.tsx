@@ -1743,7 +1743,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
 
           <TabsContent value="agents" className="space-y-4">
             <AgentConnectPanel
-              publicBaseUrl={draft.public_base_url ?? ""}
+              publicBaseUrl={draft.public_base_url}
               openMode={authMode === "open"}
             />
           </TabsContent>

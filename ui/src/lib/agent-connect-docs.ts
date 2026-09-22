@@ -59,17 +59,18 @@ function mcpEndpoint(serverUrl: string): string {
 }
 
 /**
- * The one predicate every harness body filters with.
+ * Joins a harness body's markdown lines. The ONLY place that filtering
+ * happens, so the nine bodies can't drift apart on it.
  *
- * A body is an array of markdown lines where `null` means "this line does not
+ * A body is a list of markdown lines where `null` means "this line does not
  * apply to this deployment" and `""` is a real paragraph separator. Those look
  * alike to `.filter(Boolean)`, which drops both — and losing the blank line
  * silently folds a trailing note into the preceding list item, because
  * CommonMark treats an unindented line right after a list item as a lazy
  * continuation of it. Keep the empty strings; drop only the nulls.
  */
-function isLine(l: string | null): l is string {
-  return l !== null;
+function renderBody(...lines: (string | null)[]): string {
+  return lines.filter((l): l is string => l !== null).join("\n");
 }
 
 const KEY_PLACEHOLDER = "<your ContextNest API key>";
@@ -113,7 +114,7 @@ export const HARNESSES: Harness[] = [
     where: "Settings → Connectors → Add custom connector",
     support: "header",
     body: (ctx, mcp) =>
-      [
+      renderBody(
         "1. Open **Settings → Connectors → Add custom connector**.",
         `2. Set the URL to \`${mcp}\`.`,
         ctx.openMode
@@ -124,9 +125,7 @@ export const HARNESSES: Harness[] = [
         "On Team and Enterprise plans only an Owner can add the connector; each member then connects to it individually.",
         "",
         "> The MCP client runs on Anthropic's servers, not the user's machine, so this URL must resolve on the public internet and present a valid TLS certificate. A `localhost` or internal-DNS address will not work here.",
-      ]
-        .filter(isLine)
-        .join("\n"),
+      ),
   },
   {
     id: "chatgpt",
@@ -135,7 +134,7 @@ export const HARNESSES: Harness[] = [
     where: "Settings → Apps & Connectors → Advanced → Developer mode",
     support: "header",
     body: (ctx, mcp) =>
-      [
+      renderBody(
         "1. **Settings → Apps & Connectors → Advanced settings → Developer mode**, toggled on.",
         "2. Back in Apps & Connectors, add a custom connector.",
         `3. Set the URL to \`${mcp}\`.`,
@@ -145,9 +144,7 @@ export const HARNESSES: Harness[] = [
         "5. The connector appears under **Drafts**; pick it in the composer's Developer mode tool to use it in a conversation.",
         "",
         "Developer mode is available on Plus, Pro, Business, Enterprise and Edu — not on the free tier. Public HTTPS is required.",
-      ]
-        .filter(isLine)
-        .join("\n"),
+      ),
   },
   {
     id: "grok",
@@ -156,7 +153,7 @@ export const HARNESSES: Harness[] = [
     where: "grok.com/connectors → New Connector → Custom",
     support: "header",
     body: (ctx, mcp) =>
-      [
+      renderBody(
         "1. Go to **grok.com/connectors** and choose **New Connector → Custom**.",
         `2. Enter the MCP server URL \`${mcp}\`.`,
         ctx.openMode
@@ -165,9 +162,7 @@ export const HARNESSES: Harness[] = [
         "4. Grok discovers the exposed tools and offers them alongside its built-in connectors.",
         "",
         "The server must be reachable over the public internet; Grok has no tunnel of its own.",
-      ]
-        .filter(isLine)
-        .join("\n"),
+      ),
   },
   {
     id: "perplexity",
@@ -192,7 +187,7 @@ export const HARNESSES: Harness[] = [
     where: "one command in any terminal",
     support: "header",
     body: (ctx, mcp) =>
-      [
+      renderBody(
         "```bash",
         ctx.openMode
           ? `claude mcp add --transport http contextnest ${mcp}`
@@ -204,9 +199,7 @@ export const HARNESSES: Harness[] = [
           : `Add \`--scope project\` to write \`.mcp.json\` in the repo instead of the user-level config — that file is safe to commit because it can reference \`\${${KEY_ENV}}\` rather than the value.`,
         "",
         "A session started before the server was added must be restarted; a fresh session picks it up automatically.",
-      ]
-        .filter(isLine)
-        .join("\n"),
+      ),
   },
   {
     id: "codex",
@@ -215,7 +208,7 @@ export const HARNESSES: Harness[] = [
     where: "`codex mcp add`, or ~/.codex/config.toml",
     support: "header",
     body: (ctx, mcp) =>
-      [
+      renderBody(
         "```bash",
         ctx.openMode
           ? `codex mcp add contextnest --url ${mcp}`
@@ -233,9 +226,7 @@ export const HARNESSES: Harness[] = [
         ctx.openMode
           ? null
           : "Codex reads the token from the environment and sends it as an `Authorization: Bearer` header, so the value never lands in the config file.",
-      ]
-        .filter(isLine)
-        .join("\n"),
+      ),
   },
   {
     id: "hermes",
@@ -244,7 +235,7 @@ export const HARNESSES: Harness[] = [
     where: "~/.hermes/config.yaml",
     support: "header",
     body: (ctx, mcp) =>
-      [
+      renderBody(
         "```yaml",
         "mcp_servers:",
         "  contextnest:",
@@ -259,9 +250,7 @@ export const HARNESSES: Harness[] = [
           : `Values support \`\${env:VAR}\` interpolation against \`~/.hermes/.env\`, so put the key in that file as \`${KEY_ENV}\` and keep it out of the YAML.`,
         ctx.openMode ? null : "",
         "Streamable HTTP is the default transport — only set `transport: \"sse\"` if you need the older one.",
-      ]
-        .filter(isLine)
-        .join("\n"),
+      ),
   },
   {
     id: "gemini-cli",
@@ -270,7 +259,7 @@ export const HARNESSES: Harness[] = [
     where: "~/.gemini/settings.json",
     support: "header",
     body: (ctx, mcp) =>
-      [
+      renderBody(
         "```json",
         "{",
         '  "mcpServers": {',
@@ -285,9 +274,7 @@ export const HARNESSES: Harness[] = [
         "```",
         "",
         "Gemini CLI picks the transport from the property name: `httpUrl` is Streamable HTTP, `url` would be SSE, `command` would be stdio. Use `httpUrl` here.",
-      ]
-        .filter(isLine)
-        .join("\n"),
+      ),
   },
 
   // ── Editors ────────────────────────────────────────────────────────────
@@ -298,7 +285,7 @@ export const HARNESSES: Harness[] = [
     where: "~/.cursor/mcp.json (or .cursor/mcp.json in a project)",
     support: "header",
     body: (ctx, mcp) =>
-      [
+      renderBody(
         "```json",
         "{",
         '  "mcpServers": {',
@@ -313,9 +300,7 @@ export const HARNESSES: Harness[] = [
         "```",
         "",
         "Cursor expands variables inside `url` and `headers`, so the key can come from the environment rather than the file.",
-      ]
-        .filter(isLine)
-        .join("\n"),
+      ),
   },
 ];
 
