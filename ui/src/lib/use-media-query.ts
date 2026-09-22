@@ -1,15 +1,19 @@
-import { useSyncExternalStore } from "react";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
 
 /** Live `window.matchMedia(query).matches`; false where there is no window. */
 export function useMediaQuery(query: string): boolean {
-  return useSyncExternalStore(
-    (onChange) => {
-      if (typeof window === "undefined" || !window.matchMedia) return () => {};
-      const mql = window.matchMedia(query);
+  // One MediaQueryList per query, shared by subscribe and the snapshot.
+  const mql = useMemo(
+    () => (typeof window !== "undefined" && window.matchMedia ? window.matchMedia(query) : null),
+    [query],
+  );
+  const subscribe = useCallback(
+    (onChange: () => void) => {
+      if (!mql) return () => {};
       mql.addEventListener("change", onChange);
       return () => mql.removeEventListener("change", onChange);
     },
-    () => (typeof window !== "undefined" && !!window.matchMedia ? window.matchMedia(query).matches : false),
-    () => false,
+    [mql],
   );
+  return useSyncExternalStore(subscribe, () => mql?.matches ?? false, () => false);
 }

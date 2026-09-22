@@ -799,7 +799,8 @@ export function NestView({
   // (excluded from the node list as a meta-file); surfacing that engine-built
   // index is a deeper follow-up — this is the lightweight UI overview.
   // Grouping logic lives in lib/nest-overview (tested there).
-  const tocGroups = groupNodesByFolder(nodes);
+  // Memoised: the Overview index and FolderTree memoise on this reference.
+  const tocGroups = useMemo(() => groupNodesByFolder(nodes), [nodes]);
 
   // Overview stat tile: Root is a synthetic tocGroups entry for docs with no
   // folder, not a user-created folder, so it's excluded from the count.
