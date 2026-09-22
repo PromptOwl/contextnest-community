@@ -83,12 +83,12 @@ describe("GET /llms.txt — public agent manual", () => {
     expect(text).toContain("/mcp");
   });
 
-  it("tells the ctx CLI how to register this server and one nest as vault aliases", async () => {
+  it("tells the ctx CLI to register one alias per nest", async () => {
     const res = await app.request("/llms.txt");
     const text = await res.text();
-    // Server-level alias: every nest the key can see, through /mcp.
     expect(text).toContain("## From the ctx CLI");
-    expect(text).toMatch(/ctx vault add \S+ --url http:\/\/localhost\/mcp --bearer-env CONTEXTNEST_API_KEY/);
+    // Never the server-level /mcp: ctx sends no `nest`, so its writes fail there.
+    expect(text).not.toMatch(/ctx vault add \S+ --url http:\/\/localhost\/mcp /);
     // Per-nest alias form.
     expect(text).toMatch(/ctx vault add \S+ --url http:\/\/localhost\/nests\/<nest-id>\/mcp --bearer-env CONTEXTNEST_API_KEY/);
     expect(text).toMatch(/ctx query "#\S+" --vault \S+/);

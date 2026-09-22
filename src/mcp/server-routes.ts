@@ -420,7 +420,7 @@ export const SERVER_TOOL_DEFINITIONS = [
         id: { type: "string", description: "Node id (use when title is ambiguous)" },
         content: { type: "string", description: "New content (replaces)" },
         append: { type: "string", description: "Content to append" },
-        tags: { type: "array", items: { type: "string" }, description: "Tags to add" },
+        tags: { type: "array", items: { type: "string" }, description: "Full tag set — replaces existing tags" },
         status: { type: "string", description: "New status: draft|pending_review|approved|published" },
         changeNote: { type: "string", description: "Why this changed — recorded in history" },
       },
@@ -835,12 +835,13 @@ on the command line.
 
 \`\`\`
 export CONTEXTNEST_API_KEY=<api-key>
-# every nest these credentials can read, through the server-level endpoint
-ctx vault add contextnest --url ${B}/mcp --bearer-env CONTEXTNEST_API_KEY
-# or one nest
+# one alias per nest (nest ids are in nest_index / GET /index)
 ctx vault add mynest --url ${B}/nests/<nest-id>/mcp --bearer-env CONTEXTNEST_API_KEY
 ctx query "#gtm" --vault mynest
 \`\`\`
+
+Register each nest's own endpoint, not the server-level \`/mcp\`: \`ctx\` never
+sends a \`nest\` argument, so writes through \`/mcp\` fail.
 
 Servers in "open" auth mode: drop \`--bearer-env\`. Pushing a local folder up
 is \`ctx push --server ${B} --nest <nest-id>\` with the same env var set.

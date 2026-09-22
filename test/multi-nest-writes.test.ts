@@ -71,3 +71,34 @@ describe.each(["Strategy", "Partner Alpha", "Partner Beta", "Partner Shared"])("
     expect(del.text).not.toMatch(/not found|not accessible|requires/i);
   });
 });
+
+// Stacey's other two gaps, on a secondary nest.
+describe("context_update on a secondary nest", () => {
+  const path = () => `/nests/${nests["Partner Alpha"]}/mcp`;
+
+  it("tags REPLACE the set, so a tag can be removed", async () => {
+    await jsonRequest(app, "POST", `/nests/${nests["Partner Alpha"]}/nodes`, { title: "Tag Doc", content: "# t", tags: ["keep", "drop"] }, stacey.apiKey);
+    const up = await callTool(path(), stacey.apiKey, "context_update", { title: "Tag Doc", tags: ["keep"] });
+    expect(up.isError).toBe(false);
+    const got = await jsonRequest(app, "GET", `/nests/${nests["Partner Alpha"]}/nodes/nodes/tag-doc`, undefined, stacey.apiKey);
+    expect((got.data.node ?? got.data).tags).toEqual(["#keep"]);
+  });
+
+  it("refuses frontmatter pasted into content instead of storing a dead copy", async () => {
+    const up = await callTool(path(), stacey.apiKey, "context_update", { title: "Tag Doc", content: "---\ntitle: Tag Doc\ntags: [x]\n---\n# body" });
+    expect(up.isError).toBe(true);
+    expect(up.text).toMatch(/frontmatter/);
+  });
+
+  it("context_move returns the new id as data (what ctx move reads)", async () => {
+    const res = await app.request(path(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${stacey.apiKey}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "context_move", arguments: { id: "nodes/tag-doc", folder: "archive" } } }),
+    });
+    const text = await res.text();
+    const line = text.split("\n").find((l) => l.startsWith("data: "));
+    const body = line ? JSON.parse(line.slice(6)) : JSON.parse(text);
+    expect(body.result.structuredContent).toMatchObject({ id: "nodes/archive/tag-doc", previous_id: "nodes/tag-doc" });
+  });
+});

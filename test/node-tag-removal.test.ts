@@ -1,8 +1,7 @@
 /**
  * PATCH /nodes tags is REPLACE, not merge. The editor sends the full tag set
  * on every save, so a union made tag removal impossible — a removed tag came
- * back on reopen. MCP `context_update` keeps its "tags to add" contract by
- * merging at its own call site.
+ * back on reopen. MCP `context_update` replaces too (see multi-nest-writes).
  */
 import { describe, it, expect, beforeAll } from "vitest";
 import {

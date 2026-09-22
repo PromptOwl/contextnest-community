@@ -444,7 +444,8 @@ export const TOOL_DEFINITIONS = [
         tags: {
           type: "array",
           items: { type: "string" },
-          description: "Tags to add",
+          description:
+            "The node's full tag set — REPLACES the existing tags (same as the engine catalog). To add one, send the current tags plus the new one; to remove one, send the set without it.",
         },
         status: {
           type: "string",
@@ -864,6 +865,19 @@ export async function handleToolCall(
     return toolError((err as Error).message, "VALIDATION_FAILED");
   }
   const attributed: McpToolContext = { ...ctx, client };
+  // An agent that sends a whole file (frontmatter + body) as `content` used to
+  // get a second, dead frontmatter block stored inside the body. Refuse and say
+  // where those fields go instead.
+  if (
+    (toolName === "context_create" || toolName === "context_update") &&
+    typeof args.content === "string" &&
+    /^\s*---\r?\n[\w-]+:/.test(args.content)
+  ) {
+    return toolError(
+      "`content` is the markdown body only — it starts with a YAML frontmatter block, which would be stored as body text. Drop the `---` block and pass tags/status as parameters; the server owns the frontmatter.",
+      "VALIDATION_FAILED",
+    );
+  }
   try {
     return await runTool(toolName, args, attributed);
   } catch (err) {
@@ -1567,18 +1581,15 @@ async function runTool(
           "UNAUTHORIZED_ACTION",
         );
       }
-      // updateNode replaces tags; this tool's contract is "Tags to add", so
-      // merge against the current set here rather than in the service.
-      const mergedTags = args.tags
-        ? [...new Set([...(node.frontmatter.tags || []), ...args.tags])]
-        : undefined;
+      // Tags REPLACE, per the engine catalog's context_update. This used to
+      // merge ("Tags to add"), which left no way to remove a tag over MCP.
       const { node: updated, version } = await updateNode(
         nestId,
         node.id,
         {
           content: args.content,
           append: args.append,
-          tags: mergedTags,
+          tags: args.tags,
           status: args.status,
           changeNote: args.changeNote,
           client: ctx.client,
@@ -1642,10 +1653,12 @@ async function runTool(
         args.folder,
         userEmail,
       );
+      // `data` is what `ctx move` reads; the prose is for chat clients.
+      const data = { id: moved.id, previous_id: previousId, title: moved.frontmatter.title };
       if (previousId === moved.id) {
-        return `**${moved.frontmatter.title}** is already at \`${moved.id}\` — nothing to move.`;
+        return { text: `**${moved.frontmatter.title}** is already at \`${moved.id}\` — nothing to move.`, data };
       }
-      return `Moved **${moved.frontmatter.title}**: \`${previousId}\` → \`${moved.id}\``;
+      return { text: `Moved **${moved.frontmatter.title}**: \`${previousId}\` → \`${moved.id}\``, data };
     }
 
     // ─── Governance Tool Handlers ──────────────────────────────────────
