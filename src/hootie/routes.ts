@@ -106,6 +106,14 @@ hootieRoutes.post("/chat", async (c) => {
     typeof body.node_id === "string" && body.node_id.trim()
       ? body.node_id.trim()
       : null;
+  // The id is interpolated into a selector ([[nodes/…]]) below, so it must
+  // BE an id before it goes anywhere near the grammar: slash-joined slug
+  // segments under nodes/. Anything else — traversal, a `]]` or `|` aimed at
+  // the selector parser — is simply not a document: the same 404 as a
+  // missing one, and nothing reaches the engine.
+  if (nodeId !== null && !isNodeIdShaped(nodeId)) {
+    return c.json({ error: "Node not found" }, 404);
+  }
   const history = normalizeHistory(body.history);
   if (history === null) {
     return c.json(
@@ -264,6 +272,16 @@ hootieRoutes.post("/chat", async (c) => {
     });
   });
 });
+
+/**
+ * A well-formed node id: `nodes/` then one or more slug segments. Every id
+ * this server mints is of this shape (see nodes/service.ts); the check is a
+ * whitelist, not a blacklist of known-bad characters.
+ */
+const NODE_ID_SHAPE = /^nodes(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)+$/;
+function isNodeIdShaped(id: string): boolean {
+  return id.length <= 512 && NODE_ID_SHAPE.test(id);
+}
 
 /**
  * Validate the client's conversation so far. Null means malformed; an empty

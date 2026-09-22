@@ -375,9 +375,20 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
 
   it("a traversal-shaped node_id is just not found — it never becomes a path", async () => {
     lastModelCall = null;
-    for (const bad of ["../../etc/passwd", "nodes/../../x", `../${nestId}/nodes/api-authentication-guide`]) {
-      const { status } = await chatRaw(app, nestId, { message: "?", node_id: bad }, reader.apiKey);
-      expect(status).toBe(404);
+    for (const bad of [
+      "../../etc/passwd",
+      "nodes/../../x",
+      `../${nestId}/nodes/api-authentication-guide`,
+      // Selector-grammar injection: a `]]` or `|` must not reach the engine's
+      // parser (a thrown InvalidSelectorError would be a 500, not a 404), and
+      // must not widen the anchor retrieval to a tag.
+      "x]] | #auth",
+      "nodes/api-authentication-guide]] | #auth",
+      "nodes/a|#auth",
+      "[[nodes/api-authentication-guide",
+    ]) {
+      const { status, text } = await chatRaw(app, nestId, { message: "?", node_id: bad }, reader.apiKey);
+      expect(status, `node_id=${bad}: ${text.slice(0, 80)}`).toBe(404);
     }
     expect(lastModelCall).toBeNull();
   });
