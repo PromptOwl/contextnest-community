@@ -41,7 +41,8 @@ const YOUTUBE_HOSTS = new Set([
 const VIMEO_HOSTS = new Set(["vimeo.com", "www.vimeo.com", "player.vimeo.com"]);
 
 const YOUTUBE_ID_RE = /^[A-Za-z0-9_-]{11}$/;
-const VIMEO_ID_RE = /^\d+$/;
+// Vimeo ids are ~9-10 digits today; cap at 12 so the id is plainly bounded.
+const VIMEO_ID_RE = /^\d{1,12}$/;
 const VIMEO_HASH_RE = /^[0-9a-f]+$/i;
 // `90`, `90s`, `1m30s`, `1h2m3s`.
 const START_RE = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s?)?$/;

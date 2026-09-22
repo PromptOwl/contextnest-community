@@ -111,6 +111,8 @@ describe("toEmbedUrl — everything else stays a link", () => {
     "http://vimeo.com/abc",
     "https://vimeo.com/76979871abc",
     "https://vimeo.com/76979871/not-a-hash!",
+    "https://vimeo.com/123456789012345678901234567890",
+    "https://player.vimeo.com/video/1234567890123",
     // pages that aren't one video
     "https://www.youtube.com/playlist?list=PL1234567890",
     "https://www.youtube.com/@somechannel",

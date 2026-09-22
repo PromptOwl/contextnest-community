@@ -55,6 +55,16 @@ function widgetFor(match: VideoMatch): {
       };
 }
 
+// The same video can appear more than once in a doc; keys must stay unique
+// or ProseMirror may hand one paragraph's player to another. The n-th repeat
+// (in document order) gets `#n` — stable while typing elsewhere, and the
+// first occurrence keeps the bare key.
+function uniqueKey(key: string, seen: Map<string, number>): string {
+  const n = (seen.get(key) ?? 0) + 1;
+  seen.set(key, n);
+  return n === 1 ? key : `${key}#${n}`;
+}
+
 /**
  * Find every paragraph whose sole content is a video URL — a same-origin
  * asset video, or a bare YouTube/Vimeo URL (see classifyVideoText) — and
@@ -71,6 +81,7 @@ export function collectVideoPreviewDecorations(
   doc: ProseMirrorNode,
 ): Decoration[] {
   const decorations: Decoration[] = [];
+  const seen = new Map<string, number>();
   doc.descendants((node, pos) => {
     if (node.type.name !== "paragraph" || node.childCount !== 1) return;
     const child = node.firstChild;
@@ -84,7 +95,8 @@ export function collectVideoPreviewDecorations(
 
     const start = pos + 1;
     const end = start + child.nodeSize;
-    const { key, toDOM } = widgetFor(match);
+    const { key: baseKey, toDOM } = widgetFor(match);
+    const key = uniqueKey(baseKey, seen);
     decorations.push(
       Decoration.inline(start, end, { class: "video-url-hidden" }),
     );

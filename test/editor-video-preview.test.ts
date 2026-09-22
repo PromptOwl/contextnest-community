@@ -104,3 +104,41 @@ describe("VideoPreview decorations — YouTube / Vimeo embeds", () => {
     expect(widgetKeys(para(schema.text(ASSET_URL)))).toEqual([`video-asset:${ASSET_URL}`]);
   });
 });
+
+// Review on #319: the same video embedded twice must not share a widget key —
+// ProseMirror matches keyed widgets across redraws, so a collision could
+// reuse (move/reload) the wrong iframe.
+describe("VideoPreview decorations — the same video twice", () => {
+  const YT = "https://youtu.be/dQw4w9WgXcQ";
+  const ASSET = "/nests/abc123/assets/11111111-1111-1111-1111-111111111111.mp4";
+  const keysOf = (doc: any) =>
+    collectVideoPreviewDecorations(doc)
+      .map((d: any) => d.spec?.key)
+      .filter(Boolean);
+
+  it("gives two paragraphs with the same YouTube link distinct, stable keys", () => {
+    const doc = schema.node("doc", null, [
+      schema.node("paragraph", null, [schema.text(YT)]),
+      schema.node("paragraph", null, [schema.text("between")]),
+      schema.node("paragraph", null, [schema.text(YT)]),
+    ]);
+    const keys = keysOf(doc);
+    expect(keys).toHaveLength(2);
+    expect(new Set(keys).size).toBe(2);
+    // Typing elsewhere (here: the middle paragraph) must not change them.
+    const edited = schema.node("doc", null, [
+      schema.node("paragraph", null, [schema.text(YT)]),
+      schema.node("paragraph", null, [schema.text("between, with more words")]),
+      schema.node("paragraph", null, [schema.text(YT)]),
+    ]);
+    expect(keysOf(edited)).toEqual(keys);
+  });
+
+  it("does the same for a repeated asset video", () => {
+    const doc = schema.node("doc", null, [
+      schema.node("paragraph", null, [schema.text(ASSET)]),
+      schema.node("paragraph", null, [schema.text(ASSET)]),
+    ]);
+    expect(new Set(keysOf(doc)).size).toBe(2);
+  });
+});

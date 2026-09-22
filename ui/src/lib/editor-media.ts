@@ -111,3 +111,24 @@ export function validateEmbedInput(raw: string): EmbedInputResult {
     : `https://${trimmed}`;
   return toEmbedUrl(url) ? { ok: true, url } : invalid;
 }
+
+/**
+ * Should a paste upload its image/video file? Only in a writable doc with an
+ * uploader, and never with the caret in a code block or table — those keep
+ * the default paste, the same guard the table-paste path already had.
+ */
+export function shouldUploadPastedMedia(opts: {
+  hasMediaFile: boolean;
+  canUpload: boolean;
+  editable: boolean;
+  inCodeBlock: boolean;
+  inTable: boolean;
+}): boolean {
+  return (
+    opts.hasMediaFile &&
+    opts.canUpload &&
+    opts.editable &&
+    !opts.inCodeBlock &&
+    !opts.inTable
+  );
+}

@@ -15,6 +15,7 @@ import {
   isFileDrag,
   pickMediaFile,
   validateEmbedInput,
+  shouldUploadPastedMedia,
 } from "./editor-media";
 
 describe("mediaAffordances — who sees the image/video controls", () => {
@@ -153,5 +154,24 @@ describe("validateEmbedInput — the 'Embed YouTube or Vimeo link' box", () => {
 
   it("a link containing whitespace is rejected rather than inserted as prose", () => {
     expect(validateEmbedInput("https://youtu.be/dQw4w9WgXcQ extra").ok).toBe(false);
+  });
+});
+
+// Review on #319: paste-to-upload must respect the code-block / table guard
+// the paste handler already had — a screenshot pasted inside a code block or
+// a table cell falls through to the default paste, as before.
+describe("shouldUploadPastedMedia", () => {
+  const base = { hasMediaFile: true, canUpload: true, editable: true, inCodeBlock: false, inTable: false };
+  it("uploads a pasted image in ordinary text", () => {
+    expect(shouldUploadPastedMedia(base)).toBe(true);
+  });
+  it("not inside a code block or a table", () => {
+    expect(shouldUploadPastedMedia({ ...base, inCodeBlock: true })).toBe(false);
+    expect(shouldUploadPastedMedia({ ...base, inTable: true })).toBe(false);
+  });
+  it("regression: not in a read-only / locked doc, without an uploader, or without a media file", () => {
+    expect(shouldUploadPastedMedia({ ...base, editable: false })).toBe(false);
+    expect(shouldUploadPastedMedia({ ...base, canUpload: false })).toBe(false);
+    expect(shouldUploadPastedMedia({ ...base, hasMediaFile: false })).toBe(false);
   });
 });

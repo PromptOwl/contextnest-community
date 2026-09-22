@@ -240,6 +240,7 @@ import {
   isFileDrag,
   mediaAffordances,
   pickMediaFile,
+  shouldUploadPastedMedia,
   validateEmbedInput,
 } from "@/lib/editor-media";
 import { Mention } from "./extensions/Mention";
@@ -644,8 +645,18 @@ export const MarkdownEditor = forwardRef<
         // and inserts exactly like a drop. Before this, handlePaste only knew
         // tables and a pasted screenshot silently did nothing. Never in a
         // read-only / locked / preview doc.
+        // Inside a code block or table it falls through, like everything else.
         const pastedMedia = pickMediaFile(event.clipboardData.files);
-        if (pastedMedia && onUploadImageRef.current && ed.isEditable) {
+        if (
+          pastedMedia &&
+          shouldUploadPastedMedia({
+            hasMediaFile: true,
+            canUpload: !!onUploadImageRef.current,
+            editable: ed.isEditable,
+            inCodeBlock: ed.isActive("codeBlock"),
+            inTable: ed.isActive("table"),
+          })
+        ) {
           event.preventDefault();
           void runMediaUploadRef.current(ed, pastedMedia);
           return true;
