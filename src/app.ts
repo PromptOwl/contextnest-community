@@ -115,6 +115,8 @@ import {
   authorizationServerMetadata,
   mcpChallenge,
 } from "./auth/oauth-metadata.js";
+import { oauthRoutes } from "./auth/oauth-routes.js";
+import { resolveAccessToken } from "./auth/oauth-store.js";
 import { isOidcReady } from "./auth/oidc.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
@@ -205,6 +207,40 @@ const mcpOAuthChallenge = createMiddleware<AuthEnv>(async (c, next) => {
     },
     401,
   );
+});
+
+/**
+ * Accept an access token this server issued, and resolve it to its user.
+ *
+ * Runs after the challenge and before the ticket path. A token we don't
+ * recognise is passed through untouched rather than rejected, so `cnst_` keys
+ * and MCP tickets keep working exactly as before — this middleware only ever
+ * adds a way in.
+ *
+ * The user id set here is what `buildNestIndex` gates on, which is the whole
+ * point: the caller now arrives as a person rather than as whoever owns a
+ * pasted key.
+ */
+const mcpOAuthBearer = createMiddleware<AuthEnv>(async (c, next) => {
+  const fallThrough = () => flexAuthWithPromptowlTicket(c, next);
+  if (!config.MCP_OAUTH_ENABLED) return fallThrough();
+  const header = c.req.header("Authorization") || "";
+  if (!header.startsWith("Bearer ")) return fallThrough();
+  const token = header.slice("Bearer ".length);
+  // Our access tokens are 64 hex chars and share no prefix with cnst_ keys or
+  // the dotted JWT tickets, so this check costs one lookup at most.
+  if (!/^[0-9a-f]{64}$/.test(token)) return fallThrough();
+
+  const grant = await resolveAccessToken(token);
+  // Not one of ours — could be a key or a ticket. Hand it on untouched; this
+  // middleware only ever ADDS a way in.
+  if (!grant) return fallThrough();
+
+  c.set("userId", grant.userId);
+  // OAuth grants are never narrowed to one nest: the whole point is that one
+  // connection reads across everything the person can see.
+  c.set("nestScope", null);
+  return next();
 });
 
 const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
@@ -1779,10 +1815,13 @@ export function createApp(): Hono<AuthEnv> {
   // OUTSIDE the /nests auth chain so /p/<slug> is reachable with no account
   // (public mode) or behind its own gate (email/code/invite).
   app.route("/p", publishRenderRoutes);
-  app.use("/index", flexAuthWithPromptowlTicket);
+  // Same three-way auth as /mcp: an OAuth access token, an MCP ticket, or a
+  // cnst_ key. /index is the grounded nest list the MCP tools read from, so a
+  // token that works on one must work on the other.
+  app.use("/index", mcpOAuthBearer);
   app.route("/index", nestIndexRoutes);
   app.use("/mcp", mcpOAuthChallenge);
-  app.use("/mcp", flexAuthWithPromptowlTicket);
+  app.use("/mcp", mcpOAuthBearer);
   app.route("/mcp", serverMcpRoutes);
 
   // === All /nests routes ===
@@ -2448,6 +2487,8 @@ export function createApp(): Hono<AuthEnv> {
       );
     return c.json(authorizationServerMetadata(config.PUBLIC_BASE_URL));
   });
+
+  app.route("/oauth", oauthRoutes);
 
   app.all("/.well-known/*", (c) => c.json({ error: "Not found" }, 404));
 

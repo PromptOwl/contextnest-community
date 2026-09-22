@@ -14,6 +14,33 @@ Anonymous open mode (`AUTH_MODE=open`) bypasses auth on most read endpoints.
 
 All bodies are JSON unless noted. All errors return `{ "error": "msg" }` with appropriate HTTP status.
 
+## OAuth (MCP client sign-in)
+
+Present only when `MCP_OAUTH_ENABLED` is on; every endpoint below returns `404` while it is off. See `CONFIGURATION.md` for the flag and why it requires `PUBLIC_BASE_URL`.
+
+Discovery:
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/.well-known/oauth-protected-resource/mcp` | RFC 9728. `resource` equals the MCP URL exactly; `authorization_servers[0]` is this server. |
+| GET | `/.well-known/oauth-authorization-server` | RFC 8414. Advertises `S256` PKCE, CIMD support, and `none` token-endpoint auth. |
+
+Flow:
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/oauth/register` | RFC 7591 dynamic client registration. Public client — no secret is issued. Redirect URIs must be `https`, or loopback for a native client. |
+| GET | `/oauth/authorize` | `response_type=code`, `code_challenge_method=S256` required. Renders sign-in, then consent. An unregistered `redirect_uri` is shown to the user, never redirected to. |
+| POST | `/oauth/authorize/decision` | The consent form target. Re-validates the client and redirect from scratch. |
+| POST | `/oauth/token` | `application/x-www-form-urlencoded`. Grants: `authorization_code`, `refresh_token`. Refresh tokens rotate; the replaced one is revoked in the same step. A replayed code revokes the whole grant. |
+| POST | `/oauth/revoke` | RFC 7009. Always `200`, including for an unknown token, so it is not an oracle. |
+
+An unauthenticated request to `/mcp` is answered with `401` and `WWW-Authenticate: Bearer resource_metadata="..." scope="nests:read"`, which is what starts the flow. A caller that presented *some* credential gets the ordinary rejection instead, so a client holding a stale token fails rather than looping through consent.
+
+Scopes: `nests:read`, `nests:write`, `offline_access` (ask for the last to receive a refresh token).
+
+Access tokens are accepted on `/mcp` and `/index` alongside `cnst_` keys and MCP tickets. A grant is never scoped to one nest — it reads across every nest that person can see.
+
 ## Caller attribution (`client`)
 
 `edited_by` names a person and a read names nobody, so neither answers *which
