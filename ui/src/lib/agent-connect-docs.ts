@@ -57,16 +57,27 @@ export interface Harness {
  * The server-level MCP endpoint — one connection, every nest the caller can
  * see.
  *
- * The URL comes from the admin-editable `public_base_url`, which the server
- * stores after nothing more than a trim and a trailing-slash strip
- * (`src/app.ts`), and it lands inside single-backtick code spans below. A
- * literal backtick would close the span and turn the rest of the line into
- * live markdown, in a panel other people are told to copy from. Backticks and
- * whitespace are never valid in a URL, so drop them here — at the one point
- * the value enters the module — rather than escaping at nine call sites.
+ * The URL comes from the admin-editable `public_base_url` and lands in three
+ * different syntaxes below: single-backtick markdown code spans, a `bash`
+ * block people paste into a terminal, and quoted strings in `config.toml`,
+ * `config.yaml` and `mcp.json`. A backtick closes the code span; `$(…)`, `;`,
+ * `|` and `&&` execute in the shell block; a quote breaks out of the config
+ * strings. That turns "can edit server settings" into code execution on the
+ * machine of everyone who follows these instructions.
+ *
+ * `publicBaseUrlError` (`src/shared/public-base-url.ts`) now refuses these
+ * when the setting is saved, but this module is handed a string and cannot
+ * assume that — a value stored before that check still exists, and the panel
+ * falls back to `window.location.origin` when nothing is configured. So strip
+ * here too, at the one point the value enters the module, rather than trying
+ * to escape at nine call sites: there is no escaping scheme that is at once
+ * correct for shell, TOML, YAML, JSON and markdown. None of these characters
+ * are valid in a base URL, so dropping them is lossless for a real one.
  */
 function mcpEndpoint(serverUrl: string): string {
-  const clean = serverUrl.replace(/[`\s]/g, "").replace(/\/+$/, "");
+  const clean = serverUrl
+    .replace(/["'`\\$;|&<>(){}\s]/g, "")
+    .replace(/\/+$/, "");
   return `${clean}/mcp`;
 }
 

