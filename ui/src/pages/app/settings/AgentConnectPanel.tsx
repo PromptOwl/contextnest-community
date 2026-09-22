@@ -25,6 +25,7 @@ import { copyTextWithToast } from "../../../lib/clipboard";
 import {
   DEFAULT_HARNESS,
   HARNESSES,
+  harnessById,
   renderHarnessDoc,
   renderAllHarnessDocs,
   type HarnessKind,
@@ -57,8 +58,7 @@ export function AgentConnectPanel({
   const serverUrl = configured || window.location.origin;
 
   const ctx = useMemo(() => ({ serverUrl, openMode }), [serverUrl, openMode]);
-  const selected =
-    HARNESSES.find((h) => h.id === selectedId) ?? DEFAULT_HARNESS;
+  const selected = harnessById(selectedId) ?? DEFAULT_HARNESS;
   const body = useMemo(() => renderHarnessDoc(selected, ctx), [selected, ctx]);
 
   return (
