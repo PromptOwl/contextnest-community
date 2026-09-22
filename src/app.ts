@@ -56,6 +56,11 @@ import {
 import { definitionRoutes } from "./definitions/routes.js";
 import { isDerivedAnnotationsNode } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
+import {
+  pdfNodeRoutes,
+  PDF_UPLOAD_PATH,
+  pdfMaxRequestBytes,
+} from "./nodes/pdf-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
 import {
   isSuperAdmin,
@@ -378,17 +383,21 @@ export function createApp(): Hono<AuthEnv> {
   // Request body size cap — prevents DoS via giant POST payloads before
   // a handler ever gets to parse JSON. Only applies when Content-Length
   // is declared; streamed bodies fall through (uncommon on this API).
-  // The asset-upload route alone gets a higher ceiling (video uploads,
-  // per-type caps enforced in the handler) — the global cap is untouched.
+  // The asset-upload route gets a higher ceiling (video uploads, per-type
+  // caps enforced in the handler), and so does the PDF upload route (up to
+  // PDF_MAX_MB, enforced again in its handler) — the global cap is untouched.
   const ASSET_UPLOAD_PATH = /^\/nests\/[^/]+\/assets\/?$/;
   app.use("*", async (c, next) => {
     const lenStr = c.req.header("Content-Length");
     if (lenStr) {
       const len = parseInt(lenStr, 10);
+      const isPost = c.req.method === "POST";
       const cap =
-        c.req.method === "POST" && ASSET_UPLOAD_PATH.test(c.req.path)
+        isPost && ASSET_UPLOAD_PATH.test(c.req.path)
           ? Math.max(config.MAX_BODY_BYTES, ASSET_MAX_REQUEST_BYTES)
-          : config.MAX_BODY_BYTES;
+          : isPost && PDF_UPLOAD_PATH.test(c.req.path)
+            ? Math.max(config.MAX_BODY_BYTES, pdfMaxRequestBytes())
+            : config.MAX_BODY_BYTES;
       if (Number.isFinite(len) && len > cap) {
         return c.json(
           {
@@ -2156,7 +2165,12 @@ export function createApp(): Hono<AuthEnv> {
             r.steward.userEmail.toLowerCase() === userEmail.toLowerCase() &&
             r.steward.role === "editor",
         );
-      } else if (parts.length === 2 && c.req.method === "POST") {
+      } else if (
+        c.req.method === "POST" &&
+        // POST /nodes (create) and POST /nodes/pdf (PDF upload — a create, or
+        // a new version of a pdf node) share the nest-scope editor rule.
+        (parts.length === 2 || (parts.length === 3 && parts[2] === "pdf"))
+      ) {
         // Empty nodeId: doc/tag branches won't match; nest branch returns all.
         const resolved = await resolveStewardsForNode(nestId, "");
         stewardEditorBypass = resolved.some(
@@ -2279,6 +2293,11 @@ export function createApp(): Hono<AuthEnv> {
   //   2. governanceNodeRoutes — /:nodeId/{approve,reject,submit-review,comments,…}
   //   3. nodeRoutes — CRUD incl. the bare /:nodeId{.+} catch-all, mounted last
   //      so it only matches when no suffix route did.
+  //   0. pdfNodeRoutes — POST /pdf (upload) and GET /:nodeId/pdf (the binary).
+  //      First, because the /pdf suffix must beat every greedy catch-all; the
+  //      GET falls through (next()) when the id is not a pdf node, so a
+  //      document whose own id ends in /pdf still reads.
+  nestsApp.route("/:nestId/nodes", pdfNodeRoutes);
   nestsApp.route("/:nestId/nodes", annotationRoutes);
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
   nestsApp.route("/:nestId/nodes", nodeRoutes);

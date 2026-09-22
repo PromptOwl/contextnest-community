@@ -1040,10 +1040,12 @@ export function NestView({
   const [dragOver, setDragOver] = useState(false);
   const [importing, setImporting] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const pdfInputRef = useRef<HTMLInputElement | null>(null);
 
-  const kindForFile = (name: string): "document" | "artifact" | null => {
+  const kindForFile = (name: string): "document" | "artifact" | "pdf" | null => {
     const ext = name.toLowerCase().split(".").pop() || "";
     if (ext === "html" || ext === "htm") return "artifact";
+    if (ext === "pdf") return "pdf";
     if (ext === "md" || ext === "markdown" || ext === "txt") return "document";
     return null;
   };
@@ -1053,7 +1055,7 @@ export function NestView({
       const files = Array.from(fileList).filter((f) => kindForFile(f.name));
       const skipped = fileList.length - files.length;
       if (!files.length) {
-        toast.error("Drop .md or .html files to add them to this vault.");
+        toast.error("Drop .md, .html or .pdf files to add them to this vault.");
         return;
       }
       setImporting(true);
@@ -1061,7 +1063,7 @@ export function NestView({
       try {
         for (const file of files) {
           const type = kindForFile(file.name)!;
-          const title = file.name.replace(/\.(md|markdown|txt|html|htm)$/i, "");
+          const title = file.name.replace(/\.(md|markdown|txt|html|htm|pdf)$/i, "");
           // Whole-vault import (webkitdirectory) carries relative paths —
           // keep the tree: strip the picked root dir + filename, the rest is
           // the folder. Hidden dirs (.versions, .context) are engine files.
@@ -1074,8 +1076,12 @@ export function NestView({
             folder = (segs[0] === "nodes" ? segs.slice(1) : segs).join("/") || undefined;
           }
           try {
-            const text = await file.text();
-            const res = await api.createNode(nestId, { title, content: text, type, folder });
+            // A PDF is uploaded as bytes and becomes a governed `pdf` document
+            // (the server extracts its text); everything else is read as text.
+            const res =
+              type === "pdf"
+                ? await api.createPdfNode(nestId, file, { title, folder })
+                : await api.createNode(nestId, { title, content: await file.text(), type, folder });
             const id = (res as any)?.node?.id;
             if (id) createdIds.push(id);
           } catch (e: any) {
@@ -1168,7 +1174,7 @@ export function NestView({
               Drop to add to this vault
             </div>
             <div className="text-xs text-muted-foreground">
-              .md → document · .html → hosted artifact
+              .md → document · .html → hosted artifact · .pdf → PDF document
             </div>
           </div>
         </div>
@@ -1424,7 +1430,18 @@ export function NestView({
                 ref={importInputRef}
                 type="file"
                 multiple
-                accept=".md,.markdown,.txt,.html,.htm"
+                accept=".md,.markdown,.txt,.html,.htm,.pdf"
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files?.length) void importFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              <input
+                ref={pdfInputRef}
+                type="file"
+                multiple
+                accept="application/pdf,.pdf"
                 className="hidden"
                 onChange={(e) => {
                   if (e.target.files?.length) void importFiles(e.target.files);
@@ -1696,7 +1713,13 @@ export function NestView({
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
                   <DropdownMenuItem onSelect={() => importInputRef.current?.click()}>
-                    Files (.md / .html)
+                    Files (.md / .html / .pdf)
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() => pdfInputRef.current?.click()}
+                    data-testid="nest-upload-pdf"
+                  >
+                    Upload PDF (as a document)
                   </DropdownMenuItem>
                   <DropdownMenuItem onSelect={() => importDirRef.current?.click()}>
                     Whole vault (folder, keeps structure)
