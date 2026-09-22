@@ -8,9 +8,10 @@
  * version's bytes. The extracted text is the node body (what agents read);
  * it changes only by re-upload.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { existsSync, readdirSync, readFileSync } from "fs";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { existsSync, readdirSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
+import { createHash } from "crypto";
 import {
   setupTestEnv,
   createTestApp,
@@ -45,6 +46,29 @@ async function getPdf(app: any, url: string, apiKey?: string) {
   const res = await app.request(url, { headers: apiKey ? authed(apiKey) : {} });
   const bytes = new Uint8Array(await res.arrayBuffer());
   return { res, bytes };
+}
+
+/**
+ * Make the engine's `context_update` throw once — the second step of a PDF
+ * replace (after context_import_pdf has staged the new binary + text). The
+ * dynamic import resolves the same module instance the app under test uses
+ * (createTestApp resets modules before building it).
+ */
+async function failNextContextUpdate() {
+  const eng = await import("../src/nodes/engine.js");
+  const real = eng.engineApi.run.bind(eng.engineApi);
+  const spy = vi.spyOn(eng.engineApi, "run").mockImplementation((async (
+    op: string,
+    input: unknown,
+    ctx: unknown,
+  ) => {
+    if (op === "context_update") {
+      spy.mockRestore();
+      throw new Error("injected: disk full");
+    }
+    return (real as any)(op, input, ctx);
+  }) as any);
+  return spy;
 }
 
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
@@ -547,6 +571,29 @@ describe("GET /nests/:id/nodes/:nodeId/pdf — public reader gets the approved b
     expect(sameBytes(bytes, V2)).toBe(true);
   });
 
+  it("a replace whose second write fails leaves the node exactly as it was (draft branch)", async () => {
+    const before = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${pdfId}`, undefined, owner.apiKey);
+    const spy = await failNextContextUpdate();
+    try {
+      const v3 = buildPdf([{ lines: ["Doomed third edition."] }]);
+      const res = await uploadPdf(app, nestId, owner.apiKey, v3, { nodeId: pdfId });
+      expect(res.status).toBe(500);
+    } finally {
+      spy.mockRestore();
+    }
+    const after = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${pdfId}`, undefined, owner.apiKey);
+    expect(after.data.node.content).toBe(before.data.node.content);
+    expect(after.data.node.pdf.sha256).toBe(before.data.node.pdf.sha256);
+    expect(after.data.node.version).toBe(before.data.node.version);
+    expect(after.data.node.status).toBe(before.data.node.status);
+    const cur = await getPdf(app, `/nests/${nestId}/nodes/${pdfId}/pdf`, owner.apiKey);
+    expect(sameBytes(cur.bytes, V2)).toBe(true);
+    const onDisk = new Uint8Array(
+      readFileSync(join(env.dataDir, "nests", nestId, "nodes", "handbook.pdf")),
+    );
+    expect(sameBytes(onDisk, V2)).toBe(true);
+  });
+
   it("discarding a draft re-upload restores the sealed PDF beside the node", async () => {
     const v3 = buildPdf([{ lines: ["Third edition, never approved."] }]);
     const up = await uploadPdf(app, nestId, owner.apiKey, v3, { nodeId: pdfId });
@@ -565,6 +612,21 @@ describe("GET /nests/:id/nodes/:nodeId/pdf — public reader gets the approved b
     expect(sameBytes(onDisk, V2)).toBe(true);
     const read = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${pdfId}`, undefined, owner.apiKey);
     expect(read.data.node.content).toContain("Revenue grew 14 percent.");
+  });
+
+  it("a discard that cannot restore the sealed PDF says so in its response", async () => {
+    const v3 = buildPdf([{ lines: ["Another unapproved edition."] }]);
+    expect((await uploadPdf(app, nestId, owner.apiKey, v3, { nodeId: pdfId })).status).toBe(200);
+    // Lose the archived copy of the sealed (v2) binary — only that one.
+    const archive = join(env.dataDir, "nests", nestId, "nodes", ".versions", "handbook");
+    const v2Hex = createHash("sha256").update(V2).digest("hex");
+    rmSync(join(archive, `${v2Hex}.pdf`));
+    const discard = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${pdfId}/discard`, {}, owner.apiKey);
+    expect(discard.status).toBe(200);
+    expect(discard.data.warning).toMatch(/PDF/);
+    // Put the sealed binary back for the tests that follow (as an admin would).
+    const { writeFileSync } = await import("fs");
+    writeFileSync(join(env.dataDir, "nests", nestId, "nodes", "handbook.pdf"), V2);
   });
 
   it("reverting a pdf node to an old version restores that version's PDF and text", async () => {
@@ -682,6 +744,23 @@ describe("MCP context_get on a pdf node", () => {
   it("flags a scanned PDF as having no text layer", async () => {
     const text = await callTool("context_get", { id: "nodes/signed-scan" });
     expect(text).toContain("**Source file:** PDF, 1 page, no text layer");
+  });
+
+  it("a replace whose publish step fails leaves the node as it was (auto-publish branch)", async () => {
+    const before = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/board-deck`);
+    const spy = await failNextContextUpdate();
+    try {
+      const res = await uploadPdf(app, nestId, null, textPdfV2(), { nodeId: "nodes/board-deck" });
+      expect(res.status).toBe(500);
+    } finally {
+      spy.mockRestore();
+    }
+    const after = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/board-deck`);
+    expect(after.data.node.content).toBe(before.data.node.content);
+    expect(after.data.node.pdf.sha256).toBe(before.data.node.pdf.sha256);
+    expect(after.data.node.status).toBe("published");
+    const cur = await getPdf(app, `/nests/${nestId}/nodes/nodes/board-deck/pdf`);
+    expect(sameBytes(cur.bytes, textPdf())).toBe(true);
   });
 
   it("a replace in an ungoverned nest publishes the new version (auto-publish branch)", async () => {

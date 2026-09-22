@@ -1983,6 +1983,13 @@ export async function registerImportedDocuments(
  * the assigned version, or publish with the audit note), so a PDF version is
  * governed, numbered and sealed exactly like any other edit.
  *
+ * That makes a replace two engine writes where a text edit is one, so the
+ * stage hands back `rollback`: it puts the node's previous file and sidecar
+ * back, byte for byte, for the caller to run when the second write fails —
+ * otherwise the working copy would show a PDF no version row records. The
+ * archived copy of the prior binary the engine made is content-addressed and
+ * harmless to leave.
+ *
  * `unchanged` means the bytes are the node's current PDF: nothing was written.
  */
 async function stagePdfImport(
@@ -1991,7 +1998,31 @@ async function stagePdfImport(
   pdf: PdfUpload,
   userEmail: string,
   client: ClientMetadata | undefined,
-): Promise<{ unchanged: boolean }> {
+  priorRaw: string,
+): Promise<{ unchanged: boolean; rollback: () => Promise<void> }> {
+  const { storage } = await engineCache.get(nestId);
+  const sidecar = pdfSidecarPath(nodeId);
+  let priorSidecar: Buffer | null = null;
+  try {
+    priorSidecar = await storage.readVaultBinary(sidecar);
+  } catch {
+    // Nothing (readable) there — nothing to put back.
+  }
+  const sealedBefore = await storage.maxRecordedVersion(nodeId);
+  const rollback = async () => {
+    // A write that sealed a version before failing (say, at the checkpoint)
+    // is history now: the chain vouches for the new PDF, so it stays.
+    if ((await storage.maxRecordedVersion(nodeId).catch(() => sealedBefore)) > sealedBefore) {
+      return;
+    }
+    try {
+      await storage.writeDocument(nodeId, priorRaw);
+      if (priorSidecar) await storage.writeVaultBinary(sidecar, priorSidecar);
+      await storage.regenerateIndex();
+    } catch (err) {
+      console.error("[pdf] could not roll back a failed PDF replace", nestId, nodeId, err);
+    }
+  };
   try {
     const result = await engineApi.run<{ unchanged?: boolean }>(
       "context_import_pdf",
@@ -2004,7 +2035,7 @@ async function stagePdfImport(
       },
       await opContext(nestId, userEmail),
     );
-    return { unchanged: result.unchanged === true };
+    return { unchanged: result.unchanged === true, rollback };
   } catch (err) {
     throw pdfEngineError(err);
   }
@@ -2029,6 +2060,11 @@ export async function updateNode(
       } catch {
         throw new NotFoundError(`Node not found: ${nodeId}`);
       }
+      // The exact stored bytes, for undoing a PDF replace whose second write
+      // fails (see stagePdfImport).
+      const priorRaw = node.rawContent;
+      // Set once a PDF replace has staged its new binary + text.
+      let pdfRollback: (() => Promise<void>) | null = null;
       // A stored type this server no longer accepts fails engine validation
       // on ANY write (content, append, tags, status, revert, the MCP
       // context_update — all land here). Unless this patch re-types the node,
@@ -2227,20 +2263,28 @@ export async function updateNode(
         // second chain onto the first and breaks reconstruction from there on.
         const newVersion = await versionManager.nextVersion(nodeId, currentVersion);
         if (patch.pdf) {
-          const staged = await stagePdfImport(nestId, nodeId, patch.pdf, userEmail, patch.client);
+          const staged = await stagePdfImport(
+            nestId, nodeId, patch.pdf, userEmail, patch.client, priorRaw,
+          );
           if (staged.unchanged && Object.keys(opInput).length === 0) {
             return { node, version: node.frontmatter.version || currentVersion || 1 };
           }
+          if (!staged.unchanged) pdfRollback = staged.rollback;
         }
         // The engine owns the write: it applies the patch, validates, stamps the
         // version we assigned and drops the stale published-state checksum, then
         // regenerates the index. `publish: false` because this revision has not
         // cleared review — governance below records it as a draft.
-        await engineApi.run(
-          "context_update",
-          { id: nodeId, ...opInput, publish: false, version: newVersion },
-          await opContext(nestId, userEmail),
-        );
+        try {
+          await engineApi.run(
+            "context_update",
+            { id: nodeId, ...opInput, publish: false, version: newVersion },
+            await opContext(nestId, userEmail),
+          );
+        } catch (err) {
+          if (pdfRollback) await pdfRollback();
+          throw err;
+        }
         node = await storage.readDocument(nodeId);
         await syncNodeTags(nestId, nodeId, currentTags);
 
@@ -2280,10 +2324,13 @@ export async function updateNode(
           patch.changeNote || `Auto-published on edit (${publishReason})`;
         let publishedVersion: number;
         if (patch.pdf) {
-          const staged = await stagePdfImport(nestId, nodeId, patch.pdf, userEmail, patch.client);
+          const staged = await stagePdfImport(
+            nestId, nodeId, patch.pdf, userEmail, patch.client, priorRaw,
+          );
           if (staged.unchanged && Object.keys(opInput).length === 0) {
             return { node, version: node.frontmatter.version || 1 };
           }
+          if (!staged.unchanged) pdfRollback = staged.rollback;
         }
         try {
           const result = await engineApi.run<{ version: number }>(
@@ -2297,6 +2344,7 @@ export async function updateNode(
             "publishDocument failed (node patch auto-publish)",
             err
           );
+          if (pdfRollback) await pdfRollback();
           throw err;
         }
         node = await storage.readDocument(nodeId);
@@ -2655,7 +2703,7 @@ export async function discardDraft(
   nestId: string,
   nodeId: string,
   userEmail: string,
-): Promise<{ deleted: boolean; version: number | null }> {
+): Promise<{ deleted: boolean; version: number | null; warning?: string }> {
   return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
     await assertNotReviewLocked(nestId, nodeId, userEmail, "discarding");
 
@@ -2697,12 +2745,19 @@ export async function discardDraft(
     // frontmatter names the sealed version's bytes; put them back as the live
     // sidecar (the engine resolves them from the archive and verifies the
     // hash), so the file and its binary agree again.
+    let warning: string | undefined;
     if (restored.frontmatter.type === PDF_NODE_TYPE) {
       try {
         const bytes = await readPdfBinary(storage as NestStorage, nodeId);
         await storage.writeVaultBinary(pdfSidecarPath(nodeId), bytes);
       } catch (err) {
+        // The text is back; the binary could not be. Reads stay safe (the
+        // served PDF is hash-verified, so a mismatch is refused, not served),
+        // but the caller should hear it now rather than from a later 500.
         console.error("[pdf] could not restore the sealed binary on discard", nestId, nodeId, err);
+        warning =
+          `The draft was discarded, but the PDF of version ${sealed} could not be restored ` +
+          "(its archived copy is missing or no longer matches). Upload the PDF again, or ask an admin to verify the nest.";
       }
     }
     await syncNodeTags(
@@ -2713,7 +2768,7 @@ export async function discardDraft(
 
     await versions.deleteUnsealedVersions(nestId, nodeId, sealed);
     await trackEvent("node.discard_draft", { nestId, nodeId, version: sealed });
-    return { deleted: false, version: sealed };
+    return { deleted: false, version: sealed, ...(warning ? { warning } : {}) };
   });
 }
 
