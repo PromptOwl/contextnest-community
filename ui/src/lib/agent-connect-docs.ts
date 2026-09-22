@@ -53,9 +53,21 @@ export interface Harness {
   body: (ctx: ConnectDocsContext, mcpUrl: string) => string;
 }
 
-/** The server-level MCP endpoint — one connection, every nest the caller can see. */
+/**
+ * The server-level MCP endpoint — one connection, every nest the caller can
+ * see.
+ *
+ * The URL comes from the admin-editable `public_base_url`, which the server
+ * stores after nothing more than a trim and a trailing-slash strip
+ * (`src/app.ts`), and it lands inside single-backtick code spans below. A
+ * literal backtick would close the span and turn the rest of the line into
+ * live markdown, in a panel other people are told to copy from. Backticks and
+ * whitespace are never valid in a URL, so drop them here — at the one point
+ * the value enters the module — rather than escaping at nine call sites.
+ */
 function mcpEndpoint(serverUrl: string): string {
-  return `${serverUrl.replace(/\/+$/, "")}/mcp`;
+  const clean = serverUrl.replace(/[`\s]/g, "").replace(/\/+$/, "");
+  return `${clean}/mcp`;
 }
 
 /**

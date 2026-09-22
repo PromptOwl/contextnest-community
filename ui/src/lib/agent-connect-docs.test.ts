@@ -157,6 +157,26 @@ describe("rendered instructions", () => {
     }
   });
 
+  /**
+   * serverUrl comes from the admin-editable `public_base_url`, which the
+   * server stores after nothing more than a trim and a trailing-slash strip
+   * (src/app.ts). It lands inside single-backtick code spans here, so a
+   * literal backtick would close the span and turn the rest of the line into
+   * live markdown — in a panel other people are told to copy-paste from.
+   * A backtick is never valid in a URL, so drop it rather than escape it.
+   */
+  it("cannot be broken out of a code span by the configured URL", () => {
+    const hostile = {
+      serverUrl: "https://n.example.com/`](http://evil.example)`",
+    };
+    for (const h of HARNESSES) {
+      const out = renderHarnessDoc(h, hostile);
+      expect(out).not.toContain("`](http://evil.example)");
+      // Backticks in the output may only be ones this module wrote.
+      expect(out).not.toMatch(/`[^`\n]*`\]\(/);
+    }
+  });
+
   it("tells a keyed deployment how to present the key", () => {
     // Every harness that can take a static credential must name one concrete
     // mechanism; an admin reading the panel should never have to guess.
@@ -209,5 +229,6 @@ describe("the whole panel", () => {
     const doc = renderAllHarnessDocs(KEYED);
     expect(doc.indexOf("# Chat")).toBeGreaterThanOrEqual(0);
     expect(doc.indexOf("# Command line")).toBeGreaterThan(doc.indexOf("# Chat"));
+    expect(doc.indexOf("# Editors")).toBeGreaterThan(doc.indexOf("# Command line"));
   });
 });
