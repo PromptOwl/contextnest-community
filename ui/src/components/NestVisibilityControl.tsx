@@ -289,11 +289,11 @@ export function NestVisibilityControl({
           <p className="text-xs text-muted-foreground">
             {isPublic
               ? sharedDeployment
-                ? "Anyone on the internet with the URL can read this nest — including every account on this server, other organisations too. Editing still requires being added below."
+                ? "Anyone on the internet with the URL can read this nest — including every account on this server, other organizations too. Editing still requires being added below."
                 : "Anyone on the internet with the URL can read this nest. Editing still requires being added below."
               : isOrg
                 ? sharedDeployment
-                  ? "Every account on this server can read this nest — other organisations included, not just yours. Editing still requires being added below."
+                  ? "Every account on this server can read this nest — other organizations included, not just yours. Editing still requires being added below."
                   : "Everyone signed in to this deployment can read this nest. Editing still requires being added below."
                 : "Only people added below (and the owner) can see this nest."}
           </p>

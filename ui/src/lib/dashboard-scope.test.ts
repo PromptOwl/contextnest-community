@@ -16,8 +16,9 @@ const folders = [
 ];
 
 describe("visibleUnsynced", () => {
-  it("shows every folder in the unscoped and unsynced-only views", () => {
+  it("shows every folder in the unscoped, mine and unsynced-only views", () => {
     expect(visibleUnsynced(folders, "all", "")).toHaveLength(2);
+    expect(visibleUnsynced(folders, "mine", "")).toHaveLength(2);
     expect(visibleUnsynced(folders, "unsynced", "")).toHaveLength(2);
   });
 
@@ -74,8 +75,12 @@ describe("nestInScope — which registered nests a scope keeps", () => {
     expect(keeps("public")).toEqual(["publicDiscovered", "myPublic"]);
   });
 
-  it("unsynced folders hide under 'mine' like every other access scope", () => {
-    expect(visibleUnsynced(folders, "mine", "")).toEqual([]);
+  it("unsynced folders stay visible under 'mine' — they are the operator's own disk, not a discovered nest", () => {
+    // Regression guard: 'mine' is the new DEFAULT, so hiding them here would
+    // hide every pending folder from every fresh dashboard, self-hosted
+    // included (review finding on PR #315).
+    expect(visibleUnsynced(folders, "mine", "")).toHaveLength(2);
+    expect(visibleUnsynced(folders, "mine", "bill").map((f) => f.label)).toEqual(["billing"]);
     expect(scopeShowsNests("mine")).toBe(true);
   });
 });

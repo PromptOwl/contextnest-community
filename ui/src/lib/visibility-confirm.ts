@@ -3,7 +3,7 @@
  *
  * 'org' means "every authenticated account on this deployment"
  * (server: src/shared/access.ts). On a single-company self-hosted server
- * that is the organisation, so the tier flips in one click. On a SHARED
+ * that is the organization, so the tier flips in one click. On a SHARED
  * deployment — the PromptOwl-hosted server, one install holding many
  * customers — it is every customer, so it needs the same acknowledgement
  * 'public' always needs, and the picker must say so instead of "everyone
@@ -38,7 +38,7 @@ export function visibilityTierHint(
       return "Only people added to the nest";
     case "org":
       return ctx.sharedDeployment
-        ? "Every account on this server can read — other organisations included"
+        ? "Every account on this server can read — other organizations included"
         : "Everyone signed in here can read";
     case "public":
       return ctx.sharedDeployment
@@ -62,14 +62,14 @@ export function visibilityConfirmCopy(
     return {
       title: "Make this nest public?",
       body: ctx.sharedDeployment
-        ? "This makes the nest readable by anyone on the internet — including every account on this server, which belongs to other organisations too. Anyone with the URL will be able to read it."
+        ? "This makes the nest readable by anyone on the internet — including every account on this server, which belongs to other organizations too. Anyone with the URL will be able to read it."
         : "This makes the nest readable by anyone on the internet, outside your organization. Anyone with the URL will be able to read it.",
       confirm: "Make public",
     };
   }
   return {
     title: "Open this nest to everyone on this server?",
-    body: "This server is shared: “Organization” makes the nest readable by every account on this server, including other organisations — not just yours. Only choose it for context that any of them may see.",
+    body: "This server is shared: Organization makes the nest readable by every account on this server, including other organizations — not just yours. Only choose it for context that any of them may see.",
     confirm: "Open to everyone here",
   };
 }

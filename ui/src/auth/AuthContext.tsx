@@ -60,7 +60,7 @@ export interface AuthContextValue {
    *  existing nodes of the type stay readable. */
   typeArtifactEnabled: boolean;
   typeTableEnabled: boolean;
-  /** From /health — this server hosts several organisations (the
+  /** From /health — this server hosts several organizations (the
    *  PromptOwl-hosted deployment). The nest visibility picker confirms before
    *  'Organization' and words its tiers by it. Default false. */
   sharedDeployment: boolean;

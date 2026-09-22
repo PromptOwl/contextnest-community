@@ -471,7 +471,7 @@ export function createApp(): Hono<AuthEnv> {
       // API would refuse it — existing nodes of the type stay readable.
       type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
       type_table_enabled: config.TYPE_TABLE_ENABLED,
-      // This server hosts several organisations (PromptOwl-hosted) rather than
+      // This server hosts several organizations (PromptOwl-hosted) rather than
       // one. The visibility picker words 'Organization' and 'Public' by it and
       // confirms before 'org'; the server enforces the same in
       // PATCH /nests/:id/visibility.
@@ -914,7 +914,7 @@ export function createApp(): Hono<AuthEnv> {
         value: body.people_suggest_all_users ? "true" : null,
       });
     }
-    // This server hosts several organisations. On, nest visibility 'org'
+    // This server hosts several organizations. On, nest visibility 'org'
     // needs the same acknowledgement as 'public' and the UI words both tiers
     // to name the real boundary. false persists as null — unset is off.
     if ("shared_deployment" in body) {

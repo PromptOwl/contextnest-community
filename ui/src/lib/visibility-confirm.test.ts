@@ -24,12 +24,12 @@ describe("visibilityNeedsAcknowledgement", () => {
 });
 
 describe("visibilityTierHint — the one-liner under each tier in the picker", () => {
-  it("self-hosted: org reads as the organisation", () => {
+  it("self-hosted: org reads as the organization", () => {
     expect(visibilityTierHint("org", { sharedDeployment: false })).toMatch(/signed in here/i);
     expect(visibilityTierHint("org", { sharedDeployment: false })).not.toMatch(/other organi/i);
   });
 
-  it("shared: org says every account on the server, other organisations included", () => {
+  it("shared: org says every account on the server, other organizations included", () => {
     const hint = visibilityTierHint("org", { sharedDeployment: true });
     expect(hint).toMatch(/every account on this server/i);
     expect(hint).toMatch(/other organi[sz]ations/i);
@@ -50,7 +50,7 @@ describe("visibilityConfirmCopy — the acknowledgement dialog", () => {
     expect(c.confirm).toBe("Make public");
   });
 
-  it("public, shared: also names other organisations on this server", () => {
+  it("public, shared: also names other organizations on this server", () => {
     const c = visibilityConfirmCopy("public", { sharedDeployment: true });
     expect(c.body).toMatch(/anyone on the internet/i);
     expect(c.body).toMatch(/other organi[sz]ations/i);

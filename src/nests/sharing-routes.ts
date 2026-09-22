@@ -173,10 +173,10 @@ sharingRoutes.patch("/visibility", async (c) => {
   // by anyone on the internet, outside your organization. Require an explicit
   // acknowledgement so this can never happen on a stray click. Going back to
   // private needs no acknowledgement. 'org' stays inside the deployment — on
-  // a single-company server that crosses no organisational boundary, but on
+  // a single-company server that crosses no organizational boundary, but on
   // a SHARED deployment (the PromptOwl-hosted server) the deployment is many
   // customers, so 'org' needs the same acknowledgement there. Enforced here,
-  // not only in the UI, so an API/MCP caller can't skip it either.
+  // not only in the UI, so a client that bypasses the UI can't skip it.
   const ack = body.acknowledge_public === true;
   const shared = config.SHARED_DEPLOYMENT;
   if (body.visibility === "public" && !ack) {
@@ -185,7 +185,7 @@ sharingRoutes.patch("/visibility", async (c) => {
         error: "Publishing this nest requires acknowledgement.",
         requires_acknowledgement: true,
         warning: shared
-          ? "This makes the nest readable by anyone on the internet — including every account on this server, which belongs to other organisations too."
+          ? "This makes the nest readable by anyone on the internet — including every account on this server, which belongs to other organizations too."
           : "This makes the nest readable by anyone on the internet, outside your organization.",
       },
       409,
@@ -197,7 +197,7 @@ sharingRoutes.patch("/visibility", async (c) => {
         error: "Opening this nest to the organization requires acknowledgement.",
         requires_acknowledgement: true,
         warning:
-          "This server is shared: 'Organization' makes the nest readable by every account on this server, including other organisations — not just yours.",
+          "This server is shared: 'Organization' makes the nest readable by every account on this server, including other organizations — not just yours.",
       },
       409,
     );

@@ -779,7 +779,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 <div className="flex items-start justify-between gap-4 pt-4 border-t">
                   <div className="pr-4">
                     <div className="text-sm font-medium">
-                      This server hosts several organisations
+                      This server hosts several organizations
                     </div>
                     <p className="text-xs text-muted-foreground mt-0.5">
                       A nest's Organization tier is readable by every account
@@ -787,7 +787,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                       applies in one click. On — the PromptOwl-hosted service,
                       or any install shared by unrelated customers — opening a
                       nest to Organization asks for the same acknowledgement as
-                      Public (API and MCP included), and the visibility picker
+                      Public (enforced by the server, not only the UI), and the visibility picker
                       says who the tier really reaches.
                     </p>
                   </div>

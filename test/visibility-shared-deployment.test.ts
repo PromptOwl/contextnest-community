@@ -61,7 +61,7 @@ describe("PATCH /nests/:id/visibility — 'org' on a shared deployment", () => {
     expect(res.status).toBe(409);
     expect(res.data.requires_acknowledgement).toBe(true);
     // The warning names the real boundary: every account on the server,
-    // other organisations included — not "your organization".
+    // other organizations included — not "your organization".
     expect(res.data.warning).toMatch(/every account on this server/i);
     expect(res.data.warning).toMatch(/other organi[sz]ations/i);
     expect(await visibilityOf(app, nestId, owner.apiKey)).toBe("private");
@@ -79,7 +79,7 @@ describe("PATCH /nests/:id/visibility — 'org' on a shared deployment", () => {
     expect(res.data.visibility).toBe("org");
   });
 
-  it("on: public still needs acknowledgement, and its warning names other organisations too", async () => {
+  it("on: public still needs acknowledgement, and its warning names other organizations too", async () => {
     process.env.SHARED_DEPLOYMENT = "true";
     const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
     const { owner, nestId } = await ownerAndNest(app);

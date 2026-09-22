@@ -267,7 +267,7 @@ export interface AdminSettings {
    *  a server holding several unrelated customers would otherwise hand one
    *  customer's staff another customer's email addresses. */
   people_suggest_all_users: boolean;
-  /** This server hosts several organisations (PromptOwl-hosted). On, nest
+  /** This server hosts several organizations (PromptOwl-hosted). On, nest
    *  visibility 'org' needs the same acknowledgement as 'public' and the
    *  picker words both tiers to name the real boundary. Default OFF. */
   shared_deployment: boolean;
