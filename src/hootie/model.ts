@@ -27,11 +27,13 @@ export interface ModelTurn {
 export async function* streamAnswer(params: {
   apiKey: string;
   model: string;
+  /** A gateway (LiteLLM, PromptOwl) speaking /v1/messages; null = Anthropic. */
+  baseUrl?: string | null;
   system: string;
   turns: ModelTurn[];
   signal?: AbortSignal;
 }): AsyncGenerator<string> {
-  const client = clientFor(params.apiKey);
+  const client = clientFor(params.apiKey, params.baseUrl ?? null);
   const stream = client.messages.stream(
     {
       model: params.model,
@@ -68,14 +70,18 @@ export async function* streamAnswer(params: {
 }
 
 /**
- * One client per key. The key is one server-wide setting that an admin can
- * rotate at runtime, so it is looked up per call — but the client behind it
- * (connection pool, retries) is reused rather than rebuilt for every question.
+ * One client per key + gateway. Both are server-wide settings an admin can
+ * change at runtime, so they are looked up per call — but the client behind
+ * them (connection pool, retries) is reused rather than rebuilt per question.
  */
-let cached: { apiKey: string; client: Anthropic } | null = null;
-function clientFor(apiKey: string): Anthropic {
-  if (!cached || cached.apiKey !== apiKey) {
-    cached = { apiKey, client: new Anthropic({ apiKey }) };
+let cached: { apiKey: string; baseUrl: string | null; client: Anthropic } | null = null;
+function clientFor(apiKey: string, baseUrl: string | null): Anthropic {
+  if (!cached || cached.apiKey !== apiKey || cached.baseUrl !== baseUrl) {
+    cached = {
+      apiKey,
+      baseUrl,
+      client: new Anthropic({ apiKey, ...(baseUrl ? { baseURL: baseUrl } : {}) }),
+    };
   }
   return cached.client;
 }

@@ -11,6 +11,7 @@
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { getDb } from "../db/client.js";
+import { config } from "../config.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { requireWorkflowPlane } from "./edge-type-routes.js";
@@ -88,8 +89,9 @@ envRoutes.delete("/:key", requireWorkflowPlane, async (c) => {
 });
 
 /** Full values — for the run bundle only, never a route response. The
- *  server-wide ANTHROPIC_API_KEY (super-admin Settings) is the floor; nest
- *  env rows override it. */
+ *  server-wide ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL (super-admin
+ *  Settings) are the floor; nest env rows override them. The gateway URL
+ *  rides along so the same setting routes agent runs and Hootie alike. */
 export async function envValues(nestId: string): Promise<Record<string, string>> {
   const rows = (await getDb().all(
     "SELECT key, value FROM nest_env WHERE nest_id = ?",
@@ -97,5 +99,6 @@ export async function envValues(nestId: string): Promise<Record<string, string>>
   )) as Array<{ key: string; value: string }>;
   const base: Record<string, string> = {};
   if (process.env.ANTHROPIC_API_KEY) base.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+  if (config.ANTHROPIC_BASE_URL) base.ANTHROPIC_BASE_URL = config.ANTHROPIC_BASE_URL;
   return { ...base, ...Object.fromEntries(rows.map((r) => [r.key, r.value])) };
 }

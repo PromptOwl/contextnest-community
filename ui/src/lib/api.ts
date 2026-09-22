@@ -254,6 +254,12 @@ export interface AdminSettings {
   type_table_enabled: boolean;
   /** Hootie in the nest (default ON). */
   hootie_enabled: boolean;
+  /** Model Hootie answers with (default claude-opus-5; a gateway-side name
+   *  such as `ollama/…` when routed through a gateway). */
+  hootie_model: string;
+  /** Model gateway (LiteLLM / PromptOwl) for Hootie AND agent runs;
+   *  "" = Anthropic directly. */
+  anthropic_base_url: string;
   subagent_runs_enabled: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;

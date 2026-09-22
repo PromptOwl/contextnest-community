@@ -84,7 +84,9 @@ const TABS: {
       "public_base_url",
       "logo_url",
       "anthropic_api_key",
+      "anthropic_base_url",
       "hootie_enabled",
+      "hootie_model",
       "people_suggest_all_users",
     ],
   },
@@ -756,7 +758,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   Anthropic API key above; without one the panel says so.
                 </CardDescription>
               </CardHeader>
-              <CardContent>
+              <CardContent className="space-y-4">
                 <div className="flex items-center justify-between">
                   <span className="text-sm">
                     Hootie in the nest — {draft.hootie_enabled ? "On" : "Off"}
@@ -765,6 +767,33 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     checked={draft.hootie_enabled}
                     onCheckedChange={(v) => set({ hootie_enabled: v })}
                   />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="hootie-model">Model</Label>
+                  <TextField
+                    value={draft.hootie_model ?? ""}
+                    placeholder="claude-opus-5"
+                    onChange={(v) => set({ hootie_model: v })}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    The model Hootie answers with. Through a gateway this is the
+                    gateway's name for it (<code>ollama/llama3.2</code>,{" "}
+                    <code>gpt-5</code>, …).
+                  </p>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="anthropic-base-url">Model gateway URL</Label>
+                  <TextField
+                    value={draft.anthropic_base_url ?? ""}
+                    placeholder="http://gateway:4000 — empty calls Anthropic directly"
+                    onChange={(v) => set({ anthropic_base_url: v })}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Route every model call — Hootie and agent runs — through a
+                    LiteLLM or PromptOwl gateway with the key above as its
+                    virtual key: budgets, spend logs, and any model the gateway
+                    fronts. Empty means Anthropic directly.
+                  </p>
                 </div>
               </CardContent>
             </Card>

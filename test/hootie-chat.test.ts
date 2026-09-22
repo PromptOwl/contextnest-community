@@ -51,7 +51,12 @@ function parseSse(text: string): SseEvent[] {
 /** What the mocked model will say next; tests set it per case. */
 let scriptedAnswer = "Hoot.";
 /** What the mocked model was asked; tests inspect the retrieved context. */
-let lastModelCall: { system: string; turns: any[] } | null = null;
+let lastModelCall: {
+  system: string;
+  turns: any[];
+  model?: string;
+  baseUrl?: string | null;
+} | null = null;
 /** When set, the mock parks after its first chunk until the signal aborts
  *  (or this many ms pass) and records which — the disconnect test. */
 let holdAfterFirstChunkMs = 0;
@@ -103,9 +108,16 @@ beforeAll(() => {
     streamAnswer: async function* (params: {
       system: string;
       turns: any[];
+      model: string;
+      baseUrl?: string | null;
       signal?: AbortSignal;
     }) {
-      lastModelCall = { system: params.system, turns: params.turns };
+      lastModelCall = {
+        system: params.system,
+        turns: params.turns,
+        model: params.model,
+        baseUrl: params.baseUrl ?? null,
+      };
       // Two chunks, so the route's delta framing is exercised.
       const mid = Math.ceil(scriptedAnswer.length / 2);
       yield scriptedAnswer.slice(0, mid);
@@ -799,5 +811,83 @@ describe("/admin/settings — hootie_enabled toggle", () => {
     );
     expect(on.data.settings.hootie_enabled).toBe(true);
     expect((await (await app.request("/health")).json()).hootie_enabled).toBe(true);
+  });
+});
+
+describe("/admin/settings — Hootie model + gateway", () => {
+  const OWNER = "admin2@acme.com";
+
+  afterAll(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_BASE_URL;
+    delete process.env.HOOTIE_MODEL;
+    delete process.env.HOOTIE_ENABLED;
+  });
+
+  it("model and gateway URL round-trip, validate, and take effect on the next question — no restart", async () => {
+    setupTestEnv();
+    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
+    delete process.env.ANTHROPIC_BASE_URL;
+    delete process.env.HOOTIE_MODEL;
+    const app = await createTestApp("key", { ownerEmail: OWNER });
+    const admin = await registerUser(app, OWNER);
+    const nest = (await jsonRequest(app, "POST", "/nests", { name: "Gateway" }, admin.apiKey)).data.nest.id;
+
+    const before = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(before.data.hootie_model).toBe("claude-opus-5");
+    expect(before.data.anthropic_base_url).toBe("");
+
+    // Direct Anthropic by default.
+    scriptedAnswer = "direct";
+    await chat(app, nest, { message: "hi" }, admin.apiKey);
+    expect(lastModelCall!.model).toBe("claude-opus-5");
+    expect(lastModelCall!.baseUrl).toBeNull();
+
+    // A bad gateway URL is refused, field-keyed, and nothing is applied.
+    const bad = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { anthropic_base_url: "not a url", hootie_model: "gpt-5" },
+      admin.apiKey,
+    );
+    expect(bad.status).toBe(400);
+    expect(bad.data.fieldErrors?.anthropic_base_url).toBeTruthy();
+    const still = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(still.data.hootie_model).toBe("claude-opus-5");
+
+    // Empty model is refused too.
+    const empty = await jsonRequest(app, "PATCH", "/admin/settings", { hootie_model: "   " }, admin.apiKey);
+    expect(empty.status).toBe(400);
+    expect(empty.data.fieldErrors?.hootie_model).toBeTruthy();
+
+    // Route through a gateway with a gateway-side model name.
+    const ok = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { anthropic_base_url: "http://gateway:4000/", hootie_model: "ollama/llama3.2:3b" },
+      admin.apiKey,
+    );
+    expect(ok.status).toBe(200);
+    expect(ok.data.settings.anthropic_base_url).toBe("http://gateway:4000");
+    expect(ok.data.settings.hootie_model).toBe("ollama/llama3.2:3b");
+
+    scriptedAnswer = "via gateway";
+    await chat(app, nest, { message: "hi again" }, admin.apiKey);
+    expect(lastModelCall!.model).toBe("ollama/llama3.2:3b");
+    expect(lastModelCall!.baseUrl).toBe("http://gateway:4000");
+
+    // The runner floor carries the gateway too — one setting for both.
+    const { envValues } = await import("../src/workflow/env-routes.js");
+    const env = await envValues(nest);
+    expect(env.ANTHROPIC_BASE_URL).toBe("http://gateway:4000");
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-test");
+
+    // Clearing the URL goes back to direct.
+    await jsonRequest(app, "PATCH", "/admin/settings", { anthropic_base_url: "" }, admin.apiKey);
+    await chat(app, nest, { message: "and back" }, admin.apiKey);
+    expect(lastModelCall!.baseUrl).toBeNull();
+    expect((await envValues(nest)).ANTHROPIC_BASE_URL).toBeUndefined();
   });
 });

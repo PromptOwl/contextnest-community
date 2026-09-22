@@ -233,6 +233,7 @@ hootieRoutes.post("/chat", async (c) => {
       for await (const chunk of streamAnswer({
         apiKey,
         model: config.HOOTIE_MODEL,
+        baseUrl: config.ANTHROPIC_BASE_URL || null,
         system,
         turns,
         signal: cancel.signal,

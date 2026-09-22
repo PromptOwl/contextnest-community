@@ -541,9 +541,22 @@ export const config = {
   get HOOTIE_ENABLED(): boolean {
     return process.env.HOOTIE_ENABLED !== "false";
   },
-  /** Model Hootie answers with. Env-only; one setting for the whole server. */
+  /** Model Hootie answers with. Superadmin-editable at runtime via
+   *  /admin/settings (hootie_model). A gateway-side name (`ollama/…`,
+   *  `gpt-…`) is fine when ANTHROPIC_BASE_URL points at one. */
   get HOOTIE_MODEL(): string {
     return process.env.HOOTIE_MODEL || "claude-opus-5";
+  },
+  /**
+   * Where the Anthropic-shaped model calls go. Empty = Anthropic directly.
+   * Set to a LiteLLM (or PromptOwl) gateway to route Hootie AND agent runs
+   * through it — one setting: the runner honours the same variable via the
+   * run bundle's env floor. Superadmin-editable (anthropic_base_url).
+   * Never a per-user vendor key: that is the shadow-AI hole the gateway
+   * exists to close.
+   */
+  get ANTHROPIC_BASE_URL(): string {
+    return (process.env.ANTHROPIC_BASE_URL || "").trim().replace(/\/$/, "");
   },
   /**
    * Sub-agent runs: lets a run spawn nested runs (an external runner calling

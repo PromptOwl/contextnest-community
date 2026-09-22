@@ -612,6 +612,8 @@ export function createApp(): Hono<AuthEnv> {
     type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
     type_table_enabled: config.TYPE_TABLE_ENABLED,
     hootie_enabled: config.HOOTIE_ENABLED,
+    hootie_model: config.HOOTIE_MODEL,
+    anthropic_base_url: config.ANTHROPIC_BASE_URL,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
@@ -770,6 +772,35 @@ export function createApp(): Hono<AuthEnv> {
         name: "HOOTIE_ENABLED",
         value: body.hootie_enabled ? null : "false",
       });
+    }
+    if ("hootie_model" in body) {
+      const v = String(body.hootie_model ?? "").trim();
+      if (!v) addError("hootie_model", "Model is required — e.g. claude-opus-5.");
+      else if (v.length > 200 || /\s/.test(v))
+        addError("hootie_model", "Model must be a single identifier with no spaces.");
+      else pending.push({ name: "HOOTIE_MODEL", value: v === "claude-opus-5" ? null : v });
+    }
+    // Empty clears the row (direct Anthropic). Otherwise an http(s) origin
+    // (+ optional path) with no trailing slash, so the SDK joins /v1/messages
+    // onto it cleanly.
+    if ("anthropic_base_url" in body) {
+      const v = String(body.anthropic_base_url ?? "").trim().replace(/\/$/, "");
+      if (!v) pending.push({ name: "ANTHROPIC_BASE_URL", value: null });
+      else {
+        let ok = false;
+        try {
+          const u = new URL(v);
+          ok = (u.protocol === "http:" || u.protocol === "https:") && !!u.host;
+        } catch {
+          ok = false;
+        }
+        if (!ok)
+          addError(
+            "anthropic_base_url",
+            "Model gateway URL must be an http(s) URL, e.g. http://gateway:4000 — or empty to call Anthropic directly.",
+          );
+        else pending.push({ name: "ANTHROPIC_BASE_URL", value: v });
+      }
     }
     if ("anthropic_api_key" in body) {
       const v = body.anthropic_api_key;
