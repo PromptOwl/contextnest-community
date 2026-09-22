@@ -435,3 +435,158 @@ describe("MCP OAuth — flag off", () => {
     }
   });
 });
+
+// ─── Review findings ──────────────────────────────────────────────────────
+
+describe("MCP OAuth — scope is a real boundary", () => {
+  /**
+   * The consent screen says "Read the nests you have access to" for a
+   * nests:read grant. If write tools still work, that sentence is a lie and
+   * the scope split is decoration. Write access must require nests:write.
+   */
+  it("refuses a write tool on a read-only grant", async () => {
+    enable();
+    const app = await createTestApp("key");
+    const alice = await registerUser(app, "alice@example.com");
+    const clientId = await register(app);
+    const cookie = await signIn(app, "alice@example.com", "testpass");
+    const { verifier, challenge } = pkce();
+    const code = await getCode(app, clientId, cookie, challenge, "nests:read");
+    const tok = await (await exchange(app, clientId, code, verifier)).json();
+
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tok.access_token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "nest_create", arguments: { name: "Sneaky" } },
+      }),
+    });
+    const text = await res.text();
+    expect(text).toMatch(/nests:write|insufficient/i);
+    expect(text).not.toMatch(/Sneaky/);
+  });
+
+  it("allows the same write tool once nests:write was granted", async () => {
+    enable();
+    const app = await createTestApp("key");
+    const alice = await registerUser(app, "alice@example.com");
+    const clientId = await register(app);
+    const cookie = await signIn(app, "alice@example.com", "testpass");
+    const { verifier, challenge } = pkce();
+    const code = await getCode(
+      app, clientId, cookie, challenge, "nests:read nests:write",
+    );
+    const tok = await (await exchange(app, clientId, code, verifier)).json();
+
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tok.access_token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "nest_create", arguments: { name: "Allowed" } },
+      }),
+    });
+    expect(await res.text()).not.toMatch(/nests:write required/i);
+  });
+
+  /** A cnst_ key is not an OAuth grant and must not be narrowed by this. */
+  it("leaves API-key callers unrestricted", async () => {
+    enable();
+    const app = await createTestApp("key");
+    const alice = await registerUser(app, "alice@example.com");
+    const res = await jsonRequest(
+      app, "POST", "/nests", { name: "Key Nest" }, alice.apiKey,
+    );
+    expect(res.status).toBe(201);
+  });
+});
+
+describe("MCP OAuth — consent names where the code is going", () => {
+  /**
+   * Registration is open (RFC 7591 DCR), so anyone can mint a client called
+   * "Claude" pointing at their own redirect. The only thing that lets a person
+   * notice is seeing the destination.
+   */
+  it("shows the redirect origin on the consent page", async () => {
+    enable();
+    const app = await createTestApp("key");
+    await registerUser(app, "alice@example.com");
+    const clientId = await register(app, ["https://evil.example/cb"]);
+    const cookie = await signIn(app, "alice@example.com", "testpass");
+    const { challenge } = pkce();
+
+    const res = await app.request(
+      `/oauth/authorize?response_type=code&client_id=${clientId}` +
+        `&redirect_uri=${encodeURIComponent("https://evil.example/cb")}` +
+        `&code_challenge=${challenge}&code_challenge_method=S256`,
+      { headers: { Cookie: cookie } },
+    );
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    // Must be VISIBLE, not merely present in a hidden round-trip field —
+    // that would satisfy a naive substring check while showing the person
+    // nothing.
+    const visible = html.replace(/<input[^>]*type="hidden"[^>]*>/g, "");
+    expect(visible).toContain("evil.example");
+  });
+});
+
+describe("MCP OAuth — single use is atomic", () => {
+  /**
+   * The check used to be SELECT-then-UPDATE, which two concurrent exchanges
+   * can both pass before either write lands. On Postgres that is a real race,
+   * and both callers would receive a full token pair.
+   */
+  it("mints one token pair when the same code is exchanged concurrently", async () => {
+    enable();
+    const app = await createTestApp("key");
+    const alice = await registerUser(app, "alice@example.com");
+    const clientId = await register(app);
+    const cookie = await signIn(app, "alice@example.com", "testpass");
+    const { verifier, challenge } = pkce();
+    const code = await getCode(app, clientId, cookie, challenge);
+
+    const results = await Promise.all([
+      exchange(app, clientId, code, verifier),
+      exchange(app, clientId, code, verifier),
+    ]);
+    const statuses = results.map((r) => r.status).sort();
+    expect(statuses).toEqual([200, 400]);
+  });
+});
+
+describe("scope classification", () => {
+  /**
+   * The read-only set is an allow-list, so a tool added later defaults to
+   * requiring nests:write. This asserts that the classification is a real
+   * decision for every tool rather than an accident of which list it landed
+   * in — if a genuinely read-only tool is added, it must be added to the set
+   * deliberately, and this test is where that shows up.
+   */
+  it("classifies every server tool, defaulting new ones to write", async () => {
+    const { SERVER_TOOL_DEFINITIONS, serverToolNeedsWrite } = await import(
+      "../src/mcp/server-routes.js"
+    );
+    const names = SERVER_TOOL_DEFINITIONS.map((t: any) => t.name);
+    expect(names.length).toBeGreaterThan(0);
+    // Reads we expect to stay reads.
+    for (const n of ["nest_index", "context_search", "context_get"])
+      expect(serverToolNeedsWrite(n)).toBe(false);
+    // Writes, including anything unrecognised.
+    for (const n of ["nest_create", "context_update", "context_delete", "made_up_tool"])
+      expect(serverToolNeedsWrite(n)).toBe(true);
+  });
+});

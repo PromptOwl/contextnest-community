@@ -151,10 +151,23 @@ export type CodeConsumeResult =
  */
 export async function consumeCode(code: string): Promise<CodeConsumeResult> {
   const db = getDb();
+  const h = hash(code);
+
+  // ATOMIC CLAIM. This UPDATE is the single source of truth for "who got the
+  // code", not the SELECT below it. A SELECT-then-UPDATE lets two concurrent
+  // exchanges both pass the used_at check before either write lands, and both
+  // would be handed a full token pair — a real race on Postgres, where
+  // requests run on separate connections, not merely a theoretical one.
+  // `changes` is what tells the loser it lost.
+  const claim = await db.run(
+    "UPDATE oauth_codes SET used_at = datetime('now') WHERE code_hash = ? AND used_at IS NULL",
+    [h],
+  );
+
   const row = (await db.get(
-    `SELECT client_id, user_id, redirect_uri, scope, code_challenge, resource, expires_at, used_at
+    `SELECT client_id, user_id, redirect_uri, scope, code_challenge, resource, expires_at
        FROM oauth_codes WHERE code_hash = ?`,
-    [hash(code)],
+    [h],
   )) as
     | {
         client_id: string;
@@ -164,17 +177,18 @@ export async function consumeCode(code: string): Promise<CodeConsumeResult> {
         code_challenge: string;
         resource: string | null;
         expires_at: string;
-        used_at: string | null;
       }
     | undefined;
+
+  if (claim.changes !== 1) {
+    // Lost the race, or the code was already spent, or it never existed. A row
+    // that exists but we could not claim was used by someone — which is the
+    // replay the caller must react to by revoking the whole grant.
+    return { ok: false, reason: row ? "replayed" : "unknown" };
+  }
   if (!row) return { ok: false, reason: "unknown" };
-  if (row.used_at) return { ok: false, reason: "replayed" };
   if (expired(row.expires_at)) return { ok: false, reason: "expired" };
 
-  await db.run(
-    "UPDATE oauth_codes SET used_at = datetime('now') WHERE code_hash = ? AND used_at IS NULL",
-    [hash(code)],
-  );
   return {
     ok: true,
     code: {
@@ -300,39 +314,38 @@ export async function rotateRefreshToken(
   clientId: string,
 ): Promise<RefreshResult> {
   const db = getDb();
+  const h = hash(token);
+
+  // Same atomic claim as consumeCode, for the same reason: revoking the old
+  // row IS the act of taking it, so two concurrent refreshes cannot both be
+  // served. The client_id is part of the claim so another client cannot
+  // redeem a token that was not issued to it.
+  const claim = await db.run(
+    `UPDATE oauth_tokens SET revoked_at = datetime('now')
+      WHERE refresh_token_hash = ? AND revoked_at IS NULL AND client_id = ?`,
+    [h, clientId],
+  );
+  if (claim.changes !== 1) return { ok: false, reason: "invalid" };
+
   const row = (await db.get(
-    `SELECT id, user_id, client_id, client_name, scope, resource,
-            refresh_expires_at, revoked_at
+    `SELECT user_id, client_id, client_name, scope, resource, refresh_expires_at
        FROM oauth_tokens WHERE refresh_token_hash = ?`,
-    [hash(token)],
+    [h],
   )) as
     | {
-        id: string;
         user_id: string;
         client_id: string;
         client_name: string;
         scope: string;
         resource: string | null;
         refresh_expires_at: string | null;
-        revoked_at: string | null;
       }
     | undefined;
 
-  // One indistinguishable answer for every failure: unknown token, revoked
-  // grant, expired refresh, or a client trying to redeem another's token.
-  if (
-    !row ||
-    row.revoked_at ||
-    expired(row.refresh_expires_at) ||
-    row.client_id !== clientId
-  ) {
+  // Expired refreshes leave the row revoked, which is the right end state.
+  if (!row || expired(row.refresh_expires_at))
     return { ok: false, reason: "invalid" };
-  }
 
-  await db.run(
-    "UPDATE oauth_tokens SET revoked_at = datetime('now') WHERE id = ?",
-    [row.id],
-  );
   const tokens = await issueTokens({
     userId: row.user_id,
     clientId: row.client_id,

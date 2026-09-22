@@ -281,6 +281,7 @@ button{flex:1;padding:10px;border-radius:7px;border:1px solid var(--line);backgr
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
 .err{color:#c0392b;font-size:13px;margin-top:12px;min-height:1em}
 code{font-size:12px;color:var(--muted);word-break:break-all}
+p.dest{font-size:13px;margin:0 0 10px;padding:9px 11px;border:1px solid var(--line);border-radius:7px;word-break:break-all}
 </style></head><body><div class="card">${inner}</div></body></html>`;
 }
 
@@ -363,6 +364,16 @@ document.getElementById('f').addEventListener('submit', async (ev) => {
     );
   }
 
+  // Registration is open (RFC 7591), so `client_name` is whatever the
+  // registering party typed — "Claude" is not evidence of anything. The
+  // destination is the part a person can actually check, so show it.
+  let destOrigin = params.redirectUri;
+  try {
+    destOrigin = new URL(params.redirectUri).origin;
+  } catch {
+    // parseAuthz already validated this parses; belt and braces.
+  }
+
   const email = (await getDb().get("SELECT email FROM users WHERE id = ?", [
     userId,
   ])) as { email?: string } | undefined;
@@ -373,7 +384,8 @@ document.getElementById('f').addEventListener('submit', async (ev) => {
       `<h1>Connect ${esc(client.client_name)}?</h1>
 <p class="sub">Signed in as ${esc(email?.email ?? "you")}. It will be able to:</p>
 <ul>${scopeList}</ul>
-<p class="sub">It sees exactly what you can see — nothing more. You can disconnect it at any time.</p>
+<p class="dest">Your approval will be sent to <strong>${esc(destOrigin)}</strong>.</p>
+<p class="sub">Anyone can register a client under any name, so check that address is the app you meant. It sees exactly what you can see — nothing more, and you can disconnect it at any time.</p>
 <form method="POST" action="/oauth/authorize/decision">
   ${hidden}
   <div class="row">

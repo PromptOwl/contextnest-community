@@ -10,6 +10,13 @@ export type AuthEnv = {
   Variables: {
     userId: string;
     nestScope: string | null;
+    /**
+     * Scopes on the OAuth grant this request authenticated with, when it did.
+     * ABSENT means "not an OAuth caller" — a cnst_ key or an MCP ticket — and
+     * must not be read as "no permissions": those transports are unaffected
+     * by scope and keep whatever the user themselves can do.
+     */
+    oauthScope?: string[];
     nestPermission: NestPermission;
     /** What the operator named the API key this call authenticated with, when
      *  it did. The one agent name this transport can report without inventing

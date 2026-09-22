@@ -240,6 +240,9 @@ const mcpOAuthBearer = createMiddleware<AuthEnv>(async (c, next) => {
   // OAuth grants are never narrowed to one nest: the whole point is that one
   // connection reads across everything the person can see.
   c.set("nestScope", null);
+  // What the person actually consented to. Enforced at tool dispatch — a
+  // consent screen that says "read" while write tools still work is a lie.
+  c.set("oauthScope", grant.scope.split(" ").filter(Boolean));
   return next();
 });
 
