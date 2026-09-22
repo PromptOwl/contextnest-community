@@ -13,6 +13,7 @@ import {
   BRANDING_LIMITS,
   brandingToCssVars,
   contrastRatio,
+  cssUrl,
   isBranded,
   normalizeHex,
   readableForeground,
@@ -53,7 +54,15 @@ function toDraft(b: NestBranding | null | undefined): Draft {
   };
 }
 
-/** Draft → API body: empty strings become absent; nothing left → null (clear). */
+/**
+ * Draft → API body: empty strings become absent; nothing left → null (clear).
+ *
+ * `hide_powered_by` is only ever sent as `true`, never as an explicit `false`.
+ * That is deliberate: for the server admin an absent flag and `false` mean the
+ * same thing (the server reads absent as false), and for anyone else leaving it
+ * out is what makes the server KEEP an admin-set `true` instead of treating the
+ * form's default as an attempt to turn white-labelling off.
+ */
 function toBody(d: Draft): NestBranding | null {
   const out: NestBranding = {};
   for (const [k, v] of Object.entries(d)) {
@@ -335,7 +344,7 @@ function BrandingPreview({ draft, nestName }: { draft: Draft; nestName: string }
             className="relative flex h-20 flex-col justify-end overflow-hidden rounded-md px-3 py-2"
             style={
               draft.banner_url.trim()
-                ? { backgroundImage: `url(${JSON.stringify(draft.banner_url.trim())})`, backgroundSize: "cover", backgroundPosition: "center", color: "#fff" }
+                ? { backgroundImage: cssUrl(draft.banner_url.trim()), backgroundSize: "cover", backgroundPosition: "center", color: "#fff" }
                 : { background: accent ? "var(--reader-accent)" : "hsl(var(--primary))", color: accent ? "var(--reader-accent-fg)" : "hsl(var(--primary-foreground))" }
             }
           >

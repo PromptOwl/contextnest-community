@@ -7,7 +7,7 @@ import { conventionKey, isHomeNode } from "@/lib/nest-caps";
 import { extractHeadings } from "@/lib/toc";
 import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle, orderWithinFolder, ancestorsOf, READER_SIDE_COLUMN_CLASS, READER_CARD_CLASS, searchNodes } from "@/lib/reader";
 import { relTime } from "@/lib/dates";
-import { brandingToCssVars, brandedDocumentTitle, isBranded, type NestBranding } from "@/lib/branding";
+import { brandingToCssVars, brandedDocumentTitle, cssUrl, isBranded, type NestBranding } from "@/lib/branding";
 
 /**
  * Public Docs Reader Mode — the read-only face of a nest.
@@ -496,7 +496,7 @@ function ReaderBanner({ branding }: { branding: NestBranding }) {
       className="relative mx-auto mb-4 flex h-28 w-full max-w-[88rem] flex-col justify-end overflow-hidden rounded-lg border px-5 py-4 sm:h-36 sm:px-8 lg:h-40"
       style={
         img
-          ? { backgroundImage: `url(${JSON.stringify(img)})`, backgroundSize: "cover", backgroundPosition: "center", color: "#ffffff" }
+          ? { backgroundImage: cssUrl(img), backgroundSize: "cover", backgroundPosition: "center", color: "#ffffff" }
           : {
               background: hasAccent ? "var(--reader-accent)" : "hsl(var(--primary))",
               color: hasAccent ? "var(--reader-accent-fg)" : "hsl(var(--primary-foreground))",

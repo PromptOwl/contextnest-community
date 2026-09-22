@@ -19,6 +19,7 @@ import {
   relativeLuminance,
   validateBrandingDraft,
   brandedDocumentTitle,
+  cssUrl,
 } from "./branding";
 
 const NEST = "7f0c2a1e-1111-4222-8333-444455556666";
@@ -168,5 +169,13 @@ describe("brandedDocumentTitle", () => {
     expect(brandedDocumentTitle("Intro", { site_title: "Acme Docs" }, "nest")).toBe("Intro · Acme Docs");
     expect(brandedDocumentTitle(null, { site_title: "Acme Docs" }, "nest")).toBe("Acme Docs");
     expect(brandedDocumentTitle("Intro", { accent_color: "#000" }, "Nest")).toBe("Intro · Nest");
+  });
+});
+
+describe("cssUrl", () => {
+  it("quotes and escapes anything that could leave the url() token", () => {
+    expect(cssUrl("/nests/n/assets/a.png")).toBe('url("/nests/n/assets/a.png")');
+    const inner = cssUrl(`https://x.test/a") ; background:red; x("\\\n'.png`).slice(5, -2);
+    expect(inner).not.toMatch(/["'\\\n\r()\s]/);
   });
 });

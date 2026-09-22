@@ -12,6 +12,7 @@ import {
   readableForeground,
   publishBrandCssVars,
   parseStoredBranding,
+  cssUrl,
 } from "../src/shared/branding.js";
 
 describe("server branding helpers", () => {
@@ -81,5 +82,16 @@ describe("server branding helpers", () => {
     expect(ok).toMatchObject({ logo_url: ASSET, banner_url: "https://cdn.example.com/b.jpg", footer_link_url: "https://acme.example.com/" });
     // A row whose only content was a bad URL is unbranded.
     expect(parseStoredBranding(JSON.stringify({ footer_link_url: "javascript:x" }), NEST)).toBeNull();
+  });
+
+  // Review finding (PR #321, round 2): URLs interpolated into CSS url() must be
+  // escaped by construction, not safe by coincidence of upstream normalisation.
+  it("cssUrl quotes and escapes anything that could leave the url() token", () => {
+    expect(cssUrl("https://cdn.example.com/b.jpg")).toBe('url("https://cdn.example.com/b.jpg")');
+    const nasty = cssUrl(`https://x.test/a") ; background:red; x("\\\n'.png`);
+    expect(nasty.startsWith('url("')).toBe(true);
+    expect(nasty.endsWith('")')).toBe(true);
+    const inner = nasty.slice(5, -2);
+    expect(inner).not.toMatch(/["'\\\n\r()\s]/);
   });
 });

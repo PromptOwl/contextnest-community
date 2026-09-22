@@ -172,4 +172,31 @@ describe("branded nest — /p", () => {
     const html = await (await app.request(`/p/${slug}`)).text();
     expect(html).not.toContain("Secured by PromptOwl");
   });
+
+  // Review finding (PR #321, round 2): an asset over the inline cap is skipped
+  // without being read whole (stat first), and the page still renders.
+  it("an oversized banner asset is not inlined", async () => {
+    const big = new Uint8Array(2 * 1024 * 1024 + 10);
+    big.set(PNG_BYTES, 0);
+    const form = new FormData();
+    form.append("file", new File([big], "huge.png", { type: "image/png" }));
+    const up = await app.request(`/nests/${brandNest}/assets`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${owner.apiKey}` },
+      body: form,
+    });
+    const bigUrl = (await up.json()).url;
+    const saved = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${brandNest}/branding`,
+      { site_title: "Big", banner_url: bigUrl, banner_headline: "Hello", hide_powered_by: true },
+      admin.apiKey,
+    );
+    expect(saved.status).toBe(200);
+    const slug = await publishDoc(brandNest);
+    const html = await (await app.request(`/p/${slug}`)).text();
+    expect(html).toContain("Hello");
+    expect(html).not.toContain("background-image");
+  });
 });

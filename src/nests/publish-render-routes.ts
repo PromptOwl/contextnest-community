@@ -29,11 +29,12 @@ import { tryConsume } from "../shared/rate-limit.js";
 import { clientIp } from "../shared/request-ip.js";
 import * as publish from "./publish-service.js";
 import type { PublishRow } from "./publish-service.js";
-import { getNest } from "./service.js";
+import { getDb } from "../db/client.js";
 import { resolveNestPath } from "../shared/paths.js";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  cssUrl,
   nestAssetName,
   parseStoredBranding,
   publishBrandCssVars,
@@ -150,27 +151,54 @@ const IMAGE_MIME: Record<string, string> = {
 // Inline caps: a data: URI rides every page view, so keep it to what a logo or
 // a banner reasonably needs. Anything larger renders without the image.
 const INLINE_CAP = { logo: 512 * 1024, favicon: 256 * 1024, banner: 2 * 1024 * 1024 } as const;
-// Asset names are uuid-unique and never rewritten, so a small cache is safe.
+// Asset names are uuid-unique and never rewritten, so caching the encoded
+// data: URI is safe. The cache is an LRU bounded by total size (Map insertion
+// order = recency), not entry count: a handful of 2 MB banners must not be
+// able to pin hundreds of MB. Misses (missing / oversized) are cached as null.
+const INLINE_CACHE_MAX_CHARS = 24 * 1024 * 1024;
 const inlineCache = new Map<string, string | null>();
+let inlineCacheChars = 0;
+
+function cacheGet(key: string): string | null | undefined {
+  if (!inlineCache.has(key)) return undefined;
+  const v = inlineCache.get(key)!;
+  inlineCache.delete(key); // refresh recency
+  inlineCache.set(key, v);
+  return v;
+}
+
+function cachePut(key: string, v: string | null): void {
+  const size = v?.length ?? 0;
+  if (size > INLINE_CACHE_MAX_CHARS) return;
+  inlineCache.set(key, v);
+  inlineCacheChars += size;
+  for (const [k, old] of inlineCache) {
+    if (inlineCacheChars <= INLINE_CACHE_MAX_CHARS && inlineCache.size <= 512) break;
+    inlineCache.delete(k);
+    inlineCacheChars -= old?.length ?? 0;
+  }
+}
 
 async function inlineAsset(nestId: string, url: string | null | undefined, cap: number): Promise<string | null> {
   if (!url) return null;
   const name = nestAssetName(url, nestId);
   if (!name) return null; // external https image — not rendered on /p (see above)
   const key = `${nestId}/${name}/${cap}`;
-  if (inlineCache.has(key)) return inlineCache.get(key)!;
+  const hit = cacheGet(key);
+  if (hit !== undefined) return hit;
   let out: string | null = null;
   try {
-    const bytes = await readFile(join(resolveNestPath(nestId), "assets", name));
-    if (bytes.length <= cap) {
+    const path = join(resolveNestPath(nestId), "assets", name);
+    // Size check BEFORE reading: an oversized asset (up to the 10 MB upload
+    // cap) is skipped without ever being loaded into memory.
+    if ((await stat(path)).size <= cap) {
       const mime = IMAGE_MIME[name.split(".").pop()!.toLowerCase()];
-      if (mime) out = `data:${mime};base64,${bytes.toString("base64")}`;
+      if (mime) out = `data:${mime};base64,${(await readFile(path)).toString("base64")}`;
     }
   } catch {
     out = null;
   }
-  if (inlineCache.size > 64) inlineCache.clear();
-  inlineCache.set(key, out);
+  cachePut(key, out);
   return out;
 }
 
@@ -179,7 +207,11 @@ async function inlineAsset(nestId: string, url: string | null | undefined, cap: 
 async function loadBrand(row: PublishRow): Promise<PublishBrand | null> {
   let b: NestBranding | null = null;
   try {
-    b = parseStoredBranding((await getNest(row.nest_id))?.branding_json, row.nest_id);
+    // One column, not the whole nest row — this runs on every /p view.
+    const r = (await getDb().get("SELECT branding_json FROM nests WHERE id = ?", [row.nest_id])) as
+      | { branding_json: string | null }
+      | undefined;
+    b = parseStoredBranding(r?.branding_json, row.nest_id);
   } catch {
     b = null;
   }
@@ -226,7 +258,7 @@ function brandHero(brand: PublishBrand | null): string {
   if (!brand) return "";
   const { banner_headline: h, banner_subtext: sub } = brand.b;
   if (!brand.banner && !h) return "";
-  const style = brand.banner ? ` style="background-image:url('${esc(brand.banner)}')"` : "";
+  const style = brand.banner ? ` style="background-image:${esc(cssUrl(brand.banner))}"` : "";
   const cls = brand.banner ? "cn-hero has-img" : "cn-hero";
   return `<div class="${cls}"${style}>${h ? `<strong>${esc(h)}</strong>` : ""}${sub ? `<p>${esc(sub)}</p>` : ""}</div>`;
 }

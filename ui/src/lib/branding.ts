@@ -232,3 +232,16 @@ export function brandedDocumentTitle(
   const site = b?.site_title?.trim() || nestName;
   return pageTitle ? `${pageTitle} · ${site}` : site;
 }
+
+/**
+ * A URL as a CSS `url("…")` token, escaped by construction: quotes,
+ * parentheses, backslashes, whitespace and control characters are
+ * percent-encoded, so nothing in the value can close the string or the
+ * declaration — whatever upstream validation did or didn't normalise.
+ */
+export function cssUrl(url: string): string {
+  const safe = url.replace(/["'()\\\s\u0000-\u001f\u007f]/g, (ch) =>
+    "%" + ch.charCodeAt(0).toString(16).padStart(2, "0").toUpperCase(),
+  );
+  return `url("${safe}")`;
+}

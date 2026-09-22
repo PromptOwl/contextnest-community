@@ -162,7 +162,7 @@ export async function validateBrandingInput(
     const field = issue?.path?.join(".") || "branding";
     const msg =
       issue?.code === "unrecognized_keys"
-        ? `unknown branding field(s): ${(issue as any).keys?.join(", ")}`
+        ? `unknown branding field(s): ${issue.keys.join(", ")}`
         : `${field}: ${issue?.message ?? "invalid"}`;
     throw new BrandingValidationError(msg);
   }
@@ -306,4 +306,17 @@ export function publishBrandCssVars(b: NestBranding | null): string {
   const tint = normalizeHex(b.page_tint_color);
   if (tint) decls.push(`--cn-page-bg:${mixHex(tint, "#ffffff", 0.1)}`);
   return decls.length ? `:root{${decls.join(";")}}` : "";
+}
+
+/**
+ * A URL as a CSS `url("…")` token, escaped by construction: quotes,
+ * parentheses, backslashes, whitespace and control characters are
+ * percent-encoded, so nothing in the value can close the string or the
+ * declaration — whatever upstream validation did or didn't normalise.
+ */
+export function cssUrl(url: string): string {
+  const safe = url.replace(/["'()\\\s\u0000-\u001f\u007f]/g, (ch) =>
+    "%" + ch.charCodeAt(0).toString(16).padStart(2, "0").toUpperCase(),
+  );
+  return `url("${safe}")`;
 }
