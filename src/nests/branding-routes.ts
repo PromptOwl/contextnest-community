@@ -53,11 +53,9 @@ brandingRoutes.patch("/branding", async (c) => {
   }
 
   const db = getDb();
-  const row = (await db.get("SELECT branding_json FROM nests WHERE id = ?", [nestId])) as
-    | { branding_json: string | null }
-    | undefined;
-  if (!row) throw new NotFoundError("Nest not found");
-  const current = parseStoredBranding(row.branding_json, nestId);
+  if (!(await db.get("SELECT id FROM nests WHERE id = ?", [nestId]))) {
+    throw new NotFoundError("Nest not found");
+  }
 
   // An empty body is a clear, like null.
   const text = await c.req.text();
@@ -89,22 +87,33 @@ brandingRoutes.patch("/branding", async (c) => {
     throw err;
   }
 
-  const wasHidden = current?.hide_powered_by === true;
   const mentionsHide =
     body !== null && Object.prototype.hasOwnProperty.call(body, "hide_powered_by");
-  if (!isServerAdmin) {
-    if (next?.hide_powered_by === true && !wasHidden) {
-      throw new ForbiddenError(
-        'Only the server admin can hide the "Powered by ContextNest" line',
-      );
-    }
-    // Carry the admin's white-label choice across an edit that didn't touch
-    // it — including a full clear (null / {}), which resets everything the
-    // caller is allowed to set but not the one thing only the admin can.
-    if (!mentionsHide && wasHidden) next = { ...(next ?? {}), hide_powered_by: true };
-  }
 
-  const stored = next ? JSON.stringify(next) : null;
-  await db.run("UPDATE nests SET branding_json = ? WHERE id = ?", [stored, nestId]);
+  // Read-decide-write in one transaction (row-locked on Postgres): the
+  // white-label carry-over below depends on the CURRENT stored flag, so an
+  // owner's edit racing the admin's toggle must not decide from a stale read.
+  const stored = await db.transaction(async (tx) => {
+    const lock = db.dialect === "postgres" ? " FOR UPDATE" : "";
+    const row = (await tx.get(`SELECT branding_json FROM nests WHERE id = ?${lock}`, [nestId])) as
+      | { branding_json: string | null }
+      | undefined;
+    if (!row) throw new NotFoundError("Nest not found");
+    const wasHidden = parseStoredBranding(row.branding_json, nestId)?.hide_powered_by === true;
+    if (!isServerAdmin) {
+      if (next?.hide_powered_by === true && !wasHidden) {
+        throw new ForbiddenError(
+          'Only the server admin can hide the "Powered by ContextNest" line',
+        );
+      }
+      // Carry the admin's white-label choice across an edit that didn't touch
+      // it — including a full clear (null / {}), which resets everything the
+      // caller is allowed to set but not the one thing only the admin can.
+      if (!mentionsHide && wasHidden) next = { ...(next ?? {}), hide_powered_by: true };
+    }
+    const value = next ? JSON.stringify(next) : null;
+    await tx.run("UPDATE nests SET branding_json = ? WHERE id = ?", [value, nestId]);
+    return value;
+  });
   return c.json({ branding: parseStoredBranding(stored, nestId) });
 });

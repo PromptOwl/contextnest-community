@@ -141,6 +141,27 @@ describe("PATCH /nests/:id/branding", () => {
     expect(got.data.nest.branding.hide_powered_by).toBe(false);
   });
 
+  // Review finding (PR #321, round 3): every nest payload — not just
+  // GET /nests/:id — must carry the parsed branding, never the raw column.
+  it("GET /nests (list) and the rename response never carry raw branding_json", async () => {
+    const list = await jsonRequest(app, "GET", "/nests", undefined, owner.apiKey);
+    expect(list.status).toBe(200);
+    const row = list.data.nests.find((n: any) => n.id === nestId);
+    expect(row).toBeDefined();
+    expect(row).not.toHaveProperty("branding_json");
+    expect(row.branding?.site_title).toBe("Acme Docs");
+    for (const n of list.data.nests) expect(n).not.toHaveProperty("branding_json");
+
+    const renamed = await jsonRequest(app, "PATCH", `/nests/${nestId}`, { name: "Acme Docs" }, owner.apiKey);
+    expect(renamed.status).toBe(200);
+    expect(renamed.data.nest).not.toHaveProperty("branding_json");
+    expect(renamed.data.nest.branding?.site_title).toBe("Acme Docs");
+
+    const created = await jsonRequest(app, "POST", "/nests", { name: "Fresh" }, owner.apiKey);
+    expect(created.data.nest).not.toHaveProperty("branding_json");
+    expect(created.data.nest.branding).toBeNull();
+  });
+
   it("a nest admin collaborator may edit branding", async () => {
     const res = await patch({ site_title: "Acme Knowledge", accent_color: "#2563eb" }, nestAdmin.apiKey);
     expect(res.status).toBe(200);

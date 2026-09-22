@@ -124,9 +124,11 @@ export const nestRoutes = new Hono<AuthEnv>();
 
 /**
  * The nest row as clients see it: the stored branding JSON is swapped for a
- * parsed, re-validated `branding` object (null = unbranded). This is the read
- * a public reader already makes, so reader-mode branding needs no extra route
- * — and a nest the caller can't read 404s before this runs.
+ * parsed, re-validated `branding` object (null = unbranded). Applied to EVERY
+ * nest payload this router returns (list, get, create, import, rename), so the
+ * raw column never leaves the server. GET /nests/:id is the read a public
+ * reader already makes, so reader-mode branding needs no extra route — and a
+ * nest the caller can't read 404s before this runs.
  */
 function withParsedBranding<T extends { id: string; branding_json?: string | null } | null>(nest: T) {
   if (!nest) return nest;
@@ -334,7 +336,9 @@ nestRoutes.get("/", async (c) => {
       }
     }
   }
-  const withMeta = out.map((n) =>
+  // withParsedBranding: the raw branding_json column never leaves the server —
+  // each card carries the parsed, re-validated `branding` like GET /nests/:id.
+  const withMeta = out.map((raw) => withParsedBranding(raw)).map((n) =>
     n.grant_only
       ? {
           ...n,
@@ -365,7 +369,7 @@ nestRoutes.post("/", async (c) => {
   }
 
   const nest = await createNest(c.get("userId"), body.name, body.description);
-  return c.json({ nest }, 201);
+  return c.json({ nest: withParsedBranding(nest) }, 201);
 });
 
 // POST /nests/import — import a folder the user picked in their browser. The
@@ -415,7 +419,7 @@ nestRoutes.post("/:nestId", async (c) => {
     const email = await resolveCallerEmail(userId);
     if (body.finalize) {
       return c.json({
-        nest,
+        nest: withParsedBranding(nest),
         documents: await registerImportedDocuments(
           target,
           email,
@@ -457,7 +461,7 @@ nestRoutes.post("/:nestId", async (c) => {
     const { rejected } = await stageImportedFiles(nest.id, files, email);
     // More chunks are coming — registering now would publish a partial folder.
     if (body.partial) {
-      return c.json({ nest, rejected }, 201);
+      return c.json({ nest: withParsedBranding(nest), rejected }, 201);
     }
     // Seed governance rows for the documents already in the folder so they
     // list as published and edit from their real version (not from scratch).
@@ -466,7 +470,7 @@ nestRoutes.post("/:nestId", async (c) => {
       email,
       attributeRequest(c, body.client),
     );
-    return c.json({ nest, documents, rejected }, 201);
+    return c.json({ nest: withParsedBranding(nest), documents, rejected }, 201);
   } catch (err) {
     // The nest row exists before its content does, so a failed first chunk
     // would otherwise leave an empty nest on the dashboard.
@@ -605,7 +609,7 @@ nestRoutes.patch("/:nestId", async (c) => {
     name: body.name,
     description: body.description,
   });
-  return c.json({ nest });
+  return c.json({ nest: withParsedBranding(nest) });
 });
 
 
