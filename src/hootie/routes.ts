@@ -33,7 +33,7 @@ import {
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { createThread, syncAnnotationsNode } from "../annotations/service.js";
 import { notifyCommentMentions } from "../governance/mention-notify.js";
-import { extractMentions } from "../shared/mentions.js";
+import { extractMentions, stripMentions } from "../shared/mentions.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { tryConsume } from "../shared/rate-limit.js";
 import { getNest } from "../nests/service.js";
@@ -331,17 +331,6 @@ function normalizeHistory(raw: unknown): ModelTurn[] | null {
   while (kept.length > 0 && kept[kept.length - 1].role !== "assistant")
     kept = kept.slice(0, -1);
   return kept;
-}
-
-/**
- * The message without its @name tokens, for retrieval. Both mention forms
- * from shared/mentions.ts: `@alice@acme.com` and `@(Alice Smith)`.
- */
-function stripMentions(message: string): string {
-  return message
-    .replace(/(^|\s)@(?:\([^)]*\)|[a-zA-Z0-9._@-]+)/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 function buildSystemPrompt(params: {

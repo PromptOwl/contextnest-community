@@ -427,7 +427,7 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
       const decoder = new TextDecoder();
       let seen = "";
       // Read until the first delta has arrived, then hang up.
-      while (!seen.includes('"event: delta"') && !seen.includes("event: delta")) {
+      while (!seen.includes("event: delta")) {
         const { value, done } = await reader_.read();
         if (done) break;
         seen += decoder.decode(value, { stream: true });
@@ -566,6 +566,22 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
     );
     expect(status).toBe(404);
     expect(lastModelCall).toBeNull();
+  });
+
+  it("400s a message over the length cap, and history that isn't a turn list", async () => {
+    const long = await chat(app, nestId, { message: "x".repeat(4001) }, reader.apiKey);
+    expect(long.status).toBe(400);
+    expect(long.json.error).toMatch(/too long/i);
+    for (const bad of [
+      "not a list",
+      [{ role: "system", content: "x" }],
+      [{ role: "user", content: 42 }],
+      [null],
+    ]) {
+      const { status, json } = await chat(app, nestId, { message: "hi", history: bad }, reader.apiKey);
+      expect(status, JSON.stringify(bad)).toBe(400);
+      expect(json.error).toMatch(/history/i);
+    }
   });
 
   it("400s an empty message", async () => {
