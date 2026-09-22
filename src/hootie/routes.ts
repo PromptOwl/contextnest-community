@@ -279,10 +279,13 @@ function normalizeHistory(raw: unknown): ModelTurn[] | null {
   return kept;
 }
 
-/** The message without its @name tokens, for retrieval. */
+/**
+ * The message without its @name tokens, for retrieval. Both mention forms
+ * from shared/mentions.ts: `@alice@acme.com` and `@(Alice Smith)`.
+ */
 function stripMentions(message: string): string {
   return message
-    .replace(/(^|[\s(])@[^\s@]+/g, "$1")
+    .replace(/(^|\s)@(?:\([^)]*\)|[a-zA-Z0-9._@-]+)/g, "$1")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -320,7 +323,9 @@ function buildSystemPrompt(params: {
  * Which of the retrieved nodes the answer cites, in order of first mention.
  * A citation is the node's exact title as a [[wiki link]] (case-insensitive),
  * which is what the system prompt asks for and what the panel turns into a
- * chip.
+ * chip. Titles aren't unique, so two retrieved nodes sharing one are both
+ * "cited" — both were in front of the model, and the chips carry ids, so the
+ * reader can open either; the ambiguity is the nest's, not invented here.
  */
 function citedNodes(
   answer: string,

@@ -348,6 +348,31 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
     expect(ok.events.find((e) => e.event === "meta")!.data.anchor.id).toBe(draftId);
   });
 
+  it("a traversal-shaped node_id is just not found — it never becomes a path", async () => {
+    lastModelCall = null;
+    for (const bad of ["../../etc/passwd", "nodes/../../x", `../${nestId}/nodes/api-authentication-guide`]) {
+      const { status } = await chatRaw(app, nestId, { message: "?", node_id: bad }, reader.apiKey);
+      expect(status).toBe(404);
+    }
+    expect(lastModelCall).toBeNull();
+  });
+
+  it("strips both mention forms before retrieval, so a name isn't a search term", async () => {
+    scriptedAnswer = "Bearer tokens.";
+    await chat(
+      app,
+      nestId,
+      // A display-name mention that happens to spell a document's title.
+      { message: `@(Brand Guidelines) @${owner.email} how do requests authenticate?`, node_id: authNodeId },
+      reader.apiKey,
+    );
+    // The model still sees the message as written (names and all) …
+    expect(lastModelCall!.turns.at(-1).content).toContain("@(Brand Guidelines)");
+    // … but the name was not a search term: the Brand Guidelines document
+    // was not pulled into the context by the mention.
+    expect(lastModelCall!.system).not.toContain("Logo rules");
+  });
+
   it("carries the conversation: prior turns reach the model in order", async () => {
     scriptedAnswer = "Still yes.";
     const { status } = await chat(
