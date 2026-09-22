@@ -531,6 +531,21 @@ export const config = {
     return process.env.TYPE_TABLE_ENABLED !== "false";
   },
   /**
+   * Hootie in the nest: the floating assistant on every page of the UI and
+   * its POST /nests/:id/chat route (default ON). Superadmin-editable at
+   * runtime via /admin/settings (hootie_enabled). Off → the route 404s and
+   * the launcher is hidden. Answering additionally needs the server-wide
+   * ANTHROPIC_API_KEY; without one the route answers 503, not 404 — the
+   * feature is on, it just isn't configured yet.
+   */
+  get HOOTIE_ENABLED(): boolean {
+    return process.env.HOOTIE_ENABLED !== "false";
+  },
+  /** Model Hootie answers with. Env-only; one setting for the whole server. */
+  get HOOTIE_MODEL(): string {
+    return process.env.HOOTIE_MODEL || "claude-opus-5";
+  },
+  /**
    * Sub-agent runs: lets a run spawn nested runs (an external runner calling
    * back into POST /run for a child agent). Gated SEPARATELY from the base
    * plane because recursion is the risky surface — unbounded fan-out,

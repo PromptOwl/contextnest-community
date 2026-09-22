@@ -60,6 +60,12 @@ export interface AuthContextValue {
    *  existing nodes of the type stay readable. */
   typeArtifactEnabled: boolean;
   typeTableEnabled: boolean;
+  /** Public feature flag from /health — Hootie in the nest (default ON). Off →
+   *  the launcher is hidden exactly when POST /nests/:id/chat would 404. */
+  hootieEnabled: boolean;
+  /** Whether the server holds an Anthropic key (presence only, from /health).
+   *  Hootie stays visible without one — it explains what's missing instead. */
+  runnerKeyConfigured: boolean;
   /** Public feature flag from /health — sub-agent (nested) runs. Gated
    *  separately from the plane; when off the UI hides the "spawn sub-agent"
    *  option exactly when the API would reject a parent_run_id (400). */
@@ -92,6 +98,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
   // disables), so the picker doesn't flicker types away while /health loads.
   const [typeArtifactEnabled, setTypeArtifactEnabled] = useState(true);
   const [typeTableEnabled, setTypeTableEnabled] = useState(true);
+  const [hootieEnabled, setHootieEnabled] = useState(true);
+  const [runnerKeyConfigured, setRunnerKeyConfigured] = useState(false);
   const [subagentRunsEnabled, setSubagentRunsEnabled] = useState(false);
   // Defaults mirror config.ts; overwritten by /health so operator overrides
   // flow through to the picker.
@@ -123,6 +131,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
       setTypeArtifactEnabled(h.type_artifact_enabled !== false);
       setTypeTableEnabled(h.type_table_enabled !== false);
+      setHootieEnabled(h.hootie_enabled !== false);
+      setRunnerKeyConfigured(!!h.runner_key_configured);
       setSubagentRunsEnabled(!!h.subagent_runs_enabled);
       if (typeof h.subagent_max_depth === "number") setSubagentMaxDepth(h.subagent_max_depth);
       if (typeof h.subagent_max_children === "number") setSubagentMaxChildren(h.subagent_max_children);
@@ -163,6 +173,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
         setTypeArtifactEnabled(h.type_artifact_enabled !== false);
         setTypeTableEnabled(h.type_table_enabled !== false);
+        setHootieEnabled(h.hootie_enabled !== false);
+        setRunnerKeyConfigured(!!h.runner_key_configured);
         setSubagentRunsEnabled(!!h.subagent_runs_enabled);
         // Product analytics, if the operator configured a PostHog project.
         // No-op when the server sends no key (unset, or telemetry switched off).
@@ -332,6 +344,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
         promptowlTeamsEnabled,
         typeArtifactEnabled,
         typeTableEnabled,
+        hootieEnabled,
+        runnerKeyConfigured,
         subagentRunsEnabled,
         subagentMaxDepth,
         subagentMaxChildren,

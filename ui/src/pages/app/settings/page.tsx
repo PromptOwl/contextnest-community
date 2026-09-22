@@ -84,6 +84,7 @@ const TABS: {
       "public_base_url",
       "logo_url",
       "anthropic_api_key",
+      "hootie_enabled",
       "people_suggest_all_users",
     ],
   },
@@ -737,6 +738,34 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     Keep current key
                   </button>
                 )}
+              </CardContent>
+            </Card>
+
+            {/* Hootie in the nest — the assistant on every page. Sits under
+                the key it depends on: switching it on without a key gives
+                everyone a panel that explains what's missing, not a broken
+                one, so the two settings read together. */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Hootie</CardTitle>
+                <CardDescription>
+                  The assistant in the corner of every page. It answers from
+                  what the person asking can read in the nest, cites the
+                  documents it used, and lets them @tag a colleague — which
+                  posts the exchange as a comment and notifies them. Uses the
+                  Anthropic API key above; without one the panel says so.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    Hootie in the nest — {draft.hootie_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.hootie_enabled}
+                    onCheckedChange={(v) => set({ hootie_enabled: v })}
+                  />
+                </div>
               </CardContent>
             </Card>
 

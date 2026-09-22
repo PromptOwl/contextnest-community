@@ -36,6 +36,7 @@ import { resolveNodeGrant } from "./governance/grants-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
+import { hootieRoutes } from "./hootie/routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
 import { edgeTypeRoutes } from "./workflow/edge-type-routes.js";
 import { edgeRoutes } from "./workflow/edge-routes.js";
@@ -468,6 +469,11 @@ export function createApp(): Hono<AuthEnv> {
       // API would refuse it — existing nodes of the type stay readable.
       type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
       type_table_enabled: config.TYPE_TABLE_ENABLED,
+      // Hootie in the nest (default ON). Off → POST /nests/:id/chat 404s and
+      // the UI hides the launcher. Whether it can actually answer is
+      // runner_key_configured above — the UI shows the launcher whenever the
+      // feature is on and explains the missing key, rather than hiding it.
+      hootie_enabled: config.HOOTIE_ENABLED,
       // Sub-agent runs gate its own recursion surface separately (env-only,
       // must clear a security review — NOT a UI toggle). Exposed read-only so
       // the Runs page shows the "spawn sub-agent" option only when it's live.
@@ -605,6 +611,7 @@ export function createApp(): Hono<AuthEnv> {
     promptowl_teams_enabled: config.PROMPTOWL_TEAMS_ENABLED,
     type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
     type_table_enabled: config.TYPE_TABLE_ENABLED,
+    hootie_enabled: config.HOOTIE_ENABLED,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
@@ -756,6 +763,12 @@ export function createApp(): Hono<AuthEnv> {
       pending.push({
         name: "TYPE_TABLE_ENABLED",
         value: body.type_table_enabled ? null : "false",
+      });
+    }
+    if ("hootie_enabled" in body) {
+      pending.push({
+        name: "HOOTIE_ENABLED",
+        value: body.hootie_enabled ? null : "false",
       });
     }
     if ("anthropic_api_key" in body) {
@@ -1907,7 +1920,7 @@ export function createApp(): Hono<AuthEnv> {
     // (whole-nest views). parts.length===2 pins the exact /nests/:id/<route>.
     const isReadQuery =
       parts.length === 2 &&
-      ["context", "query", "search", "export"].includes(parts[1]);
+      ["context", "query", "search", "export", "chat"].includes(parts[1]);
 
     // MCP transport is read-tier (isMcpTransport, declared above with the
     // deny helper): the Streamable HTTP protocol is ALWAYS POST — even
@@ -2280,6 +2293,8 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
   nestsApp.route("/:nestId/nodes", nodeRoutes);
   nestsApp.route("/:nestId", queryRoutes);
+  // Hootie chat — read-tier like /context (it IS /context plus a model call).
+  nestsApp.route("/:nestId", hootieRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);
   // "publications" (not "/publish") — POST /:nestId/publish is already taken by
