@@ -56,6 +56,10 @@ describe("visibilityConfirmCopy — the acknowledgement dialog", () => {
     expect(c.body).toMatch(/other organi[sz]ations/i);
   });
 
+  it("org, self-hosted: never needs a dialog, so asking for its copy is a caller bug", () => {
+    expect(() => visibilityConfirmCopy("org", { sharedDeployment: false })).toThrow(/shared deployment/);
+  });
+
   it("org, shared: every account on this server — not just yours", () => {
     const c = visibilityConfirmCopy("org", { sharedDeployment: true });
     expect(c.title).toMatch(/organization|everyone on this server/i);

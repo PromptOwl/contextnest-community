@@ -67,6 +67,13 @@ export function visibilityConfirmCopy(
       confirm: "Make public",
     };
   }
+  // 'org' only ever needs a dialog on a shared deployment — see
+  // visibilityNeedsAcknowledgement. On a single-organization server the tier
+  // applies without one, so there is no self-hosted wording to return here;
+  // a caller that reaches this with sharedDeployment=false is a bug.
+  if (!ctx.sharedDeployment) {
+    throw new Error("visibilityConfirmCopy('org') is only defined on a shared deployment");
+  }
   return {
     title: "Open this nest to everyone on this server?",
     body: "This server is shared: Organization makes the nest readable by every account on this server, including other organizations — not just yours. Only choose it for context that any of them may see.",
