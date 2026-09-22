@@ -146,13 +146,24 @@ hootieRoutes.post("/chat", async (c) => {
     const title = await nodeTitle(nestId, nodeId);
     if (title === null) return c.json({ error: "Node not found" }, 404);
     // hops: 1 — the document plus what it links to and what links to it.
-    // Gated like everything else: if the caller can't read the node, it is
-    // filtered out here and the panel simply has no anchor.
+    // include_drafts: the person has this document OPEN — very often the
+    // draft they are writing — and "is this right?" has to be about the text
+    // in front of them, not the last approved version. Gated like everything
+    // else: filterAccessible and resolveReadableBody still decide what this
+    // caller may see of it (a public reader gets the approved body), and if
+    // they can't read the node at all it is filtered out here and the panel
+    // simply has no anchor. The question path below keeps the default
+    // (published only), as /context does.
     const r = await resolveContext({
       nestId,
       userId,
       baseUrl,
-      body: { selector: `[[${title}]]`, hops: 1, max_tokens: CONTEXT_BUDGET },
+      body: {
+        selector: `[[${title}]]`,
+        hops: 1,
+        max_tokens: CONTEXT_BUDGET,
+        include_drafts: true,
+      },
     });
     take(r);
     anchor = nodes.find((n) => n.id === nodeId) ?? null;

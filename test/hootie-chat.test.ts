@@ -237,6 +237,43 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
     expect(lastModelCall!.system).toContain("Bearer tokens");
   });
 
+  it("anchors on a DRAFT the person has open — the document you're editing is the one you ask about", async () => {
+    // Own governed nest: a create lands as an unapproved draft (see
+    // context-endpoint.test.ts). The owner has it open in the editor.
+    const own = (
+      await jsonRequest(app, "POST", "/nests", { name: "Hootie Drafts" }, owner.apiKey)
+    ).data.nest.id;
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${own}/settings`,
+      { stewardship_enabled: true },
+      owner.apiKey,
+    );
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${own}/nodes`,
+      { title: "Zephyr Plan", content: "# Zephyr\n\nShip the zephyr in Q4." },
+      owner.apiKey,
+    );
+    const draftId = created.data.node.id;
+    const list = await jsonRequest(app, "GET", `/nests/${own}/nodes`, undefined, owner.apiKey);
+    expect(list.data.nodes[0].status).not.toBe("published");
+
+    scriptedAnswer = "Q4.";
+    const { status, events } = await chat(
+      app,
+      own,
+      { message: "when does this ship?", node_id: draftId },
+      owner.apiKey,
+    );
+    expect(status).toBe(200);
+    const meta = events.find((e) => e.event === "meta")!;
+    expect(meta.data.anchor).toEqual(expect.objectContaining({ id: draftId }));
+    expect(lastModelCall!.system).toContain("Ship the zephyr in Q4.");
+  });
+
   it("carries the conversation: prior turns reach the model in order", async () => {
     scriptedAnswer = "Still yes.";
     const { status } = await chat(
