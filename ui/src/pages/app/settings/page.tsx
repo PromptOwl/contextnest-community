@@ -7,7 +7,7 @@
  * list and to that tab's `keys` (so the unsaved-changes dot tracks it).
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PageTitle } from "@/components/ui/page-title";
@@ -43,6 +43,7 @@ import { reads } from "../../../lib/queries";
 import { copyTextWithToast } from "../../../lib/clipboard";
 import { getAdminSettings, updateAdminSettings } from "../../../lib/api";
 import { useAuth } from "../../../auth/AuthContext";
+import { AgentConnectPanel } from "./AgentConnectPanel";
 import { toast } from "sonner";
 
 interface SettingsPageProps {
@@ -119,6 +120,12 @@ const TABS: {
     // Teammates page), so this tab has no keys to track for the unsaved dot.
     id: "community-sites",
     label: "Community sites",
+    keys: [],
+  },
+  {
+    // Docs only — nothing here persists, so no keys for the unsaved dot.
+    id: "agents",
+    label: "Connecting agents",
     keys: [],
   },
   {
@@ -277,6 +284,10 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   const [draft, setDraft] = useState<AdminSettings | null>(settings);
   const [saving, setSaving] = useState(false);
   const qc = useQueryClient();
+  // Auth mode isn't an admin setting — it's boot-time config, reported on
+  // /health. The Connecting-agents tab needs it so open-mode deployments
+  // aren't told to send a credential that doesn't exist.
+  const health = useQuery(reads.health());
   // Error from the last failed save (shape validation or SMTP verify), shown
   // inline near the fields. Cleared on the next edit or a successful save.
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1726,6 +1737,13 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 )}
               </CardContent>
             </Card>
+          </TabsContent>
+
+          <TabsContent value="agents" className="space-y-4">
+            <AgentConnectPanel
+              publicBaseUrl={draft.public_base_url ?? ""}
+              openMode={health.data?.auth_mode === "open"}
+            />
           </TabsContent>
         </Tabs>
       )}
