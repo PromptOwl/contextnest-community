@@ -185,6 +185,7 @@ import {
   Table as TableIcon,
   FileSpreadsheet,
   Upload,
+  Video,
   Info,
   ChevronRight,
   Columns2,
@@ -228,6 +229,19 @@ import { columnExtensions } from "./extensions/Columns";
 import { TableControls } from "./TableControls";
 import { TaskCheckbox } from "./extensions/TaskCheckbox";
 import { VideoPreview } from "./extensions/VideoPreview";
+import {
+  MEDIA_ACCEPT,
+  MEDIA_FILE_RE,
+  MEDIA_HELPER_TEXT,
+  VIDEO_FILE_RE,
+  IMAGE_MAX_UPLOAD_BYTES,
+  VIDEO_MAX_UPLOAD_BYTES,
+  editorPlaceholder,
+  isFileDrag,
+  mediaAffordances,
+  pickMediaFile,
+  validateEmbedInput,
+} from "@/lib/editor-media";
 import { Mention } from "./extensions/Mention";
 import {
   SearchReplace,
@@ -304,7 +318,7 @@ export const MarkdownEditor = forwardRef<
     onUploadImage,
     onWikiLinkClick,
     onMentionClick,
-    placeholder = "Start writing...",
+    placeholder,
     editable = true,
     className,
     autofocus = "end",
@@ -325,6 +339,15 @@ export const MarkdownEditor = forwardRef<
   const [previewMarkdown, setPreviewMarkdown] = useState("");
   const qc = useQueryClient();
   const effectiveEditable = editable && !previewing;
+  // Image / video affordances (toolbar menu, drop overlay) — none in a
+  // read-only / locked / preview doc. See lib/editor-media.ts.
+  const media = mediaAffordances({
+    editable,
+    previewing,
+    canUpload: !!onUploadImage,
+  });
+  // "Drop to add an image or video" overlay while a file is dragged over.
+  const [fileDragOver, setFileDragOver] = useState(false);
 
   // Inline autocomplete state, shared by both triggers: `[[` searches the
   // nest's documents, `@` searches its people. One popup, one keyboard
@@ -481,7 +504,11 @@ export const MarkdownEditor = forwardRef<
         codeBlock: false,
       }),
       CodeBlock,
-      Placeholder.configure({ placeholder }),
+      // Caller's placeholder verbatim; the default also says media can be
+      // dropped in / linked (only when an uploader is wired).
+      Placeholder.configure({
+        placeholder: editorPlaceholder(placeholder, !!onUploadImage),
+      }),
       Link.configure({
         // Plain click opens link in new tab. Edit URL: caret inside link →
         // toolbar Link button (setLink uses extendMarkRange).
@@ -613,6 +640,16 @@ export const MarkdownEditor = forwardRef<
       handlePaste: (_view, event) => {
         const ed = editorRef.current;
         if (!ed || !event.clipboardData) return false;
+        // A pasted image/video file (a screenshot, a copied image) uploads
+        // and inserts exactly like a drop. Before this, handlePaste only knew
+        // tables and a pasted screenshot silently did nothing. Never in a
+        // read-only / locked / preview doc.
+        const pastedMedia = pickMediaFile(event.clipboardData.files);
+        if (pastedMedia && onUploadImageRef.current && ed.isEditable) {
+          event.preventDefault();
+          void runMediaUploadRef.current(ed, pastedMedia);
+          return true;
+        }
         if (ed.isActive("codeBlock") || ed.isActive("table")) return false;
         const html = event.clipboardData.getData("text/html");
         if (html && /<table[\s>]/i.test(html)) return false;
@@ -1307,7 +1344,30 @@ export const MarkdownEditor = forwardRef<
         className,
       )}
       data-variant={variant}
+      // Drop-overlay bookkeeping only — the drop itself is still ProseMirror's
+      // handleDrop (the overlay is pointer-events-none, so it never eats it).
+      onDragOver={(e) => {
+        if (media.dropOverlay && isFileDrag(e.dataTransfer?.types)) {
+          if (!fileDragOver) setFileDragOver(true);
+        }
+      }}
+      onDragLeave={(e) => {
+        const next = e.relatedTarget as Node | null;
+        if (!next || !e.currentTarget.contains(next)) setFileDragOver(false);
+      }}
+      onDropCapture={() => setFileDragOver(false)}
     >
+      {media.dropOverlay && fileDragOver && (
+        <div
+          className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg border-2 border-dashed border-primary/60 bg-background/80"
+          data-testid="markdown-editor-drop-overlay"
+        >
+          <span className="flex items-center gap-2 text-sm font-medium text-foreground">
+            <ImagePlus className="h-4 w-4" />
+            Drop to add an image or video
+          </span>
+        </div>
+      )}
       {/* Page mode: the toolbar is always there in edit mode — it is what says
           "this is an editor". It sticks a little under the document top bar
           (h-12) so the two bars read as separate surfaces while scrolling. */}
@@ -1326,10 +1386,11 @@ export const MarkdownEditor = forwardRef<
             onLink={setLink}
             onRequestDocLink={onRequestDocLink}
             onMediaFile={
-              onUploadImage
+              media.upload
                 ? (file) => void runMediaUpload(editor, file)
                 : undefined
             }
+            canEmbed={media.embed}
             uploading={uploading}
             previewing={previewing}
             onTogglePreview={() =>
@@ -1962,20 +2023,8 @@ function insertDelimitedTable(
   return true;
 }
 
-// Media the editor can upload into nest assets — mirrors the server
-// allowlist in src/nests/asset-routes.ts (SVG deliberately excluded there;
-// stored-XSS surface).
-const MEDIA_ACCEPT =
-  "image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm";
-const MEDIA_FILE_RE = /\.(png|jpe?g|gif|webp|mp4|webm)$/i;
-const VIDEO_FILE_RE = /\.(mp4|webm)$/i;
-// Client-side mirrors of the server's per-type caps — fail fast with a
-// friendly toast instead of shipping the file upstream to be rejected.
-// Video mirrors the server default (config.VIDEO_MAX_BYTES = 30 MB), kept under
-// Cloud Run's 32 MiB request limit. If a deployment raises VIDEO_MAX_MB, bump
-// this to match so the client doesn't reject an upload the server would accept.
-const IMAGE_MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
-const VIDEO_MAX_UPLOAD_BYTES = 30 * 1024 * 1024; // 30 MB
+// Media allowlist + size caps live in lib/editor-media.ts (shared with the
+// toolbar's helper text and the paste/drop pickers).
 
 /**
  * Upload an image/video via the caller's asset uploader and insert the
@@ -2031,6 +2080,7 @@ function Toolbar({
   onLink,
   onRequestDocLink,
   onMediaFile,
+  canEmbed,
   uploading,
   previewing,
   onTogglePreview,
@@ -2042,6 +2092,8 @@ function Toolbar({
   /** Picked image/video file. Parent owns the shared single-flight
    *  upload guard (toolbar + drag-drop) and the insert. */
   onMediaFile?: (file: File) => void;
+  /** Show "Embed YouTube or Vimeo link" (false in read-only / preview). */
+  canEmbed: boolean;
   uploading: boolean;
   previewing: boolean;
   onTogglePreview: () => void;
@@ -2085,6 +2137,31 @@ function Toolbar({
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-picking the same file
     if (file) onMediaFile?.(file);
+  };
+
+  // "Embed YouTube or Vimeo link": validated with toEmbedUrl (via
+  // validateEmbedInput), inserted as the bare URL on its own paragraph — the
+  // VideoPreview decoration shows the player, the markdown stays the URL.
+  const [embedDialog, setEmbedDialog] = useState<{
+    open: boolean;
+    url: string;
+    error: string | null;
+  }>({ open: false, url: "", error: null });
+  const confirmEmbed = () => {
+    const res = validateEmbedInput(embedDialog.url);
+    if (!res.ok) {
+      setEmbedDialog((d) => ({ ...d, error: res.error }));
+      return;
+    }
+    editor
+      .chain()
+      .focus()
+      .insertContent({
+        type: "paragraph",
+        content: [{ type: "text", text: res.url }],
+      })
+      .run();
+    setEmbedDialog({ open: false, url: "", error: null });
   };
   // In preview mode every formatting affordance is irrelevant — collapse
   // the toolbar to just the toggle so the user has one obvious way back
@@ -2213,9 +2290,54 @@ function Toolbar({
       >
         <TableIcon className="h-3.5 w-3.5" />
       </ToolbarButton>
-      {/* One "Upload" control for every file the editor can ingest — image
-          and CSV/TSV share the same intent, so they share one menu instead
-          of two buttons in different toolbar groups. */}
+      {/* Labelled, not icon-only: "you can add images and videos" should be
+          obvious, not a tooltip on an upload glyph. The label collapses to
+          the icon on narrow toolbars. */}
+      {(onMediaFile || canEmbed) && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              title="Add an image or video"
+              // Match ToolbarButton: don't blur the editor before the menu opens.
+              onMouseDown={(e) => e.preventDefault()}
+              className="h-7 gap-1 px-2"
+              disabled={uploading}
+              data-testid="markdown-editor-media-button"
+            >
+              <ImagePlus className="h-3.5 w-3.5" />
+              <span className="hidden text-xs sm:inline">Image / video</span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            {onMediaFile && (
+              <DropdownMenuItem onSelect={pickMedia} className="items-start">
+                <Upload className="mr-2 mt-0.5 h-4 w-4" />
+                <span className="flex flex-col">
+                  <span>Upload image or video</span>
+                  <span className="text-xs text-muted-foreground">
+                    {MEDIA_HELPER_TEXT}
+                  </span>
+                </span>
+              </DropdownMenuItem>
+            )}
+            {canEmbed && (
+              <DropdownMenuItem
+                onSelect={() =>
+                  setEmbedDialog({ open: true, url: "", error: null })
+                }
+              >
+                <Video className="mr-2 h-4 w-4" />
+                Embed YouTube or Vimeo link
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+      {/* Other file imports (CSV / TSV → table). Images and videos have
+          their own labelled button above. */}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
@@ -2232,12 +2354,6 @@ function Toolbar({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start">
-          {onMediaFile && (
-            <DropdownMenuItem onSelect={pickMedia}>
-              <ImagePlus className="mr-2 h-4 w-4" />
-              Image or video
-            </DropdownMenuItem>
-          )}
           <DropdownMenuItem onSelect={pickCsv}>
             <FileSpreadsheet className="mr-2 h-4 w-4" />
             Table from CSV / TSV
@@ -2260,6 +2376,52 @@ function Toolbar({
           onChange={onMediaPicked}
         />
       )}
+      <Dialog
+        open={embedDialog.open}
+        onOpenChange={(open) =>
+          setEmbedDialog((d) => (open ? d : { open: false, url: "", error: null }))
+        }
+      >
+        <DialogContent className="sm:max-w-[440px]">
+          <DialogHeader>
+            <DialogTitle>Embed a video</DialogTitle>
+            <DialogDescription>
+              Paste a YouTube or Vimeo link. It plays in place; the document
+              keeps the plain link.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-1">
+            <Label htmlFor="embed-url" className="text-xs">Video link</Label>
+            <Input
+              id="embed-url"
+              autoFocus
+              placeholder="https://www.youtube.com/watch?v=…"
+              value={embedDialog.url}
+              onChange={(e) =>
+                setEmbedDialog((d) => ({ ...d, url: e.target.value, error: null }))
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  confirmEmbed();
+                }
+              }}
+            />
+            {embedDialog.error && (
+              <p className="text-xs text-destructive">{embedDialog.error}</p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setEmbedDialog({ open: false, url: "", error: null })}
+            >
+              Cancel
+            </Button>
+            <Button onClick={confirmEmbed}>Embed</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Divider />
 
