@@ -52,3 +52,55 @@ describe("VideoPreview decorations", () => {
     expect(collectVideoPreviewDecorations(doc).length).toBe(0);
   });
 });
+
+// YouTube / Vimeo embeds (CU-wdqcq02pmf). The markdown stays the bare URL;
+// the decoration only paints an <iframe> player over it. Widgets carry a key
+// so ProseMirror doesn't rebuild (and reload) the iframe on every keystroke.
+describe("VideoPreview decorations — YouTube / Vimeo embeds", () => {
+  const YT = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  const para = (...content: any[]) =>
+    schema.node("doc", null, [schema.node("paragraph", null, content)]);
+  const link = (href: string) => schema.marks.link.create({ href });
+  const widgetKeys = (doc: any) =>
+    collectVideoPreviewDecorations(doc)
+      .map((d: any) => d.spec?.key)
+      .filter(Boolean);
+
+  it("decorates a paragraph that is only a bare YouTube URL with an embed widget", () => {
+    const doc = para(schema.text(YT));
+    expect(collectVideoPreviewDecorations(doc).length).toBe(2);
+    expect(widgetKeys(doc)).toEqual([
+      "video-embed:https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+    ]);
+  });
+
+  it("decorates a bare URL the editor has auto-linked (link mark, href === text)", () => {
+    const doc = para(schema.text("https://vimeo.com/76979871", [link("https://vimeo.com/76979871")]));
+    expect(widgetKeys(doc)).toEqual([
+      "video-embed:https://player.vimeo.com/video/76979871",
+    ]);
+  });
+
+  it("does NOT decorate a titled link to a video", () => {
+    const doc = para(schema.text("Watch the demo", [link(YT)]));
+    expect(collectVideoPreviewDecorations(doc).length).toBe(0);
+  });
+
+  it("does NOT decorate link text that disagrees with its href", () => {
+    const doc = para(schema.text(YT, [link("https://evil.example.com/")]));
+    expect(collectVideoPreviewDecorations(doc).length).toBe(0);
+  });
+
+  it("does NOT decorate a non-allowlisted or look-alike external URL", () => {
+    expect(collectVideoPreviewDecorations(para(schema.text("https://example.com/watch?v=dQw4w9WgXcQ"))).length).toBe(0);
+    expect(collectVideoPreviewDecorations(para(schema.text("https://youtube.com.evil.io/watch?v=dQw4w9WgXcQ"))).length).toBe(0);
+  });
+
+  it("does NOT decorate a video URL inside prose", () => {
+    expect(collectVideoPreviewDecorations(para(schema.text(`see ${YT} later`))).length).toBe(0);
+  });
+
+  it("asset videos keep their <video> widget key", () => {
+    expect(widgetKeys(para(schema.text(ASSET_URL)))).toEqual([`video-asset:${ASSET_URL}`]);
+  });
+});

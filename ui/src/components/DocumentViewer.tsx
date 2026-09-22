@@ -40,6 +40,11 @@ import type { Plugin } from "unified";
 import type { Root, Text } from "mdast";
 import { visit } from "unist-util-visit";
 import { cn } from "@/lib/utils";
+import {
+  ASSET_VIDEO_RE,
+  classifyVideoParagraph,
+  type VideoProvider,
+} from "@/lib/video-embed";
 import { CONTEXT_URI_PREFIX, CONTEXT_URI_RE, contextUriDocPath, contextUriLabel } from "@/lib/context-uri";
 
 // `[[target]]`, `[[target|Display]]`, or a bare `contextnest://nodes/…` URI.
@@ -192,12 +197,9 @@ const remarkStripHtml: Plugin<[], Root> = () => (tree) => {
   });
 };
 
-// Same-origin nest video assets only: a root-relative /nests/<id>/assets/
-// path with a server-minted uuid name (mirrors SAFE_NAME in
-// src/nests/asset-routes.ts). External URLs never match — they stay plain
-// links, no exceptions.
-const ASSET_VIDEO_RE =
-  /^\/nests\/[^/]+\/assets\/[0-9a-f-]{36}\.(mp4|webm)$/;
+// Which URLs become a player (same-origin asset videos, allowlisted
+// YouTube/Vimeo links) lives in lib/video-embed.ts, shared with the editor's
+// VideoPreview decoration. Other external URLs stay plain links.
 
 // stopPropagation: block parent click-to-edit when using the controls.
 const AssetVideo = ({ src }: { src: string }) => (
@@ -208,6 +210,36 @@ const AssetVideo = ({ src }: { src: string }) => (
     src={src}
     onClick={(e) => e.stopPropagation()}
   />
+);
+
+// YouTube / Vimeo player for a paragraph that is only a bare provider URL.
+// `embedUrl` comes from toEmbedUrl — always youtube-nocookie.com/embed or
+// player.vimeo.com/video, never the author's raw URL. Sandboxed: the player
+// needs scripts + its own origin to run, presentation for fullscreen, and
+// popups for "Watch on YouTube"; no top-navigation, no forms.
+// stopPropagation: block parent click-to-edit around the player.
+const EmbedVideo = ({
+  embedUrl,
+  provider,
+}: {
+  embedUrl: string;
+  provider: VideoProvider;
+}) => (
+  <div
+    className="not-prose my-4 aspect-video w-full max-w-3xl"
+    onClick={(e) => e.stopPropagation()}
+  >
+    <iframe
+      src={embedUrl}
+      title={provider === "youtube" ? "YouTube video" : "Vimeo video"}
+      className="h-full w-full rounded-md border-0"
+      loading="lazy"
+      allow="fullscreen; picture-in-picture; encrypted-media"
+      allowFullScreen
+      referrerPolicy="strict-origin-when-cross-origin"
+      sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"
+    />
+  </div>
 );
 
 export interface DocumentViewerProps {
@@ -329,16 +361,20 @@ export function DocumentViewer({
               );
             },
             // The editor inserts uploaded videos as the bare asset URL on
-            // its own line — a paragraph whose sole text child is a
-            // same-origin asset video URL renders as the player.
+            // its own line — a paragraph whose sole content is a same-origin
+            // asset video URL renders as the <video> player. A paragraph that
+            // is only a bare (gfm-autolinked) YouTube/Vimeo URL renders as
+            // the provider's player; titled links and links in prose don't.
             p: ({ node, children, ...props }: any) => {
-              const kids = node?.children;
-              if (
-                kids?.length === 1 &&
-                kids[0].type === "text" &&
-                ASSET_VIDEO_RE.test(kids[0].value.trim())
-              ) {
-                return <AssetVideo src={kids[0].value.trim()} />;
+              const video = classifyVideoParagraph(node?.children);
+              if (video?.kind === "asset") return <AssetVideo src={video.src} />;
+              if (video?.kind === "embed") {
+                return (
+                  <EmbedVideo
+                    embedUrl={video.embedUrl}
+                    provider={video.provider}
+                  />
+                );
               }
               return <p {...props}>{children}</p>;
             },
