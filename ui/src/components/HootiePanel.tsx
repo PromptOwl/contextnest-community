@@ -391,7 +391,10 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
                       }
                       if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
-                        void send();
+                        // A "/" draft is a nest search, never a question —
+                        // with nothing matched, Enter does nothing (the send
+                        // button is disabled for the same reason).
+                        if (slash === null) void send();
                       }
                       if (e.key === "Escape") setOpen(false);
                     }}
