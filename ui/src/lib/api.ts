@@ -854,7 +854,10 @@ export async function setNestVisibility(
   // Publishing (→ public) requires an explicit acknowledgement that the nest
   // becomes readable by anyone on the internet, outside your organization.
   // Without it the server returns 409 requires_acknowledgement. Going back to
-  // private needs no acknowledgement, so this is optional.
+  // private needs no acknowledgement, so this is optional. Despite the name,
+  // the same flag also acknowledges → org on a SHARED deployment (/health
+  // shared_deployment), where "organization" is every account on the server:
+  // one wire field for "I understand who this reaches", whichever tier.
   acknowledgePublic?: boolean,
 ) {
   return request<{ visibility: NestVisibility }>(

@@ -338,6 +338,14 @@ Turning stewardship **off** wipes stewards and pending reviews and is owner-only
     "warning": "This makes the nest readable by anyone on the internet, outside your organization."
   }
   ```
+  On a shared deployment, `org` without the acknowledgement is rejected the same way, with its own warning:
+  ```json
+  {
+    "error": "Opening this nest to the organization requires acknowledgement.",
+    "requires_acknowledgement": true,
+    "warning": "This server is shared: 'Organization' makes the nest readable by every account on this server, including other organizations — not just yours."
+  }
+  ```
   Going back to `private` needs no acknowledgement. `GET /health` reports `shared_deployment` so a client can word its own confirmation the same way.
 
 ### PATCH `/nests/:nestId/reader-mode` (server-admin / superadmin only)
