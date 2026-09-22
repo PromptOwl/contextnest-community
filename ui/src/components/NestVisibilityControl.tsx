@@ -14,7 +14,12 @@
  *
  * Going public is guarded here rather than in each host: the server requires
  * acknowledge_public and 409s without it, so the control that owns the switch
- * owns the acknowledgement too.
+ * owns the acknowledgement too. On a SHARED deployment (/health
+ * shared_deployment — the PromptOwl-hosted server, many customers on one
+ * install) 'org' is every customer, so it is guarded the same way and both
+ * tiers are worded to say who they reach. The dialog also shows the nest's
+ * description — that is all a stranger discovering the nest will see beside
+ * its name — and offers to add one when it is empty (CU-wdqcq02mek).
  */
 import { useEffect, useState } from "react";
 import { Label } from "@/components/ui/label";
@@ -43,7 +48,15 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import * as api from "../lib/api";
-import { useNestMeta } from "../lib/queries";
+import { useNestMeta, keys } from "../lib/queries";
+import { useQueryClient } from "@tanstack/react-query";
+import { useAuth } from "../auth/AuthContext";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  visibilityNeedsAcknowledgement,
+  visibilityTierHint,
+  visibilityConfirmCopy,
+} from "../lib/visibility-confirm";
 
 interface Props {
   nestId: string;
@@ -57,10 +70,10 @@ interface Props {
   variant?: "card" | "compact";
 }
 
-const TIERS: Array<{ value: api.NestVisibility; label: string; hint: string }> = [
-  { value: "private", label: "Private", hint: "Only people added to the nest" },
-  { value: "org", label: "Organization", hint: "Everyone signed in here can read" },
-  { value: "public", label: "Public", hint: "Anyone with the URL can read" },
+const TIERS: Array<{ value: api.NestVisibility; label: string }> = [
+  { value: "private", label: "Private" },
+  { value: "org", label: "Organization" },
+  { value: "public", label: "Public" },
 ];
 
 export function NestVisibilityControl({
@@ -73,9 +86,16 @@ export function NestVisibilityControl({
   const isPublic = visibility === "public";
   const isOrg = visibility === "org";
   const [saving, setSaving] = useState(false);
-  // Publishing (→ public) is guarded by an acknowledgement dialog: the nest
-  // becomes readable by anyone on the internet, outside your organization.
-  const [confirmPublic, setConfirmPublic] = useState(false);
+  // Widening past the roster is guarded by an acknowledgement dialog: always
+  // for 'public', and for 'org' on a shared deployment. Holds the tier being
+  // confirmed; null = closed.
+  const [confirming, setConfirming] = useState<"org" | "public" | null>(null);
+  const { sharedDeployment } = useAuth();
+  const ctx = { sharedDeployment };
+  const qc = useQueryClient();
+  // The description is what a discovering reader sees beside the name, so
+  // the dialog shows it and lets an empty one be filled in on the spot.
+  const [descriptionDraft, setDescriptionDraft] = useState("");
 
   // The same cached GET /nests/:id every nest screen reads — the compact
   // variant sits on every document page, so a second fetch per view would
@@ -84,6 +104,8 @@ export function NestVisibilityControl({
   const serverVisibility = (meta.data as any)?.nest?.visibility as
     | api.NestVisibility
     | undefined;
+  const serverDescription =
+    ((meta.data as any)?.nest?.description as string | null | undefined) ?? "";
   useEffect(() => {
     if (serverVisibility) setVisibility(serverVisibility);
   }, [serverVisibility]);
@@ -118,34 +140,74 @@ export function NestVisibilityControl({
 
   const choose = async (next: api.NestVisibility) => {
     if (next === visibility) return;
-    // Confirm before going public — the value only changes once acknowledged.
-    // Private and org cross no org boundary, so neither needs one.
-    if (next === "public") {
-      setConfirmPublic(true);
+    // The value only changes once acknowledged. Private never needs it; the
+    // rule for the other two lives in visibility-confirm.ts with the server.
+    if (next !== "private" && visibilityNeedsAcknowledgement(next, ctx)) {
+      setDescriptionDraft(serverDescription);
+      setConfirming(next);
       return;
     }
     await apply(next);
   };
 
+  // Confirm: save a newly written description first (best-effort — a failed
+  // description save must not block the visibility change the user just
+  // acknowledged), then apply with the acknowledgement.
+  const confirmWiden = async () => {
+    const tier = confirming;
+    if (!tier) return;
+    setConfirming(null);
+    const nextDescription = descriptionDraft.trim();
+    if (nextDescription && nextDescription !== serverDescription.trim()) {
+      try {
+        await api.updateNest(nestId, { description: nextDescription });
+        // Refresh the cached nest now — apply() only signals the host on a
+        // successful visibility change, and the description landed regardless.
+        void qc.invalidateQueries({ queryKey: keys.nest(nestId) });
+      } catch (err: any) {
+        onError?.(err?.message || "Failed to save the description");
+      }
+    }
+    await apply(tier, true);
+  };
+
+  const copy = confirming ? visibilityConfirmCopy(confirming, ctx) : null;
   const confirmDialog = (
-    <AlertDialog open={confirmPublic} onOpenChange={setConfirmPublic}>
+    <AlertDialog
+      open={confirming !== null}
+      onOpenChange={(o) => {
+        if (!o) setConfirming(null);
+      }}
+    >
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Make this nest public?</AlertDialogTitle>
-          <AlertDialogDescription>
-            This makes the nest readable by anyone on the internet, outside
-            your organization. Anyone with the URL will be able to read it.
-          </AlertDialogDescription>
+          <AlertDialogTitle>{copy?.title}</AlertDialogTitle>
+          <AlertDialogDescription>{copy?.body}</AlertDialogDescription>
         </AlertDialogHeader>
+        {/* What those readers will see beside the name. Prefilled from the
+            nest; an empty one can be written here and is saved on confirm. */}
+        <div className="space-y-1.5">
+          <Label htmlFor="visibility-description" className="text-xs">
+            {serverDescription.trim()
+              ? "Description readers will see"
+              : "This nest has no description — readers will only see its name. Add one? (optional)"}
+          </Label>
+          <Textarea
+            id="visibility-description"
+            value={descriptionDraft}
+            onChange={(e) => setDescriptionDraft(e.target.value)}
+            placeholder="What this nest is for, and who it's meant for"
+            rows={2}
+            data-testid="visibility-description"
+          />
+        </div>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
           <AlertDialogAction
-            onClick={() => {
-              setConfirmPublic(false);
-              void apply("public", true);
-            }}
+            onClick={() => void confirmWiden()}
+            data-testid="visibility-confirm"
           >
-            Make public
+            {copy?.confirm}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
@@ -159,6 +221,7 @@ export function NestVisibilityControl({
     if (!serverVisibility) return null;
     const Icon = isPublic ? Globe : isOrg ? Building2 : Lock;
     const current = TIERS.find((t) => t.value === visibility) ?? TIERS[0];
+    const currentHint = visibilityTierHint(visibility, ctx);
     return (
       <>
         <DropdownMenu>
@@ -167,7 +230,7 @@ export function NestVisibilityControl({
               type="button"
               disabled={saving}
               className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-60"
-              title={`${current.label} — ${current.hint}. Click to change.`}
+              title={`${current.label} — ${currentHint}. Click to change.`}
               aria-label={`Nest visibility: ${current.label}`}
               data-testid="nest-visibility-compact"
             >
@@ -196,7 +259,9 @@ export function NestVisibilityControl({
                 )}
                 <span className="flex flex-col">
                   <span className="text-sm">{t.label}</span>
-                  <span className="text-xs text-muted-foreground">{t.hint}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {visibilityTierHint(t.value, ctx)}
+                  </span>
                 </span>
               </DropdownMenuItem>
             ))}
@@ -223,9 +288,13 @@ export function NestVisibilityControl({
           </Label>
           <p className="text-xs text-muted-foreground">
             {isPublic
-              ? "Anyone on the internet with the URL can read this nest. Editing still requires being added below."
+              ? sharedDeployment
+                ? "Anyone on the internet with the URL can read this nest — including every account on this server, other organisations too. Editing still requires being added below."
+                : "Anyone on the internet with the URL can read this nest. Editing still requires being added below."
               : isOrg
-                ? "Everyone signed in to this deployment can read this nest. Editing still requires being added below."
+                ? sharedDeployment
+                  ? "Every account on this server can read this nest — other organisations included, not just yours. Editing still requires being added below."
+                  : "Everyone signed in to this deployment can read this nest. Editing still requires being added below."
                 : "Only people added below (and the owner) can see this nest."}
           </p>
         </div>

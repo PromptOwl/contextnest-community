@@ -3,6 +3,7 @@
  * Uses ported PromptOwl components for the UI, wired to REST API.
  */
 import { Suspense, useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { visibilityConfirmCopy, visibilityTierHint } from "../lib/visibility-confirm";
 import { lazyChunk } from "../lib/lazy-chunk";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -144,7 +145,7 @@ export function NestView({
   initialTab,
   onTabChange,
 }: NestViewProps) {
-  const { isAdmin, adminStatus, authMode } = useAuth();
+  const { isAdmin, adminStatus, authMode, sharedDeployment } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
   //   - real-owner nest → only that owner
   //   - anon-owned + open mode → any caller (server treats anon as commons)
@@ -1274,7 +1275,7 @@ export function NestView({
                 visibility === "public"
                   ? "Public — anyone with the URL can read. Click to make private."
                   : visibility === "org"
-                    ? "Organization — everyone signed in to this deployment can read. Click to manage sharing (Collaborators tab)."
+                    ? `Organization — ${visibilityTierHint("org", { sharedDeployment }).toLowerCase()}. Click to manage sharing (Collaborators tab).`
                     : "Private. Click to make public (anyone with the URL can read)."
               }
             >
@@ -2163,10 +2164,11 @@ export function NestView({
       <AlertDialog open={confirmPublic} onOpenChange={setConfirmPublic}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Make this nest public?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {visibilityConfirmCopy("public", { sharedDeployment }).title}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              This makes the nest readable by anyone on the internet, outside
-              your organization. Anyone with the URL will be able to read it.
+              {visibilityConfirmCopy("public", { sharedDeployment }).body}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

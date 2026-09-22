@@ -172,15 +172,32 @@ sharingRoutes.patch("/visibility", async (c) => {
   // Outside-org publish guardrail: flipping a nest to public makes it readable
   // by anyone on the internet, outside your organization. Require an explicit
   // acknowledgement so this can never happen on a stray click. Going back to
-  // private needs no acknowledgement — and neither does 'org', which stays
-  // inside the deployment and so crosses no organizational boundary.
-  if (body.visibility === "public" && body.acknowledge_public !== true) {
+  // private needs no acknowledgement. 'org' stays inside the deployment — on
+  // a single-company server that crosses no organisational boundary, but on
+  // a SHARED deployment (the PromptOwl-hosted server) the deployment is many
+  // customers, so 'org' needs the same acknowledgement there. Enforced here,
+  // not only in the UI, so an API/MCP caller can't skip it either.
+  const ack = body.acknowledge_public === true;
+  const shared = config.SHARED_DEPLOYMENT;
+  if (body.visibility === "public" && !ack) {
     return c.json(
       {
         error: "Publishing this nest requires acknowledgement.",
         requires_acknowledgement: true,
+        warning: shared
+          ? "This makes the nest readable by anyone on the internet — including every account on this server, which belongs to other organisations too."
+          : "This makes the nest readable by anyone on the internet, outside your organization.",
+      },
+      409,
+    );
+  }
+  if (body.visibility === "org" && shared && !ack) {
+    return c.json(
+      {
+        error: "Opening this nest to the organization requires acknowledgement.",
+        requires_acknowledgement: true,
         warning:
-          "This makes the nest readable by anyone on the internet, outside your organization.",
+          "This server is shared: 'Organization' makes the nest readable by every account on this server, including other organisations — not just yours.",
       },
       409,
     );

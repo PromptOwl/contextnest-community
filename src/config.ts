@@ -403,6 +403,22 @@ export const config = {
     return process.env.PEOPLE_SUGGEST_ALL_USERS === "true";
   },
   /**
+   * This server hosts several unrelated organisations (the PromptOwl-hosted
+   * deployment) rather than one company (a self-hosted install).
+   *
+   * OFF BY DEFAULT. Nest visibility 'org' means "every authenticated account
+   * on this deployment" (src/shared/access.ts) — on a single-company server
+   * that IS the organisation, so the tier is safe to flip in one click. On a
+   * shared server it is every customer, so with this on: flipping a nest to
+   * 'org' needs the same explicit acknowledgement 'public' always needs
+   * (PATCH /nests/:id/visibility 409s without it, API and MCP included), and
+   * the UI words both tiers to say so. Exposed on /health as
+   * `shared_deployment`. Superadmin-togglable at runtime via /admin/settings.
+   */
+  get SHARED_DEPLOYMENT(): boolean {
+    return process.env.SHARED_DEPLOYMENT === "true";
+  },
+  /**
    * Path to the .env file the server reads its config from and the license
    * install flow persists PROMPTOWL_KEY into. Defaults UNDER DATA_ROOT (not
    * $cwd) so it lands on the writable, volume-mounted, restart-surviving path

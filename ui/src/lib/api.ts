@@ -212,6 +212,7 @@ export async function getHealth() {
     /** Content-type toggles — default ON server-side; the editor's type
      *  picker hides a disabled type exactly when create would refuse it. */
     type_artifact_enabled?: boolean;
+    shared_deployment?: boolean;
     type_table_enabled?: boolean;
     subagent_runs_enabled?: boolean;
     subagent_max_depth?: number;
@@ -266,6 +267,10 @@ export interface AdminSettings {
    *  a server holding several unrelated customers would otherwise hand one
    *  customer's staff another customer's email addresses. */
   people_suggest_all_users: boolean;
+  /** This server hosts several organisations (PromptOwl-hosted). On, nest
+   *  visibility 'org' needs the same acknowledgement as 'public' and the
+   *  picker words both tiers to name the real boundary. Default OFF. */
+  shared_deployment: boolean;
   /** Server-computed readiness: enabled AND issuer+client id+secret present. */
   oidc_ready?: boolean;
   /** Write-only: string sets/replaces, null clears; never returned. */

@@ -237,7 +237,15 @@ nestRoutes.get("/", async (c) => {
     seen.add(n.id);
     deduped.push(n);
   }
-  const out = await Promise.all(deduped.map(annotate));
+  // Rows the caller reaches through visibility ALONE — no ownership, no
+  // collaborator/steward/team row. The dashboard's default "My nests" scope
+  // leaves these out, so it needs the fact stated rather than inferred from
+  // an empty roles list (a public nest you're also an editor of is yours).
+  const memberIds = new Set([...owned, ...shared].map((n) => n.id));
+  const out = (await Promise.all(deduped.map(annotate))).map((row) => ({
+    ...row,
+    discovered: !memberIds.has(row.id),
+  }));
 
   // Tile metadata: per-nest document count + people (collaborators + active
   // stewards). All three are single grouped queries rather than per-nest

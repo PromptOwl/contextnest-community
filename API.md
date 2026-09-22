@@ -246,7 +246,7 @@ Related `/admin/settings` fields (GET/PATCH, superadmin only): `sso_token_exchan
 A nest = a context vault (folder of markdown documents + governance state).
 
 ### GET `/nests`
-Returns owned + shared nests. Archived nests are **absent** — as they are from every other listing, the work inbox, cross-nest search and the MCP index. Each row carries `pinned` — the calling user's own bookmark (see `POST /nests/:nestId/pin`).
+Returns owned + shared nests. Archived nests are **absent** — as they are from every other listing, the work inbox, cross-nest search and the MCP index. Each row carries `pinned` — the calling user's own bookmark (see `POST /nests/:nestId/pin`). Nests reachable through `org`/`public` visibility alone are included too and carry `discovered: true` (owned and shared rows carry `false`) — the dashboard's default *My nests* scope leaves them out.
 ```json
 { "nests": [{ "id": "...", "user_id": "...", "name": "...", "slug": "...", "visibility": "private", "created_at": "..." }] }
 ```
@@ -330,7 +330,7 @@ Turning stewardship **off** wipes stewards and pending reviews and is owner-only
   | `public` | anyone, including anonymous callers |
   `org` and `public` readers see **approved content only** — drafts and pending versions stay with collaborators and stewards.
   Under `AUTH_MODE=open` every caller resolves to the anonymous user, so there is no "other authenticated user" for `org` to admit: on an open-mode deployment `org` behaves as `private`. Use it on a deployment with real logins.
-- **Outside-org publish guardrail.** Setting `visibility: "public"` **requires** `acknowledge_public: true` (`org` does not — it stays inside the deployment, so it crosses no organizational boundary). Without it the request is rejected `409`:
+- **Outside-org publish guardrail.** Setting `visibility: "public"` **requires** `acknowledge_public: true`. `org` does not on a single-organisation server — it stays inside the deployment, so it crosses no organisational boundary. On a **shared deployment** (`SHARED_DEPLOYMENT=true` / Settings → General → *This server hosts several organisations* — the PromptOwl-hosted service) the deployment *is* several organisations, so `org` requires the same `acknowledge_public: true` and the `warning` names that boundary. Without the acknowledgement the request is rejected `409`:
   ```json
   {
     "error": "Publishing this nest requires acknowledgement.",
@@ -338,7 +338,7 @@ Turning stewardship **off** wipes stewards and pending reviews and is owner-only
     "warning": "This makes the nest readable by anyone on the internet, outside your organization."
   }
   ```
-  Going back to `private` needs no acknowledgement.
+  Going back to `private` needs no acknowledgement. `GET /health` reports `shared_deployment` so a client can word its own confirmation the same way.
 
 ### PATCH `/nests/:nestId/reader-mode` (server-admin / superadmin only)
 Configure **Public Docs Reader Mode** — a clean, read-only public docs view of the nest. Superadmin-gated via `isServerAdminUserId` (license admin OR `access.yaml` super_admins ∪ the DB-granted set; the same gate as `/nests/unsynced` and `/admin/*`). A plain nest-owner/admin who is not a superadmin gets `403`.

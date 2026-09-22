@@ -85,6 +85,7 @@ const TABS: {
       "logo_url",
       "anthropic_api_key",
       "people_suggest_all_users",
+      "shared_deployment",
     ],
   },
   {
@@ -773,6 +774,27 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   <Switch
                     checked={draft.people_suggest_all_users}
                     onCheckedChange={(v) => set({ people_suggest_all_users: v })}
+                  />
+                </div>
+                <div className="flex items-start justify-between gap-4 pt-4 border-t">
+                  <div className="pr-4">
+                    <div className="text-sm font-medium">
+                      This server hosts several organisations
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      A nest's Organization tier is readable by every account
+                      on this server. Off, that is one company and the tier
+                      applies in one click. On — the PromptOwl-hosted service,
+                      or any install shared by unrelated customers — opening a
+                      nest to Organization asks for the same acknowledgement as
+                      Public (API and MCP included), and the visibility picker
+                      says who the tier really reaches.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={draft.shared_deployment}
+                    onCheckedChange={(v) => set({ shared_deployment: v })}
+                    data-testid="settings-shared-deployment"
                   />
                 </div>
               </CardContent>
