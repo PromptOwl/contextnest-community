@@ -6,6 +6,7 @@ import { mergeFrameAncestors } from "./shared/artifact-sandbox.js";
 import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
+import { brandingRoutes } from "./nests/branding-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
 import { publishRoutes } from "./nests/publish-routes.js";
 import { publishRenderRoutes } from "./nests/publish-render-routes.js";
@@ -2075,11 +2076,17 @@ export function createApp(): Hono<AuthEnv> {
     // would wrongly gate `…/nodes/collaborators-guide` as a collaborators route
     // and 403 a write user editing that doc. parts[1] is the resource segment.
     const resource = parts[1];
-    if (resource === "visibility" || resource === "reader-mode") {
+    if (
+      resource === "visibility" ||
+      resource === "reader-mode" ||
+      resource === "branding"
+    ) {
       // reader-mode: the nest owner/admin collaborator AND the server admin
       // may configure it — this "admin" tier already covers both
       // (resolveNestPermission maps the server/super admin to "admin" too),
       // so the handler needs no further hard-gating past this middleware.
+      // branding (CU-wdqcq02ptm): same owner/admin tier; its handler adds
+      // the server-admin-only hide_powered_by check.
       required = "admin";
     } else if (resource === "collaborators") {
       // Viewing the roster (GET) and inviting (POST) are open to write+
@@ -2284,6 +2291,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/nodes", nodeRoutes);
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
+  nestsApp.route("/:nestId", brandingRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);
   // "publications" (not "/publish") — POST /:nestId/publish is already taken by
   // the nest-snapshot endpoint in query-routes. These manage per-document

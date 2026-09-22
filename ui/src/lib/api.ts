@@ -13,6 +13,7 @@
  */
 
 import { clearDraft } from "./draft";
+import type { NestBranding } from "./branding";
 
 /**
  * A nest's visibility tier. 'org' = every authenticated user of this
@@ -877,6 +878,16 @@ export async function setNestReaderMode(
   );
 }
 
+// Per-nest reader branding (owner / nest admin / server admin). The body
+// replaces the whole branding; null clears it. hide_powered_by is server-admin
+// only (403 otherwise).
+export async function setNestBranding(nestId: string, branding: NestBranding | null) {
+  return request<{ branding: NestBranding | null }>(`/nests/${nestId}/branding`, {
+    method: "PATCH",
+    body: JSON.stringify(branding),
+  });
+}
+
 export async function getNest(nestId: string) {
   return request<{
     nest: {
@@ -888,6 +899,8 @@ export async function getNest(nestId: string) {
       reader_home_node?: string | null;
       // Set when the nest is archived — surfaced straight off the SELECT *.
       archived_at?: string | null;
+      // Per-nest reader branding, parsed server-side; null = unbranded.
+      branding?: NestBranding | null;
     };
     permission: string;
     // Caller's merged effective roles (collaborator + steward), nest-wide.

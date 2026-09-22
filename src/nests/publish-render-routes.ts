@@ -29,6 +29,16 @@ import { tryConsume } from "../shared/rate-limit.js";
 import { clientIp } from "../shared/request-ip.js";
 import * as publish from "./publish-service.js";
 import type { PublishRow } from "./publish-service.js";
+import { getNest } from "./service.js";
+import { resolveNestPath } from "../shared/paths.js";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import {
+  nestAssetName,
+  parseStoredBranding,
+  publishBrandCssVars,
+  type NestBranding,
+} from "../shared/branding.js";
 
 export const publishRenderRoutes = new Hono();
 
@@ -108,6 +118,127 @@ function esc(s: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+// ── Per-nest branding (CU-wdqcq02ptm) ──────────────────────────────────────
+//
+// Every /p page runs under a CSP that allows no external images: the document
+// view is the artifact sandbox (`img-src data: blob:`), the comment shell is
+// `default-src 'none'`. Branding does not loosen either. A logo/banner/favicon
+// uploaded to the nest is read from disk and INLINED as a `data:` URI (already
+// permitted), so it also works for a publish of a private nest whose assets an
+// anonymous viewer could not fetch. An external https image is simply not
+// rendered here: allowing `img-src https:` on the sandboxed document would also
+// let the published markdown's own `![](https://…)` images load — turning
+// every public view into a third-party beacon, which the sandbox exists to stop.
+// The SPA reader (no such CSP) does show https images.
+
+interface PublishBrand {
+  b: NestBranding;
+  logo: string | null;
+  banner: string | null;
+  favicon: string | null;
+}
+
+const IMAGE_MIME: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+};
+// Inline caps: a data: URI rides every page view, so keep it to what a logo or
+// a banner reasonably needs. Anything larger renders without the image.
+const INLINE_CAP = { logo: 512 * 1024, favicon: 256 * 1024, banner: 2 * 1024 * 1024 } as const;
+// Asset names are uuid-unique and never rewritten, so a small cache is safe.
+const inlineCache = new Map<string, string | null>();
+
+async function inlineAsset(nestId: string, url: string | null | undefined, cap: number): Promise<string | null> {
+  if (!url) return null;
+  const name = nestAssetName(url, nestId);
+  if (!name) return null; // external https image — not rendered on /p (see above)
+  const key = `${nestId}/${name}/${cap}`;
+  if (inlineCache.has(key)) return inlineCache.get(key)!;
+  let out: string | null = null;
+  try {
+    const bytes = await readFile(join(resolveNestPath(nestId), "assets", name));
+    if (bytes.length <= cap) {
+      const mime = IMAGE_MIME[name.split(".").pop()!.toLowerCase()];
+      if (mime) out = `data:${mime};base64,${bytes.toString("base64")}`;
+    }
+  } catch {
+    out = null;
+  }
+  if (inlineCache.size > 64) inlineCache.clear();
+  inlineCache.set(key, out);
+  return out;
+}
+
+/** The nest's branding for a publish, or null when it has none — in which case
+ *  every page below renders byte-for-byte as it did before branding existed. */
+async function loadBrand(row: PublishRow): Promise<PublishBrand | null> {
+  let b: NestBranding | null = null;
+  try {
+    b = parseStoredBranding((await getNest(row.nest_id))?.branding_json);
+  } catch {
+    b = null;
+  }
+  if (!b) return null;
+  const [logo, banner, favicon] = await Promise.all([
+    inlineAsset(row.nest_id, b.logo_url, INLINE_CAP.logo),
+    inlineAsset(row.nest_id, b.banner_url, INLINE_CAP.banner),
+    inlineAsset(row.nest_id, b.favicon_url, INLINE_CAP.favicon),
+  ]);
+  return { b, logo, banner, favicon };
+}
+
+const BRAND_CSS = `
+  .cn-brand{display:flex;align-items:center;gap:12px;padding:12px 24px;background:var(--cn-header-bg,#fff);color:var(--cn-header-fg,#1c1917);border-bottom:1px solid rgba(0,0,0,.08);font:600 16px/1.3 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .cn-brand img{height:32px;width:auto;max-width:160px;object-fit:contain}
+  .cn-brand span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .cn-hero{position:relative;min-height:120px;max-height:220px;height:28vw;display:flex;flex-direction:column;justify-content:flex-end;padding:20px 24px;box-sizing:border-box;background:var(--cn-accent,#142a80) center/cover no-repeat;color:var(--cn-accent-fg,#fff);overflow:hidden}
+  .cn-hero.has-img{color:#fff}
+  .cn-hero.has-img::before{content:"";position:absolute;inset:0;background:linear-gradient(to top,rgba(0,0,0,.62),rgba(0,0,0,.08))}
+  .cn-hero *{position:relative;margin:0;max-width:820px}
+  .cn-hero strong{display:block;font:700 clamp(20px,4vw,30px)/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .cn-hero p{margin-top:6px;font-size:15px;opacity:.92}
+  .cn-foot{max-width:820px;margin:0 auto;padding:20px 24px 40px;border-top:1px solid #e7e5e4;color:#78716c;font-size:13px;display:flex;flex-wrap:wrap;gap:6px 16px}
+  .cn-foot a{color:var(--cn-accent-text,#142a80)}
+`;
+
+/** `<head>` additions: the validated color variables, brand CSS, favicon. */
+function brandHead(brand: PublishBrand | null, extraCss = ""): string {
+  if (!brand) return "";
+  const icon = brand.favicon ? `<link rel="icon" href="${esc(brand.favicon)}">` : "";
+  return `<style>${publishBrandCssVars(brand.b)}${BRAND_CSS}${extraCss}</style>${icon}`;
+}
+
+/** The branded top bar: logo + site title. Empty when neither is set. */
+function brandBar(brand: PublishBrand | null): string {
+  if (!brand) return "";
+  const title = brand.b.site_title ? `<span>${esc(brand.b.site_title)}</span>` : "";
+  const logo = brand.logo ? `<img src="${esc(brand.logo)}" alt="">` : "";
+  if (!title && !logo) return "";
+  return `<header class="cn-brand">${logo}${title}</header>`;
+}
+
+function brandHero(brand: PublishBrand | null): string {
+  if (!brand) return "";
+  const { banner_headline: h, banner_subtext: sub } = brand.b;
+  if (!brand.banner && !h) return "";
+  const style = brand.banner ? ` style="background-image:url('${esc(brand.banner)}')"` : "";
+  const cls = brand.banner ? "cn-hero has-img" : "cn-hero";
+  return `<div class="${cls}"${style}>${h ? `<strong>${esc(h)}</strong>` : ""}${sub ? `<p>${esc(sub)}</p>` : ""}</div>`;
+}
+
+function brandFooter(brand: PublishBrand | null): string {
+  if (!brand) return "";
+  const { footer_text: text, footer_link_url: href, footer_link_label: label } = brand.b;
+  const parts: string[] = [];
+  if (text) parts.push(`<span>${esc(text)}</span>`);
+  if (href) parts.push(`<a href="${esc(href)}" rel="noopener noreferrer" target="_blank">${esc(label || href)}</a>`);
+  if (!brand.b.hide_powered_by) parts.push(`<span>Secured by PromptOwl · ContextNest</span>`);
+  return parts.length ? `<footer class="cn-foot">${parts.join("")}</footer>` : "";
 }
 
 /**
@@ -232,7 +363,14 @@ async function renderPublished(c: any, row: PublishRow, viewerEmail: string | nu
   // The body almost always opens with its own H1, so only fall back to the
   // node title when it doesn't — otherwise the page shows the heading twice.
   const heading = /^\s*#\s/.test(body) ? "" : `<h1>${title}</h1>`;
-  const shell = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><style>${PROSE_CSS}</style></head><body><main>${heading}${markdown.render(body)}</main>${overlays}</body></html>`;
+  // Branding wraps only this markdown shell. An HTML/artifact body above is
+  // the author's own complete page and is served untouched.
+  const brand = await loadBrand(row);
+  const docTitle = brand?.b.site_title ? `${title} · ${esc(brand.b.site_title)}` : title;
+  const brandCss = brand
+    ? `body{background:var(--cn-page-bg,#fff)}h1,h2,h3,h4,a{color:var(--cn-accent-text,#142a80)}`
+    : "";
+  const shell = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${docTitle}</title><style>${PROSE_CSS}</style>${brandHead(brand, brandCss)}</head><body>${brandBar(brand)}${brandHero(brand)}<main>${heading}${markdown.render(body)}</main>${brandFooter(brand)}${overlays}</body></html>`;
   return c.body(shell, 200, { "Content-Type": "text/html; charset=utf-8" });
 }
 
@@ -261,8 +399,34 @@ const GATE_EYE_SCRIPT = `<script>
   })();
 </script>`;
 
+// Gate-page branding: accent on the heading and the submit button (with its
+// auto-contrast text color), the page tint behind the card, the logo + site
+// title above the heading, the footer line below.
+const GATE_BRAND_CSS = `
+    body{background:var(--cn-page-bg,#f4f4f5)}
+    .card{box-sizing:border-box;overflow:hidden}
+    h1{color:var(--cn-accent-text,#142a80)}
+    button[type=submit]{background:var(--cn-accent,#142a80);color:var(--cn-accent-fg,#fff)}
+    .cn-brand{margin:-32px -34px 20px;border-radius:14px 14px 0 0;padding:14px 20px}
+    .cn-gate-foot{font-size:12px;color:#a8a29e;margin:10px 0 0;text-align:center}
+    .cn-gate-foot a{color:var(--cn-accent-text,#142a80)}
+`;
+
+function gateBrandTop(brand: PublishBrand | null): string {
+  return brandBar(brand);
+}
+
+function gateBrandFoot(brand: PublishBrand | null): string {
+  if (!brand) return "";
+  const { footer_text: text, footer_link_url: href, footer_link_label: label } = brand.b;
+  const parts: string[] = [];
+  if (text) parts.push(esc(text));
+  if (href) parts.push(`<a href="${esc(href)}" rel="noopener noreferrer" target="_blank">${esc(label || href)}</a>`);
+  return parts.length ? `<p class="cn-gate-foot">${parts.join(" · ")}</p>` : "";
+}
+
 /** The gate form (ordinary HTML — NOT sandboxed, so its form can post). */
-function gatePage(row: PublishRow, message?: string): string {
+function gatePage(row: PublishRow, message?: string, brand: PublishBrand | null = null): string {
   const wantsCode = row.access_mode === "code";
   // A passcode is typed from a slide, a QR, or someone reading it aloud, so
   // let the reader check what they typed before submitting.
@@ -295,10 +459,10 @@ function gatePage(row: PublishRow, message?: string): string {
     button.eye svg{width:18px;height:18px;display:block}
     .err{color:#be123c;font-weight:600}
     .brand{font-size:12px;color:#a8a29e;margin:18px 0 0;text-align:center}
-  </style></head><body><form class="card" method="POST" action="/p/${esc(row.slug)}/gate">
-    <h1>Protected document</h1><p>${esc(note)}</p>${err}${field}
+  </style>${brandHead(brand, GATE_BRAND_CSS)}</head><body><form class="card" method="POST" action="/p/${esc(row.slug)}/gate">
+    ${gateBrandTop(brand)}<h1>Protected document</h1><p>${esc(note)}</p>${err}${field}
     <button type="submit">${cta}</button>
-    <p class="brand">Secured by PromptOwl · ContextNest</p>
+    ${brand?.b.hide_powered_by ? "" : `<p class="brand">Secured by PromptOwl · ContextNest</p>`}${gateBrandFoot(brand)}
   </form>${wantsCode ? GATE_EYE_SCRIPT : ""}</body></html>`;
 }
 
@@ -335,7 +499,12 @@ function sentPage(): string {
  *  why the old separate comment page rendered but could never submit. Framing
  *  the document keeps its sandbox intact and puts the comment UI on a page we
  *  control and trust. */
-function readerShell(row: PublishRow, title: string, viewerEmail: string | null): string {
+function readerShell(
+  row: PublishRow,
+  title: string,
+  viewerEmail: string | null,
+  brand: PublishBrand | null = null,
+): string {
   // A gated viewer is already identified; anyone else names themselves.
   const emailField = viewerEmail
     ? `<p class="who">Commenting as <strong>${esc(viewerEmail)}</strong></p>`
@@ -359,7 +528,7 @@ function readerShell(row: PublishRow, title: string, viewerEmail: string | null)
     button[disabled]{opacity:.6;cursor:default}
     .msg{font-weight:600;margin:0 0 14px;font-size:14px}
     .msg.err{color:#be123c}.msg.ok{color:#15803d}
-  </style></head><body>
+  </style>${brand ? `<style>${publishBrandCssVars(brand.b)}#cn-open,#cn-send{background:var(--cn-accent,#142a80);color:var(--cn-accent-fg,#fff)}.card h2{color:var(--cn-accent-text,#142a80)}</style>` : ""}</head><body>
     <iframe id="cn-frame" src="/p/${esc(row.slug)}/view" title="${esc(title)}"></iframe>
     <button id="cn-open" type="button">Leave a comment</button>
     <div id="cn-back"><div class="card" role="dialog" aria-modal="true" aria-label="Leave a comment">
@@ -447,7 +616,7 @@ publishRenderRoutes.get("/:slug", async (c) => {
   if (!publish.isLivePublish(row)) return c.html(unavailablePage(), 404);
 
   const viewer = await resolveViewer(c, row);
-  if (!viewer) return c.html(gatePage(row));
+  if (!viewer) return c.html(gatePage(row, undefined, await loadBrand(row)));
   if (row.comments_enabled !== 1) return renderPublished(c, row, viewer.email);
 
   // The shell frames /view, which is what logs the view and applies the
@@ -455,7 +624,7 @@ publishRenderRoutes.get("/:slug", async (c) => {
   const title = await publishedTitle(row);
   c.header("Content-Security-Policy", SHELL_CSP);
   c.header("Referrer-Policy", "no-referrer");
-  return c.html(readerShell(row, title, viewer.email));
+  return c.html(readerShell(row, title, viewer.email, await loadBrand(row)));
 });
 
 // GET /p/:slug/view — the document itself, always sandboxed. Framed by the
@@ -518,7 +687,7 @@ publishRenderRoutes.post("/:slug/gate", async (c) => {
   // oracle against a human-chosen passcode, and the email branch is an open
   // relay that mails any address an attacker supplies.
   if (!tryConsume(`publish-gate:${slug}:${clientIp(c)}`, GATE_LIMIT)) {
-    return c.html(gatePage(row, "Too many attempts. Try again in a few minutes."), 429);
+    return c.html(gatePage(row, "Too many attempts. Try again in a few minutes.", await loadBrand(row)), 429);
   }
 
   // A public link has no gate to pass, so a POST here is either a stale form or
@@ -529,7 +698,7 @@ publishRenderRoutes.post("/:slug/gate", async (c) => {
 
   if (row.access_mode === "code") {
     if (!(await publish.verifyCode(row, String(form.code ?? "")))) {
-      return c.html(gatePage(row, "That code is not correct."), 401);
+      return c.html(gatePage(row, "That code is not correct.", await loadBrand(row)), 401);
     }
     setSessionCookie(c, slug, await publish.createSession(row.id, null));
     return c.redirect(`/p/${slug}`);
@@ -537,7 +706,7 @@ publishRenderRoutes.post("/:slug/gate", async (c) => {
 
   const email = normalizeEmail(String(form.email ?? ""));
   if (!isEmailish(email)) {
-    return c.html(gatePage(row, "Enter a valid email address."), 400);
+    return c.html(gatePage(row, "Enter a valid email address.", await loadBrand(row)), 400);
   }
   // Invite mode: only allow-listed addresses get a link. Both branches must
   // cost the same, not just look the same — returning early on a rejection
@@ -566,7 +735,7 @@ publishRenderRoutes.get("/:slug/verify", async (c) => {
   if (!publish.isLivePublish(row)) return c.html(unavailablePage(), 404);
   const email = await publish.consumeMagicLink(row.id, c.req.query("token") ?? "");
   if (!email) {
-    return c.html(gatePage(row, "That link is invalid or has expired. Request a new one."), 401);
+    return c.html(gatePage(row, "That link is invalid or has expired. Request a new one.", await loadBrand(row)), 401);
   }
   setSessionCookie(c, slug, await publish.createSession(row.id, email));
   return c.redirect(`/p/${slug}`);

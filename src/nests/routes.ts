@@ -57,6 +57,7 @@ import { config } from "../config.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { attributeRequest } from "../shared/client-metadata.js";
+import { parseStoredBranding } from "../shared/branding.js";
 
 /**
  * Effective permission for a nest, honoring open-mode + anon-owned nests.
@@ -120,6 +121,18 @@ function isGrantOnly(access: { permission: string; hasGrant: boolean }) {
 }
 
 export const nestRoutes = new Hono<AuthEnv>();
+
+/**
+ * The nest row as clients see it: the stored branding JSON is swapped for a
+ * parsed, re-validated `branding` object (null = unbranded). This is the read
+ * a public reader already makes, so reader-mode branding needs no extra route
+ * — and a nest the caller can't read 404s before this runs.
+ */
+function withParsedBranding<T extends { branding_json?: string | null } | null>(nest: T) {
+  if (!nest) return nest;
+  const { branding_json, ...rest } = nest as NonNullable<T>;
+  return { ...rest, branding: parseStoredBranding(branding_json) };
+}
 
 // GET /nests[?archived=1]
 nestRoutes.get("/", async (c) => {
@@ -560,7 +573,7 @@ nestRoutes.get("/:nestId", async (c) => {
 
   const nest = await getNest(nestId);
   return c.json({
-    nest,
+    nest: withParsedBranding(nest),
     permission,
     roles: grant_only ? ["viewer"] : roles,
     myStewards,
