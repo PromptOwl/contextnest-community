@@ -16,6 +16,7 @@ import {
   Bot,
   FileText,
   FileCode2,
+  FileType,
   CornerDownRight,
   Clock3,
   Wrench,
@@ -176,6 +177,7 @@ function TypeGlyph({ type }: { type?: string }) {
   if (type === "artifact") return <FileCode2 className="h-3.5 w-3.5 text-amber-500 shrink-0" />;
   if (type === "tool") return <Wrench className="h-3.5 w-3.5 text-teal-500 shrink-0" />;
   if (type === "table") return <Table2 className="h-3.5 w-3.5 text-cyan-500 shrink-0" />;
+  if (type === "pdf") return <FileType className="h-3.5 w-3.5 text-rose-500 shrink-0" />;
   return <FileText className="h-3.5 w-3.5 text-slate-400 shrink-0" />;
 }
 

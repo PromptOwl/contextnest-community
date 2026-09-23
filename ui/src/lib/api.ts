@@ -1068,6 +1068,63 @@ export async function createNode(
   });
 }
 
+/** The `pdf:` block a pdf node carries (engine §1.11). */
+export interface PdfMeta {
+  file: string;
+  sha256: string;
+  bytes: number;
+  pages: number;
+  /** False for a scanned PDF: no text could be extracted, the body is empty. */
+  text_layer: boolean;
+  extractor: string;
+  extractor_version: string;
+  extracted_at: string;
+}
+
+/**
+ * Upload a PDF as a governed `pdf` document (multipart — the browser sets the
+ * boundary). Pass `nodeId` to replace the PDF of an existing pdf node: that is
+ * a new version, governed like any edit. The body becomes the extracted text.
+ */
+export async function createPdfNode(
+  nestId: string,
+  file: File,
+  opts: { title?: string; folder?: string; tags?: string[]; nodeId?: string } = {},
+) {
+  const form = new FormData();
+  form.append("file", file);
+  if (opts.title) form.append("title", opts.title);
+  if (opts.folder) form.append("folder", opts.folder);
+  if (opts.nodeId) form.append("nodeId", opts.nodeId);
+  for (const t of opts.tags ?? []) form.append("tags", t);
+  const res = await fetch(`/nests/${nestId}/nodes/pdf`, {
+    method: "POST",
+    body: form,
+    credentials: "include",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `PDF upload failed: ${res.status}`);
+  return data as { node: any; version: number; stewards?: any[] };
+}
+
+/**
+ * Same-origin URL of a pdf node's binary. The server picks the version a
+ * caller may see (a public reader always gets the approved one); `approvedOnly`
+ * asks for that view explicitly, `download` for an attachment disposition.
+ */
+export function pdfUrl(
+  nestId: string,
+  nodeId: string,
+  opts: { version?: number; approvedOnly?: boolean; download?: boolean } = {},
+): string {
+  const q = new URLSearchParams();
+  if (opts.version) q.set("version", String(opts.version));
+  if (opts.approvedOnly) q.set("approved_only", "1");
+  if (opts.download) q.set("download", "1");
+  const qs = q.toString();
+  return `/nests/${nestId}/nodes/${nodeId}/pdf${qs ? `?${qs}` : ""}`;
+}
+
 export async function updateNode(
   nestId: string,
   nodeId: string,

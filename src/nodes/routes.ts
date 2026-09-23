@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import { parseDocument, readPdfBinary } from "@promptowl/contextnest-engine";
+import type { NestStorage } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
@@ -260,7 +262,7 @@ nodeRoutes.post("/:nodeId{.+}/discard", async (c) => {
 nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const { versions: versionManager } = await engineCache.get(nestId);
+  const { storage, versions: versionManager } = await engineCache.get(nestId);
 
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
@@ -287,12 +289,27 @@ nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
       `Version ${targetVersion} not found for ${nodeId}`,
     );
   }
+  // A pdf node's body can't be written back as text — it is whatever its PDF
+  // extracts to. Restoring a pdf version re-imports that version's binary
+  // (resolved from the archive and hash-verified by the engine), which brings
+  // its text back with it.
+  let restoredPdf: Buffer | null = null;
+  if (pdfMetaOf(nodeId, raw)) {
+    try {
+      restoredPdf = await readPdfBinary(storage as unknown as NestStorage, nodeId, {
+        version: targetVersion,
+      });
+    } catch (err) {
+      console.error("[pdf] revert could not read the version's binary", nestId, nodeId, targetVersion, err);
+      throw new NotFoundError(`The PDF of version ${targetVersion} is not available to restore.`);
+    }
+  }
   const content = bodyOnly(nodeId, raw);
   const { node, version } = await updateNode(
     nestId,
     nodeId,
     {
-      content,
+      ...(restoredPdf ? { pdf: { bytes: new Uint8Array(restoredPdf) } } : { content }),
       changeNote: `Restored from version ${targetVersion}`,
       client: attributeRequest(c, body.client),
     },
@@ -459,6 +476,13 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
           approved,
         );
         response.content = bodyOnly(nodeId, approvedRaw);
+        // A pdf node's `pdf:` block must describe the same version as the
+        // body — the approved one, whose binary is what /pdf serves here —
+        // not the live draft's.
+        if (response.type === "pdf") {
+          const approvedPdf = pdfMetaOf(nodeId, approvedRaw);
+          if (approvedPdf) response.pdf = approvedPdf;
+        }
       } catch (err) {
         console.error(
           "reconstructVersion failed (public single)",
@@ -597,6 +621,15 @@ nodeRoutes.delete("/:nodeId{.+}", async (c) => {
 });
 
 // ─── Helpers ────────────────────────────────────────────────────────────
+
+/** The `pdf:` block recorded in a (reconstructed) raw document, if any. */
+function pdfMetaOf(nodeId: string, raw: string) {
+  try {
+    return parseDocument(`${nodeId}.md`, raw, nodeId).frontmatter.pdf;
+  } catch {
+    return undefined;
+  }
+}
 
 async function getUserEmail(c: any): Promise<string> {
   const userId = c.get("userId");

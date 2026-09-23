@@ -798,6 +798,23 @@ A node with a pending review is frozen — `423` — for callers who can't clear
 
 Purges everything keyed to the node id — version history, review requests, the approved-version pin, tag index, annotations and their comments, review comments, watchers, schedules, trigger hooks, workflow edges, document-scoped stewards and document grants — and leaves a deletion tombstone for `GET /changes`. Node ids derive from titles, so a later document can land on the same id; it must inherit none of the old one's readers, reviewers or history. Run traces are kept: they record what happened, not what exists. `POST /nests/:nestId/nodes/:nodeId/move` carries that same set to the new id instead of dropping it (folder grants excepted — they cover a path prefix, so a moved doc leaves one share and joins another).
 
+### POST `/nests/:nestId/nodes/pdf`
+Upload a PDF as a governed `pdf` document. Multipart: `file` (required), optional `title` (default: the file name), `folder`, `tags` (repeat the field or comma-separate), `nodeId`, `changeNote`. Write permission (nest-scope steward editors too, as for `POST /nodes`).
+
+The engine's `context_import_pdf` extracts the text — the node body, one `<!-- page N -->` marker per page — and stores the PDF beside the node as `<id>.pdf`, bound by sha256 in the node's `pdf:` frontmatter block. Governance is exactly a create's: in a governed nest the upload lands as a draft (or publishes when a create by that person would); without stewards it publishes.
+
+- `nodeId` of an existing `pdf` node → the PDF is replaced as a **new version** of that node (same review lock, draft/publish rule and version rows as `PATCH`). The prior binary stays in history. Identical bytes are a no-op. A replace is two engine writes (stage the new PDF, then the same update/publish a text edit makes); if the second fails, the node's previous file and PDF are put back before the error is returned.
+- `400` — no `file`, not a PDF (checked by the `%PDF-` header, not the extension), an encrypted/unreadable PDF, or `nodeId` names a node that is not a pdf. `413` — larger than `PDF_MAX_MB` (default 25 MB). Nothing is written on any refusal.
+- A PDF with no text layer (a scan) imports with an empty body and `pdf.text_layer: false`; there is no OCR.
+- Returns `201` `{ node, version, stewards? }` on create, `200` `{ node, version }` on replace. `node.pdf` is the `pdf:` block (`file`, `sha256`, `bytes`, `pages`, `text_layer`, `extractor`, `extractor_version`, `extracted_at`).
+
+A pdf node's text is read-only: `PATCH` with a `content`/`append` that changes it → `409` (re-upload instead; echoing the stored body back is accepted). A pdf node can't be converted to another type or another type to `pdf` (`400`), can't be moved to another folder yet (`400`), and `POST /nodes` with `type: "pdf"` → `400`. `POST …/revert` re-imports the target version's PDF; `POST …/discard` restores the sealed version's PDF (the response carries a `warning` if that binary can't be restored); `DELETE` removes the binary with the node.
+
+### GET `/nests/:nestId/nodes/:nodeId/pdf`
+The PDF binary, gated exactly like `GET /nodes/:nodeId`. A public reader (or `?approved_only=1`) always gets the **approved** version's bytes — never a draft's — whatever version is asked for; other readers get the current working copy, or `?version=N`. Every response is verified against the sha256 its version records (a mismatch is refused, not served).
+
+Headers: `Content-Type: application/pdf`, `Content-Disposition: inline; filename="<slug>.pdf"` (`?download=1` → `attachment`), `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-cache`, and an `ETag` of the sha256 (`If-None-Match` → `304`). `404` when the node has no such version or no approved version (public). An id that is not a pdf node falls through to the node route, so a document whose own id ends in `/pdf` still reads.
+
 ### POST `/nests/:nestId/assets`
 Multipart upload (field `file`) of an image or video referenced from documents. Write permission.
 

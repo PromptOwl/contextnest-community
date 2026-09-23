@@ -714,4 +714,15 @@ export const config = {
     const mb = parseInt(process.env.VIDEO_MAX_MB || "30", 10);
     return (Number.isFinite(mb) && mb > 0 ? mb : 30) * 1024 * 1024;
   },
+  /**
+   * Max PDF upload size in bytes (POST /nests/:id/nodes/pdf). Default 25 MB —
+   * under Cloud Run's 32 MiB HTTP/1 request-body limit, with room for the
+   * multipart framing, so an oversized PDF is refused by our own check (413
+   * with a clear message) rather than by the platform. Read per request, so a
+   * change takes effect without a restart. Override via PDF_MAX_MB.
+   */
+  get PDF_MAX_BYTES() {
+    const mb = parseInt(process.env.PDF_MAX_MB || "25", 10);
+    return (Number.isFinite(mb) && mb > 0 ? mb : 25) * 1024 * 1024;
+  },
 };
