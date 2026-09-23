@@ -12,8 +12,10 @@ import {
   NODE_TYPES,
   TAG_PATTERN,
   generateIndexMd,
+  readPdfBinary,
+  pdfSidecarPath,
 } from "@promptowl/contextnest-engine";
-import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
+import type { ContextNode, NestStorage, PdfMeta } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { serializeNodeSafe } from "../governance/safe-publish.js";
@@ -29,6 +31,7 @@ import {
   VaultBusyError,
   isVaultLockTimeout,
 } from "../shared/errors.js";
+import type { ClientMetadata } from "../shared/client-metadata.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
 import { syncNodeTags, removeNodeFromTagIndex } from "../governance/tag-index-service.js";
@@ -37,11 +40,16 @@ import {
   resolveNestPath,
   nestAllowsSelfApprove,
   nestReviewsPrimeOnly,
+  nestCreatorIsReviewer,
 } from "../nests/service.js";
 import { isPrimeDocument, documentPrimeFlag } from "../governance/prime-service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
 import { notifyMentions } from "../governance/mention-notify.js";
-import { resolveUserRoles } from "../governance/stewardship-service.js";
+import {
+  resolveUserRoles,
+  stewardDocumentCreator,
+  removeSteward,
+} from "../governance/stewardship-service.js";
 import { canApproveWith } from "../governance/roles.js";
 import {
   resolveCallerEmail,
@@ -368,6 +376,9 @@ export interface NodeResponse {
    *  scope. Clients resolve the inherited case from `tags` + the nest's
    *  `prime_tags` setting; the server gate is authoritative either way. */
   prime?: boolean;
+  /** The `pdf:` block of a pdf node (sidecar path, sha256, size, pages,
+   *  text_layer, extractor) — absent on every other type. */
+  pdf?: PdfMeta;
 }
 
 /** Node types an orchestrator can fetch and run; only these carry schedule. */
@@ -388,7 +399,40 @@ export const ACCEPTED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
   ...RUNNABLE_NODE_TYPES,
   "artifact",
   "table",
+  "pdf",
 ]);
+
+/** A pdf node's body is the text extracted from its binary (engine §1.11). */
+export const PDF_NODE_TYPE = "pdf";
+
+/** Where a pdf node comes from — the one way to create or re-version one. */
+export const PDF_UPLOAD_HINT =
+  "upload the file to POST /nests/:nestId/nodes/pdf (the Upload PDF action)";
+
+/**
+ * A PDF being written as a pdf node: the raw bytes and, optionally, the file
+ * name it arrived under. Size and magic bytes are the caller's to check (the
+ * route answers 413/400 before any governance work); the engine re-checks both.
+ */
+export interface PdfUpload {
+  bytes: Uint8Array;
+  filename?: string;
+}
+
+/**
+ * Engine refusals on the PDF path are caller-actionable — not a PDF, an
+ * encrypted or unreadable one, an id already taken, a node that is not a pdf.
+ * Keep them as 4xx with the engine's own message instead of a generic 500.
+ */
+function pdfEngineError(err: unknown): unknown {
+  const code = (err as { code?: string })?.code;
+  const message = (err as Error)?.message || "The PDF could not be imported.";
+  if (code === "VALIDATION_FAILED" || code === "INVALID_DOCUMENT_ID") {
+    return new ValidationError(message);
+  }
+  if (code === "DOCUMENT_ALREADY_EXISTS") return new ConflictError(message);
+  return err;
+}
 
 /** The type gate shared by create and convert: the feature flags for the
  *  artifact/table kinds, then the accepted set. Unknown types must fail as a
@@ -409,6 +453,36 @@ export function assertAcceptedType(type: string): void {
         .join(", ")}`,
     );
   }
+}
+
+/**
+ * The update-side counterpart of the create gate, for nodes that predate it.
+ *
+ * A node written before `assertAcceptedType` existed (or imported from a vault
+ * with its own vocabulary) can carry a `type` this server never accepts, e.g.
+ * `policy`. The engine re-validates the WHOLE frontmatter on every write, so
+ * every update of such a node — even a no-op PATCH echoing its current body —
+ * died inside the engine (`Document validation failed: Invalid enum value …
+ * received 'policy'`) and reached the caller as the generic 500 from
+ * toSafeError, with no hint that the stored type was the problem.
+ *
+ * Refuse the write here instead, as a 400 that names the type and the way
+ * out: re-type the node in the same PATCH. A patch that carries a `type` is
+ * left to assertAcceptedType (the engine accepts a re-type from an unknown
+ * type: it sets `frontmatter.type` before validating). Read paths are not
+ * touched — existing legacy nodes still list, render and version as before.
+ */
+function assertUpdatableType(storedType: string | undefined): void {
+  const type = storedType || "document";
+  // The soft-disable of artifact/table is create-only by design (see
+  // createNode): existing nodes of a disabled type still save. Only a type
+  // outside the accepted set can never reach the engine.
+  if (ACCEPTED_NODE_TYPES.has(type)) return;
+  throw new ValidationError(
+    `node has legacy type "${type}" which this server no longer accepts; ` +
+      `include "type": "<accepted type>" in the same PATCH to migrate it ` +
+      `(allowed: ${[...ACCEPTED_NODE_TYPES].sort().join(", ")})`,
+  );
 }
 
 export function toNodeResponse(node: ContextNode): NodeResponse {
@@ -453,6 +527,7 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
         ? String((fm.metadata as any).schedule)
         : undefined,
     prime: documentPrimeFlag(fm.metadata),
+    ...(fm.type === "pdf" && fm.pdf ? { pdf: fm.pdf } : {}),
   };
 }
 
@@ -1254,6 +1329,13 @@ export interface CreateNodeInput {
    *  the nest's prime tags; `false` exempts this doc from an otherwise-prime
    *  tag. */
   prime?: boolean;
+  /** Caller attribution recorded on the version this create seals (§9.4).
+   *  Optional everywhere — an unattributed write is a valid write. */
+  client?: ClientMetadata;
+  /** Create a `pdf` node from these bytes (engine `context_import_pdf`) instead
+   *  of a markdown body. `content` is ignored — the body is the extracted text.
+   *  Requires `type: "pdf"` (or no type). */
+  pdf?: PdfUpload;
 }
 
 export interface UpdateNodePatch {
@@ -1267,9 +1349,15 @@ export interface UpdateNodePatch {
   schedule?: string;
   /** Document-scope prime flag. `null` clears it back to tag/nest inheritance. */
   prime?: boolean | null;
+  /** See CreateNodeInput.client. */
+  client?: ClientMetadata;
   /** Re-type the node (the editor's "Convert to…"). Same accepted set and
    *  feature flags as create; leaving a runnable type drops its schedule. */
   type?: string;
+  /** A new PDF for a pdf node — the only way its body changes. Runs the
+   *  engine's `context_import_pdf` in place of `context_update`; governance
+   *  (draft vs publish, version rows, review lock) is the same as any edit. */
+  pdf?: PdfUpload;
 }
 
 /**
@@ -1285,6 +1373,13 @@ export interface UpdateNodePatch {
  */
 export interface WriteOptions {
   notifyMentions?: boolean;
+  /**
+   * False keeps a create out of the nest's creator-reviews posture: the
+   * author is not stewarded and v1 is not published on their authority. For
+   * documents the system derives (the annotations projection), which nobody
+   * authored.
+   */
+  creatorReviews?: boolean;
 }
 
 export interface NodeMutationResult {
@@ -1344,11 +1439,19 @@ async function assertMayFlagPrime(
 async function autoPublishReason(
   nestId: string,
   userEmail: string,
-  doc: { tags?: readonly unknown[]; metadata?: unknown }
+  doc: { tags?: readonly unknown[]; metadata?: unknown },
+  opts: { creatorReviews?: boolean; governed?: boolean } = {},
 ): Promise<string | null> {
-  // Ungoverned nest: nothing to review, nobody to review it.
-  if (!(await isStewardshipEnabled(nestId))) return "no stewards configured";
+  // Ungoverned nest: nothing to review, nobody to review it. A caller that
+  // already looked this up passes it in — create is a hot path.
+  const governed = opts.governed ?? (await isStewardshipEnabled(nestId));
+  if (!governed) return "no stewards configured";
   if (await isPrimeDocument(nestId, doc.tags, doc.metadata)) return null;
+  // Creator-reviews (a create, in a nest with the posture on): the author is
+  // this document's reviewer, so v1 is theirs to publish. Only v1 — every
+  // later edit, theirs included, is a change to a reviewed document and goes
+  // through the queue.
+  if (opts.creatorReviews) return "creator is the document's reviewer";
   // Prime-only posture: everything that isn't prime self-publishes.
   if (await nestReviewsPrimeOnly(nestId)) {
     return "prime-only review, document is not prime";
@@ -1427,8 +1530,17 @@ async function createNodeOnce(
   // Soft-disable only: existing nodes of a disabled type still read/render/
   // version untouched. Runnable types (agent/skill/tool) are gated by
   // FEATURE_WORKFLOW_PLANE at the plane routes, not here.
-  const requestedType = input.type || "document";
+  const requestedType = input.pdf ? input.type || PDF_NODE_TYPE : input.type || "document";
   assertAcceptedType(requestedType);
+  // A pdf node's `pdf:` block records bytes, and a JSON create carries none —
+  // the engine would refuse the block-less node as an opaque 500. Point the
+  // caller at the one surface that can make one.
+  if (requestedType === PDF_NODE_TYPE && !input.pdf) {
+    throw new ValidationError(`PDF documents can't be created from text — ${PDF_UPLOAD_HINT}.`);
+  }
+  if (input.pdf && requestedType !== PDF_NODE_TYPE) {
+    throw new ValidationError(`a PDF upload creates a "pdf" node, not "${requestedType}"`);
+  }
 
   if (input.schedule !== undefined && !isRunnableType(input.type)) {
     throw new ValidationError(
@@ -1494,56 +1606,124 @@ async function createNodeOnce(
       ...(input.schedule ? { schedule: input.schedule } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
     };
-    const publishReason = await autoPublishReason(nestId, userEmail, {
-      tags,
-      metadata,
-    });
-    // Same note in the engine history and the governance row: the version
-    // history an admin reads in the UI comes from node_versions, so leaving the
-    // reason only in history.yaml hides it from the audit that matters.
-    const publishNote =
-      publishReason === null ? undefined : `Auto-published on create (${publishReason})`;
+    // Creator-reviews: steward the author BEFORE deciding to publish, since v1
+    // publishes on the strength of that row. A failure here fails the create
+    // with nothing written — never a document published on a false premise.
+    // The id is reserved by the lock and free (checked above), so the row
+    // can't name someone else's document. Not atomic with the engine write
+    // (a separate filesystem + DB path this can't join in one transaction), so
+    // it is compensated instead: everything from here until the document is on
+    // disk runs under one guard that takes the row back on any failure. A row
+    // left behind on a free id would attach to whoever creates that id next.
+    const governed = await isStewardshipEnabled(nestId);
+    const creatorReviews =
+      opts.creatorReviews !== false &&
+      governed &&
+      (await nestCreatorIsReviewer(nestId));
+    const creatorSteward = creatorReviews
+      ? await stewardDocumentCreator(nestId, id, userEmail)
+      : null;
 
-    // Write — and publish, when the gate allows — through the engine's canonical
-    // create. Governance stays here; the engine owns frontmatter assembly,
-    // validation, version assignment and the index regen, so a document created
-    // here is identical to one created by the CLI or mcp-server.
-    let published = publishReason !== null;
+    let published = false;
+    let publishNote: string | undefined;
     try {
-      await engineApi.run(
-        "context_create",
-        {
-          id,
-          title: input.title,
-          content: input.content,
-          type: requestedType,
-          // A skill node is invalid without a skill block, and this surface has
-          // no field for one — default the trigger from the title, same as the
-          // CLI and mcp-server do.
-          ...(requestedType === "skill"
-            ? { trigger: `when asked to ${input.title.toLowerCase()}` }
-            : {}),
-          ...(tags.length ? { tags } : {}),
-          ...(input.status ? { status: input.status } : {}),
-          metadata,
-          publish: published,
-          ...(publishNote ? { note: publishNote } : {}),
-        },
-        await opContext(nestId, userEmail),
+      const publishReason = await autoPublishReason(
+        nestId,
+        userEmail,
+        { tags, metadata },
+        { creatorReviews: creatorSteward?.canApprove === true, governed },
       );
-    } catch (err) {
-      // The op writes the node before publishing it. If the write landed and
-      // only the publish failed, register the document as a draft instead of
-      // throwing and stranding a file that has no governance rows.
-      let onDisk = true;
+      // Same note in the engine history and the governance row: the version
+      // history an admin reads in the UI comes from node_versions, so leaving
+      // the reason only in history.yaml hides it from the audit that matters.
+      publishNote =
+        publishReason === null
+          ? undefined
+          : `Auto-published on create (${publishReason})`;
+      published = publishReason !== null;
+
+      // Write — and publish, when the gate allows — through the engine's
+      // canonical create. Governance stays here; the engine owns frontmatter
+      // assembly, validation, version assignment and the index regen, so a
+      // document created here is identical to one created by the CLI or
+      // mcp-server.
       try {
-        await storage.readDocument(id);
-      } catch {
-        onDisk = false;
+        if (input.pdf) {
+          // Same id, tags, publish decision and note as context_create gets —
+          // only the op differs: the engine stores the binary beside the node,
+          // binds it by sha256 and writes the extracted text as the body.
+          try {
+            await engineApi.run(
+              "context_import_pdf",
+              {
+                id,
+                title: input.title,
+                bytes_base64: Buffer.from(input.pdf.bytes).toString("base64"),
+                ...(input.pdf.filename ? { filename: input.pdf.filename } : {}),
+                ...(tags.length ? { tags } : {}),
+                publish: published,
+                ...(publishNote ? { note: publishNote } : {}),
+                ...(input.client ? { client: input.client } : {}),
+              },
+              await opContext(nestId, userEmail),
+            );
+          } catch (err) {
+            throw pdfEngineError(err);
+          }
+        } else {
+          await engineApi.run(
+            "context_create",
+            {
+              id,
+              title: input.title,
+              content: input.content,
+              type: requestedType,
+              // A skill node is invalid without a skill block, and this surface
+              // has no field for one — default the trigger from the title, same
+              // as the CLI and mcp-server do.
+              ...(requestedType === "skill"
+                ? { trigger: `when asked to ${input.title.toLowerCase()}` }
+                : {}),
+              ...(tags.length ? { tags } : {}),
+              ...(input.status ? { status: input.status } : {}),
+              metadata,
+              publish: published,
+              ...(publishNote ? { note: publishNote } : {}),
+            },
+            await opContext(nestId, userEmail),
+          );
+        }
+      } catch (err) {
+        // The op writes the node before publishing it. If the write landed and
+        // only the publish failed, register the document as a draft instead of
+        // throwing and stranding a file that has no governance rows.
+        let onDisk = true;
+        try {
+          await storage.readDocument(id);
+        } catch {
+          onDisk = false;
+        }
+        if (!onDisk) throw err;
+        console.error("publishDocument failed (node create auto-publish)", err);
+        published = false;
       }
-      if (!onDisk) throw err;
-      console.error("publishDocument failed (node create auto-publish)", err);
-      published = false;
+    } catch (err) {
+      // Nothing is on disk (the inner catch only rethrows when the write never
+      // landed), so the steward row would name a document that never existed.
+      // The original failure is what the caller needs to see; a failed
+      // compensation is logged, not substituted for it.
+      if (creatorSteward?.insertedId) {
+        try {
+          await removeSteward(creatorSteward.insertedId);
+        } catch (cleanupErr) {
+          console.error(
+            "removeSteward failed while compensating a failed create",
+            id,
+            cleanupErr,
+          );
+        }
+      }
+      throw err;
     }
 
     const node = await storage.readDocument(id);
@@ -1561,6 +1741,7 @@ async function createNodeOnce(
         status: "published",
         tags,
         changeNote: publishNote,
+        client: input.client,
       });
       await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
     } else {
@@ -1571,10 +1752,12 @@ async function createNodeOnce(
         nestId,
         nodeId: id,
         version: 1,
-        content: input.content,
+        // A pdf node's body is what the engine extracted, not anything sent.
+        content: input.pdf ? node.body || "" : input.content,
         author: userEmail,
         status: "draft",
         tags,
+        client: input.client,
       });
     }
 
@@ -1712,7 +1895,10 @@ export async function alignOnDiskStatus(
 
 export async function registerImportedDocuments(
   nestId: string,
-  userEmail: string
+  userEmail: string,
+  /** Caller attribution for the import (§9.4) — recorded on every version row
+   *  this registration seeds, so a folder an agent imported says so. */
+  client?: ClientMetadata,
 ): Promise<number> {
   const startedAt = Date.now();
   const tracked = await versions.getTrackedNodeIds(nestId);
@@ -1760,6 +1946,7 @@ export async function registerImportedDocuments(
           ? "Imported from existing folder"
           : "Imported from existing folder — could not be published, kept as a draft",
       tags,
+      client,
     });
     if (d.status === "published") {
       await versions.setApprovedVersion(nestId, d.id, d.version, userEmail);
@@ -1788,6 +1975,72 @@ export async function registerImportedDocuments(
   return docs.length;
 }
 
+/**
+ * Stage a new PDF on an existing pdf node as an unpublished working copy:
+ * the engine archives the prior binary, writes the new sidecar and replaces
+ * the body with the new extraction. It is deliberately NOT the publish — the
+ * caller then runs the very same `context_update` a text edit runs (draft with
+ * the assigned version, or publish with the audit note), so a PDF version is
+ * governed, numbered and sealed exactly like any other edit.
+ *
+ * That makes a replace two engine writes where a text edit is one, so the
+ * stage hands back `rollback`: it puts the node's previous file and sidecar
+ * back, byte for byte, for the caller to run when the second write fails —
+ * otherwise the working copy would show a PDF no version row records. The
+ * archived copy of the prior binary the engine made is content-addressed and
+ * harmless to leave.
+ *
+ * `unchanged` means the bytes are the node's current PDF: nothing was written.
+ */
+async function stagePdfImport(
+  nestId: string,
+  nodeId: string,
+  pdf: PdfUpload,
+  userEmail: string,
+  client: ClientMetadata | undefined,
+  priorRaw: string,
+): Promise<{ unchanged: boolean; rollback: () => Promise<void> }> {
+  const { storage } = await engineCache.get(nestId);
+  const sidecar = pdfSidecarPath(nodeId);
+  let priorSidecar: Buffer | null = null;
+  try {
+    priorSidecar = await storage.readVaultBinary(sidecar);
+  } catch {
+    // Nothing (readable) there — nothing to put back.
+  }
+  const sealedBefore = await storage.maxRecordedVersion(nodeId);
+  const rollback = async () => {
+    // A write that sealed a version before failing (say, at the checkpoint)
+    // is history now: the chain vouches for the new PDF, so it stays.
+    if ((await storage.maxRecordedVersion(nodeId).catch(() => sealedBefore)) > sealedBefore) {
+      return;
+    }
+    try {
+      await storage.writeDocument(nodeId, priorRaw);
+      if (priorSidecar) await storage.writeVaultBinary(sidecar, priorSidecar);
+      await storage.regenerateIndex();
+    } catch (err) {
+      console.error("[pdf] could not roll back a failed PDF replace", nestId, nodeId, err);
+    }
+  };
+  try {
+    const result = await engineApi.run<{ unchanged?: boolean }>(
+      "context_import_pdf",
+      {
+        id: nodeId,
+        bytes_base64: Buffer.from(pdf.bytes).toString("base64"),
+        ...(pdf.filename ? { filename: pdf.filename } : {}),
+        publish: false,
+        ...(client ? { client } : {}),
+      },
+      await opContext(nestId, userEmail),
+    );
+    return { unchanged: result.unchanged === true, rollback };
+  } catch (err) {
+    throw pdfEngineError(err);
+  }
+}
+
 export async function updateNode(
   nestId: string,
   nodeId: string,
@@ -1806,6 +2059,54 @@ export async function updateNode(
         node = await storage.readDocument(nodeId);
       } catch {
         throw new NotFoundError(`Node not found: ${nodeId}`);
+      }
+      // The exact stored bytes, for undoing a PDF replace whose second write
+      // fails (see stagePdfImport).
+      const priorRaw = node.rawContent;
+      // Set once a PDF replace has staged its new binary + text.
+      let pdfRollback: (() => Promise<void>) | null = null;
+      // A stored type this server no longer accepts fails engine validation
+      // on ANY write (content, append, tags, status, revert, the MCP
+      // context_update — all land here). Unless this patch re-types the node,
+      // refuse now with a message that says so, instead of the opaque 500 the
+      // engine fault used to become. A patch WITH a different type is gated
+      // below by assertAcceptedType like any other convert; one that echoes
+      // the stored type back is not a re-type, so it is refused here too.
+      if (patch.type === undefined || patch.type === node.frontmatter.type) {
+        assertUpdatableType(node.frontmatter.type);
+      }
+      // A pdf node's body is the text the engine extracted from its binary;
+      // editing it by hand would leave the two disagreeing under one version.
+      // It changes only by uploading a new PDF (patch.pdf). An echo of the
+      // stored body is not an edit — the editor sends content with every
+      // save — so it is dropped rather than refused.
+      const storedType = node.frontmatter.type || "document";
+      const isPdfNode = storedType === PDF_NODE_TYPE;
+      if (patch.pdf && !isPdfNode) {
+        throw new ValidationError(
+          `${nodeId} is a "${storedType}" node, not a PDF — a PDF can only replace the PDF of a pdf node.`,
+        );
+      }
+      if (patch.type !== undefined && patch.type !== storedType) {
+        if (isPdfNode || patch.type === PDF_NODE_TYPE) {
+          throw new ValidationError(
+            isPdfNode
+              ? "A PDF document can't be converted to another type — its body is the text of its PDF."
+              : `A document can't be converted to a PDF — ${PDF_UPLOAD_HINT}.`,
+          );
+        }
+      }
+      if (isPdfNode) {
+        const readOnly =
+          "This is a PDF document: its text is extracted from the PDF and can't be edited directly. " +
+          "Upload a new version of the PDF (Replace PDF) to change it.";
+        if (patch.append) throw new ConflictError(readOnly);
+        if (patch.content !== undefined) {
+          if (patch.content.trim() !== (node.body || "").trim()) {
+            throw new ConflictError(readOnly);
+          }
+          patch = { ...patch, content: undefined };
+        }
       }
       // Kept for the mention fan-out at the end: only names this save ADDS
       // notify, so the same @name surviving many saves is one event.
@@ -1826,8 +2127,8 @@ export async function updateNode(
       if (patch.tags) {
         // Replace, don't merge: the editor sends the full tag set on every
         // save, so a union made removals impossible (CU: removed tag returns
-        // after reopen). Callers wanting additive semantics (MCP
-        // context_update) merge against the current tags themselves.
+        // after reopen). MCP context_update replaces too, per the engine
+        // catalog; a caller wanting to add a tag sends the full set.
         const nextTags = requireTags(patch.tags);
         node = { ...node, frontmatter: { ...node.frontmatter, tags: nextTags } };
         // The engine performs the write, so the new set has to reach it — the
@@ -1961,15 +2262,29 @@ export async function updateNode(
         // failed) `currentVersion + 1` reuses a version number, which grafts a
         // second chain onto the first and breaks reconstruction from there on.
         const newVersion = await versionManager.nextVersion(nodeId, currentVersion);
+        if (patch.pdf) {
+          const staged = await stagePdfImport(
+            nestId, nodeId, patch.pdf, userEmail, patch.client, priorRaw,
+          );
+          if (staged.unchanged && Object.keys(opInput).length === 0) {
+            return { node, version: node.frontmatter.version || currentVersion || 1 };
+          }
+          if (!staged.unchanged) pdfRollback = staged.rollback;
+        }
         // The engine owns the write: it applies the patch, validates, stamps the
         // version we assigned and drops the stale published-state checksum, then
         // regenerates the index. `publish: false` because this revision has not
         // cleared review — governance below records it as a draft.
-        await engineApi.run(
-          "context_update",
-          { id: nodeId, ...opInput, publish: false, version: newVersion },
-          await opContext(nestId, userEmail),
-        );
+        try {
+          await engineApi.run(
+            "context_update",
+            { id: nodeId, ...opInput, publish: false, version: newVersion },
+            await opContext(nestId, userEmail),
+          );
+        } catch (err) {
+          if (pdfRollback) await pdfRollback();
+          throw err;
+        }
         node = await storage.readDocument(nodeId);
         await syncNodeTags(nestId, nodeId, currentTags);
 
@@ -1993,6 +2308,7 @@ export async function updateNode(
           status: "draft",
           tags: currentTags,
           changeNote: patch.changeNote,
+          client: patch.client,
         });
         // Author revised their own pending submission: move the open review
         // onto this fresh version so the steward approves the edited content.
@@ -2007,6 +2323,15 @@ export async function updateNode(
         const publishNote =
           patch.changeNote || `Auto-published on edit (${publishReason})`;
         let publishedVersion: number;
+        if (patch.pdf) {
+          const staged = await stagePdfImport(
+            nestId, nodeId, patch.pdf, userEmail, patch.client, priorRaw,
+          );
+          if (staged.unchanged && Object.keys(opInput).length === 0) {
+            return { node, version: node.frontmatter.version || 1 };
+          }
+          if (!staged.unchanged) pdfRollback = staged.rollback;
+        }
         try {
           const result = await engineApi.run<{ version: number }>(
             "context_update",
@@ -2019,6 +2344,7 @@ export async function updateNode(
             "publishDocument failed (node patch auto-publish)",
             err
           );
+          if (pdfRollback) await pdfRollback();
           throw err;
         }
         node = await storage.readDocument(nodeId);
@@ -2036,6 +2362,7 @@ export async function updateNode(
           status: "published",
           tags: currentTags,
           changeNote: publishNote,
+          client: patch.client,
         });
         await versions.setApprovedVersion(
           nestId,
@@ -2215,6 +2542,17 @@ export async function moveNode(
     throw new NotFoundError(`Node not found: ${nodeId}`);
   }
 
+  // A pdf node's binary is bound to its id (`<id>.pdf`, its archived versions
+  // under the id's .versions/), and a move rewrites the id without carrying
+  // either — the moved node would name a sidecar that is not there and the
+  // delete of the old id would take the binary with it. Refuse until the
+  // engine can relocate a pdf node as one unit.
+  if (node.frontmatter.type === PDF_NODE_TYPE) {
+    throw new ValidationError(
+      "PDF documents can't be moved to another folder yet. Upload the PDF again in the destination folder instead.",
+    );
+  }
+
   // Same freeze as edit/delete: a node under open review is what the
   // reviewer is looking at — its identity can't change mid-review.
   await assertNotReviewLocked(nestId, nodeId, userEmail, "moving");
@@ -2365,7 +2703,7 @@ export async function discardDraft(
   nestId: string,
   nodeId: string,
   userEmail: string,
-): Promise<{ deleted: boolean; version: number | null }> {
+): Promise<{ deleted: boolean; version: number | null; warning?: string }> {
   return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
     await assertNotReviewLocked(nestId, nodeId, userEmail, "discarding");
 
@@ -2403,6 +2741,25 @@ export async function discardDraft(
     // Tags travel in frontmatter, so a draft that added or removed one has to
     // be undone in the tag index too — steward resolution reads it.
     const restored = parseDocument(`${nodeId}.md`, raw, nodeId);
+    // A pdf node's draft also replaced the binary beside it. The restored
+    // frontmatter names the sealed version's bytes; put them back as the live
+    // sidecar (the engine resolves them from the archive and verifies the
+    // hash), so the file and its binary agree again.
+    let warning: string | undefined;
+    if (restored.frontmatter.type === PDF_NODE_TYPE) {
+      try {
+        const bytes = await readPdfBinary(storage as NestStorage, nodeId);
+        await storage.writeVaultBinary(pdfSidecarPath(nodeId), bytes);
+      } catch (err) {
+        // The text is back; the binary could not be. Reads stay safe (the
+        // served PDF is hash-verified, so a mismatch is refused, not served),
+        // but the caller should hear it now rather than from a later 500.
+        console.error("[pdf] could not restore the sealed binary on discard", nestId, nodeId, err);
+        warning =
+          `The draft was discarded, but the PDF of version ${sealed} could not be restored ` +
+          "(its archived copy is missing or no longer matches). Upload the PDF again, or ask an admin to verify the nest.";
+      }
+    }
     await syncNodeTags(
       nestId,
       nodeId,
@@ -2411,7 +2768,7 @@ export async function discardDraft(
 
     await versions.deleteUnsealedVersions(nestId, nodeId, sealed);
     await trackEvent("node.discard_draft", { nestId, nodeId, version: sealed });
-    return { deleted: false, version: sealed };
+    return { deleted: false, version: sealed, ...(warning ? { warning } : {}) };
   });
 }
 

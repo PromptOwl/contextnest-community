@@ -90,6 +90,30 @@ Prime documents carry a **Prime** badge in the nest's document list, with a tool
 
 Flipping any of this only affects **future** writes. Marking a published document prime doesn't unpublish it; the next edit is what needs approval.
 
+## Creators review their own documents (`creator_is_reviewer`)
+
+A per-nest flag (**off** by default; nest Settings → "Creators review their own documents") for the GitHub posture: anyone with write access creates documents, and the person who created a document is the one who approves changes to it.
+
+When it's on, creating a document in a governed nest does two things:
+
+1. **The author is stewarded as a document-scope `reviewer`** of that document — exactly the row an admin would otherwise add by hand (`POST /nests/:id/stewards` with `scope: "document"`, or the `documents:` section of `stewards.yaml`). The nest owner is skipped; they already approve everything.
+2. **The first version publishes immediately.** The author is the document's reviewer, so nobody else needs to bless v1. This holds for the owner too: with this on, the owner's own new documents publish at v1 whether or not `allow_self_approve` is on — the two settings are independent, and this one only ever touches v1.
+
+The row is written **before** the publish decision, so v1 only publishes when the author really can approve the next change. If a document-scope row for the author already exists on that id with a lesser role (an admin stewarded the id ahead of time), it is left alone and v1 lands as a draft instead. If the row can't be written, the create fails with nothing written.
+
+Everything after v1 is the ordinary review cycle, and separation of duties is untouched:
+
+| | Who approves |
+|---|---|
+| A teammate edits the document | The creator (plus any tag- or nest-level reviewer, and admins) |
+| The creator edits their own document | Another reviewer — the creator can't approve their own submission |
+
+**Prime wins.** A prime document still lands as a draft: its creator is made its reviewer, but someone else has to approve the first version.
+
+Only **future** creates are affected. Turning it on doesn't steward anyone on existing documents, and turning it off leaves every steward row it created in place — remove them from the Stewards tab like any other. Every create surface participates (the editor, the REST and MCP APIs, and `ctx push` — the pusher authored what they pushed); the derived annotations document is the one exception, since nobody authored it.
+
+Like prime, this only applies to **governed** nests. With stewardship off there is nothing to review, so the flag is inert until you turn stewardship on.
+
 ## Who sees what
 
 Governance gates two things: who can **approve**, and who can **read**.

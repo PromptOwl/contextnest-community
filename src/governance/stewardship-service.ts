@@ -20,6 +20,7 @@ import {
   collabPermToRole,
   canViewWith,
   canEditWith,
+  canApproveWith,
   primaryRole,
 } from "./roles.js";
 import type {
@@ -416,6 +417,79 @@ export async function createStewardRecord(params: {
   }
 
   return results;
+}
+
+/** What stewardDocumentCreator found or did, so the create can act on it. */
+export interface CreatorStewardResult {
+  /** True when the author can approve changes to this document. */
+  canApprove: boolean;
+  /** Set when this call inserted the row — the caller removes it if the create fails. */
+  insertedId?: string;
+}
+
+/**
+ * Creator reviews their documents: make the author of a new document its
+ * reviewer. Called from createNodeOnce BEFORE the document is written, because
+ * the create publishes v1 on the strength of this row — the row has to exist
+ * before that decision, and a failure here must fail the create rather than
+ * leave a document published on a false premise. The caller compensates with
+ * removeSteward(insertedId) if the write that follows never lands.
+ *
+ * The nest owner is skipped — they already approve everything, and the roster
+ * refuses owner rows for the same reason (createStewardRecord). An existing
+ * document-scope row for the author is left as it is: a reviewer row already
+ * does the job, and a lesser role someone assigned on purpose is not silently
+ * promoted — the caller sees canApprove=false and drafts v1 instead. Nobody is
+ * emailed: the author just wrote the document; the row is a consequence of
+ * that, not an assignment someone made.
+ */
+export async function stewardDocumentCreator(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+): Promise<CreatorStewardResult> {
+  const email = userEmail.trim().toLowerCase();
+  if (!email) return { canApprove: false };
+  const ownerEmail = ((await getNestOwnerEmail(nestId)) || "").toLowerCase();
+  if (email === ownerEmail) return { canApprove: true };
+
+  // Insert first, then read on conflict — never check-then-insert. The create
+  // holds the node's write lock, but POST /stewards does not, so an admin can
+  // pre-assign this exact (id, author) row at any moment; the unique index
+  // idx_stewards_uniq_document turns that race into a conflict we resolve by
+  // taking whatever landed at face value.
+  const row = {
+    nestId,
+    scope: "document" as const,
+    nodePattern: nodeId,
+    userEmail: email,
+    userId: await userIdForEmail(email),
+    role: "reviewer" as const,
+    assignedBy: email,
+    assignedAt: new Date().toISOString(),
+    isActive: true,
+  };
+  try {
+    const created = await assignSteward(row);
+    return { canApprove: true, insertedId: created.id };
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+  }
+  // Someone already stewarded this author on this id. Their row is left as
+  // it is — a lesser role assigned on purpose is not promoted — and whether
+  // v1 may publish is answered by the same resolution the approve gate uses
+  // (collaborator role + every steward scope), so the two can never disagree.
+  return {
+    canApprove: canApproveWith(
+      await resolveUserRoles(nestId, email, { nodeId }),
+    ),
+  };
+}
+
+/** A unique-index conflict, from either database. */
+function isUniqueViolation(err: unknown): boolean {
+  const code = (err as { code?: string } | null)?.code;
+  return code === "SQLITE_CONSTRAINT_UNIQUE" || code === "23505";
 }
 
 // ─── STEWARD RESOLUTION ─────────────────────────────────────────────────

@@ -56,6 +56,11 @@ import {
 import { definitionRoutes } from "./definitions/routes.js";
 import { isDerivedAnnotationsNode } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
+import {
+  pdfNodeRoutes,
+  PDF_UPLOAD_PATH,
+  pdfMaxRequestBytes,
+} from "./nodes/pdf-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
 import {
   isSuperAdmin,
@@ -104,6 +109,7 @@ import {
 } from "./auth/license.js";
 import { persistSetting } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
+import { publicBaseUrlError } from "./shared/public-base-url.js";
 import { isOidcReady } from "./auth/oidc.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
@@ -378,17 +384,21 @@ export function createApp(): Hono<AuthEnv> {
   // Request body size cap — prevents DoS via giant POST payloads before
   // a handler ever gets to parse JSON. Only applies when Content-Length
   // is declared; streamed bodies fall through (uncommon on this API).
-  // The asset-upload route alone gets a higher ceiling (video uploads,
-  // per-type caps enforced in the handler) — the global cap is untouched.
+  // The asset-upload route gets a higher ceiling (video uploads, per-type
+  // caps enforced in the handler), and so does the PDF upload route (up to
+  // PDF_MAX_MB, enforced again in its handler) — the global cap is untouched.
   const ASSET_UPLOAD_PATH = /^\/nests\/[^/]+\/assets\/?$/;
   app.use("*", async (c, next) => {
     const lenStr = c.req.header("Content-Length");
     if (lenStr) {
       const len = parseInt(lenStr, 10);
+      const isPost = c.req.method === "POST";
       const cap =
-        c.req.method === "POST" && ASSET_UPLOAD_PATH.test(c.req.path)
+        isPost && ASSET_UPLOAD_PATH.test(c.req.path)
           ? Math.max(config.MAX_BODY_BYTES, ASSET_MAX_REQUEST_BYTES)
-          : config.MAX_BODY_BYTES;
+          : isPost && PDF_UPLOAD_PATH.test(c.req.path)
+            ? Math.max(config.MAX_BODY_BYTES, pdfMaxRequestBytes())
+            : config.MAX_BODY_BYTES;
       if (Number.isFinite(len) && len > cap) {
         return c.json(
           {
@@ -422,6 +432,9 @@ export function createApp(): Hono<AuthEnv> {
       userId: c.get("userId") ?? null,
       status: c.res.status,
       durationMs: Date.now() - started,
+      // Set by whichever handler validated the request's `client` block
+      // (§9.4). Absent on a request that sent none.
+      client: c.get("clientMetadata"),
     });
   });
 
@@ -468,6 +481,11 @@ export function createApp(): Hono<AuthEnv> {
       // API would refuse it — existing nodes of the type stay readable.
       type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
       type_table_enabled: config.TYPE_TABLE_ENABLED,
+      // This server hosts several organizations (PromptOwl-hosted) rather than
+      // one. The visibility picker words 'Organization' and 'Public' by it and
+      // confirms before 'org'; the server enforces the same in
+      // PATCH /nests/:id/visibility.
+      shared_deployment: config.SHARED_DEPLOYMENT,
       // Sub-agent runs gate its own recursion surface separately (env-only,
       // must clear a security review — NOT a UI toggle). Exposed read-only so
       // the Runs page shows the "spawn sub-agent" option only when it's live.
@@ -619,6 +637,7 @@ export function createApp(): Hono<AuthEnv> {
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
     oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
     people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
+    shared_deployment: config.SHARED_DEPLOYMENT,
     // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
     // presence is reported, never the value (same discipline as the OIDC secret).
     sso_token_exchange_enabled: config.SSO_TOKEN_EXCHANGE_ENABLED,
@@ -706,9 +725,19 @@ export function createApp(): Hono<AuthEnv> {
       const v = String(body.logo_url ?? "").trim();
       pending.push({ name: "LOGO_URL", value: v || null });
     }
+    // Validated, not just trimmed. This value is spliced into the copy-paste
+    // snippets the Connecting-agents panel renders — a `bash` block for the
+    // Claude Code and Codex commands, and quoted strings in config.toml,
+    // config.yaml and mcp.json — which people paste verbatim into their own
+    // terminal and config files. Stored unchecked, a shell metacharacter or a
+    // quote here would turn "can edit server settings" into code execution on
+    // every teammate's machine. It is also the audience a minted MCP ticket is
+    // bound to, so junk in it silently breaks token verification.
     if ("public_base_url" in body) {
       const v = String(body.public_base_url ?? "").trim().replace(/\/$/, "");
-      pending.push({ name: "PUBLIC_BASE_URL", value: v || null });
+      const err = v ? publicBaseUrlError(v) : null;
+      if (err) addError("public_base_url", err);
+      else pending.push({ name: "PUBLIC_BASE_URL", value: v || null });
     }
     if ("telemetry_enabled" in body) {
       pending.push({ name: "TELEMETRY_ENABLED", value: body.telemetry_enabled ? "true" : "false" });
@@ -903,6 +932,15 @@ export function createApp(): Hono<AuthEnv> {
       pending.push({
         name: "PEOPLE_SUGGEST_ALL_USERS",
         value: body.people_suggest_all_users ? "true" : null,
+      });
+    }
+    // This server hosts several organizations. On, nest visibility 'org'
+    // needs the same acknowledgement as 'public' and the UI words both tiers
+    // to name the real boundary. false persists as null — unset is off.
+    if ("shared_deployment" in body) {
+      pending.push({
+        name: "SHARED_DEPLOYMENT",
+        value: body.shared_deployment ? "true" : null,
       });
     }
     // ── Agent SSO / token-exchange (POST /auth/token-exchange) ────────────
@@ -2153,7 +2191,12 @@ export function createApp(): Hono<AuthEnv> {
             r.steward.userEmail.toLowerCase() === userEmail.toLowerCase() &&
             r.steward.role === "editor",
         );
-      } else if (parts.length === 2 && c.req.method === "POST") {
+      } else if (
+        c.req.method === "POST" &&
+        // POST /nodes (create) and POST /nodes/pdf (PDF upload — a create, or
+        // a new version of a pdf node) share the nest-scope editor rule.
+        (parts.length === 2 || (parts.length === 3 && parts[2] === "pdf"))
+      ) {
         // Empty nodeId: doc/tag branches won't match; nest branch returns all.
         const resolved = await resolveStewardsForNode(nestId, "");
         stewardEditorBypass = resolved.some(
@@ -2276,6 +2319,11 @@ export function createApp(): Hono<AuthEnv> {
   //   2. governanceNodeRoutes — /:nodeId/{approve,reject,submit-review,comments,…}
   //   3. nodeRoutes — CRUD incl. the bare /:nodeId{.+} catch-all, mounted last
   //      so it only matches when no suffix route did.
+  //   0. pdfNodeRoutes — POST /pdf (upload) and GET /:nodeId/pdf (the binary).
+  //      First, because the /pdf suffix must beat every greedy catch-all; the
+  //      GET falls through (next()) when the id is not a pdf node, so a
+  //      document whose own id ends in /pdf still reads.
+  nestsApp.route("/:nestId/nodes", pdfNodeRoutes);
   nestsApp.route("/:nestId/nodes", annotationRoutes);
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
   nestsApp.route("/:nestId/nodes", nodeRoutes);

@@ -403,6 +403,22 @@ export const config = {
     return process.env.PEOPLE_SUGGEST_ALL_USERS === "true";
   },
   /**
+   * This server hosts several unrelated organizations (the PromptOwl-hosted
+   * deployment) rather than one company (a self-hosted install).
+   *
+   * OFF BY DEFAULT. Nest visibility 'org' means "every authenticated account
+   * on this deployment" (src/shared/access.ts) — on a single-company server
+   * that IS the organization, so the tier is safe to flip in one click. On a
+   * shared server it is every customer, so with this on: flipping a nest to
+   * 'org' needs the same explicit acknowledgement 'public' always needs
+   * (PATCH /nests/:id/visibility 409s without it — the server enforces it, not only the UI), and
+   * the UI words both tiers to say so. Exposed on /health as
+   * `shared_deployment`. Superadmin-togglable at runtime via /admin/settings.
+   */
+  get SHARED_DEPLOYMENT(): boolean {
+    return process.env.SHARED_DEPLOYMENT === "true";
+  },
+  /**
    * Path to the .env file the server reads its config from and the license
    * install flow persists PROMPTOWL_KEY into. Defaults UNDER DATA_ROOT (not
    * $cwd) so it lands on the writable, volume-mounted, restart-surviving path
@@ -697,5 +713,16 @@ export const config = {
   get VIDEO_MAX_BYTES() {
     const mb = parseInt(process.env.VIDEO_MAX_MB || "30", 10);
     return (Number.isFinite(mb) && mb > 0 ? mb : 30) * 1024 * 1024;
+  },
+  /**
+   * Max PDF upload size in bytes (POST /nests/:id/nodes/pdf). Default 25 MB —
+   * under Cloud Run's 32 MiB HTTP/1 request-body limit, with room for the
+   * multipart framing, so an oversized PDF is refused by our own check (413
+   * with a clear message) rather than by the platform. Read per request, so a
+   * change takes effect without a restart. Override via PDF_MAX_MB.
+   */
+  get PDF_MAX_BYTES() {
+    const mb = parseInt(process.env.PDF_MAX_MB || "25", 10);
+    return (Number.isFinite(mb) && mb > 0 ? mb : 25) * 1024 * 1024;
   },
 };

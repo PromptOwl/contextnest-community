@@ -75,7 +75,10 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // per-nest tools already exist inline (same baseline exception), and these server-level
 // variants enable cross-nest workflows without multiple MCP connections. Authorization is
 // handled per-call by the same handleToolCall gates the per-nest endpoint uses.
-const BASELINE = 56;
+//
+// Lowered 56 -> 45: the server-level /mcp tools now derive from the per-nest
+// definitions (plus a `nest` arg) instead of keeping hand-written copies.
+const BASELINE = 45;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

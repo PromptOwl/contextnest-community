@@ -2,13 +2,10 @@ import { Extension } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import { classifyVideoText, type VideoMatch } from "../../../lib/video-embed";
 
-// Same-origin nest video assets only — mirrors ASSET_VIDEO_RE in
-// DocumentViewer.tsx (and SAFE_NAME in src/nests/asset-routes.ts). Kept in
-// lockstep manually, same as MEDIA_FILE_RE/VIDEO_FILE_RE already are between
-// MarkdownEditor.tsx and the server allowlist.
-export const ASSET_VIDEO_RE =
-  /^\/nests\/[^/]+\/assets\/[0-9a-f-]{36}\.(mp4|webm)$/;
+// One matcher for the read view and the editor — see ui/src/lib/video-embed.ts.
+export { ASSET_VIDEO_RE } from "../../../lib/video-embed";
 
 function createVideoWidget(url: string): HTMLVideoElement {
   const video = document.createElement("video");
@@ -19,33 +16,95 @@ function createVideoWidget(url: string): HTMLVideoElement {
   return video;
 }
 
+// YouTube / Vimeo player. Wrapped in a non-editable box so clicks and the
+// caret don't land "inside" the iframe as editor content. Same sandbox/allow
+// set as DocumentViewer's EmbedVideo — see the note there on why
+// allow-scripts + allow-same-origin is acceptable only because embedUrl is
+// pinned to youtube-nocookie.com / player.vimeo.com by toEmbedUrl.
+function createIframeWidget(
+  embedUrl: string,
+  provider: string,
+): HTMLDivElement {
+  const wrap = document.createElement("div");
+  wrap.className = "cn-video-embed cn-video-embed--iframe";
+  wrap.contentEditable = "false";
+  const iframe = document.createElement("iframe");
+  iframe.src = embedUrl;
+  iframe.title = provider === "youtube" ? "YouTube video" : "Vimeo video";
+  iframe.loading = "lazy";
+  iframe.allow = "fullscreen; picture-in-picture; encrypted-media";
+  iframe.allowFullscreen = true;
+  iframe.referrerPolicy = "strict-origin-when-cross-origin";
+  iframe.setAttribute(
+    "sandbox",
+    "allow-scripts allow-same-origin allow-presentation allow-popups",
+  );
+  wrap.appendChild(iframe);
+  return wrap;
+}
+
+function widgetFor(match: VideoMatch): {
+  key: string;
+  toDOM: () => HTMLElement;
+} {
+  return match.kind === "asset"
+    ? { key: `video-asset:${match.src}`, toDOM: () => createVideoWidget(match.src) }
+    : {
+        key: `video-embed:${match.embedUrl}`,
+        toDOM: () => createIframeWidget(match.embedUrl, match.provider),
+      };
+}
+
+// The same video can appear more than once in a doc; keys must stay unique
+// or ProseMirror may hand one paragraph's player to another. The n-th repeat
+// (in document order) gets `#n` — stable while typing elsewhere, and the
+// first occurrence keeps the bare key.
+function uniqueKey(key: string, seen: Map<string, number>): string {
+  const n = (seen.get(key) ?? 0) + 1;
+  seen.set(key, n);
+  return n === 1 ? key : `${key}#${n}`;
+}
+
 /**
- * Find every paragraph whose sole content is a same-origin asset video URL
- * and return the decorations that hide the raw text and show a <video>
- * widget in its place. Exported (model-only, no DOM needed to collect them)
- * so the matching logic is unit-testable against a real ProseMirror doc,
- * same as collectWikiLinkDecorations in WikiLink.ts.
+ * Find every paragraph whose sole content is a video URL — a same-origin
+ * asset video, or a bare YouTube/Vimeo URL (see classifyVideoText) — and
+ * return the decorations that hide the raw text and show a player widget in
+ * its place. Exported (model-only, no DOM needed to collect them) so the
+ * matching logic is unit-testable against a real ProseMirror doc, same as
+ * collectWikiLinkDecorations in WikiLink.ts.
+ *
+ * Widgets carry a `key` so ProseMirror reuses the existing DOM across
+ * transactions instead of rebuilding it — without one, every keystroke
+ * would recreate (and reload) the player.
  */
 export function collectVideoPreviewDecorations(
   doc: ProseMirrorNode,
 ): Decoration[] {
   const decorations: Decoration[] = [];
+  const seen = new Map<string, number>();
   doc.descendants((node, pos) => {
     if (node.type.name !== "paragraph" || node.childCount !== 1) return;
     const child = node.firstChild;
     if (!child?.isText || !child.text) return;
-    if (!ASSET_VIDEO_RE.test(child.text)) return;
+    const linkMark = child.marks.find((m) => m.type.name === "link");
+    const match = classifyVideoText(
+      child.text,
+      linkMark ? (linkMark.attrs.href as string | null) : undefined,
+    );
+    if (!match) return;
 
-    const url = child.text;
     const start = pos + 1;
     const end = start + child.nodeSize;
+    const { key: baseKey, toDOM } = widgetFor(match);
+    const key = uniqueKey(baseKey, seen);
     decorations.push(
       Decoration.inline(start, end, { class: "video-url-hidden" }),
     );
     decorations.push(
-      Decoration.widget(start, () => createVideoWidget(url), {
+      Decoration.widget(start, toDOM, {
         side: -1,
         ignoreSelection: true,
+        key,
       }),
     );
   });
@@ -57,13 +116,12 @@ export function collectVideoPreviewDecorations(
  * uploaded video as a paragraph whose sole content is the bare asset URL —
  * DocumentViewer.tsx's read view upgrades that to a <video> player, but the
  * TipTap editing surface (including its own "preview" toggle) rendered it
- * as literal text. This decorates any paragraph that is *only* a
- * same-origin asset video URL with an inline <video> widget and visually
- * hides the raw URL text — the same "text stays the source of truth,
- * decoration renders it nicely" approach WikiLink/TaskCheckbox already use,
- * so no schema or markdown-serialization changes are needed (the .md on
- * disk, and old docs that already have a bare-URL video line, are
- * unaffected — this re-scans on every render).
+ * as literal text. This decorates any paragraph that is *only* a video URL
+ * (asset, or a bare YouTube/Vimeo link) with an inline player widget and
+ * visually hides the raw URL text — the same "text stays the source of
+ * truth, decoration renders it nicely" approach WikiLink/TaskCheckbox
+ * already use, so no schema or markdown-serialization changes are needed
+ * (the .md on disk keeps the bare URL — this re-scans on every render).
  */
 export const VideoPreview = Extension.create({
   name: "videoPreview",

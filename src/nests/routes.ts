@@ -24,6 +24,8 @@ import {
   setStewardshipEnabled,
   disableStewardshipAndWipeGovernance,
   nestAllowsSelfApprove,
+  nestCreatorIsReviewer,
+  setCreatorIsReviewer,
   setAllowSelfApprove,
   nestReviewsPrimeOnly,
   setPrimeOnlyReview,
@@ -54,6 +56,7 @@ import { suffixOf } from "../db/sql.js";
 import { config } from "../config.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
 import { ANON_USER_ID } from "../shared/constants.js";
+import { attributeRequest } from "../shared/client-metadata.js";
 
 /**
  * Effective permission for a nest, honoring open-mode + anon-owned nests.
@@ -234,7 +237,15 @@ nestRoutes.get("/", async (c) => {
     seen.add(n.id);
     deduped.push(n);
   }
-  const out = await Promise.all(deduped.map(annotate));
+  // Rows the caller reaches through visibility ALONE — no ownership, no
+  // collaborator/steward/team row. The dashboard's default "My nests" scope
+  // leaves these out, so it needs the fact stated rather than inferred from
+  // an empty roles list (a public nest you're also an editor of is yours).
+  const memberIds = new Set([...owned, ...shared].map((n) => n.id));
+  const out = (await Promise.all(deduped.map(annotate))).map((row) => ({
+    ...row,
+    discovered: !memberIds.has(row.id),
+  }));
 
   // Tile metadata: per-nest document count + people (collaborators + active
   // stewards). All three are single grouped queries rather than per-nest
@@ -378,6 +389,7 @@ nestRoutes.post("/:nestId", async (c) => {
     nestId?: string;
     partial?: boolean;
     finalize?: boolean;
+    client?: unknown;
   }>();
   const files = Array.isArray(body.files) ? body.files : [];
   const userId = c.get("userId");
@@ -397,7 +409,14 @@ nestRoutes.post("/:nestId", async (c) => {
     }
     const email = await resolveCallerEmail(userId);
     if (body.finalize) {
-      return c.json({ nest, documents: await registerImportedDocuments(target, email) });
+      return c.json({
+        nest,
+        documents: await registerImportedDocuments(
+          target,
+          email,
+          attributeRequest(c, body.client),
+        ),
+      });
     }
     // Staging writes files straight into vault storage, skipping the node
     // creation path and its title/id validation and write locks. That is the
@@ -437,7 +456,11 @@ nestRoutes.post("/:nestId", async (c) => {
     }
     // Seed governance rows for the documents already in the folder so they
     // list as published and edit from their real version (not from scratch).
-    const documents = await registerImportedDocuments(nest.id, email);
+    const documents = await registerImportedDocuments(
+      nest.id,
+      email,
+      attributeRequest(c, body.client),
+    );
     return c.json({ nest, documents, rejected }, 201);
   } catch (err) {
     // The nest row exists before its content does, so a failed first chunk
@@ -481,7 +504,7 @@ nestRoutes.post("/:nestId/sync", async (c) => {
   if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
     throw new ForbiddenError("Only the server admin can sync folders");
   }
-  const body = await c.req.json<{ name?: string }>();
+  const body = await c.req.json<{ name?: string; client?: unknown }>();
   if (!body?.name) {
     throw new ValidationError("name is required");
   }
@@ -489,6 +512,7 @@ nestRoutes.post("/:nestId/sync", async (c) => {
     userId,
     body.name,
     await resolveCallerEmail(userId),
+    attributeRequest(c, body.client),
   );
   return c.json(result, 201);
 });
@@ -677,6 +701,7 @@ nestRoutes.get("/:nestId/settings", async (c) => {
     allow_self_approve: await nestAllowsSelfApprove(nestId),
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
+    creator_is_reviewer: await nestCreatorIsReviewer(nestId),
   });
 });
 
@@ -706,6 +731,7 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     allow_self_approve?: boolean;
     prime_only_review?: boolean;
     prime_tags?: string[] | string;
+    creator_is_reviewer?: boolean;
   }>();
   let wiped: {
     stewards: number;
@@ -750,12 +776,18 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
       Array.isArray(body.prime_tags) ? body.prime_tags : [body.prime_tags],
     );
   }
+  // Creator-reviews is likewise future-only: it stewards nobody retroactively
+  // and turning it off leaves every steward row it created in place.
+  if (typeof body.creator_is_reviewer === "boolean") {
+    await setCreatorIsReviewer(nestId, body.creator_is_reviewer);
+  }
 
   return c.json({
     stewardship_enabled: await isStewardshipEnabled(nestId),
     allow_self_approve: await nestAllowsSelfApprove(nestId),
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
+    creator_is_reviewer: await nestCreatorIsReviewer(nestId),
     wiped,
   });
 });

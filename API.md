@@ -14,6 +14,70 @@ Anonymous open mode (`AUTH_MODE=open`) bypasses auth on most read endpoints.
 
 All bodies are JSON unless noted. All errors return `{ "error": "msg" }` with appropriate HTTP status.
 
+## Caller attribution (`client`)
+
+`edited_by` names a person and a read names nobody, so neither answers *which
+agent, in which session*. Every write body below, and every MCP tool call, takes
+an optional `client` object that does ([spec §9.4](https://github.com/PromptOwl/ContextNest/blob/main/CONTEXT_NEST_SPEC.md)):
+
+```json
+{ "title": "API Design", "content": "…",
+  "client": { "agent": "claude-code", "session_id": "s-9f2", "run": 7 } }
+```
+
+- `agent` and `session_id` are reserved; any other key is custom and is recorded
+  verbatim. Values are scalars (string / number / boolean).
+- A write that creates a version records it **on that version** — it comes back
+  on `GET .../versions` and on MCP `context_versions` (in the prose and the
+  structured payload). Every path that seals a version takes it: create, edit,
+  approve, revert, and import (`POST /nests/import`, `POST /nests/unsynced/sync`,
+  which stamp every row they seed), plus `POST /review-queue/bulk`, whose one
+  block rides every approval in the batch. `POST .../submit-review` seals it
+  into the engine's own version chain (`history.yaml`), which is the entry that
+  submission appends. Every MCP tool call, and every REST
+  call that accepts `client`, records it on the activity trace
+  (`GET /admin/trace`, `GET /nests/:nestId/trace`, where it comes back as a
+  parsed `client` object) — which is where a call that seals no version is
+  attributed: a **read**, and a **rejection**, which commits no content.
+- **Entirely optional.** No endpoint requires it and an unattributed call is a
+  valid call. A call that carries none stores nothing rather than an empty
+  object — "not attributed" and "attributed to nobody" are different claims.
+- **A label, not an identity.** It is never authenticated, never used to
+  authorize, and never an input to a hash chain, so histories written before the
+  field existed keep verifying byte for byte. `editedBy` remains the
+  authoritative authoring record.
+- **Bounded**, because an untrusted caller writes it into an append-only audit
+  trail: values ≤512 chars, ≤16 custom keys, scalars only → `400` otherwise. A
+  near-miss on a reserved key (`sessionId`, `Agent`) is refused rather than
+  filed as a custom key, which would look attributed and not be.
+- The server fills what the transport already knows, **per key, under** anything
+  the caller sent. Precedence is caller > env > connection: on MCP the
+  connection means the `initialize` handshake's `clientInfo.name` and the
+  transport's session id; behind that sits the label the operator gave the API
+  key. `CONTEXTNEST_AGENT` / `CONTEXTNEST_SESSION_ID` are the env layer;
+  `CONTEXTNEST_NO_ATTRIBUTION=1` derives nothing (a `client` the caller sent
+  explicitly is still honoured). See `CONFIGURATION.md`.
+- Note the `/mcp` endpoints are **stateless** — one server per request, no
+  session issued — so a handshake's `clientInfo` is not in scope by the time a
+  tool call arrives, and `agent` comes from the key label in practice. An agent
+  that wants to name itself exactly should send `client` rather than rely on
+  what the connection happens to report.
+
+- **Treat a recorded `client` as untrusted text when you read it back.** The
+  values are whatever the caller sent, stored verbatim and unescaped by design —
+  an audit record that rewrites what the caller said is worth less than none —
+  and `context_versions` prints `agent` into the prose an LLM client reads
+  (`[via claude-code]`). That is the same standing as every other caller-written
+  string this server serves back: document titles, bodies, change notes and
+  review notes all reach an agent's context the same way. Bounds (≤512 chars,
+  scalars) cap the size, not the content. Render it as data, never as
+  instructions, and the usual rule applies to anything downstream: escape at the
+  point of use. This server's own UI does — React escapes it as a text node, and
+  nothing interpolates it into SQL (`client_json` is always a bound parameter).
+
+Distinct from `metadata`, which is frontmatter: `metadata` describes the
+document, `client` describes the call that touched it.
+
 ---
 
 ## 1. Auth
@@ -182,7 +246,7 @@ Related `/admin/settings` fields (GET/PATCH, superadmin only): `sso_token_exchan
 A nest = a context vault (folder of markdown documents + governance state).
 
 ### GET `/nests`
-Returns owned + shared nests. Archived nests are **absent** — as they are from every other listing, the work inbox, cross-nest search and the MCP index. Each row carries `pinned` — the calling user's own bookmark (see `POST /nests/:nestId/pin`).
+Returns owned + shared nests. Archived nests are **absent** — as they are from every other listing, the work inbox, cross-nest search and the MCP index. Each row carries `pinned` — the calling user's own bookmark (see `POST /nests/:nestId/pin`). Nests reachable through `org`/`public` visibility alone are included too and carry `discovered: true` (owned and shared rows carry `false`) — the dashboard's default *My nests* scope leaves them out.
 ```json
 { "nests": [{ "id": "...", "user_id": "...", "name": "...", "slug": "...", "visibility": "private", "created_at": "..." }] }
 ```
@@ -235,7 +299,8 @@ Pins are per `(user, nest)` in the `nest_pins` table and cascade with the nest. 
   "stewardship_enabled": false,
   "allow_self_approve": false,
   "prime_only_review": false,
-  "prime_tags": ["prime-document"]
+  "prime_tags": ["prime-document"],
+  "creator_is_reviewer": false
 }
 ```
 
@@ -249,6 +314,7 @@ Every field is optional; only the ones present are changed.
 - `allow_self_approve` — owner/admin writes publish immediately instead of drafting.
 - `prime_only_review` — in a governed nest, only **prime** documents need approval; everything else self-publishes. Off by default.
 - `prime_tags` — tags that mark a document prime. Accepts an array or a comma-separated string; stored and returned normalized (no leading `#`, lowercased, deduped). See `STEWARDSHIP.md → Prime documents`.
+- `creator_is_reviewer` — in a governed nest, whoever creates a document becomes its document-scope `reviewer` and v1 publishes immediately; later changes go through review as usual (the creator approves teammates' changes, another reviewer approves the creator's). Prime documents still draft. Future creates only. Off by default. See `STEWARDSHIP.md → Creators review their own documents`.
 
 Turning stewardship **off** wipes stewards and pending reviews and is owner-only; the other fields are non-destructive and never change the state of anything already published.
 
@@ -264,7 +330,7 @@ Turning stewardship **off** wipes stewards and pending reviews and is owner-only
   | `public` | anyone, including anonymous callers |
   `org` and `public` readers see **approved content only** — drafts and pending versions stay with collaborators and stewards.
   Under `AUTH_MODE=open` every caller resolves to the anonymous user, so there is no "other authenticated user" for `org` to admit: on an open-mode deployment `org` behaves as `private`. Use it on a deployment with real logins.
-- **Outside-org publish guardrail.** Setting `visibility: "public"` **requires** `acknowledge_public: true` (`org` does not — it stays inside the deployment, so it crosses no organizational boundary). Without it the request is rejected `409`:
+- **Outside-org publish guardrail.** Setting `visibility: "public"` **requires** `acknowledge_public: true`. `org` does not on a single-organization server — it stays inside the deployment, so it crosses no organizational boundary. On a **shared deployment** (`SHARED_DEPLOYMENT=true` / Settings → General → *This server hosts several organizations* — the PromptOwl-hosted service) the deployment *is* several organizations, so `org` requires the same `acknowledge_public: true` and the `warning` names that boundary. Without the acknowledgement the request is rejected `409`:
   ```json
   {
     "error": "Publishing this nest requires acknowledgement.",
@@ -272,7 +338,15 @@ Turning stewardship **off** wipes stewards and pending reviews and is owner-only
     "warning": "This makes the nest readable by anyone on the internet, outside your organization."
   }
   ```
-  Going back to `private` needs no acknowledgement.
+  On a shared deployment, `org` without the acknowledgement is rejected the same way, with its own warning:
+  ```json
+  {
+    "error": "Opening this nest to the organization requires acknowledgement.",
+    "requires_acknowledgement": true,
+    "warning": "This server is shared: 'Organization' makes the nest readable by every account on this server, including other organizations — not just yours."
+  }
+  ```
+  Going back to `private` needs no acknowledgement. `GET /health` reports `shared_deployment` so a client can word its own confirmation the same way.
 
 ### PATCH `/nests/:nestId/reader-mode` (server-admin / superadmin only)
 Configure **Public Docs Reader Mode** — a clean, read-only public docs view of the nest. Superadmin-gated via `isServerAdminUserId` (license admin OR `access.yaml` super_admins ∪ the DB-granted set; the same gate as `/nests/unsynced` and `/admin/*`). A plain nest-owner/admin who is not a superadmin gets `403`.
@@ -635,7 +709,8 @@ Optional query params, applied before the per-node enrichment:
   "scope": "team",
   "status": "draft",
   "folder": "gtm/deals",
-  "schedule": "0 6 * * *"
+  "schedule": "0 6 * * *",
+  "client": { "agent": "claude-code", "session_id": "s-9f2" }
 }
 ```
 - Slug derived from title → `nodes/<slug>`.
@@ -644,6 +719,7 @@ Optional query params, applied before the per-node enrichment:
 - Optional `schedule` (free-form cron/interval string, opaque to the server) — **only valid when `type` is `agent` or `skill`**; sent on any other type → `400`. Stored in frontmatter metadata and echoed back on every node response. See [§9 `GET /runnables`](#get-nestsnestidrunnables-read).
 - Optional `prime` (boolean) flags the document as **prime** — it then always requires steward approval, whoever writes it. Owner/admin only; any other caller sending the field gets `403`. Omit to inherit from the nest's `prime_tags`; `false` exempts this document from an otherwise-prime tag. Echoed back on every node response as `prime` (absent when inherited). See `STEWARDSHIP.md → Prime documents`.
 - If stewardship enabled → status defaults `draft`. Else `approved`.
+- Optional `client` — caller attribution, recorded on the version this create seals. See [Caller attribution](#caller-attribution-client).
 - Auto-syncs tag index for steward resolution.
 
 Response (201): `{ "node": { ... }, "stewards": [...] }`.
@@ -705,10 +781,12 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
   "content": "...",
   "tags": ["..."],
   "changeNote": "fixed typo",
-  "schedule": "0 7 * * *"
+  "schedule": "0 7 * * *",
+  "client": { "agent": "claude-code", "session_id": "s-9f2" }
 }
 ```
 Requires nest write permission.
+- `client` — caller attribution, recorded on the version this edit seals. See [Caller attribution](#caller-attribution-client).
 - `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
 - `type` — re-type the node in place (the editor's "Turn into…"): `document`, `artifact`, `table`, `agent`, `skill`, `tool`, or any other engine type. Same gate as create — the artifact/table feature flags and the accepted set (`400` otherwise). The body is kept as-is. Converting to `skill` defaults the trigger from the title; converting away from a runnable type drops its `schedule`.
 - `prime` — owner/admin only (`403` otherwise). `true`/`false` set the document-scope flag, `null` clears it back to tag/nest inheritance. An edit that makes the document prime is itself gated, so it lands as a draft awaiting approval.
@@ -719,6 +797,23 @@ Write permission. Hidden in UI for reviewer/viewer; server still enforces.
 A node with a pending review is frozen — `423` — for callers who can't clear that review. Approvers (nest owner, admin, assigned reviewer) go through: they can reject and then delete, so the lock only cost them a round trip. Same rule on `POST /nodes/:nodeId/move`; editing under review is unchanged (still author-only).
 
 Purges everything keyed to the node id — version history, review requests, the approved-version pin, tag index, annotations and their comments, review comments, watchers, schedules, trigger hooks, workflow edges, document-scoped stewards and document grants — and leaves a deletion tombstone for `GET /changes`. Node ids derive from titles, so a later document can land on the same id; it must inherit none of the old one's readers, reviewers or history. Run traces are kept: they record what happened, not what exists. `POST /nests/:nestId/nodes/:nodeId/move` carries that same set to the new id instead of dropping it (folder grants excepted — they cover a path prefix, so a moved doc leaves one share and joins another).
+
+### POST `/nests/:nestId/nodes/pdf`
+Upload a PDF as a governed `pdf` document. Multipart: `file` (required), optional `title` (default: the file name), `folder`, `tags` (repeat the field or comma-separate), `nodeId`, `changeNote`. Write permission (nest-scope steward editors too, as for `POST /nodes`).
+
+The engine's `context_import_pdf` extracts the text — the node body, one `<!-- page N -->` marker per page — and stores the PDF beside the node as `<id>.pdf`, bound by sha256 in the node's `pdf:` frontmatter block. Governance is exactly a create's: in a governed nest the upload lands as a draft (or publishes when a create by that person would); without stewards it publishes.
+
+- `nodeId` of an existing `pdf` node → the PDF is replaced as a **new version** of that node (same review lock, draft/publish rule and version rows as `PATCH`). The prior binary stays in history. Identical bytes are a no-op. A replace is two engine writes (stage the new PDF, then the same update/publish a text edit makes); if the second fails, the node's previous file and PDF are put back before the error is returned.
+- `400` — no `file`, not a PDF (checked by the `%PDF-` header, not the extension), an encrypted/unreadable PDF, or `nodeId` names a node that is not a pdf. `413` — larger than `PDF_MAX_MB` (default 25 MB). Nothing is written on any refusal.
+- A PDF with no text layer (a scan) imports with an empty body and `pdf.text_layer: false`; there is no OCR.
+- Returns `201` `{ node, version, stewards? }` on create, `200` `{ node, version }` on replace. `node.pdf` is the `pdf:` block (`file`, `sha256`, `bytes`, `pages`, `text_layer`, `extractor`, `extractor_version`, `extracted_at`).
+
+A pdf node's text is read-only: `PATCH` with a `content`/`append` that changes it → `409` (re-upload instead; echoing the stored body back is accepted). A pdf node can't be converted to another type or another type to `pdf` (`400`), can't be moved to another folder yet (`400`), and `POST /nodes` with `type: "pdf"` → `400`. `POST …/revert` re-imports the target version's PDF; `POST …/discard` restores the sealed version's PDF (the response carries a `warning` if that binary can't be restored); `DELETE` removes the binary with the node.
+
+### GET `/nests/:nestId/nodes/:nodeId/pdf`
+The PDF binary, gated exactly like `GET /nodes/:nodeId`. A public reader (or `?approved_only=1`) always gets the **approved** version's bytes — never a draft's — whatever version is asked for; other readers get the current working copy, or `?version=N`. Every response is verified against the sha256 its version records (a mismatch is refused, not served).
+
+Headers: `Content-Type: application/pdf`, `Content-Disposition: inline; filename="<slug>.pdf"` (`?download=1` → `attachment`), `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-cache`, and an `ETag` of the sha256 (`If-None-Match` → `304`). `404` when the node has no such version or no approved version (public). An id that is not a pdf node falls through to the node route, so a document whose own id ends in `/pdf` still reads.
 
 ### POST `/nests/:nestId/assets`
 Multipart upload (field `file`) of an image or video referenced from documents. Write permission.
@@ -1103,6 +1198,11 @@ Each version may also include `resolvedBy` + `resolutionStatus`, the steward who
 approved or rejected it, joined from `review_requests` (`node_versions` stores
 the status but not the resolver's email).
 
+`client` is the caller attribution the write carried — which agent, in which
+session (see [Caller attribution](#caller-attribution-client)). Absent on every
+version whose write sent none, which includes every version written before the
+field existed.
+
 `externalEditVerdicts` carries the verdicts on out-of-band (direct filesystem)
 edits, oldest first, read from the engine's append-only chain-event log. They sit
 beside the version list rather than inside it because a **rejection commits no
@@ -1127,6 +1227,7 @@ approved version.
       "status": "pending_review",
       "changeNote": "...",
       "content": "",
+      "client": { "agent": "claude-code", "session_id": "s-9f2" },
       "diff": "Index: v2\n===...\n--- v2\tv2\n+++ v2\tv3\n@@ -1,4 +1,5 @@\n title: doc\n-old line\n+new line\n"
     },
     {
@@ -1851,6 +1952,8 @@ Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually;
 **Transport is read-tier.** MCP Streamable HTTP is always POST (even `initialize` / `tools/list`), so the per-nest gate admits any credential with read access; every mutating tool re-checks its own permission inside the tool handler (create/edit via stewardship, approve/reject via reviewer rights, stewards/sharing/sync via their own admin checks).
 
 **Denials are JSON-RPC.** Gate rejections on the MCP transport path return a JSON-RPC error envelope — `{ "jsonrpc": "2.0", "id": <echoed>, "error": { "code": -32000, "message": "<what failed — actionable reason>" } }` — instead of plain `{error}` JSON, so external clients (PromptOwl, Claude Desktop, Cursor) surface *why* a connection failed: key scoped to a different nest, server suspended, license required, or nest not found / no access.
+
+**Every tool takes `client`.** The `{ agent, session_id, …custom }` block described in [Caller attribution](#caller-attribution-client) is advertised on every tool's input schema, reads included — a write that seals a version records it there (`context_versions` serves it back), and every call records it on the activity trace. It is never authenticated and never used to authorize. Omitted, the server fills what the connection reports (the API key's label, an `Mcp-Session-Id` header) under anything the caller sent, per key.
 
 **Titles are unique on this surface.** `context_get`, `context_update`, `context_versions`, `context_delete`, and `context_move` each resolve a document by title or by id (an id wins when both are sent, and an ambiguous title refuses rather than guessing). Title addressing is what makes uniqueness matter, so `context_create` refuses a title already used anywhere in the nest — including in another folder — and answers with the existing node's id plus what to do instead (`context_update` to change it, `context_move` to refile it). A duplicate would otherwise be unreachable by every tool here. REST `POST /nodes` keeps the looser rule (same title in a different folder is fine); both surfaces refuse a create whose id is already taken.
 

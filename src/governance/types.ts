@@ -5,6 +5,8 @@
  * PromptOwl can subscribe to this layer by implementing the same adapter interfaces.
  */
 
+import type { ClientMetadata } from "../shared/client-metadata.js";
+
 // Document lifecycle states. `published` is the terminal state for
 // auto-publish (no-stewards) saves — engine has bumped frontmatter on
 // disk and the row points at the live published version. `approved` is
@@ -42,6 +44,17 @@ export interface DocumentVersion {
   editedAt: string;
   changeNote?: string;
   status: DocumentLifecycleStatus;
+  /**
+   * Caller attribution for the write that sealed this version (spec §9.4) —
+   * which agent, in which session. Absent when the call carried none, which is
+   * every version written before the field existed and every write from a
+   * caller that sends nothing: attribution is evidence a caller offers, not a
+   * toll it pays.
+   *
+   * `editedBy` stays the authoritative authoring record; this is the caller's
+   * own self-report about the call, never authenticated.
+   */
+  client?: ClientMetadata;
 }
 
 // Steward assignment (ported from PromptOwl ContextSteward)

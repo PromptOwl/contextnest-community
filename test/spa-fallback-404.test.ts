@@ -1,4 +1,6 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { join } from "path";
 import { setupTestEnv, createTestApp } from "./helpers";
 
 // The SPA catch-all used to answer EVERY unmatched GET with the index.html
@@ -8,6 +10,35 @@ import { setupTestEnv, createTestApp } from "./helpers";
 // dying on `Unexpected token '<', "<!DOCTYPE "...`. The shell is now served
 // only to browser document navigations; everything else gets a JSON 404.
 describe("unmatched-route fallback", () => {
+  // The shell the navigation tests below expect to reach. app.ts resolves its
+  // static root at import time (`dist/web3`, else `src/web3`), so without a
+  // built UI serveStatic finds nothing, falls through to app.notFound, and
+  // answers the SAME JSON 404 the guard does — leaving those two tests unable
+  // to tell "the guard rejected the navigation" from "there was no shell to
+  // serve", and failing on any checkout where `npm run build:ui` hasn't run.
+  // Standing up a minimal shell is the precondition they are really asserting
+  // against. A real build is left alone and never deleted.
+  const uiDir = join(process.cwd(), "dist", "web3");
+  const shell = join(uiDir, "index.html");
+  let shellIsOurs = false;
+  let dirIsOurs = false;
+
+  beforeAll(() => {
+    if (existsSync(shell)) return;
+    dirIsOurs = !existsSync(uiDir);
+    mkdirSync(uiDir, { recursive: true });
+    writeFileSync(shell, "<!DOCTYPE html><title>ContextNest</title>");
+    shellIsOurs = true;
+  });
+
+  afterAll(() => {
+    // Take the directory too when we made it: app.ts picks its static root by
+    // the first candidate that EXISTS, so an empty `dist/web3` left behind
+    // would silently redirect another suite's resolution.
+    if (shellIsOurs) rmSync(shell, { force: true });
+    if (dirIsOurs) rmSync(uiDir, { recursive: true, force: true });
+  });
+
   beforeEach(() => setupTestEnv());
 
   const expectJson404 = async (res: Response) => {
@@ -70,9 +101,9 @@ describe("unmatched-route fallback", () => {
         "Sec-Fetch-Mode": "navigate",
       },
     });
-    // 200 with the built UI present, serveStatic's own 404 when dist/web3
-    // isn't built — either way it reached the static handler, not the guard.
-    expect(await res.text()).not.toContain('{"error":"Not found"}');
+    // Reached the static handler, not the guard.
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("<!DOCTYPE html");
   });
 
   it("serves the SPA shell on Accept alone (older browsers, no Sec-Fetch-Mode)", async () => {
@@ -80,6 +111,7 @@ describe("unmatched-route fallback", () => {
     const res = await app.request("http://localhost/dashboard", {
       headers: { Accept: "text/html,application/xhtml+xml" },
     });
-    expect(await res.text()).not.toContain('{"error":"Not found"}');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("<!DOCTYPE html");
   });
 });
