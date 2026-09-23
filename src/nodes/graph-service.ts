@@ -125,8 +125,10 @@ export function extractWikiTargets(body: string): string[] {
  * unrelated `other/gone`.
  */
 export function extractContextTargets(body: string): string[] {
-  const out: string[] = [];
-  if (!body) return out;
+  // Set, not Array#includes: a body with thousands of distinct targets must
+  // not dedupe quadratically. Insertion order is kept.
+  const out = new Set<string>();
+  if (!body) return [];
   for (const uri of extractContextLinks(body)) {
     // Plain index scans, no regex: strip scheme, anchor, pin, trailing slash.
     let t = uri.slice("contextnest://".length);
@@ -135,9 +137,9 @@ export function extractContextTargets(body: string): string[] {
     const at = t.indexOf("@");
     if (at !== -1) t = t.slice(0, at);
     if (t.endsWith("/")) t = t.slice(0, -1);
-    if (t && !out.includes(t)) out.push(t);
+    if (t) out.add(t);
   }
-  return out;
+  return [...out];
 }
 
 /**

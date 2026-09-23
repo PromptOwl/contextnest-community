@@ -379,7 +379,11 @@ queryRoutes.post("/context", async (c) => {
   // ignores `hops`, so without seeding from `documents` here a selector's
   // advertised hop expansion was a no-op. hops:0 skips this block entirely,
   // so hops:0 results are unchanged. Same neighbourhood the graph view draws.
-  const hopSeeds = [...documents, ...titleMatches];
+  // De-duplicated by id: a doc can match both the selector and a [[Title]]
+  // part (`[[Hub Note]] | #hub`), and should seed the frontier once.
+  const hopSeeds = [
+    ...new Map([...documents, ...titleMatches].map((d) => [d.id, d])).values(),
+  ];
   if (hopSeeds.length > 0 && hops > 0) {
     const byTitle = new Map(
       allDocs.map((d: ContextNode) => [

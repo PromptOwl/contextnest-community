@@ -541,3 +541,46 @@ describe("POST /context — contextnest:// links are hop edges", () => {
     expect(ids(res)).toContain("nodes/link-source");
   });
 });
+
+// ── prompt tag matches hop-expand too (behaviour change in this fix) ─────────
+// Before, the hop BFS was seeded only from [[Title]] matches, so a prompt that
+// compiled to a TAG match never expanded even with hops > 0. Now the compiled
+// selector's own matches seed it as well.
+
+describe("POST /context — prompt tag match with explicit hops", () => {
+  const ctx = (payload: object) =>
+    jsonRequest(app, "POST", `/nests/${nestId}/context`, payload);
+
+  beforeAll(async () => {
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Quartermaster Neighbour",
+      content: "# Neighbour\n\nOnly reachable by link.",
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Tagged Seed Doc",
+      content: "# Seed\n\nSee [n](contextnest://nodes/quartermaster-neighbour).",
+      tags: ["zebrafleet"],
+    });
+  });
+
+  it("hops 0: only the tag match; hops 1: its linked neighbour comes back via hop", async () => {
+    const base = await ctx({ prompt: "zebrafleet", hops: 0 });
+    const baseIds = base.data.nodes.map((n: any) => n.id);
+    expect(baseIds).toContain("nodes/tagged-seed-doc");
+    expect(base.data.trace.compiled.matched_titles).toEqual([]);
+    expect(baseIds).not.toContain("nodes/quartermaster-neighbour");
+
+    const { data } = await ctx({ prompt: "zebrafleet", hops: 1 });
+    const seed = data.nodes.find((n: any) => n.id === "nodes/tagged-seed-doc");
+    const nb = data.nodes.find((n: any) => n.id === "nodes/quartermaster-neighbour");
+    expect(seed.via).toBe("tag");
+    expect(nb).toEqual(expect.objectContaining({ via: "hop", score: 0 }));
+  });
+
+  it("a doc matched by both selector and [[Title]] seeds once and still expands", async () => {
+    const res = await ctx({ selector: "[[Tagged Seed Doc]] | #zebrafleet", hops: 1 });
+    const ids = res.data.nodes.map((n: any) => n.id);
+    expect(ids.filter((id: string) => id === "nodes/tagged-seed-doc")).toHaveLength(1);
+    expect(ids).toContain("nodes/quartermaster-neighbour");
+  });
+});
