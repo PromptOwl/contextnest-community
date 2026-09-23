@@ -42,12 +42,46 @@ describe("harness registry", () => {
     expect(harnessById("claude-code")?.name).toMatch(/Claude Code/i);
     expect(harnessById("nope")).toBeUndefined();
   });
+
+  /**
+   * Vendor UIs drift — ChatGPT renamed this whole surface in July 2026 — so
+   * every harness has to name the page its steps were written from. A missing
+   * source is how a stale path survives the next re-check.
+   */
+  it("carries an https doc link for every harness", () => {
+    for (const h of HARNESSES) {
+      expect(h.docs, `${h.id} has no docs link`).toMatch(/^https:\/\//);
+      if (h.open !== undefined)
+        expect(h.open, `${h.id} open link is not https`).toMatch(/^https:\/\//);
+    }
+  });
 });
 
 describe("rendered instructions", () => {
   it("points every harness at the server-level /mcp endpoint", () => {
     for (const h of HARNESSES) {
       expect(renderHarnessDoc(h, KEYED)).toContain("https://nest.example.com/mcp");
+    }
+  });
+
+  /**
+   * The links are appended by the renderer, not written into the nine bodies,
+   * so a new harness can't ship without them. They also have to survive the
+   * copy: these steps get pasted into Slack, where a written menu path is a
+   * lot less useful than something clickable.
+   */
+  it("renders each harness's own links, in the copy as well as the panel", () => {
+    const all = renderAllHarnessDocs(KEYED);
+    for (const h of HARNESSES) {
+      const out = renderHarnessDoc(h, KEYED);
+      expect(out, `${h.id} lost its docs link`).toContain(`(${h.docs})`);
+      expect(all, `${h.id} docs link missing from Copy all`).toContain(
+        `(${h.docs})`,
+      );
+      if (h.open !== undefined) {
+        expect(out).toContain(`[Open the settings page](${h.open})`);
+        expect(all).toContain(`[Open the settings page](${h.open})`);
+      }
     }
   });
 

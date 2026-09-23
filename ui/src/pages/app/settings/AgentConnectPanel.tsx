@@ -177,7 +177,18 @@ export function AgentConnectPanel({
             </Button>
           </div>
           <article className="prose prose-sm dark:prose-invert max-w-none">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                // Every link in these bodies points at a vendor's site, so
+                // none of them should navigate away from Settings.
+                a: ({ ...props }) => (
+                  <a {...props} target="_blank" rel="noopener noreferrer" />
+                ),
+              }}
+            >
+              {body}
+            </ReactMarkdown>
           </article>
         </div>
       </CardContent>

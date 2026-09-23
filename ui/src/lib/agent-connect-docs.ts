@@ -48,6 +48,18 @@ export interface Harness {
   kind: HarnessKind;
   /** One line: where the person actually does this. */
   where: string;
+  /**
+   * Deep link straight to the vendor's own settings page, where one is
+   * published. Omitted rather than guessed — a wrong link is worse than the
+   * written path, which at least degrades into "look for this menu".
+   */
+  open?: string;
+  /**
+   * The vendor page these steps were written from. Vendor UIs get reshuffled
+   * (ChatGPT renamed this whole surface in July 2026), so every harness
+   * carries the source that settles what the current path is.
+   */
+  docs: string;
   support: HarnessSupport;
   /** Markdown body. Must never contain key material. */
   body: (ctx: ConnectDocsContext, mcpUrl: string) => string;
@@ -134,18 +146,22 @@ export const HARNESSES: Harness[] = [
     id: "claude-desktop",
     name: "Claude (claude.ai and Claude Desktop)",
     kind: "chat",
-    where: "Settings → Connectors → Add custom connector",
+    where: "Customize → Connectors → Add custom connector",
+    open: "https://claude.ai/customize/connectors",
+    docs: "https://claude.com/docs/connectors/custom/remote-mcp",
     support: "header",
     body: (ctx, mcp) =>
       renderBody(
-        "1. Open **Settings → Connectors → Add custom connector**.",
-        `2. Set the URL to \`${mcp}\`.`,
+        "1. Open **Customize → Connectors** and click **Add custom connector**. On Team and Enterprise plans an Owner adds it once under **Organization settings → Connectors → Add → Custom → Web**; members then find it under **Customize → Connectors** and click **Connect**.",
+        `2. Set the MCP server URL to \`${mcp}\`.`,
         ctx.openMode
-          ? "3. Leave authentication empty — this server needs no credential."
-          : `3. Open the advanced/auth section and add the header \`Authorization: Bearer ${KEY_PLACEHOLDER}\`.`,
-        "4. Save, then **reload the page** — tools do not appear until you do.",
-        "",
-        "On Team and Enterprise plans only an Owner can add the connector; each member then connects to it individually.",
+          ? "3. For **Authentication**, choose **No sign-in** — this server needs no credential."
+          : `3. For **Authentication**, choose **No sign-in**, then open **Request headers**, pick the \`authorization\` header and enter \`Bearer ${KEY_PLACEHOLDER}\` as its value. Enter the value only — Claude adds the header name itself and sends the value exactly as typed, so the \`Bearer \` prefix and its trailing space have to be there.`,
+        "4. Click **Add**. Authentication settings can't be changed afterwards; changing them means removing the connector and adding it again.",
+        ctx.openMode ? null : "",
+        ctx.openMode
+          ? null
+          : "> **Request headers are in beta, and the credential is organization-wide.** If the dialog has no **Request headers** section, your organization doesn't have access yet. Everyone on the connector shares the one credential, so on this surface they all reach this server as the key's owner and see that person's nests. Per-user visibility here needs OAuth, which this server doesn't run yet — for per-user nests today, use one of the command-line harnesses.",
         "",
         "> The MCP client runs on Anthropic's servers, not the user's machine, so this URL must resolve on the public internet and present a valid TLS certificate. A `localhost` or internal-DNS address will not work here.",
       ),
@@ -154,19 +170,24 @@ export const HARNESSES: Harness[] = [
     id: "chatgpt",
     name: "ChatGPT",
     kind: "chat",
-    where: "Settings → Apps & Connectors → Advanced → Developer mode",
+    where: "Settings → Security and login → Developer mode",
+    docs: "https://developers.openai.com/plugins/deploy/connect-chatgpt",
     support: "header",
     body: (ctx, mcp) =>
       renderBody(
-        "1. **Settings → Apps & Connectors → Advanced settings → Developer mode**, toggled on.",
-        "2. Back in Apps & Connectors, add a custom connector.",
-        `3. Set the URL to \`${mcp}\`.`,
-        ctx.openMode
-          ? "4. Leave authentication empty."
-          : `4. Supply \`Authorization: Bearer ${KEY_PLACEHOLDER}\` as the connector's credential.`,
-        "5. The connector appears under **Drafts**; pick it in the composer's Developer mode tool to use it in a conversation.",
+        "1. Open **Settings → Security and login** and turn on **Developer mode**.",
+        "2. Go to the **Plugins** page and click the **+** button.",
+        "3. Give it a name and description you'll recognise in the tools menu later.",
+        `4. Under **Connection**, paste the MCP server URL \`${mcp}\` — including the \`/mcp\` path.`,
+        "5. Create the connection, then add it from the **tools menu** in a new conversation.",
         "",
         "Developer mode is available on Plus, Pro, Business, Enterprise and Edu — not on the free tier. Public HTTPS is required.",
+        ctx.openMode ? null : "",
+        ctx.openMode
+          ? null
+          : "> **This surface may not connect yet.** The connection step takes a URL and discovers the server's own authentication; OpenAI documents no field for a fixed API key or `Authorization` header. If the connection fails asking you to sign in, this server has no OAuth authorization server to offer it — use one of the command-line harnesses instead.",
+        "",
+        "> ChatGPT renamed this surface in July 2026. Older guides point at **Settings → Connectors → Advanced**, which no longer exists.",
       ),
   },
   {
@@ -174,6 +195,8 @@ export const HARNESSES: Harness[] = [
     name: "Grok",
     kind: "chat",
     where: "grok.com/connectors → New Connector → Custom",
+    open: "https://grok.com/connectors",
+    docs: "https://docs.x.ai/grok/connectors",
     support: "header",
     body: (ctx, mcp) =>
       renderBody(
@@ -181,23 +204,29 @@ export const HARNESSES: Harness[] = [
         `2. Enter the MCP server URL \`${mcp}\`.`,
         ctx.openMode
           ? "3. Leave authentication empty."
-          : `3. Complete the authentication step with \`Authorization: Bearer ${KEY_PLACEHOLDER}\`.`,
+          : `3. Complete any authentication the form asks for, supplying \`Bearer ${KEY_PLACEHOLDER}\` where it wants a credential.`,
         "4. Grok discovers the exposed tools and offers them alongside its built-in connectors.",
         "",
         "The server must be reachable over the public internet; Grok has no tunnel of its own.",
+        ctx.openMode ? null : "",
+        ctx.openMode
+          ? null
+          : "> xAI documents the connector form but not which credentials it accepts, so the authentication step isn't verified here. If it only offers OAuth, this server has none to offer yet — use a command-line harness instead.",
       ),
   },
   {
     id: "perplexity",
     name: "Perplexity",
     kind: "chat",
-    where: "Settings → Connectors → Custom connector",
+    where: "All settings → Connectors (perplexity.ai/account/connectors)",
+    open: "https://www.perplexity.ai/account/connectors",
+    docs: "https://www.perplexity.ai/help-center/en/articles/13915507-adding-custom-remote-connectors",
     support: "oauth-only",
     body: (ctx, mcp) =>
       oauthBlocked(
         ctx,
         "Perplexity",
-        "Perplexity's custom-connector form asks for an OAuth client ID over Streamable HTTP, on a paid plan.",
+        "Under **All settings → Connectors**, Perplexity's custom-connector form asks for an OAuth client ID under **Advanced**, over Streamable HTTP, on a Pro, Max or Enterprise plan.",
         mcp,
       ),
   },
@@ -208,6 +237,7 @@ export const HARNESSES: Harness[] = [
     name: "Claude Code",
     kind: "cli",
     where: "one command in any terminal",
+    docs: "https://code.claude.com/docs/en/mcp-quickstart",
     support: "header",
     body: (ctx, mcp) =>
       renderBody(
@@ -218,8 +248,8 @@ export const HARNESSES: Harness[] = [
         "```",
         "",
         ctx.openMode
-          ? "Add `--scope project` to write `.mcp.json` in the repo instead of the user-level config; that file is safe to commit."
-          : `Add \`--scope project\` to write \`.mcp.json\` in the repo instead of the user-level config — that file is safe to commit because it can reference \`\${${KEY_ENV}}\` rather than the value.`,
+          ? "By default this registers at `local` scope — only you, only this project. Add `--scope user` for every project, or `--scope project` to write `.mcp.json` in the repo; that file is safe to commit."
+          : `By default this registers at \`local\` scope — only you, only this project. Add \`--scope user\` for every project, or \`--scope project\` to write \`.mcp.json\` in the repo — that file is safe to commit because it can reference \`\${${KEY_ENV}}\` rather than the value.`,
         "",
         "A session started before the server was added must be restarted; a fresh session picks it up automatically.",
       ),
@@ -228,7 +258,8 @@ export const HARNESSES: Harness[] = [
     id: "codex",
     name: "OpenAI Codex CLI",
     kind: "cli",
-    where: "`codex mcp add`, or ~/.codex/config.toml",
+    where: "codex mcp add, or ~/.codex/config.toml",
+    docs: "https://learn.chatgpt.com/docs/extend/mcp?surface=cli",
     support: "header",
     body: (ctx, mcp) =>
       renderBody(
@@ -256,6 +287,7 @@ export const HARNESSES: Harness[] = [
     name: "Hermes (Nous Research)",
     kind: "cli",
     where: "~/.hermes/config.yaml",
+    docs: "https://hermes-agent.nousresearch.com/docs/reference/mcp-config-reference",
     support: "header",
     body: (ctx, mcp) =>
       renderBody(
@@ -272,7 +304,7 @@ export const HARNESSES: Harness[] = [
           ? null
           : `Values support \`\${env:VAR}\` interpolation against \`~/.hermes/.env\`, so put the key in that file as \`${KEY_ENV}\` and keep it out of the YAML.`,
         ctx.openMode ? null : "",
-        "Streamable HTTP is the default transport — only set `transport: \"sse\"` if you need the older one.",
+        "A `url` entry speaks Streamable HTTP — set `transport: \"sse\"` only if you need the older one.",
       ),
   },
   {
@@ -280,6 +312,7 @@ export const HARNESSES: Harness[] = [
     name: "Gemini CLI",
     kind: "cli",
     where: "~/.gemini/settings.json",
+    docs: "https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md",
     support: "header",
     body: (ctx, mcp) =>
       renderBody(
@@ -306,6 +339,7 @@ export const HARNESSES: Harness[] = [
     name: "Cursor",
     kind: "editor",
     where: "~/.cursor/mcp.json (or .cursor/mcp.json in a project)",
+    docs: "https://cursor.com/docs/mcp",
     support: "header",
     body: (ctx, mcp) =>
       renderBody(
@@ -340,7 +374,16 @@ export function harnessById(id: string): Harness | undefined {
 
 /** One harness, as a markdown block (no heading — the caller owns that). */
 export function renderHarnessDoc(h: Harness, ctx: ConnectDocsContext): string {
-  return h.body(ctx, mcpEndpoint(ctx.serverUrl));
+  // Appended here rather than in each body so no harness can forget it, and
+  // so the copied text carries the links too — these steps get pasted into
+  // Slack, where "Settings → Connectors" is a lot less useful than a link.
+  const links = [
+    h.open ? `[Open the settings page](${h.open})` : null,
+    `[${h.name} docs](${h.docs})`,
+  ]
+    .filter((l): l is string => l !== null)
+    .join(" · ");
+  return `${h.body(ctx, mcpEndpoint(ctx.serverUrl))}\n\n${links}`;
 }
 
 const KIND_HEADINGS: { kind: HarnessKind; heading: string }[] = [
