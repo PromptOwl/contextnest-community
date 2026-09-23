@@ -102,3 +102,48 @@ describe("context_update on a secondary nest", () => {
     expect(body.result.structuredContent).toMatchObject({ id: "nodes/archive/tag-doc", previous_id: "nodes/tag-doc" });
   });
 });
+
+// One server-level connection has to carry everything ctx sends.
+describe("server-level /mcp as a ctx vault", () => {
+  async function structured(name: string, args: Record<string, unknown>) {
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${stacey.apiKey}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+    });
+    const text = await res.text();
+    const line = text.split("\n").find((l) => l.startsWith("data: "));
+    return (line ? JSON.parse(line.slice(6)) : JSON.parse(text)).result;
+  }
+
+  beforeAll(async () => {
+    for (const name of ["Partner Alpha", "Partner Shared"]) {
+      await jsonRequest(app, "POST", `/nests/${nests[name]}/nodes`, { title: `Pricing ${name}`, content: "# pricing tiers", tags: ["pricing"] }, stacey.apiKey);
+    }
+  });
+
+  it("fan-out search returns structured hits, each naming its nest", async () => {
+    const r = await structured("context_search", { query: "pricing" });
+    const byNest = new Set(r.structuredContent.results.map((h: any) => h.nest.id));
+    expect(byNest).toContain(nests["Partner Alpha"]);
+    expect(byNest).toContain(nests["Partner Shared"]);
+  });
+
+  it("fan-out list carries the per-nest filters (tag) and names the nest", async () => {
+    const r = await structured("context_list", { tag: "pricing" });
+    const docs = r.structuredContent.documents;
+    expect(docs.length).toBeGreaterThanOrEqual(2);
+    expect(docs.every((d: any) => d.nest?.id && d.nest?.name)).toBe(true);
+  });
+
+  it("targeted tools take the per-nest schema: context_versions exists, returns data", async () => {
+    const r = await structured("context_versions", { nest: "Partner Alpha", title: "Pricing Partner Alpha" });
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent.versions.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("a write without `nest` is still refused", async () => {
+    const r = await structured("context_delete", { title: "Pricing Partner Alpha" });
+    expect(JSON.stringify(r)).toMatch(/nest/);
+  });
+});
