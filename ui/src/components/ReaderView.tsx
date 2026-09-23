@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { ChevronRight, ChevronDown, ChevronLeft, Menu, BookOpen, Folder, FolderOpen, FileText, Search, X } from "lucide-react";
 import { FolderTree } from "./FolderTree";
 import { DocumentViewer } from "./DocumentViewer";
+import { PdfDocumentPanel } from "./PdfDocumentPanel";
 import * as api from "../lib/api";
 import { conventionKey, isHomeNode } from "@/lib/nest-caps";
 import { extractHeadings } from "@/lib/toc";
@@ -100,6 +101,8 @@ export function ReaderView({
   // Per-node markdown cache; an in-flight set so the two effects that can
   // both ask for the same node on first mount don't fetch it twice.
   const [content, setContent] = useState<Record<string, string>>({});
+  // pdf nodes: their `pdf:` block, so the page shows the PDF above its text.
+  const [pdfMetas, setPdfMetas] = useState<Record<string, api.PdfMeta>>({});
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const inFlight = useRef<Set<string>>(new Set());
   const loadNode = async (nodeId: string) => {
@@ -109,6 +112,9 @@ export function ReaderView({
     try {
       const { node } = await api.getNode(nestId, nodeId, approvedOnly);
       setContent((prev) => ({ ...prev, [nodeId]: node?.content ?? "" }));
+      if (node?.type === "pdf" && node?.pdf) {
+        setPdfMetas((prev) => ({ ...prev, [nodeId]: node.pdf as api.PdfMeta }));
+      }
     } catch {
       // Not cached: a transient failure must be retryable. The notice offers it.
       setNotice("This page could not be loaded.");
@@ -353,6 +359,15 @@ export function ReaderView({
         )}
         {!selectedId && <p className="text-sm text-muted-foreground">Choose a page from the contents.</p>}
         {loading && <p className="text-sm text-muted-foreground">Loading…</p>}
+        {selectedId && body !== undefined && pdfMetas[selectedId] && (
+          <PdfDocumentPanel
+            nestId={nestId}
+            nodeId={selectedId}
+            title={title}
+            pdf={pdfMetas[selectedId]}
+            approvedOnly={approvedOnly}
+          />
+        )}
         {selectedId && body !== undefined && (
           <DocumentViewer
             content={body}
