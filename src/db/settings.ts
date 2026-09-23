@@ -1,5 +1,11 @@
 import { getDb } from "./client.js";
 import { insertOrReplace, nowExpr } from "./sql.js";
+import {
+  encryptSecret,
+  isSecretSetting,
+  tryDecryptSecret,
+  MASTER_KEY_SETTING,
+} from "../shared/secret-box.js";
 
 /**
  * Durable, DB-backed store for runtime-mutable server settings — the values the
@@ -55,6 +61,14 @@ export async function persistSetting(
 ): Promise<void> {
   const db = getDb();
   const envAtWrite = norm(baseline()[name]);
+  // A credential is encrypted in both columns: env_at_write holds the same
+  // secret (the deploy-env value this write was baselined against), so
+  // leaving it in the clear would defeat the point. It is only ever compared
+  // after decryption, so a fresh IV per write is fine.
+  const seal = async (v: string | null) =>
+    v !== null && isSecretSetting(name) ? await encryptSecret(v) : v;
+  const sealedValue = await seal(value);
+  const sealedBaseline = await seal(envAtWrite);
   await db.run(
     insertOrReplace(
       db,
@@ -63,7 +77,7 @@ export async function persistSetting(
       ["key"],
       `value = excluded.value, env_at_write = excluded.env_at_write, updated_at = ${nowExpr(db)}`,
     ),
-    [name, value, envAtWrite],
+    [name, sealedValue, sealedBaseline],
   );
 }
 
@@ -93,7 +107,22 @@ export async function loadServerSettings(): Promise<number> {
 
   let applied = 0;
   for (const row of rows) {
+    // The encryption key shares this table but is not a setting: it must
+    // never reach process.env or the settings API.
+    if (row.key === MASTER_KEY_SETTING) continue;
     const envVal = norm(base[row.key]);
+    // Credentials come out of the database sealed. One that can't be opened
+    // (a lost or rotated SECRETS_KEY) is treated as absent — the setting
+    // falls back to its deploy-env value or its default and the admin
+    // re-enters it, rather than the whole boot failing over one row.
+    if (isSecretSetting(row.key)) {
+      row.value =
+        row.value === null ? null : await tryDecryptSecret(row.value, row.key);
+      row.env_at_write =
+        row.env_at_write === null
+          ? null
+          : await tryDecryptSecret(row.env_at_write, `${row.key} (baseline)`);
+    }
     if (envVal !== norm(row.env_at_write)) {
       // Deploy env changed since this row was written → operator intent wins.
       // Re-sync the row to the new env value (or a tombstone if the env var was

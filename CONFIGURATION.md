@@ -103,6 +103,7 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `RUN_MAX_STEPS` | `10000` | Max steps a single run may accumulate (clamped 10..100000) — bounds a runaway/hostile runner's step log. |
 | `RUN_MAX_CONCURRENT_ROOTS` | `50` | Max concurrently-running root (depth-0) runs per nest (clamped 1..1000). The subagent caps bound a single tree; this bounds how many trees can run at once, so triggers can't flood a nest. |
 | `ANTHROPIC_API_KEY` | _(unset)_ | Server-wide default runner key for workflow-plane agent runs, and the key Hootie answers with. Never returned by the API — the health endpoint reports presence only, and Settings shows a masked tail. |
+| `SECRETS_KEY` | _(unset — a key is generated and stored in the database)_ | Master key for the credentials this server stores encrypted (the secret settings rows and every nest Tool-environment value). Any string; it is hashed to 32 bytes. Optional, and stronger than the default when your deployment has a secret manager: the key then lives outside the database it protects. Values already written under the generated key cannot be read after you set it. See [Runtime settings persistence](#runtime-settings-persistence). |
 | `SLACK_WEBHOOK_URL` | _(unset — connector off)_ | Slack incoming-webhook URL for governance-event notifications (review submitted/approved/rejected, collaborator added). `https://` only — the URL embeds a secret. Also editable from Settings in the UI. |
 | `MSTEAMS_WEBHOOK_URL` | _(unset — connector off)_ | Microsoft Teams incoming-webhook URL for the same governance events, posted as Adaptive Cards. `https://` only — the URL embeds a secret. Also editable from Settings in the UI. See [Microsoft Teams notifications](#microsoft-teams-notifications). |
 | `SMTP_URL` | _(unset — connector off)_ | SMTP connection URL for email notifications (`smtp://` or `smtps://`, credentials inline). Requires `NOTIFY_EMAIL_FROM` and `NOTIFY_EMAIL_TO`. Also editable from Settings. |
@@ -420,6 +421,32 @@ So you can always override any setting from the deploy config, while UI edits ma
 to keys you don't set in the environment stay put. Clearing a setting in the UI
 writes a tombstone, so a value you removed is not resurrected from the environment
 on the next boot.
+
+**Credentials are encrypted at rest.** The secret rows — `ANTHROPIC_API_KEY`,
+`OIDC_CLIENT_SECRET`, `MCP_SIGNING_SECRET`, `SMTP_URL`, `SLACK_WEBHOOK_URL`,
+`MSTEAMS_WEBHOOK_URL`, `PROMPTOWL_KEY` — and every value in a nest's Tool environment
+(`nest_env`) are stored AES-256-GCM encrypted, so a database dump, replica or backup
+does not carry the credentials with it. Non-secret settings stay readable: what a server
+is configured to do is worth being able to see.
+
+The master key needs nothing configured: on first use the server generates one and
+stores it in the database (`server_settings`, key `SECRETS_MASTER_KEY`), so it survives
+redeploys, is shared by every instance, and travels with your database backups. That row
+is not a setting — it is never loaded into the process environment and never returned by
+the settings API.
+
+Set **`SECRETS_KEY`** in the deploy environment to supply the key yourself instead; it
+takes precedence over the stored one, and any string works (it is hashed to 32 bytes).
+This is the stronger arrangement, because the key then lives somewhere the database is
+not: a database dump alone cannot open the values. With the stored key, a dump that
+includes that row includes the key — the encryption protects against a value being read
+or logged incidentally, not against an attacker holding the whole database. If you set
+`SECRETS_KEY` on a server that already wrote values under the stored key, it cannot read
+them: the server still boots, logs which settings it could not open, and treats each as
+unset so an admin can re-enter it.
+
+Values written before any of this existed are read back as plaintext and re-encrypted the
+next time they are saved — nothing to migrate.
 
 ### Cloud Run + Cloud SQL (PostgreSQL)
 
