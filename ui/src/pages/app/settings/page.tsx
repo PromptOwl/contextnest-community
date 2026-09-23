@@ -43,6 +43,7 @@ import { reads } from "../../../lib/queries";
 import { copyTextWithToast } from "../../../lib/clipboard";
 import { getAdminSettings, updateAdminSettings } from "../../../lib/api";
 import { useAuth } from "../../../auth/AuthContext";
+import { AgentConnectPanel } from "./AgentConnectPanel";
 import { toast } from "sonner";
 
 interface SettingsPageProps {
@@ -88,6 +89,7 @@ const TABS: {
       "hootie_enabled",
       "hootie_model",
       "people_suggest_all_users",
+      "shared_deployment",
     ],
   },
   {
@@ -122,6 +124,12 @@ const TABS: {
     // Teammates page), so this tab has no keys to track for the unsaved dot.
     id: "community-sites",
     label: "Community sites",
+    keys: [],
+  },
+  {
+    // Docs only — nothing here persists, so no keys for the unsaved dot.
+    id: "agents",
+    label: "Connecting agents",
     keys: [],
   },
   {
@@ -280,6 +288,12 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   const [draft, setDraft] = useState<AdminSettings | null>(settings);
   const [saving, setSaving] = useState(false);
   const qc = useQueryClient();
+  // Auth mode isn't an admin setting — it's boot-time config, reported on
+  // /health and already derived once in AuthContext. The Connecting-agents
+  // tab needs it so open-mode deployments aren't told to send a credential
+  // that doesn't exist; read it from there rather than mounting a second
+  // query, so there's one place that decides what "open mode" means.
+  const { authMode } = useAuth();
   // Error from the last failed save (shape validation or SMTP verify), shown
   // inline near the fields. Cleared on the next edit or a successful save.
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -831,6 +845,27 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   <Switch
                     checked={draft.people_suggest_all_users}
                     onCheckedChange={(v) => set({ people_suggest_all_users: v })}
+                  />
+                </div>
+                <div className="flex items-start justify-between gap-4 pt-4 border-t">
+                  <div className="pr-4">
+                    <div className="text-sm font-medium">
+                      This server hosts several organizations
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      A nest's Organization tier is readable by every account
+                      on this server. Off, that is one company and the tier
+                      applies in one click. On — the PromptOwl-hosted service,
+                      or any install shared by unrelated customers — opening a
+                      nest to Organization asks for the same acknowledgement as
+                      Public (enforced by the server, not only the UI), and the visibility picker
+                      says who the tier really reaches.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={draft.shared_deployment}
+                    onCheckedChange={(v) => set({ shared_deployment: v })}
+                    data-testid="settings-shared-deployment"
                   />
                 </div>
               </CardContent>
@@ -1784,6 +1819,13 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 )}
               </CardContent>
             </Card>
+          </TabsContent>
+
+          <TabsContent value="agents" className="space-y-4">
+            <AgentConnectPanel
+              publicBaseUrl={draft.public_base_url}
+              openMode={authMode === "open"}
+            />
           </TabsContent>
         </Tabs>
       )}

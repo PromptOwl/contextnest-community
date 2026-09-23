@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/select";
 import * as api from "../lib/api";
 import { formatServerDate } from "../lib/dates";
+import { formatClient, type ClientAttribution } from "../lib/client-attribution";
 
 interface TraceRow {
   id: number;
@@ -42,6 +43,10 @@ interface TraceRow {
   caller: string | null;
   status: number | null;
   duration_ms: number | null;
+  /** Caller attribution the call carried (§9.4) — which agent, in which
+   *  session. Absent when it carried none. Self-reported, never authenticated:
+   *  `caller` above is the identity this server actually verified. */
+  client?: ClientAttribution;
 }
 
 const PAGE_SIZE = 25;
@@ -211,6 +216,14 @@ export function ActivityTracePage({
                 )}
                 <td className="max-w-[180px] truncate" title={r.caller || ""}>
                   {r.caller || "—"}
+                  {r.client && (
+                    <div
+                      className="text-[11px] text-muted-foreground truncate font-mono"
+                      title={formatClient(r.client)}
+                    >
+                      {formatClient(r.client)}
+                    </div>
+                  )}
                 </td>
                 <td>
                   {r.status == null ? (

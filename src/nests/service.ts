@@ -220,6 +220,35 @@ export async function setPrimeOnlyReview(
 }
 
 /**
+ * Whether the person who creates a document becomes its reviewer. Off (the
+ * default) leaves review assignment to the roster. On, a create in a governed
+ * nest stewards the author as a document-scope reviewer and publishes v1 —
+ * the GitHub posture: anyone writes, the author gates changes to their own
+ * document. Separation of duties is untouched: the author's later edits still
+ * go to the nest's other reviewers.
+ */
+export async function nestCreatorIsReviewer(nestId: string): Promise<boolean> {
+  const db = getDb();
+  const row = (await db.get(
+    "SELECT creator_is_reviewer FROM nests WHERE id = ?",
+    [nestId],
+  )) as { creator_is_reviewer: number } | undefined;
+  return !!row?.creator_is_reviewer;
+}
+
+/** Toggle creator-reviews for a nest (admin-only). Future creates only. */
+export async function setCreatorIsReviewer(
+  nestId: string,
+  enabled: boolean,
+): Promise<void> {
+  const db = getDb();
+  await db.run("UPDATE nests SET creator_is_reviewer = ? WHERE id = ?", [
+    enabled ? 1 : 0,
+    nestId,
+  ]);
+}
+
+/**
  * Tags that mark a document prime, normalized and deduped. Stored as a comma
  * list on the nest; an empty/blank value means "no tag marks a doc prime"
  * (document-level flags still apply).

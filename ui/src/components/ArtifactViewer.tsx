@@ -17,7 +17,7 @@
  * artifact's *extracted text* (the same text the nest indexes), per the W3C
  * TextQuote anchor model.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
@@ -26,6 +26,7 @@ import { extractText, buildAnchor } from "../lib/artifact-text";
 import { DocumentViewer } from "./DocumentViewer";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { cn } from "@/lib/utils";
 import {
   Dialog,
@@ -38,7 +39,7 @@ import {
 import { VersionHistoryModal, type VersionHistoryData } from "./governance";
 import {
   ArrowLeft, Loader2, MessageSquare, MessageSquarePlus, ExternalLink, RefreshCw,
-  Eye, Highlighter, Check, RotateCcw, Send, History, Code2, X, FileText,
+  Eye, Highlighter, Check, RotateCcw, Send, History, Code2, X, FileText, Users,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -70,6 +71,19 @@ interface ArtifactViewerProps {
   /** The artifact was turned back into a markdown document — the host page
    *  re-reads the node and renders the editor instead. */
   onTurnedInto?: () => void;
+  /**
+   * The document page's ⋮ menu (copy link, share this document, publish,
+   * move, delete…), built by DocumentEditor from document-actions.ts so an
+   * artifact offers exactly what a markdown document does (CU-wdqcq02gy8).
+   * The viewer's own History button stays; callers leave that entry out.
+   */
+  actions?: OverflowAction[];
+  /** The nest's visibility tier (control or read-only badge), as the
+   *  markdown page's top bar shows it. Rendered before Share. */
+  visibilityControl?: ReactNode;
+  /** Share the whole nest — the same top-bar Share the markdown page has.
+   *  Undefined when the caller may not share (below admin, or archived). */
+  onShareNest?: () => void;
 }
 
 function fmtTime(s: string): string {
@@ -88,6 +102,9 @@ export function ArtifactViewer({
   initialThreadId,
   onBack,
   onTurnedInto,
+  actions,
+  visibilityControl,
+  onShareNest,
 }: ArtifactViewerProps) {
   const [mode, setMode] = useState<"preview" | "annotate" | "edit">("preview");
   // The annotations rail, like the document page's comments rail: closed by
@@ -616,6 +633,18 @@ export function ArtifactViewer({
               <FileText className="h-4 w-4" />
             </Button>
           )}
+          {visibilityControl}
+          {onShareNest && (
+            <Button
+              variant="outline"
+              size="icon"
+              title="Share this nest — people, teams, visibility"
+              onClick={onShareNest}
+              data-testid="artifact-share-nest"
+            >
+              <Users className="h-4 w-4" />
+            </Button>
+          )}
           <Button
             variant={commentsOpen ? "secondary" : "outline"}
             size="icon"
@@ -637,6 +666,13 @@ export function ArtifactViewer({
               <ExternalLink className="h-4 w-4" />
             </Button>
           </a>
+          {actions && actions.length > 0 && (
+            <OverflowMenu
+              actions={actions}
+              variant="outline"
+              testId="artifact-viewer-more"
+            />
+          )}
         </div>
       </div>
 

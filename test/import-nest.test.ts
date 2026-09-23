@@ -323,12 +323,20 @@ describe("import folder as nest (upload model)", () => {
       alice.apiKey,
     );
     expect(status).toBe(201);
-    // Only ok.md is written + registered; the traversal/absolute entries are dropped.
-    expect(data.documents).toBe(1);
+    // Path safety is the engine's (`context_import` owns it; this server only
+    // forwards the files and reports what came back rejected). It REJECTS the
+    // traversal and CONTAINS the absolute path — `/abs.md` is normalized to
+    // `abs.md` inside the vault rather than dropped, because a contained file
+    // is not an escape and silently losing an upload is the worse answer. So
+    // two documents register: ok.md and the contained abs.md.
+    expect(data.documents).toBe(2);
     const dataNestDir = join(env.dataDir, "nests", data.nest.id);
     expect(existsSync(join(dataNestDir, "ok.md"))).toBe(true);
-    // Nothing escaped the nest dir.
+    expect(existsSync(join(dataNestDir, "abs.md"))).toBe(true);
+    // What actually matters, and the reason this test exists: nothing escaped
+    // the nest dir, by either route.
     expect(existsSync(join(dataNestDir, "..", "escape.md"))).toBe(false);
+    expect(existsSync(join(dataNestDir, "escape.md"))).toBe(false);
   });
 });
 
@@ -451,8 +459,10 @@ describe("imported vault: discovery + registration", () => {
     const byId = Object.fromEntries(
       list.data.nodes.map((n: any) => [n.id, n.title]),
     );
-    // Filename (leaf of the id), NOT the "# Heading" or an empty string.
-    expect(byId["guides/getting-started"]).toBe("getting-started");
+    // A frontmatter-less file is titled by the engine's import hygiene: its
+    // first heading when it has one, else the filename (leaf of the id).
+    // Never an empty string, which is the failure this test guards.
+    expect(byId["guides/getting-started"]).toBe("Heading");
     expect(byId["a/b/c/deep-notes"]).toBe("deep-notes");
     // Explicit frontmatter title is untouched.
     expect(byId["with-fm"]).toBe("Explicit FM Title");

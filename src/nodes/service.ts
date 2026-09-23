@@ -29,6 +29,7 @@ import {
   VaultBusyError,
   isVaultLockTimeout,
 } from "../shared/errors.js";
+import type { ClientMetadata } from "../shared/client-metadata.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
 import { syncNodeTags, removeNodeFromTagIndex } from "../governance/tag-index-service.js";
@@ -37,11 +38,16 @@ import {
   resolveNestPath,
   nestAllowsSelfApprove,
   nestReviewsPrimeOnly,
+  nestCreatorIsReviewer,
 } from "../nests/service.js";
 import { isPrimeDocument, documentPrimeFlag } from "../governance/prime-service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
 import { notifyMentions } from "../governance/mention-notify.js";
-import { resolveUserRoles } from "../governance/stewardship-service.js";
+import {
+  resolveUserRoles,
+  stewardDocumentCreator,
+  removeSteward,
+} from "../governance/stewardship-service.js";
 import { canApproveWith } from "../governance/roles.js";
 import {
   resolveCallerEmail,
@@ -409,6 +415,36 @@ export function assertAcceptedType(type: string): void {
         .join(", ")}`,
     );
   }
+}
+
+/**
+ * The update-side counterpart of the create gate, for nodes that predate it.
+ *
+ * A node written before `assertAcceptedType` existed (or imported from a vault
+ * with its own vocabulary) can carry a `type` this server never accepts, e.g.
+ * `policy`. The engine re-validates the WHOLE frontmatter on every write, so
+ * every update of such a node — even a no-op PATCH echoing its current body —
+ * died inside the engine (`Document validation failed: Invalid enum value …
+ * received 'policy'`) and reached the caller as the generic 500 from
+ * toSafeError, with no hint that the stored type was the problem.
+ *
+ * Refuse the write here instead, as a 400 that names the type and the way
+ * out: re-type the node in the same PATCH. A patch that carries a `type` is
+ * left to assertAcceptedType (the engine accepts a re-type from an unknown
+ * type: it sets `frontmatter.type` before validating). Read paths are not
+ * touched — existing legacy nodes still list, render and version as before.
+ */
+function assertUpdatableType(storedType: string | undefined): void {
+  const type = storedType || "document";
+  // The soft-disable of artifact/table is create-only by design (see
+  // createNode): existing nodes of a disabled type still save. Only a type
+  // outside the accepted set can never reach the engine.
+  if (ACCEPTED_NODE_TYPES.has(type)) return;
+  throw new ValidationError(
+    `node has legacy type "${type}" which this server no longer accepts; ` +
+      `include "type": "<accepted type>" in the same PATCH to migrate it ` +
+      `(allowed: ${[...ACCEPTED_NODE_TYPES].sort().join(", ")})`,
+  );
 }
 
 export function toNodeResponse(node: ContextNode): NodeResponse {
@@ -1254,6 +1290,9 @@ export interface CreateNodeInput {
    *  the nest's prime tags; `false` exempts this doc from an otherwise-prime
    *  tag. */
   prime?: boolean;
+  /** Caller attribution recorded on the version this create seals (§9.4).
+   *  Optional everywhere — an unattributed write is a valid write. */
+  client?: ClientMetadata;
 }
 
 export interface UpdateNodePatch {
@@ -1267,6 +1306,8 @@ export interface UpdateNodePatch {
   schedule?: string;
   /** Document-scope prime flag. `null` clears it back to tag/nest inheritance. */
   prime?: boolean | null;
+  /** See CreateNodeInput.client. */
+  client?: ClientMetadata;
   /** Re-type the node (the editor's "Convert to…"). Same accepted set and
    *  feature flags as create; leaving a runnable type drops its schedule. */
   type?: string;
@@ -1285,6 +1326,13 @@ export interface UpdateNodePatch {
  */
 export interface WriteOptions {
   notifyMentions?: boolean;
+  /**
+   * False keeps a create out of the nest's creator-reviews posture: the
+   * author is not stewarded and v1 is not published on their authority. For
+   * documents the system derives (the annotations projection), which nobody
+   * authored.
+   */
+  creatorReviews?: boolean;
 }
 
 export interface NodeMutationResult {
@@ -1344,11 +1392,19 @@ async function assertMayFlagPrime(
 async function autoPublishReason(
   nestId: string,
   userEmail: string,
-  doc: { tags?: readonly unknown[]; metadata?: unknown }
+  doc: { tags?: readonly unknown[]; metadata?: unknown },
+  opts: { creatorReviews?: boolean; governed?: boolean } = {},
 ): Promise<string | null> {
-  // Ungoverned nest: nothing to review, nobody to review it.
-  if (!(await isStewardshipEnabled(nestId))) return "no stewards configured";
+  // Ungoverned nest: nothing to review, nobody to review it. A caller that
+  // already looked this up passes it in — create is a hot path.
+  const governed = opts.governed ?? (await isStewardshipEnabled(nestId));
+  if (!governed) return "no stewards configured";
   if (await isPrimeDocument(nestId, doc.tags, doc.metadata)) return null;
+  // Creator-reviews (a create, in a nest with the posture on): the author is
+  // this document's reviewer, so v1 is theirs to publish. Only v1 — every
+  // later edit, theirs included, is a change to a reviewed document and goes
+  // through the queue.
+  if (opts.creatorReviews) return "creator is the document's reviewer";
   // Prime-only posture: everything that isn't prime self-publishes.
   if (await nestReviewsPrimeOnly(nestId)) {
     return "prime-only review, document is not prime";
@@ -1494,56 +1550,100 @@ async function createNodeOnce(
       ...(input.schedule ? { schedule: input.schedule } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
     };
-    const publishReason = await autoPublishReason(nestId, userEmail, {
-      tags,
-      metadata,
-    });
-    // Same note in the engine history and the governance row: the version
-    // history an admin reads in the UI comes from node_versions, so leaving the
-    // reason only in history.yaml hides it from the audit that matters.
-    const publishNote =
-      publishReason === null ? undefined : `Auto-published on create (${publishReason})`;
+    // Creator-reviews: steward the author BEFORE deciding to publish, since v1
+    // publishes on the strength of that row. A failure here fails the create
+    // with nothing written — never a document published on a false premise.
+    // The id is reserved by the lock and free (checked above), so the row
+    // can't name someone else's document. Not atomic with the engine write
+    // (a separate filesystem + DB path this can't join in one transaction), so
+    // it is compensated instead: everything from here until the document is on
+    // disk runs under one guard that takes the row back on any failure. A row
+    // left behind on a free id would attach to whoever creates that id next.
+    const governed = await isStewardshipEnabled(nestId);
+    const creatorReviews =
+      opts.creatorReviews !== false &&
+      governed &&
+      (await nestCreatorIsReviewer(nestId));
+    const creatorSteward = creatorReviews
+      ? await stewardDocumentCreator(nestId, id, userEmail)
+      : null;
 
-    // Write — and publish, when the gate allows — through the engine's canonical
-    // create. Governance stays here; the engine owns frontmatter assembly,
-    // validation, version assignment and the index regen, so a document created
-    // here is identical to one created by the CLI or mcp-server.
-    let published = publishReason !== null;
+    let published = false;
+    let publishNote: string | undefined;
     try {
-      await engineApi.run(
-        "context_create",
-        {
-          id,
-          title: input.title,
-          content: input.content,
-          type: requestedType,
-          // A skill node is invalid without a skill block, and this surface has
-          // no field for one — default the trigger from the title, same as the
-          // CLI and mcp-server do.
-          ...(requestedType === "skill"
-            ? { trigger: `when asked to ${input.title.toLowerCase()}` }
-            : {}),
-          ...(tags.length ? { tags } : {}),
-          ...(input.status ? { status: input.status } : {}),
-          metadata,
-          publish: published,
-          ...(publishNote ? { note: publishNote } : {}),
-        },
-        await opContext(nestId, userEmail),
+      const publishReason = await autoPublishReason(
+        nestId,
+        userEmail,
+        { tags, metadata },
+        { creatorReviews: creatorSteward?.canApprove === true, governed },
       );
-    } catch (err) {
-      // The op writes the node before publishing it. If the write landed and
-      // only the publish failed, register the document as a draft instead of
-      // throwing and stranding a file that has no governance rows.
-      let onDisk = true;
+      // Same note in the engine history and the governance row: the version
+      // history an admin reads in the UI comes from node_versions, so leaving
+      // the reason only in history.yaml hides it from the audit that matters.
+      publishNote =
+        publishReason === null
+          ? undefined
+          : `Auto-published on create (${publishReason})`;
+      published = publishReason !== null;
+
+      // Write — and publish, when the gate allows — through the engine's
+      // canonical create. Governance stays here; the engine owns frontmatter
+      // assembly, validation, version assignment and the index regen, so a
+      // document created here is identical to one created by the CLI or
+      // mcp-server.
       try {
-        await storage.readDocument(id);
-      } catch {
-        onDisk = false;
+        await engineApi.run(
+          "context_create",
+          {
+            id,
+            title: input.title,
+            content: input.content,
+            type: requestedType,
+            // A skill node is invalid without a skill block, and this surface
+            // has no field for one — default the trigger from the title, same
+            // as the CLI and mcp-server do.
+            ...(requestedType === "skill"
+              ? { trigger: `when asked to ${input.title.toLowerCase()}` }
+              : {}),
+            ...(tags.length ? { tags } : {}),
+            ...(input.status ? { status: input.status } : {}),
+            metadata,
+            publish: published,
+            ...(publishNote ? { note: publishNote } : {}),
+          },
+          await opContext(nestId, userEmail),
+        );
+      } catch (err) {
+        // The op writes the node before publishing it. If the write landed and
+        // only the publish failed, register the document as a draft instead of
+        // throwing and stranding a file that has no governance rows.
+        let onDisk = true;
+        try {
+          await storage.readDocument(id);
+        } catch {
+          onDisk = false;
+        }
+        if (!onDisk) throw err;
+        console.error("publishDocument failed (node create auto-publish)", err);
+        published = false;
       }
-      if (!onDisk) throw err;
-      console.error("publishDocument failed (node create auto-publish)", err);
-      published = false;
+    } catch (err) {
+      // Nothing is on disk (the inner catch only rethrows when the write never
+      // landed), so the steward row would name a document that never existed.
+      // The original failure is what the caller needs to see; a failed
+      // compensation is logged, not substituted for it.
+      if (creatorSteward?.insertedId) {
+        try {
+          await removeSteward(creatorSteward.insertedId);
+        } catch (cleanupErr) {
+          console.error(
+            "removeSteward failed while compensating a failed create",
+            id,
+            cleanupErr,
+          );
+        }
+      }
+      throw err;
     }
 
     const node = await storage.readDocument(id);
@@ -1561,6 +1661,7 @@ async function createNodeOnce(
         status: "published",
         tags,
         changeNote: publishNote,
+        client: input.client,
       });
       await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
     } else {
@@ -1575,6 +1676,7 @@ async function createNodeOnce(
         author: userEmail,
         status: "draft",
         tags,
+        client: input.client,
       });
     }
 
@@ -1712,7 +1814,10 @@ export async function alignOnDiskStatus(
 
 export async function registerImportedDocuments(
   nestId: string,
-  userEmail: string
+  userEmail: string,
+  /** Caller attribution for the import (§9.4) — recorded on every version row
+   *  this registration seeds, so a folder an agent imported says so. */
+  client?: ClientMetadata,
 ): Promise<number> {
   const startedAt = Date.now();
   const tracked = await versions.getTrackedNodeIds(nestId);
@@ -1760,6 +1865,7 @@ export async function registerImportedDocuments(
           ? "Imported from existing folder"
           : "Imported from existing folder — could not be published, kept as a draft",
       tags,
+      client,
     });
     if (d.status === "published") {
       await versions.setApprovedVersion(nestId, d.id, d.version, userEmail);
@@ -1807,6 +1913,16 @@ export async function updateNode(
       } catch {
         throw new NotFoundError(`Node not found: ${nodeId}`);
       }
+      // A stored type this server no longer accepts fails engine validation
+      // on ANY write (content, append, tags, status, revert, the MCP
+      // context_update — all land here). Unless this patch re-types the node,
+      // refuse now with a message that says so, instead of the opaque 500 the
+      // engine fault used to become. A patch WITH a different type is gated
+      // below by assertAcceptedType like any other convert; one that echoes
+      // the stored type back is not a re-type, so it is refused here too.
+      if (patch.type === undefined || patch.type === node.frontmatter.type) {
+        assertUpdatableType(node.frontmatter.type);
+      }
       // Kept for the mention fan-out at the end: only names this save ADDS
       // notify, so the same @name surviving many saves is one event.
       const previousBody = node.body || "";
@@ -1826,8 +1942,8 @@ export async function updateNode(
       if (patch.tags) {
         // Replace, don't merge: the editor sends the full tag set on every
         // save, so a union made removals impossible (CU: removed tag returns
-        // after reopen). Callers wanting additive semantics (MCP
-        // context_update) merge against the current tags themselves.
+        // after reopen). MCP context_update replaces too, per the engine
+        // catalog; a caller wanting to add a tag sends the full set.
         const nextTags = requireTags(patch.tags);
         node = { ...node, frontmatter: { ...node.frontmatter, tags: nextTags } };
         // The engine performs the write, so the new set has to reach it — the
@@ -1993,6 +2109,7 @@ export async function updateNode(
           status: "draft",
           tags: currentTags,
           changeNote: patch.changeNote,
+          client: patch.client,
         });
         // Author revised their own pending submission: move the open review
         // onto this fresh version so the steward approves the edited content.
@@ -2036,6 +2153,7 @@ export async function updateNode(
           status: "published",
           tags: currentTags,
           changeNote: publishNote,
+          client: patch.client,
         });
         await versions.setApprovedVersion(
           nestId,

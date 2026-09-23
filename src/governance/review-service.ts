@@ -7,6 +7,7 @@
 
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
+import type { ClientMetadata } from "../shared/client-metadata.js";
 import { ConflictError } from "../shared/errors.js";
 import {
   notifyReviewRequested,
@@ -48,6 +49,10 @@ export async function submitForReview(params: {
   priority?: ReviewRequestPriority;
   /** Request origin, for building the notification's document link. */
   baseUrl?: string;
+  /** Caller attribution for the submission (§9.4). Submitting is the moment a
+   *  draft reaches the engine's append-only chain, so it lands on the entry
+   *  sealed below — the engine models `client` on VersionEntry. */
+  client?: ClientMetadata;
 }): Promise<ReviewRequest> {
   const db = getDb();
 
@@ -124,6 +129,7 @@ export async function submitForReview(params: {
         if (!alreadySealed) {
           await versionManager.createVersion(node, params.requestedBy, {
             note: params.note || "Submitted for review",
+            ...(params.client ? { client: params.client } : {}),
           });
         }
       } catch (err) {
@@ -268,6 +274,9 @@ export async function approve(params: {
   override?: boolean;
   /** Request origin, for building the notification's document link. */
   baseUrl?: string;
+  /** Caller attribution for the approval (§9.4). An approval publishes, so
+   *  when the engine bumps the version it seals, the new row carries it. */
+  client?: ClientMetadata;
 }): Promise<ReviewRequest> {
   // Serialize against a concurrent author edit of the same node. Authors can
   // now revise their own pending submission, so an autosave/save and this
@@ -331,6 +340,11 @@ export async function approve(params: {
     // mirrors the engine's terminal status — history.yaml/frontmatter record
     // the post-approve state as published, and divergence between the two
     // breaks drift detection and display-status resolution.
+    //
+    // No `client_json` here on purpose: this row was sealed by the AUTHOR's
+    // write and already carries the author's attribution. Overwriting it with
+    // the approver's would rewrite history — the approver's block belongs on
+    // the version the engine's publish bumps to, written further down.
     await db.run(
       "UPDATE node_versions SET status = 'published' WHERE nest_id = ? AND node_id = ? AND version = ?",
       [params.nestId, params.nodeId, version],
@@ -383,6 +397,7 @@ export async function approve(params: {
           status: "published",
           tags,
           changeNote: note,
+          client: params.client,
         });
         // Re-pin to the engine-bumped version so getDisplayStatus() resolves
         // the latest row (N+1) as "approved" rather than falling through to

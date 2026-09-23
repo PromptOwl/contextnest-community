@@ -105,6 +105,7 @@ import {
 } from "./auth/license.js";
 import { persistSetting } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
+import { publicBaseUrlError } from "./shared/public-base-url.js";
 import { isOidcReady } from "./auth/oidc.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
@@ -423,6 +424,9 @@ export function createApp(): Hono<AuthEnv> {
       userId: c.get("userId") ?? null,
       status: c.res.status,
       durationMs: Date.now() - started,
+      // Set by whichever handler validated the request's `client` block
+      // (§9.4). Absent on a request that sent none.
+      client: c.get("clientMetadata"),
     });
   });
 
@@ -474,6 +478,11 @@ export function createApp(): Hono<AuthEnv> {
       // runner_key_configured above — the UI shows the launcher whenever the
       // feature is on and explains the missing key, rather than hiding it.
       hootie_enabled: config.HOOTIE_ENABLED,
+      // This server hosts several organizations (PromptOwl-hosted) rather than
+      // one. The visibility picker words 'Organization' and 'Public' by it and
+      // confirms before 'org'; the server enforces the same in
+      // PATCH /nests/:id/visibility.
+      shared_deployment: config.SHARED_DEPLOYMENT,
       // Sub-agent runs gate its own recursion surface separately (env-only,
       // must clear a security review — NOT a UI toggle). Exposed read-only so
       // the Runs page shows the "spawn sub-agent" option only when it's live.
@@ -628,6 +637,7 @@ export function createApp(): Hono<AuthEnv> {
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
     oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
     people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
+    shared_deployment: config.SHARED_DEPLOYMENT,
     // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
     // presence is reported, never the value (same discipline as the OIDC secret).
     sso_token_exchange_enabled: config.SSO_TOKEN_EXCHANGE_ENABLED,
@@ -715,9 +725,19 @@ export function createApp(): Hono<AuthEnv> {
       const v = String(body.logo_url ?? "").trim();
       pending.push({ name: "LOGO_URL", value: v || null });
     }
+    // Validated, not just trimmed. This value is spliced into the copy-paste
+    // snippets the Connecting-agents panel renders — a `bash` block for the
+    // Claude Code and Codex commands, and quoted strings in config.toml,
+    // config.yaml and mcp.json — which people paste verbatim into their own
+    // terminal and config files. Stored unchecked, a shell metacharacter or a
+    // quote here would turn "can edit server settings" into code execution on
+    // every teammate's machine. It is also the audience a minted MCP ticket is
+    // bound to, so junk in it silently breaks token verification.
     if ("public_base_url" in body) {
       const v = String(body.public_base_url ?? "").trim().replace(/\/$/, "");
-      pending.push({ name: "PUBLIC_BASE_URL", value: v || null });
+      const err = v ? publicBaseUrlError(v) : null;
+      if (err) addError("public_base_url", err);
+      else pending.push({ name: "PUBLIC_BASE_URL", value: v || null });
     }
     if ("telemetry_enabled" in body) {
       pending.push({ name: "TELEMETRY_ENABLED", value: body.telemetry_enabled ? "true" : "false" });
@@ -947,6 +967,15 @@ export function createApp(): Hono<AuthEnv> {
       pending.push({
         name: "PEOPLE_SUGGEST_ALL_USERS",
         value: body.people_suggest_all_users ? "true" : null,
+      });
+    }
+    // This server hosts several organizations. On, nest visibility 'org'
+    // needs the same acknowledgement as 'public' and the UI words both tiers
+    // to name the real boundary. false persists as null — unset is off.
+    if ("shared_deployment" in body) {
+      pending.push({
+        name: "SHARED_DEPLOYMENT",
+        value: body.shared_deployment ? "true" : null,
       });
     }
     // ── Agent SSO / token-exchange (POST /auth/token-exchange) ────────────

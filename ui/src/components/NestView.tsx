@@ -3,12 +3,13 @@
  * Uses ported PromptOwl components for the UI, wired to REST API.
  */
 import { Suspense, useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { visibilityConfirmCopy, visibilityTierHint } from "../lib/visibility-confirm";
 import { lazyChunk } from "../lib/lazy-chunk";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
-import { resolveWikiTarget } from "../lib/wiki-preview";
+import { decideWikiLinkAction } from "../lib/wiki-preview";
 import { checkFolderPath } from "../lib/folder-path";
 import { createConsumeOnceFlag } from "../lib/consume-once-flag";
 import {
@@ -67,6 +68,7 @@ import {
 } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Tabs, TabsList, TabsTrigger, TabsContent,
 } from "@/components/ui/tabs";
@@ -144,7 +146,7 @@ export function NestView({
   initialTab,
   onTabChange,
 }: NestViewProps) {
-  const { isAdmin, adminStatus, authMode } = useAuth();
+  const { isAdmin, adminStatus, authMode, sharedDeployment } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
   //   - real-owner nest → only that owner
   //   - anon-owned + open mode → any caller (server treats anon as commons)
@@ -246,12 +248,16 @@ export function NestView({
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   const [allowSelfApprove, setAllowSelfApprove] = useState(false);
   const [primeOnlyReview, setPrimeOnlyReview] = useState(false);
+  const [creatorIsReviewer, setCreatorIsReviewer] = useState(false);
   const [primeTags, setPrimeTags] = useState<string[]>([]);
   const [visibility, setVisibility] = useState<api.NestVisibility>("private");
   const [visibilitySaving, setVisibilitySaving] = useState(false);
   // Publishing (→ public) is guarded by an acknowledgement dialog: the nest
   // becomes readable by anyone on the internet, outside your organization.
   const [confirmPublic, setConfirmPublic] = useState(false);
+  // What the new readers will see beside the name. Prefilled from the nest on
+  // open and saved on confirm, same as NestVisibilityControl's dialog.
+  const [publicDescriptionDraft, setPublicDescriptionDraft] = useState("");
   // Public Docs Reader Mode (superadmin-only config). reader_mode flips the
   // read-only presentation to the clean docs reader; reader_home_node names the
   // designated landing/hub node (empty → resolve by convention).
@@ -523,6 +529,7 @@ export function NestView({
               allow_self_approve: false,
               prime_only_review: false,
               prime_tags: [] as string[],
+              creator_is_reviewer: false,
             })
           : qc.fetchQuery(reads.settings(nestId)).catch((e) => {
               console.error("[NestView] getNestSettings failed", nestId, e);
@@ -531,6 +538,7 @@ export function NestView({
                 allow_self_approve: false,
                 prime_only_review: false,
                 prime_tags: [] as string[],
+                creator_is_reviewer: false,
               };
             }),
       ]);
@@ -539,6 +547,7 @@ export function NestView({
     setStewardshipEnabled(settingsData.stewardship_enabled);
     setAllowSelfApprove(settingsData.allow_self_approve);
     setPrimeOnlyReview(!!settingsData.prime_only_review);
+    setCreatorIsReviewer(!!settingsData.creator_is_reviewer);
     setPrimeTags(settingsData.prime_tags ?? []);
     if (nestMeta?.nest?.visibility) {
       setVisibility(nestMeta.nest.visibility);
@@ -973,11 +982,33 @@ export function NestView({
       return;
     }
     if (visibility !== "public") {
+      setPublicDescriptionDraft(nestDescription ?? "");
       setConfirmPublic(true);
       return;
     }
     await applyVisibility("private");
   };
+
+  // Confirm publishing: save a newly written description first — best-effort,
+  // because a failed description save must not block the publish the user just
+  // acknowledged — then apply with the acknowledgement.
+  const confirmPublicWiden = async () => {
+    setConfirmPublic(false);
+    const next = publicDescriptionDraft.trim();
+    if (next && next !== (nestDescription ?? "").trim()) {
+      try {
+        await api.updateNest(nestId, { description: next });
+        setNestDescription(next);
+      } catch (err: any) {
+        toast.error(
+          err?.message || "Failed to save the description — publishing anyway",
+        );
+      }
+    }
+    await applyVisibility("public", true);
+  };
+
+  const publicConfirmCopy = visibilityConfirmCopy("public", { sharedDeployment });
 
   // Public Docs Reader Mode config (server admin, or this nest's own
   // owner/admin — see canManageReaderMode below). Optimistic flip with
@@ -1270,7 +1301,7 @@ export function NestView({
                 visibility === "public"
                   ? "Public — anyone with the URL can read. Click to make private."
                   : visibility === "org"
-                    ? "Organization — everyone signed in to this deployment can read. Click to manage sharing (Collaborators tab)."
+                    ? `Organization — ${visibilityTierHint("org", { sharedDeployment }).toLowerCase()}. Click to manage sharing (Collaborators tab).`
                     : "Private. Click to make public (anyone with the URL can read)."
               }
             >
@@ -1927,6 +1958,7 @@ export function NestView({
           allowSelfApprove={allowSelfApprove}
           primeOnlyReview={primeOnlyReview}
           primeTags={primeTags}
+          creatorIsReviewer={creatorIsReviewer}
           canManageStewardship={canManageGovernance}
           onClose={() => setShowSettings(false)}
           onChanged={(next) => {
@@ -1938,6 +1970,7 @@ export function NestView({
             setAllowSelfApprove(next.allowSelfApprove);
             setPrimeOnlyReview(next.primeOnlyReview);
             setPrimeTags(next.primeTags);
+            setCreatorIsReviewer(next.creatorIsReviewer);
             fetchData();
           }}
         />
@@ -2157,21 +2190,32 @@ export function NestView({
       <AlertDialog open={confirmPublic} onOpenChange={setConfirmPublic}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Make this nest public?</AlertDialogTitle>
+            <AlertDialogTitle>{publicConfirmCopy.title}</AlertDialogTitle>
             <AlertDialogDescription>
-              This makes the nest readable by anyone on the internet, outside
-              your organization. Anyone with the URL will be able to read it.
+              {publicConfirmCopy.body}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {/* What those readers will see beside the name. Prefilled from the
+              nest; an empty one can be written here and is saved on confirm. */}
+          <div className="space-y-1.5">
+            <Label htmlFor="nest-public-description" className="text-xs">
+              {(nestDescription ?? "").trim()
+                ? "Description readers will see"
+                : "This nest has no description — readers will only see its name. Add one? (optional)"}
+            </Label>
+            <Textarea
+              id="nest-public-description"
+              value={publicDescriptionDraft}
+              onChange={(e) => setPublicDescriptionDraft(e.target.value)}
+              placeholder="What this nest is for, and who it's meant for"
+              rows={2}
+              data-testid="nest-public-description"
+            />
+          </div>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                setConfirmPublic(false);
-                void applyVisibility("public", true);
-              }}
-            >
-              Make public
+            <AlertDialogAction onClick={() => void confirmPublicWiden()}>
+              {publicConfirmCopy.confirm}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -2339,29 +2383,26 @@ function ReviewDocumentModal({
   // Resolve `[[Title]]` clicks to a node id and jump straight to that
   // doc. Without this the wiki-link decoration renders but click does
   // nothing — `MarkdownEditor` only wires nav when `onWikiLinkClick`
-  // is provided. Cache miss (no id from the existence check) falls
-  // back to a fresh title→id lookup so links resolve even when the
-  // target was created after the reviewer opened the modal. Broken
-  // links are NOT routed to the create flow — the caller is acting
-  // as a reviewer here (read-only role for this surface), so silently
-  // dropping them into an authoring page would mislead them; instead
-  // we surface an inline note.
-  const handleWikiLinkClick = async (title: string, id: string | null) => {
+  // is provided. `id` (the decoration's cached existence check) is never
+  // trusted for navigation — it can go stale between when the decoration
+  // checked and when it's clicked — so every click re-resolves against the
+  // live node list via the shared decideWikiLinkAction (same rule as the
+  // editor), which also picks up a target created after the reviewer opened
+  // the modal. Broken links are NOT routed to the create flow (canAuthor:
+  // false) — the caller is acting as a reviewer here (read-only role for
+  // this surface), so silently dropping them into an authoring page would
+  // mislead them; instead we surface an inline note.
+  const handleWikiLinkClick = async (title: string, _id: string | null) => {
     setLinkError(null);
-    if (id) {
-      onOpenDocument(id);
-      return;
-    }
     try {
-      // Full list + shared id/title/slug resolver (same rule as the editor) so
-      // a [[nodes/slug]] or slug-form link resolves here too, not title-only.
       const { nodes } = await qc.fetchQuery(reads.nodes(nestId));
-      const exact = resolveWikiTarget(
+      const action = decideWikiLinkAction(
         nodes as Array<{ id: string; title: string }>,
         title,
+        false,
       );
-      if (exact) {
-        onOpenDocument(exact.id);
+      if (action.kind === "navigate") {
+        onOpenDocument(action.node.id);
         return;
       }
       setLinkError(

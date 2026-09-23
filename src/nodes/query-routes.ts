@@ -557,6 +557,7 @@ queryRoutes.post("/publish", async (c) => {
       type?: string;
       tags?: string[];
       scope?: string;
+      folder?: string;
     }>;
     context_md?: string;
   }>();
@@ -615,6 +616,7 @@ queryRoutes.post("/publish", async (c) => {
           type: doc.type,
           tags: doc.tags,
           scope: doc.scope,
+          folder: doc.folder,
         },
         userEmail,
       );

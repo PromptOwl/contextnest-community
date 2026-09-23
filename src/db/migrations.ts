@@ -205,6 +205,13 @@ export function runMigrations(db: Database.Database): void {
     db.exec("ALTER TABLE nests ADD COLUMN prime_tags TEXT NOT NULL DEFAULT 'prime-document'");
   }
 
+  // Creator reviews their documents: on create, the author becomes the
+  // document's reviewer steward and v1 publishes. Off by default so a governed
+  // nest keeps routing new documents to its assigned reviewers on upgrade.
+  if (!nestCols.includes("creator_is_reviewer")) {
+    db.exec("ALTER TABLE nests ADD COLUMN creator_is_reviewer INTEGER NOT NULL DEFAULT 0");
+  }
+
   // Freshness stamp for node_index (migration 036). NULL means "rebuild before
   // answering" — the state every existing nest starts in on upgrade, and the
   // state any write we could not mirror puts it back into.
@@ -1532,6 +1539,29 @@ export function runMigrations(db: Database.Database): void {
       `);
       recordMigration("043_node_suggestion_details");
     })();
+  }
+
+  // 044: caller attribution (spec §9.4). One nullable JSON column per audit
+  //   surface — the version a write sealed, and the activity trace every call
+  //   lands on. Nullable and unindexed on purpose: `client` is an annotation
+  //   nobody queries by, and NULL is the whole "not attributed" story, so every
+  //   existing row is already correct. Never part of any hash.
+  //
+  //   Numbered 044, not 040: 040 is reserved for 040_push_confirmation, in
+  //   flight on another branch (see the note on 041), and ids match by string.
+  if (!hasMigration("044_client_attribution")) {
+    for (const [table, col] of [
+      ["node_versions", "client_json"],
+      ["api_events", "client_json"],
+    ] as const) {
+      const cols = (
+        db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (cols.length && !cols.includes(col)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
+      }
+    }
+    recordMigration("044_client_attribution");
   }
 }
 

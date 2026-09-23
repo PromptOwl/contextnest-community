@@ -7,6 +7,7 @@ import { ValidationError, NotFoundError } from "../shared/errors.js";
 // id is rejected up front by the assertSafeNodeId chokepoint mounted on
 // /nests/:nestId/nodes/:nodeId{.+} in app.ts — covers every node route across
 // this + the annotations + governance routers, so handlers here can trust nodeId.
+import { attributeRequest } from "../shared/client-metadata.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { getDb } from "../db/client.js";
 import * as versions from "../governance/version-service.js";
@@ -142,6 +143,7 @@ nodeRoutes.post("/", async (c) => {
     schedule?: string;
     folder?: string;
     prime?: boolean;
+    client?: unknown;
   }>();
 
   if (!body.title || !body.content) {
@@ -165,6 +167,7 @@ nodeRoutes.post("/", async (c) => {
       schedule: body.schedule,
       folder: body.folder,
       prime: body.prime,
+      client: attributeRequest(c, body.client),
     },
     authorEmail,
   );
@@ -269,8 +272,8 @@ nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
   }
 
   const body = await c.req
-    .json<{ targetVersion?: number }>()
-    .catch(() => ({}) as { targetVersion?: number });
+    .json<{ targetVersion?: number; client?: unknown }>()
+    .catch(() => ({}) as { targetVersion?: number; client?: unknown });
   const targetVersion = Number(body.targetVersion);
   if (!Number.isInteger(targetVersion) || targetVersion < 1) {
     throw new ValidationError("targetVersion (a positive integer) is required");
@@ -288,7 +291,11 @@ nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
   const { node, version } = await updateNode(
     nestId,
     nodeId,
-    { content, changeNote: `Restored from version ${targetVersion}` },
+    {
+      content,
+      changeNote: `Restored from version ${targetVersion}`,
+      client: attributeRequest(c, body.client),
+    },
     userEmail,
   );
   await trackEvent("node.revert", { nestId, nodeId, targetVersion });
@@ -529,6 +536,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     changeNote?: string;
     schedule?: string;
     prime?: boolean | null;
+    client?: unknown;
     type?: string;
   }>();
   if (body.type !== undefined && typeof body.type !== "string") {
@@ -568,6 +576,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       changeNote: body.changeNote,
       schedule: body.schedule,
       prime: body.prime,
+      client: attributeRequest(c, body.client),
       type: body.type,
     },
     authorEmail,

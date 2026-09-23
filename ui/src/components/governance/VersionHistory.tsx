@@ -21,6 +21,7 @@ import { unifiedDiff } from "./diff-util";
 import { resolveBody } from "./version-body";
 import { DocumentViewer } from "../DocumentViewer";
 import { parseServerDate } from "@/lib/dates";
+import { formatClient, type ClientAttribution } from "@/lib/client-attribution";
 import { NEVER_PUBLISHED_HINT } from "./version-hints";
 
 export interface Version {
@@ -43,6 +44,16 @@ export interface Version {
   /** The reviewer's own note on that verdict — the rejection reason, or an
    *  approver's comment. Rendered in the row so it isn't buried behind a click. */
   resolutionNote?: string;
+  /**
+   * Caller attribution for the write that sealed this version (spec §9.4):
+   * which agent, in which session, plus any custom keys. Absent when the write
+   * carried none — most human saves through this UI do.
+   *
+   * Rendered NEXT TO "By:", never instead of it: `editedBy` is the authoring
+   * identity the server authenticated, this is what the caller said about
+   * itself.
+   */
+  client?: ClientAttribution;
 }
 
 /**
@@ -649,6 +660,14 @@ export function VersionHistory({
                       <div className="text-xs text-muted-foreground">
                         {formatDate(version.editedAt)}
                       </div>
+                      {version.client && (
+                        <div className="text-xs text-muted-foreground break-words">
+                          Client:{" "}
+                          <span className="font-mono text-foreground/70">
+                            {formatClient(version.client)}
+                          </span>
+                        </div>
+                      )}
                       {version.resolvedBy && (
                         <div className="text-xs text-muted-foreground break-words">
                           {version.resolutionStatus === "rejected"
