@@ -53,7 +53,11 @@ export function nestInScope(n: ScopedNest, scope: NestScope): boolean {
     case "owned":
       return nestOwned(n);
     case "shared":
-      return !nestOwned(n);
+      // Shared WITH me — someone granted it. A discovered nest is one I can
+      // only read because of its visibility tier, which nobody chose to share
+      // with me; listing it here would put every other customer's org nest in
+      // a scope that reads as a personal invitation. (CU-wdqcq02mek)
+      return !nestOwned(n) && !n.discovered;
     case "org":
       return n.visibility === "org";
     case "public":

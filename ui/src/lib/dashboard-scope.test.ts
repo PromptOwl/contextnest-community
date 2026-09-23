@@ -67,10 +67,13 @@ describe("nestInScope — which registered nests a scope keeps", () => {
     expect(DEFAULT_NEST_SCOPE).toBe("mine");
   });
 
+  it("'shared' = granted to me only; a discovered nest was never shared with me", () => {
+    expect(keeps("shared")).toEqual(["sharedWithMe"]);
+  });
+
   it("regression: the existing scopes are unchanged", () => {
     expect(keeps("all")).toEqual(Object.keys(rows));
     expect(keeps("owned")).toEqual(["mine", "myPublic"]);
-    expect(keeps("shared")).toEqual(["sharedWithMe", "orgDiscovered", "publicDiscovered"]);
     expect(keeps("org")).toEqual(["orgDiscovered"]);
     expect(keeps("public")).toEqual(["publicDiscovered", "myPublic"]);
   });
