@@ -43,6 +43,7 @@ import { reads } from "../../../lib/queries";
 import { copyTextWithToast } from "../../../lib/clipboard";
 import { getAdminSettings, updateAdminSettings } from "../../../lib/api";
 import { useAuth } from "../../../auth/AuthContext";
+import { AgentConnectPanel } from "./AgentConnectPanel";
 import { toast } from "sonner";
 
 interface SettingsPageProps {
@@ -120,6 +121,12 @@ const TABS: {
     // Teammates page), so this tab has no keys to track for the unsaved dot.
     id: "community-sites",
     label: "Community sites",
+    keys: [],
+  },
+  {
+    // Docs only — nothing here persists, so no keys for the unsaved dot.
+    id: "agents",
+    label: "Connecting agents",
     keys: [],
   },
   {
@@ -278,6 +285,12 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   const [draft, setDraft] = useState<AdminSettings | null>(settings);
   const [saving, setSaving] = useState(false);
   const qc = useQueryClient();
+  // Auth mode isn't an admin setting — it's boot-time config, reported on
+  // /health and already derived once in AuthContext. The Connecting-agents
+  // tab needs it so open-mode deployments aren't told to send a credential
+  // that doesn't exist; read it from there rather than mounting a second
+  // query, so there's one place that decides what "open mode" means.
+  const { authMode } = useAuth();
   // Error from the last failed save (shape validation or SMTP verify), shown
   // inline near the fields. Cleared on the next edit or a successful save.
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1748,6 +1761,13 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 )}
               </CardContent>
             </Card>
+          </TabsContent>
+
+          <TabsContent value="agents" className="space-y-4">
+            <AgentConnectPanel
+              publicBaseUrl={draft.public_base_url}
+              openMode={authMode === "open"}
+            />
           </TabsContent>
         </Tabs>
       )}

@@ -104,6 +104,7 @@ import {
 } from "./auth/license.js";
 import { persistSetting } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
+import { publicBaseUrlError } from "./shared/public-base-url.js";
 import { isOidcReady } from "./auth/oidc.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
@@ -715,9 +716,19 @@ export function createApp(): Hono<AuthEnv> {
       const v = String(body.logo_url ?? "").trim();
       pending.push({ name: "LOGO_URL", value: v || null });
     }
+    // Validated, not just trimmed. This value is spliced into the copy-paste
+    // snippets the Connecting-agents panel renders — a `bash` block for the
+    // Claude Code and Codex commands, and quoted strings in config.toml,
+    // config.yaml and mcp.json — which people paste verbatim into their own
+    // terminal and config files. Stored unchecked, a shell metacharacter or a
+    // quote here would turn "can edit server settings" into code execution on
+    // every teammate's machine. It is also the audience a minted MCP ticket is
+    // bound to, so junk in it silently breaks token verification.
     if ("public_base_url" in body) {
       const v = String(body.public_base_url ?? "").trim().replace(/\/$/, "");
-      pending.push({ name: "PUBLIC_BASE_URL", value: v || null });
+      const err = v ? publicBaseUrlError(v) : null;
+      if (err) addError("public_base_url", err);
+      else pending.push({ name: "PUBLIC_BASE_URL", value: v || null });
     }
     if ("telemetry_enabled" in body) {
       pending.push({ name: "TELEMETRY_ENABLED", value: body.telemetry_enabled ? "true" : "false" });
