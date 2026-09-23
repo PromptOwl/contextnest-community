@@ -134,7 +134,7 @@ Keys are minted in the app (Workspace → API keys, or the Connect dialog) — o
 | Custom logo / branding | ✅ | ✅ |
 | Admin password reset + user removal (in-platform) | ✅ | ✅ |
 | Wiki backlinks, outline, hover-preview, link health | ✅ | ✅ |
-| Rich editor — tables, callouts, toggles, code highlight, find/replace, image & video upload | ✅ | ✅ |
+| Rich editor — tables, callouts, toggles, code highlight, find/replace, image & video upload, YouTube / Vimeo embeds | ✅ | ✅ |
 | Folder organization — nested folders, move documents, lazy folder tree | ✅ | ✅ |
 | Scales to large vaults — nest listings served from a document index, not a disk crawl | ✅ | ✅ |
 | Steward version revert | ✅ | ✅ |
