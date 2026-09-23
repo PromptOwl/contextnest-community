@@ -1979,13 +1979,17 @@ export function createApp(): Hono<AuthEnv> {
           if (!(await canSeeLicenseDetail(userId))) {
             return deny(503, NEUTRAL_READ_ONLY, { read_only: true });
           }
+          // licenseTerms carries the machine reason code; expose it as
+          // license_reason so it doesn't clobber the human-readable reason.
+          const { reason: licenseReason, ...terms } = licenseTerms(lic);
           return deny(503, "License required", {
+            ...terms,
+            license_reason: licenseReason,
             reason:
               lic?.reason === "expired"
                 ? "This server's PromptOwl license has ended, so it is read-only until it is renewed. Nothing has been deleted."
                 : "This server has no valid PromptOwl license installed. Ask the server admin to install one via the setup screen or POST /license/install.",
             setup_url: "/setup",
-            ...licenseTerms(lic),
           });
         }
       }

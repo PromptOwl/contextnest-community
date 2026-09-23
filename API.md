@@ -2162,7 +2162,7 @@ For any `/nests/:nestId/...` request, the middleware computes:
 
 Returns 403 `Insufficient permissions` if not met. Open-mode (`AUTH_MODE=open`) treats everyone as `owner`.
 
-License gate: any non-GET request OR any governance path requires a valid PromptOwl license (`/license/install`). Otherwise 503. **Who hears why:** a server admin (open mode, license owner, superadmin), or the key's owner after it lapsed, gets `{ "error": "License required", "reason": "...", "setup_url": "/setup", "trial", "expires_at", "days_left", "reason", "grace_ends_at", "contact": { "url", "email" } }` (or `"Server suspended by PromptOwl"` with `reason`, `contact`, `contact_url`). Everyone else gets only `{ "error": "This workspace is read-only right now. Your administrator has been notified.", "read_only": true }`, with no licensing vocabulary. The server-level `/mcp` write tools and run writes follow the same rule.
+License gate: any non-GET request OR any governance path requires a valid PromptOwl license (`/license/install`). Otherwise 503. **Who hears why:** a server admin (open mode, license owner, superadmin), or the key's owner after it lapsed, gets `{ "error": "License required", "reason": "...", "setup_url": "/setup", "trial", "expires_at", "days_left", "license_reason", "grace_ends_at", "contact": { "url", "email" } }` (or `"Server suspended by PromptOwl"` with `reason`, `contact`, `contact_url`). Everyone else gets only `{ "error": "This workspace is read-only right now. Your administrator has been notified.", "read_only": true }`, with no licensing vocabulary. The server-level `/mcp` write tools and run writes follow the same rule.
 
 ---
 
