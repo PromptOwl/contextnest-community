@@ -70,6 +70,78 @@ export async function* streamAnswer(params: {
 }
 
 /**
+ * What to tell the person in the panel when the model call failed.
+ *
+ * "Hootie couldn't reach the model" is true of every failure and useful for
+ * none of them: out of credit, a revoked key and a rate limit each need a
+ * different person to do a different thing. The provider says which; this
+ * turns that into one sentence naming the cause and who fixes it.
+ *
+ * Deliberately our own wording rather than the provider's text: it reaches
+ * every reader of the nest, not just the admin, and an upstream message can
+ * change or say more than we want to repeat.
+ */
+export function describeModelError(err: unknown): string {
+  const e = err as { status?: number; error?: { error?: { message?: string } } };
+  const detail = (e?.error?.error?.message || "").toLowerCase();
+  if (detail.includes("credit balance") || detail.includes("billing")) {
+    return "Hootie's Anthropic account is out of credit. A server admin needs to add credit in the Anthropic console (Plans & Billing).";
+  }
+  switch (e?.status) {
+    case 401:
+    case 403:
+      return "Anthropic rejected this server's API key. A server admin can replace it under Settings → General.";
+    case 404:
+      return `No model named "${process.env.HOOTIE_MODEL || "claude-opus-5"}" is available on this key. A server admin can change it under Settings → General.`;
+    case 413:
+      return "That question plus the documents behind it are too large for one request. Try asking something narrower.";
+    case 429:
+      return "Anthropic is rate-limiting this server right now. Try again in a moment.";
+    case 529:
+      return "The model is overloaded right now. Try again in a moment.";
+  }
+  if (typeof e?.status === "number" && e.status >= 500) {
+    return "Anthropic is having trouble right now. Try again in a moment.";
+  }
+  return "Hootie couldn't reach the model. Try again in a moment.";
+}
+
+/**
+ * Does this key actually work? Called when an admin saves one, so an invalid
+ * key is refused at the box that sets it rather than surfacing as a failed
+ * answer later.
+ *
+ * `models.list` is the cheapest call that proves the credential: no tokens,
+ * no model named, one round trip. Only an auth rejection (401/403) is a
+ * verdict — anything else (gateway down, no /v1/models on it, a timeout) says
+ * nothing about the key, so the save goes through rather than holding the
+ * admin hostage to an unrelated outage.
+ *
+ * @returns an error to show the admin, or null when there's nothing against it.
+ */
+export async function verifyModelKey(
+  apiKey: string,
+  baseUrl: string | null,
+): Promise<string | null> {
+  try {
+    await clientFor(apiKey, baseUrl).models.list(
+      { limit: 1 },
+      { signal: AbortSignal.timeout(10_000) },
+    );
+    return null;
+  } catch (err: any) {
+    const status = err?.status;
+    if (status === 401 || status === 403) {
+      return baseUrl
+        ? `The model gateway rejected that key (${status}). Check the key and the gateway URL.`
+        : "Anthropic rejected that key. Check it and paste it again.";
+    }
+    console.warn("[hootie] key check inconclusive, saving anyway", status ?? err?.message);
+    return null;
+  }
+}
+
+/**
  * One client per key + gateway. Both are server-wide settings an admin can
  * change at runtime, so they are looked up per call — but the client behind
  * them (connection pool, retries) is reused rather than rebuilt per question.

@@ -177,11 +177,14 @@ const noAutofill = (type: string) =>
 
 /** Controlled text input bound straight to the draft (no per-field Save). */
 function TextField({
+  id,
   value,
   placeholder,
   onChange,
   type = "text",
 }: {
+  /** Set it when a <Label htmlFor> points here, or the label labels nothing. */
+  id?: string;
   value: string;
   placeholder?: string;
   onChange: (v: string) => void;
@@ -195,6 +198,7 @@ function TextField({
   return (
     <div className="relative flex-1">
       <Input
+        id={id}
         value={value}
         type={isPassword && reveal ? "text" : type}
         placeholder={placeholder}
@@ -713,8 +717,9 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 <CardDescription>
                   The server-wide model key. Runners pick it up automatically
                   (every nest, unless a nest overrides it in its Tool
-                  environment). No key, no LLM calls. Stored server-side; shown
-                  masked.
+                  environment). No key, no LLM calls. Checked against the
+                  provider when you save, so a bad key is refused here rather
+                  than failing later. Stored server-side; shown masked.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -785,6 +790,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 <div className="space-y-1.5">
                   <Label htmlFor="hootie-model">Model</Label>
                   <TextField
+                    id="hootie-model"
                     value={draft.hootie_model ?? ""}
                     placeholder="claude-opus-5"
                     onChange={(v) => set({ hootie_model: v })}
@@ -798,6 +804,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 <div className="space-y-1.5">
                   <Label htmlFor="anthropic-base-url">Model gateway URL</Label>
                   <TextField
+                    id="anthropic-base-url"
                     value={draft.anthropic_base_url ?? ""}
                     placeholder="http://gateway:4000 — empty calls Anthropic directly"
                     onChange={(v) => set({ anthropic_base_url: v })}

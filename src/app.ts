@@ -37,6 +37,7 @@ import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { hootieRoutes } from "./hootie/routes.js";
+import { verifyModelKey } from "./hootie/model.js";
 import { mcpRoutes } from "./mcp/routes.js";
 import { edgeTypeRoutes } from "./workflow/edge-type-routes.js";
 import { edgeRoutes } from "./workflow/edge-routes.js";
@@ -829,7 +830,18 @@ export function createApp(): Hono<AuthEnv> {
       } else if (typeof v !== "string" || !v.trim().startsWith("sk-")) {
         addError("anthropic_api_key", 'Anthropic API key must start with "sk-" (or be empty to clear it).');
       } else {
-        pending.push({ name: "ANTHROPIC_API_KEY", value: v.trim() });
+        // Shape is not validity: a well-formed key that Anthropic rejects
+        // saves cleanly and then fails on the first question someone asks.
+        // One call settles it here, against the gateway THIS patch leaves in
+        // place (it may be setting one in the same request).
+        const key = v.trim();
+        const patchedBase = pending.find((p) => p.name === "ANTHROPIC_BASE_URL");
+        const baseUrl = patchedBase
+          ? patchedBase.value
+          : config.ANTHROPIC_BASE_URL || null;
+        const rejected = await verifyModelKey(key, baseUrl);
+        if (rejected) addError("anthropic_api_key", rejected);
+        else pending.push({ name: "ANTHROPIC_API_KEY", value: key });
       }
     }
     if ("subagent_runs_enabled" in body) {

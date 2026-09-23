@@ -12,6 +12,10 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import {
+  describeModelError as realDescribeModelError,
+  ModelRefusedError as RealModelRefusedError,
+} from "../src/hootie/model.js";
+import {
   setupTestEnv,
   createTestApp,
   registerUser,
@@ -50,6 +54,8 @@ function parseSse(text: string): SseEvent[] {
 
 /** What the mocked model will say next; tests set it per case. */
 let scriptedAnswer = "Hoot.";
+/** When set, the mocked model throws it instead of answering. */
+let scriptedError: unknown = null;
 /** What the mocked model was asked; tests inspect the retrieved context. */
 let lastModelCall: {
   system: string;
@@ -118,6 +124,7 @@ beforeAll(() => {
         model: params.model,
         baseUrl: params.baseUrl ?? null,
       };
+      if (scriptedError) throw scriptedError;
       // Two chunks, so the route's delta framing is exercised.
       const mid = Math.ceil(scriptedAnswer.length / 2);
       yield scriptedAnswer.slice(0, mid);
@@ -140,6 +147,10 @@ beforeAll(() => {
       }
       yield scriptedAnswer.slice(mid);
     },
+    // Only the SDK call is scripted; the error wording is the real one, so a
+    // test can assert what the panel would actually show.
+    describeModelError: realDescribeModelError,
+    ModelRefusedError: RealModelRefusedError,
   }));
 });
 afterAll(() => {
@@ -151,6 +162,9 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
   let owner: { apiKey: string; email: string; userId: string };
   let reader: { apiKey: string; email: string; userId: string };
   let stranger: { apiKey: string; email: string; userId: string };
+  /** On the nest, never named by a human — the model naming them must not
+   *  reach them. */
+  let bystander: { apiKey: string; email: string; userId: string };
   let nestId: string;
   let authNodeId: string;
 
@@ -164,6 +178,8 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
     reader = await registerUser(app, "reader@acme.com", "Reader");
     await resetAuthRateLimit();
     stranger = await registerUser(app, "stranger@acme.com", "Stranger");
+    await resetAuthRateLimit();
+    bystander = await registerUser(app, "bystander@acme.com", "Bystander");
     await resetAuthRateLimit();
 
     const { data } = await jsonRequest(
@@ -179,6 +195,13 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
       "POST",
       `/nests/${nestId}/collaborators`,
       { email: reader.email, permission: "read" },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: bystander.email, permission: "read" },
       owner.apiKey,
     );
 
@@ -596,6 +619,51 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
     }
   });
 
+  it("says what actually went wrong when the provider refuses the call", async () => {
+    // "Couldn't reach the model" is true of every failure and actionable for
+    // none: out of credit, a dead key and a rate limit need different people
+    // to do different things, so the panel has to name which one it is.
+    const cases: Array<{ err: any; expect: RegExp }> = [
+      {
+        err: Object.assign(new Error("400"), {
+          status: 400,
+          error: {
+            error: {
+              message:
+                "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
+            },
+          },
+        }),
+        expect: /out of credit/i,
+      },
+      {
+        err: Object.assign(new Error("401"), { status: 401 }),
+        expect: /rejected this server's API key/i,
+      },
+      { err: Object.assign(new Error("429"), { status: 429 }), expect: /rate-limiting/i },
+      { err: Object.assign(new Error("529"), { status: 529 }), expect: /overloaded/i },
+      { err: new Error("socket hang up"), expect: /couldn't reach the model/i },
+    ];
+    // Five chats in one test, on top of everything above — give the per-user
+    // budget a clean window so this measures wording, not the rate limit.
+    await resetAuthRateLimit();
+    for (const { err, expect: pattern } of cases) {
+      scriptedError = err;
+      const { events } = await chat(
+        app,
+        nestId,
+        { message: "how do requests authenticate?" },
+        reader.apiKey,
+      );
+      const error = events.find((e) => e.event === "error");
+      expect(error, `expected an error event for status ${err.status}`).toBeTruthy();
+      expect(error!.data.error).toMatch(pattern);
+      // A failed answer posts nothing and ends the stream — no half-done event.
+      expect(events.find((e) => e.event === "done")).toBeUndefined();
+    }
+    scriptedError = null;
+  });
+
   it("400s an empty message", async () => {
     const { status, json } = await chat(app, nestId, { message: "   " }, reader.apiKey);
     expect(status).toBe(400);
@@ -653,6 +721,37 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
     );
     expect(mention).toBeTruthy();
     expect(mention.message).toContain(reader.email);
+  });
+
+  it("a name the MODEL writes notifies nobody — only the asker's own @mentions do", async () => {
+    // The answer names a nest member the asker never did. It reaches the
+    // comment (it is what Hootie said) but must not reach that person's
+    // inbox: otherwise a document could page a colleague by planting a name.
+    scriptedAnswer = `Ask @${bystander.email} — they own the token rotation.`;
+    const { events } = await chat(
+      app,
+      nestId,
+      {
+        message: `@${owner.email} who owns token rotation?`,
+        node_id: authNodeId,
+      },
+      reader.apiKey,
+    );
+    const done = events.find((e) => e.event === "done")!;
+    expect(done.data.mention.status).toBe("posted");
+    // The asker's own mention still lands: one recipient, not two.
+    expect(done.data.mention.notified).toBe(1);
+
+    const { data: bystanderInbox } = await jsonRequest(
+      app,
+      "GET",
+      "/me/notifications",
+      undefined,
+      bystander.apiKey,
+    );
+    expect(
+      bystanderInbox.notifications.filter((n: any) => n.kind === "mention"),
+    ).toEqual([]);
   });
 
   it("with no open document, a mention anchors on the first node the answer cites", async () => {

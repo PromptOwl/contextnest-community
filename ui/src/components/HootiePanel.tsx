@@ -1,7 +1,7 @@
 /**
  * Hootie in the nest — the floating assistant on every page.
  *
- * A launcher in the corner opens a slide-over that knows where you are: the
+ * A launcher in the corner opens a chat window over it that knows where you are: the
  * document you have open, or the nest, and asks about that. Answers stream in
  * and cite documents as chips that open them. The composer keeps real
  * Hootie's conventions — `@` loops a colleague in, `/` switches the nest.
@@ -13,7 +13,8 @@
  * Always mounted (below the app shell) so the conversation survives closing
  * the panel and moving between pages; it resets only when the nest changes,
  * since the answers were about that nest. The launcher hides when the server
- * has the feature off; without an API key it stays and says what's missing.
+ * has the feature off, and when there is no API key — except for an admin,
+ * who gets it with the "what's missing" notice and the way to fix it.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -235,6 +236,10 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
   }, [draft, busy, scope, override, page, messages]);
 
   if (!hootieEnabled) return null;
+  // On without a key answers nothing. An admin still gets the launcher —
+  // that's the route to the setting that fixes it — but for everyone else a
+  // dead owl is worse than none, so they see nothing until the key is there.
+  if (!runnerKeyConfigured && !isAdmin) return null;
 
   const scopeLabel = !scope
     ? "Pick a nest to ask about"
@@ -264,7 +269,7 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
           role="dialog"
           aria-label="Hootie"
           data-testid="hootie-panel"
-          className="fixed inset-y-0 right-0 z-40 flex w-full max-w-[420px] flex-col border-l bg-background shadow-2xl"
+          className="fixed bottom-5 right-5 z-40 flex h-[min(60vh,560px)] max-h-[calc(100vh-2.5rem)] w-[min(420px,calc(100vw-2.5rem))] flex-col overflow-hidden rounded-xl border bg-background shadow-2xl"
         >
           <header className="flex items-start gap-3 border-b px-4 py-3">
             <img src={hootieIcon} alt="" className="mt-0.5 h-7 w-7 shrink-0" />

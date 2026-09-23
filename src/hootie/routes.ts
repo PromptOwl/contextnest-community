@@ -38,7 +38,12 @@ import { requestBaseUrl } from "../shared/base-url.js";
 import { tryConsume } from "../shared/rate-limit.js";
 import { getNest } from "../nests/service.js";
 import { trackEvent } from "../telemetry/tracker.js";
-import { streamAnswer, type ModelTurn, ModelRefusedError } from "./model.js";
+import {
+  streamAnswer,
+  describeModelError,
+  type ModelTurn,
+  ModelRefusedError,
+} from "./model.js";
 
 export const hootieRoutes = new Hono<AuthEnv>();
 
@@ -247,9 +252,7 @@ hootieRoutes.post("/chat", async (c) => {
       // to report, and nobody to report it to.
       if (cancel.signal.aborted) return;
       const text =
-        err instanceof ModelRefusedError
-          ? err.message
-          : "Hootie couldn't reach the model. Try again in a moment.";
+        err instanceof ModelRefusedError ? err.message : describeModelError(err);
       console.error("[hootie] model call failed", nestId, err);
       await stream.writeSSE({ event: "error", data: JSON.stringify({ error: text }) });
       return;
@@ -436,10 +439,14 @@ async function deliverMentions(params: {
     console.error("[hootie] mention comment failed", nestId, anchor.id, err);
     return { status: "undeliverable", reason: "post_failed" };
   }
+  // Recipients come from the ASKER's text, never the comment body: the body
+  // carries the model's answer, and a name the model wrote — echoed out of a
+  // retrieved document, or planted in one — would otherwise page a colleague
+  // in the asker's name. The comment still says the whole exchange.
   const notified = await notifyCommentMentions({
     nestId,
     nodeId: anchor.id,
-    body,
+    body: message,
     actorEmail: userEmail,
     baseUrl,
   });
