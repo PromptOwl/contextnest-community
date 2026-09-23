@@ -453,3 +453,115 @@ describe("installLicenseKey — durable persistence (Docker)", () => {
     vi.doUnmock("../src/db/settings.js");
   });
 });
+
+describe("license contract v2", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+
+  beforeEach(() => {
+    env = setupTestEnv();
+  });
+
+  afterEach(() => {
+    env.cleanup();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("reports seat count and server version on every validate", async () => {
+    process.env.PROMPTOWL_KEY = "pk_v2_report";
+    const fetchMock = mockFetch({ body: { valid: true, tier: "team" } });
+    const { validateLicense } = await loadLicense();
+    await validateLicense({ forceFresh: true });
+    const init = (fetchMock.mock.calls[0] as unknown[])[1] as RequestInit;
+    const sent = JSON.parse(String(init.body));
+    expect(sent.key).toBe("pk_v2_report");
+    expect(typeof sent.stats.users).toBe("number");
+    expect(typeof sent.stats.nests).toBe("number");
+    expect(typeof sent.server.version).toBe("string");
+  });
+
+  it("parses trial, expiry, grace, seats and contact from PromptOwl", async () => {
+    process.env.PROMPTOWL_KEY = "pk_v2_fields";
+    mockFetch({
+      body: {
+        valid: true,
+        tier: "team",
+        limits: { maxUsers: 30, maxNests: 0 },
+        reason: "expired_grace",
+        trial: true,
+        expires_at: "2026-10-23T00:00:00.000Z",
+        grace_ends_at: "2026-11-06T00:00:00.000Z",
+        seats: { licensed: 30, used: 34, over_limit: true },
+        contact: { url: "https://example.com/talk", email: "sales@example.com" },
+      },
+    });
+    const { validateLicense } = await loadLicense();
+    const lic = await validateLicense({ forceFresh: true });
+    expect(lic.valid).toBe(true);
+    expect(lic.trial).toBe(true);
+    expect(lic.reason).toBe("expired_grace");
+    expect(lic.expiresAt).toBe("2026-10-23T00:00:00.000Z");
+    expect(lic.graceEndsAt).toBe("2026-11-06T00:00:00.000Z");
+    expect(lic.seats).toEqual({ licensed: 30, used: 34, overLimit: true });
+    expect(lic.contact).toEqual({ url: "https://example.com/talk", email: "sales@example.com" });
+
+    // Cached reads keep the same terms.
+    const again = await validateLicense();
+    expect(again.graceEndsAt).toBe("2026-11-06T00:00:00.000Z");
+  });
+
+  it("derives seats from limits when PromptOwl predates v2", async () => {
+    process.env.PROMPTOWL_KEY = "pk_v2_legacy";
+    mockFetch({ body: { valid: true, tier: "team", limits: { maxUsers: 5, maxNests: 0 } } });
+    const { validateLicense } = await loadLicense();
+    const lic = await validateLicense({ forceFresh: true });
+    expect(lic.seats?.licensed).toBe(5);
+    expect(lic.seats?.overLimit).toBe(false);
+    expect(lic.contact?.url).toMatch(/^https:\/\//);
+  });
+
+  it("never renders a non-http contact link", async () => {
+    process.env.PROMPTOWL_KEY = "pk_v2_js";
+    mockFetch({
+      body: { valid: true, contact: { url: "javascript:alert(1)", email: "<x>" } },
+    });
+    const { validateLicense, DEFAULT_LICENSE_CONTACT } = await loadLicense();
+    const lic = await validateLicense({ forceFresh: true });
+    expect(lic.contact).toEqual(DEFAULT_LICENSE_CONTACT);
+  });
+
+  it("a lapse keeps the key and the owner, so a renewal restores the server", async () => {
+    process.env.PROMPTOWL_KEY = "pk_v2_lapse";
+    mockFetch({ body: { valid: true, tier: "team", owner_email: "owner@acme.com" } });
+    const license = await loadLicense();
+    await license.validateLicense();
+
+    const { getDb } = await import("../src/db/client.js");
+    await getDb().run(
+      "INSERT INTO users (id, email, name, password_hash) VALUES ('u1', 'm@acme.com', 'M', 'x')",
+    );
+    await getDb().run(
+      "INSERT INTO sessions (id, user_id, expires_at) VALUES ('s1', 'u1', datetime('now', '+1 day'))",
+    ).catch(() => {});
+    const sessionsBefore = (await getDb().get("SELECT COUNT(*) as c FROM sessions")) as { c: number };
+
+    vi.useFakeTimers();
+    mockFetch({
+      body: { valid: false, reason: "expired", owner_email: "owner@acme.com", expires_at: "2026-09-01T00:00:00.000Z" },
+    });
+    license.startLicenseSafetyPoll();
+    await vi.advanceTimersByTimeAsync(3 * 61 * 1000);
+
+    expect(license.getCurrentLicense()?.valid).toBe(false);
+    expect(license.getCurrentLicense()?.reason).toBe("expired");
+    expect(process.env.PROMPTOWL_KEY).toBe("pk_v2_lapse");
+    expect(license.getLicenseOwnerEmail()).toBe("owner@acme.com");
+    const sessionsAfter = (await getDb().get("SELECT COUNT(*) as c FROM sessions")) as { c: number };
+    expect(sessionsAfter.c).toBe(sessionsBefore.c);
+
+    // PromptOwl renews it: the next poll restores the server, no reinstall.
+    mockFetch({ body: { valid: true, tier: "team", owner_email: "owner@acme.com" } });
+    await vi.advanceTimersByTimeAsync(61 * 1000);
+    expect(license.getCurrentLicense()?.valid).toBe(true);
+  });
+});

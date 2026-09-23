@@ -26,6 +26,7 @@ import { requireWorkflowPlane } from "./edge-type-routes.js";
 import { cancelDescendants } from "./run-service.js";
 import { envValues } from "./env-routes.js";
 import { dispatchEvent } from "../notify/dispatch.js";
+import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "../auth/license-copy.js";
 
 const RUNNABLE_TYPES = ["agent", "skill"];
 
@@ -422,6 +423,12 @@ async function loadRunWithPermission(
     throw new ForbiddenError("API key not authorized for this nest");
   }
   if (required === "write") {
+    if (
+      (isSuspended() || !getCurrentLicense()?.valid) &&
+      !(await canSeeLicenseDetail(c.get("userId")))
+    ) {
+      throw new ForbiddenError(NEUTRAL_READ_ONLY);
+    }
     if (isSuspended()) {
       throw new ForbiddenError(
         `Server suspended by PromptOwl: ${getSuspensionReason()}`,

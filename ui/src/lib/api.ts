@@ -322,6 +322,24 @@ export async function sendTestNotification(channel: "slack" | "teams") {
 
 // ─── License ───────────────────────────────────────────────────────────
 
+export interface LicenseContact {
+  url: string;
+  email: string;
+}
+
+/** Trial / expiry / refusal fields shared by the public and admin views. */
+export interface LicenseTerms {
+  trial?: boolean;
+  expires_at?: string | null;
+  /** Whole days until expires_at (negative once past); null = no end date. */
+  days_left?: number | null;
+  /** not_found | deactivated | suspended | expired — or expired_grace (past
+   *  the end date, still fully working until grace_ends_at). */
+  reason?: string | null;
+  grace_ends_at?: string | null;
+  contact?: LicenseContact;
+}
+
 export interface LicenseStatus {
   valid: boolean;
   tier: string;
@@ -330,10 +348,34 @@ export interface LicenseStatus {
   suspended: boolean;
   suspended_reason: string | null;
   limits: { maxNests: number; maxUsers: number } | null;
+  /** Never licensed: show activation. False for a lapsed license. */
+  setup_required?: boolean;
 }
 
 export async function getLicenseStatus() {
   return request<LicenseStatus>("/license/status");
+}
+
+/** Admin-only license detail (Settings → License, the admin banner). */
+export interface AdminLicense extends LicenseTerms {
+  valid: boolean;
+  tier: string;
+  org: string | null;
+  owner_email: string | null;
+  suspended: boolean;
+  suspended_reason: string | null;
+  seats: {
+    licensed: number | null;
+    used: number;
+    over_limit: boolean;
+    at_limit: boolean;
+  };
+  pending_rejections: number;
+  last_checked_at: string | null;
+}
+
+export async function getAdminLicense() {
+  return request<AdminLicense>("/admin/license");
 }
 
 export async function installLicense(key: string) {
@@ -347,7 +389,7 @@ export async function installLicense(key: string) {
     // restart); `warning` carries the operator-facing explanation.
     persisted?: boolean;
     warning?: string;
-  }>("/license/install", {
+  } & LicenseTerms>("/license/install", {
     method: "POST",
     body: JSON.stringify({ key }),
   });

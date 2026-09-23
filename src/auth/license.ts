@@ -1,8 +1,28 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { config } from "../config.js";
+import { SERVICE_VERSION } from "../shared/version.js";
 import { getDb } from "../db/client.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { persistSetting } from "../db/settings.js";
+
+export interface LicenseSeats {
+  /** Seats the license covers; null = unlimited. */
+  licensed: number | null;
+  /** People on this server at the last check; null = unknown. */
+  used: number | null;
+  overLimit: boolean;
+}
+
+export interface LicenseContact {
+  url: string;
+  email: string;
+}
+
+/** Where every license message points: PromptOwl sells licenses by hand. */
+export const DEFAULT_LICENSE_CONTACT: LicenseContact = {
+  url: "https://calendar.app.google/u2z8xh5PqDjQJih78",
+  email: "support@promptowl.ai",
+};
 
 export interface LicenseInfo {
   valid: boolean;
@@ -15,6 +35,22 @@ export interface LicenseInfo {
   suspended: boolean;
   suspendedReason: string | null;
   ownerEmail: string | null;
+  // License contract v2 — advisory fields from PromptOwl's latest answer.
+  // Optional so a pre-v2 PromptOwl (and test mocks) still type-check.
+  trial?: boolean;
+  expiresAt?: string | null;
+  seats?: LicenseSeats | null;
+  /** not_found | deactivated | suspended | expired — why PromptOwl refused the
+   *  key — or expired_grace: past its end date but still valid until graceEndsAt. */
+  reason?: string | null;
+  graceEndsAt?: string | null;
+  contact?: LicenseContact;
+}
+
+/** Seat limit from the license; 0 / missing = unlimited (null). */
+export function licensedSeats(lic: LicenseInfo | null | undefined): number | null {
+  const n = lic?.limits?.maxUsers;
+  return typeof n === "number" && n > 0 ? n : null;
 }
 
 let currentLicense: LicenseInfo | null = null;
@@ -149,8 +185,18 @@ export function startLicenseSafetyPoll(): void {
       await validateLicense({ forceFresh: true });
       const isValid = !!currentLicense?.valid;
       if (wasValid && !isValid) {
-        console.log("[license] safety poll detected revocation");
-        await handleLicenseRevoked();
+        // A lapsed license (expired, deactivated, not found) is a
+        // conversation between PromptOwl and this server's admin, not a
+        // reason to throw everyone out mid-task. The server goes read-only —
+        // the license gate refuses writes — but sessions and the installed
+        // key stay put, so when PromptOwl renews or reactivates the key the
+        // next poll restores the server with nothing to reinstall. (This
+        // used to wipe every session and delete the key.)
+        console.warn(
+          `[license] license is no longer valid (${
+            currentLicense?.reason || "rejected"
+          }) — server is read-only until PromptOwl restores it or a new key is installed`,
+        );
       }
     } catch (err) {
       // Don't escalate — the watcher and next safety tick will retry.
@@ -162,43 +208,6 @@ export function startLicenseSafetyPoll(): void {
   if (typeof safetyPollHandle.unref === "function") {
     safetyPollHandle.unref();
   }
-}
-
-/**
- * Hard cleanup when PromptOwl revokes/deactivates the installed
- * license. Wipes all browser sessions so existing logins lose their
- * cookies, tombstones the persisted license key so a restart doesn't
- * resurrect the dead key, and clears the in-process PROMPTOWL_KEY so
- * the next validate call starts from "unlicensed".
- */
-async function handleLicenseRevoked(): Promise<void> {
-  try {
-    const db = getDb();
-    const result = await db.run("DELETE FROM sessions");
-    console.warn(
-      `[license] revoked — wiped ${result.changes} active session(s).`,
-    );
-  } catch (err) {
-    console.warn("[license] failed to wipe sessions:", err);
-  }
-  try {
-    await persistSetting("PROMPTOWL_KEY", null);
-    console.warn(
-      "[license] revoked — cleared persisted PROMPTOWL_KEY from the database",
-    );
-  } catch (err) {
-    console.warn("[license] failed to clear persisted key:", err);
-  }
-  process.env.PROMPTOWL_KEY = "";
-  currentLicense = {
-    valid: false,
-    tier: "none",
-    org: null,
-    limits: null,
-    suspended: false,
-    suspendedReason: null,
-    ownerEmail: null,
-  };
 }
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -259,6 +268,123 @@ export function getPendingRejections(): number {
   return rejectionKey === config.PROMPTOWL_KEY ? rejectionStreak : 0;
 }
 
+// ─── License v2 metadata ────────────────────────────────────────────────
+//
+// trial / expiry / seats / reason / contact from PromptOwl's most recent
+// answer (valid or not). Kept in memory rather than license_cache: every
+// field is advisory and refreshed by the 60s safety poll, and a rejection's
+// reason has to outlive the cache row it deletes — that's what lets the setup
+// screen say "your trial ended on …" instead of a bare "no license".
+// ────────────────────────────────────────────────────────────────────────
+
+type LicenseMeta = Pick<
+  LicenseInfo,
+  "trial" | "expiresAt" | "seats" | "reason" | "graceEndsAt" | "contact"
+>;
+
+let lastMeta: LicenseMeta | null = null;
+let lastCheckedAt: string | null = null;
+// The PromptOwl account that owns the installed key, remembered across a
+// lapse: once the license stops being valid, currentLicense.ownerEmail can go
+// null, but the owner is still the person who should hear why and fix it.
+let lastOwnerEmail: string | null = null;
+
+/** Owner of the installed key — while valid, or as last reported. */
+export function getLicenseOwnerEmail(): string | null {
+  return currentLicense?.ownerEmail || lastOwnerEmail;
+}
+
+/** When PromptOwl last answered a validate (any answer), ISO; null = never. */
+export function getLastLicenseCheck(): string | null {
+  return lastCheckedAt;
+}
+
+function safeContact(raw: unknown): LicenseContact {
+  const c = (raw && typeof raw === "object" ? raw : {}) as {
+    url?: unknown;
+    email?: unknown;
+  };
+  // Rendered as a link in the UI: http(s) only, never javascript: etc.
+  const url =
+    typeof c.url === "string" && /^https?:\/\/[^\s"'<>]+$/i.test(c.url)
+      ? c.url
+      : DEFAULT_LICENSE_CONTACT.url;
+  const email =
+    typeof c.email === "string" && /^[^\s@<>"']+@[^\s@<>"']+$/.test(c.email)
+      ? c.email
+      : DEFAULT_LICENSE_CONTACT.email;
+  return { url, email };
+}
+
+/** Parse the v2 fields out of a validate answer. A pre-v2 PromptOwl sends
+ *  none of them: seats are then derived from limits + the count we sent. */
+function isoOrNull(v: unknown): string | null {
+  return typeof v === "string" && !isNaN(Date.parse(v))
+    ? new Date(v).toISOString()
+    : null;
+}
+
+function parseMeta(
+  data: Record<string, any>,
+  usersSent: number | null,
+): LicenseMeta {
+  const limit =
+    typeof data.limits?.maxUsers === "number" && data.limits.maxUsers > 0
+      ? data.limits.maxUsers
+      : null;
+  const s = data.seats && typeof data.seats === "object" ? data.seats : null;
+  const licensed =
+    typeof s?.licensed === "number" && s.licensed > 0 ? s.licensed : limit;
+  const used = typeof s?.used === "number" ? s.used : usersSent;
+  const overLimit =
+    typeof s?.over_limit === "boolean"
+      ? s.over_limit
+      : licensed != null && used != null && used > licensed;
+  return {
+    trial: data.trial === true,
+    expiresAt: isoOrNull(data.expires_at),
+    seats: { licensed, used, overLimit },
+    reason: typeof data.reason === "string" ? data.reason : null,
+    graceEndsAt: isoOrNull(data.grace_ends_at),
+    contact: safeContact(data.contact),
+  };
+}
+
+function withMeta(info: LicenseInfo): LicenseInfo {
+  return {
+    ...info,
+    ...(lastMeta ?? {}),
+    contact: lastMeta?.contact ?? DEFAULT_LICENSE_CONTACT,
+  };
+}
+
+/** What we tell PromptOwl about this server on every validate (contract v2):
+ *  the seat count the license is billed and enforced on, plus version/URL so
+ *  PromptOwl can show the operator which server a key is running on. Sent
+ *  regardless of TELEMETRY_ENABLED — it is part of license validation, not
+ *  analytics, and carries no content. */
+async function serverReport(): Promise<{
+  stats?: { users: number; nests: number };
+  server: { version: string; public_url?: string };
+}> {
+  const server: { version: string; public_url?: string } = {
+    version: SERVICE_VERSION,
+  };
+  if (config.PUBLIC_BASE_URL) server.public_url = config.PUBLIC_BASE_URL;
+  try {
+    const db = getDb();
+    const users =
+      ((await db.get("SELECT COUNT(*) as c FROM users")) as { c: number })?.c ||
+      0;
+    const nests =
+      ((await db.get("SELECT COUNT(*) as c FROM nests")) as { c: number })?.c ||
+      0;
+    return { stats: { users: Number(users), nests: Number(nests) }, server };
+  } catch {
+    return { server };
+  }
+}
+
 type CachedLicenseRow = {
   tier: string;
   org: string;
@@ -268,7 +394,8 @@ type CachedLicenseRow = {
 };
 
 function fromCache(cached: CachedLicenseRow): LicenseInfo {
-  return {
+  if (cached.owner_email) lastOwnerEmail = cached.owner_email;
+  return withMeta({
     valid: true,
     tier: cached.tier,
     org: cached.org,
@@ -276,7 +403,7 @@ function fromCache(cached: CachedLicenseRow): LicenseInfo {
     suspended: suspensionConfirmed,
     suspendedReason: suspensionReason,
     ownerEmail: cached.owner_email || null,
-  };
+  });
 }
 
 /**
@@ -331,10 +458,11 @@ async function _validateLicenseImpl(
   // Call PromptOwl to validate
   try {
     const promptowlUrl = config.PROMPTOWL_API_URL.replace(/\/$/, "");
+    const report = await serverReport();
     const res = await fetch(`${promptowlUrl}/api/license/validate`, {
       method: "POST",
       headers: config.PROMPTOWL_FETCH_HEADERS,
-      body: JSON.stringify({ key }),
+      body: JSON.stringify({ key, ...report }),
     });
 
     if (!res.ok) {
@@ -363,7 +491,13 @@ async function _validateLicenseImpl(
       suspended?: boolean;
       suspended_reason?: string;
       owner_email?: string | null;
+      // v2 (optional): reason, trial, expires_at, seats, contact
+      [k: string]: unknown;
     };
+    lastMeta = parseMeta(data, report.stats?.users ?? null);
+    lastCheckedAt = new Date().toISOString();
+    if (data.owner_email) lastOwnerEmail = data.owner_email;
+    else if (cached?.owner_email) lastOwnerEmail = cached.owner_email;
 
     // ── Kill switch: two-strike confirmation ──
     if (data.suspended === true) {
@@ -413,7 +547,7 @@ async function _validateLicenseImpl(
         rejectionKey = null;
         if (cached) return fromCache(cached);
         // Never licensed on this key — nothing to keep serving.
-        return {
+        return withMeta({
           valid: false,
           tier: "none",
           org: null,
@@ -421,7 +555,7 @@ async function _validateLicenseImpl(
           suspended: suspensionConfirmed,
           suspendedReason: suspensionReason,
           ownerEmail: data.owner_email || null,
-        };
+        });
       }
     } else {
       // Clear any pending suspension (PromptOwl reversed it)
@@ -453,7 +587,7 @@ async function _validateLicenseImpl(
       // subsequent outage can't resurrect this license under the
       // grace-period fallback above.
       await db.run("DELETE FROM license_cache WHERE key = ?", [key]);
-      return {
+      return withMeta({
         valid: false,
         tier: "none",
         org: null,
@@ -461,7 +595,7 @@ async function _validateLicenseImpl(
         suspended: false,
         suspendedReason: null,
         ownerEmail: data.owner_email || null,
-      };
+      });
     }
 
     // Cache valid licenses
@@ -487,7 +621,7 @@ async function _validateLicenseImpl(
       );
     }
 
-    return {
+    return withMeta({
       valid: data.valid !== false,
       tier: data.tier || "community",
       org: data.org || null,
@@ -495,7 +629,7 @@ async function _validateLicenseImpl(
       suspended: suspensionConfirmed,
       suspendedReason: suspensionReason,
       ownerEmail: data.owner_email || null,
-    };
+    });
   } catch (err: any) {
     if (cached) {
       console.warn(
