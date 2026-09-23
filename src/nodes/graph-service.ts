@@ -6,7 +6,7 @@
  * governance gaps.
  */
 
-import type { ContextNode } from "@promptowl/contextnest-engine";
+import { extractContextLinks, type ContextNode } from "@promptowl/contextnest-engine";
 import { engineCache } from "./engine.js";
 import { isDerivedAnnotationsNode } from "./service.js";
 import { filterAccessible } from "../governance/access-guard.js";
@@ -110,10 +110,41 @@ export function extractWikiTargets(body: string): string[] {
 }
 
 /**
+ * Node ids linked from a body by the spec's own link form (§1.7):
+ * `[text](contextnest://nodes/x)` or `<contextnest://nodes/x>`, including the
+ * checkpoint-pinned / anchored forms (`contextnest://nodes/x@3#section`) —
+ * the pin and anchor address a version/section OF the node, so the edge is to
+ * the node itself, exactly as `[[nodes/x]]` would be.
+ *
+ * Parsing is the engine's `extractContextLinks` (linear, ReDoS-bounded, skips
+ * fenced code and inline code spans), so this repo does not fork link syntax.
+ * Folder / tag / search URIs and cross-namespace links come back as strings
+ * that match no node id and are dropped by the id-only resolution callers do.
+ * Returned targets are ids and must be resolved by id ONLY — never by title
+ * or bare slug, or a dangling `contextnest://nodes/gone` could attach to an
+ * unrelated `other/gone`.
+ */
+export function extractContextTargets(body: string): string[] {
+  const out: string[] = [];
+  if (!body) return out;
+  for (const uri of extractContextLinks(body)) {
+    // Plain index scans, no regex: strip scheme, anchor, pin, trailing slash.
+    let t = uri.slice("contextnest://".length);
+    const hash = t.indexOf("#");
+    if (hash !== -1) t = t.slice(0, hash);
+    const at = t.indexOf("@");
+    if (at !== -1) t = t.slice(0, at);
+    if (t.endsWith("/")) t = t.slice(0, -1);
+    if (t && !out.includes(t)) out.push(t);
+  }
+  return out;
+}
+
+/**
  * Build the ontology graph for a nest, gated to what the caller can read.
  * Links are de-duplicated and only kept when both ends resolve to an
  * accessible node (so the view never dangles into hidden/missing targets).
- * [[wikilink]] edges are directed; tag-cooccurrence edges are inherently
+ * [[wikilink]] and contextnest:// link edges are directed; tag-cooccurrence edges are inherently
  * undirected and stored in one canonical (sorted) direction.
  */
 export async function buildNestGraph(
@@ -166,6 +197,18 @@ export async function buildNestGraph(
         ? raw
         : titleToId.get(norm) ?? slugToId.get(bareSlug(raw).toLowerCase());
       if (!targetId || targetId === d.id) continue;
+      const key = `${d.id}->${targetId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      allLinks.push({ source: d.id, target: targetId });
+    }
+  }
+  // contextnest:// links are edges too (id-only resolution — see
+  // extractContextTargets). Same dedupe key, so a doc linking a node both ways
+  // draws one edge.
+  for (const d of accessible) {
+    for (const targetId of extractContextTargets(d.body || "")) {
+      if (!idSet.has(targetId) || targetId === d.id) continue;
       const key = `${d.id}->${targetId}`;
       if (seen.has(key)) continue;
       seen.add(key);

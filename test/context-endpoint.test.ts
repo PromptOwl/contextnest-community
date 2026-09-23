@@ -468,3 +468,76 @@ describe("POST /context — source URLs (citations)", () => {
     ).toBeUndefined();
   });
 });
+
+// ── contextnest:// links are hop edges, like [[wikilinks]] (NestBench §6.4) ──
+// Control: a source links target A by [[wikilink]] and target B by a
+// contextnest:// markdown link at the same distance. Before the fix, hop
+// expansion only followed [[..]], so B was never returned at any hop count —
+// and the selector path ignored hops entirely.
+
+describe("POST /context — contextnest:// links are hop edges", () => {
+  const ctx = (payload: object) =>
+    jsonRequest(app, "POST", `/nests/${nestId}/context`, payload);
+  const ids = (res: any) => res.data.nodes.map((n: any) => n.id).sort();
+
+  beforeAll(async () => {
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Link Target A",
+      content: "# A\n\nReached by wikilink.",
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Link Target B",
+      content: "# B\n\nReached by URI.",
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Link Target C",
+      content: "# C\n\nOnly ever quoted in code.",
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Link Source",
+      content: [
+        "# Source",
+        "",
+        "Wiki: [[Link Target A]].",
+        "URI (pinned + anchored): [b](contextnest://nodes/link-target-b@1#b).",
+        "Dangling: [gone](contextnest://nodes/no-such-node@2).",
+        "Inline code: `[c](contextnest://nodes/link-target-c)`",
+        "```md",
+        "[c](contextnest://nodes/link-target-c)",
+        "```",
+      ].join("\n"),
+    });
+  });
+
+  it("[[Title]] seed: hops 0 is the seed only; hops 1-3 reach A and B alike, never C", async () => {
+    expect(ids(await ctx({ selector: "[[Link Source]]", hops: 0 }))).toEqual([
+      "nodes/link-source",
+    ]);
+    for (const hops of [1, 2, 3]) {
+      const res = await ctx({ selector: "[[Link Source]]", hops });
+      expect(res.status).toBe(200);
+      expect(ids(res)).toEqual([
+        "nodes/link-source",
+        "nodes/link-target-a",
+        "nodes/link-target-b",
+      ]);
+    }
+  });
+
+  it("engine selector seed: hops is honoured (was ignored), hops 0 unchanged", async () => {
+    const sel = "contextnest://nodes/link-source";
+    expect(ids(await ctx({ selector: sel, hops: 0 }))).toEqual(["nodes/link-source"]);
+    const res = await ctx({ selector: sel, hops: 1 });
+    expect(ids(res)).toEqual([
+      "nodes/link-source",
+      "nodes/link-target-a",
+      "nodes/link-target-b",
+    ]);
+    expect(res.data.trace.hops_used).toBe(1);
+  });
+
+  it("the URI edge is undirected: seeding B reaches the source", async () => {
+    const res = await ctx({ selector: "[[Link Target B]]", hops: 1 });
+    expect(ids(res)).toContain("nodes/link-source");
+  });
+});
