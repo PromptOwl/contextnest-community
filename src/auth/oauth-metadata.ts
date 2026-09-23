@@ -89,7 +89,8 @@ export function protectedResourceMetadata(
 /**
  * RFC 8414. Tells a client where to send the user and how to exchange a code.
  *
- * Two fields decide how clients register with us, and they work as a pair:
+ * Two fields decide how clients register with us, and they work as a pair.
+ * We advertise CIMD as unsupported for now (see below), so clients use DCR.
  * Claude selects Client ID Metadata Documents only when the metadata carries
  * BOTH `client_id_metadata_document_supported: true` AND `"none"` in
  * `token_endpoint_auth_methods_supported` (its CIMD client authenticates as a
@@ -115,7 +116,11 @@ export function authorizationServerMetadata(
     grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
-    client_id_metadata_document_supported: true,
+    // false until CIMD is implemented: `getClient` only resolves clients that
+    // registered through `/oauth/register`, so advertising CIMD would send
+    // Claude down a path that ends in "unknown client". false makes it use DCR,
+    // which works today.
+    client_id_metadata_document_supported: false,
   };
 }
 

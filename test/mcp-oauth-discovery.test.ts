@@ -85,13 +85,15 @@ describe("authorization server metadata (RFC 8414)", () => {
   });
 
   /**
-   * Claude picks CIMD only when BOTH of these are present. Miss either and it
-   * silently falls back to Dynamic Client Registration, which registers a new
-   * client on every fresh connection.
+   * Claude picks CIMD when the metadata claims it (plus "none" auth). We have
+   * not built CIMD yet, so claiming it would strand Claude on a client_id our
+   * store cannot resolve. Until it lands, the claim must stay false so Claude
+   * uses DCR (/oauth/register), which is implemented and tested.
    */
-  it("advertises CIMD support and public-client token auth together", () => {
+  it("does not claim CIMD support it cannot honour; offers public-client auth", () => {
     const doc = authorizationServerMetadata(BASE);
-    expect(doc.client_id_metadata_document_supported).toBe(true);
+    expect(doc.client_id_metadata_document_supported).toBe(false);
+    expect(doc.registration_endpoint).toBe(`${BASE}/oauth/register`);
     expect(doc.token_endpoint_auth_methods_supported).toContain("none");
   });
 
