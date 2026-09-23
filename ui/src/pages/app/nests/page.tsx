@@ -20,6 +20,8 @@ import { nestNameProblem } from "../../../lib/nest-name";
 import {
   scopeShowsNests,
   visibleUnsynced,
+  nestInScope,
+  DEFAULT_NEST_SCOPE,
   type NestScope,
 } from "../../../lib/dashboard-scope";
 import { canRequestNestRemoval } from "../../../lib/nest-caps";
@@ -60,6 +62,8 @@ import { ImportFolderModal } from "../../../components/ImportFolderModal";
 /** How many nest cards render before "Show more" — a 50-nest account should
  *  not mount 50 cards on load. */
 const NEST_PAGE_SIZE = 24;
+const NEST_SCOPE_KEY = "cn:dashboard:nestScope";
+const NEST_SCOPES: NestScope[] = ["all", "mine", "owned", "shared", "org", "public", "synced", "unsynced"];
 
 // relTime / formatServerDate live in lib/dates: SQL-default timestamps arrive
 // as UTC with no zone, which new Date() would read as local time.
@@ -108,18 +112,32 @@ export default function NestsPage() {
   // just bounds how many cards are mounted at once.
   const [nestQuery, setNestQuery] = useState("");
   const [nestSort, setNestSort] = useState<"activity" | "name">("activity");
-  const [nestScope, setNestScope] = useState<NestScope>("all");
+  // Scope opens on "My nests" and is remembered per browser: on a shared
+  // server the discovered org/public nests are other people's, so they are a
+  // choice, not the first screen (CU-wdqcq02mek).
+  const [nestScope, setNestScopeState] = useState<NestScope>(() => {
+    try {
+      const saved = localStorage.getItem(NEST_SCOPE_KEY);
+      if (saved && NEST_SCOPES.includes(saved as NestScope)) return saved as NestScope;
+    } catch {
+      /* storage blocked — fall through to the default */
+    }
+    return DEFAULT_NEST_SCOPE;
+  });
+  const setNestScope = (scope: NestScope) => {
+    setNestScopeState(scope);
+    try {
+      localStorage.setItem(NEST_SCOPE_KEY, scope);
+    } catch {
+      /* best-effort */
+    }
+  };
   const [nestPageSize, setNestPageSize] = useState(NEST_PAGE_SIZE);
-  const nestOwned = (n: any): boolean =>
-    n.is_owner ?? (n.permission ?? "owner") === "owner";
   const filteredNests = useMemo(() => {
     if (!scopeShowsNests(nestScope)) return [];
     const q = nestQuery.trim().toLowerCase();
     const matched = allNests.filter((n: any) => {
-      if (nestScope === "owned" && !nestOwned(n)) return false;
-      if (nestScope === "shared" && nestOwned(n)) return false;
-      if (nestScope === "public" && n.visibility !== "public") return false;
-      if (nestScope === "org" && n.visibility !== "org") return false;
+      if (!nestInScope(n, nestScope)) return false;
       if (!q) return true;
       return (
         (n.name ?? "").toLowerCase().includes(q) ||
@@ -146,12 +164,19 @@ export default function NestsPage() {
   // narrowing its list; the Dashboard only offered one once nothing matched,
   // leaving a filtered-but-non-empty grid with no way back.
   const nestFiltersActive =
-    nestQuery.trim() !== "" || nestScope !== "all" || nestSort !== "activity";
+    nestQuery.trim() !== "" || nestScope !== DEFAULT_NEST_SCOPE || nestSort !== "activity";
   const clearNestFilters = () => {
     setNestQuery("");
-    setNestScope("all");
+    setNestScope(DEFAULT_NEST_SCOPE);
     setNestSort("activity");
   };
+  // Nests on the server that the default scope is hiding — reachable through
+  // visibility alone. Offered from the empty state so a newcomer on a shared
+  // server learns they exist without them being the first thing shown.
+  const discoveredCount = useMemo(
+    () => allNests.filter((n: any) => !!n.discovered).length,
+    [allNests],
+  );
   const qc = useQueryClient();
   const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
   const filteredUnsynced = useMemo(
@@ -516,6 +541,7 @@ export default function NestsPage() {
                 aria-label="Filter nests by access"
                 data-testid="nest-scope-select"
               >
+                <option value="mine">My nests</option>
                 <option value="all">All nests</option>
                 <option value="owned">Owned by me</option>
                 <option value="shared">Shared with me</option>
@@ -726,6 +752,36 @@ export default function NestsPage() {
             </div>
           ) : loading ? (
             <div className="text-center py-12 text-muted-foreground">Loading...</div>
+          ) : nestScope === DEFAULT_NEST_SCOPE &&
+            nestQuery.trim() === "" &&
+            filteredNests.length + filteredUnsynced.length === 0 &&
+            discoveredCount > 0 ? (
+            // Nothing of my own yet, but others have opened nests up on this
+            // server: say so plainly rather than "hidden by the current
+            // filter", which reads as a mistake on a first visit.
+            <Card>
+              <CardContent className="text-center py-12">
+                <Database className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
+                <p className="font-medium">No nests of your own yet</p>
+                <p className="text-sm text-muted-foreground mb-4">
+                  Create one, or browse the {discoveredCount} nest
+                  {discoveredCount === 1 ? "" : "s"} others have opened up on this server.
+                </p>
+                <div className="flex items-center justify-center gap-2">
+                  <Button onClick={() => setShowCreate(true)}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    Create Nest
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => setNestScope("all")}
+                    data-testid="nest-browse-discovered"
+                  >
+                    Browse all nests
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
           ) : allNests.length + unsynced.length > 0 &&
             filteredNests.length + filteredUnsynced.length === 0 ? (
             <Card>

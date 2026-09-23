@@ -212,6 +212,7 @@ export async function getHealth() {
     /** Content-type toggles — default ON server-side; the editor's type
      *  picker hides a disabled type exactly when create would refuse it. */
     type_artifact_enabled?: boolean;
+    shared_deployment?: boolean;
     type_table_enabled?: boolean;
     subagent_runs_enabled?: boolean;
     subagent_max_depth?: number;
@@ -266,6 +267,10 @@ export interface AdminSettings {
    *  a server holding several unrelated customers would otherwise hand one
    *  customer's staff another customer's email addresses. */
   people_suggest_all_users: boolean;
+  /** This server hosts several organizations (PromptOwl-hosted). On, nest
+   *  visibility 'org' needs the same acknowledgement as 'public' and the
+   *  picker words both tiers to name the real boundary. Default OFF. */
+  shared_deployment: boolean;
   /** Server-computed readiness: enabled AND issuer+client id+secret present. */
   oidc_ready?: boolean;
   /** Write-only: string sets/replaces, null clears; never returned. */
@@ -849,7 +854,10 @@ export async function setNestVisibility(
   // Publishing (→ public) requires an explicit acknowledgement that the nest
   // becomes readable by anyone on the internet, outside your organization.
   // Without it the server returns 409 requires_acknowledgement. Going back to
-  // private needs no acknowledgement, so this is optional.
+  // private needs no acknowledgement, so this is optional. Despite the name,
+  // the same flag also acknowledges → org on a SHARED deployment (/health
+  // shared_deployment), where "organization" is every account on the server:
+  // one wire field for "I understand who this reaches", whichever tier.
   acknowledgePublic?: boolean,
 ) {
   return request<{ visibility: NestVisibility }>(

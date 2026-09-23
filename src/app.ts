@@ -471,6 +471,11 @@ export function createApp(): Hono<AuthEnv> {
       // API would refuse it — existing nodes of the type stay readable.
       type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
       type_table_enabled: config.TYPE_TABLE_ENABLED,
+      // This server hosts several organizations (PromptOwl-hosted) rather than
+      // one. The visibility picker words 'Organization' and 'Public' by it and
+      // confirms before 'org'; the server enforces the same in
+      // PATCH /nests/:id/visibility.
+      shared_deployment: config.SHARED_DEPLOYMENT,
       // Sub-agent runs gate its own recursion surface separately (env-only,
       // must clear a security review — NOT a UI toggle). Exposed read-only so
       // the Runs page shows the "spawn sub-agent" option only when it's live.
@@ -622,6 +627,7 @@ export function createApp(): Hono<AuthEnv> {
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
     oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
     people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
+    shared_deployment: config.SHARED_DEPLOYMENT,
     // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
     // presence is reported, never the value (same discipline as the OIDC secret).
     sso_token_exchange_enabled: config.SSO_TOKEN_EXCHANGE_ENABLED,
@@ -906,6 +912,15 @@ export function createApp(): Hono<AuthEnv> {
       pending.push({
         name: "PEOPLE_SUGGEST_ALL_USERS",
         value: body.people_suggest_all_users ? "true" : null,
+      });
+    }
+    // This server hosts several organizations. On, nest visibility 'org'
+    // needs the same acknowledgement as 'public' and the UI words both tiers
+    // to name the real boundary. false persists as null — unset is off.
+    if ("shared_deployment" in body) {
+      pending.push({
+        name: "SHARED_DEPLOYMENT",
+        value: body.shared_deployment ? "true" : null,
       });
     }
     // ── Agent SSO / token-exchange (POST /auth/token-exchange) ────────────

@@ -3,6 +3,7 @@
  * Uses ported PromptOwl components for the UI, wired to REST API.
  */
 import { Suspense, useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { visibilityConfirmCopy, visibilityTierHint } from "../lib/visibility-confirm";
 import { lazyChunk } from "../lib/lazy-chunk";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -67,6 +68,7 @@ import {
 } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Tabs, TabsList, TabsTrigger, TabsContent,
 } from "@/components/ui/tabs";
@@ -144,7 +146,7 @@ export function NestView({
   initialTab,
   onTabChange,
 }: NestViewProps) {
-  const { isAdmin, adminStatus, authMode } = useAuth();
+  const { isAdmin, adminStatus, authMode, sharedDeployment } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
   //   - real-owner nest → only that owner
   //   - anon-owned + open mode → any caller (server treats anon as commons)
@@ -253,6 +255,9 @@ export function NestView({
   // Publishing (→ public) is guarded by an acknowledgement dialog: the nest
   // becomes readable by anyone on the internet, outside your organization.
   const [confirmPublic, setConfirmPublic] = useState(false);
+  // What the new readers will see beside the name. Prefilled from the nest on
+  // open and saved on confirm, same as NestVisibilityControl's dialog.
+  const [publicDescriptionDraft, setPublicDescriptionDraft] = useState("");
   // Public Docs Reader Mode (superadmin-only config). reader_mode flips the
   // read-only presentation to the clean docs reader; reader_home_node names the
   // designated landing/hub node (empty → resolve by convention).
@@ -977,11 +982,33 @@ export function NestView({
       return;
     }
     if (visibility !== "public") {
+      setPublicDescriptionDraft(nestDescription ?? "");
       setConfirmPublic(true);
       return;
     }
     await applyVisibility("private");
   };
+
+  // Confirm publishing: save a newly written description first — best-effort,
+  // because a failed description save must not block the publish the user just
+  // acknowledged — then apply with the acknowledgement.
+  const confirmPublicWiden = async () => {
+    setConfirmPublic(false);
+    const next = publicDescriptionDraft.trim();
+    if (next && next !== (nestDescription ?? "").trim()) {
+      try {
+        await api.updateNest(nestId, { description: next });
+        setNestDescription(next);
+      } catch (err: any) {
+        toast.error(
+          err?.message || "Failed to save the description — publishing anyway",
+        );
+      }
+    }
+    await applyVisibility("public", true);
+  };
+
+  const publicConfirmCopy = visibilityConfirmCopy("public", { sharedDeployment });
 
   // Public Docs Reader Mode config (server admin, or this nest's own
   // owner/admin — see canManageReaderMode below). Optimistic flip with
@@ -1274,7 +1301,7 @@ export function NestView({
                 visibility === "public"
                   ? "Public — anyone with the URL can read. Click to make private."
                   : visibility === "org"
-                    ? "Organization — everyone signed in to this deployment can read. Click to manage sharing (Collaborators tab)."
+                    ? `Organization — ${visibilityTierHint("org", { sharedDeployment }).toLowerCase()}. Click to manage sharing (Collaborators tab).`
                     : "Private. Click to make public (anyone with the URL can read)."
               }
             >
@@ -2163,21 +2190,32 @@ export function NestView({
       <AlertDialog open={confirmPublic} onOpenChange={setConfirmPublic}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Make this nest public?</AlertDialogTitle>
+            <AlertDialogTitle>{publicConfirmCopy.title}</AlertDialogTitle>
             <AlertDialogDescription>
-              This makes the nest readable by anyone on the internet, outside
-              your organization. Anyone with the URL will be able to read it.
+              {publicConfirmCopy.body}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {/* What those readers will see beside the name. Prefilled from the
+              nest; an empty one can be written here and is saved on confirm. */}
+          <div className="space-y-1.5">
+            <Label htmlFor="nest-public-description" className="text-xs">
+              {(nestDescription ?? "").trim()
+                ? "Description readers will see"
+                : "This nest has no description — readers will only see its name. Add one? (optional)"}
+            </Label>
+            <Textarea
+              id="nest-public-description"
+              value={publicDescriptionDraft}
+              onChange={(e) => setPublicDescriptionDraft(e.target.value)}
+              placeholder="What this nest is for, and who it's meant for"
+              rows={2}
+              data-testid="nest-public-description"
+            />
+          </div>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                setConfirmPublic(false);
-                void applyVisibility("public", true);
-              }}
-            >
-              Make public
+            <AlertDialogAction onClick={() => void confirmPublicWiden()}>
+              {publicConfirmCopy.confirm}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
