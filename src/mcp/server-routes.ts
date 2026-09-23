@@ -55,7 +55,13 @@ import {
   getSuspensionReason,
   getCurrentLicense,
 } from "../auth/license.js";
-import { handleToolCall, toCallToolResult, TOOL_DEFINITIONS, type ToolResult } from "./tools.js";
+import {
+  handleToolCall,
+  normalizeSearchLimit,
+  toCallToolResult,
+  TOOL_DEFINITIONS,
+  type ToolResult,
+} from "./tools.js";
 import { isDerivedAnnotationsNode } from "../nodes/service.js";
 import type { Nest } from "../shared/types.js";
 
@@ -253,9 +259,10 @@ const NEST_ARG_OPTIONAL = {
 /**
  * Per-nest tools the server-level endpoint also serves, with a `nest` arg
  * added. Their schemas and descriptions are the PER-NEST definitions, not
- * copies: a hand-kept subset drifted (no `folder` on list, no `note`/`full`
- * on query, …) and the SDK silently strips keys a schema doesn't declare, so
- * `ctx` could send a field that vanished while the call reported success.
+ * copies: the hand-kept subset drifted (no `status`/`approved_only` on list,
+ * no context_versions at all) and the SDK silently strips keys a schema
+ * doesn't declare, so `ctx` could send a field that vanished while the call
+ * reported success.
  */
 const SERVER_NEST_TOOLS = [
   // Fan-out reads — `nest` optional: omit it to span every accessible nest.
@@ -396,8 +403,12 @@ async function handleServerToolCall(
 
     // Prose for chat clients (one section per nest); `data` for `ctx`, the
     // per-nest payloads merged with every hit naming the nest it came from.
-    // Failed or erroring nests are skipped (best-effort, like nest_index).
+    // Failed or erroring nests are skipped (best-effort, like nest_index) —
+    // unless EVERY nest errored: that is the caller's input (a malformed
+    // selector, say), not an empty result, so surface the error.
     const parts: string[] = [];
+    let firstError: ToolResult | undefined;
+    let firstRejection: PromiseRejectedResult | undefined;
     const tag = (n: IndexedNest, items: unknown) =>
       Array.isArray(items) ? items.map((it) => ({ ...it, nest: { id: n.id, name: n.name } })) : [];
     // Per-nest lists, merged below — kept apart so no nest can crowd out the rest.
@@ -408,9 +419,15 @@ async function handleServerToolCall(
     let hopsUsed = 0;
     let mode: string | undefined;
     for (const r of results) {
-      if (r.status !== "fulfilled") continue;
+      if (r.status !== "fulfilled") {
+        firstRejection ??= r;
+        continue;
+      }
       const { nest: n, result } = r.value;
-      if (typeof result !== "string" && result.isError) continue;
+      if (typeof result !== "string" && result.isError) {
+        firstError ??= result;
+        continue;
+      }
       parts.push(`## ${n.name} (${n.id})\n\n${typeof result === "string" ? result : result.text}`);
       const d = (typeof result === "string" ? undefined : result.data) as any;
       if (!d) continue;
@@ -432,20 +449,29 @@ async function handleServerToolCall(
       }
       return out;
     };
+    if (!parts.length && firstError) return firstError;
+    // Same as a single-nest call that threw.
+    if (!parts.length && firstRejection) throw firstRejection.reason;
     const documents = interleave(perNestDocs);
-    const limit = typeof args.limit === "number" ? args.limit : undefined;
+    // The caps one nest applies, over the merged set (search 20, max 200;
+    // list 50) — otherwise N nests hand back N pages.
+    const listLimit =
+      typeof args.limit === "number" && args.limit >= 1 ? Math.floor(args.limit) : 50;
     const data =
       toolName === "context_search"
-        ? { results: interleave(perNestHits).slice(0, limit ?? 20), count }
+        ? { results: interleave(perNestHits).slice(0, normalizeSearchLimit(args.limit)), count }
         : toolName === "context_query"
           ? { documents, traversal: { mode: mode ?? "selector", hops_used: hopsUsed, nodes_traversed: nodesTraversed } }
-          : { documents: limit ? documents.slice(0, limit) : documents };
+          : { documents: documents.slice(0, listLimit) };
 
+    // Overview is prose only — an empty `documents` would read as an empty vault.
+    const reply = (text: string): ToolResult =>
+      toolName === "context_overview" ? text : { text, data };
     if (!nonEmpty.length) {
-      return { text: "All accessible nests are empty. Use context_create to add documents first.", data };
+      return reply("All accessible nests are empty. Use context_create to add documents first.");
     }
-    if (!parts.length) return { text: "No results found across any accessible nests.", data };
-    return { text: parts.join("\n\n---\n\n"), data };
+    if (!parts.length) return reply("No results found across any accessible nests.");
+    return reply(parts.join("\n\n---\n\n"));
   }
 
   // ─── Single-nest operations (nest required) ────────────────────────────

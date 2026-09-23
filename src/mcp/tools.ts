@@ -635,10 +635,15 @@ export const TOOL_DEFINITIONS = [
       type: "object" as const,
       properties: {
         title: { type: "string", description: "Title of the node to submit" },
+        id: {
+          type: "string",
+          description:
+            'Node id / path (e.g. "nodes/gtm/deals/win-loss-log"). Use instead of title when two nodes share a title or the title is unknown.',
+        },
         note: { type: "string", description: "Optional note for the reviewer" },
         priority: { type: "string", description: "Priority: low, normal (default), high, urgent" },
       },
-      required: ["title"],
+      // One of id or title — see context_update.
     },
   },
   {

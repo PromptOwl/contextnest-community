@@ -66,9 +66,13 @@ describe.each(["Strategy", "Partner Alpha", "Partner Beta", "Partner Shared"])("
     const id = nests[name];
     await seed(id, stacey.apiKey, "Server Doc");
     const up = await callTool("/mcp", stacey.apiKey, "context_update", { nest: name, title: "Server Doc", content: "# v2\n\nChanged." });
-    expect(up.text).not.toMatch(/not found|not accessible|requires/i);
+    expect(up.isError).toBe(false);
+    const got = await callTool(`/nests/${id}/mcp`, stacey.apiKey, "context_get", { title: "Server Doc" });
+    expect(got.text).toContain("Changed.");
     const del = await callTool("/mcp", stacey.apiKey, "context_delete", { nest: name, title: "Server Doc" });
-    expect(del.text).not.toMatch(/not found|not accessible|requires/i);
+    expect(del.isError).toBe(false);
+    const gone = await callTool(`/nests/${id}/mcp`, stacey.apiKey, "context_get", { title: "Server Doc" });
+    expect(gone.text).not.toContain("Changed.");
   });
 });
 
@@ -168,5 +172,42 @@ describe("server-level /mcp as a ctx vault", () => {
   it("a write without `nest` is still refused", async () => {
     const r = await structured("context_delete", { title: "Pricing Partner Alpha" });
     expect(JSON.stringify(r)).toMatch(/nest/);
+  });
+
+  it("context_submit_review takes `id` like the other targeted tools", async () => {
+    await jsonRequest(app, "POST", `/nests/${nests["Partner Beta"]}/nodes`, { title: "Review Me", content: "# r" }, stacey.apiKey);
+    const r = await structured("context_submit_review", { nest: "Partner Beta", id: "nodes/review-me" });
+    expect(r.isError).toBeFalsy();
+    expect(JSON.stringify(r.content)).not.toMatch(/not found/i);
+  });
+
+  it("fan-out surfaces the error when every nest rejects the input", async () => {
+    const r = await structured("context_query", { query: "((" });
+    expect(r.isError).toBe(true);
+    expect(JSON.stringify(r.content)).not.toMatch(/No results found/);
+  });
+
+  it("fan-out search caps an out-of-range limit instead of slicing with it", async () => {
+    const r = await structured("context_search", { query: "pricing", limit: -1 });
+    expect(r.structuredContent.results.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("fan-out overview stays prose-only (no empty `documents` payload)", async () => {
+    const r = await structured("context_overview", {});
+    expect(r.structuredContent).toBeUndefined();
+  });
+});
+
+describe("a nest shared read-only", () => {
+  it("refuses writes through /mcp", async () => {
+    const owner = await registerUser(app, "owner-ro@acme.com", "Owner RO");
+    const ro = await jsonRequest(app, "POST", "/nests", { name: "Read Only Share" }, owner.apiKey);
+    const id = ro.data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${id}/nodes`, { title: "Locked", content: "# locked" }, owner.apiKey);
+    await jsonRequest(app, "POST", `/nests/${id}/collaborators`, { email: "stacey@acme.com", permission: "read" }, owner.apiKey);
+    const up = await callTool("/mcp", stacey.apiKey, "context_update", { nest: id, title: "Locked", content: "# hijacked" });
+    expect(up.isError || /denied|permission|not allowed|cannot|read-only/i.test(up.text)).toBe(true);
+    const got = await callTool(`/nests/${id}/mcp`, owner.apiKey, "context_get", { title: "Locked" });
+    expect(got.text).not.toContain("hijacked");
   });
 });
