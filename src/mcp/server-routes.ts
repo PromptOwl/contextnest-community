@@ -55,7 +55,13 @@ import {
   getSuspensionReason,
   getCurrentLicense,
 } from "../auth/license.js";
-import { handleToolCall, toCallToolResult, type ToolResult } from "./tools.js";
+import {
+  handleToolCall,
+  normalizeSearchLimit,
+  toCallToolResult,
+  TOOL_DEFINITIONS,
+  type ToolResult,
+} from "./tools.js";
 import { isDerivedAnnotationsNode } from "../nodes/service.js";
 import type { Nest } from "../shared/types.js";
 
@@ -251,126 +257,50 @@ const NEST_ARG_OPTIONAL = {
 } as const;
 
 /**
- * Server-level MCP tools. Fan-out reads (search, list, query, overview) make
- * `nest` optional — omit to query all accessible nests. Targeted reads and
- * writes require `nest` to specify which nest to act on.
+ * Per-nest tools the server-level endpoint also serves, with a `nest` arg
+ * added. Their schemas and descriptions are the PER-NEST definitions, not
+ * copies: the hand-kept subset drifted (no `status`/`approved_only` on list,
+ * no context_versions at all) and the SDK silently strips keys a schema
+ * doesn't declare, so `ctx` could send a field that vanished while the call
+ * reported success.
  */
+const SERVER_NEST_TOOLS = [
+  // Fan-out reads — `nest` optional: omit it to span every accessible nest.
+  ...FANOUT_READ_TOOLS,
+  // Targeted reads and writes — `nest` required.
+  "context_get",
+  "context_resolve",
+  "context_comments",
+  "context_versions",
+  "context_create",
+  "context_update",
+  "context_delete",
+  "context_move",
+  "context_submit_review",
+];
+
+function withNestArg(tool: (typeof TOOL_DEFINITIONS)[number]) {
+  const fanout = FANOUT_READ_TOOLS.has(tool.name);
+  const schema = tool.inputSchema as { properties?: object; required?: string[] };
+  return {
+    name: tool.name,
+    description: fanout
+      ? `${tool.description} On this server-level endpoint, omit \`nest\` to run it across ALL accessible nests (each hit names its nest).`
+      : `${tool.description} On this server-level endpoint, \`nest\` (id, name or slug) is required.`,
+    inputSchema: {
+      ...schema,
+      properties: { ...(fanout ? NEST_ARG_OPTIONAL : NEST_ARG), ...schema.properties },
+      required: [...(fanout ? [] : ["nest"]), ...(schema.required ?? [])],
+    },
+  };
+}
+
 export const SERVER_TOOL_DEFINITIONS = [
   {
     name: "nest_index",
     description:
       "Grounded index of every nest these credentials can read: name, id, permission, document count. Call this FIRST.",
     inputSchema: { type: "object" as const, properties: {} },
-  },
-  // ─── Fan-out reads (nest optional) ─────────────────────────────────────
-  {
-    name: "context_query",
-    description:
-      "Run a structured selector query. Omit `nest` to query ALL accessible nests. Selector: #tag, type:X, [[Title]], scope:X, +AND, |OR, -NOT.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        ...NEST_ARG_OPTIONAL,
-        query: { type: "string", description: "Selector query" },
-        hops: {
-          type: "number",
-          description: "Graph traversal depth from the matches (default: 2)",
-        },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    name: "context_search",
-    description:
-      "Full-text keyword search. Omit `nest` to search ALL accessible nests. Returns count and first `limit` hits.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        ...NEST_ARG_OPTIONAL,
-        query: { type: "string", description: "Search terms" },
-        limit: {
-          type: "number",
-          description: "Max hits to return (default 20, max 200)",
-        },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    name: "context_list",
-    description:
-      "Browse contents with optional type, tag, or limit filters. Omit `nest` to list ALL accessible nests.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        ...NEST_ARG_OPTIONAL,
-        type: { type: "string", description: "Filter by node type" },
-        tag: { type: "string", description: "Filter by tag" },
-        limit: { type: "number", description: "Max nodes to return" },
-      },
-    },
-  },
-  {
-    name: "context_overview",
-    description:
-      "Map of nests: node count, types, tags, title+snippet per node. Omit `nest` for ALL accessible nests.",
-    inputSchema: {
-      type: "object" as const,
-      properties: { ...NEST_ARG_OPTIONAL },
-    },
-  },
-  // ─── Targeted reads (nest required) ────────────────────────────────────
-  {
-    name: "context_get",
-    description: "Get the FULL content of a node in a nest by title or id.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        ...NEST_ARG,
-        title: { type: "string", description: "Title of the node" },
-        id: { type: "string", description: "ID of the node" },
-      },
-      required: ["nest"],
-    },
-  },
-  {
-    name: "context_resolve",
-    description:
-      "Full deterministic context resolution against one nest — selector + hops + token budget, complete node bodies.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        ...NEST_ARG,
-        selector: { type: "string", description: "Selector query string" },
-        max_tokens: {
-          type: "number",
-          description: "Approximate token budget (default: 8000)",
-        },
-        hops: {
-          type: "number",
-          description: "Graph traversal depth from the matches (default: 2)",
-        },
-      },
-      required: ["nest", "selector"],
-    },
-  },
-  {
-    // Read-only, so it belongs on this endpoint: an agent reading a nest's
-    // documents across nests also needs the feedback left on them. Writing a
-    // comment stays on the per-nest endpoint with the other write tools.
-    name: "context_comments",
-    description:
-      "Get the review comments/annotations on a document in a nest — anchored quotes, threaded replies, and open/resolved status. Use to pull human feedback into context before acting on a document.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        nest: { type: "string", description: "Nest name or id (see nest_index)" },
-        title: { type: "string", description: "Title of the node" },
-        id: { type: "string", description: "ID of the node" },
-      },
-      required: ["nest"],
-    },
   },
   {
     name: "nest_create",
@@ -385,93 +315,11 @@ export const SERVER_TOOL_DEFINITIONS = [
       required: ["name"],
     },
   },
-  // ─── Writes (nest required) ────────────────────────────────────────────
-  {
-    name: "context_create",
-    description:
-      "Create a new document in a nest. Needs write permission. A `folder` path creates the folder implicitly.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        ...NEST_ARG,
-        title: { type: "string", description: "Descriptive title" },
-        content: { type: "string", description: "Markdown content body" },
-        type: { type: "string", description: "Node type (default: document)" },
-        tags: { type: "array", items: { type: "string" }, description: "Tags" },
-        scope: { type: "string", description: "Visibility scope" },
-        folder: {
-          type: "string",
-          description:
-            'Folder path under nodes/ (e.g. "gtm/deals"); segments are slugified',
-        },
-      },
-      required: ["nest", "title", "content"],
-    },
-  },
-  {
-    name: "context_update",
-    description:
-      "Update an existing node by title or id. Needs write permission. Use `content` to replace, `append` to add.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        ...NEST_ARG,
-        title: { type: "string", description: "Title of node to update" },
-        id: { type: "string", description: "Node id (use when title is ambiguous)" },
-        content: { type: "string", description: "New content (replaces)" },
-        append: { type: "string", description: "Content to append" },
-        tags: { type: "array", items: { type: "string" }, description: "Tags to add" },
-        status: { type: "string", description: "New status: draft|pending_review|approved|published" },
-        changeNote: { type: "string", description: "Why this changed — recorded in history" },
-      },
-      required: ["nest"],
-    },
-  },
-  {
-    name: "context_delete",
-    description:
-      "Delete a node by title or id. Needs write permission. Irreversible.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        ...NEST_ARG,
-        title: { type: "string", description: "Title of node to delete" },
-        id: { type: "string", description: "Node id (use when title is ambiguous)" },
-      },
-      required: ["nest"],
-    },
-  },
-  {
-    name: "context_move",
-    description:
-      "Move a node to a different folder. The id changes; history and links follow. Needs write permission.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        ...NEST_ARG,
-        title: { type: "string", description: "Title of node to move" },
-        id: { type: "string", description: "Node id (use when title is ambiguous)" },
-        folder: { type: "string", description: 'Destination folder (e.g. "gtm/deals"); "" for root' },
-      },
-      required: ["nest", "folder"],
-    },
-  },
-  {
-    name: "context_submit_review",
-    description:
-      "Submit a node for steward review. Stewards will be notified. Use on governed nests.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        ...NEST_ARG,
-        title: { type: "string", description: "Title of node to submit" },
-        id: { type: "string", description: "Node id (use when title is ambiguous)" },
-        note: { type: "string", description: "Note for the reviewer" },
-        priority: { type: "string", description: "Priority: low, normal, high, urgent" },
-      },
-      required: ["nest"],
-    },
-  },
+  ...SERVER_NEST_TOOLS.map((name) => {
+    const tool = TOOL_DEFINITIONS.find((t) => t.name === name);
+    if (!tool) throw new Error(`server-level tool ${name} has no per-nest definition`);
+    return withNestArg(tool);
+  }),
 ];
 
 async function handleServerToolCall(
@@ -485,8 +333,10 @@ async function handleServerToolCall(
 ): Promise<ToolResult> {
   if (toolName === "nest_index") {
     const nests = await buildNestIndex(userId, nestScope);
-    if (!nests.length) return "No nests accessible with these credentials.";
-    return renderNestIndexMarkdown(nests, baseUrl);
+    // `data` is what `ctx vault list` reads to list each nest as `<alias>/<nest>`.
+    const data = { nests };
+    if (!nests.length) return { text: "No nests accessible with these credentials.", data };
+    return { text: renderNestIndexMarkdown(nests, baseUrl), data };
   }
 
   // Kill-switch + license gate for writes — parity with per-nest write path.
@@ -528,9 +378,6 @@ async function handleServerToolCall(
 
     // Filter to nests with content (skip empty nests for fan-out)
     const nonEmpty = nests.filter((n) => (n.document_count ?? 0) > 0);
-    if (!nonEmpty.length) {
-      return "All accessible nests are empty. Use context_create to add documents first.";
-    }
 
     // Run tool against each nest in parallel, combine results
     const results = await Promise.allSettled(
@@ -554,21 +401,77 @@ async function handleServerToolCall(
       }),
     );
 
-    // Combine successful results with nest headers
+    // Prose for chat clients (one section per nest); `data` for `ctx`, the
+    // per-nest payloads merged with every hit naming the nest it came from.
+    // Failed or erroring nests are skipped (best-effort, like nest_index) —
+    // unless EVERY nest errored: that is the caller's input (a malformed
+    // selector, say), not an empty result, so surface the error.
     const parts: string[] = [];
+    let firstError: ToolResult | undefined;
+    let firstRejection: PromiseRejectedResult | undefined;
+    const tag = (n: IndexedNest, items: unknown) =>
+      Array.isArray(items) ? items.map((it) => ({ ...it, nest: { id: n.id, name: n.name } })) : [];
+    // Per-nest lists, merged below — kept apart so no nest can crowd out the rest.
+    const perNestDocs: unknown[][] = [];
+    const perNestHits: unknown[][] = [];
+    let count = 0;
+    let nodesTraversed = 0;
+    let hopsUsed = 0;
+    let mode: string | undefined;
     for (const r of results) {
-      if (r.status === "fulfilled") {
-        const { nest: n, result } = r.value;
-        const text = typeof result === "string" ? result : result.text;
-        parts.push(`## ${n.name} (${n.id})\n\n${text}`);
+      if (r.status !== "fulfilled") {
+        firstRejection ??= r;
+        continue;
       }
-      // Skip failed nests silently (best-effort, like nest_index)
+      const { nest: n, result } = r.value;
+      if (typeof result !== "string" && result.isError) {
+        firstError ??= result;
+        continue;
+      }
+      parts.push(`## ${n.name} (${n.id})\n\n${typeof result === "string" ? result : result.text}`);
+      const d = (typeof result === "string" ? undefined : result.data) as any;
+      if (!d) continue;
+      perNestDocs.push(tag(n, d.documents));
+      perNestHits.push(tag(n, d.results));
+      count += d.count ?? 0;
+      nodesTraversed += d.traversal?.nodes_traversed ?? 0;
+      hopsUsed = Math.max(hopsUsed, d.traversal?.hops_used ?? 0);
+      mode ??= d.traversal?.mode;
     }
+    // Round-robin: each nest's first hit, then each nest's second, … Search
+    // carries no relevance score to rank by across nests (per nest it is a
+    // term-containment filter, title matches first), and a nest-by-nest concat
+    // cut at `limit` would let the first nests fill every slot.
+    const interleave = (lists: unknown[][]) => {
+      const out: unknown[] = [];
+      for (let i = 0; lists.some((l) => i < l.length); i++) {
+        for (const l of lists) if (i < l.length) out.push(l[i]);
+      }
+      return out;
+    };
+    if (!parts.length && firstError) return firstError;
+    // Same as a single-nest call that threw.
+    if (!parts.length && firstRejection) throw firstRejection.reason;
+    const documents = interleave(perNestDocs);
+    // The caps one nest applies, over the merged set (search 20, max 200;
+    // list 50) — otherwise N nests hand back N pages.
+    const listLimit =
+      typeof args.limit === "number" && args.limit >= 1 ? Math.floor(args.limit) : 50;
+    const data =
+      toolName === "context_search"
+        ? { results: interleave(perNestHits).slice(0, normalizeSearchLimit(args.limit)), count }
+        : toolName === "context_query"
+          ? { documents, traversal: { mode: mode ?? "selector", hops_used: hopsUsed, nodes_traversed: nodesTraversed } }
+          : { documents: documents.slice(0, listLimit) };
 
-    if (!parts.length) {
-      return "No results found across any accessible nests.";
+    // Overview is prose only — an empty `documents` would read as an empty vault.
+    const reply = (text: string): ToolResult =>
+      toolName === "context_overview" ? text : { text, data };
+    if (!nonEmpty.length) {
+      return reply("All accessible nests are empty. Use context_create to add documents first.");
     }
-    return parts.join("\n\n---\n\n");
+    if (!parts.length) return reply("No results found across any accessible nests.");
+    return reply(parts.join("\n\n---\n\n"));
   }
 
   // ─── Single-nest operations (nest required) ────────────────────────────
@@ -800,7 +703,7 @@ Streamable HTTP, stateless. Two endpoints:
   Tools: \`nest_index\` (call first), then:
   - Fan-out reads (omit \`nest\` to search/list ALL nests): \`context_search\`,
     \`context_list\`, \`context_query\`, \`context_overview\`
-  - Targeted reads (\`nest\` required): \`context_get\`, \`context_resolve\`, \`context_comments\`
+  - Targeted reads (\`nest\` required): \`context_get\`, \`context_resolve\`, \`context_comments\`, \`context_versions\`
   - Writes (\`nest\` required): \`nest_create\`, \`context_create\`, \`context_update\`,
     \`context_delete\`, \`context_move\`, \`context_submit_review\`
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, the full toolset. Same names as the
@@ -837,9 +740,11 @@ on the command line.
 export CONTEXTNEST_API_KEY=<api-key>
 # every nest these credentials can read, through the server-level endpoint
 ctx vault add contextnest --url ${B}/mcp --bearer-env CONTEXTNEST_API_KEY
-# or one nest
+ctx vault list                                  # lists contextnest/<nest> for each nest
+ctx search "pricing" --vault contextnest        # reads span every nest
+ctx update nodes/x --tags a,b --vault contextnest/<nest>   # a write names one nest
+# or pin one nest by its own endpoint
 ctx vault add mynest --url ${B}/nests/<nest-id>/mcp --bearer-env CONTEXTNEST_API_KEY
-ctx query "#gtm" --vault mynest
 \`\`\`
 
 Servers in "open" auth mode: drop \`--bearer-env\`. Pushing a local folder up

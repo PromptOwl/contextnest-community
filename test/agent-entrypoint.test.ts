@@ -83,15 +83,13 @@ describe("GET /llms.txt — public agent manual", () => {
     expect(text).toContain("/mcp");
   });
 
-  it("tells the ctx CLI how to register this server and one nest as vault aliases", async () => {
+  it("tells the ctx CLI to register the server once and address nests as alias/nest", async () => {
     const res = await app.request("/llms.txt");
     const text = await res.text();
-    // Server-level alias: every nest the key can see, through /mcp.
     expect(text).toContain("## From the ctx CLI");
     expect(text).toMatch(/ctx vault add \S+ --url http:\/\/localhost\/mcp --bearer-env CONTEXTNEST_API_KEY/);
-    // Per-nest alias form.
+    expect(text).toMatch(/--vault contextnest\/<nest>/);
     expect(text).toMatch(/ctx vault add \S+ --url http:\/\/localhost\/nests\/<nest-id>\/mcp --bearer-env CONTEXTNEST_API_KEY/);
-    expect(text).toMatch(/ctx query "#\S+" --vault \S+/);
     // Never a key on argv, never key material.
     expect(text).not.toMatch(/--key\b/);
     expect(text).not.toMatch(/cnst_[a-z0-9]{8,}/i);
@@ -151,6 +149,14 @@ describe("server-level /mcp — one connection, all nests", () => {
     expect(text).toContain("Deal Brain");
     expect(text).toContain(nestId);
     expect(text).not.toContain("Bob Secrets");
+  });
+
+  it("nest_index also returns the nests as structured data (for ctx vault list)", async () => {
+    const res = await mcpCall(alice.apiKey, "tools/call", { name: "nest_index", arguments: {} });
+    const nests = res.result.structuredContent.nests;
+    expect(nests.map((n: any) => n.id)).toContain(nestId);
+    expect(nests.find((n: any) => n.id === nestId).name).toBe("Deal Brain");
+    expect(nests.map((n: any) => n.id)).not.toContain(privateNestId);
   });
 
   it("context_get reads from a nest referenced by NAME", async () => {

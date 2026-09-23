@@ -1942,8 +1942,8 @@ export async function updateNode(
       if (patch.tags) {
         // Replace, don't merge: the editor sends the full tag set on every
         // save, so a union made removals impossible (CU: removed tag returns
-        // after reopen). Callers wanting additive semantics (MCP
-        // context_update) merge against the current tags themselves.
+        // after reopen). MCP context_update replaces too, per the engine
+        // catalog; a caller wanting to add a tag sends the full set.
         const nextTags = requireTags(patch.tags);
         node = { ...node, frontmatter: { ...node.frontmatter, tags: nextTags } };
         // The engine performs the write, so the new set has to reach it — the
