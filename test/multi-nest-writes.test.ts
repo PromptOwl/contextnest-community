@@ -90,6 +90,11 @@ describe("context_update on a secondary nest", () => {
     expect(up.text).toMatch(/frontmatter/);
   });
 
+  it("still accepts a body that merely opens with a --- rule", async () => {
+    const up = await callTool(path(), stacey.apiKey, "context_update", { title: "Tag Doc", content: "---\n\n# Section\n\nText." });
+    expect(up.isError).toBe(false);
+  });
+
   it("context_move returns the new id as data (what ctx move reads)", async () => {
     const res = await app.request(path(), {
       method: "POST",
@@ -140,6 +145,24 @@ describe("server-level /mcp as a ctx vault", () => {
     const r = await structured("context_versions", { nest: "Partner Alpha", title: "Pricing Partner Alpha" });
     expect(r.isError).toBeFalsy();
     expect(r.structuredContent.versions.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("a limit can't be filled by the first nest alone: hits interleave across nests", async () => {
+    // Partner Alpha (owned, listed first) now has two pricing docs; Partner Shared has one.
+    await jsonRequest(app, "POST", `/nests/${nests["Partner Alpha"]}/nodes`, { title: "More Alpha Pricing", content: "# pricing again" }, stacey.apiKey);
+    const r = await structured("context_search", { query: "pricing", limit: 2 });
+    const byNest = r.structuredContent.results.map((h: any) => h.nest.id);
+    expect(new Set(byNest).size).toBe(2);
+  });
+
+  it("a fan-out read is attributed on the activity trace like a single-nest one", async () => {
+    await structured("context_list", { tag: "pricing" }); // no `client` in the args
+    const { getDb } = await import("../src/db/client.js");
+    const row = (await getDb().get(
+      "SELECT client_json FROM api_events WHERE tool = 'context_list' ORDER BY id DESC LIMIT 1",
+    )) as { client_json: string | null };
+    // Derived from the API key's label (registerUser names it "test").
+    expect(JSON.parse(row.client_json ?? "null")).toMatchObject({ agent: "test" });
   });
 
   it("a write without `nest` is still refused", async () => {

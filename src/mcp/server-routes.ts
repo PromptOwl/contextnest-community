@@ -384,6 +384,11 @@ async function handleServerToolCall(
           userId,
           userEmail,
           baseUrl,
+          // Same attribution the single-nest branch below passes (§9.4). A
+          // fan-out read is still one call per nest on the trace, and each row
+          // has to name the caller — without this the derived agent/session is
+          // dropped and only an explicit `client` in the args survives.
+          client,
         });
         return { nest: n, result };
       }),
@@ -395,8 +400,9 @@ async function handleServerToolCall(
     const parts: string[] = [];
     const tag = (n: IndexedNest, items: unknown) =>
       Array.isArray(items) ? items.map((it) => ({ ...it, nest: { id: n.id, name: n.name } })) : [];
-    const documents: unknown[] = [];
-    const hits: Array<{ score?: number }> = [];
+    // Per-nest lists, merged below — kept apart so no nest can crowd out the rest.
+    const perNestDocs: unknown[][] = [];
+    const perNestHits: unknown[][] = [];
     let count = 0;
     let nodesTraversed = 0;
     let hopsUsed = 0;
@@ -408,20 +414,29 @@ async function handleServerToolCall(
       parts.push(`## ${n.name} (${n.id})\n\n${typeof result === "string" ? result : result.text}`);
       const d = (typeof result === "string" ? undefined : result.data) as any;
       if (!d) continue;
-      documents.push(...tag(n, d.documents));
-      hits.push(...tag(n, d.results));
+      perNestDocs.push(tag(n, d.documents));
+      perNestHits.push(tag(n, d.results));
       count += d.count ?? 0;
       nodesTraversed += d.traversal?.nodes_traversed ?? 0;
       hopsUsed = Math.max(hopsUsed, d.traversal?.hops_used ?? 0);
       mode ??= d.traversal?.mode;
     }
-    // One ranking across nests: per-nest BM25 scores are comparable enough to
-    // interleave, and a nest-by-nest concat would bury every nest after the first.
-    hits.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+    // Round-robin: each nest's first hit, then each nest's second, … Search
+    // carries no relevance score to rank by across nests (per nest it is a
+    // term-containment filter, title matches first), and a nest-by-nest concat
+    // cut at `limit` would let the first nests fill every slot.
+    const interleave = (lists: unknown[][]) => {
+      const out: unknown[] = [];
+      for (let i = 0; lists.some((l) => i < l.length); i++) {
+        for (const l of lists) if (i < l.length) out.push(l[i]);
+      }
+      return out;
+    };
+    const documents = interleave(perNestDocs);
     const limit = typeof args.limit === "number" ? args.limit : undefined;
     const data =
       toolName === "context_search"
-        ? { results: hits.slice(0, limit ?? 20), count }
+        ? { results: interleave(perNestHits).slice(0, limit ?? 20), count }
         : toolName === "context_query"
           ? { documents, traversal: { mode: mode ?? "selector", hops_used: hopsUsed, nodes_traversed: nodesTraversed } }
           : { documents: limit ? documents.slice(0, limit) : documents };
