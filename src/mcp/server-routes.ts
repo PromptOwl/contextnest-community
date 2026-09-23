@@ -485,8 +485,10 @@ async function handleServerToolCall(
 ): Promise<ToolResult> {
   if (toolName === "nest_index") {
     const nests = await buildNestIndex(userId, nestScope);
-    if (!nests.length) return "No nests accessible with these credentials.";
-    return renderNestIndexMarkdown(nests, baseUrl);
+    // `data` is what `ctx vault fix` reads to register one alias per nest.
+    const data = { nests };
+    if (!nests.length) return { text: "No nests accessible with these credentials.", data };
+    return { text: renderNestIndexMarkdown(nests, baseUrl), data };
   }
 
   // Kill-switch + license gate for writes — parity with per-nest write path.
@@ -841,7 +843,9 @@ ctx query "#gtm" --vault mynest
 \`\`\`
 
 Register each nest's own endpoint, not the server-level \`/mcp\`: \`ctx\` never
-sends a \`nest\` argument, so writes through \`/mcp\` fail.
+sends a \`nest\` argument, so writes through \`/mcp\` fail. Already registered
+\`/mcp\`? \`ctx vault fix\` (CLI with that command) swaps it for one alias per
+nest these credentials can reach.
 
 Servers in "open" auth mode: drop \`--bearer-env\`. Pushing a local folder up
 is \`ctx push --server ${B} --nest <nest-id>\` with the same env var set.

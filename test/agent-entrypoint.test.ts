@@ -153,6 +153,14 @@ describe("server-level /mcp — one connection, all nests", () => {
     expect(text).not.toContain("Bob Secrets");
   });
 
+  it("nest_index also returns the nests as structured data (for ctx vault fix)", async () => {
+    const res = await mcpCall(alice.apiKey, "tools/call", { name: "nest_index", arguments: {} });
+    const nests = res.result.structuredContent.nests;
+    expect(nests.map((n: any) => n.id)).toContain(nestId);
+    expect(nests.find((n: any) => n.id === nestId).name).toBe("Deal Brain");
+    expect(nests.map((n: any) => n.id)).not.toContain(privateNestId);
+  });
+
   it("context_get reads from a nest referenced by NAME", async () => {
     const text = await callTool(alice.apiKey, "context_get", {
       nest: "Deal Brain",
