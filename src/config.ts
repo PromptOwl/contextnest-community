@@ -605,6 +605,27 @@ export const config = {
     return raw;
   },
   /**
+   * Email transport: "smtp" (SMTP_URL, default) or "ses" (AWS SES via the SDK,
+   * for deployments that can't use SMTP). Anything else falls back to smtp.
+   */
+  get EMAIL_PROVIDER(): "smtp" | "ses" {
+    return process.env.EMAIL_PROVIDER?.trim().toLowerCase() === "ses" ? "ses" : "smtp";
+  },
+  /** AWS region for SES, e.g. us-east-1. Required when EMAIL_PROVIDER=ses. */
+  get SES_REGION(): string | null {
+    return process.env.SES_REGION?.trim() || null;
+  },
+  /**
+   * Optional static SES credentials. Both unset → the AWS default credential
+   * chain (IAM role, AWS_* env, shared profile). The secret is write-only.
+   */
+  get SES_ACCESS_KEY_ID(): string | null {
+    return process.env.SES_ACCESS_KEY_ID?.trim() || null;
+  },
+  get SES_SECRET_ACCESS_KEY(): string | null {
+    return process.env.SES_SECRET_ACCESS_KEY?.trim() || null;
+  },
+  /**
    * From address for notification emails. Shape-validated here (not only in
    * the /admin/settings PATCH) so a value set directly via env/Docker can't
    * reach nodemailer's envelope unchecked. Invalid = connector off.

@@ -103,7 +103,10 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `ANTHROPIC_API_KEY` | _(unset)_ | Server-wide default runner key for workflow-plane agent runs. Never returned by the API — the health endpoint reports presence only, and Settings shows a masked tail. |
 | `SLACK_WEBHOOK_URL` | _(unset — connector off)_ | Slack incoming-webhook URL for governance-event notifications (review submitted/approved/rejected, collaborator added). `https://` only — the URL embeds a secret. Also editable from Settings in the UI. |
 | `MSTEAMS_WEBHOOK_URL` | _(unset — connector off)_ | Microsoft Teams incoming-webhook URL for the same governance events, posted as Adaptive Cards. `https://` only — the URL embeds a secret. Also editable from Settings in the UI. See [Microsoft Teams notifications](#microsoft-teams-notifications). |
+| `EMAIL_PROVIDER` | `smtp` | Email transport: `smtp` (uses `SMTP_URL`) or `ses` (AWS SES through the AWS SDK, for servers that can't use SMTP). Also editable from Settings. |
 | `SMTP_URL` | _(unset — connector off)_ | SMTP connection URL for email notifications (`smtp://` or `smtps://`, credentials inline). Requires `NOTIFY_EMAIL_FROM` and `NOTIFY_EMAIL_TO`. Also editable from Settings. |
+| `SES_REGION` | _(unset — connector off)_ | AWS region for SES (e.g. `us-east-1`) when `EMAIL_PROVIDER=ses`. The From address must be a verified SES identity. |
+| `SES_ACCESS_KEY_ID` / `SES_SECRET_ACCESS_KEY` | _(unset)_ | Optional static SES credentials (need `ses:SendEmail`). Saving one email provider in Settings clears the other one's settings. Leave the keys unset to use the AWS default credential chain (IAM role, `AWS_*` env, shared profile). The secret is write-only in Settings. |
 | `NOTIFY_EMAIL_FROM` | _(unset)_ | From address for notification emails. |
 | `NOTIFY_EMAIL_TO` | _(unset)_ | Comma-separated recipients for notification emails. |
 | `NOTIFY_DEBOUNCE_MS` | `15000` | Per-nest buffer window before notifications flush; bursts collapse into one digest message. |

@@ -289,7 +289,14 @@ export interface AdminSettings {
   anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   msteams_webhook_url: string;
+  email_provider: "smtp" | "ses";
   smtp_url: string;
+  ses_region: string;
+  ses_access_key_id: string;
+  /** SES secret is write-only — GET reports presence; PATCH sends a string to
+   *  set or null to clear. */
+  ses_secret_access_key_set?: boolean;
+  ses_secret_access_key?: string | null;
   notify_email_from: string;
   notify_email_to: string;
   anthropic_api_key?: string | null

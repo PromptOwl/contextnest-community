@@ -56,7 +56,7 @@ publishRoutes.post("/", async (c) => {
   // invited — can ever open. Refuse it rather than hand back a dead link.
   if ((mode === "email" || mode === "invite") && !isEmailConfigured()) {
     throw new ValidationError(
-      "Email and invite links need email set up on this server (SMTP_URL and NOTIFY_EMAIL_FROM). Use a public or passcode link instead.",
+      "Email and invite links need email set up on this server (SMTP or AWS SES, plus NOTIFY_EMAIL_FROM). Use a public or passcode link instead.",
     );
   }
   const row = await createPublish({

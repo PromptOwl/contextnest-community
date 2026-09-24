@@ -98,7 +98,11 @@ import {
   isVaultLockTimeout,
 } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish } from "./config.js";
-import { verifySmtp, isEmailConfigured } from "./notify/email.js";
+import {
+  verifyEmailTransport,
+  isEmailConfigured,
+  transportSettings,
+} from "./notify/email.js";
 import { getDb } from "./db/client.js";
 import { ensureAnonymousUser } from "./auth/anonymous.js";
 import {
@@ -659,7 +663,12 @@ export function createApp(): Hono<AuthEnv> {
       : null,
     slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
     msteams_webhook_url: config.MSTEAMS_WEBHOOK_URL ?? "",
+    email_provider: config.EMAIL_PROVIDER,
     smtp_url: config.SMTP_URL ?? "",
+    ses_region: config.SES_REGION ?? "",
+    ses_access_key_id: config.SES_ACCESS_KEY_ID ?? "",
+    // Write-only, like the OIDC secret — presence only, never the value.
+    ses_secret_access_key_set: !!config.SES_SECRET_ACCESS_KEY,
     notify_email_from: config.NOTIFY_EMAIL_FROM ?? "",
     notify_email_to: config.NOTIFY_EMAIL_TO ?? "",
   });
@@ -1079,6 +1088,42 @@ export function createApp(): Hono<AuthEnv> {
         addError("smtp_url", "SMTP connection URL must start with smtp:// or smtps:// (or leave it empty to turn email notifications off).");
       else pending.push({ name: "SMTP_URL", value: v || null });
     }
+    if ("email_provider" in body) {
+      const v = String(body.email_provider ?? "").trim().toLowerCase();
+      if (v !== "smtp" && v !== "ses")
+        addError("email_provider", "Email provider must be SMTP or AWS SES.");
+      else pending.push({ name: "EMAIL_PROVIDER", value: v });
+    }
+    if ("ses_region" in body) {
+      const v = String(body.ses_region ?? "").trim();
+      if (v && !/^[a-z]{2}(-[a-z]+)+-\d+$/.test(v))
+        addError("ses_region", "AWS region must look like us-east-1.");
+      else pending.push({ name: "SES_REGION", value: v || null });
+    }
+    if ("ses_access_key_id" in body) {
+      const v = String(body.ses_access_key_id ?? "").trim();
+      pending.push({ name: "SES_ACCESS_KEY_ID", value: v || null });
+    }
+    if ("ses_secret_access_key" in body) {
+      const v = body.ses_secret_access_key;
+      if (v !== null && typeof v !== "string")
+        addError("ses_secret_access_key", "AWS secret access key must be a string (or empty to clear it).");
+      else pending.push({ name: "SES_SECRET_ACCESS_KEY", value: v?.trim() || null });
+    }
+    // Saving a provider drops the other one's settings, so no stale credential
+    // lingers (e.g. an old SMTP URL once the server moves to SES).
+    const provider = String(body.email_provider ?? "").trim().toLowerCase();
+    if (provider === "smtp" || provider === "ses") {
+      const stale =
+        provider === "ses"
+          ? ["SMTP_URL"]
+          : ["SES_REGION", "SES_ACCESS_KEY_ID", "SES_SECRET_ACCESS_KEY"];
+      for (const name of stale) {
+        const i = pending.findIndex((p) => p.name === name);
+        if (i >= 0) pending.splice(i, 1);
+        pending.push({ name, value: null });
+      }
+    }
     // Shape check (local@domain.tld, no CR/LF) — these flow into nodemailer's
     // envelope, so junk and header-injection shapes stop here. Same guard the
     // config getters apply, so env-set and UI-set values gate identically.
@@ -1148,21 +1193,25 @@ export function createApp(): Hono<AuthEnv> {
         400,
       );
 
-    // Shape is good — now prove the SMTP credentials actually work before we
-    // persist them. A prefix-valid URL can still point at the wrong host or
-    // carry a bad password; connect + authenticate so junk is blocked at save
-    // instead of silently failing on the first governance event. Only runs when
-    // the URL is being set to a non-empty value (empty = disabling the
-    // connector, nothing to verify).
-    const smtpChange = pending.find((p) => p.name === "SMTP_URL");
-    if (smtpChange && smtpChange.value) {
-      const result = await verifySmtp(smtpChange.value);
+    // Shape is good — now prove the email credentials actually work before we
+    // persist them (wrong host/password, bad AWS keys or region). Only when this
+    // PATCH touches the selected provider's fields and leaves it configured —
+    // clearing them just turns the connector off, nothing to verify.
+    const over = Object.fromEntries(pending.map((p) => [p.name, p.value]));
+    const nextEmail = transportSettings(over);
+    const emailFields =
+      nextEmail?.provider === "ses"
+        ? ["EMAIL_PROVIDER", "SES_REGION", "SES_ACCESS_KEY_ID", "SES_SECRET_ACCESS_KEY"]
+        : ["EMAIL_PROVIDER", "SMTP_URL"];
+    if (nextEmail && emailFields.some((k) => k in over)) {
+      const result = await verifyEmailTransport(nextEmail);
       if (!result.ok) {
-        const message = `SMTP connection failed: ${result.error}`;
+        const ses = nextEmail.provider === "ses";
+        const message = `${ses ? "AWS SES" : "SMTP"} connection failed: ${result.error}`;
         return c.json(
           {
             error: message,
-            fieldErrors: { smtp_url: message },
+            fieldErrors: { [ses ? "ses_region" : "smtp_url"]: message },
             settings: currentServerSettings(),
           },
           400,

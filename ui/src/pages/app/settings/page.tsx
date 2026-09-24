@@ -113,7 +113,17 @@ const TABS: {
   {
     id: "notifications",
     label: "Notifications",
-    keys: ["slack_webhook_url", "msteams_webhook_url", "smtp_url", "notify_email_from", "notify_email_to"],
+    keys: [
+      "slack_webhook_url",
+      "msteams_webhook_url",
+      "email_provider",
+      "smtp_url",
+      "ses_region",
+      "ses_access_key_id",
+      "ses_secret_access_key",
+      "notify_email_from",
+      "notify_email_to",
+    ],
   },
   {
     // Not draft-backed like the tabs above — sites are added/edited/removed
@@ -412,7 +422,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
       if (
         k === "anthropic_api_key" ||
         k === "oidc_client_secret" ||
-        k === "mcp_signing_secret"
+        k === "mcp_signing_secret" ||
+        k === "ses_secret_access_key"
       ) {
         const v = draft[k];
         return (typeof v === "string" && v.trim() !== "") || v === null;
@@ -1376,19 +1387,79 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               <CardHeader>
                 <CardTitle className="text-base">Email notifications</CardTitle>
                 <CardDescription>
-                  Send the same governance events over SMTP. Set the connection
-                  URL (smtp:// or smtps://, credentials inline), a From address,
-                  and one or more recipients (comma-separated). Leave the URL
-                  empty to turn the connector off.
+                  Invites, shares and governance events by email. Send through
+                  SMTP, or through AWS SES when this server can't use SMTP. Set
+                  a From address and one or more team recipients
+                  (comma-separated). Leave the SMTP URL or AWS region empty to
+                  turn email off.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">
-                <TextField
-                  type="password"
-                  value={draft.smtp_url ?? ""}
-                  placeholder="smtps://user:pass@smtp.example.com:465"
-                  onChange={(v) => set({ smtp_url: v })}
-                />
+                <div role="radiogroup" className="flex gap-4 text-sm">
+                  {(
+                    [
+                      ["smtp", "SMTP"],
+                      ["ses", "AWS SES"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <label key={value} className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="email_provider"
+                        checked={(draft.email_provider ?? "smtp") === value}
+                        onChange={() => set({ email_provider: value })}
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                {(draft.email_provider ?? "smtp") === "smtp" ? (
+                  <TextField
+                    type="password"
+                    value={draft.smtp_url ?? ""}
+                    placeholder="smtps://user:pass@smtp.example.com:465"
+                    onChange={(v) => set({ smtp_url: v })}
+                  />
+                ) : (
+                  <>
+                    <TextField
+                      value={draft.ses_region ?? ""}
+                      placeholder="AWS region — us-east-1"
+                      onChange={(v) => set({ ses_region: v })}
+                    />
+                    <TextField
+                      value={draft.ses_access_key_id ?? ""}
+                      placeholder="Access key ID — leave empty to use the server's IAM role"
+                      onChange={(v) => set({ ses_access_key_id: v })}
+                    />
+                    <TextField
+                      type="password"
+                      value={
+                        typeof draft.ses_secret_access_key === "string"
+                          ? draft.ses_secret_access_key
+                          : ""
+                      }
+                      placeholder={
+                        draft.ses_secret_access_key === null
+                          ? "Secret access key — will be cleared when you save"
+                          : settings?.ses_secret_access_key_set
+                            ? "Secret access key is set — paste to replace"
+                            : "Secret access key — leave empty to use the server's IAM role"
+                      }
+                      onChange={(v) => set({ ses_secret_access_key: v })}
+                    />
+                    {settings?.ses_secret_access_key_set &&
+                      draft.ses_secret_access_key !== null && (
+                        <button
+                          type="button"
+                          className="text-xs text-destructive hover:underline"
+                          onClick={() => set({ ses_secret_access_key: null })}
+                        >
+                          Clear secret
+                        </button>
+                      )}
+                  </>
+                )}
                 <TextField
                   value={draft.notify_email_from ?? ""}
                   placeholder="From — nest@yourcompany.com"
