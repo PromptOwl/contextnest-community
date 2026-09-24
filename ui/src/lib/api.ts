@@ -224,6 +224,8 @@ export async function getHealth() {
     posthog_host?: string;
     /** Mail transport is set up — email/invite publish gates need it. */
     email_configured?: boolean;
+    /** Who may create nests; "admins" hides the create CTAs from everyone else. */
+    nest_creation?: "admins" | "everyone";
     suspended_reason?: string;
   }>("/health");
 }

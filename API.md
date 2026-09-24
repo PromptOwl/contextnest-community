@@ -261,6 +261,8 @@ Returns owned + shared nests. Archived nests are **absent** — as they are from
 ```
 Response (201): `{ "nest": { ... } }`
 
+With `NEST_CREATION=admins` (the default) only a server admin may create or import a nest; anyone else gets `403` ("Only a server admin can create nests on this server…"). The same rule covers `POST /nests/import` and the MCP `nest_create` tool. `GET /health` reports it as `nest_creation`.
+
 ### GET `/nests/:nestId`
 ```json
 { "nest": { ... }, "permission": "owner" | "admin" | "write" | "read" }

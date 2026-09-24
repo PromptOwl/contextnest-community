@@ -82,6 +82,11 @@ export default function NestsPage() {
     refetch: refetchNests,
   } = useNests();
   const allNests = nestsData?.nests ?? [];
+  // Nest creation is admins-only unless the server opens it (NEST_CREATION) —
+  // non-admins never see a create/import CTA they can't use.
+  const { data: health } = useQuery(reads.health());
+  const canCreate = authMode === "open" || isAdmin || health?.nest_creation === "everyone";
+  const adminEmail = adminStatus?.admin?.email;
   // Archived is a switch on the Nests page, not a tab: the list stays
   // unfetched until someone flips it — archived nests are a rare visit, not
   // part of every dashboard load.
@@ -422,18 +427,20 @@ export default function NestsPage() {
             description="Shared knowledge vaults for your team"
             className="mb-0"
             actions={
-              <>
-                {/* Search lives in the header on every page — one entry point,
-                    not a second one styled differently here (CU-wdqcq012uv). */}
-                <Button variant="outline" onClick={() => setShowImport(true)}>
-                  <FolderInput className="h-4 w-4 mr-2" />
-                  Import Folder
-                </Button>
-                <Button onClick={() => setShowCreate(true)}>
-                  <Plus className="h-4 w-4 mr-2" />
-                  New Nest
-                </Button>
-              </>
+              canCreate && (
+                <>
+                  {/* Search lives in the header on every page — one entry point,
+                      not a second one styled differently here (CU-wdqcq012uv). */}
+                  <Button variant="outline" onClick={() => setShowImport(true)}>
+                    <FolderInput className="h-4 w-4 mr-2" />
+                    Import Folder
+                  </Button>
+                  <Button onClick={() => setShowCreate(true)}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    New Nest
+                  </Button>
+                </>
+              )
             }
           />
 
@@ -764,14 +771,16 @@ export default function NestsPage() {
                 <Database className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
                 <p className="font-medium">No nests of your own yet</p>
                 <p className="text-sm text-muted-foreground mb-4">
-                  Create one, or browse the {discoveredCount} nest
+                  {canCreate ? "Create one, or browse" : "Browse"} the {discoveredCount} nest
                   {discoveredCount === 1 ? "" : "s"} others have opened up on this server.
                 </p>
                 <div className="flex items-center justify-center gap-2">
-                  <Button onClick={() => setShowCreate(true)}>
-                    <Plus className="h-4 w-4 mr-2" />
-                    Create Nest
-                  </Button>
+                  {canCreate && (
+                    <Button onClick={() => setShowCreate(true)}>
+                      <Plus className="h-4 w-4 mr-2" />
+                      Create Nest
+                    </Button>
+                  )}
                   <Button
                     variant="outline"
                     onClick={() => setNestScope("all")}
@@ -804,14 +813,27 @@ export default function NestsPage() {
             <Card>
               <CardContent className="text-center py-12">
                 <Database className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
-                <p className="font-medium">No nests yet</p>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Create your first nest to start sharing knowledge with your team
-                </p>
-                <Button onClick={() => setShowCreate(true)}>
-                  <Plus className="h-4 w-4 mr-2" />
-                  Create First Nest
-                </Button>
+                {canCreate ? (
+                  <>
+                    <p className="font-medium">No nests yet</p>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Create your first nest to start sharing knowledge with your team
+                    </p>
+                    <Button onClick={() => setShowCreate(true)}>
+                      <Plus className="h-4 w-4 mr-2" />
+                      Create First Nest
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <p className="font-medium">
+                      You don't have access to any nests yet.
+                    </p>
+                    <p className="text-sm text-muted-foreground">
+                      Ask {adminEmail || "your admin"} to share one.
+                    </p>
+                  </>
+                )}
               </CardContent>
             </Card>
           ) : (

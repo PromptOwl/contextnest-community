@@ -403,6 +403,16 @@ export const config = {
     return process.env.PEOPLE_SUGGEST_ALL_USERS === "true";
   },
   /**
+   * Who may create nests. "admins" (default): server admins only, until the
+   * server is on a paid plan. "everyone": any signed-in user. Open mode is
+   * unaffected (everyone is admin there).
+   */
+  get NEST_CREATION(): "admins" | "everyone" {
+    return process.env.NEST_CREATION?.trim().toLowerCase() === "everyone"
+      ? "everyone"
+      : "admins";
+  },
+  /**
    * This server hosts several unrelated organizations (the PromptOwl-hosted
    * deployment) rather than one company (a self-hosted install).
    *

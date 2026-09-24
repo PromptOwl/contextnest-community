@@ -457,6 +457,9 @@ export function createApp(): Hono<AuthEnv> {
       // Presence only: the publish dialog hides the email/invite gates when
       // this server cannot send mail, because their only way in is a mailed link.
       email_configured: isEmailConfigured(),
+      // Who may create nests (admins | everyone) — the Nests page hides the
+      // create buttons from non-admins when it's admins-only.
+      nest_creation: config.NEST_CREATION,
       // Product analytics for the SPA. The PostHog project key is a public
       // client key, but it only ships while usage telemetry is on — one switch
       // covers everything this server sends outward.
