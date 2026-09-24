@@ -593,9 +593,12 @@ export interface ApiKeyMinted {
   api_key: string;
   key_prefix: string;
   label: string | null;
+  /** The one nest this key is scoped to, or null for an all-nests key. */
+  nest_id?: string | null;
 }
 
-/** Mint another external-client API key. 409s only at the per-user ceiling. */
+/** Mint another external-client API key. 409s at the per-user ceiling or on a
+ *  duplicate name; with nest_id, 404s unless the caller can reach that nest. */
 export async function createApiKey(opts?: { label?: string; nest_id?: string }) {
   return request<ApiKeyMinted>("/auth/keys", {
     method: "POST",

@@ -6,8 +6,10 @@
  * not the prefix. Every snippet carries a placeholder the user substitutes
  * after copying, so snippets are reusable templates that leak no secret.
  *
- * Creating and rotating keys lives on the API keys page (`onManageKeys`),
- * not here. Per-nest rotation was a trap: an account holds several keys,
+ * The one key this dialog mints is a nest-only key ("Create a key for this
+ * nest only"): it reaches this nest and nothing else, pairs with the per-nest
+ * MCP URL, and minting it disturbs no other client. Rotating, revoking and
+ * all-nests keys live on the API keys page (`onManageKeys`), not here. Per-nest rotation was a trap: an account holds several keys,
  * one per place it connects from, and a rotate fired from whichever nest
  * happened to be open would kill clients wired to the others. Plaintext is
  * still revealed exactly once, by KeyRevealModal (exported below, rendered
@@ -45,6 +47,9 @@ import {
 } from "lucide-react";
 import * as api from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads, useApiKeys } from "../lib/queries";
+import { nestOnlyKeyLabel } from "../lib/api-key-scope";
 import {
   nestChatPrompt,
   nestSetupPrompt,
@@ -95,6 +100,31 @@ export function ConnectModal({
   const [showMore, setShowMore] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
+
+  // "Create a key for this nest only" — the key names come from the account's
+  // key list so the default name never collides (the server refuses duplicates).
+  const qc = useQueryClient();
+  const canMintKey = authenticated && authMode !== "open";
+  const { data: keyData } = useApiKeys({ enabled: isOpen && canMintKey });
+  const [mintingNestKey, setMintingNestKey] = useState(false);
+  const [nestKey, setNestKey] = useState<string | null>(null);
+  const mintNestKey = async () => {
+    setError(null);
+    setMintingNestKey(true);
+    try {
+      const label = nestOnlyKeyLabel(
+        nestName,
+        (keyData?.keys ?? []).map((k) => k.label),
+      );
+      const minted = await api.createApiKey({ label, nest_id: nestId });
+      setNestKey(minted.api_key);
+    } catch (err: any) {
+      setError(err?.message || "Couldn't create a key for this nest.");
+    } finally {
+      qc.invalidateQueries({ queryKey: reads.apiKeys().queryKey });
+      setMintingNestKey(false);
+    }
+  };
 
   // Clear a stale export error when the dialog reopens.
   useEffect(() => {
@@ -280,11 +310,30 @@ export function ConnectModal({
                 )}
               </div>
               <p className="text-xs text-muted-foreground">
-                Use the key you already have — any of your keys works on every
-                nest you can see. Need a new one, or lost the plaintext? Create
-                or rotate it on the API keys page; keys are shown only once,
-                when they're created.
+                Use the key you already have — an all-nests key works here too.
+                Handing this nest to an agent or integration that shouldn't see
+                anything else? Create a key for this nest only: it works with
+                this nest's MCP URL below, and every other nest, your account
+                and your API keys answer 403. Rotate or revoke keys on the API
+                keys page; a key is shown only once, when it's created.
               </p>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="shrink-0"
+                  disabled={mintingNestKey}
+                  onClick={mintNestKey}
+                >
+                  {mintingNestKey ? (
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Key className="mr-1.5 h-3.5 w-3.5" />
+                  )}
+                  Create a key for this nest only
+                </Button>
+              </div>
+              <Snippet label="This nest's MCP URL" value={mcpUrl} />
             </div>
           )}
 
@@ -784,6 +833,15 @@ export function ConnectModal({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {nestKey && (
+        <KeyRevealModal
+          apiKey={nestKey}
+          kind="generated"
+          nestId={nestId}
+          scopedTo={{ nestName, mcpUrl }}
+          onClose={() => setNestKey(null)}
+        />
+      )}
     </>
   );
 }
@@ -804,11 +862,15 @@ export function KeyRevealModal({
   kind,
   onClose,
   nestId,
+  scopedTo,
 }: {
   apiKey: string;
   kind: "generated" | "rotated";
   onClose: () => void;
   nestId?: string;
+  /** Set when the key is nest-only: says so, and pairs it with the one MCP
+   *  URL it works with. */
+  scopedTo?: { nestName: string; mcpUrl: string };
 }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
@@ -878,6 +940,16 @@ export function KeyRevealModal({
             <Download className="mr-1.5 h-3.5 w-3.5" />
             Download .env
           </Button>
+          {scopedTo && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+              <p className="mb-1.5">
+                This key works for <strong>{scopedTo.nestName}</strong> only.
+                Use it with this nest's MCP URL — other nests, your account and
+                your API keys refuse it.
+              </p>
+              <Snippet label="MCP URL" value={scopedTo.mcpUrl} />
+            </div>
+          )}
           <p className="text-xs text-muted-foreground">
             Copy it, or download a ready{" "}
             <code className="text-[11px]">.env</code> (server URL + key) to hand
