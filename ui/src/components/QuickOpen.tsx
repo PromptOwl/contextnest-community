@@ -98,11 +98,13 @@ interface QuickOpenProps {
   /** Names the current nest on its rows, so a pick from either scope carries
    *  the nest it belongs to. */
   nestName?: string;
+  /** Pin the scope to `nestId` — a public reader can reach no other nest. */
+  nestOnly?: boolean;
   onSelect: (id: string, result: QuickOpenResult) => void;
   onClose: () => void;
 }
 
-export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProps) {
+export function QuickOpen({ nestId, nestName, nestOnly = false, onSelect, onClose }: QuickOpenProps) {
   const [query, setQuery] = useState("");
   // Inside a nest the palette starts scoped to it and can widen; on the
   // dashboard there is nothing to scope to, so it is always all-nests.
@@ -117,6 +119,7 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const qc = useQueryClient();
   const global = !nestId || allNests;
+  const canWiden = !!nestId && !nestOnly;
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -229,7 +232,7 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
         : `Type to search ${nestName ?? "this nest"}…`;
     // A scoped miss is not "it doesn't exist" — name the nest that was searched
     // and offer the wider one right here, where the dead end is (CU-wdqcq012ut).
-    if (!global) {
+    if (!global && canWiden) {
       return (
         <>
           No matches in {nestName ?? "this nest"}.{" "}
@@ -274,7 +277,7 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
               // Either direction: the input is the palette's first focusable
               // element, so letting Shift+Tab through moved focus to the page
               // behind an open modal.
-              if (e.key === "Tab" && nestId) {
+              if (e.key === "Tab" && canWiden) {
                 e.preventDefault();
                 setAllNests((v) => !v);
               }
@@ -304,7 +307,9 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
         {/* Scope is stated, not inferred from where the palette was opened. */}
         <div className="flex items-center gap-2 border-b px-3 py-1.5 text-xs text-muted-foreground">
           <span>Searching</span>
-          {nestId ? (
+          {nestId && !canWiden ? (
+            <span className="font-medium text-foreground">{nestName ?? "this nest"}</span>
+          ) : nestId ? (
             <div className="flex items-center gap-1">
               <ScopeTab
                 active={!allNests}

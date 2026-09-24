@@ -982,9 +982,15 @@ export default function App() {
               ? view.nestName
               : undefined
           }
+          nestOnly={!authenticated && authMode === "key"}
           onClose={() => setShowQuickOpen(false)}
           onSelect={(nodeId, result) => {
             setShowQuickOpen(false);
+            // Reader mode has no editor to open — show the hit in the reader.
+            if (view.page === "nest" && nestIsReaderView && result.kind === "node" && (result.nest_id ?? view.nestId) === view.nestId) {
+              setView({ ...view, readerDoc: nodeId });
+              return;
+            }
             // A hit in the nest you are already in keeps the standing you were
             // admitted with (a public deep link isn't in the nest list, so
             // re-resolving it there would drop those capabilities).
@@ -1015,8 +1021,13 @@ export default function App() {
     </>
   );
 
-  // Unauth + key mode → Login, unless deep-link probe resolved a public nest.
-  if (!authenticated && authMode === "key" && deepLinkProbe.status !== "ok") {
+  // Unauth + key mode → Login, unless deep-link probe resolved a public nest
+  // and the view is still that nest (or Docs) — dashboard pages need an account.
+  if (
+    !authenticated &&
+    authMode === "key" &&
+    (deepLinkProbe.status !== "ok" || !("nestId" in view || view.page === "docs"))
+  ) {
     return (
       <>
         <Login />
@@ -1039,7 +1050,10 @@ export default function App() {
   // The dashboard gets the same rail (every nest, none expanded) — it's the
   // app's navigation, not the nest's.
   // Docs (header button) is an app page too — same rail, full width.
-  const withSidebar = inNest || view.page === "dashboard" || view.page === "docs";
+  // A logged-out public reader gets no app rail: every page in it needs an account.
+  const withSidebar =
+    (authenticated || authMode !== "key") &&
+    (inNest || view.page === "dashboard" || view.page === "docs");
   const showSidebar = withSidebar && (!docSidebarCollapsed || docSidebarDrawer);
   const pageWidth =
     view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
@@ -1207,7 +1221,10 @@ export default function App() {
             </Button>
           )}
           <button
-            onClick={() => setView({ page: "dashboard" })}
+            onClick={() =>
+              // In the reader the brand is the site's home: its home page, not the dashboard.
+              setView(view.page === "nest" && nestIsReaderView ? { ...view, readerDoc: undefined } : { page: "dashboard" })
+            }
             className={`flex items-center gap-2 hover:opacity-80${showSidebar ? " md:hidden" : ""}`}
           >
             {readerBrand ? (

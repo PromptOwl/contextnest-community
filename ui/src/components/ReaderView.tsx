@@ -97,6 +97,10 @@ export function ReaderView({
   useEffect(() => {
     if (!selectedId && homeNode) setSelectedIdState(homeNode.id);
   }, [homeNode, selectedId]);
+  // The shell can move the reader too (header brand → home), so follow `?doc=`.
+  useEffect(() => {
+    setSelectedIdState(initialDoc ?? homeNode?.id ?? null);
+  }, [initialDoc]);
 
   // Per-node markdown cache; an in-flight set so the two effects that can
   // both ask for the same node on first mount don't fetch it twice.
