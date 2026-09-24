@@ -235,6 +235,159 @@ describe("kill switch (isSuspended / two-strike confirmation)", () => {
   });
 });
 
+// PromptOwl answers a suspended key with valid:false + suspended:true. That
+// used to flip the license invalid on the first strike, so the 60s safety poll
+// treated it as a revocation (wiped sessions, deleted the key) and the 1h
+// two-strike window never ran.
+describe("suspension (valid:false + suspended:true) keeps the two-strike window", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+
+  beforeEach(() => {
+    env = setupTestEnv();
+  });
+
+  afterEach(() => {
+    env.cleanup();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("stays licensed through the window, then suspends without revoking", async () => {
+    process.env.PROMPTOWL_KEY = "pk_susp_v2";
+    mockFetch({ body: { valid: true, tier: "team", org: "Acme" } });
+    const license = await loadLicense();
+    await license.validateLicense();
+
+    const realNow = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(realNow);
+    mockFetch({
+      body: { valid: false, suspended: true, suspended_reason: "unpaid", tier: "none" },
+    });
+    const first = await license.validateLicense({ forceFresh: true });
+    expect(first.valid).toBe(true); // first strike: nothing changes
+    expect(first.tier).toBe("team");
+    expect(license.isSuspended()).toBe(false);
+
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 61 * 60 * 1000);
+    const second = await license.validateLicense({ forceFresh: true });
+    expect(second.valid).toBe(true); // license kept; writes blocked via isSuspended()
+    expect(license.isSuspended()).toBe(true);
+    expect(second.suspended).toBe(true);
+    expect(second.suspendedReason).toBe("unpaid");
+
+    // The cached license survives, so an outage can't turn this into unlicensed.
+    const { getDb } = await import("../src/db/client.js");
+    const row = await getDb().get("SELECT key FROM license_cache WHERE key = ?", [
+      "pk_susp_v2",
+    ]);
+    expect(row).toBeTruthy();
+  });
+
+  it("the safety poll does not revoke (sessions and key survive) on a suspension", async () => {
+    process.env.PROMPTOWL_KEY = "pk_susp_poll";
+    mockFetch({ body: { valid: true, tier: "team", org: "Acme" } });
+    const license = await loadLicense();
+    await license.validateLicense();
+    expect(license.getCurrentLicense()?.valid).toBe(true);
+
+    vi.useFakeTimers();
+    mockFetch({ body: { valid: false, suspended: true, suspended_reason: "unpaid" } });
+    license.startLicenseSafetyPoll();
+    await vi.advanceTimersByTimeAsync(61 * 1000);
+
+    expect(license.getCurrentLicense()?.valid).toBe(true);
+    expect(process.env.PROMPTOWL_KEY).toBe("pk_susp_poll");
+  });
+
+  it("a suspension on a key that was never licensed stays unlicensed", async () => {
+    process.env.PROMPTOWL_KEY = "pk_susp_never";
+    mockFetch({ body: { valid: false, suspended: true, suspended_reason: "abuse" } });
+    const { validateLicense } = await loadLicense();
+    const result = await validateLicense();
+    expect(result.valid).toBe(false);
+  });
+});
+
+describe("rejection grace (CU-wdqcq01kh5)", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+
+  beforeEach(() => {
+    env = setupTestEnv();
+  });
+
+  afterEach(() => {
+    env.cleanup();
+    vi.restoreAllMocks();
+  });
+
+  async function licensed(key: string) {
+    process.env.PROMPTOWL_KEY = key;
+    mockFetch({ body: { valid: true, tier: "team", org: "Acme" } });
+    const license = await loadLicense();
+    await license.validateLicense();
+    return license;
+  }
+
+  it("keeps a cached license through two rejections and drops it on the third", async () => {
+    const license = await licensed("pk_rej_1");
+    mockFetch({ body: { valid: false, reason: "deactivated" } });
+
+    const r1 = await license.validateLicense({ forceFresh: true });
+    expect(r1.valid).toBe(true);
+    expect(license.getPendingRejections()).toBe(1);
+    const r2 = await license.validateLicense({ forceFresh: true });
+    expect(r2.valid).toBe(true);
+    expect(license.getPendingRejections()).toBe(2);
+
+    const r3 = await license.validateLicense({ forceFresh: true });
+    expect(r3.valid).toBe(false);
+    expect(license.getPendingRejections()).toBe(0);
+    const { getDb } = await import("../src/db/client.js");
+    const row = await getDb().get("SELECT key FROM license_cache WHERE key = ?", [
+      "pk_rej_1",
+    ]);
+    expect(row).toBeUndefined();
+  });
+
+  it("a valid answer resets the streak", async () => {
+    const license = await licensed("pk_rej_2");
+    mockFetch({ body: { valid: false } });
+    await license.validateLicense({ forceFresh: true });
+    await license.validateLicense({ forceFresh: true });
+    expect(license.getPendingRejections()).toBe(2);
+
+    mockFetch({ body: { valid: true, tier: "team", org: "Acme" } });
+    await license.validateLicense({ forceFresh: true });
+    expect(license.getPendingRejections()).toBe(0);
+
+    mockFetch({ body: { valid: false } });
+    const again = await license.validateLicense({ forceFresh: true });
+    expect(again.valid).toBe(true); // streak restarted at 1
+  });
+
+  it("the safety poll does not revoke on a single rejection", async () => {
+    const license = await licensed("pk_rej_poll");
+    vi.useFakeTimers();
+    try {
+      mockFetch({ body: { valid: false } });
+      license.startLicenseSafetyPoll();
+      await vi.advanceTimersByTimeAsync(61 * 1000);
+      expect(license.getCurrentLicense()?.valid).toBe(true);
+      expect(process.env.PROMPTOWL_KEY).toBe("pk_rej_poll");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("installing a key fails immediately on rejection, even with an old cache row", async () => {
+    const license = await licensed("pk_rej_install");
+    mockFetch({ body: { valid: false } });
+    const result = await license.installLicenseKey("pk_rej_install");
+    expect(result.valid).toBe(false);
+    expect(result.persisted).toBe(false);
+  });
+});
+
 // Regression for the Docker license-persist bug: the in-app License Setup
 // flow wrote PROMPTOWL_KEY to $cwd/.env (= /app/.env in the image), which is
 // not on the mounted volume and not writable as the node user — so the key

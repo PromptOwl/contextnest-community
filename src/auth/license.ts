@@ -102,7 +102,7 @@ export async function installLicenseKey(key: string): Promise<InstallResult> {
   // (if any) stays untouched on failure.
   const previousKey = process.env.PROMPTOWL_KEY || "";
   process.env.PROMPTOWL_KEY = trimmed;
-  const info = await validateLicense({ forceFresh: true });
+  const info = await validateLicense({ forceFresh: true, strict: true });
 
   if (!info.valid) {
     // Restore prior env so a working license isn't blown away by a
@@ -237,21 +237,69 @@ export function getSuspensionReason(): string | null {
   return suspensionReason;
 }
 
+// ─── Rejection grace ────────────────────────────────────────────────────
+//
+// An explicit rejection (PromptOwl reached, answered valid:false, not
+// suspended) used to drop a licensed server to unlicensed on the spot —
+// every non-GET 503s, MCP dies. One bad answer from the licensing service
+// (a deploy blip, a race during key rotation) must not do that to a paying
+// server, so a key that is already cached keeps serving until PromptOwl
+// rejects it REJECTION_STRIKES_TO_REVOKE times in a row (~3 min at the 60s
+// safety poll). Any valid answer resets the streak. Unreachable/5xx answers
+// don't count either way — they already fall back to the cache.
+// CU-wdqcq01kh5.
+// ────────────────────────────────────────────────────────────────────────
+
+const REJECTION_STRIKES_TO_REVOKE = 3;
+let rejectionStreak = 0;
+let rejectionKey: string | null = null;
+
+/** Consecutive explicit rejections of the installed key not yet acted on. */
+export function getPendingRejections(): number {
+  return rejectionKey === config.PROMPTOWL_KEY ? rejectionStreak : 0;
+}
+
+type CachedLicenseRow = {
+  tier: string;
+  org: string;
+  limits_json: string;
+  validated_at: string;
+  owner_email: string | null;
+};
+
+function fromCache(cached: CachedLicenseRow): LicenseInfo {
+  return {
+    valid: true,
+    tier: cached.tier,
+    org: cached.org,
+    limits: cached.limits_json ? JSON.parse(cached.limits_json) : null,
+    suspended: suspensionConfirmed,
+    suspendedReason: suspensionReason,
+    ownerEmail: cached.owner_email || null,
+  };
+}
+
 /**
  * Validate the PromptOwl license key.
  *
  * Checks local cache first (valid for 24h), then calls PromptOwl API.
  * Server always starts — invalid key just means unlicensed mode.
+ *
+ * `strict` skips the rejection grace: installing a key must fail the moment
+ * PromptOwl rejects it, even if an older cache row for that key exists.
  */
 export async function validateLicense(
-  opts: { forceFresh?: boolean } = {},
+  opts: { forceFresh?: boolean; strict?: boolean } = {},
 ): Promise<LicenseInfo> {
-  const info = await _validateLicenseImpl(!!opts.forceFresh);
+  const info = await _validateLicenseImpl(!!opts.forceFresh, !!opts.strict);
   currentLicense = info;
   return info;
 }
 
-async function _validateLicenseImpl(forceFresh: boolean): Promise<LicenseInfo> {
+async function _validateLicenseImpl(
+  forceFresh: boolean,
+  strict: boolean,
+): Promise<LicenseInfo> {
   const key = config.PROMPTOWL_KEY;
 
   if (!key) {
@@ -271,28 +319,12 @@ async function _validateLicenseImpl(forceFresh: boolean): Promise<LicenseInfo> {
   const cached = (await db.get(
     "SELECT * FROM license_cache WHERE key = ?",
     [key],
-  )) as
-    | {
-      tier: string;
-      org: string;
-      limits_json: string;
-      validated_at: string;
-      owner_email: string | null;
-    }
-    | undefined;
+  )) as CachedLicenseRow | undefined;
 
   if (cached && !forceFresh) {
     const age = Date.now() - new Date(cached.validated_at + "Z").getTime();
     if (age < CACHE_TTL_MS) {
-      return {
-        valid: true,
-        tier: cached.tier,
-        org: cached.org,
-        limits: cached.limits_json ? JSON.parse(cached.limits_json) : null,
-        suspended: suspensionConfirmed,
-        suspendedReason: suspensionReason,
-        ownerEmail: cached.owner_email || null,
-      };
+      return fromCache(cached);
     }
   }
 
@@ -310,15 +342,7 @@ async function _validateLicenseImpl(forceFresh: boolean): Promise<LicenseInfo> {
         console.warn(
           "  PromptOwl unreachable, using cached license (grace period)",
         );
-        return {
-          valid: true,
-          tier: cached.tier,
-          org: cached.org,
-          limits: cached.limits_json ? JSON.parse(cached.limits_json) : null,
-          suspended: suspensionConfirmed,
-          suspendedReason: suspensionReason,
-          ownerEmail: cached.owner_email || null,
-        };
+        return fromCache(cached);
       }
       return {
         valid: false,
@@ -376,6 +400,29 @@ async function _validateLicenseImpl(forceFresh: boolean): Promise<LicenseInfo> {
         );
       }
       // During the confirmation window, server runs normally
+
+      // A suspension is never a revocation. PromptOwl sends valid:false
+      // alongside suspended:true, and returning that as-is flipped the
+      // license invalid on the FIRST strike — the safety poll then read it
+      // as a revocation (wiped every session, deleted the key) before the
+      // 1h window could run. Keep serving on the cached license: during the
+      // window nothing changes, and once confirmed isSuspended() blocks
+      // writes while reads keep working.
+      if (data.valid !== true) {
+        rejectionStreak = 0;
+        rejectionKey = null;
+        if (cached) return fromCache(cached);
+        // Never licensed on this key — nothing to keep serving.
+        return {
+          valid: false,
+          tier: "none",
+          org: null,
+          limits: null,
+          suspended: suspensionConfirmed,
+          suspendedReason: suspensionReason,
+          ownerEmail: data.owner_email || null,
+        };
+      }
     } else {
       // Clear any pending suspension (PromptOwl reversed it)
       if (suspensionFirstSeen) {
@@ -387,10 +434,24 @@ async function _validateLicenseImpl(forceFresh: boolean): Promise<LicenseInfo> {
     }
 
     if (!data.valid && !data.suspended) {
-      // Explicit deactivation/revocation — PromptOwl reached us and said
-      // the key is no longer valid. Clear any cached row so a subsequent
-      // outage can't resurrect this license under the grace-period
-      // fallback above.
+      // Explicit rejection. Hold on to a previously-valid license until the
+      // rejection is confirmed (see "Rejection grace" above); a key with no
+      // cache row — or a strict install — has nothing to protect.
+      if (cached && !strict) {
+        rejectionStreak = rejectionKey === key ? rejectionStreak + 1 : 1;
+        rejectionKey = key;
+        if (rejectionStreak < REJECTION_STRIKES_TO_REVOKE) {
+          console.warn(
+            `[license] PromptOwl rejected the license (${rejectionStreak}/${REJECTION_STRIKES_TO_REVOKE}); keeping the cached license until the rejection is confirmed`,
+          );
+          return fromCache(cached);
+        }
+      }
+      rejectionStreak = 0;
+      rejectionKey = null;
+      // Confirmed deactivation/revocation. Clear any cached row so a
+      // subsequent outage can't resurrect this license under the
+      // grace-period fallback above.
       await db.run("DELETE FROM license_cache WHERE key = ?", [key]);
       return {
         valid: false,
@@ -405,6 +466,8 @@ async function _validateLicenseImpl(forceFresh: boolean): Promise<LicenseInfo> {
 
     // Cache valid licenses
     if (data.valid) {
+      rejectionStreak = 0;
+      rejectionKey = null;
       const limitsJson = data.limits ? JSON.stringify(data.limits) : null;
       await db.run(
         insertOrReplace(
@@ -438,15 +501,7 @@ async function _validateLicenseImpl(forceFresh: boolean): Promise<LicenseInfo> {
       console.warn(
         `  PromptOwl validation failed (${err.message}), using cached license`,
       );
-      return {
-        valid: true,
-        tier: cached.tier,
-        org: cached.org,
-        limits: cached.limits_json ? JSON.parse(cached.limits_json) : null,
-        suspended: suspensionConfirmed,
-        suspendedReason: suspensionReason,
-        ownerEmail: cached.owner_email || null,
-      };
+      return fromCache(cached);
     }
     return {
       valid: false,
