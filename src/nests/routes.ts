@@ -245,9 +245,12 @@ nestRoutes.get("/", async (c) => {
   // Dedupe by id (owner/shared rows win over public discovery row), then
   // annotate every card concurrently — the per-nest grant lookups are the
   // dashboard's hot path, so a serial loop paid N× the latency for nothing.
+  // A nest-scoped API key lists only its own nest.
+  const nestScope = c.get("nestScope");
   const seen = new Set<string>();
   const deduped: Array<(typeof owned)[number]> = [];
   for (const n of [...owned, ...shared, ...publicExtras]) {
+    if (nestScope && n.id !== nestScope) continue;
     if (seen.has(n.id)) continue;
     seen.add(n.id);
     deduped.push(n);
