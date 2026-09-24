@@ -225,6 +225,8 @@ export async function getHealth() {
     posthog_host?: string;
     /** Mail transport is set up — email/invite publish gates need it. */
     email_configured?: boolean;
+    /** Who may create nests; "admins" hides the create CTAs from everyone else. */
+    nest_creation?: "admins" | "everyone";
     suspended_reason?: string;
   }>("/health");
 }
@@ -267,6 +269,7 @@ export interface AdminSettings {
   /** Offer every registered account in the add-a-person pickers. Default OFF:
    *  a server holding several unrelated customers would otherwise hand one
    *  customer's staff another customer's email addresses. */
+  nest_creation: "admins" | "everyone";
   people_suggest_all_users: boolean;
   /** This server hosts several organizations (PromptOwl-hosted). On, nest
    *  visibility 'org' needs the same acknowledgement as 'public' and the
@@ -290,7 +293,14 @@ export interface AdminSettings {
   anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   msteams_webhook_url: string;
+  email_provider: "smtp" | "ses";
   smtp_url: string;
+  ses_region: string;
+  ses_access_key_id: string;
+  /** SES secret is write-only — GET reports presence; PATCH sends a string to
+   *  set or null to clear. */
+  ses_secret_access_key_set?: boolean;
+  ses_secret_access_key?: string | null;
   notify_email_from: string;
   notify_email_to: string;
   anthropic_api_key?: string | null
@@ -382,6 +392,10 @@ export async function inviteTeammate(email: string) {
   return request<{
     temporary_password: string;
     user: { id: string; email: string };
+    /** PromptOwl sign-in is open to everyone, so the teammate can use it too. */
+    promptowl_sign_in?: boolean;
+    /** The invite email with the password was sent to them. */
+    emailed?: boolean;
     message: string;
   }>("/auth/invite", {
     method: "POST",
@@ -2636,6 +2650,17 @@ export async function removeNodeWatcher(nestId: string, nodeId: string, email: s
     { method: "DELETE" },
   );
   return r.watchers;
+}
+
+export async function listUnreadNotifications() {
+  return request<{ notifications: WatcherNotification[] }>(
+    "/me/notifications?unread=true",
+  );
+}
+
+/** Decline a nest invite — removes the caller's own access to that nest. */
+export async function leaveNest(nestId: string) {
+  return request<{ left: boolean }>(`/me/nests/${nestId}/leave`, { method: "POST" });
 }
 
 export async function markNotificationsRead(ids: string[] | "all") {

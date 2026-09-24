@@ -18,6 +18,15 @@ const verify = vi.fn(async () => true);
 const close = vi.fn();
 const createTransport = vi.fn(() => ({ sendMail, verify, close }));
 vi.mock("nodemailer", () => ({ default: { createTransport } }));
+const sesClients: any[] = [];
+vi.mock("@aws-sdk/client-sesv2", () => ({
+  SESv2Client: class {
+    constructor(public config: any) {
+      sesClients.push(this);
+    }
+  },
+  SendEmailCommand: class {},
+}));
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -106,6 +115,8 @@ describe("email connector", () => {
     // PUBLIC_BASE_URL configured in this test, yet a link is still built.
     expect(process.env.PUBLIC_BASE_URL).toBeUndefined();
     expect(msg.html).toContain("http://localhost/?nest=");
+    // Bob has never signed in → the link prefills and guides the login page.
+    expect(msg.html).toContain("invite=bob%40acme.com");
     expect(msg.html).toContain(">Open nest<");
     expect(msg.disableFileAccess).toBe(true);
     expect(msg.disableUrlAccess).toBe(true);
@@ -287,6 +298,64 @@ describe("admin settings validation", () => {
     });
     expect(off.status).toBe(200);
     expect(verify).not.toHaveBeenCalled();
+    process.env.SMTP_URL = "smtps://user:pass@smtp.test:465";
+  });
+
+  it("AWS SES: verifies on save, hides the secret, and sends through SES", async () => {
+    const openApp = await createTestApp("open");
+    verify.mockClear();
+    createTransport.mockClear();
+    sendMail.mockClear();
+    const badRegion = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      email_provider: "ses",
+      ses_region: "not a region",
+    });
+    expect(badRegion.status).toBe(400);
+    expect(badRegion.data.fieldErrors).toHaveProperty("ses_region");
+
+    // Half a key pair would be silently ignored at send time — refused instead.
+    const halfKeys = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      email_provider: "ses",
+      ses_region: "us-east-1",
+      ses_access_key_id: "AKIAONLY",
+    });
+    expect(halfKeys.status).toBe(400);
+    expect(halfKeys.data.fieldErrors.ses_access_key_id).toMatch(/both/);
+
+    const ok = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      email_provider: "ses",
+      ses_region: "us-east-1",
+      ses_access_key_id: "AKIATEST",
+      ses_secret_access_key: "s3cret",
+    });
+    expect(ok.status).toBe(200);
+    expect(verify).toHaveBeenCalled();
+    const sesArg = createTransport.mock.calls[0][0] as any;
+    expect(sesArg.SES.sesClient.config).toEqual({
+      region: "us-east-1",
+      credentials: { accessKeyId: "AKIATEST", secretAccessKey: "s3cret" },
+    });
+    // Saving SES drops the old SMTP URL so no stale credential lingers.
+    expect(ok.data.settings.smtp_url).toBe("");
+    // Write-only secret: presence reported, value never returned.
+    expect(ok.data.settings.email_provider).toBe("ses");
+    expect(ok.data.settings.ses_secret_access_key_set).toBe(true);
+    expect(JSON.stringify(ok.data.settings)).not.toContain("s3cret");
+
+    // An invite now goes out over the SES transport even with SMTP_URL unset.
+    delete process.env.SMTP_URL;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "sam@acme.com", permission: "read" },
+      alice.apiKey,
+    );
+    await waitForSend();
+    expect(sendMail.mock.calls.map((c) => (c[0] as any).to)).toContain("sam@acme.com");
+
+    for (const k of ["EMAIL_PROVIDER", "SES_REGION", "SES_ACCESS_KEY_ID", "SES_SECRET_ACCESS_KEY"])
+      delete process.env[k];
     process.env.SMTP_URL = "smtps://user:pass@smtp.test:465";
   });
 

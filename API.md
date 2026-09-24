@@ -159,8 +159,7 @@ Creates an invited user and returns a **temporary password** (once) for the admi
 { "email": "teammate@x.com" }
 ```
 - New email → user row with `is_invited = 1` and a temporary password.
-- Existing, not-yet-claimed email (`is_invited = 1`, hasn't logged in) → refreshes the temp password.
-- Existing, claimed email (has logged in or set their own password, `is_invited = 0`) → `409`; use Reset password instead.
+- Any existing email → `409`, credentials untouched. The error says "already a member" once they've signed in (`is_invited = 0`), or "already invited but hasn't signed in yet" (`is_invited = 1`, including people a nest was shared with). Use Reset password to issue a new temporary password.
 
 `is_invited` clears to `0` on the teammate's first successful login (or when they set their own password).
 
@@ -169,9 +168,12 @@ Response (201):
 {
   "temporary_password": "...",
   "user": { "id": "...", "email": "..." },
+  "promptowl_sign_in": true,
+  "emailed": true,
   "message": "Share this temporary password securely — it won't be shown again."
 }
 ```
+`emailed` — email is configured, so the invite email (password + sign-in link) was sent. `promptowl_sign_in` — PromptOwl sign-in is open to everyone, so the teammate may use it instead (the email says so too).
 
 ### GET `/auth/teammates` (admin only)
 Returns all users + key counts. **Sorted: admins first, then `created_at DESC`.**
@@ -258,6 +260,8 @@ Returns owned + shared nests. Archived nests are **absent** — as they are from
 { "name": "My Nest", "description": "optional" }
 ```
 Response (201): `{ "nest": { ... } }`
+
+With `NEST_CREATION=admins` (the default) only a server admin may create or import a nest; anyone else gets `403` ("Only a server admin can create nests on this server…"). The same rule covers `POST /nests/import` and the MCP `nest_create` tool. `GET /health` reports it as `nest_creation`.
 
 ### GET `/nests/:nestId`
 ```json
@@ -1170,6 +1174,12 @@ The UI deep-links a comment item to its document with the thread focused via
 ### Notification rows (`GET /me/work` → `notifications`, `GET /me/notifications`)
 
 Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review verdicts, document deletion flags, mentions); nest-level rows have `node_id: null`.
+
+Unread `nest_invite` rows are what the Nests page shows as **Pending invites**. Accept marks them read (`POST /me/notifications/read`) and opens the nest.
+
+### POST `/me/nests/:nestId/leave`
+
+Decline a nest invite. Removes the caller's **own** collaborator row on that nest (never anyone else's) and marks its `nest_invite` rows read. Response: `{ "left": true }`. Access that isn't a direct collaborator row — ownership, or a share through a team — isn't touched: `{ "left": false }`, and the invite rows are still marked read.
 
 ### GET `/me/drafts`
 

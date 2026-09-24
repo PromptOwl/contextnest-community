@@ -3,7 +3,7 @@
  */
 import React, { useState, useEffect } from "react";
 import * as api from "../../../lib/api";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../../../lib/queries";
 import { parseServerDate } from "../../../lib/dates";
 import { useAuth } from "../../../auth/AuthContext";
@@ -50,7 +50,7 @@ export default function TeammatesPage() {
   const [error, setError] = useState<string | null>(null);
   const [showInvite, setShowInvite] = useState(false);
   const [inviteSeedEmail, setInviteSeedEmail] = useState<string>("");
-  const [newKey, setNewKey] = useState<{ email: string; password: string } | null>(null);
+  const [newKey, setNewKey] = useState<{ email: string; password: string; promptowl: boolean; emailed: boolean } | null>(null);
   // Temp password to reveal after an admin reset (no email — shown once).
   // password === null means we're still generating (shows a loader).
   const [resetPw, setResetPw] = useState<{ email: string; password: string | null } | null>(null);
@@ -379,10 +379,10 @@ export default function TeammatesPage() {
             setShowInvite(false);
             setInviteSeedEmail("");
           }}
-          onCreated={(email, password) => {
+          onCreated={(email, password, promptowl, emailed) => {
             setShowInvite(false);
             setInviteSeedEmail("");
-            setNewKey({ email, password });
+            setNewKey({ email, password, promptowl, emailed });
             fetchTeammates();
           }}
         />
@@ -392,6 +392,8 @@ export default function TeammatesPage() {
         <NewKeyModal
           email={newKey.email}
           password={newKey.password}
+          promptowl={newKey.promptowl}
+          emailed={newKey.emailed}
           onClose={() => setNewKey(null)}
         />
       )}
@@ -624,7 +626,7 @@ function InviteTeammateModal({
 }: {
   seedEmail?: string;
   onClose: () => void;
-  onCreated: (email: string, password: string) => void;
+  onCreated: (email: string, password: string, promptowl: boolean, emailed: boolean) => void;
 }) {
   const [email, setEmail] = useState(seedEmail || "");
   const [loading, setLoading] = useState(false);
@@ -637,7 +639,7 @@ function InviteTeammateModal({
     setError(null);
     try {
       const result = await api.inviteTeammate(email);
-      onCreated(email, result.temporary_password);
+      onCreated(email, result.temporary_password, !!result.promptowl_sign_in, !!result.emailed);
     } catch (err: any) {
       setError(err.message);
       setLoading(false);
@@ -693,10 +695,14 @@ function InviteTeammateModal({
 function NewKeyModal({
   email,
   password,
+  promptowl,
+  emailed,
   onClose,
 }: {
   email: string;
   password: string;
+  promptowl: boolean;
+  emailed: boolean;
   onClose: () => void;
 }) {
   const [copied, setCopied] = useState(false);
@@ -712,8 +718,10 @@ function NewKeyModal({
         <DialogHeader>
           <DialogTitle>Teammate added: {email}</DialogTitle>
           <DialogDescription>
-            Send them this temporary password via Slack, email, or another
-            secure channel. <strong>It won't be shown again.</strong>
+            {emailed
+              ? "We've emailed them this temporary password and a sign-in link. "
+              : "Send them this temporary password via Slack, email, or another secure channel. "}
+            <strong>It won't be shown again.</strong>
           </DialogDescription>
         </DialogHeader>
 
@@ -738,12 +746,116 @@ function NewKeyModal({
             can change it under their account and create their own API key for
             Hootie, Claude Desktop, or the CLI.
           </p>
+          {promptowl && (
+            <p className="text-xs text-muted-foreground">
+              Or they can choose <strong>Sign in with PromptOwl</strong>, using
+              a PromptOwl account under this same email.
+            </p>
+          )}
         </div>
+
+        <ShareNestPrompt email={email} />
 
         <DialogFooter>
           <Button onClick={onClose}>Done</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * A new teammate has no nest access — joining the server grants nothing on its
+ * own. Offer to share a nest right here so they don't land on an empty server.
+ */
+function ShareNestPrompt({ email }: { email: string }) {
+  const { data, isLoading } = useQuery(reads.nestList());
+  // Same rule as the server's collaborator add: write access or above.
+  const nests = (data?.nests ?? []).filter((n: any) =>
+    ["owner", "admin", "write"].includes(n.permission ?? "owner"),
+  );
+  const [nestId, setNestId] = useState("");
+  const [permission, setPermission] = useState("read");
+  const [saving, setSaving] = useState(false);
+  const [shared, setShared] = useState<{ id: string; name: string; permission: string }[]>([]);
+  const choices = nests.filter((n: any) => !shared.some((s) => s.id === n.id));
+  const [error, setError] = useState<string | null>(null);
+
+  const share = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await api.addCollaborator(nestId, { email, permission });
+      const name = nests.find((n: any) => n.id === nestId)?.name ?? nestId;
+      setShared((s) => [...s, { id: nestId, name, permission }]);
+      setNestId("");
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="rounded-md border border-amber-200 bg-amber-50/60 p-3 space-y-2">
+      {shared.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-sm font-medium">Shared with them</p>
+          <ul className="space-y-1">
+            {shared.map((s) => (
+              <li key={s.id} className="flex items-center gap-2 text-sm">
+                <Check className="h-3.5 w-3.5 text-green-600 shrink-0" />
+                <span className="truncate">{s.name}</span>
+                <Badge variant="outline" className="ml-auto shrink-0">
+                  {s.permission === "write" ? "Can edit" : "Can view"}
+                </Badge>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <p className="text-sm font-medium">
+        {shared.length ? "Share another nest?" : "This person has no nests yet. Share one?"}
+      </p>
+      {isLoading ? (
+        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+      ) : choices.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          {shared.length
+            ? "Every nest you can share is shared with them."
+            : "You don't have a nest you can share yet."}
+        </p>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            aria-label="Nest to share"
+            value={nestId}
+            onChange={(e) => setNestId(e.target.value)}
+            className="h-8 flex-1 min-w-[10rem] rounded-md border bg-background px-2 text-sm"
+          >
+            <option value="">Pick a nest…</option>
+            {choices.map((n: any) => (
+              <option key={n.id} value={n.id}>
+                {n.name}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label="Access level"
+            value={permission}
+            onChange={(e) => setPermission(e.target.value)}
+            className="h-8 rounded-md border bg-background px-2 text-sm"
+          >
+            <option value="read">Can view</option>
+            <option value="write">Can edit</option>
+          </select>
+          <Button size="sm" disabled={!nestId || saving} onClick={share}>
+            {saving && <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />}
+            Share
+          </Button>
+        </div>
+      )}
+      {error && <p className="text-xs text-destructive">{error}</p>}
+    </div>
   );
 }

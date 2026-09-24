@@ -15,7 +15,7 @@
 import { config } from "../config.js";
 import { notifySlackForNest } from "./slack.js";
 import { notifyMsTeamsForNest } from "./msteams.js";
-import { notifyEmailForNest } from "./email.js";
+import { notifyEmailForNest, transportSettings } from "./email.js";
 import type { EmailEventDetails } from "./email-render.js";
 
 const DIGEST_LINE_CAP = 10;
@@ -87,7 +87,7 @@ export async function notifyNestEvent(
   if (
     !config.SLACK_WEBHOOK_URL &&
     !config.MSTEAMS_WEBHOOK_URL &&
-    !config.SMTP_URL
+    !transportSettings()
   )
     return;
 

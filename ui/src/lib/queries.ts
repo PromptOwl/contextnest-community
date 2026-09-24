@@ -125,6 +125,7 @@ export const keys = {
   licenseStatus: () => [...keys.license, "status"] as const,
 
   me: ["me"] as const,
+  unreadNotifications: () => [...keys.me, "notifications", "unread"] as const,
   myWork: (limit?: number, offset?: number) =>
     [...keys.me, "work", limit ?? null, offset ?? null] as const,
   myDrafts: (limit?: number, offset?: number, q?: string, sort?: string) =>
@@ -717,6 +718,12 @@ export const reads = {
     }),
 
   // ── Server-wide ────────────────────────────────────────────────────────
+  unreadNotifications: () =>
+    queryOptions({
+      queryKey: keys.unreadNotifications(),
+      queryFn: () => api.listUnreadNotifications(),
+      staleTime: STALE.listing,
+    }),
   health: () =>
     queryOptions({
       queryKey: keys.health,
