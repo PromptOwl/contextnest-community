@@ -95,3 +95,23 @@
 [role="alertdialog"][data-state] {
   width: min(calc(100% - 2rem), calc(100vw - 2rem));
 }
+
+/* Per-nest reader branding (CU-wdqcq02ptm). Everything here is scoped to a
+   branded reader ([data-reader-branded] is only rendered when the nest has
+   branding), so an unbranded reader is untouched. Colors come from the
+   variables ui/src/lib/branding.ts sets — contrast-checked there. */
+[data-reader-branded] .prose a {
+  color: var(--reader-accent-text, hsl(var(--primary)));
+  text-decoration-color: color-mix(in srgb, var(--reader-accent-text, currentColor) 45%, transparent);
+}
+[data-reader-branded] .prose a:hover {
+  text-decoration-color: currentColor;
+}
+[data-reader-branded] aside button[aria-current="page"] {
+  box-shadow: inset 2px 0 0 var(--reader-accent-text, hsl(var(--primary)));
+}
+/* A colored header bar: its own text follows --reader-header-fg, but controls
+   that paint their own light surface (search, Login) keep the normal dark text. */
+[data-reader-brand-header] .bg-background {
+  color: hsl(var(--foreground));
+}

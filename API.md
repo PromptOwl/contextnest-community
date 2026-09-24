@@ -371,6 +371,41 @@ Response (200) echoes the persisted row:
 ```
 The two additive columns (`nests.reader_mode`, `nests.reader_home_node`) also surface on `GET /nests/:nestId` via the `SELECT *` nest payload.
 
+### PATCH `/nests/:nestId/branding` (nest owner / nest admin / server admin)
+Per-nest branding for the public reader (reader mode) and the nest's `/p` published pages. The body **replaces** the nest's branding; `null`, an empty body, or `{}` resets it to unbranded.
+```json
+{
+  "site_title": "Acme Docs",
+  "logo_url": "/nests/<nestId>/assets/<uuid>.png",
+  "banner_url": "https://cdn.example.com/banner.jpg",
+  "banner_headline": "Acme Handbook",
+  "banner_subtext": "Everything we know, versioned.",
+  "accent_color": "#e11d48",
+  "header_bg_color": "#0f172a",
+  "page_tint_color": "#fef2f2",
+  "footer_text": "© Acme Corp",
+  "footer_link_url": "https://acme.example.com/",
+  "footer_link_label": "acme.example.com",
+  "favicon_url": "/nests/<nestId>/assets/<uuid>.png",
+  "hide_powered_by": false
+}
+```
+Every field is optional. Rules (any violation → `400`, nothing saved):
+- **Colors** (`accent_color`, `header_bg_color`, `page_tint_color`): `#rgb` or `#rrggbb` only; stored as lowercase `#rrggbb`. Anything else — named colors, `red; background:url(…)`, `var()` — is refused.
+- **Images** (`logo_url`, `banner_url`, `favicon_url`): an image asset uploaded to **this** nest (`POST /nests/:nestId/assets` → `/nests/<nestId>/assets/<uuid>.<png|jpg|gif|webp>`, must exist), or an `https://` URL (no credentials) whose path ends in `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp`. `javascript:`, `data:`, `http:`, protocol-relative, SVG, video assets and other nests' assets are refused.
+- **`footer_link_url`**: an `https://` URL.
+- **Text** (`site_title` ≤ 120, `banner_headline` ≤ 120, `banner_subtext` ≤ 280, `footer_text` ≤ 280, `footer_link_label` ≤ 80): plain text, no control characters; always rendered escaped.
+- **Unknown keys** are refused — there is no free-form CSS or JS.
+- **`hide_powered_by`** (boolean): hides "Powered by ContextNest" in the reader and "Secured by PromptOwl · ContextNest" on `/p`. Turning it on is **server-admin only** (`403` for a nest owner/admin). A non-admin edit that omits the field keeps the stored value — a non-admin full clear (`null` / `{}`) included, which then stores `{ "hide_powered_by": true }`; a non-admin may turn it off explicitly.
+
+Gate: the access middleware requires the `admin` tier for this resource (owner, admin collaborator, or server admin); the handler re-checks it. Editors and viewers get `403`, anonymous callers `401`.
+
+Response (200): `{ "branding": { …normalised… } }` or `{ "branding": null }`.
+
+**Reading it.** There is no separate GET: `GET /nests/:nestId` returns `nest.branding` (parsed and re-validated against the write rules — a stored URL that no longer passes is dropped; `null` when unbranded) in place of the raw `branding_json` column. It is therefore readable exactly by whoever can read the nest — an anonymous reader of a public nest sees it; a private nest still `404`s.
+
+**Where it applies.** The SPA reader (read-only callers in reader mode, and an owner's "Preview as reader") uses it for the header logo + title (falling back to the server `LOGO_URL` and the nest name), the banner on the home page, accent/header/page-tint colors, footer, favicon and tab title. On `/p`, the markdown document view, the gate page and the comment shell pick up the colors, title, logo, banner and footer; **the CSP is unchanged** — uploaded images are inlined as `data:` URIs (already allowed by `img-src data:`), and external https images are not rendered there. HTML/artifact publishes are served untouched.
+
 ### GET `/nests/unsynced` (server-admin only outside open mode)
 Lists folders under `DATA_ROOT` that aren't nests yet — typically dropped in by the starter CLI or copied in manually. Each entry is a sync candidate. Reflects server-side filesystem state, so in non-open mode only a server admin — the license admin or any superadmin (`access.yaml` ∪ granted; same resolution as `/admin/*`) — sees it (everyone else gets `403`).
 
@@ -2156,6 +2191,7 @@ For any `/nests/:nestId/...` request, the middleware computes:
 - Required level by path:
   - `/collaborators`, `/visibility` → `admin`
   - `/reader-mode` → `admin` at the middleware, then the handler hard-gates on `isServerAdminUserId` (superadmin only)
+  - `/branding` → `admin` at the middleware (owner, admin collaborator, or server admin), re-checked in the handler; `hide_powered_by: true` additionally requires the server admin
   - Stewardship action paths (`/approve`, `/reject`, `/submit-review`, `/cancel-review`) → `read` (handler enforces fine-grained steward gating)
   - Other non-GET → `write`
   - GET → `read`

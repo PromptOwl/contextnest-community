@@ -229,6 +229,13 @@ export function runMigrations(db: Database.Database): void {
     db.exec("ALTER TABLE nests ADD COLUMN reader_home_node TEXT");
   }
 
+  // Per-nest reader branding (CU-wdqcq02ptm): one validated JSON document —
+  // logo, banner, colors, site title, footer, favicon. NULL = unbranded, which
+  // renders exactly as before. See src/shared/branding.ts.
+  if (!nestCols.includes("branding_json")) {
+    db.exec("ALTER TABLE nests ADD COLUMN branding_json TEXT");
+  }
+
   // Admin flag on users (first PromptOwl-authed user becomes the server admin)
   const userCols = (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name);
   if (!userCols.includes("is_admin")) {

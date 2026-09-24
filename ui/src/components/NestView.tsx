@@ -17,7 +17,7 @@ import {
   Clock, CheckCircle2, Loader2, Link2, Settings as SettingsIcon,
   Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
   FileStack, FolderPlus, X,
-  Activity, BookOpen, Archive, Eye,
+  Activity, BookOpen, Archive, Eye, Palette,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { prettyFolderPath } from "./FolderTree";
@@ -29,6 +29,8 @@ import { byPathSegments, folderOfNode } from "./nest/node-display";
 import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ReaderView } from "./ReaderView";
+import { ReaderBrandingDialog } from "./ReaderBrandingDialog";
+import { isBranded, type NestBranding } from "../lib/branding";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import {
   AlertDialog,
@@ -265,6 +267,10 @@ export function NestView({
   const [readerHomeNode, setReaderHomeNode] = useState<string | null>(null);
   const [readerModeSaving, setReaderModeSaving] = useState(false);
   const [readerDialogOpen, setReaderDialogOpen] = useState(false);
+  // Per-nest reader branding (CU-wdqcq02ptm): nest.branding, edited from the
+  // reader-mode dialog, applied by ReaderView (and the shell, for readers).
+  const [branding, setBranding] = useState<NestBranding | null>(null);
+  const [brandingDialogOpen, setBrandingDialogOpen] = useState(false);
   // "Preview as reader": an owner/editor looking at the visitor-facing reader
   // from inside the authoring UI. Presentation only — rights are unchanged.
   const [previewReader, setPreviewReader] = useState(false);
@@ -557,6 +563,7 @@ export function NestView({
       setNestDescription((nestMeta.nest as any).description ?? null);
       setReaderModeEnabled(!!(nestMeta.nest as any).reader_mode);
       setReaderHomeNode((nestMeta.nest as any).reader_home_node ?? null);
+      setBranding(nestMeta.nest.branding ?? null);
       setNestArchivedAt((nestMeta.nest as any).archived_at ?? null);
     }
     if (nestMeta?.permission) {
@@ -1166,6 +1173,7 @@ export function NestView({
         loadingFolders={loadingFolders}
         loadedFolders={loadedFolderPaths}
           approvedOnly={previewReader}
+          branding={branding}
       />
       </div>
     );
@@ -2169,6 +2177,31 @@ export function NestView({
             </div>
           )}
 
+          {/* Branding — logo, banner, colors, footer — for the reader and
+              the nest's /p links. Its own dialog: it needs room for a preview. */}
+          <div className="rounded-lg border p-4 flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <Label className="text-sm font-medium">Branding</Label>
+              <p className="text-xs text-muted-foreground">
+                {isBranded(branding)
+                  ? "Custom logo, colors and footer are applied for readers."
+                  : "Readers see the default ContextNest look."}
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0 gap-1.5"
+              onClick={() => {
+                setReaderDialogOpen(false);
+                setBrandingDialogOpen(true);
+              }}
+            >
+              <Palette className="h-3.5 w-3.5" />
+              {isBranded(branding) ? "Edit branding" : "Customize"}
+            </Button>
+          </div>
+
           <DialogFooter>
             {readerModeEnabled && (
               <Button
@@ -2189,6 +2222,16 @@ export function NestView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ReaderBrandingDialog
+        open={brandingDialogOpen}
+        onOpenChange={setBrandingDialogOpen}
+        nestId={nestId}
+        nestName={editableName}
+        branding={branding}
+        isServerAdmin={isAdmin}
+        onSaved={setBranding}
+      />
 
       {/* Reader mode's landing document, picked from the real document list —
           the field used to take a hand-typed node id, so a title people could

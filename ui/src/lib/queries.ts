@@ -318,6 +318,9 @@ const NEST_WRITE_SCOPES: Array<{
   // reader_home_node) and, for read-only callers, flips the whole presentation
   // to the docs reader — so the nest payload must refetch.
   { match: /^\/reader-mode/, affects: (n) => [keys.nest(n), keys.nestListAll()] },
+  // Branding rides GET /nests/:id (nest.branding), which the reader and the
+  // shell's header/footer both read.
+  { match: /^\/branding/, affects: (n) => [keys.nest(n)] },
   { match: /^\/definitions/, affects: (n) => [keys.definitions(n)] },
   { match: /^\/edges/, affects: (n) => [keys.edges(n), keys.graph(n)] },
   { match: /^\/edge-types/, affects: (n) => [keys.edgeTypes(n), keys.edges(n)] },
