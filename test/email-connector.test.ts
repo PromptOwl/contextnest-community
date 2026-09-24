@@ -115,6 +115,8 @@ describe("email connector", () => {
     // PUBLIC_BASE_URL configured in this test, yet a link is still built.
     expect(process.env.PUBLIC_BASE_URL).toBeUndefined();
     expect(msg.html).toContain("http://localhost/?nest=");
+    // Bob has never signed in → the link prefills and guides the login page.
+    expect(msg.html).toContain("invite=bob%40acme.com");
     expect(msg.html).toContain(">Open nest<");
     expect(msg.disableFileAccess).toBe(true);
     expect(msg.disableUrlAccess).toBe(true);

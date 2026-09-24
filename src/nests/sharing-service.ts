@@ -170,19 +170,22 @@ export async function addCollaborator(params: {
   // above: a rich email at the invitee's OWN address + a Hootie inbox row, so
   // the person added actually hears about it (not just a shared team inbox).
   // Both best-effort — a delivery failure must never fail the invite.
-  const inviteeEmail =
-    params.email ||
-    (
-      (await db.get("SELECT email FROM users WHERE id = ?", [userId])) as
-        | { email?: string }
-        | undefined
-    )?.email;
+  const invitee = (await db.get(
+    "SELECT email, is_invited FROM users WHERE id = ?",
+    [userId],
+  )) as { email?: string; is_invited?: number } | undefined;
+  const inviteeEmail = params.email || invitee?.email;
   if (inviteeEmail) {
+    // Never signed in yet → ?invite= so the login page prefills and guides them.
+    const nestLink = docLink(nestId, undefined, params.baseUrl);
     void sendEmailToRecipient(inviteeEmail, {
       status: "shared",
       docTitle: shareNestName,
       path: shareNestName,
-      link: docLink(nestId, undefined, params.baseUrl),
+      link:
+        nestLink && invitee?.is_invited === 1
+          ? `${nestLink}&invite=${encodeURIComponent(inviteeEmail)}`
+          : nestLink,
       actor: inviteeEmail,
       permission: params.permission,
       by: params.grantedByEmail || undefined,

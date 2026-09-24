@@ -292,7 +292,7 @@ authRoutes.post("/register", async (c) => {
     return c.json(
       {
         error:
-          "Self-registration is disabled on this server. If you were invited, use “Set your password” to activate your account. Otherwise ask your admin for an invite.",
+          "Self-registration is disabled on this server. If you were invited, sign in with the temporary password from your invite email, or continue with PromptOwl using that email. Otherwise ask your admin for an invite.",
       },
       403,
     );
@@ -332,7 +332,7 @@ authRoutes.post("/register", async (c) => {
       return c.json(
         {
           error:
-            "You've been invited to this server. Ask your admin for your temporary password, then sign in and change it — you can't set it here.",
+            "You've been invited to this server. Sign in with the temporary password from your invite email, or continue with PromptOwl using this email. Your admin can reset the password if you don't have it.",
         },
         409,
       );
@@ -1248,7 +1248,8 @@ authRoutes.post("/invite", async (c) => {
     by: inviter?.email || undefined,
     tempPassword,
     promptowlSignIn,
-    link: requestBaseUrl(c.req.url),
+    // ?invite= prefills the login page and guides them to sign in.
+    link: `${requestBaseUrl(c.req.url).replace(/\/$/, "")}/?invite=${encodeURIComponent(email)}`,
   });
 
   return c.json(
