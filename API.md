@@ -1140,6 +1140,12 @@ The UI deep-links a comment item to its document with the thread focused via
 
 Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review verdicts, document deletion flags, mentions); nest-level rows have `node_id: null`.
 
+Unread `nest_invite` rows are what the Nests page shows as **Pending invites**. Accept marks them read (`POST /me/notifications/read`) and opens the nest.
+
+### POST `/me/nests/:nestId/leave`
+
+Decline a nest invite. Removes the caller's **own** collaborator row on that nest (never anyone else's) and marks its `nest_invite` rows read. Response: `{ "left": true }`. Access that isn't a direct collaborator row — ownership, or a share through a team — isn't touched: `{ "left": false }`, and the invite rows are still marked read.
+
 ### GET `/me/drafts`
 
 Query: `?limit=25&offset=0&q=&sort=updated|title` (limit clamps to 1–100, offset to ≥ 0)

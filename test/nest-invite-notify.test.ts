@@ -94,5 +94,30 @@ describe("nest invite inbox", () => {
         (n: any) => n.kind === "nest_invite" && n.nest_id === teamNestId,
       ),
     ).toBeFalsy();
+
+    // Declining a team share can't remove team access — the invite still clears.
+    const decline = await jsonRequest(app, "POST", `/me/nests/${teamNestId}/leave`, undefined, carol.apiKey);
+    expect(decline.data.left).toBe(false);
+    const unread = await jsonRequest(app, "GET", "/me/notifications?unread=true", undefined, carol.apiKey);
+    expect(unread.data.notifications.some((n: any) => n.nest_id === teamNestId)).toBe(false);
+  });
+
+  it("Decline removes only the caller's own access and settles the invite", async () => {
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Decline Nest" }, alice.apiKey);
+    const id = nest.data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${id}/collaborators`, { email: "bob@acme.com", permission: "read" }, alice.apiKey);
+    expect((await jsonRequest(app, "GET", `/nests/${id}`, undefined, bob.apiKey)).status).toBe(200);
+
+    const res = await jsonRequest(app, "POST", `/me/nests/${id}/leave`, undefined, bob.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data.left).toBe(true);
+    expect((await jsonRequest(app, "GET", `/nests/${id}`, undefined, bob.apiKey)).status).not.toBe(200);
+    const unread = await jsonRequest(app, "GET", "/me/notifications?unread=true", undefined, bob.apiKey);
+    expect(unread.data.notifications.some((n: any) => n.nest_id === id)).toBe(false);
+
+    // The owner is untouched: nothing of theirs to "leave".
+    const owner = await jsonRequest(app, "POST", `/me/nests/${id}/leave`, undefined, alice.apiKey);
+    expect(owner.data.left).toBe(false);
+    expect((await jsonRequest(app, "GET", `/nests/${id}`, undefined, alice.apiKey)).status).toBe(200);
   });
 });

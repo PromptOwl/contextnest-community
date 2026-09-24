@@ -2639,6 +2639,17 @@ export async function removeNodeWatcher(nestId: string, nodeId: string, email: s
   return r.watchers;
 }
 
+export async function listUnreadNotifications() {
+  return request<{ notifications: WatcherNotification[] }>(
+    "/me/notifications?unread=true",
+  );
+}
+
+/** Decline a nest invite — removes the caller's own access to that nest. */
+export async function leaveNest(nestId: string) {
+  return request<{ left: boolean }>(`/me/nests/${nestId}/leave`, { method: "POST" });
+}
+
 export async function markNotificationsRead(ids: string[] | "all") {
   return request<{ ok: boolean }>("/me/notifications/read", {
     method: "POST",

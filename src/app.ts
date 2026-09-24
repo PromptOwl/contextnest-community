@@ -1651,6 +1651,24 @@ export function createApp(): Hono<AuthEnv> {
     return c.json({ ok: true });
   });
 
+  // Decline a nest invite: drop the caller's OWN collaborator row (never anyone
+  // else's) and settle its invite rows. Access through a team isn't a row here,
+  // so left=false — the invite still clears, the nest stays.
+  app.post("/me/nests/:nestId/leave", async (c) => {
+    const nestId = c.req.param("nestId");
+    const me = await resolveCallerEmail(c.get("userId"));
+    const db = getDb();
+    const info = await db.run(
+      "DELETE FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
+      [nestId, c.get("userId")],
+    );
+    await db.run(
+      `UPDATE notifications SET read_at = ? WHERE LOWER(user_email) = LOWER(?) AND nest_id = ? AND kind = 'nest_invite' AND read_at IS NULL`,
+      [new Date().toISOString(), me, nestId],
+    );
+    return c.json({ left: info.changes > 0 });
+  });
+
   // flexAuthMiddleware so it works without auth in open mode and with
   // a Bearer/cookie in key mode.
   app.use("/stats", flexAuthMiddleware);
