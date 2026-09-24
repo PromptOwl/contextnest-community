@@ -643,6 +643,7 @@ export function createApp(): Hono<AuthEnv> {
     oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
     oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
+    nest_creation: config.NEST_CREATION,
     people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
     shared_deployment: config.SHARED_DEPLOYMENT,
     // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
@@ -940,6 +941,12 @@ export function createApp(): Hono<AuthEnv> {
     // this server may be multi-tenant (the PromptOwl-hosted deployment holds
     // many customers), where "every registered account" means another
     // customer's staff. false persists as null — unset already means off.
+    if ("nest_creation" in body) {
+      const v = String(body.nest_creation ?? "").trim().toLowerCase();
+      if (v !== "admins" && v !== "everyone")
+        addError("nest_creation", "Nest creation must be admins or everyone.");
+      else pending.push({ name: "NEST_CREATION", value: v });
+    }
     if ("people_suggest_all_users" in body) {
       pending.push({
         name: "PEOPLE_SUGGEST_ALL_USERS",

@@ -49,6 +49,20 @@ describe("nest creation gate", () => {
     expect(health.data.nest_creation).toBe("admins");
   });
 
+  it("server admin can switch it from Settings; bad values are rejected", async () => {
+    const bad = await jsonRequest(app, "PATCH", "/admin/settings", { nest_creation: "maybe" }, admin.apiKey);
+    expect(bad.status).toBe(400);
+    const on = await jsonRequest(app, "PATCH", "/admin/settings", { nest_creation: "everyone" }, admin.apiKey);
+    expect(on.status).toBe(200);
+    expect(on.data.settings.nest_creation).toBe("everyone");
+    const res = await jsonRequest(app, "POST", "/nests", { name: "Now Allowed" }, member.apiKey);
+    expect(res.status).toBe(201);
+    const off = await jsonRequest(app, "PATCH", "/admin/settings", { nest_creation: "admins" }, admin.apiKey);
+    expect(off.data.settings.nest_creation).toBe("admins");
+    const denied = await jsonRequest(app, "POST", "/nests", { name: "Denied Again" }, member.apiKey);
+    expect(denied.status).toBe(403);
+  });
+
   it("NEST_CREATION=everyone lets any signed-in user create", async () => {
     process.env.NEST_CREATION = "everyone";
     const res = await jsonRequest(app, "POST", "/nests", { name: "Open Nest" }, member.apiKey);

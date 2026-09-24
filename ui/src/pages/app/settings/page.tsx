@@ -85,6 +85,7 @@ const TABS: {
       "public_base_url",
       "logo_url",
       "anthropic_api_key",
+      "nest_creation",
       "people_suggest_all_users",
       "shared_deployment",
     ],
@@ -762,6 +763,38 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     Keep current key
                   </button>
                 )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Plus className="h-4 w-4 text-muted-foreground" />
+                  Nest creation
+                </CardTitle>
+                <CardDescription>
+                  Who can create and import nests on this server.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <div className="pr-4">
+                    <div className="text-sm font-medium">
+                      Let everyone create nests
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Off, only server admins can create or import nests, and
+                      everyone else works in the nests shared with them. On,
+                      any signed-in user can create their own.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={draft.nest_creation === "everyone"}
+                    onCheckedChange={(v) =>
+                      set({ nest_creation: v ? "everyone" : "admins" })
+                    }
+                  />
+                </div>
               </CardContent>
             </Card>
 
@@ -1941,6 +1974,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
  *  hands the form the same props it always took. */
 export default function SettingsRoute() {
   const { isAdmin, refreshHealth } = useAuth();
+  const qc = useQueryClient();
   // Server-wide settings for the admin Settings page. Loaded once for admins.
   const [serverSettings, setServerSettings] = useState<AdminSettings | null>(null);
   useEffect(() => {
@@ -1961,6 +1995,8 @@ export default function SettingsRoute() {
       // there takes effect live — no page reload, and no per-key allowlist to
       // keep in sync as new flags are added.
       await refreshHealth();
+      // Pages reading /health through the query cache (e.g. nest_creation).
+      await qc.invalidateQueries({ queryKey: reads.health().queryKey });
       toast.success("Settings saved");
     } catch (e: any) {
       toast.error(e?.message || "Failed to save settings");
@@ -1970,7 +2006,7 @@ export default function SettingsRoute() {
       // Settings page can focus the offending field's tab and show the message.
       throw e;
     }
-  }, [refreshHealth]);
+  }, [refreshHealth, qc]);
   return (
     <SettingsPage
       settings={serverSettings}

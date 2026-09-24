@@ -268,6 +268,7 @@ export interface AdminSettings {
   /** Offer every registered account in the add-a-person pickers. Default OFF:
    *  a server holding several unrelated customers would otherwise hand one
    *  customer's staff another customer's email addresses. */
+  nest_creation: "admins" | "everyone";
   people_suggest_all_users: boolean;
   /** This server hosts several organizations (PromptOwl-hosted). On, nest
    *  visibility 'org' needs the same acknowledgement as 'public' and the
