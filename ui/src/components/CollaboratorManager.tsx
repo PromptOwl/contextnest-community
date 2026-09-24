@@ -41,7 +41,10 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import type { Team, TeamMember } from "../lib/api";
 import { isEmailish } from "../lib/utils";
-import { removeCollaboratorConfirmCopy } from "../lib/collaborator-confirm";
+import {
+  removeCollaboratorConfirmCopy,
+  removeCollaboratorSuccessMessage,
+} from "../lib/collaborator-confirm";
 import { PersonCombobox } from "./PersonCombobox";
 import { SearchableSelect } from "./SearchableSelect";
 
@@ -274,6 +277,7 @@ export function CollaboratorManager({
     try {
       await api.removeCollaborator(nestId, collab.id);
       setCollaborators((prev) => prev.filter((c) => c.id !== collab.id));
+      toast.success(removeCollaboratorSuccessMessage(collab.email));
       onChanged();
     } catch (err: any) {
       setError(err?.message || "Failed to remove collaborator");

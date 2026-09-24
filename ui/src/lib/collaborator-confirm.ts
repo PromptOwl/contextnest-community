@@ -23,3 +23,11 @@ export function removeCollaboratorConfirmCopy(
     confirm: "Remove access",
   };
 }
+
+/** Toast shown after a collaborator's access has been removed. */
+export function removeCollaboratorSuccessMessage(
+  collaboratorEmail: string | undefined,
+): string {
+  const who = collaboratorEmail || "Collaborator";
+  return `${who} removed from this nest`;
+}
