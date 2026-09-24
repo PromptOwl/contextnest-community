@@ -1275,8 +1275,11 @@ export function NestView({
           <>
           {/* Visibility — an inline toggle for owner/admin (so the public/
               private switch isn't buried in the Share dialog), a read-only
-              badge for everyone else. */}
-          {canManage ? (
+              badge for everyone else. Gated on !initialLoad (not `loading`,
+              which flips on every background refetch too — see its
+              definition above) so the header never flashes the "private"
+              default before the real value lands from fetchData. */}
+          {!initialLoad && (canManage ? (
             // Two-state on purpose: a header shortcut for the common flip,
             // private <-> public. An org nest routes to the full three-tier
             // control on the Collaborators tab instead (see
@@ -1340,13 +1343,14 @@ export function NestView({
                 {visibility === "public" ? "Public" : "Organization"}
               </Badge>
             )
-          )}
+          ))}
           {/* Public Docs Reader Mode config — server admin, or this nest's own
               owner/admin (see canManageReaderMode). A menu rather than a
               toggle: the landing document is part of the same setting, and
               changing it must not mean switching reader mode off and on
-              again. */}
-            {canManageReaderMode && !nestArchived && (
+              again. Also gated on !initialLoad — same flash-of-default-state
+              reason as the visibility badge above. */}
+            {canManageReaderMode && !nestArchived && !initialLoad && (
             <Button
               variant="outline"
               size="sm"
