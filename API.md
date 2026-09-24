@@ -159,8 +159,7 @@ Creates an invited user and returns a **temporary password** (once) for the admi
 { "email": "teammate@x.com" }
 ```
 - New email → user row with `is_invited = 1` and a temporary password.
-- Existing, not-yet-claimed email (`is_invited = 1`, hasn't logged in) → refreshes the temp password.
-- Existing, claimed email (has logged in or set their own password, `is_invited = 0`) → `409`; use Reset password instead.
+- Any existing email → `409`, credentials untouched. The error says "already a member" once they've signed in (`is_invited = 0`), or "already invited but hasn't signed in yet" (`is_invited = 1`, including people a nest was shared with). Use Reset password to issue a new temporary password.
 
 `is_invited` clears to `0` on the teammate's first successful login (or when they set their own password).
 

@@ -1,9 +1,7 @@
 /**
  * POST /auth/invite — admin issues a teammate a temporary PASSWORD (not an API
- * key). Re-inviting a not-yet-claimed user refreshes the temp password, but once
- * the teammate has claimed their account by choosing their own password, a
- * re-invite must NOT clobber it (409). The "claim" is /auth/password setting
- * is_invited = 0 — the guard this test locks in.
+ * key). Re-inviting any existing email is refused (409) and never overwrites
+ * credentials — signed in or not. Re-issuing a password is Reset password.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers";
@@ -52,7 +50,7 @@ describe("POST /auth/invite", () => {
     expect(login.status).toBe(200);
   });
 
-  it("refreshes the temp password when re-inviting a not-yet-claimed user", async () => {
+  it("refuses re-inviting a not-yet-signed-in user (409) and keeps their first password", async () => {
     const first = await jsonRequest(
       app,
       "POST",
@@ -67,20 +65,35 @@ describe("POST /auth/invite", () => {
       { email: "carol@co.com" },
       admin.apiKey,
     );
-    expect(second.status).toBe(201);
-    expect(second.data.temporary_password).not.toBe(first.data.temporary_password);
+    expect(second.status).toBe(409);
+    expect(second.data.error).toMatch(/already invited.*Reset password/);
+    expect(second.data.temporary_password).toBeUndefined();
 
-    // Old temp is dead; the refreshed one works.
-    const stale = await jsonRequest(app, "POST", "/auth/login", {
+    // The password she was first sent still works.
+    const login = await jsonRequest(app, "POST", "/auth/login", {
       email: "carol@co.com",
       password: first.data.temporary_password,
     });
-    expect(stale.status).toBe(401);
-    const fresh = await jsonRequest(app, "POST", "/auth/login", {
-      email: "carol@co.com",
-      password: second.data.temporary_password,
-    });
-    expect(fresh.status).toBe(200);
+    expect(login.status).toBe(200);
+  });
+
+  it("refuses inviting someone a nest was already shared with — no overwrite", async () => {
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Shared" }, admin.apiKey);
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nest.data.nest.id}/collaborators`,
+      { email: "frank@co.com", permission: "read" },
+      admin.apiKey,
+    );
+    const inv = await jsonRequest(
+      app,
+      "POST",
+      "/auth/invite",
+      { email: "frank@co.com" },
+      admin.apiKey,
+    );
+    expect(inv.status).toBe(409);
   });
 
   it("clears is_invited on first login, so a later re-invite is refused (409)", async () => {
@@ -107,6 +120,7 @@ describe("POST /auth/invite", () => {
       admin.apiKey,
     );
     expect(reinvite.status).toBe(409);
+    expect(reinvite.data.error).toMatch(/already a member/);
   });
 
   it("does NOT clobber a claimed password on re-invite (409)", async () => {
