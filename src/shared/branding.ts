@@ -292,9 +292,12 @@ export function ensureContrast(fg: string, bg: string, min = 4.5): string {
 export function publishBrandCssVars(b: NestBranding | null): string {
   if (!b) return "";
   const decls: string[] = [];
+  const tint = normalizeHex(b.page_tint_color);
+  const page = tint ? mixHex(tint, "#ffffff", 0.1) : "#ffffff";
   const accent = normalizeHex(b.accent_color);
   if (accent) {
-    const text = ensureContrast(accent, "#ffffff");
+    // Readable on the tinted body and on white cards — same nesting as the UI reader.
+    const text = ensureContrast(ensureContrast(accent, page), "#ffffff");
     decls.push(
       `--cn-accent:${accent}`,
       `--cn-accent-fg:${readableForeground(accent)}`,
@@ -303,8 +306,7 @@ export function publishBrandCssVars(b: NestBranding | null): string {
   }
   const header = normalizeHex(b.header_bg_color);
   if (header) decls.push(`--cn-header-bg:${header}`, `--cn-header-fg:${readableForeground(header)}`);
-  const tint = normalizeHex(b.page_tint_color);
-  if (tint) decls.push(`--cn-page-bg:${mixHex(tint, "#ffffff", 0.1)}`);
+  if (tint) decls.push(`--cn-page-bg:${page}`);
   return decls.length ? `:root{${decls.join(";")}}` : "";
 }
 

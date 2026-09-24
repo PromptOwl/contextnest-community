@@ -170,6 +170,8 @@ function cacheGet(key: string): string | null | undefined {
 function cachePut(key: string, v: string | null): void {
   const size = v?.length ?? 0;
   if (size > INLINE_CACHE_MAX_CHARS) return;
+  // Two concurrent misses can put the same key — don't count it twice.
+  inlineCacheChars -= inlineCache.get(key)?.length ?? 0;
   inlineCache.set(key, v);
   inlineCacheChars += size;
   for (const [k, old] of inlineCache) {
@@ -196,7 +198,8 @@ async function inlineAsset(nestId: string, url: string | null | undefined, cap: 
       if (mime) out = `data:${mime};base64,${(await readFile(path)).toString("base64")}`;
     }
   } catch {
-    out = null;
+    // Not cached: a transient EMFILE/EBUSY would otherwise hide the image until restart.
+    return null;
   }
   cachePut(key, out);
   return out;

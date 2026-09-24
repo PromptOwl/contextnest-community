@@ -47,6 +47,15 @@ describe("server branding helpers", () => {
     expect(publishBrandCssVars({ accent_color: "red;}body{display:none" } as any)).toBe("");
   });
 
+  it("publishBrandCssVars checks accent text against the tinted page, not just white", () => {
+    // #767676 passes on white (4.54:1) but not on a black tint's #e6e6e6 page.
+    const css = publishBrandCssVars({ accent_color: "#767676", page_tint_color: "#000000" } as any);
+    const text = css.match(/--cn-accent-text:(#[0-9a-f]{6})/)![1];
+    const page = css.match(/--cn-page-bg:(#[0-9a-f]{6})/)![1];
+    expect(contrastRatio(text, page)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(text, "#ffffff")).toBeGreaterThanOrEqual(4.5);
+  });
+
   const NEST = "7f0c2a1e-1111-4222-8333-444455556666";
   const ASSET = `/nests/${NEST}/assets/0b0f5a4e-9d1c-4e8b-a1d2-3c4d5e6f7a8b.png`;
 
