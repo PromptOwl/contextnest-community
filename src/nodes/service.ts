@@ -1108,7 +1108,8 @@ async function vaultFolderPaths(
         ? e.path.slice(prefix.length + 1)
         : e.path,
     )
-    .filter(Boolean);
+    // A flat nest shares its root with the uploads dir (<nest>/assets) — not a document folder.
+    .filter((p) => p && !(!prefix && (p === "assets" || p.startsWith("assets/"))));
 }
 
 /**
