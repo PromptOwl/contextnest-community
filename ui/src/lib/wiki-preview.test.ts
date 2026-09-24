@@ -12,7 +12,7 @@
  * through to "create" (permissions allowing) instead of a dead end.
  */
 import { describe, it, expect } from "vitest";
-import { decideWikiLinkAction, resolveWikiTarget } from "./wiki-preview";
+import { decideWikiLinkAction, resolveWikiTarget, wikiLinkIsBroken } from "./wiki-preview";
 
 const nodes = [
   { id: "nodes/roadmap", title: "Roadmap" },
@@ -51,5 +51,24 @@ describe("resolveWikiTarget (existing behavior, unchanged)", () => {
   });
   it("returns null for no match", () => {
     expect(resolveWikiTarget(nodes, "nope")).toBeNull();
+  });
+});
+
+describe("wikiLinkIsBroken", () => {
+  const previewFor = (target: string) => {
+    const node = resolveWikiTarget(nodes, target);
+    return node ? { title: node.title, snippet: "" } : null;
+  };
+
+  it("is not broken when the target resolves", () => {
+    expect(wikiLinkIsBroken("Roadmap", previewFor)).toBe(false);
+  });
+
+  it("is broken when the target doesn't resolve", () => {
+    expect(wikiLinkIsBroken("Deleted Doc", previewFor)).toBe(true);
+  });
+
+  it("stays optimistic (not broken) when there's no previewFor to resolve against", () => {
+    expect(wikiLinkIsBroken("Anything", undefined)).toBe(false);
   });
 });

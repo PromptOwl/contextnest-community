@@ -58,6 +58,22 @@ export function decideWikiLinkAction(
   return canAuthor ? { kind: "create", title: target } : { kind: "blocked", title: target };
 }
 
+/**
+ * Whether a `[[Title]]` should render with broken-link styling in a
+ * read-only view, given the same target resolution the hover preview
+ * uses (`previewFor`, wired to `resolveWikiTarget` by the caller).
+ * No `previewFor` means there's nothing to resolve against — stay
+ * optimistic, matching the editor's own `checkExists`-less default
+ * (see WikiLink.ts's `exists = cached?.exists ?? !checkExists`).
+ */
+export function wikiLinkIsBroken(
+  target: string,
+  previewFor?: (target: string) => { title: string; snippet: string } | null,
+): boolean {
+  if (!previewFor) return false;
+  return previewFor(target) === null;
+}
+
 /** A short plain-text snippet of a markdown body for the preview card. */
 export function previewSnippet(content: string, maxLen = 280): string {
   const plain = (content ?? "")

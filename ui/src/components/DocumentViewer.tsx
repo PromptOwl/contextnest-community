@@ -46,6 +46,7 @@ import {
   type VideoProvider,
 } from "@/lib/video-embed";
 import { CONTEXT_URI_PREFIX, CONTEXT_URI_RE, contextUriDocPath, contextUriLabel } from "@/lib/context-uri";
+import { wikiLinkIsBroken } from "@/lib/wiki-preview";
 
 // `[[target]]`, `[[target|Display]]`, or a bare `contextnest://nodes/…` URI.
 const wikiLinkRegex = new RegExp(
@@ -342,15 +343,22 @@ export function DocumentViewer({
             wikilink: ({ children, ...props }: any) => {
               const target = (props["data-wiki-target"] ?? "") as string;
               const display = (props["data-wiki-display"] ?? target) as string;
+              const exists = !wikiLinkIsBroken(target, previewFor);
               return (
                 <button
                   type="button"
                   className={
                     plainLinks
                       ? "bg-transparent border-0 p-0 m-0 cursor-pointer text-primary underline underline-offset-2 decoration-primary/40 hover:decoration-primary font-normal"
-                      : "wiki-link wiki-link-exists bg-transparent border-0 p-0 m-0 cursor-pointer"
+                      : `wiki-link ${exists ? "wiki-link-exists" : "wiki-link-broken"} bg-transparent border-0 p-0 m-0 cursor-pointer`
                   }
-                  title={previewFor ? undefined : `Open "${target}"`}
+                  title={
+                    !previewFor
+                      ? `Open "${target}"`
+                      : exists
+                        ? undefined
+                        : `"${display}" not found in this nest`
+                  }
                   onClick={(e) => {
                     e.preventDefault();
                     e.stopPropagation();

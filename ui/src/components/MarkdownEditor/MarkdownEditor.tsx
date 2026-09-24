@@ -137,6 +137,7 @@ function formatWikiLink(nodeId: string, title: string): string {
 }
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
@@ -221,6 +222,7 @@ import {
   type MentionMember,
 } from "./picker-match";
 import { WikiLink, clearWikiExistsCache } from "./extensions/WikiLink";
+import { resolveWikiTarget, previewSnippet } from "@/lib/wiki-preview";
 import { CodeBlock } from "./extensions/CodeBlock";
 import { tableExtensions } from "./extensions/Table";
 import { Callout } from "./extensions/Callout";
@@ -340,6 +342,26 @@ export const MarkdownEditor = forwardRef<
   const [previewMarkdown, setPreviewMarkdown] = useState("");
   const qc = useQueryClient();
   const effectiveEditable = editable && !previewing;
+  // Same target resolution as DocumentEditor's own read view (lib/wiki-preview),
+  // so the "Preview" toggle's broken-link styling and hover preview match the
+  // view/comment modes instead of styling every `[[…]]` as resolved.
+  const { data: previewNodesData } = useQuery({
+    ...reads.nodes(nestId ?? ""),
+    enabled: !!nestId && previewing,
+  });
+  const previewFor = useCallback(
+    (target: string) => {
+      const nodes = (previewNodesData?.nodes ?? []) as Array<{
+        id: string;
+        title: string;
+        content?: string;
+      }>;
+      const node = resolveWikiTarget(nodes, target);
+      if (!node) return null;
+      return { title: node.title, snippet: previewSnippet(node.content ?? "") };
+    },
+    [previewNodesData],
+  );
   // Image / video affordances (toolbar menu, drop overlay) — none in a
   // read-only / locked / preview doc. See lib/editor-media.ts.
   const media = mediaAffordances({
@@ -1611,6 +1633,7 @@ export const MarkdownEditor = forwardRef<
         <DocumentViewer
           content={previewMarkdown}
           onWikiLinkClick={(title) => onWikiLinkClick?.(title, null)}
+          previewFor={nestId ? previewFor : undefined}
         />
       )}
 
