@@ -253,9 +253,12 @@ export interface DocumentViewerProps {
   /** The raw markdown source to render. Should NOT be HTML; use a
    *  read-only TipTap surface for HTML-stored legacy docs. */
   content: string;
-  /** Called when the user clicks a `[[WikiLink]]`. Receives the title
-   *  (post-trim), not the optional display alias. */
-  onWikiLinkClick?: (title: string) => void;
+  /** Called when the user clicks a `[[WikiLink]]`. `title` is the raw
+   *  target (post-trim) — for aliased links this is the internal node id,
+   *  not what the reader sees. `displayText` is the human-readable alias,
+   *  so callers building a "create this document" fallback can use a
+   *  readable title instead of the internal id. */
+  onWikiLinkClick?: (title: string, displayText?: string) => void;
   /** Hover-preview lookup for a wiki-link target; return null for no
    *  preview (unknown target). Synchronous — caller caches the list. */
   previewFor?: (target: string) => { title: string; snippet: string } | null;
@@ -363,7 +366,7 @@ export function DocumentViewer({
                     e.preventDefault();
                     e.stopPropagation();
                     hidePreview();
-                    onWikiLinkClick?.(target);
+                    onWikiLinkClick?.(target, display);
                   }}
                   onMouseEnter={(e) =>
                     showPreview(target, e.clientX, e.clientY)

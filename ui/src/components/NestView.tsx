@@ -2473,7 +2473,11 @@ function ReviewDocumentModal({
   // false) — the caller is acting as a reviewer here (read-only role for
   // this surface), so silently dropping them into an authoring page would
   // mislead them; instead we surface an inline note.
-  const handleWikiLinkClick = async (title: string, _id: string | null) => {
+  const handleWikiLinkClick = async (
+    title: string,
+    _id: string | null,
+    displayText?: string | null,
+  ) => {
     setLinkError(null);
     try {
       const { nodes } = await qc.fetchQuery(reads.nodes(nestId));
@@ -2481,13 +2485,14 @@ function ReviewDocumentModal({
         nodes as Array<{ id: string; title: string }>,
         title,
         false,
+        displayText,
       );
       if (action.kind === "navigate") {
         onOpenDocument(action.node.id);
         return;
       }
       setLinkError(
-        `"${title}" doesn't exist in this nest. Reviewers can't create new documents — ask an editor to add it.`,
+        `"${action.title}" doesn't exist in this nest. Reviewers can't create new documents — ask an editor to add it.`,
       );
     } catch (e) {
       console.error("[NestView] wiki-link lookup failed", nestId, title, e);

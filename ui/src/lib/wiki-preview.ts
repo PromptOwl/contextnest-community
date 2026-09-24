@@ -47,15 +47,23 @@ export type WikiLinkAction =
  * renamed or deleted). A target that doesn't resolve always falls through to
  * "create" (or "blocked" for a non-authoring role) rather than a dead end
  * (CU-wdqcq02g17).
+ *
+ * `target` is the link's internal id (aliased links store `[[nodes/<id>|Title]]`
+ * — see `formatWikiLink`), so once the node it points at is gone it's no
+ * longer a human-readable title. `displayText` is the alias shown to the
+ * reader; when present it's what "create"/"blocked" report as the title so a
+ * broken aliased link doesn't leak `nodes/<id>` into the New Document form.
  */
 export function decideWikiLinkAction(
   nodes: PreviewNode[],
   target: string,
   canAuthor: boolean,
+  displayText?: string | null,
 ): WikiLinkAction {
   const node = resolveWikiTarget(nodes, target);
   if (node) return { kind: "navigate", node };
-  return canAuthor ? { kind: "create", title: target } : { kind: "blocked", title: target };
+  const title = displayText?.trim() || target;
+  return canAuthor ? { kind: "create", title } : { kind: "blocked", title };
 }
 
 /**

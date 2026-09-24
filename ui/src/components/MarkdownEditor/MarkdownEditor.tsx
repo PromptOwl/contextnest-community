@@ -284,8 +284,14 @@ interface MarkdownEditorProps {
    *  picked file, resolve to its asset URL. Omit to hide the button
    *  (e.g. contexts with no asset storage). */
   onUploadImage?: (file: File) => Promise<string>;
-  /** Click on a `[[Title]]` decoration inside the editor. */
-  onWikiLinkClick?: (title: string, id: string | null) => void;
+  /** Click on a `[[Title]]` decoration inside the editor. `displayText` is
+   *  the human-readable alias (for aliased links `title` is the internal
+   *  node id — see `formatWikiLink`). */
+  onWikiLinkClick?: (
+    title: string,
+    id: string | null,
+    displayText?: string | null,
+  ) => void;
   /** Click on an `@name` decoration. */
   onMentionClick?: (name: string) => void;
   placeholder?: string;
@@ -1632,7 +1638,9 @@ export const MarkdownEditor = forwardRef<
       {previewing && (
         <DocumentViewer
           content={previewMarkdown}
-          onWikiLinkClick={(title) => onWikiLinkClick?.(title, null)}
+          onWikiLinkClick={(title, displayText) =>
+            onWikiLinkClick?.(title, null, displayText)
+          }
           previewFor={nestId ? previewFor : undefined}
         />
       )}
