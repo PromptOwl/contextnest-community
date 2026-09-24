@@ -123,7 +123,7 @@ export function ReaderBrandingDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-[1040px]">
+      <DialogContent className="flex max-h-[92vh] flex-col sm:max-w-[1040px]">
         <DialogHeader>
           <DialogTitle>Reader branding</DialogTitle>
           <DialogDescription>
@@ -133,7 +133,7 @@ export function ReaderBrandingDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_minmax(0,26rem)]">
+        <div className="-mx-4 grid min-h-0 flex-1 gap-6 overflow-y-auto border-y px-4 py-4 sm:-mx-6 sm:px-6 md:grid-cols-[minmax(0,1fr)_minmax(0,26rem)]">
           <div className="min-w-0 space-y-5">
             <Section title="Identity">
               <TextField label="Site title" hint={`Shown in the header and the browser tab. Defaults to “${nestName}”.`} value={draft.site_title} max={BRANDING_LIMITS.site_title} error={errors.site_title} onChange={(v) => set("site_title", v)} placeholder={nestName} />
