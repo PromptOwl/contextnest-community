@@ -313,6 +313,15 @@ describe("admin settings validation", () => {
     expect(badRegion.status).toBe(400);
     expect(badRegion.data.fieldErrors).toHaveProperty("ses_region");
 
+    // Half a key pair would be silently ignored at send time — refused instead.
+    const halfKeys = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      email_provider: "ses",
+      ses_region: "us-east-1",
+      ses_access_key_id: "AKIAONLY",
+    });
+    expect(halfKeys.status).toBe(400);
+    expect(halfKeys.data.fieldErrors.ses_access_key_id).toMatch(/both/);
+
     const ok = await jsonRequest(openApp, "PATCH", "/admin/settings", {
       email_provider: "ses",
       ses_region: "us-east-1",

@@ -1486,9 +1486,11 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                         <button
                           type="button"
                           className="text-xs text-destructive hover:underline"
-                          onClick={() => set({ ses_secret_access_key: null })}
+                          onClick={() =>
+                            set({ ses_secret_access_key: null, ses_access_key_id: "" })
+                          }
                         >
-                          Clear secret
+                          Clear keys
                         </button>
                       )}
                   </>

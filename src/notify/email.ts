@@ -4,7 +4,8 @@
  * Dependency posture (see the supply-chain scan in the PR/ticket): nodemailer
  * is pinned EXACTLY to 9.0.3 — zero runtime deps, zero install scripts,
  * registry-signed, no unpatched advisories. Usage is deliberately hardened:
- *   - SMTP transport only (never sendmail — no child_process path)
+ *   - SMTP or the AWS SES SDK transport only (never sendmail — no
+ *     child_process path)
  *   - disableFileAccess / disableUrlAccess on the transport AND no `raw`
  *     option ever, so a message can't be turned into a file read or SSRF
  *   - recipients/subjects are server-built from governance events; no
@@ -117,7 +118,8 @@ export function transportSettings(
           provider: "ses",
           region,
           accessKeyId: v("SES_ACCESS_KEY_ID", config.SES_ACCESS_KEY_ID),
-          secretAccessKey: v("SES_SECRET_ACCESS_KEY", config.SES_SECRET_ACCESS_KEY),        }
+          secretAccessKey: v("SES_SECRET_ACCESS_KEY", config.SES_SECRET_ACCESS_KEY),
+        }
       : null;
   }
   const url = v("SMTP_URL", config.SMTP_URL);

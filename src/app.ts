@@ -1134,6 +1134,21 @@ export function createApp(): Hono<AuthEnv> {
         pending.push({ name, value: null });
       }
     }
+    // SES keys are a pair: one without the other would be silently dropped for
+    // the IAM role at send time, so refuse it here instead.
+    if ("ses_access_key_id" in body || "ses_secret_access_key" in body) {
+      const next = (name: string, current: string | null) => {
+        const p = pending.find((x) => x.name === name);
+        return p ? p.value : current;
+      };
+      const hasId = !!next("SES_ACCESS_KEY_ID", config.SES_ACCESS_KEY_ID);
+      const hasSecret = !!next("SES_SECRET_ACCESS_KEY", config.SES_SECRET_ACCESS_KEY);
+      if (hasId !== hasSecret)
+        addError(
+          "ses_access_key_id",
+          "Set both the AWS access key ID and secret access key, or leave both empty to use the server's IAM role.",
+        );
+    }
     // Shape check (local@domain.tld, no CR/LF) — these flow into nodemailer's
     // envelope, so junk and header-injection shapes stop here. Same guard the
     // config getters apply, so env-set and UI-set values gate identically.
