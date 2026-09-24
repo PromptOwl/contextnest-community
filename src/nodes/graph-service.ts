@@ -6,7 +6,11 @@
  * governance gaps.
  */
 
-import { extractContextLinks, type ContextNode } from "@promptowl/contextnest-engine";
+import {
+  contextLinkTarget,
+  extractContextLinks,
+  type ContextNode,
+} from "@promptowl/contextnest-engine";
 import { engineCache } from "./engine.js";
 import { isDerivedAnnotationsNode } from "./service.js";
 import { filterAccessible } from "../governance/access-guard.js";
@@ -116,8 +120,8 @@ export function extractWikiTargets(body: string): string[] {
  * the pin and anchor address a version/section OF the node, so the edge is to
  * the node itself, exactly as `[[nodes/x]]` would be.
  *
- * Parsing is the engine's `extractContextLinks` (linear, ReDoS-bounded, skips
- * fenced code and inline code spans), so this repo does not fork link syntax.
+ * Parsing and pin/anchor stripping are the engine's `extractContextLinks` /
+ * `contextLinkTarget` (linear, skip code spans), so this repo does not fork link syntax.
  * Folder / tag / search URIs and cross-namespace links come back as strings
  * that match no node id and are dropped by the id-only resolution callers do.
  * Returned targets are ids and must be resolved by id ONLY — never by title
@@ -130,13 +134,7 @@ export function extractContextTargets(body: string): string[] {
   const out = new Set<string>();
   if (!body) return [];
   for (const uri of extractContextLinks(body)) {
-    // Plain index scans, no regex: strip scheme, anchor, pin, trailing slash.
-    let t = uri.slice("contextnest://".length);
-    const hash = t.indexOf("#");
-    if (hash !== -1) t = t.slice(0, hash);
-    const at = t.indexOf("@");
-    if (at !== -1) t = t.slice(0, at);
-    if (t.endsWith("/")) t = t.slice(0, -1);
+    const t = contextLinkTarget(uri);
     if (t) out.add(t);
   }
   return [...out];
