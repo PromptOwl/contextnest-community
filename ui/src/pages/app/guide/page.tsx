@@ -218,8 +218,8 @@ export default function GuidePage() {
               <p className="text-muted-foreground">{t.summary}</p>
               <Steps steps={t.steps} />
               <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
-                {t.notes.map((n) => (
-                  <li key={n}>{n}</li>
+                {t.notes.map((n, i) => (
+                  <li key={`${t.id}-note-${i}`}>{n}</li>
                 ))}
               </ul>
             </div>
