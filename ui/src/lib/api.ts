@@ -388,6 +388,10 @@ export async function inviteTeammate(email: string) {
   return request<{
     temporary_password: string;
     user: { id: string; email: string };
+    /** PromptOwl sign-in is open to everyone, so the teammate can use it too. */
+    promptowl_sign_in?: boolean;
+    /** The invite email with the password was sent to them. */
+    emailed?: boolean;
     message: string;
   }>("/auth/invite", {
     method: "POST",

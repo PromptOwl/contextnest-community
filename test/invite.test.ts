@@ -42,6 +42,9 @@ describe("POST /auth/invite", () => {
     expect(inv.status).toBe(201);
     expect(typeof inv.data.temporary_password).toBe("string");
     expect(inv.data.temporary_password.length).toBeGreaterThan(0);
+    // Default gate is open → PromptOwl sign-in is offered; no email set up here.
+    expect(inv.data.promptowl_sign_in).toBe(true);
+    expect(inv.data.emailed).toBe(false);
 
     const login = await jsonRequest(app, "POST", "/auth/login", {
       email: "bob@co.com",

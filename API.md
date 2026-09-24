@@ -168,9 +168,12 @@ Response (201):
 {
   "temporary_password": "...",
   "user": { "id": "...", "email": "..." },
+  "promptowl_sign_in": true,
+  "emailed": true,
   "message": "Share this temporary password securely — it won't be shown again."
 }
 ```
+`emailed` — email is configured, so the invite email (password + sign-in link) was sent. `promptowl_sign_in` — PromptOwl sign-in is open to everyone, so the teammate may use it instead (the email says so too).
 
 ### GET `/auth/teammates` (admin only)
 Returns all users + key counts. **Sorted: admins first, then `created_at DESC`.**

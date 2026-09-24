@@ -45,7 +45,7 @@ import { oidcRoutes } from "./oidc.js";
 import { handleTokenExchange } from "./token-exchange.js";
 import { clientIp } from "../shared/request-ip.js";
 import { ANON_USER_ID } from "../shared/constants.js";
-import { sendEmailToRecipient } from "../notify/email.js";
+import { sendEmailToRecipient, isEmailConfigured } from "../notify/email.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 
 /** is_admin for user-facing payloads: license admin OR superadmin. */
@@ -1238,6 +1238,8 @@ authRoutes.post("/invite", async (c) => {
   const inviter = (await db.get("SELECT email FROM users WHERE id = ?", [
     callerId,
   ])) as { email?: string } | undefined;
+  // PromptOwl sign-in only counts as an option for them when it's open to all.
+  const promptowlSignIn = config.PROMPTOWL_SIGN_IN_GATE === "open";
   void sendEmailToRecipient(email, {
     status: "invited",
     docTitle: "ContextNest",
@@ -1245,6 +1247,7 @@ authRoutes.post("/invite", async (c) => {
     actor: email,
     by: inviter?.email || undefined,
     tempPassword,
+    promptowlSignIn,
     link: requestBaseUrl(c.req.url),
   });
 
@@ -1252,6 +1255,9 @@ authRoutes.post("/invite", async (c) => {
     {
       temporary_password: tempPassword,
       user: { id: userId, email },
+      promptowl_sign_in: promptowlSignIn,
+      // Email is configured, so the invite email (with this password) went out.
+      emailed: isEmailConfigured(),
       message:
         "Share this temporary password securely. Your teammate signs in with their email + this password, then can change it and create their own API key.",
     },
