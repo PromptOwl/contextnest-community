@@ -1547,124 +1547,6 @@ export function NestView({
           })()}
       </NestPageHeader>
 
-      {/* Stats Cards — only governance-related stats when stewardship is on.
-          In ungoverned mode every doc is auto-approved so the pending/review
-          columns are always zero and just add noise. Not on Overview: it
-          carries the same numbers as its own summary line (CU-wdqcq02qb1). */}
-      {activeTab !== "overview" && (
-      <div
-        className={`grid grid-cols-1 gap-4 mb-4 ${stewardshipEnabled
-          ? "md:grid-cols-4"
-          : "md:grid-cols-1 max-w-sm"
-          }`}
-      >
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription>Total Documents</CardDescription>
-            {/* initialLoad, not `loading`: a background refetch keeps the real
-                numbers on screen, and only a cold load — where every stat is
-                still 0 — shows the placeholder. */}
-            <CardTitle className="text-3xl">
-              {initialLoad ? <CountSkeleton className="h-8 w-12" /> : stats.total}
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <FileText className="h-4 w-4" />
-              {/* An empty nest has nothing to be approved or AI-ready, so the
-                  readiness line would be a promise about content that isn't
-                  there — say what's true instead (CU-wdqcq00x8y). */}
-              <span>
-                {/* Gated on the same cold-load flag as the count above: every
-                    stat is 0 until the first read lands, and claiming an empty
-                    nest before then is wrong on a slow connection. */}
-                {initialLoad
-                  ? "Loading…"
-                  : stats.total === 0
-                    ? "No documents yet"
-                    : stewardshipEnabled
-                      ? "In your context"
-                      : "Auto-approved, AI-ready"}
-              </span>
-            </div>
-          </CardContent>
-        </Card>
-        {stewardshipEnabled && (
-          <>
-            <Card>
-              <CardHeader className="pb-2">
-                <CardDescription>Pending Approvals</CardDescription>
-                <CardTitle className="text-3xl text-amber-600">
-                  {initialLoad ? (
-                    <CountSkeleton className="h-8 w-12" />
-                  ) : (
-                    stats.pending
-                  )}
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Clock className="h-4 w-4" />
-                  <span>Awaiting approval</span>
-                </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className="pb-2">
-                <CardDescription>AI Ready</CardDescription>
-                <CardTitle className="text-3xl text-green-600">
-                  {initialLoad ? (
-                    <CountSkeleton className="h-8 w-12" />
-                  ) : (
-                    stats.approved
-                  )}
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <CheckCircle2 className="h-4 w-4" />
-                  <span>
-                    {initialLoad
-                      ? "Loading…"
-                      : stats.total === 0
-                        ? "Nothing to evaluate yet"
-                        : "Approved for AI"}
-                  </span>
-                </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className="pb-2">
-                <CardDescription>Your Review Queue</CardDescription>
-                <CardTitle className="text-3xl text-blue-600">
-                  {initialLoad ? (
-                    <CountSkeleton className="h-8 w-12" />
-                  ) : (
-                    stats.reviewable
-                  )}
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Shield className="h-4 w-4" />
-                  <span>
-                    Need your review
-                    {stats.reviewQueue > stats.reviewable && (
-                      <span className="ml-1 text-xs">
-                        ({stats.reviewQueue} pending total,
-                        {" "}
-                        {stats.reviewQueue - stats.reviewable} outside your scope)
-                      </span>
-                    )}
-                  </span>
-                </div>
-              </CardContent>
-            </Card>
-          </>
-        )}
-      </div>
-      )}
-
       {/* Tabbed layout — Documents / Review Queue / Stewards.
           When stewardship is off the latter two tabs are hidden because
           their data is empty by definition. */}
@@ -1782,6 +1664,124 @@ export function NestView({
             </div>
           )}
         </div>
+
+      {/* Stats Cards — only governance-related stats when stewardship is on.
+          In ungoverned mode every doc is auto-approved so the pending/review
+          columns are always zero and just add noise. Not on Overview: it
+          carries the same numbers as its own summary line (CU-wdqcq02qb1). */}
+      {activeTab !== "overview" && (
+      <div
+        className={`grid grid-cols-1 gap-4 mb-4 ${stewardshipEnabled
+          ? "md:grid-cols-4"
+          : "md:grid-cols-1 max-w-sm"
+          }`}
+      >
+        <Card>
+          <CardHeader className="pb-2">
+            <CardDescription>Total Documents</CardDescription>
+            {/* initialLoad, not `loading`: a background refetch keeps the real
+                numbers on screen, and only a cold load — where every stat is
+                still 0 — shows the placeholder. */}
+            <CardTitle className="text-3xl">
+              {initialLoad ? <CountSkeleton className="h-8 w-12" /> : stats.total}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <FileText className="h-4 w-4" />
+              {/* An empty nest has nothing to be approved or AI-ready, so the
+                  readiness line would be a promise about content that isn't
+                  there — say what's true instead (CU-wdqcq00x8y). */}
+              <span>
+                {/* Gated on the same cold-load flag as the count above: every
+                    stat is 0 until the first read lands, and claiming an empty
+                    nest before then is wrong on a slow connection. */}
+                {initialLoad
+                  ? "Loading…"
+                  : stats.total === 0
+                    ? "No documents yet"
+                    : stewardshipEnabled
+                      ? "In your context"
+                      : "Auto-approved, AI-ready"}
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+        {stewardshipEnabled && (
+          <>
+            <Card>
+              <CardHeader className="pb-2">
+                <CardDescription>Pending Approvals</CardDescription>
+                <CardTitle className="text-3xl text-amber-600">
+                  {initialLoad ? (
+                    <CountSkeleton className="h-8 w-12" />
+                  ) : (
+                    stats.pending
+                  )}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Clock className="h-4 w-4" />
+                  <span>Awaiting approval</span>
+                </div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2">
+                <CardDescription>AI Ready</CardDescription>
+                <CardTitle className="text-3xl text-green-600">
+                  {initialLoad ? (
+                    <CountSkeleton className="h-8 w-12" />
+                  ) : (
+                    stats.approved
+                  )}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <CheckCircle2 className="h-4 w-4" />
+                  <span>
+                    {initialLoad
+                      ? "Loading…"
+                      : stats.total === 0
+                        ? "Nothing to evaluate yet"
+                        : "Approved for AI"}
+                  </span>
+                </div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2">
+                <CardDescription>Your Review Queue</CardDescription>
+                <CardTitle className="text-3xl text-blue-600">
+                  {initialLoad ? (
+                    <CountSkeleton className="h-8 w-12" />
+                  ) : (
+                    stats.reviewable
+                  )}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Shield className="h-4 w-4" />
+                  <span>
+                    Need your review
+                    {stats.reviewQueue > stats.reviewable && (
+                      <span className="ml-1 text-xs">
+                        ({stats.reviewQueue} pending total,
+                        {" "}
+                        {stats.reviewQueue - stats.reviewable} outside your scope)
+                      </span>
+                    )}
+                  </span>
+                </div>
+              </CardContent>
+            </Card>
+          </>
+        )}
+      </div>
+      )}
 
         {/* Overview — the nest's index/landing: stat tiles, recently-edited
             rows, and a grouped table-of-contents grid so opening a nest
