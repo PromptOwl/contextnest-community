@@ -1,4 +1,4 @@
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { lazyChunk } from "./lib/lazy-chunk";
 import type React from "react";
 import { Login } from "./components/Login";
@@ -33,6 +33,8 @@ import {
   isViewBlockedInReaderMode,
 } from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
+import { ReaderBrandFooter } from "./components/ReaderBrandFooter";
+import { brandingToCssVars, isBranded, type NestBranding } from "./lib/branding";
 import { Shield, Info, ChevronDown, LogOut, BookOpen, Activity, Search, FileText, Keyboard, PanelLeft, ChevronRight, UserRound } from "lucide-react";
 const AgentDocsPage = lazyNamed(() => import("./components/AgentDocsPage"), "AgentDocsPage");
 const ActivityTracePage = lazyNamed(() => import("./components/ActivityTracePage"), "ActivityTracePage");
@@ -641,6 +643,9 @@ export default function App() {
   // paint; the nest-scoped fetch below resolves it for every other entry point
   // (dashboard, back arrow, wiki-link nav), which never carried it.
   const [nestIsReaderView, setNestIsReaderView] = useState<boolean | null>(null);
+  // The nest's reader branding (nest.branding). Applied to the shell's header
+  // and footer only while the caller is actually in reader mode.
+  const [nestBranding, setNestBranding] = useState<NestBranding | null>(null);
   const readerMode = isNestScoped(view)
     ? (nestIsReaderView ?? view.readerMode ?? false)
     : false;
@@ -680,6 +685,7 @@ export default function App() {
   useEffect(() => {
     setNestCanEdit(null);
     setNestIsReaderView(null);
+    setNestBranding(null);
     if (!nestScopedId) return;
     let cancelled = false;
     qc.fetchQuery(reads.nest(nestScopedId))
@@ -695,6 +701,7 @@ export default function App() {
         });
         setNestCanEdit(caps.canEditDocs);
         setNestIsReaderView(caps.isReaderView);
+        setNestBranding(meta?.nest?.branding ?? null);
       })
       .catch(() => {
         if (cancelled) return;
@@ -975,9 +982,15 @@ export default function App() {
               ? view.nestName
               : undefined
           }
+          nestOnly={!authenticated && authMode === "key"}
           onClose={() => setShowQuickOpen(false)}
           onSelect={(nodeId, result) => {
             setShowQuickOpen(false);
+            // Reader mode has no editor to open — show the hit in the reader.
+            if (view.page === "nest" && nestIsReaderView && result.kind === "node" && (result.nest_id ?? view.nestId) === view.nestId) {
+              setView({ ...view, readerDoc: nodeId });
+              return;
+            }
             // A hit in the nest you are already in keeps the standing you were
             // admitted with (a public deep link isn't in the nest list, so
             // re-resolving it there would drop those capabilities).
@@ -1008,8 +1021,13 @@ export default function App() {
     </>
   );
 
-  // Unauth + key mode → Login, unless deep-link probe resolved a public nest.
-  if (!authenticated && authMode === "key" && deepLinkProbe.status !== "ok") {
+  // Unauth + key mode → Login, unless deep-link probe resolved a public nest
+  // and the view is still that nest (or Docs) — dashboard pages need an account.
+  if (
+    !authenticated &&
+    authMode === "key" &&
+    (deepLinkProbe.status !== "ok" || !("nestId" in view || view.page === "docs"))
+  ) {
     return (
       <>
         <Login />
@@ -1032,7 +1050,10 @@ export default function App() {
   // The dashboard gets the same rail (every nest, none expanded) — it's the
   // app's navigation, not the nest's.
   // Docs (header button) is an app page too — same rail, full width.
-  const withSidebar = inNest || view.page === "dashboard" || view.page === "docs";
+  // A logged-out public reader gets no app rail: every page in it needs an account.
+  const withSidebar =
+    (authenticated || authMode !== "key") &&
+    (inNest || view.page === "dashboard" || view.page === "docs");
   const showSidebar = withSidebar && (!docSidebarCollapsed || docSidebarDrawer);
   const pageWidth =
     view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
@@ -1040,9 +1061,23 @@ export default function App() {
   // `mx-auto` — auto margins on a flex-column item shrink it to its content.
   // Without a sidebar the old centred page width applies.
   const shellWidth = withSidebar ? "w-full max-w-none" : `${pageWidth} mx-auto`;
+  // Reader branding (CU-wdqcq02ptm): only for a caller in reader mode, and
+  // only when the nest has any. Otherwise every value below is inert and the
+  // shell renders exactly as before.
+  const readerBrand = readerMode && isBranded(nestBranding) ? nestBranding : null;
+  const readerBrandVars = readerBrand
+    ? (brandingToCssVars(readerBrand, document.documentElement.classList.contains("dark") ? "dark" : "light") as CSSProperties)
+    : undefined;
+  const readerHeaderStyle =
+    readerBrand?.header_bg_color
+      ? { backgroundColor: "var(--reader-header-bg)", color: "var(--reader-header-fg)", borderColor: "transparent" }
+      : undefined;
 
   return (
-    <div className={withSidebar ? "flex min-h-screen items-stretch bg-background" : "min-h-screen bg-background"}>
+    <div
+      className={withSidebar ? "flex min-h-screen items-stretch bg-background" : "min-h-screen bg-background"}
+      style={readerBrandVars}
+    >
       {/* The sidebar is a full-height column beside the whole shell — header
           included — with the brand at its top, so header and rail read as one
           surface. It stays on the unreachable-nest screen too — that is exactly
@@ -1158,7 +1193,11 @@ export default function App() {
         {/* Sticky: the breadcrumb and account row stay put while a page
             scrolls, and every in-page sticky bar (document toolbar, artifact
             toolbar, comment rails) offsets by this row's 4rem. */}
-        <div className="sticky top-0 z-40 border-b border-border bg-card">
+        <div
+          className="sticky top-0 z-40 border-b border-border bg-card"
+          style={readerHeaderStyle}
+          data-reader-brand-header={readerHeaderStyle ? "" : undefined}
+        >
         <div className={`${shellWidth} h-16 px-4 flex items-center justify-between gap-2`}>
           {/* min-w-0 so the breadcrumb truncates on a phone instead of
               pushing the account row past the window edge. */}
@@ -1184,21 +1223,41 @@ export default function App() {
             </Button>
           )}
           <button
-            onClick={() => setView({ page: "dashboard" })}
-            // On a phone with a sidebar the mark lives in the drawer; the
-            // toggle beside it opens that, so the row keeps its room for the
-            // breadcrumb.
+            onClick={() =>
+              // In the reader the brand is the site's home: its home page, not the dashboard.
+              setView(view.page === "nest" && nestIsReaderView ? { ...view, readerDoc: undefined } : { page: "dashboard" })
+            }
             className={`flex shrink-0 items-center gap-2 hover:opacity-80${showSidebar ? " md:hidden" : ""}${withSidebar ? " max-sm:hidden" : ""}`}
           >
-            <img
-              src={logoUrl ?? hootieIcon}
-              alt="ContextNest"
-              className="h-7 w-7 object-contain"
-            />
-            <span className="font-semibold">ContextNest</span>
-            <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
-              Community
-            </Badge>
+            {readerBrand ? (
+              // Branded reader: the nest's logo (falling back to the server's
+              // LOGO_URL, then the owl) and its site title (falling back to
+              // the nest name), in place of the product mark.
+              <>
+                <img
+                  src={readerBrand.logo_url || logoUrl || hootieIcon}
+                  alt=""
+                  className={`h-8 w-auto max-w-[9rem] object-contain${readerBrand.logo_url ? "" : " hidden min-[480px]:block"}`}
+                />
+                {/* On a phone one mark carries the brand — the nest's logo when
+                    it has one, else its title — so search / docs / login fit. */}
+                <span className={`max-w-[40vw] truncate font-semibold sm:max-w-[24rem]${readerBrand.logo_url ? " hidden min-[480px]:inline" : ""}`}>
+                  {readerBrand.site_title || ("nestName" in view ? view.nestName : "")}
+                </span>
+              </>
+            ) : (
+              <>
+                <img
+                  src={logoUrl ?? hootieIcon}
+                  alt="ContextNest"
+                  className="h-7 w-7 object-contain"
+                />
+                <span className="font-semibold">ContextNest</span>
+                <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                  Community
+                </Badge>
+              </>
+            )}
           </button>
           {withSidebar && crumbs.length > 0 && (
             <nav aria-label="Breadcrumb" className="ml-1 flex min-w-0 items-center gap-1 text-sm" data-testid="header-breadcrumb">
@@ -1655,9 +1714,13 @@ export default function App() {
           the window at full scroll. The build version is a footnote; a write
           action reaching the edge of the screen is not. */}
       {view.page !== "document" && (
+        readerBrand ? (
+          <ReaderBrandFooter branding={readerBrand} className={shellWidth} />
+        ) : (
         <footer className={`${shellWidth} px-4 py-4 text-xs text-muted-foreground text-center`}>
           ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
         </footer>
+        )
       )}
 
       </div>

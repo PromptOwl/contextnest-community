@@ -1,5 +1,127 @@
 # @promptowl/contextnest-community
 
+## 1.25.0
+
+### Minor Changes
+
+- 34a6b6d: Server settings has a **Connecting agents** tab: verified setup steps for nine AI tools, all pointing at the one endpoint that reads across every nest a person can see.
+
+  An operator who stands a nest server up gets asked "how do I wire this into <tool>?" by everyone on their team, and every tool spells it differently — a flag on `claude mcp add`, a TOML table for Codex, a YAML block for Hermes, a web form for ChatGPT, Grok and Claude. Nothing in the product answered that, so the answer lived in whatever someone could reconstruct.
+
+  The new tab covers Claude (claude.ai and Desktop), ChatGPT, Grok, Perplexity, Claude Code, OpenAI Codex CLI, Hermes, Gemini CLI and Cursor, grouped by chat / command line / editors, with per-harness and copy-all buttons. Every one of them points at the server-level `/mcp` endpoint rather than a per-nest URL, so a person connects once and reads across the public nests plus whatever private nests they have access to — and nothing has to be redone when they are added to another nest.
+
+  Two things the panel now says that nothing said before: a **user-level** key is required, because a key scoped to one nest narrows that same endpoint back down to that nest (`nestScope`, `src/auth/middleware.ts`) and looks exactly like the connect-once promise being broken; and each person should use their own key, because a shared key makes all of them the same user to this server. In open mode no credential is mentioned at all. Where a surface only drives an OAuth client and this server has no authorization server to offer it — Perplexity today — the panel says so plainly instead of printing steps that end in a failed connection.
+
+  The text is a pure, unit-tested module (`ui/src/lib/agent-connect-docs.ts`), so the invariants are enforced rather than maintained by hand: no harness may render key material, none may render a per-nest URL, and open mode must drop every credential instruction.
+
+  `PUBLIC_BASE_URL` is now validated when it is saved. It has to be a plain `http(s)` URL, with no whitespace, quotes or shell characters (`" ' \` \ $ ; | & < > ( ) { }`). Those were previously accepted — the setting was stored after nothing more than a trim — and this value is rendered straight into the snippets above, including a `bash`block and quoted strings in`config.toml`, `config.yaml`and`mcp.json` that people paste verbatim. An admin who set a hostile value could therefore have run commands on the machine of everyone who followed the setup instructions. The panel strips the same characters when it renders, so a value stored before this check cannot reach a snippet either; existing values are not rewritten.
+
+- 4615fe8: `client` — caller attribution on every read and write.
+
+  Every node write and every MCP tool call now accepts an optional `client` object
+  naming the calling agent and its session, plus any custom scalar keys — create,
+  edit, submit for review, approve, reject, revert, import (`POST /nests/import`,
+  `POST /nests/unsynced/sync`) and bulk review on the REST side, every tool on the
+  MCP side:
+
+  ```jsonc
+  {
+    "title": "API Design",
+    "content": "…",
+    "client": { "agent": "claude-code", "session_id": "s-9f2" }
+  }
+  ```
+
+  Submitting for review seals it into the engine's own version chain, since that
+  is the entry a submission appends. Every other write that seals a version
+  records it on that version, so version history —
+  the REST list, `context_versions` (prose and structured payload alike), and the
+  history panel in the UI — answers "which agent wrote v7, in which session".
+  Every MCP tool call, and every REST call that accepts `client`, records it on the
+  activity trace — which is where a call that seals no version is attributed: a
+  read, and a rejection, which commits no content.
+  The admin Activity Trace shows it under the caller it belongs to. `editedBy` is
+  untouched and remains the authoritative authoring record.
+
+  Everything about it is optional — the object and each field within it. No
+  endpoint requires it, an unattributed call is a valid call, and a call carrying
+  none stores nothing rather than an empty `{}`: "not attributed" and "attributed
+  to nobody" are different claims.
+
+  The server fills what the transport already knows under anything the caller
+  sent, merged per key, so a caller that names its agent but no session keeps its
+  agent and still gains a session id: `agent` from the API key's label,
+  `session_id` from an `Mcp-Session-Id` header. `CONTEXTNEST_AGENT` /
+  `CONTEXTNEST_SESSION_ID` override those; `CONTEXTNEST_NO_ATTRIBUTION=1` derives
+  nothing, which matters because what is derived lands in an append-only history —
+  consent has to be available before the first write, not after. Nothing is
+  synthesized where the transport knows nothing: a placeholder session id would be
+  indistinguishable from a real one.
+
+  The field itself is the engine's: `clientField`, `clientMetadataSchema` and its
+  bounds are imported from `@promptowl/contextnest-engine/api` and never restated
+  here, so the CLI, the upstream MCP server and this edition all accept exactly
+  the same `client`. This release therefore requires engine ≥2.6.0. Only the
+  binding lives in this repo: what this server's transport can report about its
+  caller, and how the block is stored on version rows and the activity trace.
+
+  `client` is a label, not an identity claim: never authenticated, never used to
+  authorize, and deliberately not an input to any hash chain, so histories
+  recorded before the field existed keep verifying byte for byte. It is bounded
+  (scalar values ≤512 chars, ≤16 custom keys) because an untrusted caller writes
+  it into an append-only audit trail, and a near-miss on a reserved key
+  (`sessionId`, `Agent`) is rejected rather than filed as a custom key — which
+  would leave the write looking attributed while the slot readers check stays
+  empty. It is distinct from `metadata`, which is frontmatter and describes the
+  document rather than the call.
+
+  Specified in `CONTEXT_NEST_SPEC.md` §9.4 upstream (PromptOwl/ContextNest#107);
+  this is the Community Edition binding of it, over this server's own version
+  rows and activity trace.
+
+- a344cc5: New nest setting "Creators review their own documents" (`creator_is_reviewer`, off by default). In a governed nest, whoever creates a document becomes its reviewer steward and the first version publishes immediately; every later change — a teammate's or the creator's own — goes through review as usual, with separation of duties unchanged. Prime documents still start as drafts. Future creates only; nothing is stewarded retroactively.
+- cd9b298: MCP writes behave the same on every nest, and match the engine catalog.
+
+  - **`context_update` tags now replace the set** (the catalog's contract) instead of merging. Merging left no way to remove a tag over MCP. To add one, send the current tags plus the new one.
+  - **Frontmatter pasted into `content` is refused** on `context_create` / `context_update`, with a message saying to pass tags/status as parameters. It used to be stored as a second, dead frontmatter block in the body.
+  - **`context_move` returns `{ id, previous_id, title }` as structured data**, so `ctx move --vault <alias>` can read the result.
+  - **One `/mcp` connection works for `ctx` across every nest.** The server-level tools now use the per-nest tool schemas plus a `nest` argument (the hand-kept copies had drifted, and undeclared keys were silently dropped). Reads that omit `nest` (`context_search`, `context_list`, `context_query`) return merged structured results, each hit tagged `nest: { id, name }`. Hits are interleaved round-robin across nests (search has no cross-nest relevance score), so a `limit` never fills up from the first nests alone. `context_overview` stays prose-only. `context_versions` is now served there too.
+  - **`nest_index` returns the nests as structured data** alongside the markdown, which `ctx vault list` uses to list each nest as `<alias>/<nest>`.
+  - **`/llms.txt`** documents registering the server once and addressing a nest as `--vault <alias>/<nest>`.
+  - **`context_submit_review` takes `id`** on `/mcp` and no longer requires `title`, matching `context_versions`. A fan-out read that every nest rejects (a malformed selector, say) now returns that error instead of "No results found", and merged `list` / `search` cap their limits the way one nest does.
+
+- 0cf46c2: Upload PDFs as governed `pdf` documents.
+
+  `POST /nests/:id/nodes/pdf` (multipart `file`) turns a PDF into a document whose body is the PDF's extracted text — what agents read through `context_get`, which now also says `**Source file:** PDF, N pages` (and `no text layer` for a scan). The PDF itself is kept beside the document and bound to each version by sha256 (engine `context_import_pdf`, `@promptowl/contextnest-engine` 2.7). Uploads go through the same stewardship as any create or edit: a draft in a governed nest, a new version when the PDF is replaced. `GET /nests/:id/nodes/:nodeId/pdf` serves the binary through the node's read gate, so a public reader only ever gets the approved version's PDF.
+
+  In the app: Import → "Upload PDF", or drop a `.pdf` on the vault. A PDF document shows the PDF in the browser's viewer above its extracted text (read-only), with Download and Replace PDF, and a warning when the PDF has no text layer. New setting `PDF_MAX_MB` (default 25).
+
+- 5dc00db: Opening a nest to the Organization tier on a shared server now asks first — and says who it really reaches. Plus a "My nests" dashboard default.
+
+  A nest's **Organization** visibility means every authenticated account on this deployment. On a self-hosted server that is your company, so the tier flipped in one click with the hint "everyone signed in here can read". On the PromptOwl-hosted service one server holds many unrelated customers, so the same click made a nest readable by every one of them — under a label that sounded like "my organization". Only **Public** confirmed.
+
+  **A superadmin toggle names what the server is.** Settings → General → _This server hosts several organizations_ (`SHARED_DEPLOYMENT`, off by default, persisted like every other runtime setting, reported on `GET /health`). With it on, choosing Organization asks for the same acknowledgement Public does — and the server enforces it: `PATCH /nests/:id/visibility` to `org` without `acknowledge_public: true` returns `409 requires_acknowledgement`, so a client that bypasses the UI can't skip it either. The picker's hints and both dialogs then say the literal boundary: "every account on this server — other organizations included", and Public adds "including every account on this server". Off, nothing changes for a self-hosted install. Turning it on guards future changes only: nests already at Organization stay as they are until their admins narrow them — audit those first (the dashboard's _Organization_ scope lists every one).
+
+  **The dialog shows what strangers will see.** Every confirmation — the visibility picker's and the nest header's publish toggle — displays the nest's description, since that and the name are all a reader discovering the nest gets, and offers to write one when it is empty. Optional; it never blocks the change.
+
+  **Your nests first.** The dashboard opens on a new **My nests** scope (owned or shared with you) instead of everything you can read, so other people's org/public nests are a choice — _Organization_, _Public_ or _All nests_ in the same select — rather than the first screen. The choice is remembered per browser. `GET /nests` rows now carry `discovered: true` for nests reached through visibility alone, and **Shared with me** lists only nests somebody actually shared with you — a nest you can merely read because of its tier is no longer counted as one. A newcomer with nothing of their own sees "No nests of your own yet" with a _Browse all nests_ button, not "hidden by the current filter".
+
+- cd2b02c: YouTube and Vimeo links play in place.
+
+  Paste a YouTube or Vimeo URL on a line of its own and the document shows the video's player instead of a bare link — in the reader, version history, the artifact viewer and the editor (and its preview). The markdown on disk stays the plain URL, so agents, exports and the `/p` published pages see exactly what was written; published pages keep showing it as a link.
+
+  Only a bare URL embeds: a titled link (`[Watch the demo](https://youtu.be/…)`) and a link inside a sentence stay links. Recognised: `youtube.com/watch?v=…`, `youtu.be/…`, `youtube.com/shorts/…`, `youtube.com/embed/…` (a `t=`/`start=` time is kept), `vimeo.com/<id>` (including unlisted `vimeo.com/<id>/<hash>`) and `player.vimeo.com/video/<id>`. Hosts are matched exactly — anything else, including look-alike domains, stays a link. YouTube plays from `youtube-nocookie.com`; the player runs in a sandboxed, lazy-loaded frame. For an unlisted Vimeo video, paste the share link that includes its hash (`vimeo.com/<id>/<hash>`) — without it Vimeo refuses to play the video.
+
+  **Adding images and videos is obvious now.** The editor toolbar has a labelled **Image / video** button (icon-only on narrow screens) with two choices: _Upload image or video_ — with the accepted types and limits spelled out (PNG, JPG, GIF, WebP up to 10 MB · MP4, WebM up to 30 MB) — and _Embed YouTube or Vimeo link_, which checks the link and drops it in as its own line so the player shows (a link that isn't a YouTube/Vimeo video gets an inline error). Dragging a file over the editor shows "Drop to add an image or video"; pasting a screenshot or copied image uploads it the same way a drop does (before, a pasted image did nothing); and an empty document's placeholder mentions both. CSV / TSV import stays under the Upload button. None of this appears in a read-only, locked or preview document.
+
+### Patch Changes
+
+- 62cf2bc: An HTML artifact can be shared, published, linked, moved and deleted from its own page, the way a markdown document can.
+
+  A markdown document's top bar has Share (the nest) and a ⋮ menu with Copy link, Move to folder, Share this document, Publish and Delete. An artifact — a slide deck, dashboard or infographic an agent emitted as HTML — opened in a viewer that had none of them: Preview / Annotate / Edit source, History, Reload, Turn into a document, Comments and Open in new tab. The server already published and granted access to artifacts exactly as it does documents; the buttons just weren't there, so sharing an artifact meant going back to the nest list and finding its row menu.
+
+  The artifact page now carries the same visibility control, the same Share button and the same ⋮ menu, with the same gating — owners and admins share and publish, editors move and ask for deletion, viewers get Copy link, an archived nest withholds sharing — and a published artifact serves as HTML under the artifact sandbox as before. The two pages draw the menu from one list (`ui/src/lib/document-actions.ts`), so they can't drift apart again; that list is unit-tested for the role matrix.
+
 ## 1.24.0
 
 ### Minor Changes

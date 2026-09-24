@@ -20,6 +20,8 @@ import { nestNameProblem } from "../../../lib/nest-name";
 import {
   scopeShowsNests,
   visibleUnsynced,
+  nestInScope,
+  DEFAULT_NEST_SCOPE,
   type NestScope,
 } from "../../../lib/dashboard-scope";
 import { canRequestNestRemoval } from "../../../lib/nest-caps";
@@ -60,6 +62,8 @@ import { ImportFolderModal } from "../../../components/ImportFolderModal";
 /** How many nest cards render before "Show more" — a 50-nest account should
  *  not mount 50 cards on load. */
 const NEST_PAGE_SIZE = 24;
+const NEST_SCOPE_KEY = "cn:dashboard:nestScope";
+const NEST_SCOPES: NestScope[] = ["all", "mine", "owned", "shared", "org", "public", "synced", "unsynced"];
 
 // relTime / formatServerDate live in lib/dates: SQL-default timestamps arrive
 // as UTC with no zone, which new Date() would read as local time.
@@ -78,6 +82,11 @@ export default function NestsPage() {
     refetch: refetchNests,
   } = useNests();
   const allNests = nestsData?.nests ?? [];
+  // Nest creation is admins-only unless the server opens it (NEST_CREATION) —
+  // non-admins never see a create/import CTA they can't use.
+  const { data: health } = useQuery(reads.health());
+  const canCreate = authMode === "open" || isAdmin || health?.nest_creation === "everyone";
+  const adminEmail = adminStatus?.admin?.email;
   // Archived is a switch on the Nests page, not a tab: the list stays
   // unfetched until someone flips it — archived nests are a rare visit, not
   // part of every dashboard load.
@@ -108,18 +117,32 @@ export default function NestsPage() {
   // just bounds how many cards are mounted at once.
   const [nestQuery, setNestQuery] = useState("");
   const [nestSort, setNestSort] = useState<"activity" | "name">("activity");
-  const [nestScope, setNestScope] = useState<NestScope>("all");
+  // Scope opens on "My nests" and is remembered per browser: on a shared
+  // server the discovered org/public nests are other people's, so they are a
+  // choice, not the first screen (CU-wdqcq02mek).
+  const [nestScope, setNestScopeState] = useState<NestScope>(() => {
+    try {
+      const saved = localStorage.getItem(NEST_SCOPE_KEY);
+      if (saved && NEST_SCOPES.includes(saved as NestScope)) return saved as NestScope;
+    } catch {
+      /* storage blocked — fall through to the default */
+    }
+    return DEFAULT_NEST_SCOPE;
+  });
+  const setNestScope = (scope: NestScope) => {
+    setNestScopeState(scope);
+    try {
+      localStorage.setItem(NEST_SCOPE_KEY, scope);
+    } catch {
+      /* best-effort */
+    }
+  };
   const [nestPageSize, setNestPageSize] = useState(NEST_PAGE_SIZE);
-  const nestOwned = (n: any): boolean =>
-    n.is_owner ?? (n.permission ?? "owner") === "owner";
   const filteredNests = useMemo(() => {
     if (!scopeShowsNests(nestScope)) return [];
     const q = nestQuery.trim().toLowerCase();
     const matched = allNests.filter((n: any) => {
-      if (nestScope === "owned" && !nestOwned(n)) return false;
-      if (nestScope === "shared" && nestOwned(n)) return false;
-      if (nestScope === "public" && n.visibility !== "public") return false;
-      if (nestScope === "org" && n.visibility !== "org") return false;
+      if (!nestInScope(n, nestScope)) return false;
       if (!q) return true;
       return (
         (n.name ?? "").toLowerCase().includes(q) ||
@@ -146,12 +169,19 @@ export default function NestsPage() {
   // narrowing its list; the Dashboard only offered one once nothing matched,
   // leaving a filtered-but-non-empty grid with no way back.
   const nestFiltersActive =
-    nestQuery.trim() !== "" || nestScope !== "all" || nestSort !== "activity";
+    nestQuery.trim() !== "" || nestScope !== DEFAULT_NEST_SCOPE || nestSort !== "activity";
   const clearNestFilters = () => {
     setNestQuery("");
-    setNestScope("all");
+    setNestScope(DEFAULT_NEST_SCOPE);
     setNestSort("activity");
   };
+  // Nests on the server that the default scope is hiding — reachable through
+  // visibility alone. Offered from the empty state so a newcomer on a shared
+  // server learns they exist without them being the first thing shown.
+  const discoveredCount = useMemo(
+    () => allNests.filter((n: any) => !!n.discovered).length,
+    [allNests],
+  );
   const qc = useQueryClient();
   const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
   const filteredUnsynced = useMemo(
@@ -397,19 +427,29 @@ export default function NestsPage() {
             description="Shared knowledge vaults for your team"
             className="mb-0"
             actions={
-              <>
-                {/* Search lives in the header on every page — one entry point,
-                    not a second one styled differently here (CU-wdqcq012uv). */}
-                <Button variant="outline" onClick={() => setShowImport(true)}>
-                  <FolderInput className="h-4 w-4 mr-2" />
-                  Import Folder
-                </Button>
-                <Button onClick={() => setShowCreate(true)}>
-                  <Plus className="h-4 w-4 mr-2" />
-                  New Nest
-                </Button>
-              </>
+              canCreate && (
+                <>
+                  {/* Search lives in the header on every page — one entry point,
+                      not a second one styled differently here (CU-wdqcq012uv). */}
+                  <Button variant="outline" onClick={() => setShowImport(true)}>
+                    <FolderInput className="h-4 w-4 mr-2" />
+                    Import Folder
+                  </Button>
+                  <Button onClick={() => setShowCreate(true)}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    New Nest
+                  </Button>
+                </>
+              )
             }
+          />
+
+          <PendingInvites
+            nests={allNests}
+            onOpen={(n) =>
+              onSelectNest(n.id, n.name, n.is_owner ?? false, n.user_id === ANON_USER_ID)
+            }
+            onDeclined={() => refetchNests()}
           />
 
           {/* Whole-brain landing: frame every nest as one connectable brain. */}
@@ -516,6 +556,7 @@ export default function NestsPage() {
                 aria-label="Filter nests by access"
                 data-testid="nest-scope-select"
               >
+                <option value="mine">My nests</option>
                 <option value="all">All nests</option>
                 <option value="owned">Owned by me</option>
                 <option value="shared">Shared with me</option>
@@ -726,6 +767,38 @@ export default function NestsPage() {
             </div>
           ) : loading ? (
             <div className="text-center py-12 text-muted-foreground">Loading...</div>
+          ) : nestScope === DEFAULT_NEST_SCOPE &&
+            nestQuery.trim() === "" &&
+            filteredNests.length + filteredUnsynced.length === 0 &&
+            discoveredCount > 0 ? (
+            // Nothing of my own yet, but others have opened nests up on this
+            // server: say so plainly rather than "hidden by the current
+            // filter", which reads as a mistake on a first visit.
+            <Card>
+              <CardContent className="text-center py-12">
+                <Database className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
+                <p className="font-medium">No nests of your own yet</p>
+                <p className="text-sm text-muted-foreground mb-4">
+                  {canCreate ? "Create one, or browse" : "Browse"} the {discoveredCount} nest
+                  {discoveredCount === 1 ? "" : "s"} others have opened up on this server.
+                </p>
+                <div className="flex items-center justify-center gap-2">
+                  {canCreate && (
+                    <Button onClick={() => setShowCreate(true)}>
+                      <Plus className="h-4 w-4 mr-2" />
+                      Create Nest
+                    </Button>
+                  )}
+                  <Button
+                    variant="outline"
+                    onClick={() => setNestScope("all")}
+                    data-testid="nest-browse-discovered"
+                  >
+                    Browse all nests
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
           ) : allNests.length + unsynced.length > 0 &&
             filteredNests.length + filteredUnsynced.length === 0 ? (
             <Card>
@@ -748,14 +821,27 @@ export default function NestsPage() {
             <Card>
               <CardContent className="text-center py-12">
                 <Database className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
-                <p className="font-medium">No nests yet</p>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Create your first nest to start sharing knowledge with your team
-                </p>
-                <Button onClick={() => setShowCreate(true)}>
-                  <Plus className="h-4 w-4 mr-2" />
-                  Create First Nest
-                </Button>
+                {canCreate ? (
+                  <>
+                    <p className="font-medium">No nests yet</p>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Create your first nest to start sharing knowledge with your team
+                    </p>
+                    <Button onClick={() => setShowCreate(true)}>
+                      <Plus className="h-4 w-4 mr-2" />
+                      Create First Nest
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <p className="font-medium">
+                      You don't have access to any nests yet.
+                    </p>
+                    <p className="text-sm text-muted-foreground">
+                      Ask {adminEmail || "your admin"} to share one.
+                    </p>
+                  </>
+                )}
               </CardContent>
             </Card>
           ) : (
@@ -1465,5 +1551,88 @@ function CopyInline({ value }: { value: string }) {
         <Copy className="h-3 w-3" />
       )}
     </button>
+  );
+}
+
+/**
+ * Nests shared with the caller that they haven't acted on yet: unread
+ * `nest_invite` inbox rows whose nest is still in their list. Accept opens the
+ * nest (and settles the invite); Decline removes their own access.
+ */
+function PendingInvites({
+  nests,
+  onOpen,
+  onDeclined,
+}: {
+  nests: any[];
+  onOpen: (nest: any) => void;
+  onDeclined: () => void;
+}) {
+  const qc = useQueryClient();
+  const { data } = useQuery(reads.unreadNotifications());
+  const [busy, setBusy] = useState<string | null>(null);
+  const invites = (data?.notifications ?? []).filter((n) => n.kind === "nest_invite");
+  // One row per nest, even if it was shared more than once.
+  const pending = nests.filter((nest) => invites.some((i) => i.nest_id === nest.id));
+  if (pending.length === 0) return null;
+
+  const settle = (nestId: string) =>
+    api.markNotificationsRead(invites.filter((i) => i.nest_id === nestId).map((i) => i.id));
+  const refresh = () =>
+    qc.invalidateQueries({ queryKey: reads.unreadNotifications().queryKey });
+
+  const accept = async (nest: any) => {
+    setBusy(nest.id);
+    await settle(nest.id).catch(() => {});
+    await refresh();
+    setBusy(null);
+    onOpen(nest);
+  };
+  const decline = async (nest: any) => {
+    setBusy(nest.id);
+    try {
+      const { left } = await api.leaveNest(nest.id);
+      if (left) {
+        toast.success(`Declined ${nest.name}`);
+        onDeclined();
+      } else {
+        toast.info(`${nest.name} was shared with your team, so it stays in your list.`);
+      }
+    } catch (e: any) {
+      toast.error(e?.message || "Couldn't decline this invite");
+    } finally {
+      await refresh();
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Card className="border-primary/30 bg-primary/5">
+      <CardContent className="py-4 space-y-2">
+        <p className="font-medium text-sm">Pending invites</p>
+        {pending.map((nest) => (
+          <div key={nest.id} className="flex items-center gap-3 rounded-md border bg-background p-3">
+            <Database className="h-4 w-4 text-muted-foreground shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="font-medium truncate">{nest.name}</div>
+              <div className="text-xs text-muted-foreground truncate">
+                {invites.find((i) => i.nest_id === nest.id)?.message}
+              </div>
+            </div>
+            <Button size="sm" disabled={busy === nest.id} onClick={() => accept(nest)}>
+              Accept
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy === nest.id}
+              onClick={() => decline(nest)}
+            >
+              Decline
+            </Button>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
   );
 }

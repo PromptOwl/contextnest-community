@@ -69,6 +69,8 @@ export interface EmailEventDetails {
   scopeLabel?: string;
   /** Teammate-invite event: the one-time temporary password to sign in with. */
   tempPassword?: string;
+  /** Teammate-invite event: PromptOwl sign-in is open, so mention it as an option. */
+  promptowlSignIn?: boolean;
   version?: number | null;
   note?: string | null;
   /** Direct URL to open the document/nest ("" when no base URL is available). */
@@ -178,6 +180,9 @@ const governanceRows = (x: RenderCtx): RowSpec[] => [
  * detail rows; renderEmail just looks one up by `status` and fills it. Adding a
  * new email = adding one entry here, no scattered `status === …` branches.
  */
+const PROMPTOWL_LINE =
+  " Or choose Sign in with PromptOwl, using a PromptOwl account under this same email.";
+
 const TEMPLATES: Record<EmailEventDetails["status"], EmailTemplate> = {
   approved: {
     heading: (x) => `${x.title} is ${x.meta.subjectWord}`,
@@ -234,9 +239,9 @@ const TEMPLATES: Record<EmailEventDetails["status"], EmailTemplate> = {
     detailsHeader: "Sign-in details",
     linkLabel: "Sign in",
     lineT: (x) =>
-      `You've been invited to ${x.title}${x.d.by ? ` by ${x.d.by}` : ""}. Sign in with your email and the temporary password below, then choose your own password.`,
+      `You've been invited to ${x.title}${x.d.by ? ` by ${x.d.by}` : ""}. Sign in with your email and the temporary password below, then choose your own password.${x.d.promptowlSignIn ? PROMPTOWL_LINE : ""}`,
     lineH: (x) =>
-      `You've been invited to ${x.doc}${x.d.by ? ` by ${escapeHtml(x.d.by)}` : ""}. Sign in with your email and the temporary password below, then choose your own password.`,
+      `You've been invited to ${x.doc}${x.d.by ? ` by ${escapeHtml(x.d.by)}` : ""}. Sign in with your email and the temporary password below, then choose your own password.${x.d.promptowlSignIn ? PROMPTOWL_LINE : ""}`,
     rows: (x) => [
       plainRow("Email", x.d.actor || ""),
       ...(x.d.tempPassword

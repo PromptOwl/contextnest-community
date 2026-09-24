@@ -13,6 +13,7 @@
  */
 
 import { clearDraft } from "./draft";
+import type { NestBranding } from "./branding";
 
 /**
  * A nest's visibility tier. 'org' = every authenticated user of this
@@ -212,6 +213,7 @@ export async function getHealth() {
     /** Content-type toggles — default ON server-side; the editor's type
      *  picker hides a disabled type exactly when create would refuse it. */
     type_artifact_enabled?: boolean;
+    shared_deployment?: boolean;
     type_table_enabled?: boolean;
     subagent_runs_enabled?: boolean;
     subagent_max_depth?: number;
@@ -223,6 +225,8 @@ export async function getHealth() {
     posthog_host?: string;
     /** Mail transport is set up — email/invite publish gates need it. */
     email_configured?: boolean;
+    /** Who may create nests; "admins" hides the create CTAs from everyone else. */
+    nest_creation?: "admins" | "everyone";
     suspended_reason?: string;
   }>("/health");
 }
@@ -265,7 +269,12 @@ export interface AdminSettings {
   /** Offer every registered account in the add-a-person pickers. Default OFF:
    *  a server holding several unrelated customers would otherwise hand one
    *  customer's staff another customer's email addresses. */
+  nest_creation: "admins" | "everyone";
   people_suggest_all_users: boolean;
+  /** This server hosts several organizations (PromptOwl-hosted). On, nest
+   *  visibility 'org' needs the same acknowledgement as 'public' and the
+   *  picker words both tiers to name the real boundary. Default OFF. */
+  shared_deployment: boolean;
   /** Server-computed readiness: enabled AND issuer+client id+secret present. */
   oidc_ready?: boolean;
   /** Write-only: string sets/replaces, null clears; never returned. */
@@ -284,7 +293,14 @@ export interface AdminSettings {
   anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   msteams_webhook_url: string;
+  email_provider: "smtp" | "ses";
   smtp_url: string;
+  ses_region: string;
+  ses_access_key_id: string;
+  /** SES secret is write-only — GET reports presence; PATCH sends a string to
+   *  set or null to clear. */
+  ses_secret_access_key_set?: boolean;
+  ses_secret_access_key?: string | null;
   notify_email_from: string;
   notify_email_to: string;
   anthropic_api_key?: string | null
@@ -376,6 +392,10 @@ export async function inviteTeammate(email: string) {
   return request<{
     temporary_password: string;
     user: { id: string; email: string };
+    /** PromptOwl sign-in is open to everyone, so the teammate can use it too. */
+    promptowl_sign_in?: boolean;
+    /** The invite email with the password was sent to them. */
+    emailed?: boolean;
     message: string;
   }>("/auth/invite", {
     method: "POST",
@@ -849,7 +869,10 @@ export async function setNestVisibility(
   // Publishing (→ public) requires an explicit acknowledgement that the nest
   // becomes readable by anyone on the internet, outside your organization.
   // Without it the server returns 409 requires_acknowledgement. Going back to
-  // private needs no acknowledgement, so this is optional.
+  // private needs no acknowledgement, so this is optional. Despite the name,
+  // the same flag also acknowledges → org on a SHARED deployment (/health
+  // shared_deployment), where "organization" is every account on the server:
+  // one wire field for "I understand who this reaches", whichever tier.
   acknowledgePublic?: boolean,
 ) {
   return request<{ visibility: NestVisibility }>(
@@ -877,6 +900,16 @@ export async function setNestReaderMode(
   );
 }
 
+// Per-nest reader branding (owner / nest admin / server admin). The body
+// replaces the whole branding; null clears it. hide_powered_by is server-admin
+// only (403 otherwise).
+export async function setNestBranding(nestId: string, branding: NestBranding | null) {
+  return request<{ branding: NestBranding | null }>(`/nests/${nestId}/branding`, {
+    method: "PATCH",
+    body: JSON.stringify(branding),
+  });
+}
+
 export async function getNest(nestId: string) {
   return request<{
     nest: {
@@ -888,6 +921,8 @@ export async function getNest(nestId: string) {
       reader_home_node?: string | null;
       // Set when the nest is archived — surfaced straight off the SELECT *.
       archived_at?: string | null;
+      // Per-nest reader branding, parsed server-side; null = unbranded.
+      branding?: NestBranding | null;
     };
     permission: string;
     // Caller's merged effective roles (collaborator + steward), nest-wide.
@@ -1058,6 +1093,63 @@ export async function createNode(
     method: "POST",
     body: JSON.stringify(data),
   });
+}
+
+/** The `pdf:` block a pdf node carries (engine §1.11). */
+export interface PdfMeta {
+  file: string;
+  sha256: string;
+  bytes: number;
+  pages: number;
+  /** False for a scanned PDF: no text could be extracted, the body is empty. */
+  text_layer: boolean;
+  extractor: string;
+  extractor_version: string;
+  extracted_at: string;
+}
+
+/**
+ * Upload a PDF as a governed `pdf` document (multipart — the browser sets the
+ * boundary). Pass `nodeId` to replace the PDF of an existing pdf node: that is
+ * a new version, governed like any edit. The body becomes the extracted text.
+ */
+export async function createPdfNode(
+  nestId: string,
+  file: File,
+  opts: { title?: string; folder?: string; tags?: string[]; nodeId?: string } = {},
+) {
+  const form = new FormData();
+  form.append("file", file);
+  if (opts.title) form.append("title", opts.title);
+  if (opts.folder) form.append("folder", opts.folder);
+  if (opts.nodeId) form.append("nodeId", opts.nodeId);
+  for (const t of opts.tags ?? []) form.append("tags", t);
+  const res = await fetch(`/nests/${nestId}/nodes/pdf`, {
+    method: "POST",
+    body: form,
+    credentials: "include",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `PDF upload failed: ${res.status}`);
+  return data as { node: any; version: number; stewards?: any[] };
+}
+
+/**
+ * Same-origin URL of a pdf node's binary. The server picks the version a
+ * caller may see (a public reader always gets the approved one); `approvedOnly`
+ * asks for that view explicitly, `download` for an attachment disposition.
+ */
+export function pdfUrl(
+  nestId: string,
+  nodeId: string,
+  opts: { version?: number; approvedOnly?: boolean; download?: boolean } = {},
+): string {
+  const q = new URLSearchParams();
+  if (opts.version) q.set("version", String(opts.version));
+  if (opts.approvedOnly) q.set("approved_only", "1");
+  if (opts.download) q.set("download", "1");
+  const qs = q.toString();
+  return `/nests/${nestId}/nodes/${nodeId}/pdf${qs ? `?${qs}` : ""}`;
 }
 
 export async function updateNode(
@@ -2558,6 +2650,17 @@ export async function removeNodeWatcher(nestId: string, nodeId: string, email: s
     { method: "DELETE" },
   );
   return r.watchers;
+}
+
+export async function listUnreadNotifications() {
+  return request<{ notifications: WatcherNotification[] }>(
+    "/me/notifications?unread=true",
+  );
+}
+
+/** Decline a nest invite — removes the caller's own access to that nest. */
+export async function leaveNest(nestId: string) {
+  return request<{ left: boolean }>(`/me/nests/${nestId}/leave`, { method: "POST" });
 }
 
 export async function markNotificationsRead(ids: string[] | "all") {

@@ -116,6 +116,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       index_synced_at TEXT,
       reader_mode INTEGER NOT NULL DEFAULT 0,
       reader_home_node TEXT,
+      -- Per-nest reader branding JSON (CU-wdqcq02ptm); NULL = unbranded.
+      branding_json TEXT,
       -- Set = archived (migration 038): off the dashboard, out of MCP, read
       -- only, nothing deleted. NULL is the whole "not archived" story.
       archived_at TEXT,
@@ -476,6 +478,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- upgrade. reader_mode is off by default; reader_home_node is nullable.
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS reader_mode INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS reader_home_node TEXT;
+    -- Per-nest reader branding (CU-wdqcq02ptm): same inline-plus-ALTER pattern.
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS branding_json TEXT;
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS archived_at TEXT;
 
     CREATE TABLE IF NOT EXISTS schedules (

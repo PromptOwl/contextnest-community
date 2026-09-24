@@ -8,6 +8,7 @@ import {
   Users,
   Settings,
   UserCircle,
+  UserPlus,
 } from "lucide-react";
 import { BetaBadge } from "@/components/ui/beta-badge";
 import { PageTitle } from "@/components/ui/page-title";
@@ -120,11 +121,22 @@ export default function GuidePage() {
         <Section title="Nests" icon={Boxes}>
           <Bullets
             items={[
-              ["Create", <>From the Nests page. Have Markdown already? <b>Import folder</b> brings a whole directory in.</>],
+              ["Create", <>From the Nests page — server admins only, unless an admin lets everyone create nests in Server settings. Have Markdown already? <b>Import folder</b> brings a whole directory in.</>],
               ["Organize", <>Folders and subfolders in the sidebar; move a document from its folder picker. With many nests, the sidebar has a name filter.</>],
               ["Share", <>The whole nest with a person or a team (viewer / editor / admin), or just one document or folder — the recipient sees only that slice.</>],
               ["Go public", <>A public nest gets a read-only <b>Reader mode</b> with a home document. A single document can also be published to a link.</>],
               ["Housekeeping", <>Rename, pin, archive or delete a nest. Anyone can request a deletion; an owner honours or declines it.</>],
+            ]}
+          />
+        </Section>
+
+        <Section title="Inviting someone" icon={UserPlus}>
+          <Steps
+            steps={[
+              <><b>Share a nest</b> with their email (the nest's Collaborators tab), or add them under <b>Teammates</b> and pick a nest to share right there. Joining the server alone gives no nest access.</>,
+              <>They get an <b>invite email</b> naming the nest and who shared it. Adding a teammate also emails a temporary password.</>,
+              <>The link opens sign-in with their email filled in. They <b>Continue with PromptOwl</b> using that same email — creating a PromptOwl account there if they have none — or use the temporary password.</>,
+              <>Signed in, they see <b>Pending invites</b> on the Nests page. <b>Accept</b> opens the nest; <b>Decline</b> removes their access.</>,
             ]}
           />
         </Section>
@@ -188,7 +200,7 @@ export default function GuidePage() {
           <Bullets
             items={[
               ["Teammates", <>Invite people, reset passwords, remove accounts, name other admins.</>],
-              ["Server settings", <>Public URL and logo, the Anthropic key, Slack / Teams / email notifications, allowed content types, upload limit, telemetry.</>],
+              ["Server settings", <>Public URL and logo, who can create nests, the Anthropic key, Slack / Teams / email notifications (email over SMTP or AWS SES), allowed content types, upload limit, telemetry.</>],
               ["Activity trace", <>Every governance action on the server. Each nest has its own trace under Activity.</>],
             ]}
           />

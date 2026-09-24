@@ -3,6 +3,7 @@
  * Uses ported PromptOwl components for the UI, wired to REST API.
  */
 import { Suspense, useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { visibilityConfirmCopy, visibilityTierHint } from "../lib/visibility-confirm";
 import { lazyChunk } from "../lib/lazy-chunk";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -16,7 +17,7 @@ import {
   Clock, CheckCircle2, Loader2, Link2, Settings as SettingsIcon,
   Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
   FileStack, FolderPlus, X,
-  Activity, BookOpen, Archive, Eye,
+  Activity, BookOpen, Archive, Eye, Palette,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { prettyFolderPath } from "./FolderTree";
@@ -30,6 +31,8 @@ import { groupNodesByFolder } from "@/lib/nest-overview";
 import { useMediaQuery } from "@/lib/use-media-query";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ReaderView } from "./ReaderView";
+import { ReaderBrandingDialog } from "./ReaderBrandingDialog";
+import { isBranded, type NestBranding } from "../lib/branding";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import {
   AlertDialog,
@@ -69,6 +72,7 @@ import {
 } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Tabs, TabsList, TabsTrigger, TabsContent,
 } from "@/components/ui/tabs";
@@ -150,7 +154,7 @@ export function NestView({
   initialTab,
   onTabChange,
 }: NestViewProps) {
-  const { isAdmin, adminStatus, authMode } = useAuth();
+  const { isAdmin, adminStatus, authMode, sharedDeployment } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
   //   - real-owner nest → only that owner
   //   - anon-owned + open mode → any caller (server treats anon as commons)
@@ -259,6 +263,9 @@ export function NestView({
   // Publishing (→ public) is guarded by an acknowledgement dialog: the nest
   // becomes readable by anyone on the internet, outside your organization.
   const [confirmPublic, setConfirmPublic] = useState(false);
+  // What the new readers will see beside the name. Prefilled from the nest on
+  // open and saved on confirm, same as NestVisibilityControl's dialog.
+  const [publicDescriptionDraft, setPublicDescriptionDraft] = useState("");
   // Public Docs Reader Mode (superadmin-only config). reader_mode flips the
   // read-only presentation to the clean docs reader; reader_home_node names the
   // designated landing/hub node (empty → resolve by convention).
@@ -266,6 +273,10 @@ export function NestView({
   const [readerHomeNode, setReaderHomeNode] = useState<string | null>(null);
   const [readerModeSaving, setReaderModeSaving] = useState(false);
   const [readerDialogOpen, setReaderDialogOpen] = useState(false);
+  // Per-nest reader branding (CU-wdqcq02ptm): nest.branding, edited from the
+  // reader-mode dialog, applied by ReaderView (and the shell, for readers).
+  const [branding, setBranding] = useState<NestBranding | null>(null);
+  const [brandingDialogOpen, setBrandingDialogOpen] = useState(false);
   // "Preview as reader": an owner/editor looking at the visitor-facing reader
   // from inside the authoring UI. Presentation only — rights are unchanged.
   const [previewReader, setPreviewReader] = useState(false);
@@ -558,6 +569,7 @@ export function NestView({
       setNestDescription((nestMeta.nest as any).description ?? null);
       setReaderModeEnabled(!!(nestMeta.nest as any).reader_mode);
       setReaderHomeNode((nestMeta.nest as any).reader_home_node ?? null);
+      setBranding(nestMeta.nest.branding ?? null);
       setNestArchivedAt((nestMeta.nest as any).archived_at ?? null);
     }
     if (nestMeta?.permission) {
@@ -954,11 +966,33 @@ export function NestView({
       return;
     }
     if (visibility !== "public") {
+      setPublicDescriptionDraft(nestDescription ?? "");
       setConfirmPublic(true);
       return;
     }
     await applyVisibility("private");
   };
+
+  // Confirm publishing: save a newly written description first — best-effort,
+  // because a failed description save must not block the publish the user just
+  // acknowledged — then apply with the acknowledgement.
+  const confirmPublicWiden = async () => {
+    setConfirmPublic(false);
+    const next = publicDescriptionDraft.trim();
+    if (next && next !== (nestDescription ?? "").trim()) {
+      try {
+        await api.updateNest(nestId, { description: next });
+        setNestDescription(next);
+      } catch (err: any) {
+        toast.error(
+          err?.message || "Failed to save the description — publishing anyway",
+        );
+      }
+    }
+    await applyVisibility("public", true);
+  };
+
+  const publicConfirmCopy = visibilityConfirmCopy("public", { sharedDeployment });
 
   // Public Docs Reader Mode config (server admin, or this nest's own
   // owner/admin — see canManageReaderMode below). Optimistic flip with
@@ -1020,10 +1054,12 @@ export function NestView({
   const [importMenuOpen, setImportMenuOpen] = useState(false);
   // Phone width: Share folds into the ⋮ menu so the header actions keep one row.
   const isPhone = useMediaQuery("(max-width: 639px)");
+  const pdfInputRef = useRef<HTMLInputElement | null>(null);
 
-  const kindForFile = (name: string): "document" | "artifact" | null => {
+  const kindForFile = (name: string): "document" | "artifact" | "pdf" | null => {
     const ext = name.toLowerCase().split(".").pop() || "";
     if (ext === "html" || ext === "htm") return "artifact";
+    if (ext === "pdf") return "pdf";
     if (ext === "md" || ext === "markdown" || ext === "txt") return "document";
     return null;
   };
@@ -1033,7 +1069,7 @@ export function NestView({
       const files = Array.from(fileList).filter((f) => kindForFile(f.name));
       const skipped = fileList.length - files.length;
       if (!files.length) {
-        toast.error("Drop .md or .html files to add them to this vault.");
+        toast.error("Drop .md, .html or .pdf files to add them to this vault.");
         return;
       }
       setImporting(true);
@@ -1041,7 +1077,7 @@ export function NestView({
       try {
         for (const file of files) {
           const type = kindForFile(file.name)!;
-          const title = file.name.replace(/\.(md|markdown|txt|html|htm)$/i, "");
+          const title = file.name.replace(/\.(md|markdown|txt|html|htm|pdf)$/i, "");
           // Whole-vault import (webkitdirectory) carries relative paths —
           // keep the tree: strip the picked root dir + filename, the rest is
           // the folder. Hidden dirs (.versions, .context) are engine files.
@@ -1054,8 +1090,12 @@ export function NestView({
             folder = (segs[0] === "nodes" ? segs.slice(1) : segs).join("/") || undefined;
           }
           try {
-            const text = await file.text();
-            const res = await api.createNode(nestId, { title, content: text, type, folder });
+            // A PDF is uploaded as bytes and becomes a governed `pdf` document
+            // (the server extracts its text); everything else is read as text.
+            const res =
+              type === "pdf"
+                ? await api.createPdfNode(nestId, file, { title, folder })
+                : await api.createNode(nestId, { title, content: await file.text(), type, folder });
             const id = (res as any)?.node?.id;
             if (id) createdIds.push(id);
           } catch (e: any) {
@@ -1113,6 +1153,7 @@ export function NestView({
         loadingFolders={loadingFolders}
         loadedFolders={loadedFolderPaths}
           approvedOnly={previewReader}
+          branding={branding}
       />
       </div>
     );
@@ -1148,7 +1189,7 @@ export function NestView({
               Drop to add to this vault
             </div>
             <div className="text-xs text-muted-foreground">
-              .md → document · .html → hosted artifact
+              .md → document · .html → hosted artifact · .pdf → PDF document
             </div>
           </div>
         </div>
@@ -1256,7 +1297,7 @@ export function NestView({
                 visibility === "public"
                   ? "Public — anyone with the URL can read. Click to make private."
                   : visibility === "org"
-                    ? "Organization — everyone signed in to this deployment can read. Click to manage sharing (Collaborators tab)."
+                    ? `Organization — ${visibilityTierHint("org", { sharedDeployment }).toLowerCase()}. Click to manage sharing (Collaborators tab).`
                     : "Private. Click to make public (anyone with the URL can read)."
               }
             >
@@ -1407,7 +1448,18 @@ export function NestView({
                 ref={importInputRef}
                 type="file"
                 multiple
-                accept=".md,.markdown,.txt,.html,.htm"
+                accept=".md,.markdown,.txt,.html,.htm,.pdf"
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files?.length) void importFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              <input
+                ref={pdfInputRef}
+                type="file"
+                multiple
+                accept="application/pdf,.pdf"
                 className="hidden"
                 onChange={(e) => {
                   if (e.target.files?.length) void importFiles(e.target.files);
@@ -1697,7 +1749,13 @@ export function NestView({
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
                   <DropdownMenuItem onSelect={() => importInputRef.current?.click()}>
-                    Files (.md / .html)
+                    Files (.md / .html / .pdf)
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() => pdfInputRef.current?.click()}
+                    data-testid="nest-upload-pdf"
+                  >
+                    Upload PDF (as a document)
                   </DropdownMenuItem>
                   <DropdownMenuItem onSelect={() => importDirRef.current?.click()}>
                     Whole vault (folder, keeps structure)
@@ -2130,6 +2188,31 @@ export function NestView({
             </div>
           )}
 
+          {/* Branding — logo, banner, colors, footer — for the reader and
+              the nest's /p links. Its own dialog: it needs room for a preview. */}
+          <div className="rounded-lg border p-4 flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <Label className="text-sm font-medium">Branding</Label>
+              <p className="text-xs text-muted-foreground">
+                {isBranded(branding)
+                  ? "Custom logo, colors and footer are applied for readers."
+                  : "Readers see the default ContextNest look."}
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0 gap-1.5"
+              onClick={() => {
+                setReaderDialogOpen(false);
+                setBrandingDialogOpen(true);
+              }}
+            >
+              <Palette className="h-3.5 w-3.5" />
+              {isBranded(branding) ? "Edit branding" : "Customize"}
+            </Button>
+          </div>
+
           <DialogFooter>
             {readerModeEnabled && (
               <Button
@@ -2150,6 +2233,16 @@ export function NestView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ReaderBrandingDialog
+        open={brandingDialogOpen}
+        onOpenChange={setBrandingDialogOpen}
+        nestId={nestId}
+        nestName={editableName}
+        branding={branding}
+        isServerAdmin={isAdmin}
+        onSaved={setBranding}
+      />
 
       {/* Reader mode's landing document, picked from the real document list —
           the field used to take a hand-typed node id, so a title people could
@@ -2174,21 +2267,32 @@ export function NestView({
       <AlertDialog open={confirmPublic} onOpenChange={setConfirmPublic}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Make this nest public?</AlertDialogTitle>
+            <AlertDialogTitle>{publicConfirmCopy.title}</AlertDialogTitle>
             <AlertDialogDescription>
-              This makes the nest readable by anyone on the internet, outside
-              your organization. Anyone with the URL will be able to read it.
+              {publicConfirmCopy.body}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {/* What those readers will see beside the name. Prefilled from the
+              nest; an empty one can be written here and is saved on confirm. */}
+          <div className="space-y-1.5">
+            <Label htmlFor="nest-public-description" className="text-xs">
+              {(nestDescription ?? "").trim()
+                ? "Description readers will see"
+                : "This nest has no description — readers will only see its name. Add one? (optional)"}
+            </Label>
+            <Textarea
+              id="nest-public-description"
+              value={publicDescriptionDraft}
+              onChange={(e) => setPublicDescriptionDraft(e.target.value)}
+              placeholder="What this nest is for, and who it's meant for"
+              rows={2}
+              data-testid="nest-public-description"
+            />
+          </div>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                setConfirmPublic(false);
-                void applyVisibility("public", true);
-              }}
-            >
-              Make public
+            <AlertDialogAction onClick={() => void confirmPublicWiden()}>
+              {publicConfirmCopy.confirm}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

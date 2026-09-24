@@ -43,6 +43,7 @@ import { reads } from "../../../lib/queries";
 import { copyTextWithToast } from "../../../lib/clipboard";
 import { getAdminSettings, updateAdminSettings } from "../../../lib/api";
 import { useAuth } from "../../../auth/AuthContext";
+import { AgentConnectPanel } from "./AgentConnectPanel";
 import { toast } from "sonner";
 
 interface SettingsPageProps {
@@ -84,7 +85,9 @@ const TABS: {
       "public_base_url",
       "logo_url",
       "anthropic_api_key",
+      "nest_creation",
       "people_suggest_all_users",
+      "shared_deployment",
     ],
   },
   {
@@ -111,7 +114,17 @@ const TABS: {
   {
     id: "notifications",
     label: "Notifications",
-    keys: ["slack_webhook_url", "msteams_webhook_url", "smtp_url", "notify_email_from", "notify_email_to"],
+    keys: [
+      "slack_webhook_url",
+      "msteams_webhook_url",
+      "email_provider",
+      "smtp_url",
+      "ses_region",
+      "ses_access_key_id",
+      "ses_secret_access_key",
+      "notify_email_from",
+      "notify_email_to",
+    ],
   },
   {
     // Not draft-backed like the tabs above — sites are added/edited/removed
@@ -119,6 +132,12 @@ const TABS: {
     // Teammates page), so this tab has no keys to track for the unsaved dot.
     id: "community-sites",
     label: "Community sites",
+    keys: [],
+  },
+  {
+    // Docs only — nothing here persists, so no keys for the unsaved dot.
+    id: "agents",
+    label: "Connecting agents",
     keys: [],
   },
   {
@@ -277,6 +296,12 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   const [draft, setDraft] = useState<AdminSettings | null>(settings);
   const [saving, setSaving] = useState(false);
   const qc = useQueryClient();
+  // Auth mode isn't an admin setting — it's boot-time config, reported on
+  // /health and already derived once in AuthContext. The Connecting-agents
+  // tab needs it so open-mode deployments aren't told to send a credential
+  // that doesn't exist; read it from there rather than mounting a second
+  // query, so there's one place that decides what "open mode" means.
+  const { authMode } = useAuth();
   // Error from the last failed save (shape validation or SMTP verify), shown
   // inline near the fields. Cleared on the next edit or a successful save.
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -398,7 +423,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
       if (
         k === "anthropic_api_key" ||
         k === "oidc_client_secret" ||
-        k === "mcp_signing_secret"
+        k === "mcp_signing_secret" ||
+        k === "ses_secret_access_key"
       ) {
         const v = draft[k];
         return (typeof v === "string" && v.trim() !== "") || v === null;
@@ -740,6 +766,38 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               </CardContent>
             </Card>
 
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Plus className="h-4 w-4 text-muted-foreground" />
+                  Nest creation
+                </CardTitle>
+                <CardDescription>
+                  Who can create and import nests on this server.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <div className="pr-4">
+                    <div className="text-sm font-medium">
+                      Let everyone create nests
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Off, only server admins can create or import nests, and
+                      everyone else works in the nests shared with them. On,
+                      any signed-in user can create their own.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={draft.nest_creation === "everyone"}
+                    onCheckedChange={(v) =>
+                      set({ nest_creation: v ? "everyone" : "admins" })
+                    }
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
             {/* Who the add-a-person pickers may offer. Default OFF, and the
                 copy says why in the admin's own terms: on a server shared by
                 unrelated customers this hands one customer's staff another
@@ -773,6 +831,27 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   <Switch
                     checked={draft.people_suggest_all_users}
                     onCheckedChange={(v) => set({ people_suggest_all_users: v })}
+                  />
+                </div>
+                <div className="flex items-start justify-between gap-4 pt-4 border-t">
+                  <div className="pr-4">
+                    <div className="text-sm font-medium">
+                      This server hosts several organizations
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      A nest's Organization tier is readable by every account
+                      on this server. Off, that is one company and the tier
+                      applies in one click. On — the PromptOwl-hosted service,
+                      or any install shared by unrelated customers — opening a
+                      nest to Organization asks for the same acknowledgement as
+                      Public (enforced by the server, not only the UI), and the visibility picker
+                      says who the tier really reaches.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={draft.shared_deployment}
+                    onCheckedChange={(v) => set({ shared_deployment: v })}
+                    data-testid="settings-shared-deployment"
                   />
                 </div>
               </CardContent>
@@ -1341,19 +1420,81 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               <CardHeader>
                 <CardTitle className="text-base">Email notifications</CardTitle>
                 <CardDescription>
-                  Send the same governance events over SMTP. Set the connection
-                  URL (smtp:// or smtps://, credentials inline), a From address,
-                  and one or more recipients (comma-separated). Leave the URL
-                  empty to turn the connector off.
+                  Invites, shares and governance events by email. Send through
+                  SMTP, or through AWS SES when this server can't use SMTP. Set
+                  a From address and one or more team recipients
+                  (comma-separated). Leave the SMTP URL or AWS region empty to
+                  turn email off.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">
-                <TextField
-                  type="password"
-                  value={draft.smtp_url ?? ""}
-                  placeholder="smtps://user:pass@smtp.example.com:465"
-                  onChange={(v) => set({ smtp_url: v })}
-                />
+                <div role="radiogroup" className="flex gap-4 text-sm">
+                  {(
+                    [
+                      ["smtp", "SMTP"],
+                      ["ses", "AWS SES"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <label key={value} className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="email_provider"
+                        checked={(draft.email_provider ?? "smtp") === value}
+                        onChange={() => set({ email_provider: value })}
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                {(draft.email_provider ?? "smtp") === "smtp" ? (
+                  <TextField
+                    type="password"
+                    value={draft.smtp_url ?? ""}
+                    placeholder="smtps://user:pass@smtp.example.com:465"
+                    onChange={(v) => set({ smtp_url: v })}
+                  />
+                ) : (
+                  <>
+                    <TextField
+                      value={draft.ses_region ?? ""}
+                      placeholder="AWS region — us-east-1"
+                      onChange={(v) => set({ ses_region: v })}
+                    />
+                    <TextField
+                      value={draft.ses_access_key_id ?? ""}
+                      placeholder="Access key ID — leave empty to use the server's IAM role"
+                      onChange={(v) => set({ ses_access_key_id: v })}
+                    />
+                    <TextField
+                      type="password"
+                      value={
+                        typeof draft.ses_secret_access_key === "string"
+                          ? draft.ses_secret_access_key
+                          : ""
+                      }
+                      placeholder={
+                        draft.ses_secret_access_key === null
+                          ? "Secret access key — will be cleared when you save"
+                          : settings?.ses_secret_access_key_set
+                            ? "Secret access key is set — paste to replace"
+                            : "Secret access key — leave empty to use the server's IAM role"
+                      }
+                      onChange={(v) => set({ ses_secret_access_key: v })}
+                    />
+                    {settings?.ses_secret_access_key_set &&
+                      draft.ses_secret_access_key !== null && (
+                        <button
+                          type="button"
+                          className="text-xs text-destructive hover:underline"
+                          onClick={() =>
+                            set({ ses_secret_access_key: null, ses_access_key_id: "" })
+                          }
+                        >
+                          Clear keys
+                        </button>
+                      )}
+                  </>
+                )}
                 <TextField
                   value={draft.notify_email_from ?? ""}
                   placeholder="From — nest@yourcompany.com"
@@ -1727,6 +1868,13 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               </CardContent>
             </Card>
           </TabsContent>
+
+          <TabsContent value="agents" className="space-y-4">
+            <AgentConnectPanel
+              publicBaseUrl={draft.public_base_url}
+              openMode={authMode === "open"}
+            />
+          </TabsContent>
         </Tabs>
       )}
 
@@ -1828,6 +1976,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
  *  hands the form the same props it always took. */
 export default function SettingsRoute() {
   const { isAdmin, refreshHealth } = useAuth();
+  const qc = useQueryClient();
   // Server-wide settings for the admin Settings page. Loaded once for admins.
   const [serverSettings, setServerSettings] = useState<AdminSettings | null>(null);
   useEffect(() => {
@@ -1848,6 +1997,8 @@ export default function SettingsRoute() {
       // there takes effect live — no page reload, and no per-key allowlist to
       // keep in sync as new flags are added.
       await refreshHealth();
+      // Pages reading /health through the query cache (e.g. nest_creation).
+      await qc.invalidateQueries({ queryKey: reads.health().queryKey });
       toast.success("Settings saved");
     } catch (e: any) {
       toast.error(e?.message || "Failed to save settings");
@@ -1857,7 +2008,7 @@ export default function SettingsRoute() {
       // Settings page can focus the offending field's tab and show the message.
       throw e;
     }
-  }, [refreshHealth]);
+  }, [refreshHealth, qc]);
   return (
     <SettingsPage
       settings={serverSettings}

@@ -6,6 +6,7 @@ import { mergeFrameAncestors } from "./shared/artifact-sandbox.js";
 import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
+import { brandingRoutes } from "./nests/branding-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
 import { publishRoutes } from "./nests/publish-routes.js";
 import { publishRenderRoutes } from "./nests/publish-render-routes.js";
@@ -56,6 +57,11 @@ import {
 import { definitionRoutes } from "./definitions/routes.js";
 import { isDerivedAnnotationsNode } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
+import {
+  pdfNodeRoutes,
+  PDF_UPLOAD_PATH,
+  pdfMaxRequestBytes,
+} from "./nodes/pdf-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
 import {
   isSuperAdmin,
@@ -93,7 +99,11 @@ import {
   isVaultLockTimeout,
 } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish } from "./config.js";
-import { verifySmtp, isEmailConfigured } from "./notify/email.js";
+import {
+  verifyEmailTransport,
+  isEmailConfigured,
+  transportSettings,
+} from "./notify/email.js";
 import { getDb } from "./db/client.js";
 import { ensureAnonymousUser } from "./auth/anonymous.js";
 import {
@@ -104,6 +114,7 @@ import {
 } from "./auth/license.js";
 import { persistSetting } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
+import { publicBaseUrlError } from "./shared/public-base-url.js";
 import { isOidcReady } from "./auth/oidc.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
@@ -378,17 +389,21 @@ export function createApp(): Hono<AuthEnv> {
   // Request body size cap — prevents DoS via giant POST payloads before
   // a handler ever gets to parse JSON. Only applies when Content-Length
   // is declared; streamed bodies fall through (uncommon on this API).
-  // The asset-upload route alone gets a higher ceiling (video uploads,
-  // per-type caps enforced in the handler) — the global cap is untouched.
+  // The asset-upload route gets a higher ceiling (video uploads, per-type
+  // caps enforced in the handler), and so does the PDF upload route (up to
+  // PDF_MAX_MB, enforced again in its handler) — the global cap is untouched.
   const ASSET_UPLOAD_PATH = /^\/nests\/[^/]+\/assets\/?$/;
   app.use("*", async (c, next) => {
     const lenStr = c.req.header("Content-Length");
     if (lenStr) {
       const len = parseInt(lenStr, 10);
+      const isPost = c.req.method === "POST";
       const cap =
-        c.req.method === "POST" && ASSET_UPLOAD_PATH.test(c.req.path)
+        isPost && ASSET_UPLOAD_PATH.test(c.req.path)
           ? Math.max(config.MAX_BODY_BYTES, ASSET_MAX_REQUEST_BYTES)
-          : config.MAX_BODY_BYTES;
+          : isPost && PDF_UPLOAD_PATH.test(c.req.path)
+            ? Math.max(config.MAX_BODY_BYTES, pdfMaxRequestBytes())
+            : config.MAX_BODY_BYTES;
       if (Number.isFinite(len) && len > cap) {
         return c.json(
           {
@@ -443,6 +458,9 @@ export function createApp(): Hono<AuthEnv> {
       // Presence only: the publish dialog hides the email/invite gates when
       // this server cannot send mail, because their only way in is a mailed link.
       email_configured: isEmailConfigured(),
+      // Who may create nests (admins | everyone) — the Nests page hides the
+      // create buttons from non-admins when it's admins-only.
+      nest_creation: config.NEST_CREATION,
       // Product analytics for the SPA. The PostHog project key is a public
       // client key, but it only ships while usage telemetry is on — one switch
       // covers everything this server sends outward.
@@ -471,6 +489,11 @@ export function createApp(): Hono<AuthEnv> {
       // API would refuse it — existing nodes of the type stay readable.
       type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
       type_table_enabled: config.TYPE_TABLE_ENABLED,
+      // This server hosts several organizations (PromptOwl-hosted) rather than
+      // one. The visibility picker words 'Organization' and 'Public' by it and
+      // confirms before 'org'; the server enforces the same in
+      // PATCH /nests/:id/visibility.
+      shared_deployment: config.SHARED_DEPLOYMENT,
       // Sub-agent runs gate its own recursion surface separately (env-only,
       // must clear a security review — NOT a UI toggle). Exposed read-only so
       // the Runs page shows the "spawn sub-agent" option only when it's live.
@@ -621,7 +644,9 @@ export function createApp(): Hono<AuthEnv> {
     oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
     oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
+    nest_creation: config.NEST_CREATION,
     people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
+    shared_deployment: config.SHARED_DEPLOYMENT,
     // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
     // presence is reported, never the value (same discipline as the OIDC secret).
     sso_token_exchange_enabled: config.SSO_TOKEN_EXCHANGE_ENABLED,
@@ -643,7 +668,12 @@ export function createApp(): Hono<AuthEnv> {
       : null,
     slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
     msteams_webhook_url: config.MSTEAMS_WEBHOOK_URL ?? "",
+    email_provider: config.EMAIL_PROVIDER,
     smtp_url: config.SMTP_URL ?? "",
+    ses_region: config.SES_REGION ?? "",
+    ses_access_key_id: config.SES_ACCESS_KEY_ID ?? "",
+    // Write-only, like the OIDC secret — presence only, never the value.
+    ses_secret_access_key_set: !!config.SES_SECRET_ACCESS_KEY,
     notify_email_from: config.NOTIFY_EMAIL_FROM ?? "",
     notify_email_to: config.NOTIFY_EMAIL_TO ?? "",
   });
@@ -709,9 +739,19 @@ export function createApp(): Hono<AuthEnv> {
       const v = String(body.logo_url ?? "").trim();
       pending.push({ name: "LOGO_URL", value: v || null });
     }
+    // Validated, not just trimmed. This value is spliced into the copy-paste
+    // snippets the Connecting-agents panel renders — a `bash` block for the
+    // Claude Code and Codex commands, and quoted strings in config.toml,
+    // config.yaml and mcp.json — which people paste verbatim into their own
+    // terminal and config files. Stored unchecked, a shell metacharacter or a
+    // quote here would turn "can edit server settings" into code execution on
+    // every teammate's machine. It is also the audience a minted MCP ticket is
+    // bound to, so junk in it silently breaks token verification.
     if ("public_base_url" in body) {
       const v = String(body.public_base_url ?? "").trim().replace(/\/$/, "");
-      pending.push({ name: "PUBLIC_BASE_URL", value: v || null });
+      const err = v ? publicBaseUrlError(v) : null;
+      if (err) addError("public_base_url", err);
+      else pending.push({ name: "PUBLIC_BASE_URL", value: v || null });
     }
     if ("telemetry_enabled" in body) {
       pending.push({ name: "TELEMETRY_ENABLED", value: body.telemetry_enabled ? "true" : "false" });
@@ -902,10 +942,25 @@ export function createApp(): Hono<AuthEnv> {
     // this server may be multi-tenant (the PromptOwl-hosted deployment holds
     // many customers), where "every registered account" means another
     // customer's staff. false persists as null — unset already means off.
+    if ("nest_creation" in body) {
+      const v = String(body.nest_creation ?? "").trim().toLowerCase();
+      if (v !== "admins" && v !== "everyone")
+        addError("nest_creation", "Nest creation must be admins or everyone.");
+      else pending.push({ name: "NEST_CREATION", value: v });
+    }
     if ("people_suggest_all_users" in body) {
       pending.push({
         name: "PEOPLE_SUGGEST_ALL_USERS",
         value: body.people_suggest_all_users ? "true" : null,
+      });
+    }
+    // This server hosts several organizations. On, nest visibility 'org'
+    // needs the same acknowledgement as 'public' and the UI words both tiers
+    // to name the real boundary. false persists as null — unset is off.
+    if ("shared_deployment" in body) {
+      pending.push({
+        name: "SHARED_DEPLOYMENT",
+        value: body.shared_deployment ? "true" : null,
       });
     }
     // ── Agent SSO / token-exchange (POST /auth/token-exchange) ────────────
@@ -1044,6 +1099,57 @@ export function createApp(): Hono<AuthEnv> {
         addError("smtp_url", "SMTP connection URL must start with smtp:// or smtps:// (or leave it empty to turn email notifications off).");
       else pending.push({ name: "SMTP_URL", value: v || null });
     }
+    if ("email_provider" in body) {
+      const v = String(body.email_provider ?? "").trim().toLowerCase();
+      if (v !== "smtp" && v !== "ses")
+        addError("email_provider", "Email provider must be SMTP or AWS SES.");
+      else pending.push({ name: "EMAIL_PROVIDER", value: v });
+    }
+    if ("ses_region" in body) {
+      const v = String(body.ses_region ?? "").trim();
+      if (v && !/^[a-z]{2}(-[a-z]+)+-\d+$/.test(v))
+        addError("ses_region", "AWS region must look like us-east-1.");
+      else pending.push({ name: "SES_REGION", value: v || null });
+    }
+    if ("ses_access_key_id" in body) {
+      const v = String(body.ses_access_key_id ?? "").trim();
+      pending.push({ name: "SES_ACCESS_KEY_ID", value: v || null });
+    }
+    if ("ses_secret_access_key" in body) {
+      const v = body.ses_secret_access_key;
+      if (v !== null && typeof v !== "string")
+        addError("ses_secret_access_key", "AWS secret access key must be a string (or empty to clear it).");
+      else pending.push({ name: "SES_SECRET_ACCESS_KEY", value: v?.trim() || null });
+    }
+    // Saving a provider drops the other one's settings, so no stale credential
+    // lingers (e.g. an old SMTP URL once the server moves to SES).
+    const provider = String(body.email_provider ?? "").trim().toLowerCase();
+    if (provider === "smtp" || provider === "ses") {
+      const stale =
+        provider === "ses"
+          ? ["SMTP_URL"]
+          : ["SES_REGION", "SES_ACCESS_KEY_ID", "SES_SECRET_ACCESS_KEY"];
+      for (const name of stale) {
+        const i = pending.findIndex((p) => p.name === name);
+        if (i >= 0) pending.splice(i, 1);
+        pending.push({ name, value: null });
+      }
+    }
+    // SES keys are a pair: one without the other would be silently dropped for
+    // the IAM role at send time, so refuse it here instead.
+    if ("ses_access_key_id" in body || "ses_secret_access_key" in body) {
+      const next = (name: string, current: string | null) => {
+        const p = pending.find((x) => x.name === name);
+        return p ? p.value : current;
+      };
+      const hasId = !!next("SES_ACCESS_KEY_ID", config.SES_ACCESS_KEY_ID);
+      const hasSecret = !!next("SES_SECRET_ACCESS_KEY", config.SES_SECRET_ACCESS_KEY);
+      if (hasId !== hasSecret)
+        addError(
+          "ses_access_key_id",
+          "Set both the AWS access key ID and secret access key, or leave both empty to use the server's IAM role.",
+        );
+    }
     // Shape check (local@domain.tld, no CR/LF) — these flow into nodemailer's
     // envelope, so junk and header-injection shapes stop here. Same guard the
     // config getters apply, so env-set and UI-set values gate identically.
@@ -1113,21 +1219,25 @@ export function createApp(): Hono<AuthEnv> {
         400,
       );
 
-    // Shape is good — now prove the SMTP credentials actually work before we
-    // persist them. A prefix-valid URL can still point at the wrong host or
-    // carry a bad password; connect + authenticate so junk is blocked at save
-    // instead of silently failing on the first governance event. Only runs when
-    // the URL is being set to a non-empty value (empty = disabling the
-    // connector, nothing to verify).
-    const smtpChange = pending.find((p) => p.name === "SMTP_URL");
-    if (smtpChange && smtpChange.value) {
-      const result = await verifySmtp(smtpChange.value);
+    // Shape is good — now prove the email credentials actually work before we
+    // persist them (wrong host/password, bad AWS keys or region). Only when this
+    // PATCH touches the selected provider's fields and leaves it configured —
+    // clearing them just turns the connector off, nothing to verify.
+    const over = Object.fromEntries(pending.map((p) => [p.name, p.value]));
+    const nextEmail = transportSettings(over);
+    const emailFields =
+      nextEmail?.provider === "ses"
+        ? ["EMAIL_PROVIDER", "SES_REGION", "SES_ACCESS_KEY_ID", "SES_SECRET_ACCESS_KEY"]
+        : ["EMAIL_PROVIDER", "SMTP_URL"];
+    if (nextEmail && emailFields.some((k) => k in over)) {
+      const result = await verifyEmailTransport(nextEmail);
       if (!result.ok) {
-        const message = `SMTP connection failed: ${result.error}`;
+        const ses = nextEmail.provider === "ses";
+        const message = `${ses ? "AWS SES" : "SMTP"} connection failed: ${result.error}`;
         return c.json(
           {
             error: message,
-            fieldErrors: { smtp_url: message },
+            fieldErrors: { [ses ? "ses_region" : "smtp_url"]: message },
             settings: currentServerSettings(),
           },
           400,
@@ -1555,6 +1665,24 @@ export function createApp(): Hono<AuthEnv> {
       .catch(() => ({}) as { ids?: string[] | "all" });
     await markNotificationsRead(me, body.ids === "all" ? "all" : body.ids ?? []);
     return c.json({ ok: true });
+  });
+
+  // Decline a nest invite: drop the caller's OWN collaborator row (never anyone
+  // else's) and settle its invite rows. Access through a team isn't a row here,
+  // so left=false — the invite still clears, the nest stays.
+  app.post("/me/nests/:nestId/leave", async (c) => {
+    const nestId = c.req.param("nestId");
+    const me = await resolveCallerEmail(c.get("userId"));
+    const db = getDb();
+    const info = await db.run(
+      "DELETE FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
+      [nestId, c.get("userId")],
+    );
+    await db.run(
+      `UPDATE notifications SET read_at = ? WHERE LOWER(user_email) = LOWER(?) AND nest_id = ? AND kind = 'nest_invite' AND read_at IS NULL`,
+      [new Date().toISOString(), me, nestId],
+    );
+    return c.json({ left: info.changes > 0 });
   });
 
   // flexAuthMiddleware so it works without auth in open mode and with
@@ -2075,11 +2203,17 @@ export function createApp(): Hono<AuthEnv> {
     // would wrongly gate `…/nodes/collaborators-guide` as a collaborators route
     // and 403 a write user editing that doc. parts[1] is the resource segment.
     const resource = parts[1];
-    if (resource === "visibility" || resource === "reader-mode") {
+    if (
+      resource === "visibility" ||
+      resource === "reader-mode" ||
+      resource === "branding"
+    ) {
       // reader-mode: the nest owner/admin collaborator AND the server admin
       // may configure it — this "admin" tier already covers both
       // (resolveNestPermission maps the server/super admin to "admin" too),
       // so the handler needs no further hard-gating past this middleware.
+      // branding (CU-wdqcq02ptm): same owner/admin tier; its handler adds
+      // the server-admin-only hide_powered_by check.
       required = "admin";
     } else if (resource === "collaborators") {
       // Viewing the roster (GET) and inviting (POST) are open to write+
@@ -2156,7 +2290,12 @@ export function createApp(): Hono<AuthEnv> {
             r.steward.userEmail.toLowerCase() === userEmail.toLowerCase() &&
             r.steward.role === "editor",
         );
-      } else if (parts.length === 2 && c.req.method === "POST") {
+      } else if (
+        c.req.method === "POST" &&
+        // POST /nodes (create) and POST /nodes/pdf (PDF upload — a create, or
+        // a new version of a pdf node) share the nest-scope editor rule.
+        (parts.length === 2 || (parts.length === 3 && parts[2] === "pdf"))
+      ) {
         // Empty nodeId: doc/tag branches won't match; nest branch returns all.
         const resolved = await resolveStewardsForNode(nestId, "");
         stewardEditorBypass = resolved.some(
@@ -2279,11 +2418,17 @@ export function createApp(): Hono<AuthEnv> {
   //   2. governanceNodeRoutes — /:nodeId/{approve,reject,submit-review,comments,…}
   //   3. nodeRoutes — CRUD incl. the bare /:nodeId{.+} catch-all, mounted last
   //      so it only matches when no suffix route did.
+  //   0. pdfNodeRoutes — POST /pdf (upload) and GET /:nodeId/pdf (the binary).
+  //      First, because the /pdf suffix must beat every greedy catch-all; the
+  //      GET falls through (next()) when the id is not a pdf node, so a
+  //      document whose own id ends in /pdf still reads.
+  nestsApp.route("/:nestId/nodes", pdfNodeRoutes);
   nestsApp.route("/:nestId/nodes", annotationRoutes);
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
   nestsApp.route("/:nestId/nodes", nodeRoutes);
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
+  nestsApp.route("/:nestId", brandingRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);
   // "publications" (not "/publish") — POST /:nestId/publish is already taken by
   // the nest-snapshot endpoint in query-routes. These manage per-document

@@ -45,7 +45,7 @@ import { oidcRoutes } from "./oidc.js";
 import { handleTokenExchange } from "./token-exchange.js";
 import { clientIp } from "../shared/request-ip.js";
 import { ANON_USER_ID } from "../shared/constants.js";
-import { sendEmailToRecipient } from "../notify/email.js";
+import { sendEmailToRecipient, isEmailConfigured } from "../notify/email.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 
 /** is_admin for user-facing payloads: license admin OR superadmin. */
@@ -292,7 +292,7 @@ authRoutes.post("/register", async (c) => {
     return c.json(
       {
         error:
-          "Self-registration is disabled on this server. If you were invited, use “Set your password” to activate your account. Otherwise ask your admin for an invite.",
+          "Self-registration is disabled on this server. If you were invited, sign in with the temporary password from your invite email, or continue with PromptOwl using that email. Otherwise ask your admin for an invite.",
       },
       403,
     );
@@ -332,7 +332,7 @@ authRoutes.post("/register", async (c) => {
       return c.json(
         {
           error:
-            "You've been invited to this server. Ask your admin for your temporary password, then sign in and change it — you can't set it here.",
+            "You've been invited to this server. Sign in with the temporary password from your invite email, or continue with PromptOwl using this email. Your admin can reset the password if you don't have it.",
         },
         409,
       );
@@ -1202,14 +1202,16 @@ authRoutes.post("/invite", async (c) => {
     [email],
   ) as { id: string; email: string; is_invited: number } | undefined;
 
-  // A fully-established user (one who claimed their own password) already has a
-  // working login — don't silently clobber it from the invite flow. Point the
-  // admin at Reset password instead.
-  if (existing && existing.is_invited === 0) {
+  // Never overwrite an existing user's credentials from the invite flow — not
+  // even a not-yet-signed-in one, whose emailed password would silently die.
+  // Re-issuing a password is the explicit Reset password action.
+  if (existing) {
     return c.json(
       {
         error:
-          "A user with this email already exists. Use Reset password to issue them a new password.",
+          existing.is_invited === 0
+            ? `${email} is already a member of this server.`
+            : `${email} is already invited but hasn't signed in yet. Use Reset password on their row to issue a new temporary password.`,
       },
       409,
     );
@@ -1218,25 +1220,15 @@ authRoutes.post("/invite", async (c) => {
   // Issue a PASSWORD, not an API key. The admin adds teammates so they can log
   // in; teammates mint their own API keys (for CLI/MCP/Hootie) after signing in.
   // Readable 16-char temporary password, returned ONCE for the admin to hand
-  // over. Re-inviting a not-yet-claimed user refreshes it (so "delete + re-add"
-  // / re-invite now produces a working credential).
+  // over.
   const tempPassword = uuid().replace(/-/g, "").slice(0, 16);
   const passwordHash = await hashPassword(tempPassword);
 
-  let userId: string;
-  if (existing) {
-    userId = existing.id;
-    await db.run("UPDATE users SET password_hash = ? WHERE id = ?", [
-      passwordHash,
-      userId,
-    ]);
-  } else {
-    userId = uuid();
-    await db.run(
-      "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-      [userId, email, null, passwordHash],
-    );
-  }
+  const userId = uuid();
+  await db.run(
+    "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
+    [userId, email, null, passwordHash],
+  );
 
   trackEvent("admin.invite", { adminId: callerId, email });
 
@@ -1246,6 +1238,8 @@ authRoutes.post("/invite", async (c) => {
   const inviter = (await db.get("SELECT email FROM users WHERE id = ?", [
     callerId,
   ])) as { email?: string } | undefined;
+  // PromptOwl sign-in only counts as an option for them when it's open to all.
+  const promptowlSignIn = config.PROMPTOWL_SIGN_IN_GATE === "open";
   void sendEmailToRecipient(email, {
     status: "invited",
     docTitle: "ContextNest",
@@ -1253,13 +1247,18 @@ authRoutes.post("/invite", async (c) => {
     actor: email,
     by: inviter?.email || undefined,
     tempPassword,
-    link: requestBaseUrl(c.req.url),
+    promptowlSignIn,
+    // ?invite= prefills the login page and guides them to sign in.
+    link: `${requestBaseUrl(c.req.url).replace(/\/$/, "")}/?invite=${encodeURIComponent(email)}`,
   });
 
   return c.json(
     {
       temporary_password: tempPassword,
       user: { id: userId, email },
+      promptowl_sign_in: promptowlSignIn,
+      // Email is configured, so the invite email (with this password) went out.
+      emailed: isEmailConfigured(),
       message:
         "Share this temporary password securely. Your teammate signs in with their email + this password, then can change it and create their own API key.",
     },
