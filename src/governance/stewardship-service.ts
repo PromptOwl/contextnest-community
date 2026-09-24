@@ -357,12 +357,8 @@ export async function createStewardRecord(params: {
     // (self-registration of a brand-new email is refused there).
     let userId = userRow?.id;
     if (!userId) {
-      const { hashPassword } = await import("../auth/keys.js");
-      userId = uuid();
-      await db.run(
-        "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-        [userId, email, null, await hashPassword(uuid())],
-      );
+      const { findOrCreateInvitedUser } = await import("../auth/invited-user.js");
+      userId = (await findOrCreateInvitedUser(email)).id;
     }
 
     const created = await assignSteward({

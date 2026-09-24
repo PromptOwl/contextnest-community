@@ -45,7 +45,8 @@ import { oidcRoutes } from "./oidc.js";
 import { handleTokenExchange } from "./token-exchange.js";
 import { clientIp } from "../shared/request-ip.js";
 import { ANON_USER_ID } from "../shared/constants.js";
-import { sendEmailToRecipient, isEmailConfigured } from "../notify/email.js";
+import { isEmailConfigured } from "../notify/email.js";
+import { createInvitedUser } from "./invited-user.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 
 /** is_admin for user-facing payloads: license admin OR superadmin. */
@@ -1217,46 +1218,25 @@ authRoutes.post("/invite", async (c) => {
     );
   }
 
-  // Issue a PASSWORD, not an API key. The admin adds teammates so they can log
-  // in; teammates mint their own API keys (for CLI/MCP/Hootie) after signing in.
-  // Readable 16-char temporary password, returned ONCE for the admin to hand
-  // over.
-  const tempPassword = uuid().replace(/-/g, "").slice(0, 16);
-  const passwordHash = await hashPassword(tempPassword);
-
-  const userId = uuid();
-  await db.run(
-    "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-    [userId, email, null, passwordHash],
-  );
-
-  trackEvent("admin.invite", { adminId: callerId, email });
-
-  // Email the invitee their temp password + a sign-in link (best-effort — a
-  // dead SMTP must never fail the invite; the admin still gets the password in
-  // the response to hand over manually). Off unless the email connector is set.
+  // Issue a PASSWORD, not an API key: teammates mint their own keys after
+  // signing in. The temp password is emailed to them (when email is set up)
+  // and returned ONCE for the admin to hand over otherwise.
   const inviter = (await db.get("SELECT email FROM users WHERE id = ?", [
     callerId,
   ])) as { email?: string } | undefined;
-  // PromptOwl sign-in only counts as an option for them when it's open to all.
-  const promptowlSignIn = config.PROMPTOWL_SIGN_IN_GATE === "open";
-  void sendEmailToRecipient(email, {
-    status: "invited",
-    docTitle: "ContextNest",
-    path: "",
-    actor: email,
-    by: inviter?.email || undefined,
-    tempPassword,
-    promptowlSignIn,
-    // ?invite= prefills the login page and guides them to sign in.
-    link: `${requestBaseUrl(c.req.url).replace(/\/$/, "")}/?invite=${encodeURIComponent(email)}`,
+  const { id: userId, tempPassword } = await createInvitedUser(email, {
+    invitedBy: inviter?.email,
+    baseUrl: requestBaseUrl(c.req.url),
   });
+
+  trackEvent("admin.invite", { adminId: callerId, email });
 
   return c.json(
     {
       temporary_password: tempPassword,
       user: { id: userId, email },
-      promptowl_sign_in: promptowlSignIn,
+      // PromptOwl sign-in only counts as an option for them when it's open to all.
+      promptowl_sign_in: config.PROMPTOWL_SIGN_IN_GATE === "open",
       // Email is configured, so the invite email (with this password) went out.
       emailed: isEmailConfigured(),
       message:

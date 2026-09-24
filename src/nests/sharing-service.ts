@@ -11,10 +11,10 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { notifyNestEvent } from "../notify/notify.js";
 import { sendEmailToRecipient } from "../notify/email.js";
+import { findOrCreateInvitedUser } from "../auth/invited-user.js";
 import { notifyNestInvite } from "../governance/notify-service.js";
 import { nestName, docLink } from "../governance/title-resolver.js";
 import { ValidationError, ConflictError, ForbiddenError } from "../shared/errors.js";
-import { normalizeEmail } from "../shared/email.js";
 import { isEmailish } from "../config.js";
 import { permissionLevel, type NestPermission } from "../shared/access.js";
 import type { NestCollaborator } from "../shared/types.js";
@@ -71,21 +71,13 @@ export async function addCollaborator(params: {
     if (!isEmailish(params.email)) {
       throw new ValidationError("Enter a valid email address.");
     }
-    const email = normalizeEmail(params.email);
-    const existing = (await db.get(
-      "SELECT id FROM users WHERE LOWER(email) = ?",
-      [email],
-    )) as { id: string } | undefined;
-    if (existing) {
-      userId = existing.id;
-    } else {
-      const { hashPassword } = await import("../auth/keys.js");
-      userId = uuid();
-      await db.run(
-        "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-        [userId, email, null, await hashPassword(uuid())],
-      );
-    }
+    // A new address gets an account + the sign-in email (temp password).
+    userId = (
+      await findOrCreateInvitedUser(params.email, {
+        invitedBy: params.grantedByEmail,
+        baseUrl: params.baseUrl,
+      })
+    ).id;
   }
   if (!userId) {
     throw new ValidationError("user_id or email is required");

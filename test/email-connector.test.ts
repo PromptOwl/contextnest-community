@@ -99,9 +99,15 @@ describe("email connector", () => {
 
     // Inspect the invitee's direct email — addressed to them in the second
     // person ("You've been given Editor access …"), not the third.
-    const msg = sendMail.mock.calls.find(
-      (c) => (c[0] as any).to === "bob@acme.com",
-    )![0] as any;
+    const toBob = sendMail.mock.calls.map((c) => c[0] as any).filter((m) => m.to === "bob@acme.com");
+    const msg = toBob.find((m) => m.subject.includes("Mail Nest"))!;
+
+    // Bob is brand new, so he also gets the sign-in email — and its temporary
+    // password actually logs him in.
+    const signIn = toBob.find((m) => m.subject === "You've been invited to ContextNest")!;
+    const temp = /Temporary password: (\w+)/.exec(signIn.text)![1];
+    const login = await jsonRequest(app, "POST", "/auth/login", { email: "bob@acme.com", password: temp });
+    expect(login.status).toBe(200);
     expect(msg.from).toBe("nest@test.local");
     expect(msg.subject).toContain("Mail Nest");
     expect(msg.text).toContain("You've been given Editor access to Mail Nest");
