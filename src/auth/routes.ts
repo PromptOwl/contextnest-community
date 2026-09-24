@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { nowExpr } from "../db/sql.js";
@@ -505,7 +505,7 @@ authRoutes.post("/logout", async (c) => {
 // would trade itself for a whole-account key. The app-wide nestScopedKeyGuard
 // already refuses these paths; this is the belt to that brace, right where the
 // escalation would happen.
-function refuseNestScopedCaller(c: any) {
+function refuseNestScopedCaller(c: Context<AuthEnv>) {
   if (!c.get("nestScope")) return null;
   return c.json(
     {
