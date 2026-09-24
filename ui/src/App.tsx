@@ -27,7 +27,7 @@ import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { NestPageProvider } from "./lib/nest-page-context";
 import { appPageIdFromPath, appPath, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
-import { useBreadcrumbTail, type Crumb } from "./lib/breadcrumb";
+import { useBreadcrumbTail, crumbLabelClass, type Crumb } from "./lib/breadcrumb";
 import {
   deriveNestCaps,
   isReaderHiddenView,
@@ -1270,9 +1270,9 @@ export default function App() {
                   <span key={i} className={`flex min-w-0 items-center gap-1${last ? "" : " max-sm:hidden"}`}>
                     {i > 0 && <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-muted-foreground/60${last ? " max-sm:hidden" : ""}`} aria-hidden />}
                     {last || !c.go ? (
-                      <span className={last ? "truncate text-base font-semibold" : "truncate text-muted-foreground"} aria-current={last ? "page" : undefined}>{c.label}</span>
+                      <span className={crumbLabelClass(last)} aria-current={last ? "page" : undefined}>{c.label}</span>
                     ) : (
-                      <button type="button" onClick={c.go} className="truncate text-muted-foreground hover:text-foreground">{c.label}</button>
+                      <button type="button" onClick={c.go} className={`${crumbLabelClass(false)} hover:text-foreground`}>{c.label}</button>
                     )}
                   </span>
                 );
