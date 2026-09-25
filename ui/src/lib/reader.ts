@@ -42,10 +42,16 @@ export function resolveWikiTarget<T extends ReaderNode>(target: string, nodes: T
   return nodes.find((n) => String(n.title ?? "").toLowerCase() === want) ?? nodes.find((n) => canonical(n.id).endsWith(`/${want}`)) ?? null;
 }
 
-/** "hosted-nest" → "Hosted nest". Sentence case: a folder name is a label, not a title. */
+/**
+ * "hosted-nest" → "Hosted Nest". Title case, matching the authoring
+ * sidebar's `prettyFolder` (FolderTree.tsx) — the same folder must read the
+ * same way in both surfaces.
+ */
 export function humanize(slug: string): string {
-  const s = slug.replace(/[-_]+/g, " ").trim();
-  return s ? s[0].toUpperCase() + s.slice(1) : s;
+  return slug
+    .split(/[-_]/)
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(" ");
 }
 
 /** Folder path → what the nav calls it. The nest root is "General". */
