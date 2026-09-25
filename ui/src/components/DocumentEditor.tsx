@@ -1705,6 +1705,7 @@ export function DocumentEditor({
       canShare,
       isArchived,
       canEditContent,
+      isPdf: isPdfNode,
       isLocked,
       canRequestDeletion,
       canDeleteDirectly,
