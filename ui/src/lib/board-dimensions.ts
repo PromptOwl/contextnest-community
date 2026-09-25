@@ -77,12 +77,40 @@ export interface BoardConfig {
 
 export interface BoardColumn {
   key: string;
-  /** Heading text. For folder columns, the full folder path — a shortened
-   *  leaf-only label loses hierarchy and can't tell "a/notes" from "b/notes"
-   *  apart. Long labels wrap/truncate in the UI; `title` carries the full text. */
+  /** Heading text. For folder columns, the full folder path, shortened from
+   *  the front (see `folderColumnLabel`) so a deep path still shows its leaf
+   *  segment — a shortened leaf-only label loses hierarchy and can't tell
+   *  "a/notes" from "b/notes" apart, but the CSS `truncate` the header uses
+   *  elides from the END, which for an untouched long path hides the leaf —
+   *  the one segment that actually names the folder. `title` carries the full,
+   *  unshortened text. */
   label: string;
   /** Full, untrimmed name for the tooltip. Same as `label` for folder columns. */
   title: string;
+}
+
+/**
+ * Shortens a folder path for display, dropping segments from the front (the
+ * end closest to the root) until it fits within `maxChars`, so the leaf
+ * segment — the folder's actual name, and the last thing a browser's
+ * end-eliding `truncate` would clip — is always the part kept. The leaf is
+ * kept even if it alone exceeds `maxChars`; the header's own `truncate`
+ * handles that remaining overflow, clipping from a point that still shows the
+ * leaf's start rather than the path's root.
+ *
+ * `maxChars` defaults to roughly what fits in the board's column header
+ * (w-64, see MaturityBoard.tsx) before the browser starts eliding anyway.
+ */
+export function folderColumnLabel(path: string, maxChars = 28): string {
+  if (path.length <= maxChars) return path;
+  const segments = path.split("/");
+  for (let i = 1; i < segments.length; i++) {
+    const candidate = `…/${segments.slice(i).join("/")}`;
+    if (candidate.length <= maxChars || i === segments.length - 1) {
+      return candidate;
+    }
+  }
+  return path;
 }
 
 /**
@@ -268,6 +296,7 @@ function labelFor(key: string, config: BoardConfig): string {
   // since the heading is rendered with CSS `capitalize`.
   if (config.dimension === "status")
     return STATUS_LABELS[key] ?? key.replace(/_/g, " ");
+  if (config.dimension === "folder") return folderColumnLabel(key);
   return key;
 }
 
