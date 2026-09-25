@@ -146,6 +146,25 @@ const UI_DIR_ABS =
   UI_DIR_CANDIDATES.find((p) => existsSync(p)) || UI_DIR_CANDIDATES[0];
 const UI_DIR_REL = relative(process.cwd(), UI_DIR_ABS) || ".";
 
+// True for a browser loading this URL as a page (hard reload, typed/bookmarked
+// link), false for the app's own fetch()es and other programmatic callers.
+// Sec-Fetch-Mode is sent by every current browser on navigation; the Accept
+// sniff is the fallback for older ones. Non-browser clients send neither (the
+// MCP SDK's discovery fetch sets no Accept header at all), and this app's own
+// API client (ui/src/lib/api.ts) never sets an HTML Accept either.
+const isDocumentNavigation = (c: { req: { header(n: string): string | undefined } }) =>
+  c.req.header("Sec-Fetch-Mode") === "navigate" ||
+  (c.req.header("Accept") || "").includes("text/html");
+
+// The SPA shell, shared by the catch-all below and the /teams guard — same
+// file, same no-cache policy (index.html is unhashed and must always
+// revalidate so a deploy's new bundle is picked up on next load).
+const serveIndexShell = serveStatic({
+  root: UI_DIR_REL,
+  path: "index.html",
+  onFound: (_p, c) => c.header("Cache-Control", "no-cache"),
+});
+
 // In open mode, assign the anonymous admin user to every request.
 // This gives full access without requiring auth headers.
 const openModeMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
@@ -1476,6 +1495,20 @@ export function createApp(): Hono<AuthEnv> {
   // changes). flexAuth so it works in open mode and with a key.
   // Teams — global, owner-managed group primitive (not nest-scoped). Auth via
   // flexAuth; ownership + admin bypass enforced inside the service/handlers.
+  //
+  // GET /teams is also the browser URL for the client's Teams page
+  // (ui/src/pages/app/teams/meta.ts) — unlike every other app page path
+  // (my-work, settings, ...), it collides with a top-level API route. In-app
+  // navigation never re-requests it (history.pushState), but a hard reload or
+  // a direct link issues a real GET /teams, which teamRoutes below would
+  // otherwise answer first with raw JSON instead of the app shell. Guard it
+  // here, ahead of auth, the same way the SPA catch-all further down guards
+  // every other path: a document navigation gets index.html; an API call
+  // (no Sec-Fetch-Mode: navigate, no HTML Accept) falls through unchanged.
+  app.get("/teams", async (c, next) => {
+    if (isDocumentNavigation(c)) return serveIndexShell(c, next);
+    return next();
+  });
   app.use("/teams/*", flexAuthMiddleware);
   app.use("/teams", flexAuthMiddleware);
   app.route("/teams", teamRoutes);
@@ -1555,10 +1588,14 @@ export function createApp(): Hono<AuthEnv> {
     // ponytail: nest-granularity check. A reviewer scoped to only one doc/tag
     // will see that whole nest's pending items, not just their scoped docs.
     // Tighten to per-node canUserApprove if that over-inclusion ever matters.
+    // Resolved for every nest the caller can SEE, not just nests that happen
+    // to appear in this page of `requests` — pagination.total below needs
+    // the full picture (a nest with pending reviews from someone else, on a
+    // page the caller never fetched, still has to be excluded consistently).
     const others = requests.filter((r) => r.requestedBy !== me);
     const nestApprove = new Map<string, boolean>(
       await Promise.all(
-        [...new Set(others.map((r) => r.nestId))].map(
+        [...nestName.keys()].map(
           async (nestId): Promise<[string, boolean]> => [
             nestId,
             await canApproveInNest(nestId, me),
@@ -1602,13 +1639,53 @@ export function createApp(): Hono<AuthEnv> {
     waiting.sort(byNewest);
     // Watcher notifications (HITL tags) ride along so the inbox is one call.
     const notifications = await listNotifications(me, { unreadOnly: true, limit: 50 });
+    // `total` from getReviewQueue counts every PENDING REVIEW across every
+    // nest the caller can see — full stop, regardless of who requested it or
+    // whether the caller can approve it. But items/waiting only ever surface
+    // a review that is either the caller's own request or one the caller can
+    // actually approve (see nestApprove above); a review from someone else in
+    // a nest where the caller is a bare viewer/editor never appears in either
+    // bucket, yet was still counted in `total` — so the badge (which reads
+    // pagination.total, see my-work/meta.ts) overcounted relative to what My
+    // Work actually shows. Recompute the review portion of the total as
+    // exactly (pending reviews in nests the caller can approve) + (the
+    // caller's own pending reviews elsewhere) — the same two conditions
+    // items/waiting are built from — via two SQL counts rather than the raw,
+    // unfiltered getReviewQueue total.
+    const approvableNestIds = [...nestName.keys()].filter((id) =>
+      nestApprove.get(id),
+    );
+    const restNestIds = [...nestName.keys()].filter(
+      (id) => !nestApprove.get(id),
+    );
+    const [{ total: approvableReviewTotal }, { total: myReviewsElsewhereTotal }] =
+      await Promise.all([
+        getReviewQueue({ status: "pending", nestIds: approvableNestIds, limit: 1 }),
+        getReviewQueue({
+          status: "pending",
+          nestIds: restNestIds,
+          requestedByEmail: me,
+          limit: 1,
+        }),
+      ]);
+    const reviewTotal = approvableReviewTotal + myReviewsElsewhereTotal;
+    // Deletion flags ride the same two buckets (above) but aren't paginated
+    // (listDeletionRequests always fetches every pending one), so folding in
+    // however many are actually shown keeps the total exact regardless of
+    // which review page this call fetched.
+    const deletionsShown =
+      items.filter((i) => i.type === "deletion").length +
+      waiting.filter((i) => i.type === "deletion").length;
     return c.json({
       items,
       waiting,
       notifications,
-      // total = all pending across visible nests (both buckets); has_more drives
-      // the "Load more" control on the client.
-      pagination: { total, limit, offset, has_more: offset + requests.length < total },
+      pagination: {
+        total: reviewTotal + deletionsShown,
+        limit,
+        offset,
+        has_more: offset + requests.length < total,
+      },
     });
   });
 
@@ -2477,25 +2554,15 @@ export function createApp(): Hono<AuthEnv> {
   // passed through. Those callers parse what they get, so a 200 HTML page turns
   // a plain 404 into a confusing failure elsewhere (JSON.parse on "<!DOCTYPE",
   // or a <script> tag executing the shell). Give them JSON 404 instead.
-  //
-  // Sec-Fetch-Mode is sent by every current browser on navigation; the Accept
-  // sniff is the fallback for older ones. Non-browser clients send neither
-  // (the MCP SDK's discovery fetch sets no Accept header at all).
-  const isDocumentNavigation = (c: { req: { header(n: string): string | undefined } }) =>
-    c.req.header("Sec-Fetch-Mode") === "navigate" ||
-    (c.req.header("Accept") || "").includes("text/html");
-
+  // (isDocumentNavigation, serveIndexShell defined above, shared with the
+  // /teams guard.)
   app.get(
     "*",
     async (c, next) => {
       if (isDocumentNavigation(c)) return next();
       return c.json({ error: "Not found" }, 404);
     },
-    serveStatic({
-      root: UI_DIR_REL,
-      path: "index.html",
-      onFound: (_p, c) => c.header("Cache-Control", "no-cache"),
-    }),
+    serveIndexShell,
   );
 
   // Non-GET requests that matched no route (POST to a mistyped endpoint, the

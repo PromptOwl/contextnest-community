@@ -16,6 +16,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Input } from "@/components/ui/input";
 import { reads } from "../lib/queries";
+import { personComboboxEnterAction } from "../lib/person-combobox";
 import { cn } from "@/lib/utils";
 
 /** Keystroke-to-request delay. See the debounce note in the component. */
@@ -133,32 +134,24 @@ export function PersonCombobox({
             setOpen(false);
             return;
           }
-          if (!open || options.length === 0) {
-            if (e.key === "Enter" && onSubmit) {
-              e.preventDefault();
-              onSubmit();
-            }
-            // No onSubmit: Enter is left alone, so a surrounding <form>
-            // submits natively — see the note on the Enter branch below.
-            return;
-          }
-          if (e.key === "ArrowDown") {
-            e.preventDefault();
-            setHighlight((i) => (i + 1) % options.length);
-          } else if (e.key === "ArrowUp") {
-            e.preventDefault();
-            setHighlight((i) => (i <= 0 ? options.length - 1 : i - 1));
-          } else if (e.key === "Enter") {
+          if (e.key === "Enter") {
             // Enter takes the highlighted person; with nothing highlighted it
             // submits what was typed, so a full address never needs the list.
-            // Indexed defensively: the reset effect runs after the render that
-            // shrank `options`, so for one commit the index can point past it.
-            const chosen = highlight >= 0 ? options[highlight] : undefined;
-            if (chosen) {
+            // Either way the list closes — left open, it kept querying
+            // /people/suggest as the field cleared after a successful add,
+            // reopening with every account once the empty-query result came
+            // back (see personComboboxEnterAction).
+            const action = personComboboxEnterAction(
+              open,
+              options.length,
+              highlight,
+            );
+            if (action.type === "pick") {
               e.preventDefault();
-              pick(chosen.email);
+              pick(options[action.index].email);
             } else if (onSubmit) {
               e.preventDefault();
+              setOpen(false);
               onSubmit();
             }
             // Otherwise the key is NOT consumed. Swallowing it whenever the
@@ -166,6 +159,15 @@ export function PersonCombobox({
             // character is typed — silently broke Enter-to-add in a form whose
             // caller hadn't wired onSubmit, where the plain <input> this
             // replaced had submitted natively.
+            return;
+          }
+          if (!open || options.length === 0) return;
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setHighlight((i) => (i + 1) % options.length);
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setHighlight((i) => (i <= 0 ? options.length - 1 : i - 1));
           } else if (e.key === "Tab" && highlight >= 0) {
             const chosen = options[highlight];
             if (chosen) {

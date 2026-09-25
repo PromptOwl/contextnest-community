@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { documentActions, type DocumentActionsInput } from "./document-actions";
+import { documentActions, nodeTypeSupportsMove, type DocumentActionsInput } from "./document-actions";
 
 // The header ⋮ menu on a document page. One builder feeds BOTH the markdown
 // editor and the artifact viewer, so the two surfaces can't drift apart again
@@ -60,6 +60,13 @@ describe("documentActions — the document-page ⋮ menu", () => {
     expect(keys({ ...owner, isLocked: true })).not.toContain("move");
   });
 
+  it("a pdf can't be moved — the server always rejects it", () => {
+    const pdf = keys({ ...owner, isPdf: true });
+    expect(pdf).not.toContain("move");
+    // everything else an owner gets stays available
+    expect(pdf).toEqual(["history", "copy-link", "share-doc", "publish", "delete"]);
+  });
+
   it("an unsaved document has no node to act on — empty menu", () => {
     expect(keys({ ...owner, isNew: true })).toEqual([]);
   });
@@ -105,5 +112,17 @@ describe("documentActions — the document-page ⋮ menu", () => {
     });
     expect(withdrawOnly.find((a) => a.key === "withdraw-deletion")?.separatorBefore).toBe(true);
     expect(documentActions(owner).find((a) => a.key === "delete")?.separatorBefore).toBe(true);
+  });
+});
+
+describe("nodeTypeSupportsMove — shared by this menu and the documents-list row menu", () => {
+  it("withholds move for a pdf", () => {
+    expect(nodeTypeSupportsMove("pdf")).toBe(false);
+  });
+
+  it("allows move for every other node type, including undefined (defaults to document)", () => {
+    expect(nodeTypeSupportsMove("document")).toBe(true);
+    expect(nodeTypeSupportsMove("artifact")).toBe(true);
+    expect(nodeTypeSupportsMove(undefined)).toBe(true);
   });
 });

@@ -11,6 +11,7 @@ const DocumentEditor = lazyNamed(() => import("./components/DocumentEditor"), "D
 import { DocumentSidebar } from "./components/DocumentSidebar";
 import { ConnectModal } from "./components/ConnectModal";
 import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
+import { shouldReturnToNestOnSave } from "./lib/document-save-nav";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, type LicenseStatus } from "./lib/api";
@@ -26,7 +27,7 @@ import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { NestPageProvider } from "./lib/nest-page-context";
 import { appPageIdFromPath, appPath, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
-import { useBreadcrumbTail, type Crumb } from "./lib/breadcrumb";
+import { useBreadcrumbTail, crumbLabelClass, type Crumb } from "./lib/breadcrumb";
 import {
   deriveNestCaps,
   isReaderHiddenView,
@@ -1269,9 +1270,9 @@ export default function App() {
                   <span key={i} className={`flex min-w-0 items-center gap-1${last ? "" : " max-sm:hidden"}`}>
                     {i > 0 && <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-muted-foreground/60${last ? " max-sm:hidden" : ""}`} aria-hidden />}
                     {last || !c.go ? (
-                      <span className={last ? "truncate text-base font-semibold" : "truncate text-muted-foreground"} aria-current={last ? "page" : undefined}>{c.label}</span>
+                      <span className={crumbLabelClass(last)} aria-current={last ? "page" : undefined}>{c.label}</span>
                     ) : (
-                      <button type="button" onClick={c.go} className="truncate text-muted-foreground hover:text-foreground">{c.label}</button>
+                      <button type="button" onClick={c.go} className={`${crumbLabelClass(false)} hover:text-foreground`}>{c.label}</button>
                     )}
                   </span>
                 );
@@ -1603,7 +1604,14 @@ export default function App() {
                 if (!entry) return;
                 openDocument({ ...entry, breadcrumb: stack.slice(0, index) });
               }}
-              onSaved={() => openNest()}
+              onSaved={() => {
+                // A fresh "new" doc has nowhere to stay open on, so land back
+                // on the nest; saving an EXISTING document must leave the
+                // view (and URL) pointed at that same document — otherwise
+                // the app shows Overview while ?doc=<id> still names the doc
+                // (CU-wdqcq02cxe), a mismatch only a reload used to fix.
+                if (shouldReturnToNestOnSave(doc.nodeId)) openNest();
+              }}
               onNavigateDocument={(linkNestId, linkNodeId, currentTitle) => {
                 // Cycle handling: never duplicate target in chain.
                 //  - target == current doc → no-op (self-link).

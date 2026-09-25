@@ -133,6 +133,17 @@ it("hides approve-inbox items from an editor, shows them to a reviewer", async (
   // Reviewer can approve → it shows in his items.
   expect(bobWork.data.items.some((w: any) => w.nest_id === nestId)).toBe(true);
 
+  // Regression: pagination.total (what the sidebar badge reads) came straight
+  // from getReviewQueue's raw count — every pending review in every nest the
+  // caller can SEE, regardless of who requested it or whether the caller can
+  // approve it. For carol (a fresh user whose only visible nest is this one),
+  // that raw count included alice's pending review even though it never
+  // appears in carol's items or waiting — the badge overcounted relative to
+  // what My Work actually shows her.
+  expect(carolWork.data.pagination.total).toBe(
+    carolWork.data.items.length + carolWork.data.waiting.length,
+  );
+
   // Belt-and-braces: the server hard-blocks an editor's approve attempt too.
   const approve = await jsonRequest(
     app,
@@ -182,6 +193,52 @@ it("bare owner sees the inbox item only when self-approve is on", async () => {
   expect(data.items.some((w: any) => w.nest_id === offNest)).toBe(false);
   // Bare owner, self-approve ON → shown.
   expect(data.items.some((w: any) => w.nest_id === onNest)).toBe(true);
+});
+
+it("folds a pending deletion/archive request into pagination.total, matching what items+waiting show", async () => {
+  // Regression: pagination.total came straight from getReviewQueue (reviews
+  // only), so a pending deletion/archive flag rode along in items/waiting
+  // (rendered on the My Work page) without ever being counted in total — the
+  // sidebar badge (which reads pagination.total directly) undercounted by
+  // however many such flags were pending. Asserted as a before/after delta
+  // (not an absolute total) since this suite accumulates pending reviews
+  // across nests visible to alice.
+  const nestId = await governedNest(alice, "Deletion Total Nest");
+  await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/collaborators`,
+    { email: bob.email, permission: "write" },
+    alice.apiKey,
+  );
+  const { data: created } = await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/nodes`,
+    { title: "stale", content: "# Stale" },
+    bob.apiKey,
+  );
+
+  const before = await jsonRequest(app, "GET", "/me/work", undefined, alice.apiKey);
+  const shownBefore = before.data.items.length + before.data.waiting.length;
+
+  const flagged = await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/nodes/${created.node.id}/request-deletion`,
+    { reason: "no longer needed" },
+    bob.apiKey,
+  );
+  expect(flagged.status).toBe(201);
+
+  const after = await jsonRequest(app, "GET", "/me/work", undefined, alice.apiKey);
+  // Bob asked, alice (owner) can action it → shows in her actionable items.
+  expect(
+    after.data.items.some((w: any) => w.nest_id === nestId && w.type === "deletion"),
+  ).toBe(true);
+  const shownAfter = after.data.items.length + after.data.waiting.length;
+  expect(shownAfter - shownBefore).toBe(1);
+  expect(after.data.pagination.total - before.data.pagination.total).toBe(1);
 });
 
 it("a review verdict notification carries the document it is about", async () => {

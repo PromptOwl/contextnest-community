@@ -24,6 +24,16 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Trash2, Loader2, AlertCircle, UserPlus, Users, Share2 } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../lib/api";
@@ -31,6 +41,10 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import type { Team, TeamMember } from "../lib/api";
 import { isEmailish } from "../lib/utils";
+import {
+  removeCollaboratorConfirmCopy,
+  removeCollaboratorSuccessMessage,
+} from "../lib/collaborator-confirm";
 import { PersonCombobox } from "./PersonCombobox";
 import { SearchableSelect } from "./SearchableSelect";
 
@@ -118,6 +132,12 @@ export function CollaboratorManager({
   const [myTeams, setMyTeams] = useState<Team[]>([]);
   const [selectedTeam, setSelectedTeam] = useState("");
   const [teamBusy, setTeamBusy] = useState(false);
+
+  // Collaborator pending removal — holds the row so the styled confirm
+  // dialog can show their email; null closes the dialog. Replaces a native
+  // window.confirm(), which also leaked this deployment's Cloud Run URL in
+  // the browser's popup chrome.
+  const [removeTarget, setRemoveTarget] = useState<Collaborator | null>(null);
 
   const loadCollaborators = async () => {
     setLoading(true);
@@ -249,15 +269,15 @@ export function CollaboratorManager({
     }
   };
 
-  const handleRemove = async (collab: Collaborator) => {
-    const ok = window.confirm(
-      `Remove ${collab.email || "this collaborator"}'s access to "${nestName}"? They keep their account; only their access to this nest is revoked.`,
-    );
-    if (!ok) return;
+  const confirmRemove = async () => {
+    const collab = removeTarget;
+    if (!collab) return;
+    setRemoveTarget(null);
     setError(null);
     try {
       await api.removeCollaborator(nestId, collab.id);
       setCollaborators((prev) => prev.filter((c) => c.id !== collab.id));
+      toast.success(removeCollaboratorSuccessMessage(collab.email));
       onChanged();
     } catch (err: any) {
       setError(err?.message || "Failed to remove collaborator");
@@ -493,7 +513,7 @@ export function CollaboratorManager({
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => handleRemove(c)}
+                        onClick={() => setRemoveTarget(c)}
                         title="Remove access"
                         className="text-destructive hover:text-destructive hover:bg-destructive/10"
                       >
@@ -514,6 +534,37 @@ export function CollaboratorManager({
           </div>
         )}
       </div>
+
+      <AlertDialog
+        open={removeTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setRemoveTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          {(() => {
+            const copy = removeCollaboratorConfirmCopy(removeTarget?.email, nestName);
+            return (
+              <>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>{copy.title}</AlertDialogTitle>
+                  <AlertDialogDescription>{copy.body}</AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={() => void confirmRemove()}
+                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    data-testid="remove-collaborator-confirm"
+                  >
+                    {copy.confirm}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </>
+            );
+          })()}
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
