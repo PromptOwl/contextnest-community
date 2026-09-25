@@ -1602,13 +1602,26 @@ export function createApp(): Hono<AuthEnv> {
     waiting.sort(byNewest);
     // Watcher notifications (HITL tags) ride along so the inbox is one call.
     const notifications = await listNotifications(me, { unreadOnly: true, limit: 50 });
+    // `total` from getReviewQueue only counts pending reviews — deletion flags
+    // ride the same two buckets (above) but were never folded in, so the
+    // sidebar badge (which reads this field directly, see my-work/meta.ts)
+    // undercounted by however many deletion rows were actually shown.
+    // has_more stays driven off the review-only total: deletions are always
+    // fetched in full regardless of page, so they don't affect whether
+    // another page of reviews remains.
+    const deletionsShown =
+      items.filter((i) => i.type === "deletion").length +
+      waiting.filter((i) => i.type === "deletion").length;
     return c.json({
       items,
       waiting,
       notifications,
-      // total = all pending across visible nests (both buckets); has_more drives
-      // the "Load more" control on the client.
-      pagination: { total, limit, offset, has_more: offset + requests.length < total },
+      pagination: {
+        total: total + deletionsShown,
+        limit,
+        offset,
+        has_more: offset + requests.length < total,
+      },
     });
   });
 
