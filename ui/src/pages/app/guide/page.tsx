@@ -3,6 +3,7 @@ import {
   BookOpen,
   Boxes,
   FileText,
+  KeyRound,
   ShieldCheck,
   LayoutGrid,
   Users,
@@ -13,6 +14,7 @@ import {
 import { BetaBadge } from "@/components/ui/beta-badge";
 import { PageTitle } from "@/components/ui/page-title";
 import { useAppNav } from "@/lib/app-nav";
+import { ADMIN_HELP_TOPICS } from "./help-topics";
 
 /**
  * How it works — a tour of the app in the order the sidebar shows it: what a
@@ -200,11 +202,29 @@ export default function GuidePage() {
           <Bullets
             items={[
               ["Teammates", <>Invite people, reset passwords, remove accounts, name other admins.</>],
-              ["Server settings", <>Public URL and logo, who can create nests, the Anthropic key, Slack / Teams / email notifications (email over SMTP or AWS SES), allowed content types, upload limit, telemetry.</>],
+              ["Server settings", <>Public URL and logo, single sign-on, who can create nests, the Anthropic key, Slack / Teams / email notifications (email over SMTP or AWS SES), allowed content types, upload limit, telemetry.</>],
               ["Activity trace", <>Every governance action on the server. Each nest has its own trace under Activity.</>],
             ]}
           />
         </Section>
+
+        {ADMIN_HELP_TOPICS.map((t) => (
+          <Section key={t.id} title={t.title} icon={KeyRound}>
+            <div id={`help-${t.id}`} className="space-y-3">
+              <p className="text-muted-foreground">
+                <span className="text-xs uppercase tracking-wide">For server admins</span>{" "}
+                · <b className="text-foreground">{t.where}</b>
+              </p>
+              <p className="text-muted-foreground">{t.summary}</p>
+              <Steps steps={t.steps} />
+              <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
+                {t.notes.map((n, i) => (
+                  <li key={`${t.id}-note-${i}`}>{n}</li>
+                ))}
+              </ul>
+            </div>
+          </Section>
+        ))}
 
         <Section title="Account" icon={UserCircle}>
           <p className="text-muted-foreground">
