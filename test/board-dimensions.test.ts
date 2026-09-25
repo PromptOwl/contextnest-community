@@ -130,7 +130,7 @@ describe("buildColumns", () => {
       "weird",
     ]);
   });
-  it("labels a folder column with its own name, full path in the title", () => {
+  it("labels a folder column with its full path, matching the title", () => {
     const cfg: BoardConfig = { dimension: "folder" };
     const cols = buildColumns(
       [
@@ -139,7 +139,10 @@ describe("buildColumns", () => {
       ],
       cfg,
     );
-    expect(cols.map((c) => c.label)).toEqual(["architecture", "deals"]);
+    expect(cols.map((c) => c.label)).toEqual([
+      "b006e456-15de/nodes/architecture",
+      "b006e456-15de/nodes/gtm/deals",
+    ]);
     expect(cols.map((c) => c.title)).toEqual([
       "b006e456-15de/nodes/architecture",
       "b006e456-15de/nodes/gtm/deals",
@@ -157,22 +160,15 @@ describe("buildColumns", () => {
     expect(cols[0]!.label).toBe("gtm");
   });
 
-  it("grows colliding folder labels until they are distinct", () => {
+  it("keeps nested folders with the same leaf name distinct", () => {
+    // The report's own example: "a/notes" and "b/notes" must not both
+    // collapse to an ambiguous "notes" column.
     const cfg: BoardConfig = { dimension: "folder" };
     const cols = buildColumns(
-      [
-        node({ id: "v1/nodes/content/social/a" }),
-        node({ id: "v1/nodes/content/published/social/b" }),
-        node({ id: "v1/nodes/content/blog/c" }),
-      ],
+      [node({ id: "a/notes/x" }), node({ id: "b/notes/y" })],
       cfg,
     );
-    // Only the two "social" columns deepen; "blog" was already unique.
-    expect(cols.map((c) => c.label).sort()).toEqual([
-      "blog",
-      "content/social",
-      "published/social",
-    ]);
+    expect(cols.map((c) => c.label).sort()).toEqual(["a/notes", "b/notes"]);
   });
   it("labels a doc at the vault root '(root)'", () => {
     const cfg: BoardConfig = { dimension: "folder" };
@@ -180,13 +176,16 @@ describe("buildColumns", () => {
       [node({ id: "loose-doc" }), node({ id: "gtm/deals/b" })],
       cfg,
     );
-    expect(cols.map((c) => c.label)).toEqual(["(root)", "deals"]);
+    expect(cols.map((c) => c.label)).toEqual(["(root)", "gtm/deals"]);
   });
-  it("shows the folder's own name even when it is the only column", () => {
+  it("shows the folder's full path even when it is the only column", () => {
+    // A leaf-only label ("folder") loses the nesting entirely and can't be
+    // told apart from another folder with the same name elsewhere in the
+    // vault — the label always carries the full path instead.
     const cfg: BoardConfig = { dimension: "folder" };
-    const cols = buildColumns([node({ id: "gtm/deals/a" })], cfg);
-    expect(cols.map((c) => c.label)).toEqual(["deals"]);
-    expect(cols.map((c) => c.title)).toEqual(["gtm/deals"]);
+    const cols = buildColumns([node({ id: "no/such/folder/a" })], cfg);
+    expect(cols.map((c) => c.label)).toEqual(["no/such/folder"]);
+    expect(cols.map((c) => c.title)).toEqual(["no/such/folder"]);
   });
 });
 

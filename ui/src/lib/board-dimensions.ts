@@ -77,9 +77,11 @@ export interface BoardConfig {
 
 export interface BoardColumn {
   key: string;
-  /** Heading text. For folder columns, just the folder's own name. */
+  /** Heading text. For folder columns, the full folder path — a shortened
+   *  leaf-only label loses hierarchy and can't tell "a/notes" from "b/notes"
+   *  apart. Long labels wrap/truncate in the UI; `title` carries the full text. */
   label: string;
-  /** Full, untrimmed name for the tooltip, since `label` may be shortened. */
+  /** Full, untrimmed name for the tooltip. Same as `label` for folder columns. */
   title: string;
 }
 
@@ -259,47 +261,6 @@ function shownKeys(
   return keys.length > 0 ? keys : [UNCATEGORIZED];
 }
 
-/**
- * Folder headings: the folder's own name, and only as much of its parent path
- * as it takes to be unique.
- *
- * The full path is useless as a heading — an imported vault puts every folder
- * under one long root, so the headings all truncate to the same elided prefix.
- * The last segment alone is readable but collides (`content/social` and
- * `content/published/social` both read "social"), so colliding labels grow one
- * parent segment at a time until they separate: "content/social" vs
- * "published/social". Columns that were already unique keep their short name.
- */
-function disambiguateFolderLabels(keys: string[]): Map<string, string> {
-  const segments = new Map(keys.map((k) => [k, k.split("/")]));
-  const depth = new Map(keys.map((k) => [k, 1]));
-  const labelOf = (k: string) => segments.get(k)!.slice(-depth.get(k)!).join("/");
-
-  for (;;) {
-    const byLabel = new Map<string, string[]>();
-    for (const k of keys) {
-      const label = labelOf(k);
-      const group = byLabel.get(label);
-      if (group) group.push(k);
-      else byLabel.set(label, [k]);
-    }
-    // Deepen only the colliding ones. Terminates: each pass either deepens a
-    // key (bounded by its segment count) or changes nothing and stops.
-    let deepened = false;
-    for (const group of byLabel.values()) {
-      if (group.length < 2) continue;
-      for (const k of group) {
-        if (depth.get(k)! < segments.get(k)!.length) {
-          depth.set(k, depth.get(k)! + 1);
-          deepened = true;
-        }
-      }
-    }
-    if (!deepened) break;
-  }
-  return new Map(keys.map((k) => [k, labelOf(k)]));
-}
-
 function labelFor(key: string, config: BoardConfig): string {
   if (key === UNCATEGORIZED) return "Uncategorized";
   if (key === "" && config.dimension === "folder") return "(root)";
@@ -373,15 +334,9 @@ export function buildColumns(
   const keys = [...ordered, ...rest];
   // UNCATEGORIZED always trails, regardless of columnOrder placement.
   if (needUncat) keys.push(UNCATEGORIZED);
-  const folderLabels =
-    config.dimension === "folder"
-      ? disambiguateFolderLabels(
-          keys.filter((k) => k !== UNCATEGORIZED && k !== ""),
-        )
-      : null;
   return keys.map((key) => ({
     key,
-    label: folderLabels?.get(key) ?? labelFor(key, config),
+    label: labelFor(key, config),
     title: titleFor(key, config),
   }));
 }
