@@ -215,6 +215,7 @@ import {
 } from "@/components/ui/dialog";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../../lib/queries";
+import { escapeUnknownInlineHtml } from "../../lib/html-tag-allowlist";
 import {
   detectTrigger,
   matchMembers,
@@ -631,7 +632,7 @@ export const MarkdownEditor = forwardRef<
         transformCopiedText: true,
       }),
     ],
-    content,
+    content: escapeUnknownInlineHtml(content),
     editable,
     // Caret-ready on open so you can type immediately (Notion/Obsidian
     // feel). "end" lands at doc end; placeholder shows when empty. A
@@ -962,7 +963,9 @@ export const MarkdownEditor = forwardRef<
     if (!editor) return;
     if (editor.isFocused) return;
     if (content === getEditorMarkdown(editor)) return;
-    editor.commands.setContent(content, { emitUpdate: false });
+    editor.commands.setContent(escapeUnknownInlineHtml(content), {
+      emitUpdate: false,
+    });
   }, [content, editor]);
 
   useImperativeHandle(

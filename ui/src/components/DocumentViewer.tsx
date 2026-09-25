@@ -36,6 +36,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { remarkMathNoCurrency } from "@/lib/markdown-math";
 import { remarkMentions } from "@/lib/markdown-mentions";
+import { stripKnownHtmlTags } from "@/lib/html-tag-allowlist";
 import type { Plugin } from "unified";
 import type { Root, Text } from "mdast";
 import { visit } from "unist-util-visit";
@@ -181,20 +182,19 @@ const remarkColorSpans: Plugin<[], Root> = () => (tree) => {
 // Stored docs are markdown-only, but legacy content can carry stray inline
 // HTML (e.g. an unmatched color <span> from an old save, or hand-authored
 // HTML). react-markdown renders raw HTML as literal text — turn html nodes
-// into plain text with tags stripped so only the inner text shows. Fenced
-// code is a `code` node, never `html`, so code samples are untouched.
+// into plain text with real tags stripped so only the inner text shows.
+// Fenced code is a `code` node, never `html`, so code samples are untouched.
+//
+// remark's raw-HTML tokenizer treats ANY `<word>` as a tag per CommonMark,
+// so generic-type prose like "Array<string>" tokenizes as an `html` node
+// too, with no separate text for "string" to fall back to — stripping it
+// unconditionally used to erase it. Only strip tags this app actually
+// treats as markup (see html-tag-allowlist.ts); anything else stays as the
+// literal text it is.
 const remarkStripHtml: Plugin<[], Root> = () => (tree) => {
   visit(tree, "html", (node: any) => {
     node.type = "text";
-    // Loop until stable: a single pass of /<[^>]*>/g can leave behind
-    // fragments that reassemble into another tag (e.g. `<scr<script>ipt>`).
-    let value = node.value || "";
-    let prev: string;
-    do {
-      prev = value;
-      value = value.replace(/<[^>]*>/g, "");
-    } while (value !== prev);
-    node.value = value;
+    node.value = stripKnownHtmlTags(node.value || "");
   });
 };
 
