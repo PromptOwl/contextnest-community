@@ -133,6 +133,17 @@ it("hides approve-inbox items from an editor, shows them to a reviewer", async (
   // Reviewer can approve → it shows in his items.
   expect(bobWork.data.items.some((w: any) => w.nest_id === nestId)).toBe(true);
 
+  // Regression: pagination.total (what the sidebar badge reads) came straight
+  // from getReviewQueue's raw count — every pending review in every nest the
+  // caller can SEE, regardless of who requested it or whether the caller can
+  // approve it. For carol (a fresh user whose only visible nest is this one),
+  // that raw count included alice's pending review even though it never
+  // appears in carol's items or waiting — the badge overcounted relative to
+  // what My Work actually shows her.
+  expect(carolWork.data.pagination.total).toBe(
+    carolWork.data.items.length + carolWork.data.waiting.length,
+  );
+
   // Belt-and-braces: the server hard-blocks an editor's approve attempt too.
   const approve = await jsonRequest(
     app,

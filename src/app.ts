@@ -1555,10 +1555,14 @@ export function createApp(): Hono<AuthEnv> {
     // ponytail: nest-granularity check. A reviewer scoped to only one doc/tag
     // will see that whole nest's pending items, not just their scoped docs.
     // Tighten to per-node canUserApprove if that over-inclusion ever matters.
+    // Resolved for every nest the caller can SEE, not just nests that happen
+    // to appear in this page of `requests` — pagination.total below needs
+    // the full picture (a nest with pending reviews from someone else, on a
+    // page the caller never fetched, still has to be excluded consistently).
     const others = requests.filter((r) => r.requestedBy !== me);
     const nestApprove = new Map<string, boolean>(
       await Promise.all(
-        [...new Set(others.map((r) => r.nestId))].map(
+        [...nestName.keys()].map(
           async (nestId): Promise<[string, boolean]> => [
             nestId,
             await canApproveInNest(nestId, me),
@@ -1602,13 +1606,40 @@ export function createApp(): Hono<AuthEnv> {
     waiting.sort(byNewest);
     // Watcher notifications (HITL tags) ride along so the inbox is one call.
     const notifications = await listNotifications(me, { unreadOnly: true, limit: 50 });
-    // `total` from getReviewQueue only counts pending reviews — deletion flags
-    // ride the same two buckets (above) but were never folded in, so the
-    // sidebar badge (which reads this field directly, see my-work/meta.ts)
-    // undercounted by however many deletion rows were actually shown.
-    // has_more stays driven off the review-only total: deletions are always
-    // fetched in full regardless of page, so they don't affect whether
-    // another page of reviews remains.
+    // `total` from getReviewQueue counts every PENDING REVIEW across every
+    // nest the caller can see — full stop, regardless of who requested it or
+    // whether the caller can approve it. But items/waiting only ever surface
+    // a review that is either the caller's own request or one the caller can
+    // actually approve (see nestApprove above); a review from someone else in
+    // a nest where the caller is a bare viewer/editor never appears in either
+    // bucket, yet was still counted in `total` — so the badge (which reads
+    // pagination.total, see my-work/meta.ts) overcounted relative to what My
+    // Work actually shows. Recompute the review portion of the total as
+    // exactly (pending reviews in nests the caller can approve) + (the
+    // caller's own pending reviews elsewhere) — the same two conditions
+    // items/waiting are built from — via two SQL counts rather than the raw,
+    // unfiltered getReviewQueue total.
+    const approvableNestIds = [...nestName.keys()].filter((id) =>
+      nestApprove.get(id),
+    );
+    const restNestIds = [...nestName.keys()].filter(
+      (id) => !nestApprove.get(id),
+    );
+    const [{ total: approvableReviewTotal }, { total: myReviewsElsewhereTotal }] =
+      await Promise.all([
+        getReviewQueue({ status: "pending", nestIds: approvableNestIds, limit: 1 }),
+        getReviewQueue({
+          status: "pending",
+          nestIds: restNestIds,
+          requestedByEmail: me,
+          limit: 1,
+        }),
+      ]);
+    const reviewTotal = approvableReviewTotal + myReviewsElsewhereTotal;
+    // Deletion flags ride the same two buckets (above) but aren't paginated
+    // (listDeletionRequests always fetches every pending one), so folding in
+    // however many are actually shown keeps the total exact regardless of
+    // which review page this call fetched.
     const deletionsShown =
       items.filter((i) => i.type === "deletion").length +
       waiting.filter((i) => i.type === "deletion").length;
@@ -1617,7 +1648,7 @@ export function createApp(): Hono<AuthEnv> {
       waiting,
       notifications,
       pagination: {
-        total: total + deletionsShown,
+        total: reviewTotal + deletionsShown,
         limit,
         offset,
         has_more: offset + requests.length < total,
