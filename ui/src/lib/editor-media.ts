@@ -88,7 +88,7 @@ const MEDIA_MIME_TYPES = new Set(MEDIA_ACCEPT.split(","));
  * beats hiding the overlay for an upload that would have worked.
  */
 export function isUnsupportedFileDrag(
-  items: ReadonlyArray<{ kind: string; type: string }> | null | undefined,
+  items: ArrayLike<{ kind: string; type: string }> | null | undefined,
 ): boolean {
   if (!items) return false;
   const fileItems = Array.from(items).filter((item) => item.kind === "file");
