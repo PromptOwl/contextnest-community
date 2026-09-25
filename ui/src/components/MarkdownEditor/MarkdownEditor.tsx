@@ -35,6 +35,7 @@ import { DragHandle } from "@tiptap/extension-drag-handle-react";
 import { NodeRange } from "@tiptap/extension-node-range";
 import type { Transaction } from "@tiptap/pm/state";
 import { Markdown, type MarkdownStorage } from "tiptap-markdown";
+import { serializeImageNode } from "../../lib/image-markdown-serializer";
 
 // tiptap-markdown's storage isn't in TipTap's Storage type; cast.
 // TextStyle/Color have no dedicated markdown syntax, so with no explicit
@@ -551,9 +552,18 @@ export const MarkdownEditor = forwardRef<
       }),
       TaskList,
       TaskItem.configure({ nested: true }),
-      // Inline images — required for tiptap-markdown to round-trip ![alt](url)
-      // instead of dropping it. Rendering constrained via editor-styles.css.
-      TiptapImage.configure({ inline: false, allowBase64: false }),
+      // Block-level images — required for tiptap-markdown to round-trip
+      // ![alt](url) instead of dropping it. Rendering constrained via
+      // editor-styles.css. Custom markdown serializer: the built-in one
+      // (inherited from an inline-image assumption) never closes the
+      // image's block, which drops the blank line before whatever follows
+      // it — see image-markdown-serializer.ts for why that silently breaks
+      // a video URL placed right after an image.
+      TiptapImage.extend({
+        addStorage() {
+          return { markdown: { serialize: serializeImageNode } };
+        },
+      }).configure({ inline: false, allowBase64: false }),
       // `==text==` highlight. multicolor lets the color marks set a bg.
       Highlight.configure({ multicolor: true }),
       // Text color mark. Persisted via the html:true raw-HTML fallback below
