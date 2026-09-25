@@ -13,7 +13,9 @@ import {
   mediaAffordances,
   editorPlaceholder,
   isFileDrag,
+  isUnsupportedFileDrag,
   pickMediaFile,
+  unsupportedMediaDropMessage,
   validateEmbedInput,
   shouldUploadPastedMedia,
 } from "./editor-media";
@@ -87,6 +89,55 @@ describe("isFileDrag — only a file drag lights the overlay", () => {
     expect(isFileDrag(["text/plain", "text/html"])).toBe(false);
     expect(isFileDrag([])).toBe(false);
     expect(isFileDrag(undefined)).toBe(false);
+  });
+});
+
+describe("isUnsupportedFileDrag — skip the overlay for a file we'd reject anyway", () => {
+  it("true when every dragged file's MIME type is a known non-match (svg, pdf, txt)", () => {
+    expect(
+      isUnsupportedFileDrag([{ kind: "file", type: "image/svg+xml" }]),
+    ).toBe(true);
+    expect(
+      isUnsupportedFileDrag([{ kind: "file", type: "application/pdf" }]),
+    ).toBe(true);
+    expect(
+      isUnsupportedFileDrag([{ kind: "file", type: "text/plain" }]),
+    ).toBe(true);
+  });
+  it("false for an accepted image/video MIME type", () => {
+    expect(
+      isUnsupportedFileDrag([{ kind: "file", type: "image/png" }]),
+    ).toBe(false);
+    expect(
+      isUnsupportedFileDrag([{ kind: "file", type: "video/webm" }]),
+    ).toBe(false);
+  });
+  it("false (inconclusive) when the browser reports no type, or there's no drag", () => {
+    expect(isUnsupportedFileDrag([{ kind: "file", type: "" }])).toBe(false);
+    expect(isUnsupportedFileDrag([])).toBe(false);
+    expect(isUnsupportedFileDrag(null)).toBe(false);
+    expect(isUnsupportedFileDrag(undefined)).toBe(false);
+  });
+  it("false when at least one dragged file is accepted (multi-file drag)", () => {
+    expect(
+      isUnsupportedFileDrag([
+        { kind: "file", type: "application/pdf" },
+        { kind: "file", type: "image/png" },
+      ]),
+    ).toBe(false);
+  });
+  it("ignores non-file drag items (e.g. dragged text)", () => {
+    expect(isUnsupportedFileDrag([{ kind: "string", type: "text/plain" }])).toBe(
+      false,
+    );
+  });
+});
+
+describe("unsupportedMediaDropMessage — the toast when a drop is rejected", () => {
+  it("names the file and the accepted types/caps", () => {
+    const msg = unsupportedMediaDropMessage("logo.svg");
+    expect(msg).toContain("logo.svg");
+    expect(msg).toContain(MEDIA_HELPER_TEXT);
   });
 });
 

@@ -77,6 +77,32 @@ export function isFileDrag(
   return !!types && Array.from(types).includes("Files");
 }
 
+const MEDIA_MIME_TYPES = new Set(MEDIA_ACCEPT.split(","));
+
+/**
+ * True when a drag-over payload is definitely not an accepted image/video —
+ * used to skip the drop overlay before the real filename is known (drag
+ * events only expose MIME type via `dataTransfer.items`, not the filename,
+ * until drop). A blank/unknown type is treated as "might be accepted": some
+ * OS + file-type combinations never report one, and a false "supported"
+ * beats hiding the overlay for an upload that would have worked.
+ */
+export function isUnsupportedFileDrag(
+  items: ReadonlyArray<{ kind: string; type: string }> | null | undefined,
+): boolean {
+  if (!items) return false;
+  const fileItems = Array.from(items).filter((item) => item.kind === "file");
+  if (fileItems.length === 0) return false;
+  return fileItems.every(
+    (item) => item.type !== "" && !MEDIA_MIME_TYPES.has(item.type),
+  );
+}
+
+/** Toast shown when a dropped file isn't an accepted image/video. */
+export function unsupportedMediaDropMessage(fileName: string): string {
+  return `"${fileName}" isn't a supported image or video. ${MEDIA_HELPER_TEXT}`;
+}
+
 /** The first file on the upload allowlist, or null. */
 export function pickMediaFile<T extends { name: string }>(
   files: ArrayLike<T> | null | undefined,

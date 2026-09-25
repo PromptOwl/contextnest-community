@@ -242,9 +242,11 @@ import {
   VIDEO_MAX_UPLOAD_BYTES,
   editorPlaceholder,
   isFileDrag,
+  isUnsupportedFileDrag,
   mediaAffordances,
   pickMediaFile,
   shouldUploadPastedMedia,
+  unsupportedMediaDropMessage,
   validateEmbedInput,
 } from "@/lib/editor-media";
 import { Mention } from "./extensions/Mention";
@@ -715,9 +717,12 @@ export const MarkdownEditor = forwardRef<
         });
       },
       // Image/video file dropped onto the editor → same upload + insert
-      // as the toolbar picker, at the drop position. Anything else falls
-      // through (return false) so ProseMirror's default drop handling —
-      // text drags, in-editor block moves — is untouched.
+      // as the toolbar picker, at the drop position. An unsupported file
+      // type is rejected with a toast (handled, not left to fall through —
+      // an unhandled file drop can otherwise navigate the tab to the file).
+      // A drag with no files at all still falls through (return false) so
+      // ProseMirror's default drop handling — text drags, in-editor block
+      // moves — is untouched.
       handleDrop: (view, event) => {
         const ed = editorRef.current;
         const upload = onUploadImageRef.current;
@@ -727,7 +732,11 @@ export const MarkdownEditor = forwardRef<
         // never upload/insert into a locked or preview-mode doc.
         if (!ed.isEditable) return false;
         const file = files[0];
-        if (!MEDIA_FILE_RE.test(file.name)) return false;
+        if (!MEDIA_FILE_RE.test(file.name)) {
+          event.preventDefault();
+          toast.error(unsupportedMediaDropMessage(file.name));
+          return true;
+        }
         event.preventDefault();
         if (files.length > 1) {
           toast("Only the first file was uploaded — drop one file at a time.");
@@ -1400,7 +1409,8 @@ export const MarkdownEditor = forwardRef<
       // handleDrop (the overlay is pointer-events-none, so it never eats it).
       onDragOver={(e) => {
         if (media.dropOverlay && isFileDrag(e.dataTransfer?.types)) {
-          if (!fileDragOver) setFileDragOver(true);
+          const show = !isUnsupportedFileDrag(e.dataTransfer?.items);
+          if (fileDragOver !== show) setFileDragOver(show);
         }
       }}
       onDragLeave={(e) => {
