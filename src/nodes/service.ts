@@ -2908,8 +2908,9 @@ async function vaultFolderDir(nestId: string, rel: string): Promise<string> {
 }
 
 /** Is this folder already a directory in the vault? */
-async function vaultFolderExists(nestId: string, rel: string): Promise<boolean> {
+export async function vaultFolderExists(nestId: string, rel: string): Promise<boolean> {
   if (!rel) return false;
+  assertSafeFolder(rel);
   try {
     return (await stat(await vaultFolderDir(nestId, rel))).isDirectory();
   } catch {

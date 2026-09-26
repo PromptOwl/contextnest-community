@@ -408,7 +408,9 @@ export function DocumentsTab({
     if (canManage) {
       const { deleted } = await api.deleteFolder(nestId, folder.path);
       toast.success(
-        `Deleted ${folder.label} — ${deleted} document${deleted === 1 ? "" : "s"}`,
+        deleted === 0
+          ? `Deleted ${folder.label}`
+          : `Deleted ${folder.label} — ${deleted} document${deleted === 1 ? "" : "s"}`,
       );
     } else {
       await api.requestTargetDeletion(nestId, "folder", folder.path, reason);
@@ -1664,7 +1666,9 @@ export function DocumentsTab({
                               (canManage || !folderFlagPending(node.path)) && (
                               <button
                                 type="button"
-                                className={`rounded p-0.5 opacity-0 group-hover/fh:opacity-100 ${
+                                // An empty folder's only useful action is
+                                // removing it, so it shows without a hover.
+                                className={`rounded p-0.5 ${node.total === 0 ? "" : "opacity-0"} group-hover/fh:opacity-100 focus-visible:opacity-100 ${
                                   canManage
                                     ? "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
                                     : "text-muted-foreground hover:text-primary hover:bg-primary/10"
@@ -1977,7 +1981,11 @@ export function DocumentsTab({
               : `Request deletion of "${folderTarget.label}"`
           }
           description={
-            canManage
+            folderTarget.total === 0
+              ? canManage
+                ? "This folder is empty — deleting it just removes it from the tree."
+                : "A nest admin reviews this. The folder is empty, so nothing else is removed."
+              : canManage
               ? `This deletes all ${folderTarget.total} document${folderTarget.total === 1 ? "" : "s"} in this folder and its subfolders, with their history, comments and annotations. It cannot be undone.`
               : `A nest admin reviews this. Honouring it deletes all ${folderTarget.total} document${folderTarget.total === 1 ? "" : "s"} in this folder. Nothing is removed yet.`
           }
