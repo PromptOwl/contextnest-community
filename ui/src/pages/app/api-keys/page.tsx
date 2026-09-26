@@ -42,7 +42,7 @@ import {
   keyScope,
 } from "../../../lib/api-key-scope";
 import { parseServerDate } from "../../../lib/dates";
-import { KeyRevealModal } from "../../../components/ConnectModal";
+import { KeyRevealModal, confirmRotate } from "../../../components/ConnectModal";
 
 function when(value: string | null): string {
   if (!value) return "never";
@@ -263,6 +263,7 @@ export default function ApiKeysPage() {
                     size="sm"
                     disabled={busy === k.id}
                     onClick={() =>
+                      confirmRotate(name) &&
                       run(
                         k.id,
                         () => api.rotateApiKey({ key_id: k.id }),

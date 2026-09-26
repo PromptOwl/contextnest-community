@@ -351,7 +351,10 @@ export function ConnectModal({
                       variant="outline"
                       className="shrink-0"
                       disabled={mintingNestKey !== null}
-                      onClick={() => mintNestKey(k.id)}
+                      onClick={() =>
+                        confirmRotate(k.label || "Untitled key") &&
+                        mintNestKey(k.id)
+                      }
                     >
                       {mintingNestKey === k.id ? (
                         <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
@@ -892,6 +895,12 @@ export function ConnectModal({
     </>
   );
 }
+
+/** Rotating kills the old key on the spot — ask first, naming the key. */
+export const confirmRotate = (name: string) =>
+  window.confirm(
+    `Rotate "${name}"? The current key stops working immediately — anything still using it needs the new one.`,
+  );
 
 /**
  * Standalone modal that surfaces a freshly minted / rotated plaintext
