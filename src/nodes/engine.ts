@@ -4,6 +4,7 @@ import {
   VersionManager,
   DocumentNotFoundError,
 } from "@promptowl/contextnest-engine";
+import { config } from "../config.js";
 import { createEngineApi } from "@promptowl/contextnest-engine/api";
 import type { OperationContext } from "@promptowl/contextnest-engine/api";
 import type { ContextNode } from "@promptowl/contextnest-engine";
@@ -335,5 +336,8 @@ export async function opContext(
   onProgress?: (done: number, total: number) => void,
 ): Promise<OperationContext> {
   const { storage, query, versions } = await engineCache.get(nestId);
-  return { storage, query, versions, actor, onProgress };
+  // Host-set upload ceilings: the engine enforces them too, so a PDF the
+  // route admitted can never be larger than this server's PDF_MAX_MB.
+  const limits = { pdfMaxBytes: config.PDF_MAX_BYTES };
+  return { storage, query, versions, actor, onProgress, limits };
 }

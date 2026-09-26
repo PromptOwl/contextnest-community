@@ -17,7 +17,7 @@ import {
   Clock, CheckCircle2, Loader2, Link2, Settings as SettingsIcon,
   Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
   FileStack, FolderPlus, X,
-  Activity, BookOpen, Archive, Eye,
+  Activity, BookOpen, Archive, Eye, Palette,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { prettyFolderPath } from "./FolderTree";
@@ -25,10 +25,14 @@ import { prettyFolderPath } from "./FolderTree";
 /** One icon per node type — agent/skill/artifact/document each read distinctly. */
 // Kept as a re-export: WorkflowsView imports it from here.
 export { NodeTypeIcon } from "./nest/NodeTypeIcon";
-import { byPathSegments, folderOfNode } from "./nest/node-display";
+import { folderOfNode } from "./nest/node-display";
 import { GenerateContextModal } from "./GenerateContextModal";
+import { groupNodesByFolder } from "@/lib/nest-overview";
+import { useMediaQuery } from "@/lib/use-media-query";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ReaderView } from "./ReaderView";
+import { ReaderBrandingDialog } from "./ReaderBrandingDialog";
+import { isBranded, type NestBranding } from "../lib/branding";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import {
   AlertDialog,
@@ -127,6 +131,10 @@ interface NestViewProps {
   /** Reports tab changes up so App can mirror them into ?tab=. */
   onTabChange?: (tab: string) => void;
 }
+
+/** Nest tab strip, in the reader's text-tab style (CU-wdqcq02qb1). */
+const NEST_TAB =
+  "relative rounded-none px-0 pb-2.5 pt-1 text-muted-foreground hover:text-foreground data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:rounded-full after:bg-transparent data-[state=active]:after:bg-primary";
 
 export function NestView({
   nestId,
@@ -265,6 +273,10 @@ export function NestView({
   const [readerHomeNode, setReaderHomeNode] = useState<string | null>(null);
   const [readerModeSaving, setReaderModeSaving] = useState(false);
   const [readerDialogOpen, setReaderDialogOpen] = useState(false);
+  // Per-nest reader branding (CU-wdqcq02ptm): nest.branding, edited from the
+  // reader-mode dialog, applied by ReaderView (and the shell, for readers).
+  const [branding, setBranding] = useState<NestBranding | null>(null);
+  const [brandingDialogOpen, setBrandingDialogOpen] = useState(false);
   // "Preview as reader": an owner/editor looking at the visitor-facing reader
   // from inside the authoring UI. Presentation only — rights are unchanged.
   const [previewReader, setPreviewReader] = useState(false);
@@ -557,6 +569,7 @@ export function NestView({
       setNestDescription((nestMeta.nest as any).description ?? null);
       setReaderModeEnabled(!!(nestMeta.nest as any).reader_mode);
       setReaderHomeNode((nestMeta.nest as any).reader_home_node ?? null);
+      setBranding(nestMeta.nest.branding ?? null);
       setNestArchivedAt((nestMeta.nest as any).archived_at ?? null);
     }
     if (nestMeta?.permission) {
@@ -797,38 +810,9 @@ export function NestView({
   // NOTE: the engine also generates a canonical INDEX.md via regenerateIndex()
   // (excluded from the node list as a meta-file); surfacing that engine-built
   // index is a deeper follow-up — this is the lightweight UI overview.
-  const tocGroups = (() => {
-    // Group by the FULL folder path (everything before the leaf), not just
-    // the first segment, so nested folders like nodes/gtm/deals each get
-    // their own group. Sorting by path keeps children right under parents;
-    // depth drives the header indent.
-    const groups = new Map<string, any[]>();
-    for (const n of nodes) {
-      const id: string = n.id || "";
-      // Strip the "nodes/" storage root — it's not a user folder. What's left
-      // is the real folder path; a doc directly under nodes/ has none → Root.
-      const rel = id.startsWith("nodes/") ? id.slice(6) : id;
-      const slash = rel.lastIndexOf("/");
-      const folder = slash > 0 ? rel.slice(0, slash) : "Root";
-      if (!groups.has(folder)) groups.set(folder, []);
-      groups.get(folder)!.push(n);
-    }
-    return [...groups.entries()]
-      .map(([folder, items]) => ({
-        folder,
-        depth: folder === "Root" ? 0 : folder.split("/").length,
-        items: [...items].sort((a, b) =>
-          String(a.title || a.id).localeCompare(String(b.title || b.id)),
-        ),
-      }))
-      .sort((a, b) =>
-        a.folder === "Root"
-          ? -1
-          : b.folder === "Root"
-            ? 1
-            : byPathSegments(a.folder, b.folder),
-      );
-  })();
+  // Grouping logic lives in lib/nest-overview (tested there).
+  // Memoised: the Overview index and FolderTree memoise on this reference.
+  const tocGroups = useMemo(() => groupNodesByFolder(nodes), [nodes]);
 
   // Overview stat tile: Root is a synthetic tocGroups entry for docs with no
   // folder, not a user-created folder, so it's excluded from the count.
@@ -1067,10 +1051,15 @@ export function NestView({
   const [dragOver, setDragOver] = useState(false);
   const [importing, setImporting] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const [importMenuOpen, setImportMenuOpen] = useState(false);
+  // Phone width: Share folds into the ⋮ menu so the header actions keep one row.
+  const isPhone = useMediaQuery("(max-width: 639px)");
+  const pdfInputRef = useRef<HTMLInputElement | null>(null);
 
-  const kindForFile = (name: string): "document" | "artifact" | null => {
+  const kindForFile = (name: string): "document" | "artifact" | "pdf" | null => {
     const ext = name.toLowerCase().split(".").pop() || "";
     if (ext === "html" || ext === "htm") return "artifact";
+    if (ext === "pdf") return "pdf";
     if (ext === "md" || ext === "markdown" || ext === "txt") return "document";
     return null;
   };
@@ -1080,7 +1069,7 @@ export function NestView({
       const files = Array.from(fileList).filter((f) => kindForFile(f.name));
       const skipped = fileList.length - files.length;
       if (!files.length) {
-        toast.error("Drop .md or .html files to add them to this vault.");
+        toast.error("Drop .md, .html or .pdf files to add them to this vault.");
         return;
       }
       setImporting(true);
@@ -1088,7 +1077,7 @@ export function NestView({
       try {
         for (const file of files) {
           const type = kindForFile(file.name)!;
-          const title = file.name.replace(/\.(md|markdown|txt|html|htm)$/i, "");
+          const title = file.name.replace(/\.(md|markdown|txt|html|htm|pdf)$/i, "");
           // Whole-vault import (webkitdirectory) carries relative paths —
           // keep the tree: strip the picked root dir + filename, the rest is
           // the folder. Hidden dirs (.versions, .context) are engine files.
@@ -1101,8 +1090,12 @@ export function NestView({
             folder = (segs[0] === "nodes" ? segs.slice(1) : segs).join("/") || undefined;
           }
           try {
-            const text = await file.text();
-            const res = await api.createNode(nestId, { title, content: text, type, folder });
+            // A PDF is uploaded as bytes and becomes a governed `pdf` document
+            // (the server extracts its text); everything else is read as text.
+            const res =
+              type === "pdf"
+                ? await api.createPdfNode(nestId, file, { title, folder })
+                : await api.createNode(nestId, { title, content: await file.text(), type, folder });
             const id = (res as any)?.node?.id;
             if (id) createdIds.push(id);
           } catch (e: any) {
@@ -1160,6 +1153,7 @@ export function NestView({
         loadingFolders={loadingFolders}
         loadedFolders={loadedFolderPaths}
           approvedOnly={previewReader}
+          branding={branding}
       />
       </div>
     );
@@ -1195,7 +1189,7 @@ export function NestView({
               Drop to add to this vault
             </div>
             <div className="text-xs text-muted-foreground">
-              .md → document · .html → hosted artifact
+              .md → document · .html → hosted artifact · .pdf → PDF document
             </div>
           </div>
         </div>
@@ -1214,7 +1208,9 @@ export function NestView({
         onBack={onBack}
         title={
           canManage ? (
-            <div className="min-w-0 flex-1">
+            // A floor on the name's width so the header's chips wrap under it
+            // on a phone instead of truncating it to one letter.
+            <div className="min-w-[11rem] flex-1 sm:min-w-0">
               <div className="flex items-center gap-1">
               <input
                 value={editableName}
@@ -1279,8 +1275,11 @@ export function NestView({
           <>
           {/* Visibility — an inline toggle for owner/admin (so the public/
               private switch isn't buried in the Share dialog), a read-only
-              badge for everyone else. */}
-          {canManage ? (
+              badge for everyone else. Gated on !initialLoad (not `loading`,
+              which flips on every background refetch too — see its
+              definition above) so the header never flashes the "private"
+              default before the real value lands from fetchData. */}
+          {!initialLoad && (canManage ? (
             // Two-state on purpose: a header shortcut for the common flip,
             // private <-> public. An org nest routes to the full three-tier
             // control on the Collaborators tab instead (see
@@ -1344,13 +1343,14 @@ export function NestView({
                 {visibility === "public" ? "Public" : "Organization"}
               </Badge>
             )
-          )}
+          ))}
           {/* Public Docs Reader Mode config — server admin, or this nest's own
               owner/admin (see canManageReaderMode). A menu rather than a
               toggle: the landing document is part of the same setting, and
               changing it must not mean switching reader mode off and on
-              again. */}
-            {canManageReaderMode && !nestArchived && (
+              again. Also gated on !initialLoad — same flash-of-default-state
+              reason as the visibility badge above. */}
+            {canManageReaderMode && !nestArchived && !initialLoad && (
             <Button
               variant="outline"
               size="sm"
@@ -1430,9 +1430,10 @@ export function NestView({
               Add with AI
             </Button>
           )}
-          {canManage && (
+          {canManage && !isPhone && (
             // Inside the nest, Share IS the Collaborators tab — one surface
-            // for visibility, people and teams (CU-wdqcpzzzy6).
+            // for visibility, people and teams (CU-wdqcpzzzy6). On a phone it
+            // is the ⋮ menu's first item instead.
             <Button
               variant="outline"
               size="sm"
@@ -1451,7 +1452,18 @@ export function NestView({
                 ref={importInputRef}
                 type="file"
                 multiple
-                accept=".md,.markdown,.txt,.html,.htm"
+                accept=".md,.markdown,.txt,.html,.htm,.pdf"
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files?.length) void importFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              <input
+                ref={pdfInputRef}
+                type="file"
+                multiple
+                accept="application/pdf,.pdf"
                 className="hidden"
                 onChange={(e) => {
                   if (e.target.files?.length) void importFiles(e.target.files);
@@ -1477,6 +1489,12 @@ export function NestView({
               destructive, write+admin gated. */}
           {(() => {
             const actions: OverflowAction[] = [];
+            if (canManage && isPhone)
+              actions.push({
+                label: "Share",
+                icon: Users,
+                onSelect: () => setActiveTab("collaborators"),
+              });
             if (!isReadOnly && canManageGovernance)
               actions.push({
                 label: "Nest settings",
@@ -1533,9 +1551,129 @@ export function NestView({
           })()}
       </NestPageHeader>
 
+      {/* Tabbed layout — Documents / Review Queue / Stewards.
+          When stewardship is off the latter two tabs are hidden because
+          their data is empty by definition. */}
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full min-w-0">
+        {/* New Folder sits beside the tab row — it acts on the content area
+            below (Overview/Documents), not on the nest as a whole.
+            The triggers never wrap, so on a narrow window the row scrolls
+            inside itself rather than making the whole page scroll sideways —
+            page-level overflow drags fixed UI (toasts, dialogs) off-screen
+            with it. */}
+        {/* The reader's quieter nav: text tabs over one hairline, the active
+            one underlined — not a grey pill strip. Styled here, not in
+            ui/tabs, so the other pages that use Tabs are unchanged. On a
+            phone the actions sit above the tabs so the underline meets the
+            rule. */}
+        <div className="flex flex-wrap items-end gap-x-2 gap-y-3 mb-5 min-w-0 border-b">
+          <TabsList className="h-auto min-h-0 max-w-full justify-start gap-5 overflow-x-auto rounded-none bg-transparent p-0">
+            <TabsTrigger value="overview" className={NEST_TAB}>Overview</TabsTrigger>
+            <TabsTrigger value="documents" className={NEST_TAB}>Documents</TabsTrigger>
+            {/* Governance tabs hidden for view-only. */}
+            {showReviewTab && !isReadOnly && (
+              <TabsTrigger value="review" className={NEST_TAB + " gap-2"}>
+                Review Queue
+                {reviewableQueue.length > 0 && (
+                  <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                    {reviewableQueue.length}
+                  </Badge>
+                )}
+              </TabsTrigger>
+            )}
+            {!isReadOnly && (
+              <TabsTrigger value="external-edits" className={NEST_TAB + " gap-2"}>
+                External Edits
+                {externalEditCount > 0 && (
+                  <Badge
+                    variant="secondary"
+                    className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
+                  >
+                    {externalEditCount}
+                  </Badge>
+                )}
+              </TabsTrigger>
+            )}
+            {/* Steward roster is admin-only (list + manage), and hidden when
+              the admin is viewing a real user's nest. */}
+            {stewardshipEnabled && canManageGovernance && (
+              <TabsTrigger value="stewards" className={NEST_TAB}>Stewards</TabsTrigger>
+            )}
+            {/* Collaborators — plain access sharing, independent of
+              stewardship. Owner/admin manage the full roster; write
+              collaborators can invite (escalation-capped server-side), so
+              they see the tab too. The roster controls cap themselves by the
+              caller's permission (see CollaboratorManager). */}
+            {(canManage || collabCanWrite) && (
+              <TabsTrigger value="collaborators" className={NEST_TAB}>Collaborators</TabsTrigger>
+            )}
+          </TabsList>
+          {!isReadOnly && canEditDocs && (
+            <div className="ml-auto flex shrink-0 items-center gap-2 pb-2 max-sm:order-first max-sm:w-full max-sm:justify-end">
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-muted-foreground"
+              onClick={() => setShowNewFolder(true)}
+              title="Create a folder (nest with parent/child)"
+              aria-label="New Folder"
+            >
+              <FolderPlus className="h-4 w-4 sm:mr-1.5" />
+              {/* Icon-only on a phone so the three actions fit one row. */}
+              <span className="max-sm:hidden">New Folder</span>
+            </Button>
+            {/* Import and New Document act on the content area too, so they
+                sit with New Folder rather than in the nest header. */}
+              {/* Controlled so the Overview's empty state can open this same
+                  menu rather than keep a second copy of its items. */}
+              <DropdownMenu modal={false} open={importMenuOpen} onOpenChange={setImportMenuOpen}>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" data-testid="nest-import-files">
+                    <Upload className="h-3.5 w-3.5 mr-1.5" />
+                    Import
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => importInputRef.current?.click()}>
+                    Files (.md / .html / .pdf)
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() => pdfInputRef.current?.click()}
+                    data-testid="nest-upload-pdf"
+                  >
+                    Upload PDF (as a document)
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => importDirRef.current?.click()}>
+                    Whole vault (folder, keeps structure)
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <Button
+                size="sm"
+                // Default into the folder the Documents tab is scoped to, so a
+                // doc lands where the user is looking (CU-wdqcq0247w). The
+                // editor's folder picker still lets them change it.
+                onClick={() =>
+                  onOpenDocument("new", {
+                    folder:
+                      activeTab === "documents" && folderFilter
+                        ? folderFilter
+                        : undefined,
+                  })
+                }
+              >
+                <Plus className="h-3.5 w-3.5 mr-1.5" />
+                New Document
+              </Button>
+            </div>
+          )}
+        </div>
+
       {/* Stats Cards — only governance-related stats when stewardship is on.
           In ungoverned mode every doc is auto-approved so the pending/review
-          columns are always zero and just add noise. */}
+          columns are always zero and just add noise. Not on Overview: it
+          carries the same numbers as its own summary line (CU-wdqcq02qb1). */}
+      {activeTab !== "overview" && (
       <div
         className={`grid grid-cols-1 gap-4 mb-4 ${stewardshipEnabled
           ? "md:grid-cols-4"
@@ -1647,109 +1785,7 @@ export function NestView({
           </>
         )}
       </div>
-
-      {/* Tabbed layout — Documents / Review Queue / Stewards.
-          When stewardship is off the latter two tabs are hidden because
-          their data is empty by definition. */}
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full min-w-0">
-        {/* New Folder sits beside the tab row — it acts on the content area
-            below (Overview/Documents), not on the nest as a whole.
-            The triggers never wrap, so on a narrow window the row scrolls
-            inside itself rather than making the whole page scroll sideways —
-            page-level overflow drags fixed UI (toasts, dialogs) off-screen
-            with it. */}
-        <div className="flex items-center gap-2 mb-4 min-w-0">
-          <TabsList className="max-w-full justify-start overflow-x-auto">
-            <TabsTrigger value="overview">Overview</TabsTrigger>
-            <TabsTrigger value="documents">Documents</TabsTrigger>
-            {/* Governance tabs hidden for view-only. */}
-            {showReviewTab && !isReadOnly && (
-              <TabsTrigger value="review" className="gap-2">
-                Review Queue
-                {reviewableQueue.length > 0 && (
-                  <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
-                    {reviewableQueue.length}
-                  </Badge>
-                )}
-              </TabsTrigger>
-            )}
-            {!isReadOnly && (
-              <TabsTrigger value="external-edits" className="gap-2">
-                External Edits
-                {externalEditCount > 0 && (
-                  <Badge
-                    variant="secondary"
-                    className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
-                  >
-                    {externalEditCount}
-                  </Badge>
-                )}
-              </TabsTrigger>
-            )}
-            {/* Steward roster is admin-only (list + manage), and hidden when
-              the admin is viewing a real user's nest. */}
-            {stewardshipEnabled && canManageGovernance && (
-              <TabsTrigger value="stewards">Stewards</TabsTrigger>
-            )}
-            {/* Collaborators — plain access sharing, independent of
-              stewardship. Owner/admin manage the full roster; write
-              collaborators can invite (escalation-capped server-side), so
-              they see the tab too. The roster controls cap themselves by the
-              caller's permission (see CollaboratorManager). */}
-            {(canManage || collabCanWrite) && (
-              <TabsTrigger value="collaborators">Collaborators</TabsTrigger>
-            )}
-          </TabsList>
-          {!isReadOnly && canEditDocs && (
-            <div className="ml-auto flex shrink-0 items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-muted-foreground"
-              onClick={() => setShowNewFolder(true)}
-              title="Create a folder (nest with parent/child)"
-            >
-              <FolderPlus className="h-4 w-4 mr-1.5" />
-              New Folder
-            </Button>
-            {/* Import and New Document act on the content area too, so they
-                sit with New Folder rather than in the nest header. */}
-              <DropdownMenu modal={false}>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" size="sm" data-testid="nest-import-files">
-                    <Upload className="h-3.5 w-3.5 mr-1.5" />
-                    Import
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onSelect={() => importInputRef.current?.click()}>
-                    Files (.md / .html)
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => importDirRef.current?.click()}>
-                    Whole vault (folder, keeps structure)
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-              <Button
-                size="sm"
-                // Default into the folder the Documents tab is scoped to, so a
-                // doc lands where the user is looking (CU-wdqcq0247w). The
-                // editor's folder picker still lets them change it.
-                onClick={() =>
-                  onOpenDocument("new", {
-                    folder:
-                      activeTab === "documents" && folderFilter
-                        ? folderFilter
-                        : undefined,
-                  })
-                }
-              >
-                <Plus className="h-3.5 w-3.5 mr-1.5" />
-                New Document
-              </Button>
-            </div>
-          )}
-        </div>
+      )}
 
         {/* Overview — the nest's index/landing: stat tiles, recently-edited
             rows, and a grouped table-of-contents grid so opening a nest
@@ -1768,6 +1804,16 @@ export function NestView({
             canEditDocs={canEditDocs}
             onOpenDocument={onOpenDocument}
             onOpenFolder={openFolderInDocuments}
+            nestName={editableName}
+            loadedFolders={loadedFolderPaths}
+            loadingFolders={loadingFolders}
+            onExpandFolder={fetchLevel}
+            description={nestDescription}
+            governance={stewardshipEnabled ? stats : undefined}
+            onOpenReview={showReviewTab && !isReadOnly ? () => setActiveTab("review") : undefined}
+            onImport={canEditDocs && !isReadOnly ? () => setImportMenuOpen(true) : undefined}
+            // Same gate as the header's Add with AI button.
+            onAddWithAI={!isReadOnly ? () => setShowGenerate(true) : undefined}
           />
           </Suspense>
         </TabsContent>
@@ -2146,6 +2192,31 @@ export function NestView({
             </div>
           )}
 
+          {/* Branding — logo, banner, colors, footer — for the reader and
+              the nest's /p links. Its own dialog: it needs room for a preview. */}
+          <div className="rounded-lg border p-4 flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <Label className="text-sm font-medium">Branding</Label>
+              <p className="text-xs text-muted-foreground">
+                {isBranded(branding)
+                  ? "Custom logo, colors and footer are applied for readers."
+                  : "Readers see the default ContextNest look."}
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0 gap-1.5"
+              onClick={() => {
+                setReaderDialogOpen(false);
+                setBrandingDialogOpen(true);
+              }}
+            >
+              <Palette className="h-3.5 w-3.5" />
+              {isBranded(branding) ? "Edit branding" : "Customize"}
+            </Button>
+          </div>
+
           <DialogFooter>
             {readerModeEnabled && (
               <Button
@@ -2166,6 +2237,16 @@ export function NestView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ReaderBrandingDialog
+        open={brandingDialogOpen}
+        onOpenChange={setBrandingDialogOpen}
+        nestId={nestId}
+        nestName={editableName}
+        branding={branding}
+        isServerAdmin={isAdmin}
+        onSaved={setBranding}
+      />
 
       {/* Reader mode's landing document, picked from the real document list —
           the field used to take a hand-typed node id, so a title people could
@@ -2392,7 +2473,11 @@ function ReviewDocumentModal({
   // false) — the caller is acting as a reviewer here (read-only role for
   // this surface), so silently dropping them into an authoring page would
   // mislead them; instead we surface an inline note.
-  const handleWikiLinkClick = async (title: string, _id: string | null) => {
+  const handleWikiLinkClick = async (
+    title: string,
+    _id: string | null,
+    displayText?: string | null,
+  ) => {
     setLinkError(null);
     try {
       const { nodes } = await qc.fetchQuery(reads.nodes(nestId));
@@ -2400,13 +2485,14 @@ function ReviewDocumentModal({
         nodes as Array<{ id: string; title: string }>,
         title,
         false,
+        displayText,
       );
       if (action.kind === "navigate") {
         onOpenDocument(action.node.id);
         return;
       }
       setLinkError(
-        `"${title}" doesn't exist in this nest. Reviewers can't create new documents — ask an editor to add it.`,
+        `"${action.title}" doesn't exist in this nest. Reviewers can't create new documents — ask an editor to add it.`,
       );
     } catch (e) {
       console.error("[NestView] wiki-link lookup failed", nestId, title, e);

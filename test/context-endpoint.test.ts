@@ -476,3 +476,119 @@ describe("POST /context — source URLs (citations)", () => {
     ).toBeUndefined();
   });
 });
+
+// ── contextnest:// links are hop edges, like [[wikilinks]] (NestBench §6.4) ──
+// Control: a source links target A by [[wikilink]] and target B by a
+// contextnest:// markdown link at the same distance. Before the fix, hop
+// expansion only followed [[..]], so B was never returned at any hop count —
+// and the selector path ignored hops entirely.
+
+describe("POST /context — contextnest:// links are hop edges", () => {
+  const ctx = (payload: object) =>
+    jsonRequest(app, "POST", `/nests/${nestId}/context`, payload);
+  const ids = (res: any) => res.data.nodes.map((n: any) => n.id).sort();
+
+  beforeAll(async () => {
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Link Target A",
+      content: "# A\n\nReached by wikilink.",
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Link Target B",
+      content: "# B\n\nReached by URI.",
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Link Target C",
+      content: "# C\n\nOnly ever quoted in code.",
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Link Source",
+      content: [
+        "# Source",
+        "",
+        "Wiki: [[Link Target A]].",
+        "URI (pinned + anchored): [b](contextnest://nodes/link-target-b@1#b).",
+        "Dangling: [gone](contextnest://nodes/no-such-node@2).",
+        "Inline code: `[c](contextnest://nodes/link-target-c)`",
+        "```md",
+        "[c](contextnest://nodes/link-target-c)",
+        "```",
+      ].join("\n"),
+    });
+  });
+
+  it("[[Title]] seed: hops 0 is the seed only; hops 1-3 reach A and B alike, never C", async () => {
+    expect(ids(await ctx({ selector: "[[Link Source]]", hops: 0 }))).toEqual([
+      "nodes/link-source",
+    ]);
+    for (const hops of [1, 2, 3]) {
+      const res = await ctx({ selector: "[[Link Source]]", hops });
+      expect(res.status).toBe(200);
+      expect(ids(res)).toEqual([
+        "nodes/link-source",
+        "nodes/link-target-a",
+        "nodes/link-target-b",
+      ]);
+    }
+  });
+
+  it("engine selector seed: hops is honoured (was ignored), hops 0 unchanged", async () => {
+    const sel = "contextnest://nodes/link-source";
+    expect(ids(await ctx({ selector: sel, hops: 0 }))).toEqual(["nodes/link-source"]);
+    const res = await ctx({ selector: sel, hops: 1 });
+    expect(ids(res)).toEqual([
+      "nodes/link-source",
+      "nodes/link-target-a",
+      "nodes/link-target-b",
+    ]);
+    expect(res.data.trace.hops_used).toBe(1);
+  });
+
+  it("the URI edge is undirected: seeding B reaches the source", async () => {
+    const res = await ctx({ selector: "[[Link Target B]]", hops: 1 });
+    expect(ids(res)).toContain("nodes/link-source");
+  });
+});
+
+// ── prompt tag matches hop-expand too (behaviour change in this fix) ─────────
+// Before, the hop BFS was seeded only from [[Title]] matches, so a prompt that
+// compiled to a TAG match never expanded even with hops > 0. Now the compiled
+// selector's own matches seed it as well.
+
+describe("POST /context — prompt tag match with explicit hops", () => {
+  const ctx = (payload: object) =>
+    jsonRequest(app, "POST", `/nests/${nestId}/context`, payload);
+
+  beforeAll(async () => {
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Quartermaster Neighbour",
+      content: "# Neighbour\n\nOnly reachable by link.",
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Tagged Seed Doc",
+      content: "# Seed\n\nSee [n](contextnest://nodes/quartermaster-neighbour).",
+      tags: ["zebrafleet"],
+    });
+  });
+
+  it("hops 0: only the tag match; hops 1: its linked neighbour comes back via hop", async () => {
+    const base = await ctx({ prompt: "zebrafleet", hops: 0 });
+    const baseIds = base.data.nodes.map((n: any) => n.id);
+    expect(baseIds).toContain("nodes/tagged-seed-doc");
+    expect(base.data.trace.compiled.matched_titles).toEqual([]);
+    expect(baseIds).not.toContain("nodes/quartermaster-neighbour");
+
+    const { data } = await ctx({ prompt: "zebrafleet", hops: 1 });
+    const seed = data.nodes.find((n: any) => n.id === "nodes/tagged-seed-doc");
+    const nb = data.nodes.find((n: any) => n.id === "nodes/quartermaster-neighbour");
+    expect(seed.via).toBe("tag");
+    expect(nb).toEqual(expect.objectContaining({ via: "hop", score: 0 }));
+  });
+
+  it("a doc matched by both selector and [[Title]] seeds once and still expands", async () => {
+    const res = await ctx({ selector: "[[Tagged Seed Doc]] | #zebrafleet", hops: 1 });
+    const ids = res.data.nodes.map((n: any) => n.id);
+    expect(ids.filter((id: string) => id === "nodes/tagged-seed-doc")).toHaveLength(1);
+    expect(ids).toContain("nodes/quartermaster-neighbour");
+  });
+});

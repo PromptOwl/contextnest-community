@@ -335,23 +335,9 @@ export async function resolveMemberIdentity(params: {
   if (!requested) {
     throw new ValidationError("user_id or email is required");
   }
-  const existing = (await db.get(
-    "SELECT id, email FROM users WHERE LOWER(email) = ?",
-    [requested],
-  )) as { id: string; email?: string } | undefined;
-  if (existing) {
-    return {
-      userId: existing.id,
-      email: normalizeEmail(existing.email ?? requested),
-    };
-  }
-  const { hashPassword } = await import("../auth/keys.js");
-  const userId = uuid();
-  await db.run(
-    "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-    [userId, requested, null, await hashPassword(uuid())],
-  );
-  return { userId, email: requested };
+  const { findOrCreateInvitedUser } = await import("../auth/invited-user.js");
+  const { id } = await findOrCreateInvitedUser(requested);
+  return { userId: id, email: requested };
 }
 
 /**

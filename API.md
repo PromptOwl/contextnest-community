@@ -12,6 +12,20 @@ Two methods, evaluated in order:
 
 Anonymous open mode (`AUTH_MODE=open`) bypasses auth on most read endpoints.
 
+### Nest-scoped API keys
+
+A key minted with `nest_id` reaches **that one nest and nothing else**. It is deny-by-default: a request outside the list below answers **403** `{ "error": "This API key is scoped to one nest and can't …", "code": "nest_scoped_key" }`, before the route's own checks run, so a route added later is closed to nest keys until it is allowed on purpose.
+
+| A nest-scoped key **can** reach | Notes |
+|---|---|
+| `/nests/<its nest>` and everything under it, including `/nests/<its nest>/mcp` | The owner's permission on that nest still applies. |
+| `GET /nests`, `GET /search`, `GET /stats` | Narrowed to its nest — other nests never appear. |
+| `/mcp`, `GET /index` | Already filtered to its nest. |
+| `/runs/<id>/*` | Only runs in its nest (403 otherwise). |
+| `GET /health`, `GET /license/status`, `GET /llms.txt`, `GET /auth/admin-status` | Public / self-describing. |
+
+Everything else is **403 `nest_scoped_key`** — notably `/auth/keys*` (a nest key can't mint, rotate, list or revoke keys, so it can't trade itself for a whole-account key), `POST /nests`, every other nest (`/nests/<other>/…` answers 403 "API key not authorized for this nest"; its MCP transport answers with a JSON-RPC error envelope), `/admin/*`, `/auth/teammates`, `/auth/invite`, `/auth/users/*`, `/auth/admin/*`, `/auth/profile`, `/auth/password`, `/teams*`, `/people*` and `/me/*` — even when the key's owner is a server admin. A session cookie sent alongside the key wins, as everywhere else. User-level keys (no `nest_id`) and sessions are unaffected.
+
 All bodies are JSON unless noted. All errors return `{ "error": "msg" }` with appropriate HTTP status.
 
 ## Caller attribution (`client`)
@@ -121,16 +135,16 @@ Mints an API key for the caller. A user may hold **several** keys — one per pl
 ```
 Response (201):
 ```json
-{ "api_key": "cnst_...", "id": "uuid", "key_prefix": "cnst_abc123...", "label": "cli" }
+{ "api_key": "cnst_...", "id": "uuid", "key_prefix": "cnst_abc123...", "label": "cli", "nest_id": null }
 ```
-**Plaintext shown once.** Omit `nest_id` for a **user-level key** (works on every nest the user can access — what the Connect dialog mints); a nest-scoped key is rejected on other nests' MCP/API paths.
+**Plaintext shown once.** Omit `nest_id` for a **user-level key** (works on every nest the user can access — what the whole-brain Connect flow mints). With `nest_id` the key is **nest-scoped** — see [Nest-scoped API keys](#nest-scoped-api-keys) for exactly what it can reach. The caller must be able to reach that nest: an unknown nest, or one the caller has no access to, is **404** (the same answer for both, so this is no existence oracle). A nest-scoped key calling this endpoint gets **403 `nest_scoped_key`**.
 
 ### POST `/auth/keys/rotate` (auth required)
 Replaces **one** key and returns its new plaintext; the caller's other keys are untouched.
 
 `key_id` names the target. Omitting it is only accepted when the account holds exactly one key (pre-multi-key clients) — with several keys and no `key_id` the server answers **400** rather than guessing which to replace. **404** if the id isn't the caller's.
 
-Scope resolution on the optional `nest_id` field: **absent** → keep the prior scope; **`null` (or `""`)** → clear to a user-level key; **a nest id** → scope to that nest. Same for `label` (absent keeps the prior label). Supplying a `label` that matches a *different* key of the caller's is **409**; renaming a key to what it is already called is fine.
+Scope resolution on the optional `nest_id` field: **absent** → keep the prior scope; **`null` (or `""`)** → clear to a user-level key; **a nest id** → scope to that nest (**404** unless the caller can reach it, and the old key is left alone). The response reports the new key's `nest_id`. Un-scoping has to come from a session or a user-level key — a nest-scoped key calling any `/auth/keys*` route gets **403 `nest_scoped_key`**. Same for `label` (absent keeps the prior label). Supplying a `label` that matches a *different* key of the caller's is **409**; renaming a key to what it is already called is fine.
 ```json
 { "key_id": "uuid", "label": "optional", "nest_id": "optional" }
 ```
@@ -159,8 +173,7 @@ Creates an invited user and returns a **temporary password** (once) for the admi
 { "email": "teammate@x.com" }
 ```
 - New email → user row with `is_invited = 1` and a temporary password.
-- Existing, not-yet-claimed email (`is_invited = 1`, hasn't logged in) → refreshes the temp password.
-- Existing, claimed email (has logged in or set their own password, `is_invited = 0`) → `409`; use Reset password instead.
+- Any existing email → `409`, credentials untouched. The error says "already a member" once they've signed in (`is_invited = 0`), or "already invited but hasn't signed in yet" (`is_invited = 1`, including people a nest was shared with). Use Reset password to issue a new temporary password.
 
 `is_invited` clears to `0` on the teammate's first successful login (or when they set their own password).
 
@@ -169,9 +182,12 @@ Response (201):
 {
   "temporary_password": "...",
   "user": { "id": "...", "email": "..." },
+  "promptowl_sign_in": true,
+  "emailed": true,
   "message": "Share this temporary password securely — it won't be shown again."
 }
 ```
+`emailed` — email is configured, so the invite email (password + sign-in link) was sent. `promptowl_sign_in` — PromptOwl sign-in is open to everyone, so the teammate may use it instead (the email says so too).
 
 ### GET `/auth/teammates` (admin only)
 Returns all users + key counts. **Sorted: admins first, then `created_at DESC`.**
@@ -221,12 +237,12 @@ Starts generic **OIDC single sign-on** (Microsoft Entra ID, Google, or any spec-
 When enabled and fully configured: fetches the issuer's discovery document (cached in-process ~5 min), mints `state` + `nonce` + a PKCE S256 verifier into three short-lived (10 min) httpOnly `SameSite=Lax` cookies scoped to `Path=/auth/oidc`, and `302`s to the IdP's authorization endpoint with `response_type=code&scope=openid email profile`. When disabled/unconfigured → `302` to `/?sso_error=disabled` / `not_configured`. Rate-limited per IP.
 
 ### GET `/auth/oidc/callback`
-The redirect URI (`<base url>/auth/oidc/callback` — register this exact URI at your IdP). Verifies the `state` param against the flow cookie, exchanges the code at the token endpoint (client secret + PKCE verifier), validates the ID token with the issuer's JWKS (signature, `iss`, `aud` = client id, `exp`, and the `nonce` claim against the flow cookie), extracts the email (`email`, falling back to `preferred_username` for Entra; normalized trim+lowercase), and enforces `oidc_allowed_domains`. Existing users are signed in; unknown users are JIT-provisioned when `oidc_auto_provision` is on (name from the `name` claim), else refused. Every successful login also upserts `users.department` from the optional string `department` claim (trimmed, whitespace collapsed, capped at 120 chars; absent claim clears the stored value) — read by the `oidc_department_tagging` feature (see `CONFIGURATION.md → Department auto-tagging`). On success → session cookie (identical to a password login) + `302` to `/`. On any failure → `302` to `/?sso_error=<code>`; codes: `disabled`, `not_configured`, `discovery_failed`, `provider_error`, `state_mismatch`, `exchange_failed`, `invalid_token`, `email_not_verified` (ID token carries `email_verified: false` — an absent claim is trusted; see the trust assumption in `CONFIGURATION.md → Single sign-on (OIDC)`), `domain_not_allowed`, `not_invited`, `rate_limited`, `service_error`. Flow cookies are cleared on every outcome. Rate-limited per IP.
+The redirect URI (`<base url>/auth/oidc/callback` — register this exact URI at your IdP). Verifies the `state` param against the flow cookie, exchanges the code at the token endpoint (client secret + PKCE verifier), validates the ID token with the issuer's JWKS (signature, `iss`, `aud` = client id, `exp`, and the `nonce` claim against the flow cookie), extracts the email (`email`, falling back to `preferred_username` for Entra; normalized trim+lowercase), and enforces `oidc_allowed_domains`. Existing users are signed in; unknown users are JIT-provisioned when `oidc_auto_provision` is on (name from the `name` claim), else refused. Every successful login also upserts `users.department` from the optional string `department` claim (trimmed, whitespace collapsed, capped at 120 chars; absent claim clears the stored value) — read by the `oidc_department_tagging` feature (see `CONFIGURATION.md → Department auto-tagging`). On success → session cookie (identical to a password login) + `302` to `/`. On any failure → `302` to `/?sso_error=<code>`; codes: `disabled`, `not_configured`, `discovery_failed`, `provider_error`, `state_mismatch`, `exchange_failed`, `invalid_token`, `email_not_verified` (ID token carries `email_verified: false` — an absent claim is trusted; see the trust assumption in `CONFIGURATION.md → Single sign-on (OIDC)`), `domain_not_allowed`, `not_invited`, `rate_limited`, `service_error` (cause and fix for each: `CONFIGURATION.md → Troubleshooting SSO sign-in`). Flow cookies are cleared on every outcome. Rate-limited per IP.
 
 ### GET `/auth/oidc/logout`
 RP-initiated logout for an SSO session. Deletes the current session server-side and clears the session cookie plus the `cnst_sso_session` marker. If the issuer advertises an `end_session_endpoint` (Entra/Okta/Keycloak; Google does not), `302`s the browser through it with `post_logout_redirect_uri=<base url>/` so the IdP session ends too; otherwise `302`s straight to `/`. Always clears cookies and always lands on `/`, even if discovery is unreachable. The SPA navigates here (instead of `POST /auth/logout`) only when the non-httpOnly `cnst_sso_session` marker cookie — set on OIDC callback success — is present, so password sessions keep the plain logout.
 
-Related `/admin/settings` fields (GET/PATCH, superadmin only): `oidc_enabled`, `oidc_issuer` (https URL), `oidc_client_id`, `oidc_client_secret` (**write-only** — PATCH sets/replaces, `null` clears; GET returns only `oidc_client_secret_set: boolean`), `oidc_allowed_domains` (comma-separated), `oidc_auto_provision`, `oidc_department_tagging` (append `dept:<slugified-department>` to a new document's tags on create — create-only, no-op for users without a stored department). Enabling is refused unless issuer + client id + secret are all present.
+Related `/admin/settings` fields (GET/PATCH, server admin only — the license admin or a superadmin): `oidc_enabled`, `oidc_issuer` (https URL), `oidc_client_id`, `oidc_client_secret` (**write-only** — PATCH sets/replaces, `null` clears; GET returns only `oidc_client_secret_set: boolean`), `oidc_allowed_domains` (comma-separated), `oidc_auto_provision`, `oidc_department_tagging` (append `dept:<slugified-department>` to a new document's tags on create — create-only, no-op for users without a stored department). Enabling is refused unless issuer + client id + secret are all present.
 
 ### POST `/auth/token-exchange`
 Exchange an IdP ID token for a short-lived, scoped **MCP bearer** (RFC 8693-shaped) — for an external agent acting on behalf of a user your IdP already authenticated. No session, no API key. **Off by default; security-critical** — see `CONFIGURATION.md → Agent SSO (token exchange)`.
@@ -258,6 +274,8 @@ Returns owned + shared nests. Archived nests are **absent** — as they are from
 { "name": "My Nest", "description": "optional" }
 ```
 Response (201): `{ "nest": { ... } }`
+
+With `NEST_CREATION=admins` (the default) only a server admin may create or import a nest; anyone else gets `403` ("Only a server admin can create nests on this server…"). The same rule covers `POST /nests/import` and the MCP `nest_create` tool. `GET /health` reports it as `nest_creation`.
 
 ### GET `/nests/:nestId`
 ```json
@@ -370,6 +388,41 @@ Response (200) echoes the persisted row:
 { "reader_mode": 1, "reader_home_node": "welcome" }
 ```
 The two additive columns (`nests.reader_mode`, `nests.reader_home_node`) also surface on `GET /nests/:nestId` via the `SELECT *` nest payload.
+
+### PATCH `/nests/:nestId/branding` (nest owner / nest admin / server admin)
+Per-nest branding for the public reader (reader mode) and the nest's `/p` published pages. The body **replaces** the nest's branding; `null`, an empty body, or `{}` resets it to unbranded.
+```json
+{
+  "site_title": "Acme Docs",
+  "logo_url": "/nests/<nestId>/assets/<uuid>.png",
+  "banner_url": "https://cdn.example.com/banner.jpg",
+  "banner_headline": "Acme Handbook",
+  "banner_subtext": "Everything we know, versioned.",
+  "accent_color": "#e11d48",
+  "header_bg_color": "#0f172a",
+  "page_tint_color": "#fef2f2",
+  "footer_text": "© Acme Corp",
+  "footer_link_url": "https://acme.example.com/",
+  "footer_link_label": "acme.example.com",
+  "favicon_url": "/nests/<nestId>/assets/<uuid>.png",
+  "hide_powered_by": false
+}
+```
+Every field is optional. Rules (any violation → `400`, nothing saved):
+- **Colors** (`accent_color`, `header_bg_color`, `page_tint_color`): `#rgb` or `#rrggbb` only; stored as lowercase `#rrggbb`. Anything else — named colors, `red; background:url(…)`, `var()` — is refused.
+- **Images** (`logo_url`, `banner_url`, `favicon_url`): an image asset uploaded to **this** nest (`POST /nests/:nestId/assets` → `/nests/<nestId>/assets/<uuid>.<png|jpg|gif|webp>`, must exist), or an `https://` URL (no credentials) whose path ends in `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp`. `javascript:`, `data:`, `http:`, protocol-relative, SVG, video assets and other nests' assets are refused.
+- **`footer_link_url`**: an `https://` URL.
+- **Text** (`site_title` ≤ 120, `banner_headline` ≤ 120, `banner_subtext` ≤ 280, `footer_text` ≤ 280, `footer_link_label` ≤ 80): plain text, no control characters; always rendered escaped.
+- **Unknown keys** are refused — there is no free-form CSS or JS.
+- **`hide_powered_by`** (boolean): hides "Powered by ContextNest" in the reader and "Secured by PromptOwl · ContextNest" on `/p`. Turning it on is **server-admin only** (`403` for a nest owner/admin). A non-admin edit that omits the field keeps the stored value — a non-admin full clear (`null` / `{}`) included, which then stores `{ "hide_powered_by": true }`; a non-admin may turn it off explicitly.
+
+Gate: the access middleware requires the `admin` tier for this resource (owner, admin collaborator, or server admin); the handler re-checks it. Editors and viewers get `403`, anonymous callers `401`.
+
+Response (200): `{ "branding": { …normalised… } }` or `{ "branding": null }`.
+
+**Reading it.** There is no separate GET: `GET /nests/:nestId` returns `nest.branding` (parsed and re-validated against the write rules — a stored URL that no longer passes is dropped; `null` when unbranded) in place of the raw `branding_json` column. It is therefore readable exactly by whoever can read the nest — an anonymous reader of a public nest sees it; a private nest still `404`s.
+
+**Where it applies.** The SPA reader (read-only callers in reader mode, and an owner's "Preview as reader") uses it for the header logo + title (falling back to the server `LOGO_URL` and the nest name), the banner on the home page, accent/header/page-tint colors, footer, favicon and tab title. On `/p`, the markdown document view, the gate page and the comment shell pick up the colors, title, logo, banner and footer; **the CSP is unchanged** — uploaded images are inlined as `data:` URIs (already allowed by `img-src data:`), and external https images are not rendered there. HTML/artifact publishes are served untouched.
 
 ### GET `/nests/unsynced` (server-admin only outside open mode)
 Lists folders under `DATA_ROOT` that aren't nests yet — typically dropped in by the starter CLI or copied in manually. Each entry is a sync candidate. Reflects server-side filesystem state, so in non-open mode only a server admin — the license admin or any superadmin (`access.yaml` ∪ granted; same resolution as `/admin/*`) — sees it (everyone else gets `403`).
@@ -798,6 +851,23 @@ A node with a pending review is frozen — `423` — for callers who can't clear
 
 Purges everything keyed to the node id — version history, review requests, the approved-version pin, tag index, annotations and their comments, review comments, watchers, schedules, trigger hooks, workflow edges, document-scoped stewards and document grants — and leaves a deletion tombstone for `GET /changes`. Node ids derive from titles, so a later document can land on the same id; it must inherit none of the old one's readers, reviewers or history. Run traces are kept: they record what happened, not what exists. `POST /nests/:nestId/nodes/:nodeId/move` carries that same set to the new id instead of dropping it (folder grants excepted — they cover a path prefix, so a moved doc leaves one share and joins another).
 
+### POST `/nests/:nestId/nodes/pdf`
+Upload a PDF as a governed `pdf` document. Multipart: `file` (required), optional `title` (default: the file name), `folder`, `tags` (repeat the field or comma-separate), `nodeId`, `changeNote`. Write permission (nest-scope steward editors too, as for `POST /nodes`).
+
+The engine's `context_import_pdf` extracts the text — the node body, one `<!-- page N -->` marker per page — and stores the PDF beside the node as `<id>.pdf`, bound by sha256 in the node's `pdf:` frontmatter block. Governance is exactly a create's: in a governed nest the upload lands as a draft (or publishes when a create by that person would); without stewards it publishes.
+
+- `nodeId` of an existing `pdf` node → the PDF is replaced as a **new version** of that node (same review lock, draft/publish rule and version rows as `PATCH`). The prior binary stays in history. Identical bytes are a no-op. A replace is two engine writes (stage the new PDF, then the same update/publish a text edit makes); if the second fails, the node's previous file and PDF are put back before the error is returned.
+- `400` — no `file`, not a PDF (checked by the `%PDF-` header, not the extension), an encrypted/unreadable PDF, or `nodeId` names a node that is not a pdf. `413` — larger than `PDF_MAX_MB` (default 25 MB). Nothing is written on any refusal.
+- A PDF with no text layer (a scan) imports with an empty body and `pdf.text_layer: false`; there is no OCR.
+- Returns `201` `{ node, version, stewards? }` on create, `200` `{ node, version }` on replace. `node.pdf` is the `pdf:` block (`file`, `sha256`, `bytes`, `pages`, `text_layer`, `extractor`, `extractor_version`, `extracted_at`).
+
+A pdf node's text is read-only: `PATCH` with a `content`/`append` that changes it → `409` (re-upload instead; echoing the stored body back is accepted). A pdf node can't be converted to another type or another type to `pdf` (`400`), can't be moved to another folder yet (`400`), and `POST /nodes` with `type: "pdf"` → `400`. `POST …/revert` re-imports the target version's PDF; `POST …/discard` restores the sealed version's PDF (the response carries a `warning` if that binary can't be restored); `DELETE` removes the binary with the node.
+
+### GET `/nests/:nestId/nodes/:nodeId/pdf`
+The PDF binary, gated exactly like `GET /nodes/:nodeId`. A public reader (or `?approved_only=1`) always gets the **approved** version's bytes — never a draft's — whatever version is asked for; other readers get the current working copy, or `?version=N`. Every response is verified against the sha256 its version records (a mismatch is refused, not served).
+
+Headers: `Content-Type: application/pdf`, `Content-Disposition: inline; filename="<slug>.pdf"` (`?download=1` → `attachment`), `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-cache`, and an `ETag` of the sha256 (`If-None-Match` → `304`). `404` when the node has no such version or no approved version (public). An id that is not a pdf node falls through to the node route, so a document whose own id ends in `/pdf` still reads.
+
 ### POST `/nests/:nestId/assets`
 Multipart upload (field `file`) of an image or video referenced from documents. Write permission.
 
@@ -1118,6 +1188,12 @@ The UI deep-links a comment item to its document with the thread focused via
 ### Notification rows (`GET /me/work` → `notifications`, `GET /me/notifications`)
 
 Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review verdicts, document deletion flags, mentions); nest-level rows have `node_id: null`.
+
+Unread `nest_invite` rows are what the Nests page shows as **Pending invites**. Accept marks them read (`POST /me/notifications/read`) and opens the nest.
+
+### POST `/me/nests/:nestId/leave`
+
+Decline a nest invite. Removes the caller's **own** collaborator row on that nest (never anyone else's) and marks its `nest_invite` rows read. Response: `{ "left": true }`. Access that isn't a direct collaborator row — ownership, or a share through a team — isn't touched: `{ "left": false }`, and the invite rows are still marked read.
 
 ### GET `/me/drafts`
 
@@ -1517,7 +1593,7 @@ Body (give `prompt` OR `selector`; everything else optional):
 ```
 - `prompt` — natural language. Tokens are matched against tag names and titles, and every document is scored against them (title hits weigh most, then tags, then body words); documents under half the top score are dropped as noise. A prompt that matches nothing returns `nodes: []` — never the whole nest. `trace.compiled.fallback` is `"fulltext"` when body scoring alone produced the answer.
 - `selector` — explicit selector grammar (e.g. `#auth`). Wins over `prompt`. May carry `[[Title]]` parts in an OR union (`#auth | [[Auth Overview]]`), and `[[nodes/auth-overview]]` names one document by id where a title may match several.
-- `hops` — wikilink expansion depth. Defaults to `0` for a `prompt` (neighbours of a keyword match are not answers to the question) and `2` for a `selector`.
+- `hops` — link expansion depth (`[[wikilinks]]` and `contextnest://` links, both directions). Defaults to `0` for a `prompt` (neighbours of a keyword match are not answers to the question) and `2` for a `selector`.
 - `max_tokens` — budget, floored at 50, default 4000. A node that doesn't fit is skipped and the next tried (`trace.truncated_by_budget` counts the skips); only when nothing fits does the first node go through oversized.
 - 400 `prompt or selector is required` if both missing.
 - Each node carries a `url` deep link, and its context block a matching `_source: <url>_` line, so answers can cite sources. Built from `PUBLIC_BASE_URL`, falling back to the request origin; omitted when neither resolves.
@@ -2172,6 +2248,7 @@ For any `/nests/:nestId/...` request, the middleware computes:
 - Required level by path:
   - `/collaborators`, `/visibility` → `admin`
   - `/reader-mode` → `admin` at the middleware, then the handler hard-gates on `isServerAdminUserId` (superadmin only)
+  - `/branding` → `admin` at the middleware (owner, admin collaborator, or server admin), re-checked in the handler; `hide_powered_by: true` additionally requires the server admin
   - Stewardship action paths (`/approve`, `/reject`, `/submit-review`, `/cancel-review`) → `read` (handler enforces fine-grained steward gating)
   - Other non-GET → `write`
   - GET → `read`

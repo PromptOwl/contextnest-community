@@ -18,6 +18,7 @@ import {
   RefreshCw,
   Loader2,
   FileText,
+  FileType,
   Zap,
   Bot,
   Database,
@@ -117,6 +118,7 @@ function TypeIcon({ type }: { type: string }) {
   if (type === "skill") return <Zap className={`${cls} text-blue-500`} />;
   if (type === "agent") return <Bot className={`${cls} text-violet-500`} />;
   if (type === "table") return <Database className={`${cls} text-emerald-500`} />;
+  if (type === "pdf") return <FileType className={`${cls} text-rose-500`} />;
   return <FileText className={`${cls} text-muted-foreground`} />;
 }
 

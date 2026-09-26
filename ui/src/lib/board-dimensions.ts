@@ -77,10 +77,40 @@ export interface BoardConfig {
 
 export interface BoardColumn {
   key: string;
-  /** Heading text. For folder columns, just the folder's own name. */
+  /** Heading text. For folder columns, the full folder path, shortened from
+   *  the front (see `folderColumnLabel`) so a deep path still shows its leaf
+   *  segment — a shortened leaf-only label loses hierarchy and can't tell
+   *  "a/notes" from "b/notes" apart, but the CSS `truncate` the header uses
+   *  elides from the END, which for an untouched long path hides the leaf —
+   *  the one segment that actually names the folder. `title` carries the full,
+   *  unshortened text. */
   label: string;
-  /** Full, untrimmed name for the tooltip, since `label` may be shortened. */
+  /** Full, untrimmed name for the tooltip. Same as `label` for folder columns. */
   title: string;
+}
+
+/**
+ * Shortens a folder path for display, dropping segments from the front (the
+ * end closest to the root) until it fits within `maxChars`, so the leaf
+ * segment — the folder's actual name, and the last thing a browser's
+ * end-eliding `truncate` would clip — is always the part kept. The leaf is
+ * kept even if it alone exceeds `maxChars`; the header's own `truncate`
+ * handles that remaining overflow, clipping from a point that still shows the
+ * leaf's start rather than the path's root.
+ *
+ * `maxChars` defaults to roughly what fits in the board's column header
+ * (w-64, see MaturityBoard.tsx) before the browser starts eliding anyway.
+ */
+export function folderColumnLabel(path: string, maxChars = 28): string {
+  if (path.length <= maxChars) return path;
+  const segments = path.split("/");
+  for (let i = 1; i < segments.length; i++) {
+    const candidate = `…/${segments.slice(i).join("/")}`;
+    if (candidate.length <= maxChars || i === segments.length - 1) {
+      return candidate;
+    }
+  }
+  return path;
 }
 
 /**
@@ -259,47 +289,6 @@ function shownKeys(
   return keys.length > 0 ? keys : [UNCATEGORIZED];
 }
 
-/**
- * Folder headings: the folder's own name, and only as much of its parent path
- * as it takes to be unique.
- *
- * The full path is useless as a heading — an imported vault puts every folder
- * under one long root, so the headings all truncate to the same elided prefix.
- * The last segment alone is readable but collides (`content/social` and
- * `content/published/social` both read "social"), so colliding labels grow one
- * parent segment at a time until they separate: "content/social" vs
- * "published/social". Columns that were already unique keep their short name.
- */
-function disambiguateFolderLabels(keys: string[]): Map<string, string> {
-  const segments = new Map(keys.map((k) => [k, k.split("/")]));
-  const depth = new Map(keys.map((k) => [k, 1]));
-  const labelOf = (k: string) => segments.get(k)!.slice(-depth.get(k)!).join("/");
-
-  for (;;) {
-    const byLabel = new Map<string, string[]>();
-    for (const k of keys) {
-      const label = labelOf(k);
-      const group = byLabel.get(label);
-      if (group) group.push(k);
-      else byLabel.set(label, [k]);
-    }
-    // Deepen only the colliding ones. Terminates: each pass either deepens a
-    // key (bounded by its segment count) or changes nothing and stops.
-    let deepened = false;
-    for (const group of byLabel.values()) {
-      if (group.length < 2) continue;
-      for (const k of group) {
-        if (depth.get(k)! < segments.get(k)!.length) {
-          depth.set(k, depth.get(k)! + 1);
-          deepened = true;
-        }
-      }
-    }
-    if (!deepened) break;
-  }
-  return new Map(keys.map((k) => [k, labelOf(k)]));
-}
-
 function labelFor(key: string, config: BoardConfig): string {
   if (key === UNCATEGORIZED) return "Uncategorized";
   if (key === "" && config.dimension === "folder") return "(root)";
@@ -307,6 +296,7 @@ function labelFor(key: string, config: BoardConfig): string {
   // since the heading is rendered with CSS `capitalize`.
   if (config.dimension === "status")
     return STATUS_LABELS[key] ?? key.replace(/_/g, " ");
+  if (config.dimension === "folder") return folderColumnLabel(key);
   return key;
 }
 
@@ -373,15 +363,9 @@ export function buildColumns(
   const keys = [...ordered, ...rest];
   // UNCATEGORIZED always trails, regardless of columnOrder placement.
   if (needUncat) keys.push(UNCATEGORIZED);
-  const folderLabels =
-    config.dimension === "folder"
-      ? disambiguateFolderLabels(
-          keys.filter((k) => k !== UNCATEGORIZED && k !== ""),
-        )
-      : null;
   return keys.map((key) => ({
     key,
-    label: folderLabels?.get(key) ?? labelFor(key, config),
+    label: labelFor(key, config),
     title: titleFor(key, config),
   }));
 }

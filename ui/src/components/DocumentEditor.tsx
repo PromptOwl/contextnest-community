@@ -33,6 +33,7 @@ import {
   writeDocPagePrefs,
 } from "../lib/doc-page";
 import { NestVisibilityControl } from "./NestVisibilityControl";
+import { PdfDocumentPanel } from "./PdfDocumentPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -309,6 +310,8 @@ export function DocumentEditor({
   // Node kind. An "artifact" node is rich HTML hosted + annotated, not edited
   // as markdown — once loaded we hand off to ArtifactViewer (see below).
   const [nodeType, setNodeType] = useState<string | null>(null);
+  // The `pdf:` block of a pdf node (pages, text layer, sha256) — null otherwise.
+  const [pdfMeta, setPdfMeta] = useState<api.PdfMeta | null>(null);
   // Version history for the detail view (CU-wdqcpztgwn). Lazily loaded when
   // the user opens the modal — VersionHistory already renders highlighted diffs.
   const [versionData, setVersionData] = useState<{
@@ -457,6 +460,9 @@ export function DocumentEditor({
   // The node's kind for editor-surface decisions: the picked kind while
   // drafting, the loaded type once it exists.
   const effectiveType = isNew ? newType : (nodeType ?? "document");
+  // A pdf node's body is the text extracted from its PDF: never edited in
+  // place (the server refuses it), only replaced by uploading a new PDF.
+  const isPdfNode = !isNew && nodeType === "pdf";
   // Source-only kinds get NO WYSIWYG: a tool's body is code and a table's
   // body is CSV — TipTap's markdown round-trip mangles both. Edit mode is
   // always a monospace source editor; the rich/raw toggle is meaningless.
@@ -996,6 +1002,7 @@ export function DocumentEditor({
       setContent(loadedContent);
       setTags(loadedTags);
       setNodeType(node?.type ?? null);
+      setPdfMeta(node?.type === "pdf" && node?.pdf ? (node.pdf as api.PdfMeta) : null);
       const loadedSchedule =
         node?.schedule == null ? "" : String(node.schedule);
       setSchedule(loadedSchedule);
@@ -1153,7 +1160,7 @@ export function DocumentEditor({
     pendingReviewBy.toLowerCase() === currentEmail;
   const isLocked = status === "pending_review" && !isOwnPendingReview;
   // Existing document: the Type control is the Turn into entry point.
-  const canTurnIntoHere = !isNew && !isLocked && turnIntoOptions.length > 0;
+  const canTurnIntoHere = !isNew && !isLocked && !isPdfNode && turnIntoOptions.length > 0;
   const currentTypeValue = isNew ? newType : (nodeType ?? "document");
 
   // Fields read-only when locked or outside edit mode; "Start Editing" or
@@ -1623,9 +1630,9 @@ export function DocumentEditor({
   // remounts DocumentViewer→MarkdownEditor and loses the caret/reflows.
   // Read-only sessions (view-only / locked / reviewer) keep the rendered view.
   useEffect(() => {
-    if (loading || mode === "edit" || commentMode) return;
+    if (loading || mode === "edit" || commentMode || isPdfNode) return;
     if (!isViewOnly && !isLocked && !isReviewerOnly) setMode("edit");
-  }, [loading, isViewOnly, isLocked, isReviewerOnly, mode, commentMode]);
+  }, [loading, isViewOnly, isLocked, isReviewerOnly, mode, commentMode, isPdfNode]);
 
   // A doc can become locked while already in edit mode (e.g. the user just
   // submitted it for review). Kick back to read-only view so the editor
@@ -1650,12 +1657,16 @@ export function DocumentEditor({
   // node list and let decideWikiLinkAction decide navigate/create/blocked —
   // a broken link then always falls through to create (or a permission
   // message) instead of a dead end (CU-wdqcq02g17).
-  const handleWikiLinkClick = async (linkTitle: string, _id: string | null) => {
+  const handleWikiLinkClick = async (
+    linkTitle: string,
+    _id: string | null,
+    displayText?: string | null,
+  ) => {
     try {
       const { nodes } = await qc.fetchQuery(reads.nodes(nestId));
       const list = nodes as Array<{ id: string; title: string }>;
       const canAuthor = !isReviewerOnly && !isViewOnly;
-      const action = decideWikiLinkAction(list, linkTitle, canAuthor);
+      const action = decideWikiLinkAction(list, linkTitle, canAuthor, displayText);
       if (action.kind === "navigate") {
         confirmLeave(
           `open "${action.node.title}"`,
@@ -1694,6 +1705,7 @@ export function DocumentEditor({
       canShare,
       isArchived,
       canEditContent,
+      isPdf: isPdfNode,
       isLocked,
       canRequestDeletion,
       canDeleteDirectly,
@@ -2305,7 +2317,7 @@ export function DocumentEditor({
                   <span className="hidden sm:inline">Submit for review</span>
                 </Button>
               )}
-              {!isViewOnly && !isReviewerOnly && !isLocked && (
+              {!isViewOnly && !isReviewerOnly && !isLocked && !isPdfNode && (
                 <Button
                   size="sm"
                   className="h-8"
@@ -3061,6 +3073,8 @@ export function DocumentEditor({
                         // stray click must not yank the grid away — entering edit is
                         // explicit via "Start Editing".
                         if (effectiveType === "table") return;
+                        // PDF text is read-only (Replace PDF is the edit).
+                        if (isPdfNode) return;
                         if (mode === "view" && !isReviewerOnly) {
                           setMode("edit");
                         }
@@ -3069,6 +3083,19 @@ export function DocumentEditor({
                       {/* Source-only kinds keep a label: code and CSV are not prose,
                     and the label says which raw form the box expects. Documents
                     get none — the body is the page. */}
+                      {isPdfNode && (
+                        <PdfDocumentPanel
+                          nestId={nestId}
+                          nodeId={nodeId}
+                          title={title}
+                          pdf={pdfMeta}
+                          canReplace={!isViewOnly && !isReviewerOnly && !isLocked && !isArchived}
+                          onReplaced={() => {
+                            invalidateForPath(qc, `/nests/${nestId}/nodes/${nodeId}`);
+                            void loadNode();
+                          }}
+                        />
+                      )}
                       {(isArtifactDraft || effectiveType === "tool" || effectiveType === "table") && (
                         <div className="mb-1 text-xs font-medium text-muted-foreground">
                           {isArtifactDraft
@@ -3331,8 +3358,8 @@ export function DocumentEditor({
                           ) : (
                             <DocumentViewer
                               content={content}
-                              onWikiLinkClick={(title) =>
-                                handleWikiLinkClick(title, null)
+                              onWikiLinkClick={(title, displayText) =>
+                                handleWikiLinkClick(title, null, displayText)
                               }
                               previewFor={previewFor}
                             />

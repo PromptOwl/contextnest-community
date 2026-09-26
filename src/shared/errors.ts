@@ -36,6 +36,14 @@ export class ValidationError extends AppError {
   }
 }
 
+/** The upload is bigger than this server accepts for its kind (413). */
+export class PayloadTooLargeError extends AppError {
+  constructor(message: string) {
+    super(413, message);
+    this.name = "PayloadTooLargeError";
+  }
+}
+
 export class ConflictError extends AppError {
   constructor(message: string) {
     super(409, message);

@@ -403,6 +403,16 @@ export const config = {
     return process.env.PEOPLE_SUGGEST_ALL_USERS === "true";
   },
   /**
+   * Who may create nests. "admins" (default): server admins only, until the
+   * server is on a paid plan. "everyone": any signed-in user. Open mode is
+   * unaffected (everyone is admin there).
+   */
+  get NEST_CREATION(): "admins" | "everyone" {
+    return process.env.NEST_CREATION?.trim().toLowerCase() === "everyone"
+      ? "everyone"
+      : "admins";
+  },
+  /**
    * This server hosts several unrelated organizations (the PromptOwl-hosted
    * deployment) rather than one company (a self-hosted install).
    *
@@ -633,6 +643,27 @@ export const config = {
     return raw;
   },
   /**
+   * Email transport: "smtp" (SMTP_URL, default) or "ses" (AWS SES via the SDK,
+   * for deployments that can't use SMTP). Anything else falls back to smtp.
+   */
+  get EMAIL_PROVIDER(): "smtp" | "ses" {
+    return process.env.EMAIL_PROVIDER?.trim().toLowerCase() === "ses" ? "ses" : "smtp";
+  },
+  /** AWS region for SES, e.g. us-east-1. Required when EMAIL_PROVIDER=ses. */
+  get SES_REGION(): string | null {
+    return process.env.SES_REGION?.trim() || null;
+  },
+  /**
+   * Optional static SES credentials. Both unset → the AWS default credential
+   * chain (IAM role, AWS_* env, shared profile). The secret is write-only.
+   */
+  get SES_ACCESS_KEY_ID(): string | null {
+    return process.env.SES_ACCESS_KEY_ID?.trim() || null;
+  },
+  get SES_SECRET_ACCESS_KEY(): string | null {
+    return process.env.SES_SECRET_ACCESS_KEY?.trim() || null;
+  },
+  /**
    * From address for notification emails. Shape-validated here (not only in
    * the /admin/settings PATCH) so a value set directly via env/Docker can't
    * reach nodemailer's envelope unchecked. Invalid = connector off.
@@ -741,5 +772,16 @@ export const config = {
   get VIDEO_MAX_BYTES() {
     const mb = parseInt(process.env.VIDEO_MAX_MB || "30", 10);
     return (Number.isFinite(mb) && mb > 0 ? mb : 30) * 1024 * 1024;
+  },
+  /**
+   * Max PDF upload size in bytes (POST /nests/:id/nodes/pdf). Default 25 MB —
+   * under Cloud Run's 32 MiB HTTP/1 request-body limit, with room for the
+   * multipart framing, so an oversized PDF is refused by our own check (413
+   * with a clear message) rather than by the platform. Read per request, so a
+   * change takes effect without a restart. Override via PDF_MAX_MB.
+   */
+  get PDF_MAX_BYTES() {
+    const mb = parseInt(process.env.PDF_MAX_MB || "25", 10);
+    return (Number.isFinite(mb) && mb > 0 ? mb : 25) * 1024 * 1024;
   },
 };

@@ -4,6 +4,7 @@ import type {
   VersionManager,
   ContextNode,
 } from "@promptowl/contextnest-engine";
+import { parseDocument } from "@promptowl/contextnest-engine";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import * as versions from "../governance/version-service.js";
@@ -169,6 +170,30 @@ function summarizeNode(node: ContextNode, body: string | null) {
     tags: node.frontmatter.tags,
     body: body ?? undefined,
   };
+}
+
+/**
+ * `**Source file:** PDF, N pages[, no text layer]` for a pdf node — tells an
+ * agent the body is text extracted from a PDF, and when it is empty because
+ * the PDF is a scan rather than because the document says nothing.
+ *
+ * Describes the version whose body is being returned: under stewardship
+ * `body` is the APPROVED snapshot (frontmatter included), whose `pdf:` block
+ * can differ from the live draft's, so it is read from there when present.
+ */
+function pdfSourceLine(node: ContextNode, body: string | null): string | null {
+  if ((node.frontmatter.type || "document") !== "pdf") return null;
+  let pdf = node.frontmatter.pdf;
+  if (body && body.startsWith("---")) {
+    try {
+      pdf = parseDocument(`${node.id}.md`, body, node.id).frontmatter.pdf ?? pdf;
+    } catch {
+      // Unparseable snapshot: fall back to the live block.
+    }
+  }
+  if (!pdf) return "**Source file:** PDF";
+  const pages = `${pdf.pages} page${pdf.pages === 1 ? "" : "s"}`;
+  return `**Source file:** PDF, ${pages}${pdf.text_layer ? "" : ", no text layer"}`;
 }
 
 export interface McpToolContext {
@@ -1218,6 +1243,7 @@ async function runTool(
         node.frontmatter.tags?.length
           ? `**Tags:** ${node.frontmatter.tags.join(" ")}`
           : null,
+        pdfSourceLine(node, body),
       ]
         .filter(Boolean)
         .join("\n");
@@ -2208,23 +2234,11 @@ async function runTool(
         const { createGrant } = await import("../governance/grants-service.js");
         // Resolve the grantee — mint a placeholder invited user if unknown,
         // same as collaborator/document sharing.
-        const db = (await import("../db/client.js")).getDb();
         const { normalizeEmail } = await import("../shared/email.js");
         const e = normalizeEmail(String(args.email || ""));
         if (!e) return "email is required.";
-        let row = (await db.get("SELECT id FROM users WHERE LOWER(email) = ?", [e])) as
-          | { id: string }
-          | undefined;
-        if (!row) {
-          const { hashPassword } = await import("../auth/keys.js");
-          const { v4: uuid } = await import("uuid");
-          const id = uuid();
-          await db.run(
-            "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-            [id, e, null, await hashPassword(uuid())],
-          );
-          row = { id };
-        }
+        const { findOrCreateInvitedUser } = await import("../auth/invited-user.js");
+        const row = await findOrCreateInvitedUser(e, { invitedBy: ctx.userEmail });
         await createGrant({
           nestId: ctx.nestId,
           targetType: targetType as any,

@@ -134,7 +134,7 @@ Keys are minted in the app (Workspace → API keys, or the Connect dialog) — o
 | Custom logo / branding | ✅ | ✅ |
 | Admin password reset + user removal (in-platform) | ✅ | ✅ |
 | Wiki backlinks, outline, hover-preview, link health | ✅ | ✅ |
-| Rich editor — tables, callouts, toggles, code highlight, find/replace, image & video upload | ✅ | ✅ |
+| Rich editor — tables, callouts, toggles, code highlight, find/replace, image & video upload, YouTube / Vimeo embeds | ✅ | ✅ |
 | Folder organization — nested folders, move documents, lazy folder tree | ✅ | ✅ |
 | Scales to large vaults — nest listings served from a document index, not a disk crawl | ✅ | ✅ |
 | Steward version revert | ✅ | ✅ |
@@ -150,7 +150,7 @@ Keys are minted in the app (Workspace → API keys, or the Connect dialog) — o
 | Activity trace — every governance action, per nest and server-wide | ✅ | ✅ |
 | Notifications — Slack, Microsoft Teams, email | ✅ | ✅ |
 | Centralized multi-tenant admin console | — | ✅ |
-| Single sign-on (OIDC — Entra ID, Google, Okta, Keycloak) | ✅ | ✅ |
+| Single sign-on (OIDC — Entra ID, Google, Okta, Keycloak) — [admin guide](./CONFIGURATION.md#single-sign-on-oidc) | ✅ | ✅ |
 | SAML / SCIM provisioning | — | ✅ |
 | Audit log streaming | — | ✅ |
 | Policy transforms (redaction, summarization) | — | ✅ |
@@ -165,6 +165,7 @@ Release notes live in [CHANGELOG.md](./CHANGELOG.md).
 ## Documentation
 
 - [CONFIGURATION.md](./CONFIGURATION.md) — every environment variable (port, auth mode, storage, notifications, telemetry)
+- [Single sign-on admin guide](./CONFIGURATION.md#single-sign-on-oidc) — connect Microsoft Entra ID, Google, Okta, Keycloak or any OIDC provider; what happens to existing accounts, API keys and agents; every `sso_error` code with its fix
 - [API.md](./API.md) — complete REST reference with request and response bodies
 - [STEWARDSHIP.md](./STEWARDSHIP.md) — the governance model: modes, stewards, scopes, prime documents, teams, super-admins
 - `<server>/llms.txt` — the agent manual the running server publishes; rendered as **Docs** in the app

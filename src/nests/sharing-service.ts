@@ -11,10 +11,10 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { notifyNestEvent } from "../notify/notify.js";
 import { sendEmailToRecipient } from "../notify/email.js";
+import { findOrCreateInvitedUser } from "../auth/invited-user.js";
 import { notifyNestInvite } from "../governance/notify-service.js";
 import { nestName, docLink } from "../governance/title-resolver.js";
 import { ValidationError, ConflictError, ForbiddenError } from "../shared/errors.js";
-import { normalizeEmail } from "../shared/email.js";
 import { isEmailish } from "../config.js";
 import { permissionLevel, type NestPermission } from "../shared/access.js";
 import type { NestCollaborator } from "../shared/types.js";
@@ -71,21 +71,13 @@ export async function addCollaborator(params: {
     if (!isEmailish(params.email)) {
       throw new ValidationError("Enter a valid email address.");
     }
-    const email = normalizeEmail(params.email);
-    const existing = (await db.get(
-      "SELECT id FROM users WHERE LOWER(email) = ?",
-      [email],
-    )) as { id: string } | undefined;
-    if (existing) {
-      userId = existing.id;
-    } else {
-      const { hashPassword } = await import("../auth/keys.js");
-      userId = uuid();
-      await db.run(
-        "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-        [userId, email, null, await hashPassword(uuid())],
-      );
-    }
+    // A new address gets an account + the sign-in email (temp password).
+    userId = (
+      await findOrCreateInvitedUser(params.email, {
+        invitedBy: params.grantedByEmail,
+        baseUrl: params.baseUrl,
+      })
+    ).id;
   }
   if (!userId) {
     throw new ValidationError("user_id or email is required");
@@ -170,19 +162,22 @@ export async function addCollaborator(params: {
   // above: a rich email at the invitee's OWN address + a Hootie inbox row, so
   // the person added actually hears about it (not just a shared team inbox).
   // Both best-effort — a delivery failure must never fail the invite.
-  const inviteeEmail =
-    params.email ||
-    (
-      (await db.get("SELECT email FROM users WHERE id = ?", [userId])) as
-        | { email?: string }
-        | undefined
-    )?.email;
+  const invitee = (await db.get(
+    "SELECT email, is_invited FROM users WHERE id = ?",
+    [userId],
+  )) as { email?: string; is_invited?: number } | undefined;
+  const inviteeEmail = params.email || invitee?.email;
   if (inviteeEmail) {
+    // Never signed in yet → ?invite= so the login page prefills and guides them.
+    const nestLink = docLink(nestId, undefined, params.baseUrl);
     void sendEmailToRecipient(inviteeEmail, {
       status: "shared",
       docTitle: shareNestName,
       path: shareNestName,
-      link: docLink(nestId, undefined, params.baseUrl),
+      link:
+        nestLink && invitee?.is_invited === 1
+          ? `${nestLink}&invite=${encodeURIComponent(inviteeEmail)}`
+          : nestLink,
       actor: inviteeEmail,
       permission: params.permission,
       by: params.grantedByEmail || undefined,
