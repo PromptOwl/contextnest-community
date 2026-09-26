@@ -9,7 +9,7 @@ import {
 } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invalidateForPath, keys, reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { setNavGuard, bypassNavGuard } from "../lib/nav-guard";
@@ -374,6 +374,15 @@ export function DocumentEditor({
     grant: myGrant,
     isArchived,
   });
+  // Creator's display name from the nest roster (same cached read the comments
+  // panel makes); the email stays on hover, and is the fallback.
+  const { data: roster } = useQuery({
+    ...reads.mentionable(nestId),
+    enabled: !!nestId && !isNew && !isViewOnly,
+  });
+  const authorName = roster?.people.find(
+    (p) => p.email.toLowerCase() === author?.toLowerCase(),
+  )?.name;
   // Who deletes outright: the nest admin/owner tier, plus the person who wrote
   // the document — asking permission to delete your own work is the wrong
   // default. Everyone else goes through the request path. The server still
@@ -2808,7 +2817,7 @@ export function DocumentEditor({
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
                     {author && (
                       <span className="inline-flex items-center gap-1.5">
-                        Created by <span className="font-medium text-foreground/80">{author}</span>
+                        Created by <span className="font-medium text-foreground/80" title={author}>{authorName || author}</span>
                       </span>
                     )}
                     {author && collaborators.length > 0 && <span aria-hidden>·</span>}
