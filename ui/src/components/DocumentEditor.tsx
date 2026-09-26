@@ -130,6 +130,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import type { PendingChange } from "../lib/api";
 import { findBacklinks, inboundLinkWarning, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
+import { displayNameFor } from "../lib/person-name";
 import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
@@ -380,9 +381,7 @@ export function DocumentEditor({
     ...reads.mentionable(nestId),
     enabled: !!nestId && !isNew && !isViewOnly,
   });
-  const authorName = roster?.people.find(
-    (p) => p.email.toLowerCase() === author?.toLowerCase(),
-  )?.name;
+  const authorName = author ? displayNameFor(author, roster?.people) : null;
   // Who deletes outright: the nest admin/owner tier, plus the person who wrote
   // the document — asking permission to delete your own work is the wrong
   // default. Everyone else goes through the request path. The server still
@@ -2818,7 +2817,7 @@ export function DocumentEditor({
                   <div className="flex flex-col items-start gap-1 text-xs text-muted-foreground">
                     {author && (
                       <span className="inline-flex items-center gap-1.5">
-                        Created by <span className="font-medium text-foreground/80" title={author}>{authorName || author}</span>
+                        Created by <span className="font-medium text-foreground/80" title={author}>{authorName}</span>
                       </span>
                     )}
                     {collaborators.length > 0 && (
