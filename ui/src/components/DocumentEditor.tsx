@@ -129,7 +129,7 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import type { PendingChange } from "../lib/api";
-import { findBacklinks, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
+import { findBacklinks, inboundLinkWarning, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
@@ -1835,7 +1835,8 @@ export function DocumentEditor({
           }
           description={
             canDeleteDirectly
-              ? "This removes the document, its version history, comments and annotations. It cannot be undone."
+              ? "This removes the document, its version history, comments and annotations. It cannot be undone." +
+                inboundLinkWarning(backlinks.length)
               : "A nest admin reviews this and either deletes the document or rejects with a note. Nothing is removed yet."
           }
           // Deleting your own work needs no justification; asking for someone

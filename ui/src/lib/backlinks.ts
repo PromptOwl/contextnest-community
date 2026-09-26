@@ -175,3 +175,11 @@ export function findBacklinks(
   }
   return out;
 }
+
+/** Delete-confirm addendum for docs that link here; "" when none. */
+export function inboundLinkWarning(count: number): string {
+  if (count === 0) return "";
+  return count === 1
+    ? " 1 document links to this — deleting it will break that link."
+    : ` ${count} documents link to this — deleting it will break those links.`;
+}

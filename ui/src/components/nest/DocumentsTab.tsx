@@ -16,6 +16,7 @@ import { visibleDocuments, documentsTabIsEmpty, hasActiveFilters as hasActiveFil
 import { documentFacets } from "../../lib/document-facets";
 import { activityTimestamp } from "../../lib/node-sort";
 import { linkHealth } from "../../lib/link-health";
+import { findBacklinks, inboundLinkWarning } from "../../lib/backlinks";
 import { nodeTypeSupportsMove } from "../../lib/document-actions";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
@@ -171,6 +172,12 @@ export function DocumentsTab({
   const [deletionTarget, setDeletionTarget] = useState<any | null>(null);
   // Node pending a plain delete confirm (for callers who can delete outright).
   const [deleteNodeTarget, setDeleteNodeTarget] = useState<any | null>(null);
+  // Its confirm warns about docs linking to it, which needs every body — read
+  // the (shared, cached) full listing only while that dialog is open.
+  const deleteLinks = useQuery({ ...reads.nodes(nestId), enabled: !!deleteNodeTarget });
+  const deleteBacklinks = deleteNodeTarget
+    ? findBacklinks(deleteLinks.data?.nodes ?? [], deleteNodeTarget).length
+    : 0;
 
   // Folder pending deletion (admin) or a deletion request (everyone else).
   const [folderTarget, setFolderTarget] = useState<
@@ -1988,7 +1995,10 @@ export function DocumentsTab({
           open
           onOpenChange={(o) => !o && setDeleteNodeTarget(null)}
           title={`Delete "${deleteNodeTarget.title}"?`}
-          description="This removes the document, its version history, comments and annotations. It cannot be undone."
+          description={
+            "This removes the document, its version history, comments and annotations. It cannot be undone." +
+            inboundLinkWarning(deleteBacklinks)
+          }
           confirmLabel="Delete document"
           destructive
           onConfirm={handleDeleteNode}
