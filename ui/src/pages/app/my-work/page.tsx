@@ -1,7 +1,7 @@
 /**
  * MyWorkPage — My Work (/my-work): the cross-nest review inbox, what you are waiting on, and watcher notifications.
  */
-import { useState, useEffect } from "react";
+import { Fragment, useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import * as api from "../../../lib/api";
 import {
@@ -108,6 +108,9 @@ export default function MyWorkPage() {
 
   /** Review rows in the inbox — the only ones a batch decision applies to. */
   const reviewItems = work.items.filter((w) => w.type === "review");
+  // Requests (deletion / archive) are decided one at a time, so they list after
+  // the reviews under their own header instead of mixing into the batch.
+  const requestItems = work.items.filter((w) => w.type !== "review");
   const workKey = (w: api.WorkItem) => `${w.nest_id}:${w.node_id}`;
 
   // The cap is per call and a call is per nest, so what matters is the biggest
@@ -460,11 +463,16 @@ export default function MyWorkPage() {
                       )}
                     </div>
                   )}
-                  {work.items.map((w) => {
+                  {[...reviewItems, ...requestItems].map((w, i) => {
                     const key = `${w.nest_id}:${w.node_id}`;
                     return (
+                      <Fragment key={key}>
+                      {reviewItems.length > 1 && i === reviewItems.length && (
+                        <div className="bg-muted/40 px-4 py-2 text-sm text-muted-foreground">
+                          {requestItems.length} {requestItems.length === 1 ? "request" : "requests"} · approve or reject each one
+                        </div>
+                      )}
                       <div
-                        key={key}
                         className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 group"
                       >
                         {reviewItems.length > 1 && (
@@ -548,6 +556,7 @@ export default function MyWorkPage() {
                           )}
                         </div>
                       </div>
+                      </Fragment>
                     );
                   })}
                 </div>
