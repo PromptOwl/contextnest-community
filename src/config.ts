@@ -403,6 +403,16 @@ export const config = {
     return process.env.PEOPLE_SUGGEST_ALL_USERS === "true";
   },
   /**
+   * Who may create nests. "admins" (default): server admins only, until the
+   * server is on a paid plan. "everyone": any signed-in user. Open mode is
+   * unaffected (everyone is admin there).
+   */
+  get NEST_CREATION(): "admins" | "everyone" {
+    return process.env.NEST_CREATION?.trim().toLowerCase() === "everyone"
+      ? "everyone"
+      : "admins";
+  },
+  /**
    * This server hosts several unrelated organizations (the PromptOwl-hosted
    * deployment) rather than one company (a self-hosted install).
    *
@@ -603,6 +613,27 @@ export const config = {
       return null;
     }
     return raw;
+  },
+  /**
+   * Email transport: "smtp" (SMTP_URL, default) or "ses" (AWS SES via the SDK,
+   * for deployments that can't use SMTP). Anything else falls back to smtp.
+   */
+  get EMAIL_PROVIDER(): "smtp" | "ses" {
+    return process.env.EMAIL_PROVIDER?.trim().toLowerCase() === "ses" ? "ses" : "smtp";
+  },
+  /** AWS region for SES, e.g. us-east-1. Required when EMAIL_PROVIDER=ses. */
+  get SES_REGION(): string | null {
+    return process.env.SES_REGION?.trim() || null;
+  },
+  /**
+   * Optional static SES credentials. Both unset → the AWS default credential
+   * chain (IAM role, AWS_* env, shared profile). The secret is write-only.
+   */
+  get SES_ACCESS_KEY_ID(): string | null {
+    return process.env.SES_ACCESS_KEY_ID?.trim() || null;
+  },
+  get SES_SECRET_ACCESS_KEY(): string | null {
+    return process.env.SES_SECRET_ACCESS_KEY?.trim() || null;
   },
   /**
    * From address for notification emails. Shape-validated here (not only in

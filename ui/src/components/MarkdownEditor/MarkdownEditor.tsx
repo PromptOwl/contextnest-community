@@ -35,6 +35,7 @@ import { DragHandle } from "@tiptap/extension-drag-handle-react";
 import { NodeRange } from "@tiptap/extension-node-range";
 import type { Transaction } from "@tiptap/pm/state";
 import { Markdown, type MarkdownStorage } from "tiptap-markdown";
+import { serializeImageNode } from "../../lib/image-markdown-serializer";
 
 // tiptap-markdown's storage isn't in TipTap's Storage type; cast.
 // TextStyle/Color have no dedicated markdown syntax, so with no explicit
@@ -137,6 +138,7 @@ function formatWikiLink(nodeId: string, title: string): string {
 }
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
@@ -214,6 +216,7 @@ import {
 } from "@/components/ui/dialog";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../../lib/queries";
+import { escapeUnknownInlineHtml } from "../../lib/html-tag-allowlist";
 import {
   detectTrigger,
   matchMembers,
@@ -221,6 +224,7 @@ import {
   type MentionMember,
 } from "./picker-match";
 import { WikiLink, clearWikiExistsCache } from "./extensions/WikiLink";
+import { resolveWikiTarget, previewSnippet } from "@/lib/wiki-preview";
 import { CodeBlock } from "./extensions/CodeBlock";
 import { tableExtensions } from "./extensions/Table";
 import { Callout } from "./extensions/Callout";
@@ -238,9 +242,11 @@ import {
   VIDEO_MAX_UPLOAD_BYTES,
   editorPlaceholder,
   isFileDrag,
+  isUnsupportedFileDrag,
   mediaAffordances,
   pickMediaFile,
   shouldUploadPastedMedia,
+  unsupportedMediaDropMessage,
   validateEmbedInput,
 } from "@/lib/editor-media";
 import { Mention } from "./extensions/Mention";
@@ -282,8 +288,14 @@ interface MarkdownEditorProps {
    *  picked file, resolve to its asset URL. Omit to hide the button
    *  (e.g. contexts with no asset storage). */
   onUploadImage?: (file: File) => Promise<string>;
-  /** Click on a `[[Title]]` decoration inside the editor. */
-  onWikiLinkClick?: (title: string, id: string | null) => void;
+  /** Click on a `[[Title]]` decoration inside the editor. `displayText` is
+   *  the human-readable alias (for aliased links `title` is the internal
+   *  node id — see `formatWikiLink`). */
+  onWikiLinkClick?: (
+    title: string,
+    id: string | null,
+    displayText?: string | null,
+  ) => void;
   /** Click on an `@name` decoration. */
   onMentionClick?: (name: string) => void;
   placeholder?: string;
@@ -340,6 +352,26 @@ export const MarkdownEditor = forwardRef<
   const [previewMarkdown, setPreviewMarkdown] = useState("");
   const qc = useQueryClient();
   const effectiveEditable = editable && !previewing;
+  // Same target resolution as DocumentEditor's own read view (lib/wiki-preview),
+  // so the "Preview" toggle's broken-link styling and hover preview match the
+  // view/comment modes instead of styling every `[[…]]` as resolved.
+  const { data: previewNodesData } = useQuery({
+    ...reads.nodes(nestId ?? ""),
+    enabled: !!nestId && previewing,
+  });
+  const previewFor = useCallback(
+    (target: string) => {
+      const nodes = (previewNodesData?.nodes ?? []) as Array<{
+        id: string;
+        title: string;
+        content?: string;
+      }>;
+      const node = resolveWikiTarget(nodes, target);
+      if (!node) return null;
+      return { title: node.title, snippet: previewSnippet(node.content ?? "") };
+    },
+    [previewNodesData],
+  );
   // Image / video affordances (toolbar menu, drop overlay) — none in a
   // read-only / locked / preview doc. See lib/editor-media.ts.
   const media = mediaAffordances({
@@ -522,9 +554,18 @@ export const MarkdownEditor = forwardRef<
       }),
       TaskList,
       TaskItem.configure({ nested: true }),
-      // Inline images — required for tiptap-markdown to round-trip ![alt](url)
-      // instead of dropping it. Rendering constrained via editor-styles.css.
-      TiptapImage.configure({ inline: false, allowBase64: false }),
+      // Block-level images — required for tiptap-markdown to round-trip
+      // ![alt](url) instead of dropping it. Rendering constrained via
+      // editor-styles.css. Custom markdown serializer: the built-in one
+      // (inherited from an inline-image assumption) never closes the
+      // image's block, which drops the blank line before whatever follows
+      // it — see image-markdown-serializer.ts for why that silently breaks
+      // a video URL placed right after an image.
+      TiptapImage.extend({
+        addStorage() {
+          return { markdown: { serialize: serializeImageNode } };
+        },
+      }).configure({ inline: false, allowBase64: false }),
       // `==text==` highlight. multicolor lets the color marks set a bg.
       Highlight.configure({ multicolor: true }),
       // Text color mark. Persisted via the html:true raw-HTML fallback below
@@ -603,7 +644,7 @@ export const MarkdownEditor = forwardRef<
         transformCopiedText: true,
       }),
     ],
-    content,
+    content: escapeUnknownInlineHtml(content),
     editable,
     // Caret-ready on open so you can type immediately (Notion/Obsidian
     // feel). "end" lands at doc end; placeholder shows when empty. A
@@ -676,9 +717,12 @@ export const MarkdownEditor = forwardRef<
         });
       },
       // Image/video file dropped onto the editor → same upload + insert
-      // as the toolbar picker, at the drop position. Anything else falls
-      // through (return false) so ProseMirror's default drop handling —
-      // text drags, in-editor block moves — is untouched.
+      // as the toolbar picker, at the drop position. An unsupported file
+      // type is rejected with a toast (handled, not left to fall through —
+      // an unhandled file drop can otherwise navigate the tab to the file).
+      // A drag with no files at all still falls through (return false) so
+      // ProseMirror's default drop handling — text drags, in-editor block
+      // moves — is untouched.
       handleDrop: (view, event) => {
         const ed = editorRef.current;
         const upload = onUploadImageRef.current;
@@ -688,7 +732,11 @@ export const MarkdownEditor = forwardRef<
         // never upload/insert into a locked or preview-mode doc.
         if (!ed.isEditable) return false;
         const file = files[0];
-        if (!MEDIA_FILE_RE.test(file.name)) return false;
+        if (!MEDIA_FILE_RE.test(file.name)) {
+          event.preventDefault();
+          toast.error(unsupportedMediaDropMessage(file.name));
+          return true;
+        }
         event.preventDefault();
         if (files.length > 1) {
           toast("Only the first file was uploaded — drop one file at a time.");
@@ -934,7 +982,9 @@ export const MarkdownEditor = forwardRef<
     if (!editor) return;
     if (editor.isFocused) return;
     if (content === getEditorMarkdown(editor)) return;
-    editor.commands.setContent(content, { emitUpdate: false });
+    editor.commands.setContent(escapeUnknownInlineHtml(content), {
+      emitUpdate: false,
+    });
   }, [content, editor]);
 
   useImperativeHandle(
@@ -1359,7 +1409,8 @@ export const MarkdownEditor = forwardRef<
       // handleDrop (the overlay is pointer-events-none, so it never eats it).
       onDragOver={(e) => {
         if (media.dropOverlay && isFileDrag(e.dataTransfer?.types)) {
-          if (!fileDragOver) setFileDragOver(true);
+          const show = !isUnsupportedFileDrag(e.dataTransfer?.items);
+          if (fileDragOver !== show) setFileDragOver(show);
         }
       }}
       onDragLeave={(e) => {
@@ -1610,7 +1661,10 @@ export const MarkdownEditor = forwardRef<
       {previewing && (
         <DocumentViewer
           content={previewMarkdown}
-          onWikiLinkClick={(title) => onWikiLinkClick?.(title, null)}
+          onWikiLinkClick={(title, displayText) =>
+            onWikiLinkClick?.(title, null, displayText)
+          }
+          previewFor={nestId ? previewFor : undefined}
         />
       )}
 

@@ -13,6 +13,7 @@
  */
 
 import { clearDraft } from "./draft";
+import type { NestBranding } from "./branding";
 
 /**
  * A nest's visibility tier. 'org' = every authenticated user of this
@@ -224,6 +225,8 @@ export async function getHealth() {
     posthog_host?: string;
     /** Mail transport is set up — email/invite publish gates need it. */
     email_configured?: boolean;
+    /** Who may create nests; "admins" hides the create CTAs from everyone else. */
+    nest_creation?: "admins" | "everyone";
     suspended_reason?: string;
   }>("/health");
 }
@@ -266,6 +269,7 @@ export interface AdminSettings {
   /** Offer every registered account in the add-a-person pickers. Default OFF:
    *  a server holding several unrelated customers would otherwise hand one
    *  customer's staff another customer's email addresses. */
+  nest_creation: "admins" | "everyone";
   people_suggest_all_users: boolean;
   /** This server hosts several organizations (PromptOwl-hosted). On, nest
    *  visibility 'org' needs the same acknowledgement as 'public' and the
@@ -289,7 +293,14 @@ export interface AdminSettings {
   anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   msteams_webhook_url: string;
+  email_provider: "smtp" | "ses";
   smtp_url: string;
+  ses_region: string;
+  ses_access_key_id: string;
+  /** SES secret is write-only — GET reports presence; PATCH sends a string to
+   *  set or null to clear. */
+  ses_secret_access_key_set?: boolean;
+  ses_secret_access_key?: string | null;
   notify_email_from: string;
   notify_email_to: string;
   anthropic_api_key?: string | null
@@ -423,6 +434,10 @@ export async function inviteTeammate(email: string) {
   return request<{
     temporary_password: string;
     user: { id: string; email: string };
+    /** PromptOwl sign-in is open to everyone, so the teammate can use it too. */
+    promptowl_sign_in?: boolean;
+    /** The invite email with the password was sent to them. */
+    emailed?: boolean;
     message: string;
   }>("/auth/invite", {
     method: "POST",
@@ -620,9 +635,12 @@ export interface ApiKeyMinted {
   api_key: string;
   key_prefix: string;
   label: string | null;
+  /** The one nest this key is scoped to, or null for an all-nests key. */
+  nest_id?: string | null;
 }
 
-/** Mint another external-client API key. 409s only at the per-user ceiling. */
+/** Mint another external-client API key. 409s at the per-user ceiling or on a
+ *  duplicate name; with nest_id, 404s unless the caller can reach that nest. */
 export async function createApiKey(opts?: { label?: string; nest_id?: string }) {
   return request<ApiKeyMinted>("/auth/keys", {
     method: "POST",
@@ -927,6 +945,16 @@ export async function setNestReaderMode(
   );
 }
 
+// Per-nest reader branding (owner / nest admin / server admin). The body
+// replaces the whole branding; null clears it. hide_powered_by is server-admin
+// only (403 otherwise).
+export async function setNestBranding(nestId: string, branding: NestBranding | null) {
+  return request<{ branding: NestBranding | null }>(`/nests/${nestId}/branding`, {
+    method: "PATCH",
+    body: JSON.stringify(branding),
+  });
+}
+
 export async function getNest(nestId: string) {
   return request<{
     nest: {
@@ -938,6 +966,8 @@ export async function getNest(nestId: string) {
       reader_home_node?: string | null;
       // Set when the nest is archived — surfaced straight off the SELECT *.
       archived_at?: string | null;
+      // Per-nest reader branding, parsed server-side; null = unbranded.
+      branding?: NestBranding | null;
     };
     permission: string;
     // Caller's merged effective roles (collaborator + steward), nest-wide.
@@ -2665,6 +2695,17 @@ export async function removeNodeWatcher(nestId: string, nodeId: string, email: s
     { method: "DELETE" },
   );
   return r.watchers;
+}
+
+export async function listUnreadNotifications() {
+  return request<{ notifications: WatcherNotification[] }>(
+    "/me/notifications?unread=true",
+  );
+}
+
+/** Decline a nest invite — removes the caller's own access to that nest. */
+export async function leaveNest(nestId: string) {
+  return request<{ left: boolean }>(`/me/nests/${nestId}/leave`, { method: "POST" });
 }
 
 export async function markNotificationsRead(ids: string[] | "all") {

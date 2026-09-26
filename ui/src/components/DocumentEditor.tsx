@@ -1657,12 +1657,16 @@ export function DocumentEditor({
   // node list and let decideWikiLinkAction decide navigate/create/blocked —
   // a broken link then always falls through to create (or a permission
   // message) instead of a dead end (CU-wdqcq02g17).
-  const handleWikiLinkClick = async (linkTitle: string, _id: string | null) => {
+  const handleWikiLinkClick = async (
+    linkTitle: string,
+    _id: string | null,
+    displayText?: string | null,
+  ) => {
     try {
       const { nodes } = await qc.fetchQuery(reads.nodes(nestId));
       const list = nodes as Array<{ id: string; title: string }>;
       const canAuthor = !isReviewerOnly && !isViewOnly;
-      const action = decideWikiLinkAction(list, linkTitle, canAuthor);
+      const action = decideWikiLinkAction(list, linkTitle, canAuthor, displayText);
       if (action.kind === "navigate") {
         confirmLeave(
           `open "${action.node.title}"`,
@@ -1701,6 +1705,7 @@ export function DocumentEditor({
       canShare,
       isArchived,
       canEditContent,
+      isPdf: isPdfNode,
       isLocked,
       canRequestDeletion,
       canDeleteDirectly,
@@ -3353,8 +3358,8 @@ export function DocumentEditor({
                           ) : (
                             <DocumentViewer
                               content={content}
-                              onWikiLinkClick={(title) =>
-                                handleWikiLinkClick(title, null)
+                              onWikiLinkClick={(title, displayText) =>
+                                handleWikiLinkClick(title, null, displayText)
                               }
                               previewFor={previewFor}
                             />

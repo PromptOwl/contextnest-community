@@ -6,6 +6,7 @@ import { mergeFrameAncestors } from "./shared/artifact-sandbox.js";
 import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
+import { brandingRoutes } from "./nests/branding-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
 import { publishRoutes } from "./nests/publish-routes.js";
 import { publishRenderRoutes } from "./nests/publish-render-routes.js";
@@ -76,6 +77,7 @@ import {
 } from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
+import { nestScopedKeyGuard } from "./auth/nest-scope-guard.js";
 import {
   verifySsoTicket,
   isValidTicketSub,
@@ -98,7 +100,11 @@ import {
   isVaultLockTimeout,
 } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish } from "./config.js";
-import { verifySmtp, isEmailConfigured } from "./notify/email.js";
+import {
+  verifyEmailTransport,
+  isEmailConfigured,
+  transportSettings,
+} from "./notify/email.js";
 import { getDb } from "./db/client.js";
 import { ensureAnonymousUser } from "./auth/anonymous.js";
 import {
@@ -180,6 +186,24 @@ function rejectedKeyMessage(info: LicenseInfo): string {
       return "PromptOwl rejected this license key. It wasn't saved. Verify the key is correct and active, then try again.";
   }
 }
+// True for a browser loading this URL as a page (hard reload, typed/bookmarked
+// link), false for the app's own fetch()es and other programmatic callers.
+// Sec-Fetch-Mode is sent by every current browser on navigation; the Accept
+// sniff is the fallback for older ones. Non-browser clients send neither (the
+// MCP SDK's discovery fetch sets no Accept header at all), and this app's own
+// API client (ui/src/lib/api.ts) never sets an HTML Accept either.
+const isDocumentNavigation = (c: { req: { header(n: string): string | undefined } }) =>
+  c.req.header("Sec-Fetch-Mode") === "navigate" ||
+  (c.req.header("Accept") || "").includes("text/html");
+
+// The SPA shell, shared by the catch-all below and the /teams guard — same
+// file, same no-cache policy (index.html is unhashed and must always
+// revalidate so a deploy's new bundle is picked up on next load).
+const serveIndexShell = serveStatic({
+  root: UI_DIR_REL,
+  path: "index.html",
+  onFound: (_p, c) => c.header("Cache-Control", "no-cache"),
+});
 
 // In open mode, assign the anonymous admin user to every request.
 // This gives full access without requiring auth headers.
@@ -478,6 +502,12 @@ export function createApp(): Hono<AuthEnv> {
     });
   });
 
+  // Nest-scoped API keys are deny-by-default outside their nest. Registered
+  // ahead of every route (and every route's own auth) so a route added later
+  // is closed to nest keys until it is allowlisted on purpose — see
+  // auth/nest-scope-guard.ts for what a nest key may reach.
+  app.use("*", nestScopedKeyGuard);
+
   // Health check (public)
   app.get("/health", (c) => {
     const oidcReady = isOidcReady();
@@ -493,6 +523,9 @@ export function createApp(): Hono<AuthEnv> {
       // Presence only: the publish dialog hides the email/invite gates when
       // this server cannot send mail, because their only way in is a mailed link.
       email_configured: isEmailConfigured(),
+      // Who may create nests (admins | everyone) — the Nests page hides the
+      // create buttons from non-admins when it's admins-only.
+      nest_creation: config.NEST_CREATION,
       // Product analytics for the SPA. The PostHog project key is a public
       // client key, but it only ships while usage telemetry is on — one switch
       // covers everything this server sends outward.
@@ -726,6 +759,7 @@ export function createApp(): Hono<AuthEnv> {
     oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
     oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
+    nest_creation: config.NEST_CREATION,
     people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
     shared_deployment: config.SHARED_DEPLOYMENT,
     // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
@@ -749,7 +783,12 @@ export function createApp(): Hono<AuthEnv> {
       : null,
     slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
     msteams_webhook_url: config.MSTEAMS_WEBHOOK_URL ?? "",
+    email_provider: config.EMAIL_PROVIDER,
     smtp_url: config.SMTP_URL ?? "",
+    ses_region: config.SES_REGION ?? "",
+    ses_access_key_id: config.SES_ACCESS_KEY_ID ?? "",
+    // Write-only, like the OIDC secret — presence only, never the value.
+    ses_secret_access_key_set: !!config.SES_SECRET_ACCESS_KEY,
     notify_email_from: config.NOTIFY_EMAIL_FROM ?? "",
     notify_email_to: config.NOTIFY_EMAIL_TO ?? "",
   });
@@ -1018,6 +1057,12 @@ export function createApp(): Hono<AuthEnv> {
     // this server may be multi-tenant (the PromptOwl-hosted deployment holds
     // many customers), where "every registered account" means another
     // customer's staff. false persists as null — unset already means off.
+    if ("nest_creation" in body) {
+      const v = String(body.nest_creation ?? "").trim().toLowerCase();
+      if (v !== "admins" && v !== "everyone")
+        addError("nest_creation", "Nest creation must be admins or everyone.");
+      else pending.push({ name: "NEST_CREATION", value: v });
+    }
     if ("people_suggest_all_users" in body) {
       pending.push({
         name: "PEOPLE_SUGGEST_ALL_USERS",
@@ -1169,6 +1214,57 @@ export function createApp(): Hono<AuthEnv> {
         addError("smtp_url", "SMTP connection URL must start with smtp:// or smtps:// (or leave it empty to turn email notifications off).");
       else pending.push({ name: "SMTP_URL", value: v || null });
     }
+    if ("email_provider" in body) {
+      const v = String(body.email_provider ?? "").trim().toLowerCase();
+      if (v !== "smtp" && v !== "ses")
+        addError("email_provider", "Email provider must be SMTP or AWS SES.");
+      else pending.push({ name: "EMAIL_PROVIDER", value: v });
+    }
+    if ("ses_region" in body) {
+      const v = String(body.ses_region ?? "").trim();
+      if (v && !/^[a-z]{2}(-[a-z]+)+-\d+$/.test(v))
+        addError("ses_region", "AWS region must look like us-east-1.");
+      else pending.push({ name: "SES_REGION", value: v || null });
+    }
+    if ("ses_access_key_id" in body) {
+      const v = String(body.ses_access_key_id ?? "").trim();
+      pending.push({ name: "SES_ACCESS_KEY_ID", value: v || null });
+    }
+    if ("ses_secret_access_key" in body) {
+      const v = body.ses_secret_access_key;
+      if (v !== null && typeof v !== "string")
+        addError("ses_secret_access_key", "AWS secret access key must be a string (or empty to clear it).");
+      else pending.push({ name: "SES_SECRET_ACCESS_KEY", value: v?.trim() || null });
+    }
+    // Saving a provider drops the other one's settings, so no stale credential
+    // lingers (e.g. an old SMTP URL once the server moves to SES).
+    const provider = String(body.email_provider ?? "").trim().toLowerCase();
+    if (provider === "smtp" || provider === "ses") {
+      const stale =
+        provider === "ses"
+          ? ["SMTP_URL"]
+          : ["SES_REGION", "SES_ACCESS_KEY_ID", "SES_SECRET_ACCESS_KEY"];
+      for (const name of stale) {
+        const i = pending.findIndex((p) => p.name === name);
+        if (i >= 0) pending.splice(i, 1);
+        pending.push({ name, value: null });
+      }
+    }
+    // SES keys are a pair: one without the other would be silently dropped for
+    // the IAM role at send time, so refuse it here instead.
+    if ("ses_access_key_id" in body || "ses_secret_access_key" in body) {
+      const next = (name: string, current: string | null) => {
+        const p = pending.find((x) => x.name === name);
+        return p ? p.value : current;
+      };
+      const hasId = !!next("SES_ACCESS_KEY_ID", config.SES_ACCESS_KEY_ID);
+      const hasSecret = !!next("SES_SECRET_ACCESS_KEY", config.SES_SECRET_ACCESS_KEY);
+      if (hasId !== hasSecret)
+        addError(
+          "ses_access_key_id",
+          "Set both the AWS access key ID and secret access key, or leave both empty to use the server's IAM role.",
+        );
+    }
     // Shape check (local@domain.tld, no CR/LF) — these flow into nodemailer's
     // envelope, so junk and header-injection shapes stop here. Same guard the
     // config getters apply, so env-set and UI-set values gate identically.
@@ -1238,21 +1334,25 @@ export function createApp(): Hono<AuthEnv> {
         400,
       );
 
-    // Shape is good — now prove the SMTP credentials actually work before we
-    // persist them. A prefix-valid URL can still point at the wrong host or
-    // carry a bad password; connect + authenticate so junk is blocked at save
-    // instead of silently failing on the first governance event. Only runs when
-    // the URL is being set to a non-empty value (empty = disabling the
-    // connector, nothing to verify).
-    const smtpChange = pending.find((p) => p.name === "SMTP_URL");
-    if (smtpChange && smtpChange.value) {
-      const result = await verifySmtp(smtpChange.value);
+    // Shape is good — now prove the email credentials actually work before we
+    // persist them (wrong host/password, bad AWS keys or region). Only when this
+    // PATCH touches the selected provider's fields and leaves it configured —
+    // clearing them just turns the connector off, nothing to verify.
+    const over = Object.fromEntries(pending.map((p) => [p.name, p.value]));
+    const nextEmail = transportSettings(over);
+    const emailFields =
+      nextEmail?.provider === "ses"
+        ? ["EMAIL_PROVIDER", "SES_REGION", "SES_ACCESS_KEY_ID", "SES_SECRET_ACCESS_KEY"]
+        : ["EMAIL_PROVIDER", "SMTP_URL"];
+    if (nextEmail && emailFields.some((k) => k in over)) {
+      const result = await verifyEmailTransport(nextEmail);
       if (!result.ok) {
-        const message = `SMTP connection failed: ${result.error}`;
+        const ses = nextEmail.provider === "ses";
+        const message = `${ses ? "AWS SES" : "SMTP"} connection failed: ${result.error}`;
         return c.json(
           {
             error: message,
-            fieldErrors: { smtp_url: message },
+            fieldErrors: { [ses ? "ses_region" : "smtp_url"]: message },
             settings: currentServerSettings(),
           },
           400,
@@ -1491,6 +1591,20 @@ export function createApp(): Hono<AuthEnv> {
   // changes). flexAuth so it works in open mode and with a key.
   // Teams — global, owner-managed group primitive (not nest-scoped). Auth via
   // flexAuth; ownership + admin bypass enforced inside the service/handlers.
+  //
+  // GET /teams is also the browser URL for the client's Teams page
+  // (ui/src/pages/app/teams/meta.ts) — unlike every other app page path
+  // (my-work, settings, ...), it collides with a top-level API route. In-app
+  // navigation never re-requests it (history.pushState), but a hard reload or
+  // a direct link issues a real GET /teams, which teamRoutes below would
+  // otherwise answer first with raw JSON instead of the app shell. Guard it
+  // here, ahead of auth, the same way the SPA catch-all further down guards
+  // every other path: a document navigation gets index.html; an API call
+  // (no Sec-Fetch-Mode: navigate, no HTML Accept) falls through unchanged.
+  app.get("/teams", async (c, next) => {
+    if (isDocumentNavigation(c)) return serveIndexShell(c, next);
+    return next();
+  });
   app.use("/teams/*", flexAuthMiddleware);
   app.use("/teams", flexAuthMiddleware);
   app.route("/teams", teamRoutes);
@@ -1570,10 +1684,14 @@ export function createApp(): Hono<AuthEnv> {
     // ponytail: nest-granularity check. A reviewer scoped to only one doc/tag
     // will see that whole nest's pending items, not just their scoped docs.
     // Tighten to per-node canUserApprove if that over-inclusion ever matters.
+    // Resolved for every nest the caller can SEE, not just nests that happen
+    // to appear in this page of `requests` — pagination.total below needs
+    // the full picture (a nest with pending reviews from someone else, on a
+    // page the caller never fetched, still has to be excluded consistently).
     const others = requests.filter((r) => r.requestedBy !== me);
     const nestApprove = new Map<string, boolean>(
       await Promise.all(
-        [...new Set(others.map((r) => r.nestId))].map(
+        [...nestName.keys()].map(
           async (nestId): Promise<[string, boolean]> => [
             nestId,
             await canApproveInNest(nestId, me),
@@ -1617,13 +1735,53 @@ export function createApp(): Hono<AuthEnv> {
     waiting.sort(byNewest);
     // Watcher notifications (HITL tags) ride along so the inbox is one call.
     const notifications = await listNotifications(me, { unreadOnly: true, limit: 50 });
+    // `total` from getReviewQueue counts every PENDING REVIEW across every
+    // nest the caller can see — full stop, regardless of who requested it or
+    // whether the caller can approve it. But items/waiting only ever surface
+    // a review that is either the caller's own request or one the caller can
+    // actually approve (see nestApprove above); a review from someone else in
+    // a nest where the caller is a bare viewer/editor never appears in either
+    // bucket, yet was still counted in `total` — so the badge (which reads
+    // pagination.total, see my-work/meta.ts) overcounted relative to what My
+    // Work actually shows. Recompute the review portion of the total as
+    // exactly (pending reviews in nests the caller can approve) + (the
+    // caller's own pending reviews elsewhere) — the same two conditions
+    // items/waiting are built from — via two SQL counts rather than the raw,
+    // unfiltered getReviewQueue total.
+    const approvableNestIds = [...nestName.keys()].filter((id) =>
+      nestApprove.get(id),
+    );
+    const restNestIds = [...nestName.keys()].filter(
+      (id) => !nestApprove.get(id),
+    );
+    const [{ total: approvableReviewTotal }, { total: myReviewsElsewhereTotal }] =
+      await Promise.all([
+        getReviewQueue({ status: "pending", nestIds: approvableNestIds, limit: 1 }),
+        getReviewQueue({
+          status: "pending",
+          nestIds: restNestIds,
+          requestedByEmail: me,
+          limit: 1,
+        }),
+      ]);
+    const reviewTotal = approvableReviewTotal + myReviewsElsewhereTotal;
+    // Deletion flags ride the same two buckets (above) but aren't paginated
+    // (listDeletionRequests always fetches every pending one), so folding in
+    // however many are actually shown keeps the total exact regardless of
+    // which review page this call fetched.
+    const deletionsShown =
+      items.filter((i) => i.type === "deletion").length +
+      waiting.filter((i) => i.type === "deletion").length;
     return c.json({
       items,
       waiting,
       notifications,
-      // total = all pending across visible nests (both buckets); has_more drives
-      // the "Load more" control on the client.
-      pagination: { total, limit, offset, has_more: offset + requests.length < total },
+      pagination: {
+        total: reviewTotal + deletionsShown,
+        limit,
+        offset,
+        has_more: offset + requests.length < total,
+      },
     });
   });
 
@@ -1682,6 +1840,24 @@ export function createApp(): Hono<AuthEnv> {
     return c.json({ ok: true });
   });
 
+  // Decline a nest invite: drop the caller's OWN collaborator row (never anyone
+  // else's) and settle its invite rows. Access through a team isn't a row here,
+  // so left=false — the invite still clears, the nest stays.
+  app.post("/me/nests/:nestId/leave", async (c) => {
+    const nestId = c.req.param("nestId");
+    const me = await resolveCallerEmail(c.get("userId"));
+    const db = getDb();
+    const info = await db.run(
+      "DELETE FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
+      [nestId, c.get("userId")],
+    );
+    await db.run(
+      `UPDATE notifications SET read_at = ? WHERE LOWER(user_email) = LOWER(?) AND nest_id = ? AND kind = 'nest_invite' AND read_at IS NULL`,
+      [new Date().toISOString(), me, nestId],
+    );
+    return c.json({ left: info.changes > 0 });
+  });
+
   // flexAuthMiddleware so it works without auth in open mode and with
   // a Bearer/cookie in key mode.
   app.use("/stats", flexAuthMiddleware);
@@ -1690,7 +1866,11 @@ export function createApp(): Hono<AuthEnv> {
     const userId = c.get("userId");
     const userEmail = await resolveCallerEmail(userId);
 
-    const visibleNests = await listVisibleNests(userId);
+    // A nest-scoped key counts only its own nest.
+    const nestScope = c.get("nestScope");
+    const visibleNests = (await listVisibleNests(userId)).filter(
+      (n) => !nestScope || n.id === nestScope,
+    );
 
     // Count accessible documents across every nest the caller can see.
     // Mirrors the per-nest filterAccessible logic used by GET /nests/:id/nodes
@@ -1752,8 +1932,13 @@ export function createApp(): Hono<AuthEnv> {
     // search could not find documents they can plainly read. filterAccessible
     // below still narrows a public reader to approved docs and a grantee to
     // their granted docs, so widening the scan surfaces nothing new.
+    // A nest-scoped key searches only its own nest.
+    const nestScope = c.get("nestScope");
+    const searchable = (await listVisibleNests(userId, { readable: true })).filter(
+      (n) => !nestScope || n.id === nestScope,
+    );
     const perNest = await Promise.all(
-      (await listVisibleNests(userId, { readable: true })).map(async (nest): Promise<SearchHit[]> => {
+      searchable.map(async (nest): Promise<SearchHit[]> => {
         try {
           const { storage } = await engineCache.get(nest.id);
           const matches = matchDocuments(await discoverForSearch(storage), q);
@@ -2216,11 +2401,17 @@ export function createApp(): Hono<AuthEnv> {
     // would wrongly gate `…/nodes/collaborators-guide` as a collaborators route
     // and 403 a write user editing that doc. parts[1] is the resource segment.
     const resource = parts[1];
-    if (resource === "visibility" || resource === "reader-mode") {
+    if (
+      resource === "visibility" ||
+      resource === "reader-mode" ||
+      resource === "branding"
+    ) {
       // reader-mode: the nest owner/admin collaborator AND the server admin
       // may configure it — this "admin" tier already covers both
       // (resolveNestPermission maps the server/super admin to "admin" too),
       // so the handler needs no further hard-gating past this middleware.
+      // branding (CU-wdqcq02ptm): same owner/admin tier; its handler adds
+      // the server-admin-only hide_powered_by check.
       required = "admin";
     } else if (resource === "collaborators") {
       // Viewing the roster (GET) and inviting (POST) are open to write+
@@ -2435,6 +2626,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/nodes", nodeRoutes);
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
+  nestsApp.route("/:nestId", brandingRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);
   // "publications" (not "/publish") — POST /:nestId/publish is already taken by
   // the nest-snapshot endpoint in query-routes. These manage per-document
@@ -2483,25 +2675,15 @@ export function createApp(): Hono<AuthEnv> {
   // passed through. Those callers parse what they get, so a 200 HTML page turns
   // a plain 404 into a confusing failure elsewhere (JSON.parse on "<!DOCTYPE",
   // or a <script> tag executing the shell). Give them JSON 404 instead.
-  //
-  // Sec-Fetch-Mode is sent by every current browser on navigation; the Accept
-  // sniff is the fallback for older ones. Non-browser clients send neither
-  // (the MCP SDK's discovery fetch sets no Accept header at all).
-  const isDocumentNavigation = (c: { req: { header(n: string): string | undefined } }) =>
-    c.req.header("Sec-Fetch-Mode") === "navigate" ||
-    (c.req.header("Accept") || "").includes("text/html");
-
+  // (isDocumentNavigation, serveIndexShell defined above, shared with the
+  // /teams guard.)
   app.get(
     "*",
     async (c, next) => {
       if (isDocumentNavigation(c)) return next();
       return c.json({ error: "Not found" }, 404);
     },
-    serveStatic({
-      root: UI_DIR_REL,
-      path: "index.html",
-      onFound: (_p, c) => c.header("Cache-Control", "no-cache"),
-    }),
+    serveIndexShell,
   );
 
   // Non-GET requests that matched no route (POST to a mistyped endpoint, the

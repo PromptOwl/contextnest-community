@@ -35,6 +35,8 @@ export function setupTestEnv() {
   process.env.DATABASE_PATH = join(testDir, "test.db");
   process.env.PROMPTOWL_KEY = ""; // no license in tests
   process.env.TELEMETRY_ENABLED = "false";
+  // Suites create nests as ordinary users; the admins-only gate has its own test.
+  process.env.NEST_CREATION = "everyone";
   // Default tests to SQLite regardless of any DB_DRIVER/DATABASE_URL set in
   // the developer's shell (the gated Postgres suite sets these itself).
   process.env.DB_DRIVER = "sqlite";

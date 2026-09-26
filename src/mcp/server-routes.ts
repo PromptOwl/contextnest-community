@@ -49,7 +49,7 @@ import {
   listPublicNests,
   createNest,
 } from "../nests/service.js";
-import { ValidationError } from "../shared/errors.js";
+import { ValidationError, ForbiddenError } from "../shared/errors.js";
 import {
   isSuspended,
   getSuspensionReason,
@@ -371,7 +371,7 @@ async function handleServerToolCall(
       );
       return `Created nest "${nest.name}" (id: ${nest.id}). Add documents with context_create, retrieve with the other tools.`;
     } catch (err) {
-      if (err instanceof ValidationError) return err.message;
+      if (err instanceof ValidationError || err instanceof ForbiddenError) return err.message;
       throw err;
     }
   }

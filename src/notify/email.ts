@@ -1,10 +1,11 @@
 /**
- * Email connector — optional team notifications over SMTP via nodemailer.
+ * Email connector — optional notifications via nodemailer, over SMTP or AWS SES.
  *
  * Dependency posture (see the supply-chain scan in the PR/ticket): nodemailer
  * is pinned EXACTLY to 9.0.3 — zero runtime deps, zero install scripts,
  * registry-signed, no unpatched advisories. Usage is deliberately hardened:
- *   - SMTP transport only (never sendmail — no child_process path)
+ *   - SMTP or the AWS SES SDK transport only (never sendmail — no
+ *     child_process path)
  *   - disableFileAccess / disableUrlAccess on the transport AND no `raw`
  *     option ever, so a message can't be turned into a file read or SSRF
  *   - recipients/subjects are server-built from governance events; no
@@ -24,7 +25,7 @@ import {
 } from "./email-render.js";
 
 let transporterPromise: Promise<any> | null = null;
-let configuredUrl: string | null = null;
+let configuredKey: string | null = null;
 let warnedOnce = false;
 
 /**
@@ -92,24 +93,75 @@ export function withPool(url: string): string {
   return url + (url.includes("?") ? "&" : "?") + missing.join("&");
 }
 
+export type TransportSettings =
+  | { provider: "smtp"; url: string }
+  | {
+      provider: "ses";
+      region: string;
+      accessKeyId: string | null;
+      secretAccessKey: string | null;
+    };
+
 /**
- * Live credential check for the /admin/settings save path: actually connect to
- * the SMTP server and authenticate, so a wrong host/port/user/password is
- * caught before the setting is persisted (a bare shape check can't know the
- * password is wrong). Same hardening as the send path — timeouts ride the URL
- * so a dead host can't hang the request, file/URL access disabled. Never
- * throws: returns a typed result the caller turns into a 400.
+ * The selected provider's settings, or null when that provider isn't set up.
+ * `over` (env name → value) previews unsaved values, for the settings save check.
  */
-export async function verifySmtp(
-  url: string,
+export function transportSettings(
+  over: Record<string, string | null> = {},
+): TransportSettings | null {
+  const v = (name: string, current: string | null) =>
+    name in over ? over[name] : current;
+  if (v("EMAIL_PROVIDER", config.EMAIL_PROVIDER) === "ses") {
+    const region = v("SES_REGION", config.SES_REGION);
+    return region
+      ? {
+          provider: "ses",
+          region,
+          accessKeyId: v("SES_ACCESS_KEY_ID", config.SES_ACCESS_KEY_ID),
+          secretAccessKey: v("SES_SECRET_ACCESS_KEY", config.SES_SECRET_ACCESS_KEY),
+        }
+      : null;
+  }
+  const url = v("SMTP_URL", config.SMTP_URL);
+  return url ? { provider: "smtp", url } : null;
+}
+
+/**
+ * SMTP: pooled + timeouts on the URL (see withPool/withTimeouts). SES: the
+ * SDK client; no static keys → AWS default credential chain (IAM role etc.).
+ */
+async function createTransport(s: TransportSettings, pooled: boolean): Promise<any> {
+  const nodemailer = (await import("nodemailer")).default;
+  const hardening = { disableFileAccess: true, disableUrlAccess: true };
+  if (s.provider === "smtp") {
+    const url = withTimeouts(s.url);
+    return nodemailer.createTransport(pooled ? withPool(url) : url, hardening as any);
+  }
+  const ses = await import("@aws-sdk/client-sesv2");
+  const sesClient = new ses.SESv2Client({
+    region: s.region,
+    ...(s.accessKeyId && s.secretAccessKey
+      ? { credentials: { accessKeyId: s.accessKeyId, secretAccessKey: s.secretAccessKey } }
+      : {}),
+  });
+  return nodemailer.createTransport({
+    SES: { sesClient, SendEmailCommand: ses.SendEmailCommand },
+    ...hardening,
+  } as any);
+}
+
+/**
+ * Live credential check for the /admin/settings save path: SMTP connects and
+ * authenticates; SES sends a probe nodemailer treats as ok unless auth/region
+ * fails. Catches bad credentials before they're persisted. Never throws:
+ * returns a typed result the caller turns into a 400.
+ */
+export async function verifyEmailTransport(
+  s: TransportSettings,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   let transporter: any = null;
   try {
-    const nodemailer = await import("nodemailer");
-    transporter = nodemailer.default.createTransport(withTimeouts(url), {
-      disableFileAccess: true,
-      disableUrlAccess: true,
-    } as any);
+    transporter = await createTransport(s, false);
     await transporter.verify();
     return { ok: true };
   } catch (err) {
@@ -126,25 +178,18 @@ export async function verifySmtp(
 }
 
 async function getTransporter(): Promise<any | null> {
-  const url = config.SMTP_URL;
-  if (!url) return null;
-  // Rebuild if the admin changed the SMTP URL at runtime (settings PATCH).
-  if (!transporterPromise || configuredUrl !== url) {
-    configuredUrl = url;
-    transporterPromise = import("nodemailer").then((nodemailer) =>
-      // withPool → connection pool + per-second rate limit, so a burst queues
-      // instead of tripping the provider's "too many emails" 550.
-      nodemailer.default.createTransport(withPool(withTimeouts(url)), {
-        // Per-message defaults (belt-and-braces; also set on each sendMail).
-        disableFileAccess: true,
-        disableUrlAccess: true,
-      } as any),
-    );
+  const s = transportSettings();
+  if (!s) return null;
+  const key = JSON.stringify(s);
+  // Rebuild if the admin changed the email settings at runtime (settings PATCH).
+  if (!transporterPromise || configuredKey !== key) {
+    configuredKey = key;
+    transporterPromise = createTransport(s, true);
     // A rejected build must not be cached forever (a settled Promise is
     // truthy) — reset so the next event retries instead of silently dying.
     transporterPromise.catch(() => {
       transporterPromise = null;
-      configuredUrl = null;
+      configuredKey = null;
     });
   }
   return transporterPromise;
@@ -157,7 +202,7 @@ export async function notifyEmailForNest(
 ): Promise<void> {
   const from = config.NOTIFY_EMAIL_FROM;
   const to = config.NOTIFY_EMAIL_TO;
-  if (!config.SMTP_URL || !from || !to) return;
+  if (!transportSettings() || !from || !to) return;
   try {
     const transporter = await getTransporter();
     if (!transporter) return;
@@ -211,7 +256,7 @@ export async function notifyEmailForNest(
  * Send a rich governance email to explicit recipient(s) — one address, or an
  * array (e.g. every reviewer steward on a submit), delivered in a single send.
  * Independent of the NOTIFY_EMAIL_TO team channel; same transport, rendering and
- * fire-and-forget posture as notifyEmailForNest. Gated on SMTP_URL +
+ * fire-and-forget posture as notifyEmailForNest. Gated on a configured transport (SMTP or SES) +
  * NOTIFY_EMAIL_FROM + at least one recipient — the team-channel address is
  * irrelevant here, so emailing an invitee/reviewer never depends on it.
  */
@@ -223,7 +268,7 @@ export async function notifyEmailForNest(
  * instead of silently producing something nobody can open.
  */
 export function isEmailConfigured(): boolean {
-  return !!config.SMTP_URL && !!config.NOTIFY_EMAIL_FROM;
+  return !!transportSettings() && !!config.NOTIFY_EMAIL_FROM;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -254,7 +299,7 @@ export function isRateLimited(err: unknown): boolean {
   const msg = String((err as any)?.message ?? err);
   const code = Number((err as any)?.responseCode);
   return (
-    /too many|rate limit|throttl|try again|4\.7\.\d|too many emails/i.test(msg) ||
+    /too many|rate limit|rate exceeded|throttl|try again|4\.7\.\d|too many emails/i.test(msg) ||
     code === 421 ||
     code === 429 ||
     code === 450 ||
@@ -291,7 +336,7 @@ export async function sendEmailToRecipient(
 ): Promise<void> {
   const from = config.NOTIFY_EMAIL_FROM;
   const hasRecipient = Array.isArray(to) ? to.length > 0 : !!to;
-  if (!config.SMTP_URL || !from || !hasRecipient) return;
+  if (!transportSettings() || !from || !hasRecipient) return;
   try {
     const transporter = await getTransporter();
     if (!transporter) return;

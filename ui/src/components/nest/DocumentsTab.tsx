@@ -16,6 +16,7 @@ import { visibleDocuments, documentsTabIsEmpty, hasActiveFilters as hasActiveFil
 import { documentFacets } from "../../lib/document-facets";
 import { activityTimestamp } from "../../lib/node-sort";
 import { linkHealth } from "../../lib/link-health";
+import { nodeTypeSupportsMove } from "../../lib/document-actions";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
   parseSavedFilters, serializeSavedFilters,
@@ -1137,6 +1138,7 @@ export function DocumentsTab({
                   // so reorganizing an under-review doc stays possible.
                   const canMove =
                     canEditNode(node) &&
+                    nodeTypeSupportsMove(nodeType) &&
                     (node.status !== "pending_review" ||
                       isOwner ||
                       isAdmin ||
