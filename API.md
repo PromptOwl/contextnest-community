@@ -12,6 +12,20 @@ Two methods, evaluated in order:
 
 Anonymous open mode (`AUTH_MODE=open`) bypasses auth on most read endpoints.
 
+### Nest-scoped API keys
+
+A key minted with `nest_id` reaches **that one nest and nothing else**. It is deny-by-default: a request outside the list below answers **403** `{ "error": "This API key is scoped to one nest and can't …", "code": "nest_scoped_key" }`, before the route's own checks run, so a route added later is closed to nest keys until it is allowed on purpose.
+
+| A nest-scoped key **can** reach | Notes |
+|---|---|
+| `/nests/<its nest>` and everything under it, including `/nests/<its nest>/mcp` | The owner's permission on that nest still applies. |
+| `GET /nests`, `GET /search`, `GET /stats` | Narrowed to its nest — other nests never appear. |
+| `/mcp`, `GET /index` | Already filtered to its nest. |
+| `/runs/<id>/*` | Only runs in its nest (403 otherwise). |
+| `GET /health`, `GET /license/status`, `GET /llms.txt`, `GET /auth/admin-status` | Public / self-describing. |
+
+Everything else is **403 `nest_scoped_key`** — notably `/auth/keys*` (a nest key can't mint, rotate, list or revoke keys, so it can't trade itself for a whole-account key), `POST /nests`, every other nest (`/nests/<other>/…` answers 403 "API key not authorized for this nest"; its MCP transport answers with a JSON-RPC error envelope), `/admin/*`, `/auth/teammates`, `/auth/invite`, `/auth/users/*`, `/auth/admin/*`, `/auth/profile`, `/auth/password`, `/teams*`, `/people*` and `/me/*` — even when the key's owner is a server admin. A session cookie sent alongside the key wins, as everywhere else. User-level keys (no `nest_id`) and sessions are unaffected.
+
 All bodies are JSON unless noted. All errors return `{ "error": "msg" }` with appropriate HTTP status.
 
 ## Caller attribution (`client`)
@@ -121,16 +135,16 @@ Mints an API key for the caller. A user may hold **several** keys — one per pl
 ```
 Response (201):
 ```json
-{ "api_key": "cnst_...", "id": "uuid", "key_prefix": "cnst_abc123...", "label": "cli" }
+{ "api_key": "cnst_...", "id": "uuid", "key_prefix": "cnst_abc123...", "label": "cli", "nest_id": null }
 ```
-**Plaintext shown once.** Omit `nest_id` for a **user-level key** (works on every nest the user can access — what the Connect dialog mints); a nest-scoped key is rejected on other nests' MCP/API paths.
+**Plaintext shown once.** Omit `nest_id` for a **user-level key** (works on every nest the user can access — what the whole-brain Connect flow mints). With `nest_id` the key is **nest-scoped** — see [Nest-scoped API keys](#nest-scoped-api-keys) for exactly what it can reach. The caller must be able to reach that nest: an unknown nest, or one the caller has no access to, is **404** (the same answer for both, so this is no existence oracle). A nest-scoped key calling this endpoint gets **403 `nest_scoped_key`**.
 
 ### POST `/auth/keys/rotate` (auth required)
 Replaces **one** key and returns its new plaintext; the caller's other keys are untouched.
 
 `key_id` names the target. Omitting it is only accepted when the account holds exactly one key (pre-multi-key clients) — with several keys and no `key_id` the server answers **400** rather than guessing which to replace. **404** if the id isn't the caller's.
 
-Scope resolution on the optional `nest_id` field: **absent** → keep the prior scope; **`null` (or `""`)** → clear to a user-level key; **a nest id** → scope to that nest. Same for `label` (absent keeps the prior label). Supplying a `label` that matches a *different* key of the caller's is **409**; renaming a key to what it is already called is fine.
+Scope resolution on the optional `nest_id` field: **absent** → keep the prior scope; **`null` (or `""`)** → clear to a user-level key; **a nest id** → scope to that nest (**404** unless the caller can reach it, and the old key is left alone). The response reports the new key's `nest_id`. Un-scoping has to come from a session or a user-level key — a nest-scoped key calling any `/auth/keys*` route gets **403 `nest_scoped_key`**. Same for `label` (absent keeps the prior label). Supplying a `label` that matches a *different* key of the caller's is **409**; renaming a key to what it is already called is fine.
 ```json
 { "key_id": "uuid", "label": "optional", "nest_id": "optional" }
 ```

@@ -11,7 +11,7 @@ The server supports two authentication modes. You pick one per instance with `AU
 Every request requires an `Authorization: Bearer cnst_...` header. Use this for any multi-user or internet-facing deployment.
 
 - Users register via `POST /auth/register` (email + password) or log in with PromptOwl via `POST /auth/device` → `POST /auth/promptowl`.
-- API keys are per-user (`cnst_<64-hex>`) and can be scoped to a single nest for service-account use.
+- API keys are per-user (`cnst_<64-hex>`) and can be scoped to a single nest for service-account use. A nest-scoped key reaches that nest (its REST routes and `/nests/<id>/mcp`), the server `/mcp` and `/index` filtered to it, and `GET /nests` / `/search` / `/stats` narrowed to it — and nothing else: other nests, `/auth/keys*` (so it can't mint itself a wider key), `/admin/*`, teammates, teams, people and `/me/*` answer `403` with `code: "nest_scoped_key"`, even when the key's owner is a server admin. Mint one on the API keys page (scope picker) or from a nest's Connect dialog ("Create a key for this nest only"). See `API.md → Nest-scoped API keys`.
 - Rate-limited login / register / device-auth endpoints (sliding window, per IP + per email).
 - First PromptOwl-authenticated user becomes the server admin (atomic claim). Admin can invite teammates at `POST /auth/invite`.
 

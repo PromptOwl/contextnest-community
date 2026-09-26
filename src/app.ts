@@ -77,6 +77,7 @@ import {
 } from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
+import { nestScopedKeyGuard } from "./auth/nest-scope-guard.js";
 import {
   verifySsoTicket,
   isValidTicketSub,
@@ -461,6 +462,12 @@ export function createApp(): Hono<AuthEnv> {
       client: c.get("clientMetadata"),
     });
   });
+
+  // Nest-scoped API keys are deny-by-default outside their nest. Registered
+  // ahead of every route (and every route's own auth) so a route added later
+  // is closed to nest keys until it is allowlisted on purpose — see
+  // auth/nest-scope-guard.ts for what a nest key may reach.
+  app.use("*", nestScopedKeyGuard);
 
   // Health check (public)
   app.get("/health", (c) => {
@@ -1770,7 +1777,11 @@ export function createApp(): Hono<AuthEnv> {
     const userId = c.get("userId");
     const userEmail = await resolveCallerEmail(userId);
 
-    const visibleNests = await listVisibleNests(userId);
+    // A nest-scoped key counts only its own nest.
+    const nestScope = c.get("nestScope");
+    const visibleNests = (await listVisibleNests(userId)).filter(
+      (n) => !nestScope || n.id === nestScope,
+    );
 
     // Count accessible documents across every nest the caller can see.
     // Mirrors the per-nest filterAccessible logic used by GET /nests/:id/nodes
@@ -1832,8 +1843,13 @@ export function createApp(): Hono<AuthEnv> {
     // search could not find documents they can plainly read. filterAccessible
     // below still narrows a public reader to approved docs and a grantee to
     // their granted docs, so widening the scan surfaces nothing new.
+    // A nest-scoped key searches only its own nest.
+    const nestScope = c.get("nestScope");
+    const searchable = (await listVisibleNests(userId, { readable: true })).filter(
+      (n) => !nestScope || n.id === nestScope,
+    );
     const perNest = await Promise.all(
-      (await listVisibleNests(userId, { readable: true })).map(async (nest): Promise<SearchHit[]> => {
+      searchable.map(async (nest): Promise<SearchHit[]> => {
         try {
           const { storage } = await engineCache.get(nest.id);
           const matches = matchDocuments(await discoverForSearch(storage), q);

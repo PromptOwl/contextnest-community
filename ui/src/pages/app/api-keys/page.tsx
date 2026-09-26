@@ -6,22 +6,41 @@
  * from, and losing the plaintext for one no longer forces a rotate that
  * silently disconnects every other client. Plaintext is still shown exactly
  * once at mint time — you can't re-read a key, only replace it.
+ *
+ * Each key has a scope, shown as a badge on its row and picked when it's made:
+ * all your nests (a user-level key), or one nest only — the key to hand an
+ * agent that should see a single nest. See lib/api-key-scope.ts.
  */
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  Boxes,
   KeyRound,
+  Layers,
   Loader2,
   Plus,
   RefreshCw,
   Trash2,
 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PageTitle } from "@/components/ui/page-title";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import * as api from "../../../lib/api";
-import { reads, useApiKeys } from "../../../lib/queries";
+import { reads, useApiKeys, useNests } from "../../../lib/queries";
+import {
+  ALL_NESTS,
+  createKeyRequest,
+  keyScope,
+} from "../../../lib/api-key-scope";
 import { parseServerDate } from "../../../lib/dates";
 import { KeyRevealModal } from "../../../components/ConnectModal";
 
@@ -35,8 +54,18 @@ export default function ApiKeysPage() {
   const qc = useQueryClient();
   const { data, isLoading } = useApiKeys();
   const keys = data?.keys ?? [];
+  // Every listed nest names a scope badge; the picker offers only the nests
+  // you're a member of (not ones you merely discovered, or reach through a
+  // single shared document) — the server refuses a key for a nest you can't
+  // reach, and a public nest you happen to see is rarely what you mean.
+  const { data: nestData } = useNests();
+  const allNests: any[] = nestData?.nests ?? [];
+  const nests: Array<{ id: string; name: string }> = allNests
+    .filter((n) => !n.discovered && !n.grant_only)
+    .map((n) => ({ id: n.id, name: n.name ?? n.id }));
 
   const [label, setLabel] = useState("");
+  const [scope, setScope] = useState<string>(ALL_NESTS);
   // One id at a time: which row is mid-request, so only its button spins.
   const [busy, setBusy] = useState<string | null>(null);
   const [reveal, setReveal] = useState<{
@@ -65,7 +94,10 @@ export default function ApiKeysPage() {
     try {
       const { api_key } = await fn();
       setReveal({ apiKey: api_key, kind });
-      if (id === "new") setLabel("");
+      if (id === "new") {
+        setLabel("");
+        setScope(ALL_NESTS);
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
@@ -100,9 +132,26 @@ export default function ApiKeysPage() {
       <PageTitle
         icon={KeyRound}
         title="API keys"
-        description="Each key authenticates every nest you can see, plus the server-level MCP endpoint. Make one per place you connect from — then rotating the key for one client leaves the others alone."
+        description="Make one key per place you connect from — then rotating the key for one client leaves the others alone."
         className="mb-0"
       />
+      <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+        <p className="rounded-md border p-2.5">
+          <span className="flex items-center gap-1.5 font-medium text-foreground">
+            <Layers className="h-3.5 w-3.5" /> All your nests
+          </span>
+          Works on every nest you can see, the server-level MCP endpoint, and
+          your account (including managing keys). Use it for your own tools.
+        </p>
+        <p className="rounded-md border p-2.5">
+          <span className="flex items-center gap-1.5 font-medium text-foreground">
+            <Boxes className="h-3.5 w-3.5" /> One nest only
+          </span>
+          Reaches that one nest and nothing else — every other nest, your
+          account, API keys and admin settings answer 403. Hand this one to an
+          agent or integration.
+        </p>
+      </div>
       <form
         className="flex flex-col gap-2 sm:flex-row"
         onSubmit={(e) => {
@@ -110,7 +159,7 @@ export default function ApiKeysPage() {
           if (!canGenerate) return;
           run(
             "new",
-            () => api.createApiKey({ label: trimmedLabel }),
+            () => api.createApiKey(createKeyRequest(trimmedLabel, scope)),
             "generated",
           );
         }}
@@ -130,6 +179,22 @@ export default function ApiKeysPage() {
             </p>
           )}
         </div>
+        <Select value={scope} onValueChange={setScope}>
+          <SelectTrigger
+            className="w-full sm:w-[200px] shrink-0"
+            aria-label="What this key can reach"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL_NESTS}>All your nests</SelectItem>
+            {nests.map((n) => (
+              <SelectItem key={n.id} value={n.id}>
+                Only {n.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <Button
           type="submit"
           disabled={busy === "new" || !canGenerate}
@@ -156,13 +221,36 @@ export default function ApiKeysPage() {
         <ul className="divide-y rounded-md border">
           {keys.map((k) => {
             const name = k.label || "Unnamed key";
+            const reach = keyScope(k, allNests);
             return (
               <li
                 key={k.id}
                 className="flex flex-col gap-2 p-3 sm:flex-row sm:items-center sm:justify-between"
               >
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{name}</p>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <p className="truncate text-sm font-medium">{name}</p>
+                    <Badge
+                      variant="outline"
+                      className={
+                        reach.kind === "nest"
+                          ? "shrink-0 gap-1 border-amber-200 bg-amber-50 text-amber-800"
+                          : "shrink-0 gap-1"
+                      }
+                      title={
+                        reach.kind === "nest"
+                          ? "This key reaches this one nest only."
+                          : "This key reaches every nest you can see."
+                      }
+                    >
+                      {reach.kind === "nest" ? (
+                        <Boxes className="h-3 w-3" />
+                      ) : (
+                        <Layers className="h-3 w-3" />
+                      )}
+                      <span className="max-w-[16rem] truncate">{reach.label}</span>
+                    </Badge>
+                  </div>
                   <p className="text-xs text-muted-foreground">
                     <code className="font-mono">{k.key_prefix}</code> ·
                     created {when(k.created_at)} · last used{" "}

@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { nowExpr } from "../db/sql.js";
@@ -12,6 +12,7 @@ import {
   verifyKeyRequest,
 } from "./keys.js";
 import { authMiddleware, type AuthEnv } from "./middleware.js";
+import { NEST_SCOPED_KEY_CODE } from "./nest-scope-guard.js";
 import {
   buildClearSessionCookie,
   buildOidcMarkerCookie,
@@ -37,7 +38,7 @@ import {
 import { isSuperAdmin } from "../governance/access-service.js";
 // Guards the people-management surfaces below so a granted superadmin gets the
 // same operator powers as the license owner (see shared/access.ts).
-import { isServerAdminUserId } from "../shared/access.js";
+import { isServerAdminUserId, resolveNestPermission } from "../shared/access.js";
 import { tryConsume, isLimited, recordFailure, clear } from "../shared/rate-limit.js";
 import { verifySsoTicket, isValidTicketSub } from "./sso-token.js";
 import { ssoCandidates } from "./community-sites.js";
@@ -500,6 +501,50 @@ authRoutes.post("/logout", async (c) => {
 // every other client. Every route below runs verifyKeyRequest first; that
 // helper owns the label rules, the per-user ceiling, and ownership lookup.
 
+// A nest-scoped key must never manage keys — minting or rotating is how it
+// would trade itself for a whole-account key. The app-wide nestScopedKeyGuard
+// already refuses these paths; this is the belt to that brace, right where the
+// escalation would happen.
+function refuseNestScopedCaller(c: Context<AuthEnv>) {
+  if (!c.get("nestScope")) return null;
+  return c.json(
+    {
+      error:
+        "This API key is scoped to one nest and can't create, rotate, list or revoke API keys. Use a key for all your nests, or the web app.",
+      code: NEST_SCOPED_KEY_CODE,
+    },
+    403,
+  );
+}
+
+// A key may only be scoped to a nest its owner can actually reach. Without
+// this a caller could mint a key "for" someone else's nest id — useless today
+// (the gate still applies the owner's own permission) but a confusing record,
+// and a latent grant the day that nest is shared with them. Missing and
+// inaccessible answer the same 404 so this is no existence oracle.
+async function checkKeyNest(
+  userId: string,
+  nestId: string,
+): Promise<{ error: string; status: 400 | 404 } | null> {
+  if (typeof nestId !== "string" || !nestId.trim()) {
+    return { error: "nest_id must be a nest id.", status: 400 };
+  }
+  const row = (await getDb().get("SELECT id FROM nests WHERE id = ?", [nestId])) as
+    | { id: string }
+    | undefined;
+  const reachable =
+    !!row &&
+    (config.AUTH_MODE === "open" ||
+      (await resolveNestPermission(nestId, userId)) !== "none");
+  if (!reachable) {
+    return {
+      error: "Nest not found — you can only scope a key to a nest you have access to.",
+      status: 404,
+    };
+  }
+  return null;
+}
+
 // POST /auth/keys — mint another external-client API key.
 //
 // The plaintext is shown ONCE on creation and never retrievable again —
@@ -508,6 +553,8 @@ authRoutes.post("/keys", authMiddleware, async (c) => {
   const body = await c.req.json<{ label?: string; nest_id?: string }>().catch(
     () => ({}) as { label?: string; nest_id?: string },
   );
+  const refused = refuseNestScopedCaller(c);
+  if (refused) return refused;
   const db = getDb();
   const userId = c.get("userId");
 
@@ -516,6 +563,10 @@ authRoutes.post("/keys", authMiddleware, async (c) => {
     label: body.label,
   });
   if (!check.ok) return c.json({ error: check.error }, check.status);
+  if (body.nest_id) {
+    const bad = await checkKeyNest(userId, body.nest_id);
+    if (bad) return c.json({ error: bad.error }, bad.status);
+  }
 
   const apiKey = generateApiKey();
   const keyId = uuid();
@@ -532,7 +583,13 @@ authRoutes.post("/keys", authMiddleware, async (c) => {
   );
 
   return c.json(
-    { id: keyId, api_key: apiKey, key_prefix: getKeyPrefix(apiKey), label: check.label },
+    {
+      id: keyId,
+      api_key: apiKey,
+      key_prefix: getKeyPrefix(apiKey),
+      label: check.label,
+      nest_id: body.nest_id || null,
+    },
     201,
   );
 });
@@ -546,6 +603,8 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
   const body = await c.req
     .json<{ label?: string; nest_id?: string | null; key_id?: string }>()
     .catch(() => ({}) as { label?: string; nest_id?: string | null; key_id?: string });
+  const refused = refuseNestScopedCaller(c);
+  if (refused) return refused;
   const db = getDb();
   const userId = c.get("userId");
 
@@ -556,6 +615,10 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
   });
   if (!check.ok) return c.json({ error: check.error }, check.status);
   const prior = check.key!;
+  if ("nest_id" in body && body.nest_id) {
+    const bad = await checkKeyNest(userId, body.nest_id);
+    if (bad) return c.json({ error: bad.error }, bad.status);
+  }
 
   const apiKey = generateApiKey();
   const keyId = uuid();
@@ -604,11 +667,14 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
     api_key: apiKey,
     key_prefix: getKeyPrefix(apiKey),
     label: check.label ?? prior.label,
+    nest_id: nestScope,
   });
 });
 
 // GET /auth/keys — return the caller's key metadata (no plaintext).
 authRoutes.get("/keys", authMiddleware, async (c) => {
+  const refused = refuseNestScopedCaller(c);
+  if (refused) return refused;
   const db = getDb();
   const userId = c.get("userId");
   const check = await verifyKeyRequest(db, userId, { action: "fetch" });
@@ -623,6 +689,8 @@ authRoutes.get("/keys", authMiddleware, async (c) => {
 
 // DELETE /auth/keys/:keyId — revoke one of the caller's external keys.
 authRoutes.delete("/keys/:keyId", authMiddleware, async (c) => {
+  const refused = refuseNestScopedCaller(c);
+  if (refused) return refused;
   const db = getDb();
   const userId = c.get("userId");
   const check = await verifyKeyRequest(db, userId, {
