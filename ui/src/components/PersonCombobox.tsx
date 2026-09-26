@@ -127,8 +127,15 @@ export function PersonCombobox({
           onChange(e.target.value);
           setOpen(true);
         }}
-        onFocus={() => setOpen(true)}
+        // Click, typing or ArrowDown opens it — not bare focus, which a dialog
+        // gives its first field on open, dropping the list over the form.
+        onClick={() => setOpen(true)}
         onKeyDown={(e) => {
+          if (e.key === "ArrowDown" && !open) {
+            e.preventDefault();
+            setOpen(true);
+            return;
+          }
           if (e.key === "Escape" && open) {
             e.stopPropagation();
             setOpen(false);
@@ -155,7 +162,7 @@ export function PersonCombobox({
               onSubmit();
             }
             // Otherwise the key is NOT consumed. Swallowing it whenever the
-            // list happened to be open — which it is on focus, before a
+            // list happened to be open — which it can be before a
             // character is typed — silently broke Enter-to-add in a form whose
             // caller hadn't wired onSubmit, where the plain <input> this
             // replaced had submitted natively.
