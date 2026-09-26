@@ -1440,13 +1440,16 @@ export function DocumentEditor({
       // `afterSave` (below) navigates away on create (onSaved → back to the
       // nest), unmounting this editor before "Saved"/justSaved could ever be
       // seen — so a fresh create needs its own toast to confirm what actually
-      // happened (published vs. saved as a draft awaiting review).
+      // happened (published vs. saved as a draft awaiting review). An edit
+      // navigates away too, so it gets one as well.
       if (isNew && savedId) {
         toast.success(
           createdStatus === "published"
             ? `"${title.trim() || "Untitled"}" published — it's now live and available for use.`
             : `"${title.trim() || "Untitled"}" saved as a draft.`,
         );
+      } else if (!isNew && !noop) {
+        toast.success(`"${title.trim() || "Untitled"}" saved.`);
       }
       // The document is clean now, but React has not re-rendered yet: the
       // app-level nav guard registered by the effect below still closes over
