@@ -17,6 +17,7 @@ import {
   Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle,
 } from "lucide-react";
 import { BULK_REVIEW_LIMIT } from "../../../lib/constants";
+import { splitWorkItems } from "../../../lib/my-work-groups";
 import { toast } from "sonner";
 import { relTime, formatServerDate } from "../../../lib/dates";
 import { Button } from "@/components/ui/button";
@@ -106,11 +107,7 @@ export default function MyWorkPage() {
     dropWorkItem(w);
   };
 
-  /** Review rows in the inbox — the only ones a batch decision applies to. */
-  const reviewItems = work.items.filter((w) => w.type === "review");
-  // Requests (deletion / archive) are decided one at a time, so they list after
-  // the reviews under their own header instead of mixing into the batch.
-  const requestItems = work.items.filter((w) => w.type !== "review");
+  const { reviews: reviewItems, requests: requestItems } = splitWorkItems(work.items);
   const workKey = (w: api.WorkItem) => `${w.nest_id}:${w.node_id}`;
 
   // The cap is per call and a call is per nest, so what matters is the biggest
