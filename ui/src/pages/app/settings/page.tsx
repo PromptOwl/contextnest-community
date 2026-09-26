@@ -2001,11 +2001,11 @@ export default function SettingsRoute() {
       await qc.invalidateQueries({ queryKey: reads.health().queryKey });
       toast.success("Settings saved");
     } catch (e: any) {
-      toast.error(e?.message || "Failed to save settings");
       // A rejected save (validation / SMTP verify) persisted nothing server-side,
       // so DON'T re-sync — that would reset the draft and wipe what the admin
       // typed. Re-throw the original error (with its `body.fieldErrors`) so the
-      // Settings page can focus the offending field's tab and show the message.
+      // Settings page can focus the offending field's tab and show the message
+      // inline — no toast here, or the same error shows twice.
       throw e;
     }
   }, [refreshHealth, qc]);
