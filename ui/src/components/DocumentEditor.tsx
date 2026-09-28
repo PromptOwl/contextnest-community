@@ -376,10 +376,12 @@ export function DocumentEditor({
     isArchived,
   });
   // Creator's display name from the nest roster (same cached read the comments
-  // panel makes); the email stays on hover, and is the fallback.
+  // panel makes); the email stays on hover, and is the fallback. Read-only
+  // collaborators are on the roster too, so only signed-out readers skip it
+  // (an off-roster caller's 403 isn't retried and just keeps the email).
   const { data: roster } = useQuery({
     ...reads.mentionable(nestId),
-    enabled: !!nestId && !isNew && !isViewOnly,
+    enabled: !!nestId && !isNew && !!adminStatus?.me,
   });
   const authorName = author ? displayNameFor(author, roster?.people) : null;
   // Who deletes outright: the nest admin/owner tier, plus the person who wrote
