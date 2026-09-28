@@ -178,9 +178,61 @@ describe("edge creation + validation", () => {
     expect(res.status).toBe(409);
     // Names the exact closed cycle: alpha→beta→gamma (existing flow) then the
     // proposed gamma→alpha edge closing back to alpha — by the titles on the
-    // canvas, not the ids behind them (CU-wdqcq018r1).
+    // canvas, not the ids behind them (CU-wdqcq018r1), and in plain language
+    // rather than "must form a DAG" (CU-wdqcq01k1y).
     expect(res.data.error).toContain(
-      'cycle: "Alpha" → "Beta" → "Gamma" → "Alpha"',
+      'These steps loop back on each other: "Alpha" → "Beta" → "Gamma" → "Alpha"',
+    );
+    expect(res.data.error).not.toContain("DAG");
+    // The cycle path and the general explanation are on separate lines, not
+    // run together in one sentence.
+    expect(res.data.error).toContain(
+      '"Alpha".\n\nA flow can\'t return to a step it already ran.',
+    );
+  });
+
+  it("rejects a self-loop edge with a 409 that separates the step from the explanation", async () => {
+    const res = await mkEdge({
+      from_node: "nodes/owner-doc",
+      to_node: "nodes/owner-doc",
+      type: "next",
+    });
+    expect(res.status).toBe(409);
+    expect(res.data.error).toContain(
+      'This step loops back on itself: "Owner Doc".\n\nA flow can\'t return to a step it already ran.',
+    );
+  });
+
+  it("addresses the cards by id when two share a title", async () => {
+    // Two cards called "Draft": titles alone name neither (CU-wdqcq01k29).
+    // Same title, different folders — one title per folder is all the id
+    // scheme allows, and that is exactly how a nest ends up with two "Draft".
+    const ids: string[] = [];
+    for (const folder of ["", "gtm"]) {
+      const node = await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes`,
+        { title: "Draft", content: "# Draft", folder },
+        owner.apiKey,
+      );
+      expect(node.status).toBe(201);
+      ids.push(node.data.node.id);
+    }
+    expect(ids[0]).not.toBe(ids[1]);
+
+    const first = await mkEdge({ from_node: ids[0], to_node: ids[1], type: "next" });
+    expect(first.status).toBe(201);
+
+    const cycle = await mkEdge({ from_node: ids[1], to_node: ids[0], type: "next" });
+    expect(cycle.status).toBe(409);
+    // Every step in the trail carries its id, so each "Draft" is one card.
+    expect(cycle.data.error).toContain(`"Draft" (${ids[0]})`);
+    expect(cycle.data.error).toContain(`"Draft" (${ids[1]})`);
+
+    await jsonRequest(
+      app, "DELETE", `/nests/${nestId}/edges/${first.data.edge.id}`,
+      undefined, owner.apiKey,
     );
   });
 

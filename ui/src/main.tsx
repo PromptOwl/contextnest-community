@@ -5,6 +5,7 @@ import App from "./App";
 import { AuthProvider } from "./auth/AuthContext";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ReadCacheProvider } from "./lib/query-provider";
+import { BreadcrumbProvider } from "./lib/breadcrumb";
 import "./index.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
@@ -14,7 +15,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           module's invalidation hooks, which this provider registers. */}
       <ReadCacheProvider>
         <AuthProvider>
-          <App />
+          <BreadcrumbProvider>
+            <App />
+          </BreadcrumbProvider>
           {/* Mounted at the root so it never unmounts during view swaps.
               A Toaster inside App's conditional return tree gets torn down
               on logout (auth flip → <Login /> branch), which throws away

@@ -5,13 +5,20 @@ export interface User {
   created_at: string;
 }
 
+export type NestVisibility = "private" | "org" | "public";
+
 export interface Nest {
   id: string;
   user_id: string;
   name: string;
   slug: string;
   description: string | null;
-  visibility: "private" | "public";
+  /**
+   * 'org' = every authenticated user of this deployment (Community has no
+   * tenant model; a self-hosted install is one organization). Kept in sync
+   * with the CHECK in migrations.ts and with NestVisibility in ui/src/lib/api.ts.
+   */
+  visibility: NestVisibility;
   created_at: string;
   // 1 when the nest was imported from an existing folder (its files copied
   // into <DATA_ROOT>/nests/<id>); drives the "Imported" badge and flat
@@ -28,6 +35,10 @@ export interface Nest {
   reader_mode?: number;
   // Designated reader-mode landing/hub node id; null resolves by convention.
   reader_home_node?: string | null;
+  // Per-nest reader branding, stored as validated JSON (src/shared/branding.ts).
+  // Never sent to clients raw — GET /nests/:id replaces it with a parsed
+  // `branding` object.
+  branding_json?: string | null;
   // When set, the nest is archived: hidden from every listing that isn't
   // explicitly asking for archived nests, invisible to MCP, and read-only
   // (see resolveNestAccess). null/undefined = a live nest.

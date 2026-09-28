@@ -83,15 +83,13 @@ describe("GET /llms.txt — public agent manual", () => {
     expect(text).toContain("/mcp");
   });
 
-  it("tells the ctx CLI how to register this server and one nest as vault aliases", async () => {
+  it("tells the ctx CLI to register the server once and address nests as alias/nest", async () => {
     const res = await app.request("/llms.txt");
     const text = await res.text();
-    // Server-level alias: every nest the key can see, through /mcp.
     expect(text).toContain("## From the ctx CLI");
     expect(text).toMatch(/ctx vault add \S+ --url http:\/\/localhost\/mcp --bearer-env CONTEXTNEST_API_KEY/);
-    // Per-nest alias form.
+    expect(text).toMatch(/--vault contextnest\/<nest>/);
     expect(text).toMatch(/ctx vault add \S+ --url http:\/\/localhost\/nests\/<nest-id>\/mcp --bearer-env CONTEXTNEST_API_KEY/);
-    expect(text).toMatch(/ctx query "#\S+" --vault \S+/);
     // Never a key on argv, never key material.
     expect(text).not.toMatch(/--key\b/);
     expect(text).not.toMatch(/cnst_[a-z0-9]{8,}/i);
@@ -126,18 +124,24 @@ describe("GET /index — person nest index", () => {
 });
 
 describe("server-level /mcp — one connection, all nests", () => {
-  it("lists nest_index and nest-parameterized read tools", async () => {
+  it("lists nest_index and nest-parameterized tools", async () => {
     const res = await mcpCall(alice.apiKey, "tools/list", {});
     const names = res.result.tools.map((t: any) => t.name);
     expect(names).toContain("nest_index");
     expect(names).toContain("context_query");
     expect(names).toContain("context_get");
     expect(names).toContain("context_resolve");
-    // Two bootstrap writes only — governance/update tools stay per-nest.
+    // Writes available on server-level /mcp (nest required as argument).
     expect(names).toContain("nest_create");
     expect(names).toContain("context_create");
-    expect(names).not.toContain("context_update");
+    expect(names).toContain("context_update");
+    expect(names).toContain("context_delete");
+    expect(names).toContain("context_move");
+    expect(names).toContain("context_submit_review");
+    // Governance tools stay per-nest only.
     expect(names).not.toContain("context_approve");
+    expect(names).not.toContain("context_reject");
+    expect(names).not.toContain("context_share_nest");
   });
 
   it("nest_index returns the grounded index", async () => {
@@ -145,6 +149,14 @@ describe("server-level /mcp — one connection, all nests", () => {
     expect(text).toContain("Deal Brain");
     expect(text).toContain(nestId);
     expect(text).not.toContain("Bob Secrets");
+  });
+
+  it("nest_index also returns the nests as structured data (for ctx vault list)", async () => {
+    const res = await mcpCall(alice.apiKey, "tools/call", { name: "nest_index", arguments: {} });
+    const nests = res.result.structuredContent.nests;
+    expect(nests.map((n: any) => n.id)).toContain(nestId);
+    expect(nests.find((n: any) => n.id === nestId).name).toBe("Deal Brain");
+    expect(nests.map((n: any) => n.id)).not.toContain(privateNestId);
   });
 
   it("context_get reads from a nest referenced by NAME", async () => {
@@ -252,5 +264,66 @@ describe("nest-scoped API key — index and cross-nest calls stay scoped", () =>
       title: "Scoped Doc",
     });
     expect(outside).toMatch(/not found or not accessible/i);
+  });
+});
+
+describe("server-level /mcp — fan-out reads (nest optional)", () => {
+  it("context_search WITH nest searches only that nest", async () => {
+    const text = await callTool(alice.apiKey, "context_search", {
+      nest: "Deal Brain",
+      query: "win",
+    });
+    expect(text).toContain("Win Loss Log");
+    // Single-nest response: no grouped nest header format
+    expect(text).not.toMatch(/^## Deal Brain/m);
+  });
+
+  it("context_list WITH nest lists only that nest", async () => {
+    const text = await callTool(alice.apiKey, "context_list", {
+      nest: "Deal Brain",
+    });
+    expect(text).toContain("Win Loss Log");
+  });
+});
+
+describe("server-level /mcp — write tools with nest argument", () => {
+  it("context_update without nest is rejected by validation", async () => {
+    const text = await callTool(alice.apiKey, "context_update", {
+      title: "Win Loss Log",
+      append: "test",
+    });
+    // MCP schema validation rejects missing required `nest` argument
+    expect(text).toMatch(/invalid|expected string/i);
+  });
+
+  it("context_update with nest can update a document", async () => {
+    const text = await callTool(alice.apiKey, "context_update", {
+      nest: "Deal Brain",
+      title: "Win Loss Log",
+      append: "\n\n## Via Server MCP\nAppended via server-level endpoint.",
+    });
+    expect(text).toMatch(/updated/i);
+
+    // Verify the update took effect
+    const content = await callTool(alice.apiKey, "context_get", {
+      nest: "Deal Brain",
+      title: "Win Loss Log",
+    });
+    expect(content).toContain("Via Server MCP");
+  });
+
+  it("context_delete without nest is rejected by validation", async () => {
+    const text = await callTool(alice.apiKey, "context_delete", {
+      title: "anything",
+    });
+    expect(text).toMatch(/invalid|expected string/i);
+  });
+
+  it("context_move without nest is rejected by validation", async () => {
+    const text = await callTool(alice.apiKey, "context_move", {
+      title: "anything",
+      folder: "archive",
+    });
+    expect(text).toMatch(/invalid|expected string/i);
   });
 });

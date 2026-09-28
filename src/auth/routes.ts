@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { nowExpr } from "../db/sql.js";
@@ -12,6 +12,7 @@ import {
   verifyKeyRequest,
 } from "./keys.js";
 import { authMiddleware, type AuthEnv } from "./middleware.js";
+import { NEST_SCOPED_KEY_CODE } from "./nest-scope-guard.js";
 import {
   buildClearSessionCookie,
   buildOidcMarkerCookie,
@@ -37,14 +38,16 @@ import {
 import { isSuperAdmin } from "../governance/access-service.js";
 // Guards the people-management surfaces below so a granted superadmin gets the
 // same operator powers as the license owner (see shared/access.ts).
-import { isServerAdminUserId } from "../shared/access.js";
+import { isServerAdminUserId, resolveNestPermission } from "../shared/access.js";
 import { tryConsume, isLimited, recordFailure, clear } from "../shared/rate-limit.js";
 import { verifySsoTicket, isValidTicketSub } from "./sso-token.js";
+import { ssoCandidates } from "./community-sites.js";
 import { oidcRoutes } from "./oidc.js";
 import { handleTokenExchange } from "./token-exchange.js";
 import { clientIp } from "../shared/request-ip.js";
 import { ANON_USER_ID } from "../shared/constants.js";
-import { sendEmailToRecipient } from "../notify/email.js";
+import { isEmailConfigured } from "../notify/email.js";
+import { createInvitedUser } from "./invited-user.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 
 /** is_admin for user-facing payloads: license admin OR superadmin. */
@@ -291,7 +294,7 @@ authRoutes.post("/register", async (c) => {
     return c.json(
       {
         error:
-          "Self-registration is disabled on this server. If you were invited, use “Set your password” to activate your account. Otherwise ask your admin for an invite.",
+          "Self-registration is disabled on this server. If you were invited, sign in with the temporary password from your invite email, or continue with PromptOwl using that email. Otherwise ask your admin for an invite.",
       },
       403,
     );
@@ -331,7 +334,7 @@ authRoutes.post("/register", async (c) => {
       return c.json(
         {
           error:
-            "You've been invited to this server. Ask your admin for your temporary password, then sign in and change it — you can't set it here.",
+            "You've been invited to this server. Sign in with the temporary password from your invite email, or continue with PromptOwl using this email. Your admin can reset the password if you don't have it.",
         },
         409,
       );
@@ -498,6 +501,50 @@ authRoutes.post("/logout", async (c) => {
 // every other client. Every route below runs verifyKeyRequest first; that
 // helper owns the label rules, the per-user ceiling, and ownership lookup.
 
+// A nest-scoped key must never manage keys — minting or rotating is how it
+// would trade itself for a whole-account key. The app-wide nestScopedKeyGuard
+// already refuses these paths; this is the belt to that brace, right where the
+// escalation would happen.
+function refuseNestScopedCaller(c: Context<AuthEnv>) {
+  if (!c.get("nestScope")) return null;
+  return c.json(
+    {
+      error:
+        "This API key is scoped to one nest and can't create, rotate, list or revoke API keys. Use a key for all your nests, or the web app.",
+      code: NEST_SCOPED_KEY_CODE,
+    },
+    403,
+  );
+}
+
+// A key may only be scoped to a nest its owner can actually reach. Without
+// this a caller could mint a key "for" someone else's nest id — useless today
+// (the gate still applies the owner's own permission) but a confusing record,
+// and a latent grant the day that nest is shared with them. Missing and
+// inaccessible answer the same 404 so this is no existence oracle.
+async function checkKeyNest(
+  userId: string,
+  nestId: string,
+): Promise<{ error: string; status: 400 | 404 } | null> {
+  if (typeof nestId !== "string" || !nestId.trim()) {
+    return { error: "nest_id must be a nest id.", status: 400 };
+  }
+  const row = (await getDb().get("SELECT id FROM nests WHERE id = ?", [nestId])) as
+    | { id: string }
+    | undefined;
+  const reachable =
+    !!row &&
+    (config.AUTH_MODE === "open" ||
+      (await resolveNestPermission(nestId, userId)) !== "none");
+  if (!reachable) {
+    return {
+      error: "Nest not found — you can only scope a key to a nest you have access to.",
+      status: 404,
+    };
+  }
+  return null;
+}
+
 // POST /auth/keys — mint another external-client API key.
 //
 // The plaintext is shown ONCE on creation and never retrievable again —
@@ -506,6 +553,8 @@ authRoutes.post("/keys", authMiddleware, async (c) => {
   const body = await c.req.json<{ label?: string; nest_id?: string }>().catch(
     () => ({}) as { label?: string; nest_id?: string },
   );
+  const refused = refuseNestScopedCaller(c);
+  if (refused) return refused;
   const db = getDb();
   const userId = c.get("userId");
 
@@ -514,6 +563,10 @@ authRoutes.post("/keys", authMiddleware, async (c) => {
     label: body.label,
   });
   if (!check.ok) return c.json({ error: check.error }, check.status);
+  if (body.nest_id) {
+    const bad = await checkKeyNest(userId, body.nest_id);
+    if (bad) return c.json({ error: bad.error }, bad.status);
+  }
 
   const apiKey = generateApiKey();
   const keyId = uuid();
@@ -530,7 +583,13 @@ authRoutes.post("/keys", authMiddleware, async (c) => {
   );
 
   return c.json(
-    { id: keyId, api_key: apiKey, key_prefix: getKeyPrefix(apiKey), label: check.label },
+    {
+      id: keyId,
+      api_key: apiKey,
+      key_prefix: getKeyPrefix(apiKey),
+      label: check.label,
+      nest_id: body.nest_id || null,
+    },
     201,
   );
 });
@@ -544,6 +603,8 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
   const body = await c.req
     .json<{ label?: string; nest_id?: string | null; key_id?: string }>()
     .catch(() => ({}) as { label?: string; nest_id?: string | null; key_id?: string });
+  const refused = refuseNestScopedCaller(c);
+  if (refused) return refused;
   const db = getDb();
   const userId = c.get("userId");
 
@@ -554,6 +615,10 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
   });
   if (!check.ok) return c.json({ error: check.error }, check.status);
   const prior = check.key!;
+  if ("nest_id" in body && body.nest_id) {
+    const bad = await checkKeyNest(userId, body.nest_id);
+    if (bad) return c.json({ error: bad.error }, bad.status);
+  }
 
   const apiKey = generateApiKey();
   const keyId = uuid();
@@ -602,11 +667,14 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
     api_key: apiKey,
     key_prefix: getKeyPrefix(apiKey),
     label: check.label ?? prior.label,
+    nest_id: nestScope,
   });
 });
 
 // GET /auth/keys — return the caller's key metadata (no plaintext).
 authRoutes.get("/keys", authMiddleware, async (c) => {
+  const refused = refuseNestScopedCaller(c);
+  if (refused) return refused;
   const db = getDb();
   const userId = c.get("userId");
   const check = await verifyKeyRequest(db, userId, { action: "fetch" });
@@ -621,6 +689,8 @@ authRoutes.get("/keys", authMiddleware, async (c) => {
 
 // DELETE /auth/keys/:keyId — revoke one of the caller's external keys.
 authRoutes.delete("/keys/:keyId", authMiddleware, async (c) => {
+  const refused = refuseNestScopedCaller(c);
+  if (refused) return refused;
   const db = getDb();
   const userId = c.get("userId");
   const check = await verifyKeyRequest(db, userId, {
@@ -766,27 +836,31 @@ authRoutes.post("/promptowl", async (c) => {
   });
 });
 
-// GET /auth/sso — one-click SSO auto-login from PromptOwl.
+// GET /auth/sso — one-click SSO auto-login from an official community site.
 //
-// THE DOMAIN LOCK. PromptOwl redirects a logged-in user here with a short-lived
-// JWT ticket signed with the shared OFFICIAL_COMMUNITY_SSO_SECRET. Only the ONE
-// official deployment holds that secret, so:
-//   - secret unset  → feature disabled (every self-hosted server); bounce to the
-//                     SPA with ?sso_error=not_supported so the user sees a clear
+// THE DOMAIN LOCK. A trusted site redirects a logged-in user here with a
+// short-lived JWT ticket signed with a shared secret. Only sites configured
+// as official community sites (DB-managed from Server Settings, plus the
+// legacy OFFICIAL_COMMUNITY_SSO_SECRET/PUBLIC_BASE_URL env-var pair for
+// backward compatibility — see auth/community-sites.ts) hold a secret this
+// server accepts, so:
+//   - no site configured → feature disabled; bounce to the SPA with
+//                     ?sso_error=not_supported so the user sees a clear
 //                     message instead of a bare 404. This does NOT weaken the
-//                     lock: without the secret no ticket can be verified, so
-//                     other domains still cannot auto-login.
-//   - secret set    → verify signature + audience + expiry + one-time jti, then
-//                     provision the user and start a session, exactly like the
-//                     manual /auth/promptowl flow.
+//                     lock: without a matching secret no ticket can be
+//                     verified, so other domains still cannot auto-login.
+//   - a site matches     → verify signature + audience + expiry + one-time jti,
+//                     then provision the user and start a session, exactly
+//                     like the manual /auth/promptowl flow.
 // On any failure the user is bounced to the app with ?sso_error=<code> so the
 // SPA can show a message and fall back to manual sign-in.
 authRoutes.get("/sso", async (c) => {
   const ssoError = (code: string) => c.redirect(`/?sso_error=${code}`, 302);
 
-  const secret = config.OFFICIAL_COMMUNITY_SSO_SECRET;
-  // Self-hosted servers (no shared secret) don't support one-click SSO.
-  if (!secret) return ssoError("not_supported");
+  const candidates = ssoCandidates();
+  // No official site configured (self-hosted, or an official deployment mid
+  // setup) doesn't support one-click SSO.
+  if (candidates.length === 0) return ssoError("not_supported");
 
   if (!tryConsume(`sso:ip:${clientIp(c)}`, DEVICE_LIMIT)) {
     return ssoError("rate_limited");
@@ -795,12 +869,23 @@ authRoutes.get("/sso", async (c) => {
   const ticket = c.req.query("ticket");
   if (!ticket) return ssoError("missing_ticket");
 
-  let claims;
-  try {
-    claims = verifySsoTicket(ticket, secret);
-  } catch {
-    return ssoError("invalid_ticket");
+  // Try the ticket against every configured site's secret — the same
+  // "signature + expiry" gate as before, just repeated per candidate. The
+  // first one whose secret verifies the signature wins; matches nothing when
+  // no site's secret produced a valid signature.
+  let claims: ReturnType<typeof verifySsoTicket> | undefined;
+  let matched: (typeof candidates)[number] | undefined;
+  for (const candidate of candidates) {
+    try {
+      claims = verifySsoTicket(ticket, candidate.secret);
+      matched = candidate;
+      break;
+    } catch {
+      // Try the next candidate — a signature mismatch here just means this
+      // wasn't the site that minted the ticket.
+    }
   }
+  if (!claims || !matched) return ssoError("invalid_ticket");
 
   // Reject an MCP bearer ticket here: this endpoint mints a full login
   // session, so a `scope: "mcp"` ticket (server-to-server, no jti) must never
@@ -809,18 +894,22 @@ authRoutes.get("/sso", async (c) => {
   // and neither side has to trust the issuer to keep the jti/scope invariant.
   if ((claims.scope || "") === "mcp") return ssoError("invalid_ticket");
 
-  // Audience binding — a ticket minted for a different server is rejected, so
-  // it can't be replayed elsewhere even if the secret were shared. When
-  // PUBLIC_BASE_URL is unset this binding is DISABLED (the secret is the only
-  // control left), so warn loudly — that's a misconfiguration on an official
-  // deployment, not an intended mode.
+  // Audience binding — a ticket minted for a different deployment is rejected,
+  // so it can't be replayed against this one even if the secret were shared.
+  // This checks the ticket's `aud` against THIS deployment's own
+  // PUBLIC_BASE_URL, not the matched site's `url` — a site's `url` is a
+  // display/uniqueness field for the admin list, not an audience value (see
+  // SsoCandidate.url in community-sites.ts). When PUBLIC_BASE_URL is unset
+  // this binding is DISABLED (the secret is the only control left), so warn
+  // loudly — that's a misconfiguration, not an intended mode.
   const expectedAud = config.PUBLIC_BASE_URL;
   if (!expectedAud && !warnedMissingSsoAudience) {
     warnedMissingSsoAudience = true;
     console.warn(
-      "[sso] OFFICIAL_COMMUNITY_SSO_SECRET is set but PUBLIC_BASE_URL is empty — " +
-        "ticket audience binding is DISABLED. Set PUBLIC_BASE_URL so a ticket minted " +
-        "for another server cannot be replayed against this one.",
+      `[sso] site "${matched.label}" has a secret but PUBLIC_BASE_URL is unset — ` +
+        "ticket audience binding is DISABLED. Set PUBLIC_BASE_URL to this " +
+        "deployment's own URL so a ticket minted for another deployment cannot " +
+        "be replayed against this one.",
     );
   }
   if (expectedAud) {
@@ -923,6 +1012,19 @@ authRoutes.get("/admin-status", async (c) => {
     admin,
     me,
   });
+});
+
+// PATCH /auth/profile — change own display name. Empty clears it (UI falls
+// back to the email). authMiddleware wants a session or key, so the open-mode
+// anonymous caller never reaches here — it gets 401.
+authRoutes.patch("/profile", authMiddleware, async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json<{ name?: unknown }>();
+  if (typeof body.name !== "string") throw new ValidationError("name is required");
+  const name = body.name.trim();
+  if (name.length > 80) throw new ValidationError("name must be 80 characters or fewer");
+  await getDb().run("UPDATE users SET name = ? WHERE id = ?", [name || null, userId]);
+  return c.json({ ok: true, name: name || null });
 });
 
 // POST /auth/password — change own password and invalidate all sessions
@@ -1169,64 +1271,42 @@ authRoutes.post("/invite", async (c) => {
     [email],
   ) as { id: string; email: string; is_invited: number } | undefined;
 
-  // A fully-established user (one who claimed their own password) already has a
-  // working login — don't silently clobber it from the invite flow. Point the
-  // admin at Reset password instead.
-  if (existing && existing.is_invited === 0) {
+  // Never overwrite an existing user's credentials from the invite flow — not
+  // even a not-yet-signed-in one, whose emailed password would silently die.
+  // Re-issuing a password is the explicit Reset password action.
+  if (existing) {
     return c.json(
       {
         error:
-          "A user with this email already exists. Use Reset password to issue them a new password.",
+          existing.is_invited === 0
+            ? `${email} is already a member of this server.`
+            : `${email} is already invited but hasn't signed in yet. Use Reset password on their row to issue a new temporary password.`,
       },
       409,
     );
   }
 
-  // Issue a PASSWORD, not an API key. The admin adds teammates so they can log
-  // in; teammates mint their own API keys (for CLI/MCP/Hootie) after signing in.
-  // Readable 16-char temporary password, returned ONCE for the admin to hand
-  // over. Re-inviting a not-yet-claimed user refreshes it (so "delete + re-add"
-  // / re-invite now produces a working credential).
-  const tempPassword = uuid().replace(/-/g, "").slice(0, 16);
-  const passwordHash = await hashPassword(tempPassword);
-
-  let userId: string;
-  if (existing) {
-    userId = existing.id;
-    await db.run("UPDATE users SET password_hash = ? WHERE id = ?", [
-      passwordHash,
-      userId,
-    ]);
-  } else {
-    userId = uuid();
-    await db.run(
-      "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-      [userId, email, null, passwordHash],
-    );
-  }
-
-  trackEvent("admin.invite", { adminId: callerId, email });
-
-  // Email the invitee their temp password + a sign-in link (best-effort — a
-  // dead SMTP must never fail the invite; the admin still gets the password in
-  // the response to hand over manually). Off unless the email connector is set.
+  // Issue a PASSWORD, not an API key: teammates mint their own keys after
+  // signing in. The temp password is emailed to them (when email is set up)
+  // and returned ONCE for the admin to hand over otherwise.
   const inviter = (await db.get("SELECT email FROM users WHERE id = ?", [
     callerId,
   ])) as { email?: string } | undefined;
-  void sendEmailToRecipient(email, {
-    status: "invited",
-    docTitle: "ContextNest",
-    path: "",
-    actor: email,
-    by: inviter?.email || undefined,
-    tempPassword,
-    link: requestBaseUrl(c.req.url),
+  const { id: userId, tempPassword } = await createInvitedUser(email, {
+    invitedBy: inviter?.email,
+    baseUrl: requestBaseUrl(c.req.url),
   });
+
+  trackEvent("admin.invite", { adminId: callerId, email });
 
   return c.json(
     {
       temporary_password: tempPassword,
       user: { id: userId, email },
+      // PromptOwl sign-in only counts as an option for them when it's open to all.
+      promptowl_sign_in: config.PROMPTOWL_SIGN_IN_GATE === "open",
+      // Email is configured, so the invite email (with this password) went out.
+      emailed: isEmailConfigured(),
       message:
         "Share this temporary password securely. Your teammate signs in with their email + this password, then can change it and create their own API key.",
     },
@@ -1261,7 +1341,12 @@ authRoutes.get("/teammates", async (c) => {
   const teammates = await db.all(
     `SELECT u.id, u.email, u.name, u.is_invited,
          (SELECT COUNT(*) FROM api_keys WHERE user_id = u.id) as key_count,
-         (SELECT MAX(last_used_at) FROM api_keys WHERE user_id = u.id) as last_active
+         -- Latest of API-key use and web-session activity (same text format).
+         (SELECT MAX(t) FROM (
+            SELECT last_used_at AS t FROM api_keys WHERE user_id = u.id
+            UNION ALL
+            SELECT last_seen_at FROM sessions WHERE user_id = u.id
+          ) activity) as last_active
        FROM users u
        WHERE u.id != ?
        ORDER BY u.created_at DESC`,

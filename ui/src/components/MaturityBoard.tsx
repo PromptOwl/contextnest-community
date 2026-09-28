@@ -18,6 +18,7 @@ import {
   RefreshCw,
   Loader2,
   FileText,
+  FileType,
   Zap,
   Bot,
   Database,
@@ -30,13 +31,14 @@ import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
-import { deriveNestCaps } from "../lib/nest-caps";
+import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { slugifyFolderPath } from "../lib/folder-target";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   UNCATEGORIZED,
+  capitalizeColumnHeader,
   cardColumnKeys,
   groupByColumn,
   layoutKey,
@@ -53,6 +55,8 @@ interface Props {
   nestId: string;
   nestName: string;
   isOwner: boolean;
+  /** Nest is archived — opened from the Archived section, forces read-only. */
+  isArchived?: boolean;
   onBack: () => void;
   onOpenDocument: (nodeId: string) => void;
 }
@@ -114,6 +118,7 @@ function TypeIcon({ type }: { type: string }) {
   if (type === "skill") return <Zap className={`${cls} text-blue-500`} />;
   if (type === "agent") return <Bot className={`${cls} text-violet-500`} />;
   if (type === "table") return <Database className={`${cls} text-emerald-500`} />;
+  if (type === "pdf") return <FileType className={`${cls} text-rose-500`} />;
   return <FileText className={`${cls} text-muted-foreground`} />;
 }
 
@@ -121,6 +126,7 @@ export function MaturityBoard({
   nestId,
   nestName,
   isOwner,
+  isArchived,
   onBack,
   onOpenDocument,
 }: Props) {
@@ -153,6 +159,12 @@ export function MaturityBoard({
             myStewards: meta?.myStewards ?? [],
             isOwner,
             isAdmin,
+            // OR'd with the fetched nest itself, not just the isArchived prop
+            // threaded down from App's View state — this page is also
+            // reachable by a route that doesn't forward it (a deep link, a
+            // refresh while already here), and the fetch this effect already
+            // makes is the authoritative answer regardless of how we got here.
+            isArchived: isArchived || isNestArchived(meta?.nest),
           }).canEditDocs,
         );
       })
@@ -163,13 +175,16 @@ export function MaturityBoard({
     return () => {
       cancelled = true;
     };
-  }, [nestId, isOwner, isAdmin]);
+  }, [nestId, isOwner, isAdmin, isArchived]);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const { nodes: raw } = await qc.fetchQuery(reads.nodes(nestId));
+      // Metadata-only, nest-wide — every node in the nest buckets into a
+      // column, and the board never reads a body, so this skips the vault
+      // crawl `reads.nodes` (content=1) would otherwise pay on every load.
+      const { nodes: raw } = await qc.fetchQuery(reads.nodesMeta(nestId));
       setNodes(
         (raw as any[]).map((n) => ({
           id: n.id,
@@ -398,9 +413,13 @@ export function MaturityBoard({
           <label className="text-sm text-muted-foreground">Columns by</label>
           <select
             value={config.dimension}
-            onChange={(e) =>
-              updateConfig({ dimension: e.target.value as DimensionKind })
-            }
+            onChange={(e) => {
+              // The add-column input is shared between folder and tag mode;
+              // an unsubmitted value from one doesn't mean anything in the
+              // other, so switching dimensions clears it.
+              setNewColumn("");
+              updateConfig({ dimension: e.target.value as DimensionKind });
+            }}
             className="h-8 rounded-md border border-input bg-background px-2 text-sm"
           >
             <option value="folder">Folder</option>
@@ -643,9 +662,9 @@ export function MaturityBoard({
                   title={col.title}
                 >
                   <span
-                    className={`min-w-0 text-sm font-medium truncate capitalize ${
-                      col.key === UNCATEGORIZED ? "text-muted-foreground" : ""
-                    }`}
+                    className={`min-w-0 text-sm font-medium truncate ${
+                      capitalizeColumnHeader(effectiveConfig.dimension) ? "capitalize" : ""
+                    } ${col.key === UNCATEGORIZED ? "text-muted-foreground" : ""}`}
                   >
                     {col.label}
                   </span>

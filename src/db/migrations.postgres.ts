@@ -74,6 +74,10 @@ const HISTORICAL_MIGRATIONS = [
   "038_nest_archive",
   "039_nest_pins",
   "040_push_confirmation",
+  "041_nest_visibility_org",
+  "042_community_sites",
+  "043_node_suggestion_details",
+  "044_client_attribution",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -101,18 +105,21 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       slug TEXT NOT NULL,
       description TEXT,
       visibility TEXT NOT NULL DEFAULT 'private'
-        CHECK(visibility IN ('private', 'public')),
+        CHECK(visibility IN ('private', 'org', 'public')),
       created_at TEXT NOT NULL DEFAULT ${NOW},
       stewardship_enabled INTEGER NOT NULL DEFAULT 0,
       is_imported INTEGER NOT NULL DEFAULT 0,
       allow_self_approve INTEGER NOT NULL DEFAULT 0,
       prime_only_review INTEGER NOT NULL DEFAULT 0,
       prime_tags TEXT NOT NULL DEFAULT 'prime-document',
+      creator_is_reviewer INTEGER NOT NULL DEFAULT 0,
       shared_teams TEXT NOT NULL DEFAULT '[]',
       index_synced_at TEXT,
       require_push_confirmation INTEGER NOT NULL DEFAULT 0,
       reader_mode INTEGER NOT NULL DEFAULT 0,
       reader_home_node TEXT,
+      -- Per-nest reader branding JSON (CU-wdqcq02ptm); NULL = unbranded.
+      branding_json TEXT,
       -- Set = archived (migration 038): off the dashboard, out of MCP, read
       -- only, nothing deleted. NULL is the whole "not archived" story.
       archived_at TEXT,
@@ -260,9 +267,14 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
         CHECK(status IN ('draft', 'pending_review', 'approved', 'published', 'rejected')),
       change_note TEXT,
       tags_json TEXT,
+      -- Caller attribution (spec §9.4, migration 044): which agent/session made
+      -- the write that sealed this version. Annotation only — never hashed,
+      -- never authorized from, NULL when the call carried none.
+      client_json TEXT,
       created_at TEXT NOT NULL DEFAULT ${NOW},
       UNIQUE(nest_id, node_id, version)
     );
+    ALTER TABLE node_versions ADD COLUMN IF NOT EXISTS client_json TEXT;
     CREATE INDEX IF NOT EXISTS idx_versions_node ON node_versions(nest_id, node_id);
     -- Migration 034 (SQLite): the /me/drafts lookup — author + status.
     CREATE INDEX IF NOT EXISTS idx_versions_author_status
@@ -303,13 +315,26 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_node_index_folder
       ON node_index(nest_id, folder);
 
-    -- node_suggestions (migration 036). Which documents have an external edit
-    -- staged — so the listing's pending badge is a SELECT, not a vault walk.
+    -- node_suggestions (migrations 036 + 043). One row per staged external
+    -- edit with the suggestion itself — so the External Edits list and its
+    -- badge are a SELECT, not a vault walk, and old vs new is detected_at.
     CREATE TABLE IF NOT EXISTS node_suggestions (
       nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
       node_id TEXT NOT NULL,
-      PRIMARY KEY (nest_id, node_id)
+      suggestion_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      detected_at TEXT NOT NULL,
+      target_hash TEXT NOT NULL,
+      proposed_hash TEXT NOT NULL,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      PRIMARY KEY (nest_id, node_id, suggestion_id)
     );
+    -- idx_node_suggestions_nest_detected is created after the 043 parity
+    -- check below: a pre-043 database already has node_suggestions without
+    -- detected_at, so CREATE TABLE IF NOT EXISTS is a no-op and indexing the
+    -- column here aborts the whole bootstrap before the rebuild can run.
 
     -- sessions (migration 003).
     CREATE TABLE IF NOT EXISTS sessions (
@@ -442,6 +467,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- created before prime shipped still gets the columns on upgrade.
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS prime_only_review INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS prime_tags TEXT NOT NULL DEFAULT 'prime-document';
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS creator_is_reviewer INTEGER NOT NULL DEFAULT 0;
 
     -- node_index freshness stamp: same inline-plus-explicit-ALTER pattern. The
     -- inline declaration only reaches a database created after it shipped, and
@@ -457,6 +483,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- upgrade. reader_mode is off by default; reader_home_node is nullable.
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS reader_mode INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS reader_home_node TEXT;
+    -- Per-nest reader branding (CU-wdqcq02ptm): same inline-plus-ALTER pattern.
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS branding_json TEXT;
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS archived_at TEXT;
 
     CREATE TABLE IF NOT EXISTS schedules (
@@ -614,8 +642,10 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       user_id TEXT,
       user_email TEXT,
       status INTEGER,              -- HTTP status (api + mcp rows)
-      duration_ms INTEGER
+      duration_ms INTEGER,
+      client_json TEXT             -- caller attribution (§9.4, migration 044)
     );
+    ALTER TABLE api_events ADD COLUMN IF NOT EXISTS client_json TEXT;
     CREATE INDEX IF NOT EXISTS idx_api_events_ts ON api_events(ts);
     -- (nest_id, id) composite (migration 026): the per-nest trace view
     -- (GET /nests/:id/trace) filters by nest_id and pages newest-first by id.
@@ -748,6 +778,19 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       created_by_user_id TEXT NOT NULL,
       created_at TEXT NOT NULL,
       PRIMARY KEY (nest_id, user_id, key_id)
+    
+    -- community_sites (migration 042): official community site connections
+    -- trusted for SSO auto-login — extends the single OFFICIAL_COMMUNITY_SSO_
+    -- SECRET/PUBLIC_BASE_URL env-var pair to a DB-backed list, each row with
+    -- its own name/url/secret and an active flag. See src/auth/community-sites.ts.
+    CREATE TABLE IF NOT EXISTS community_sites (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      url TEXT NOT NULL UNIQUE,
+      secret TEXT NOT NULL,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      updated_at TEXT NOT NULL DEFAULT ${NOW}
     );
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -763,6 +806,67 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       [id],
     );
   }
+
+  // Migration 041 parity: widen the visibility CHECK to accept 'org' on a
+  // database created before it existed. Postgres has no ADD CONSTRAINT IF NOT
+  // EXISTS, so this is a drop-then-add by the constraint's generated name.
+  //
+  // Read the current definition first rather than swapping unconditionally:
+  // ADD CONSTRAINT re-validates every existing row and takes a lock to do it,
+  // so an unguarded swap would pay that cost on every server start and grow
+  // with the table. Every other statement in this file is a true no-op on an
+  // up-to-date database (IF NOT EXISTS / ADD COLUMN IF NOT EXISTS); this one
+  // has to be as well.
+  //
+  // Unlike SQLite this is catalogue-only — no table rebuild, so none of the
+  // ON DELETE CASCADE hazard that makes the SQLite side delicate.
+  const visibilityCheck = (await db.get(
+    `SELECT pg_get_constraintdef(oid) AS def
+       FROM pg_constraint
+      WHERE conrelid = 'nests'::regclass
+        AND conname = 'nests_visibility_check'`,
+  )) as { def?: string } | undefined;
+  if (!visibilityCheck?.def?.includes("'org'")) {
+    await db.run(
+      "ALTER TABLE nests DROP CONSTRAINT IF EXISTS nests_visibility_check",
+    );
+    await db.run(
+      "ALTER TABLE nests ADD CONSTRAINT nests_visibility_check CHECK (visibility IN ('private', 'org', 'public'))",
+    );
+  }
+
+  // Migration 043 parity: a database from before 043 has the flag-only
+  // node_suggestions (no suggestion_id). Rebuild it empty and mark every nest
+  // stale so the next index rebuild re-fills it from disk. Guarded on the
+  // column so an up-to-date database pays nothing.
+  const suggestionIdCol = (await db.get(
+    `SELECT 1 AS ok FROM information_schema.columns
+      WHERE table_name = 'node_suggestions' AND column_name = 'suggestion_id'`,
+  )) as { ok?: number } | undefined;
+  if (!suggestionIdCol?.ok) {
+    await db.exec(`
+      DROP TABLE IF EXISTS node_suggestions;
+      CREATE TABLE node_suggestions (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        suggestion_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        detected_at TEXT NOT NULL,
+        target_hash TEXT NOT NULL,
+        proposed_hash TEXT NOT NULL,
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT ${NOW},
+        PRIMARY KEY (nest_id, node_id, suggestion_id)
+      );
+      UPDATE nests SET index_synced_at = NULL;
+    `);
+  }
+  // Both shapes (fresh bootstrap and the rebuild above) now carry detected_at.
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_node_suggestions_nest_detected
+      ON node_suggestions(nest_id, detected_at DESC);
+  `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(

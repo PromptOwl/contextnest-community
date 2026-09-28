@@ -17,7 +17,13 @@ export type AuthEnv = {
     // that wrote, so an agent write from one key can be whitelisted without
     // whitelisting every other key the same user holds.
     apiKeyId: string | null;
-    apiKeyLabel: string | null;
+    /** What the operator named the API key this call authenticated with, when
+     *  it did. The one agent name this transport can report without inventing
+     *  it — see `derivedClient` (spec §9.4.2). */
+    apiKeyLabel?: string;
+    /** Caller attribution for this request, once a route has validated it —
+     *  read by the activity-trace middleware. */
+    clientMetadata?: Record<string, string | number | boolean | undefined>;
   };
 };
 
@@ -78,5 +84,22 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
     }
   }
 
-  return c.json({ error: "Missing or invalid credentials" }, 401);
+  // Distinguish WHY, so a client can tell "your session expired, sign back
+  // in" from "this API key was revoked" instead of one opaque 401 for both.
+  if (sessionId) {
+    return c.json(
+      { error: "Your session has expired — sign in again.", code: "session_expired" },
+      401,
+    );
+  }
+  if (key) {
+    return c.json(
+      { error: "This API key is invalid or has been revoked — generate a new one.", code: "invalid_key" },
+      401,
+    );
+  }
+  return c.json(
+    { error: "Authentication required — sign in or provide an API key.", code: "missing_credentials" },
+    401,
+  );
 });

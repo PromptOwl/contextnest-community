@@ -14,20 +14,23 @@ import {
   resolveCallerEmail,
   filterAccessible,
 } from "../governance/access-guard.js";
-import { compilePrompt } from "./prompt-compiler.js";
-import { resolveNodeUrl } from "../governance/title-resolver.js";
+import {
+  resolveContext,
+  approxTokens,
+  type ContextRequest,
+} from "./context-service.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
   nodeToMarkdown,
   nodesToMarkdown,
   isMarkdownFormat,
 } from "./markdown-export.js";
-import { resolveReadableBody, resolveExportBody } from "./readable-body.js";
+import { resolveExportBody } from "./readable-body.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { countThreadsByNode } from "../annotations/service.js";
 import { permissionLevel, isPublicReader } from "../shared/access.js";
 import { exportNestBundle } from "../nests/bundle-service.js";
-import { buildNestGraph, extractWikiTargets } from "./graph-service.js";
+import { buildNestGraph } from "./graph-service.js";
 import {
   listNodesForCaller,
   listNestFolders,
@@ -236,260 +239,21 @@ queryRoutes.get("/graph", async (c) => {
   return c.json(graph);
 });
 
-// ─── Token budgeting helper ───
-// Rough 4-chars-per-token estimator. Good enough for budgeting; exact
-// tokenization is provider-specific and would require tiktoken.
-function approxTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
-
-function formatContextBlock(node: ContextNode, url?: string): string {
-  const tags = (node.frontmatter.tags || []).join(" ");
-  const meta = [
-    tags ? `_tags: ${tags}_` : null,
-    url ? `_source: ${url}_` : null,
-  ].filter(Boolean);
-  const header = meta.length
-    ? `# ${node.frontmatter.title}\n\n${meta.join("\n")}\n\n`
-    : `# ${node.frontmatter.title}\n\n`;
-  return header + (node.body || "").trim();
-}
-
 // POST /nests/:nestId/context
 // One-call context retrieval for app integrations. Accepts either a
 // natural-language `prompt` (compiled to a selector server-side) or an
 // explicit `selector`. Returns markdown ready to prepend to an LLM prompt,
-// plus trace + manifest.
+// plus trace + manifest. The retrieval itself lives in context-service.ts,
+// shared with Hootie's chat route.
 queryRoutes.post("/context", async (c) => {
-  const body = await c.req.json<{
-    prompt?: string;
-    selector?: string;
-    max_tokens?: number;
-    hops?: number;
-    include_drafts?: boolean;
-  }>();
-
-  if (!body.prompt && !body.selector) {
-    throw new ValidationError("prompt or selector is required");
-  }
-
-  const nestId = c.req.param("nestId")!;
-  const baseUrl = requestBaseUrl(c.req.url);
-  const { query: queryEngine, storage } = await engineCache.get(nestId);
-  // Floor at 50 tokens — anything smaller returns nothing useful. Default
-  // is 4000, a typical system-prompt budget.
-  const maxTokens = Math.max(50, body.max_tokens ?? 4000);
-  const hops = body.hops ?? 2;
-  const includeDrafts = body.include_drafts === true;
-
-  // Mirror the engine's draft rule (isPublished: status === "published") so the
-  // hand-rolled [[Title]] + hop path below never surfaces drafts the engine's
-  // selector path would have filtered out for the same include_drafts value.
-  const isVisible = (d: ContextNode) =>
-    includeDrafts || d.frontmatter.status === "published";
-
-  // ── 1. Resolve selector + title-match list ──
-  let selector: string | null = body.selector?.trim() || null;
-  let compileDetail: Awaited<ReturnType<typeof compilePrompt>> | null = null;
-  let titleMatches: ContextNode[] = [];
-  // True once an explicit selector's [[Title]] parts were peeled + resolved —
-  // guards the prompt branch below from clobbering those matches.
-  let resolvedTitleSelector = false;
-  const allDocs = await storage.discoverDocuments();
-
-  // Explicit selectors may carry [[Title]] parts in an OR union — that's
-  // what the graph view's click-to-query and the API docs emit. The engine
-  // grammar doesn't accept wiki syntax, so peel those parts off here: match
-  // titles directly (case-insensitive) and hand the rest to the engine.
-  // Hop expansion for the title matches happens after the merge below, over
-  // the same wikilink graph the engine traverses.
-  if (selector && selector.includes("[[")) {
-    const parts = selector.split("|").map((p) => p.trim()).filter(Boolean);
-    const wantedTitles = new Set<string>();
-    const rest: string[] = [];
-    for (const p of parts) {
-      const m = /^\[\[(.+)\]\]$/.exec(p);
-      if (m) wantedTitles.add(m[1].trim().toLowerCase());
-      else rest.push(p);
-    }
-    if (wantedTitles.size > 0) {
-      selector = rest.join("|") || null;
-      resolvedTitleSelector = true;
-      titleMatches = allDocs.filter(
-        (d: ContextNode) =>
-          wantedTitles.has(String(d.frontmatter.title || "").toLowerCase()) &&
-          isVisible(d),
-      );
-    }
-  }
-
-  if (!selector && !resolvedTitleSelector && body.prompt) {
-    const titles = allDocs.map((d: ContextNode) => d.frontmatter.title);
-    compileDetail = await compilePrompt(body.prompt, nestId, titles);
-    selector = compileDetail.selector;
-
-    // Title matches are fetched directly — the engine's selector grammar
-    // doesn't accept [[Title]] wiki syntax.
-    if (compileDetail.matchedTitles.length > 0) {
-      const matchedLower = new Set(
-        compileDetail.matchedTitles.map((t) => t.toLowerCase()),
-      );
-      titleMatches = allDocs.filter((d: ContextNode) =>
-        matchedLower.has(d.frontmatter.title.toLowerCase()),
-      );
-    }
-  }
-
-  // ── 2. Run the engine (or short-circuit if nothing compiled) ──
-  let documents: ContextNode[] = [];
-  let hopsUsed = 0;
-  let nodesTraversed = 0;
-
-  if (selector) {
-    // full:true skips the context.yaml index path and loads every document
-    // fresh — the indexed path can miss recently-added nodes until
-    // context.yaml is regenerated. Correct + cheap for typical nest sizes.
-    const result = await queryEngine.query(selector, {
-      hops,
-      includeDrafts,
-      full: true,
-    });
-    documents = result.documents;
-    hopsUsed = result.hopsUsed;
-    nodesTraversed = result.nodesTraversed;
-  }
-
-  // Hop-expand title matches over the wikilink graph (both directions) so
-  // "[[Title]] + hops" pulls the same neighborhood the engine would for a
-  // selector match — and the same one the graph view highlights.
-  if (titleMatches.length > 0 && hops > 0) {
-    const byTitle = new Map(
-      allDocs.map((d: ContextNode) => [
-        String(d.frontmatter.title || "").toLowerCase(),
-        d,
-      ]),
-    );
-    const byId = new Map(allDocs.map((d: ContextNode) => [d.id, d]));
-    const adj = new Map<string, Set<string>>();
-    const link = (a: string, b: string) => {
-      (adj.get(a) ?? adj.set(a, new Set()).get(a)!).add(b);
-      (adj.get(b) ?? adj.set(b, new Set()).get(b)!).add(a);
-    };
-    for (const d of allDocs) {
-      for (const target of extractWikiTargets(d.body || "")) {
-        // Resolve id-style targets ([[nodes/some-id]]) as well as titles, the
-        // same way buildNestGraph does — otherwise the hop neighborhood the API
-        // returns disagrees with the one the graph view highlights.
-        const t = byId.get(target) ?? byTitle.get(target.toLowerCase());
-        if (t && t.id !== d.id) link(d.id, t.id);
-      }
-    }
-    const seen = new Set(titleMatches.map((d) => d.id));
-    let frontier = titleMatches.map((d) => d.id);
-    for (let depth = 0; depth < hops && frontier.length; depth++) {
-      const next: string[] = [];
-      for (const id of frontier) {
-        for (const nb of adj.get(id) ?? []) {
-          if (seen.has(nb)) continue;
-          seen.add(nb);
-          const doc = byId.get(nb);
-          // Skip drafts entirely when include_drafts is off — don't return them
-          // and don't traverse through them, so the neighborhood matches what
-          // the engine selector path would have produced.
-          if (!doc || !isVisible(doc)) continue;
-          next.push(nb);
-          titleMatches.push(doc);
-        }
-      }
-      frontier = next;
-      hopsUsed = Math.max(hopsUsed, depth + 1);
-    }
-    nodesTraversed += seen.size;
-  }
-
-  // Merge title-matched docs, de-duped by id.
-  if (titleMatches.length > 0) {
-    const seen = new Set(documents.map((d) => d.id));
-    for (const t of titleMatches) {
-      if (!seen.has(t.id)) {
-        documents.push(t);
-        seen.add(t.id);
-      }
-    }
-  }
-
-  // ── 3. Permission gate (no-op when stewardship is disabled) ──
-  const userId = c.get("userId");
-  const userEmail = await resolveCallerEmail(userId);
-  const beforePermission = documents.length;
-  const accessible = await filterAccessible(nestId, userId, userEmail, documents);
-  const permissionFiltered = beforePermission - accessible.length;
-
-  // Public readers must see approved bodies only, never on-disk drafts. The
-  // source URL rides along so it resolves once per node, then feeds the budget
-  // pass, the markdown, and the manifest.
-  const readable = await Promise.all(
-    accessible.map(async (doc) => ({
-      ...doc,
-      body: await resolveReadableBody(nestId, doc.id, userId, doc.body || ""),
-      url: resolveNodeUrl(doc, { nestId, baseUrl }),
-    })),
-  );
-
-  // ── 4. Budget-fit within max_tokens ──
-  const included: (ContextNode & { url?: string })[] = [];
-  let tokenCount = 0;
-  for (const doc of readable) {
-    const block = formatContextBlock(doc, doc.url);
-    const blockTokens = approxTokens(block);
-    if (tokenCount + blockTokens > maxTokens && included.length > 0) break;
-    included.push(doc);
-    tokenCount += blockTokens;
-  }
-  const truncatedByBudget = accessible.length - included.length;
-
-  // ── 5. Format response ──
-  const contextMarkdown = included
-    .map((n) => formatContextBlock(n, n.url))
-    .join("\n\n---\n\n");
-
-  trackEvent("context.resolve", {
-    nestId,
-    selector_from_prompt: !!compileDetail,
-    included: included.length,
-    permission_filtered: permissionFiltered,
-    token_count: tokenCount,
+  const body = await c.req.json<ContextRequest>();
+  const { blocks: _blocks, ...result } = await resolveContext({
+    nestId: c.req.param("nestId")!,
+    userId: c.get("userId"),
+    baseUrl: requestBaseUrl(c.req.url),
+    body,
   });
-
-  return c.json({
-    context: contextMarkdown,
-    nodes: included.map((n) => ({
-      id: n.id,
-      title: n.frontmatter.title,
-      url: n.url,
-      tags: n.frontmatter.tags || [],
-      type: n.frontmatter.type || "document",
-    })),
-    trace: {
-      selector_used: selector,
-      from_prompt: body.prompt ?? null,
-      compiled: compileDetail
-        ? {
-            matched_tags: compileDetail.matchedTags,
-            matched_titles: compileDetail.matchedTitles,
-            unmatched_tokens: compileDetail.unmatched,
-          }
-        : null,
-      total_matched: documents.length,
-      permission_filtered: permissionFiltered,
-      included: included.length,
-      truncated_by_budget: truncatedByBudget,
-      hops_used: hopsUsed,
-      nodes_traversed: nodesTraversed,
-      approx_tokens: tokenCount,
-      max_tokens: maxTokens,
-    },
-  });
+  return c.json(result);
 });
 
 // POST /nests/:nestId/query
@@ -750,7 +514,8 @@ queryRoutes.get("/export", async (c) => {
   );
 
   // Optional token budget — full set by default; an agent can cap a fetch
-  // with ?max_tokens= (same estimator as POST /context).
+  // with ?max_tokens= (same estimator and fill rule as POST /context: a
+  // document that doesn't fit is skipped, not the end of the list).
   const maxParam = parseInt(c.req.query("max_tokens") ?? "", 10);
   const maxTokens = Number.isFinite(maxParam) && maxParam > 0 ? maxParam : null;
   let included = fields;
@@ -759,11 +524,11 @@ queryRoutes.get("/export", async (c) => {
     let tokens = 0;
     for (const f of fields) {
       const t = approxTokens(nodeToMarkdown(f));
-      if (tokens + t > maxTokens && kept.length > 0) break;
+      if (tokens + t > maxTokens) continue;
       kept.push(f);
       tokens += t;
     }
-    included = kept;
+    included = kept.length > 0 ? kept : fields.slice(0, 1);
   }
 
   trackEvent("nest.export", {
@@ -776,4 +541,117 @@ queryRoutes.get("/export", async (c) => {
   return c.body(nodesToMarkdown(included), 200, {
     "Content-Type": "text/markdown; charset=utf-8",
   });
+});
+
+// POST /nests/:nestId/publish — bulk publish
+queryRoutes.post("/publish", async (c) => {
+  const body = await c.req.json<{
+    documents?: Array<{
+      title: string;
+      content: string;
+      type?: string;
+      tags?: string[];
+      scope?: string;
+      folder?: string;
+    }>;
+    context_md?: string;
+  }>();
+
+  if (!body.documents?.length && !body.context_md) {
+    throw new ValidationError("documents array or context_md is required");
+  }
+
+  // Content-type toggles gate this bulk path up front. createNode refuses a
+  // disabled artifact/table below anyway, but that would land the rows before
+  // it and report the rest as failures — and a disabled type is a POLICY
+  // violation, so it fails the WHOLE batch before any write, context_md
+  // included. (Malformed rows — missing title/content — keep this endpoint's
+  // existing skip-silently semantics below; those are shape problems,
+  // not policy ones.)
+  for (const doc of body.documents || []) {
+    const t = doc.type || "document";
+    if (t === "artifact" && !config.TYPE_ARTIFACT_ENABLED) {
+      throw new ValidationError("Artifact nodes are disabled on this server");
+    }
+    if (t === "table" && !config.TYPE_TABLE_ENABLED) {
+      throw new ValidationError("Table nodes are disabled on this server");
+    }
+  }
+
+  const nestId = c.req.param("nestId")!;
+  const userEmail = await resolveCallerEmail(c.get("userId"));
+  const created: string[] = [];
+  const skipped: string[] = [];
+  const failed: Array<{ title: string; error: string }> = [];
+
+  if (body.context_md) {
+    // No engine op exists for context.md, so this stays a direct write; the
+    // index regen keeps graph-mode reads (seeded from context.yaml) aware of
+    // it. Document creation below regenerates per doc via the engine.
+    const { storage } = await engineCache.get(nestId);
+    await storage.writeContextMd(body.context_md);
+    await storage.regenerateIndex();
+  }
+
+  for (const doc of body.documents || []) {
+    if (!doc.title || !doc.content) continue;
+
+    // Route through the canonical create (engine `context_create` underneath)
+    // instead of hand-assembling documents here: same slugs, same governance
+    // rows, same id-occupancy check as every other create surface. The engine
+    // regenerates the index per create, where the old direct-write path
+    // regenerated once for the batch — fine at agent batch sizes, and the cost
+    // of a bulk path that no longer bypasses the vault lock.
+    try {
+      const result = await createNode(
+        nestId,
+        {
+          title: doc.title,
+          content: doc.content,
+          type: doc.type,
+          tags: doc.tags,
+          scope: doc.scope,
+          folder: doc.folder,
+        },
+        userEmail,
+      );
+      created.push(result.node.id);
+    } catch (err) {
+      // Occupied id: the legacy handler silently overwrote the existing doc
+      // and restarted its history. Skip instead — republishing a folder must
+      // not destroy version chains — and report it so callers can react.
+      if (err instanceof ConflictError) {
+        skipped.push(doc.title);
+        continue;
+      }
+      // A busy vault fails every remaining document the same way, so stop and
+      // let the caller retry the whole batch: what already landed comes back
+      // as `skipped`, so the retry finishes the job instead of duplicating.
+      if (isVaultLockTimeout(err) || err instanceof VaultBusyError) throw err;
+      // Anything else is one document's problem — an unusable title, a type
+      // the engine rejects. Report it and keep going: aborting the batch left
+      // the earlier writes on disk with nothing in the response naming them.
+      // Only an AppError's message is caller-facing; anything else could carry
+      // a filesystem path, so it goes to the log and the caller gets the
+      // generic line, same as the 500 handler would have given them.
+      if (!(err instanceof AppError)) console.error("bulk publish row failed", err);
+      failed.push({
+        title: doc.title,
+        error: err instanceof AppError ? err.message : "Could not create this document",
+      });
+    }
+  }
+
+  trackEvent("nest.publish", { nestId, count: created.length });
+
+  return c.json(
+    {
+      published: created.length,
+      context_md_updated: !!body.context_md,
+      node_ids: created,
+      skipped,
+      failed,
+    },
+    201,
+  );
 });

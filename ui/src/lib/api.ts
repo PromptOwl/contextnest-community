@@ -13,6 +13,15 @@
  */
 
 import { clearDraft } from "./draft";
+import type { NestBranding } from "./branding";
+
+/**
+ * A nest's visibility tier. 'org' = every authenticated user of this
+ * deployment (a self-hosted install is one organization); 'public' = anyone,
+ * including anonymous callers. Nothing in the UI sets 'org' yet, but the API
+ * returns it, so every surface that renders visibility has to handle it.
+ */
+export type NestVisibility = "private" | "org" | "public";
 
 const API_BASE = "";
 const STALE_LOCAL_STORAGE_KEY = "cnst_token";
@@ -204,13 +213,23 @@ export async function getHealth() {
     /** Content-type toggles — default ON server-side; the editor's type
      *  picker hides a disabled type exactly when create would refuse it. */
     type_artifact_enabled?: boolean;
+    shared_deployment?: boolean;
     type_table_enabled?: boolean;
     subagent_runs_enabled?: boolean;
     subagent_max_depth?: number;
     subagent_max_children?: number;
     runner_key_configured?: boolean;
+    /** Hootie in the nest (default ON). Off → the launcher is hidden and
+     *  POST /nests/:id/chat 404s. */
+    hootie_enabled?: boolean;
+    /** PostHog project key, or null when analytics is unconfigured or usage
+     *  telemetry is switched off. The browser needs it to send events. */
+    posthog_key?: string | null;
+    posthog_host?: string;
     /** Mail transport is set up — email/invite publish gates need it. */
     email_configured?: boolean;
+    /** Who may create nests; "admins" hides the create CTAs from everyone else. */
+    nest_creation?: "admins" | "everyone";
     suspended_reason?: string;
   }>("/health");
 }
@@ -224,6 +243,9 @@ export interface AdminSettings {
   manual_sign_in: ManualSignIn;
   logo_url: string | null;
   telemetry_enabled: boolean;
+  /** PostHog project key ("" = analytics off) and ingestion host. */
+  posthog_key: string;
+  posthog_host: string;
   public_base_url: string;
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
@@ -234,6 +256,14 @@ export interface AdminSettings {
    *  the type only — existing nodes still read/render/version. */
   type_artifact_enabled: boolean;
   type_table_enabled: boolean;
+  /** Hootie in the nest (default ON). */
+  hootie_enabled: boolean;
+  /** Model Hootie answers with (default claude-opus-5; a gateway-side name
+   *  such as `ollama/…` when routed through a gateway). */
+  hootie_model: string;
+  /** Model gateway (LiteLLM / PromptOwl) for Hootie AND agent runs;
+   *  "" = Anthropic directly. */
+  anthropic_base_url: string;
   subagent_runs_enabled: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
@@ -247,6 +277,15 @@ export interface AdminSettings {
   oidc_auto_provision: boolean;
   /** Tag new documents with the creator's directory department (dept:<slug>). */
   oidc_department_tagging: boolean;
+  /** Offer every registered account in the add-a-person pickers. Default OFF:
+   *  a server holding several unrelated customers would otherwise hand one
+   *  customer's staff another customer's email addresses. */
+  nest_creation: "admins" | "everyone";
+  people_suggest_all_users: boolean;
+  /** This server hosts several organizations (PromptOwl-hosted). On, nest
+   *  visibility 'org' needs the same acknowledgement as 'public' and the
+   *  picker words both tiers to name the real boundary. Default OFF. */
+  shared_deployment: boolean;
   /** Server-computed readiness: enabled AND issuer+client id+secret present. */
   oidc_ready?: boolean;
   /** Write-only: string sets/replaces, null clears; never returned. */
@@ -265,7 +304,14 @@ export interface AdminSettings {
   anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   msteams_webhook_url: string;
+  email_provider: "smtp" | "ses";
   smtp_url: string;
+  ses_region: string;
+  ses_access_key_id: string;
+  /** SES secret is write-only — GET reports presence; PATCH sends a string to
+   *  set or null to clear. */
+  ses_secret_access_key_set?: boolean;
+  ses_secret_access_key?: string | null;
   notify_email_from: string;
   notify_email_to: string;
   anthropic_api_key?: string | null
@@ -357,6 +403,10 @@ export async function inviteTeammate(email: string) {
   return request<{
     temporary_password: string;
     user: { id: string; email: string };
+    /** PromptOwl sign-in is open to everyone, so the teammate can use it too. */
+    promptowl_sign_in?: boolean;
+    /** The invite email with the password was sent to them. */
+    emailed?: boolean;
     message: string;
   }>("/auth/invite", {
     method: "POST",
@@ -392,6 +442,62 @@ export async function removeSuperAdmin(email: string) {
     `/admin/super-admins/${encodeURIComponent(email)}`,
     { method: "DELETE" },
   );
+}
+
+// ─── Community sites (official-site SSO connections) ───────────────────
+// Sites trusted for one-click SSO auto-login (GET /auth/sso). `secret` is
+// write-only — set it to change it, otherwise omit it; the server never
+// echoes the value back, only whether one is set.
+
+export interface CommunitySite {
+  id: string;
+  name: string;
+  url: string;
+  secret_set: boolean;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listCommunitySites() {
+  return request<{ community_sites: CommunitySite[] }>("/admin/community-sites");
+}
+
+export async function addCommunitySite(input: {
+  name: string;
+  url: string;
+  secret: string;
+  is_active?: boolean;
+}) {
+  return request<CommunitySite>("/admin/community-sites", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function updateCommunitySite(
+  id: string,
+  patch: Partial<{ name: string; url: string; secret: string; is_active: boolean }>,
+) {
+  return request<CommunitySite>(`/admin/community-sites/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function removeCommunitySite(id: string) {
+  return request<{ ok: boolean; id: string }>(
+    `/admin/community-sites/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
+// Logged-in user renames themselves; empty clears the name (email shows).
+export async function updateProfile(name: string) {
+  return request<{ ok: boolean; name: string | null }>("/auth/profile", {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
 }
 
 // Logged-in user changes their own password (e.g., after an admin reset
@@ -498,9 +604,12 @@ export interface ApiKeyMinted {
   api_key: string;
   key_prefix: string;
   label: string | null;
+  /** The one nest this key is scoped to, or null for an all-nests key. */
+  nest_id?: string | null;
 }
 
-/** Mint another external-client API key. 409s only at the per-user ceiling. */
+/** Mint another external-client API key. 409s at the per-user ceiling or on a
+ *  duplicate name; with nest_id, 404s unless the caller can reach that nest. */
 export async function createApiKey(opts?: { label?: string; nest_id?: string }) {
   return request<ApiKeyMinted>("/auth/keys", {
     method: "POST",
@@ -539,6 +648,8 @@ export interface NestSettings {
   prime_tags: string[];
   /** Push Confirmation Gate — superadmin-only to SET; readable by anyone. */
   require_push_confirmation: boolean;
+  /** The person who creates a document becomes its reviewer; v1 publishes. */
+  creator_is_reviewer: boolean;
 }
 
 export async function getNestSettings(nestId: string) {
@@ -554,6 +665,7 @@ export async function updateNestSettings(
     prime_tags?: string[];
     /** Superadmin-only — a per-field 403 is returned to anyone else. */
     require_push_confirmation?: boolean;
+    creator_is_reviewer?: boolean;
   },
 ) {
   return request<NestSettings>(`/nests/${nestId}/settings`, {
@@ -867,14 +979,17 @@ export async function deleteUnsyncedFolder(name: string) {
 
 export async function setNestVisibility(
   nestId: string,
-  visibility: "private" | "public",
+  visibility: NestVisibility,
   // Publishing (→ public) requires an explicit acknowledgement that the nest
   // becomes readable by anyone on the internet, outside your organization.
   // Without it the server returns 409 requires_acknowledgement. Going back to
-  // private needs no acknowledgement, so this is optional.
+  // private needs no acknowledgement, so this is optional. Despite the name,
+  // the same flag also acknowledges → org on a SHARED deployment (/health
+  // shared_deployment), where "organization" is every account on the server:
+  // one wire field for "I understand who this reaches", whichever tier.
   acknowledgePublic?: boolean,
 ) {
-  return request<{ visibility: "private" | "public" }>(
+  return request<{ visibility: NestVisibility }>(
     `/nests/${nestId}/visibility`,
     {
       method: "PATCH",
@@ -899,15 +1014,29 @@ export async function setNestReaderMode(
   );
 }
 
+// Per-nest reader branding (owner / nest admin / server admin). The body
+// replaces the whole branding; null clears it. hide_powered_by is server-admin
+// only (403 otherwise).
+export async function setNestBranding(nestId: string, branding: NestBranding | null) {
+  return request<{ branding: NestBranding | null }>(`/nests/${nestId}/branding`, {
+    method: "PATCH",
+    body: JSON.stringify(branding),
+  });
+}
+
 export async function getNest(nestId: string) {
   return request<{
     nest: {
       id: string;
       name: string;
-      visibility: "private" | "public";
+      visibility: NestVisibility;
       // Public Docs Reader Mode fields — surfaced straight off the SELECT *.
       reader_mode?: number;
       reader_home_node?: string | null;
+      // Set when the nest is archived — surfaced straight off the SELECT *.
+      archived_at?: string | null;
+      // Per-nest reader branding, parsed server-side; null = unbranded.
+      branding?: NestBranding | null;
     };
     permission: string;
     // Caller's merged effective roles (collaborator + steward), nest-wide.
@@ -1026,6 +1155,21 @@ export async function listFolderNodes(nestId: string, folder: string) {
   );
 }
 
+/**
+ * The whole nest, metadata only — no body, no `folder` scope. Same
+ * body-free/index-backed path as listFolderNodes (see its comment), just
+ * unscoped so every node in the nest comes back in one request.
+ *
+ * For consumers like the Board that bucket EVERY node by tag/folder/status
+ * and never read a body: using listNodes here would force the `content=1`
+ * vault crawl for bytes that are thrown away, on every load and refresh.
+ */
+export async function listNodesMeta(nestId: string, approvedOnly = false) {
+  return request<{ count: number; nodes: any[] }>(
+    `/nests/${nestId}/nodes${approvedOnly ? "?approved_only=1" : ""}`,
+  );
+}
+
 /** The nest-wide shape — one per nest, not per folder level. */
 export async function getNestCensus(nestId: string) {
   return request<{ census: NestCensus }>(`/nests/${nestId}/census`);
@@ -1038,8 +1182,11 @@ export async function getCommentCounts(nestId: string) {
   }>(`/nests/${nestId}/comment-counts`);
 }
 
-export async function getNode(nestId: string, nodeId: string) {
-  return request<{ node: any }>(`/nests/${nestId}/nodes/${nodeId}`);
+/** approvedOnly serves the approved body, as a public reader would get it. */
+export async function getNode(nestId: string, nodeId: string, approvedOnly = false) {
+  return request<{ node: any }>(
+    `/nests/${nestId}/nodes/${nodeId}${approvedOnly ? "?approved_only=1" : ""}`,
+  );
 }
 
 export async function createNode(
@@ -1062,6 +1209,63 @@ export async function createNode(
   });
 }
 
+/** The `pdf:` block a pdf node carries (engine §1.11). */
+export interface PdfMeta {
+  file: string;
+  sha256: string;
+  bytes: number;
+  pages: number;
+  /** False for a scanned PDF: no text could be extracted, the body is empty. */
+  text_layer: boolean;
+  extractor: string;
+  extractor_version: string;
+  extracted_at: string;
+}
+
+/**
+ * Upload a PDF as a governed `pdf` document (multipart — the browser sets the
+ * boundary). Pass `nodeId` to replace the PDF of an existing pdf node: that is
+ * a new version, governed like any edit. The body becomes the extracted text.
+ */
+export async function createPdfNode(
+  nestId: string,
+  file: File,
+  opts: { title?: string; folder?: string; tags?: string[]; nodeId?: string } = {},
+) {
+  const form = new FormData();
+  form.append("file", file);
+  if (opts.title) form.append("title", opts.title);
+  if (opts.folder) form.append("folder", opts.folder);
+  if (opts.nodeId) form.append("nodeId", opts.nodeId);
+  for (const t of opts.tags ?? []) form.append("tags", t);
+  const res = await fetch(`/nests/${nestId}/nodes/pdf`, {
+    method: "POST",
+    body: form,
+    credentials: "include",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `PDF upload failed: ${res.status}`);
+  return data as { node: any; version: number; stewards?: any[] };
+}
+
+/**
+ * Same-origin URL of a pdf node's binary. The server picks the version a
+ * caller may see (a public reader always gets the approved one); `approvedOnly`
+ * asks for that view explicitly, `download` for an attachment disposition.
+ */
+export function pdfUrl(
+  nestId: string,
+  nodeId: string,
+  opts: { version?: number; approvedOnly?: boolean; download?: boolean } = {},
+): string {
+  const q = new URLSearchParams();
+  if (opts.version) q.set("version", String(opts.version));
+  if (opts.approvedOnly) q.set("approved_only", "1");
+  if (opts.download) q.set("download", "1");
+  const qs = q.toString();
+  return `/nests/${nestId}/nodes/${nodeId}/pdf${qs ? `?${qs}` : ""}`;
+}
+
 export async function updateNode(
   nestId: string,
   nodeId: string,
@@ -1074,6 +1278,8 @@ export async function updateNode(
     schedule?: string;
     /** Owner/admin only; `null` clears the flag back to tag/nest inheritance. */
     prime?: boolean | null;
+    /** Re-type the node ("Turn into…"). Same accepted set as create. */
+    type?: string;
   },
   baseVersion?: number,
 ) {
@@ -1815,6 +2021,11 @@ export async function listExternalEdits(nestId: string, refresh = false) {
   );
 }
 
+/** Pending external edits, as a number — the badge read. */
+export async function countExternalEdits(nestId: string) {
+  return request<{ total: number }>(`/nests/${nestId}/external-edits?count=1`);
+}
+
 export async function scanExternalEdits(nestId: string) {
   return request<{ scanned: number; staged: number }>(
     `/nests/${nestId}/external-edits/scan`,
@@ -1943,6 +2154,29 @@ export async function listCollaborators(nestId: string) {
       source: "owner" | "collaborator" | "team" | "steward" | "grant";
     }>;
   }>(`/nests/${nestId}/collaborators`);
+}
+
+/** The nest's people, for the `@mention` pickers. Read tier (see the route),
+ *  so a read-only reviewer's comment box can offer the roster too — unlike
+ *  listCollaborators, which needs write. */
+export async function listMentionablePeople(nestId: string) {
+  return request<{ people: Array<{ email: string; name: string | null }> }>(
+    `/nests/${nestId}/mentionable`,
+  );
+}
+
+/** People the caller already works with — what the add-a-person controls
+ *  autocomplete against. An address that appears nowhere here is still valid
+ *  to type: that's how you add someone who has no account yet. */
+export async function suggestPeople(q = "") {
+  const query = q.trim() ? `?q=${encodeURIComponent(q.trim())}` : "";
+  return request<{
+    people: Array<{
+      email: string;
+      name: string | null;
+      source: "nest" | "team" | "directory";
+    }>;
+  }>(`/people/suggest${query}`);
 }
 
 export async function addCollaborator(
@@ -2262,9 +2496,10 @@ export interface WorkItem {
   /** Deletion items only: why it was flagged, and the row to resolve. */
   reason?: string;
   request_id?: string;
-  /** Deletion items only. For "folder"/"nest", node_id is a folder path or the
-   *  nest id — NOT a document id, so don't open the editor on it. */
-  target_type?: "document" | "folder" | "nest";
+  /** Deletion items only. For "folder"/"nest"/"nest_archive", node_id is a
+   *  folder path or the nest id — NOT a document id, so don't open the editor
+   *  on it. "nest_archive" is the reversible ask: honouring it archives. */
+  target_type?: "document" | "folder" | "nest" | "nest_archive";
 }
 
 export interface WatcherNotification {
@@ -2277,6 +2512,8 @@ export interface WatcherNotification {
   read_at: string | null;
   /** Document the row is about, when there is one — null for nest-level rows. */
   node_id?: string | null;
+  /** Resolved server-side; the inbox navigates on it without a nest list. */
+  nest_name: string;
 }
 
 export interface WorkPagination {
@@ -2547,6 +2784,17 @@ export async function removeNodeWatcher(nestId: string, nodeId: string, email: s
   return r.watchers;
 }
 
+export async function listUnreadNotifications() {
+  return request<{ notifications: WatcherNotification[] }>(
+    "/me/notifications?unread=true",
+  );
+}
+
+/** Decline a nest invite — removes the caller's own access to that nest. */
+export async function leaveNest(nestId: string) {
+  return request<{ left: boolean }>(`/me/nests/${nestId}/leave`, { method: "POST" });
+}
+
 export async function markNotificationsRead(ids: string[] | "all") {
   return request<{ ok: boolean }>("/me/notifications/read", {
     method: "POST",
@@ -2741,4 +2989,113 @@ export async function triggerRun(
       }),
     },
   );
+}
+
+// ─── Hootie in the nest ──────────────────────────────────────────────────
+
+export interface HootieNode {
+  id: string;
+  title: string;
+  url?: string;
+  tags: string[];
+  type: string;
+}
+
+export type HootieMention =
+  | {
+      status: "posted";
+      node_id: string;
+      node_title: string;
+      thread_id: string;
+      notified: number;
+    }
+  | { status: "undeliverable"; reason: "no_anchor" | "post_failed" };
+
+export interface HootieTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/**
+ * Ask Hootie about a nest. The route streams server-sent events; each one is
+ * handed to the matching callback as it lands so the panel renders the answer
+ * while it is still being written. Resolves when the stream closes.
+ *
+ * Non-2xx responses (feature off, no key, 400, 429) throw the same ApiError
+ * shape as request(), with the JSON body on `err.body`.
+ */
+export async function chatWithHootie(
+  nestId: string,
+  body: { message: string; node_id?: string | null; history?: HootieTurn[] },
+  on: {
+    meta?: (m: { nodes: HootieNode[]; anchor: HootieNode | null }) => void;
+    delta?: (text: string) => void;
+    done?: (d: {
+      answer: string;
+      cited: HootieNode[];
+      mention: HootieMention | null;
+    }) => void;
+    error?: (message: string) => void;
+  },
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/nests/${nestId}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    let data: any;
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = { error: text.slice(0, 200) };
+    }
+    if (res.status === 401 && typeof window !== "undefined") {
+      window.dispatchEvent(new Event("auth:unauthorized"));
+    }
+    const err = new Error(data.error || `Request failed: ${res.status}`) as ApiError;
+    err.status = res.status;
+    err.body = data;
+    throw err;
+  }
+  if (!res.body) return;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const dispatch = (chunk: string) => {
+    let event = "message";
+    const data: string[] = [];
+    for (const line of chunk.split("\n")) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+    }
+    if (data.length === 0) return;
+    let payload: any;
+    try {
+      payload = JSON.parse(data.join("\n"));
+    } catch {
+      return;
+    }
+    if (event === "meta") on.meta?.(payload);
+    else if (event === "delta") on.delta?.(payload.text ?? "");
+    else if (event === "done") on.done?.(payload);
+    else if (event === "error") on.error?.(payload.error ?? "Something went wrong.");
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    // Events are separated by a blank line; keep any partial tail for the
+    // next read.
+    let at: number;
+    while ((at = buffer.indexOf("\n\n")) >= 0) {
+      dispatch(buffer.slice(0, at));
+      buffer = buffer.slice(at + 2);
+    }
+  }
+  if (buffer.trim()) dispatch(buffer);
 }

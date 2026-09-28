@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { AuthEnv } from "../auth/middleware.js";
@@ -7,6 +8,11 @@ import { getDb } from "../db/client.js";
 import { TOOL_DEFINITIONS, handleToolCall, toCallToolResult } from "./tools.js";
 import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
 import { requestBaseUrl } from "../shared/base-url.js";
+import {
+  attributeRequest,
+  clientToolField,
+  connectionClient,
+} from "../shared/client-metadata.js";
 import { config } from "../config.js";
 import { z } from "zod";
 
@@ -26,6 +32,7 @@ function createMcpServerForNest(
   baseUrl: string,
   apiKeyId: string | null,
   apiKeyLabel: string | null,
+  c: Context<AuthEnv>,
 ): McpServer {
   const server = new McpServer(
     { name: `contextnest-${nestId}`, version: "1.0.0" },
@@ -57,9 +64,23 @@ function createMcpServerForNest(
       if (!required.includes(key)) field = field.optional();
       shape[key] = field;
     }
+    // Caller attribution rides on EVERY tool (spec §9.4) — declared here
+    // rather than in each tool's inputSchema, so no tool can be added without
+    // it and the divergence guard sees no new inline schema. Validated against
+    // the engine's own schema inside handleToolCall.
+    Object.assign(shape, clientToolField);
 
     server.tool(tool.name, tool.description, shape, async (args) => {
       const engine = await engineCache.get(nestId);
+      // Caller attribution (§9.4.2), resolved HERE rather than when the server
+      // was built: the `initialize` handshake completes inside the transport,
+      // so `clientInfo` only exists once a call is being served. A `client`
+      // sent with the tool call itself still wins, per key, in handleToolCall.
+      // `attributeRequest` also stashes this on the request for the REST trace
+      // middleware; that is inert here, since app.ts skips `/mcp` paths and the
+      // MCP row is written by the tool logger with the FULLY merged client (the
+      // tool call's own `client` wins over what is derived here).
+      const client = attributeRequest(c, undefined, connectionClient(server));
       // Audit logging happens inside handleToolCall (covers per-nest +
       // server-level MCP, and thrown calls).
       const out = await handleToolCall(tool.name, args, {
@@ -72,6 +93,7 @@ function createMcpServerForNest(
         baseUrl,
         apiKeyId,
         apiKeyLabel,
+        client,
       });
       return toCallToolResult(out);
     });
@@ -93,6 +115,7 @@ mcpRoutes.all("/", async (c) => {
     requestBaseUrl(c.req.url),
     c.get("apiKeyId") ?? null,
     c.get("apiKeyLabel") ?? null,
+    c,
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({

@@ -11,7 +11,7 @@ import {
   createTestApp,
   jsonRequest,
 } from "./helpers";
-import { compilePrompt, tokenizePrompt } from "../src/nodes/prompt-compiler";
+import { compilePrompt, scorePrompt, tokenizePrompt } from "../src/nodes/prompt-compiler";
 import { resolveNodeUrl } from "../src/governance/title-resolver";
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -72,6 +72,7 @@ describe("tokenizePrompt", () => {
 
   it("returns [] for empty / whitespace / stopwords-only input", () => {
     expect(tokenizePrompt("")).toEqual([]);
+    expect(tokenizePrompt("hello there, good morning!")).toEqual([]);
     expect(tokenizePrompt("  ")).toEqual([]);
     expect(tokenizePrompt("a the of")).toEqual([]);
   });
@@ -123,6 +124,28 @@ describe("compilePrompt — against seeded nest", () => {
     expect(result.selector).toBeNull();
     expect(result.matchedTags).toEqual([]);
     expect(result.matchedTitles).toEqual([]);
+  });
+});
+
+describe("scorePrompt", () => {
+  const doc = {
+    frontmatter: { title: "API Authentication Guide", tags: ["#security"] },
+    body: "Bearer tokens explained.",
+  };
+
+  it("weights title > tag > body and reports the best hit as via", () => {
+    // title: starts-a-word = 2 of 4, starts-the-title = 3; tag = 2; body word = 1
+    expect(scorePrompt(doc, ["authentication"])).toEqual({ score: 0.5, via: "title" });
+    expect(scorePrompt(doc, ["api"])).toEqual({ score: 0.75, via: "title" });
+    expect(scorePrompt(doc, ["security"])).toEqual({ score: 0.5, via: "tag" });
+    expect(scorePrompt(doc, ["bearer"])).toEqual({ score: 0.25, via: "fulltext" });
+    expect(scorePrompt(doc, ["bearer", "guide"])).toEqual({ score: 3 / 8, via: "title" });
+  });
+
+  it("scores 0 with via null when nothing hits — mid-word body hits don't count", () => {
+    expect(scorePrompt(doc, ["quantum"])).toEqual({ score: 0, via: null });
+    expect(scorePrompt(doc, ["ken"])).toEqual({ score: 0, via: null }); // to-ken-s
+    expect(scorePrompt(doc, [])).toEqual({ score: 0, via: null });
   });
 });
 
@@ -291,6 +314,124 @@ describe("POST /context — explicit [[Title]] selector", () => {
   });
 });
 
+// ── relevance: ranked prompt matches, no hop noise (CU-wdqcq02018) ────────
+// PromptOwl cites every node this returns, so a prompt must come back with
+// real matches only, ranked, each flagged with how it matched.
+
+describe("POST /context — prompt relevance", () => {
+  const ctx = (payload: object) =>
+    jsonRequest(app, "POST", `/nests/${nestId}/context`, payload);
+
+  it("a greeting returns no nodes rather than the nest", async () => {
+    const { data } = await ctx({ prompt: "hello" });
+    expect(data.nodes).toEqual([]);
+    expect(data.context).toBe("");
+    expect(data.trace.compiled.fallback).toBeNull();
+  });
+
+  it("falls back to full-text when tags and titles miss, ranked by score", async () => {
+    // "postgres" / "migrations" live only in Database Setup's body.
+    const { data } = await ctx({ prompt: "how do I run postgres migrations" });
+    expect(data.trace.compiled.fallback).toBe("fulltext");
+    expect(data.nodes[0].id).toBe("nodes/database-setup");
+    expect(data.nodes[0].via).toBe("fulltext");
+    expect(data.nodes[0].score).toBeGreaterThan(0);
+    for (const n of data.nodes) expect(n.score).toBeGreaterThan(0);
+  });
+
+  it("does not hop-expand a prompt match unless hops is passed", async () => {
+    const { data } = await ctx({ prompt: "hub" });
+    const ids = data.nodes.map((n: any) => n.id);
+    expect(ids).toContain("nodes/hub-note");
+    expect(ids).not.toContain("nodes/spoke-note");
+    expect(data.trace.compiled.fallback).toBeNull();
+  });
+
+  it("flags hop neighbours as via: hop and ranks them last", async () => {
+    const { data } = await ctx({ prompt: "hub", hops: 1 });
+    const hub = data.nodes.find((n: any) => n.id === "nodes/hub-note");
+    const spoke = data.nodes.find((n: any) => n.id === "nodes/spoke-note");
+    expect(hub.via).toBe("title");
+    expect(spoke).toEqual(expect.objectContaining({ via: "hop", score: 0 }));
+    expect(data.nodes.indexOf(hub)).toBeLessThan(data.nodes.indexOf(spoke));
+  });
+
+  it("unions body hits with a compiled title match, ranked, dropping the weak tail", async () => {
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Widget Policy",
+      content: "# Widget Policy\n\nAll widgets ship with a policy.",
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Ops Runbook",
+      content: "# Ops\n\nwidget policy rollout steps.",
+    });
+    // Title compiles for Widget Policy only; Ops Runbook is a body-only hit
+    // that still surfaces, after it, because it scores above half the top.
+    let { data } = await ctx({ prompt: "widget policy rollout" });
+    let ids = data.nodes.map((n: any) => n.id);
+    expect(ids.slice(0, 2)).toEqual(["nodes/widget-policy", "nodes/ops-runbook"]);
+    expect(data.nodes[1].via).toBe("fulltext");
+    expect(data.trace.compiled.fallback).toBeNull();
+    // A lone body mention against a title match is noise — cut.
+    ({ data } = await ctx({ prompt: "widget" }));
+    ids = data.nodes.map((n: any) => n.id);
+    expect(ids).toContain("nodes/widget-policy");
+    expect(ids).not.toContain("nodes/ops-runbook");
+  });
+
+  it("keeps a compiled tag match even when it scores under the cutoff", async () => {
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Q3 Ledger",
+      content: "# Ledger\n\nNumbers.",
+      tags: ["audit"],
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Onboarding Checklist Guide",
+      content: "# Onboarding\n\nSteps.",
+    });
+    // #audit compiles (2/12) but sits under half the title match (5/12).
+    const { data } = await ctx({ prompt: "audit onboarding checklist" });
+    expect(data.trace.compiled.matched_tags).toEqual(["audit"]);
+    const ledger = data.nodes.find((n: any) => n.id === "nodes/q3-ledger");
+    expect(ledger).toEqual(expect.objectContaining({ via: "tag" }));
+    expect(data.nodes[0].id).toBe("nodes/onboarding-checklist-guide");
+  });
+
+  it("a prompt title match never surfaces a draft unless include_drafts", async () => {
+    // Own nest: stewardship on makes a create land as an unapproved draft.
+    const own = (await jsonRequest(app, "POST", "/nests", { name: "Drafts" })).data.nest.id;
+    await jsonRequest(app, "PATCH", `/nests/${own}/settings`, { stewardship_enabled: true });
+    await jsonRequest(app, "POST", `/nests/${own}/nodes`, {
+      title: "Zephyr Plan",
+      content: "# Zephyr\n\nUnreleased.",
+    });
+    const list = await jsonRequest(app, "GET", `/nests/${own}/nodes`);
+    expect(list.data.nodes[0].status).not.toBe("published");
+
+    const ask = (body: object) => jsonRequest(app, "POST", `/nests/${own}/context`, body);
+    let { data } = await ask({ prompt: "zephyr plan" });
+    expect(data.trace.compiled.matched_titles).toEqual(["Zephyr Plan"]);
+    expect(data.nodes).toEqual([]);
+    ({ data } = await ask({ prompt: "zephyr plan", include_drafts: true }));
+    expect(data.nodes.map((n: any) => n.id)).toEqual(["nodes/zephyr-plan"]);
+  });
+
+  it("[[nodes/id]] names one document by id, with the same hop expansion", async () => {
+    const { data } = await ctx({ selector: "[[nodes/hub-note]]" });
+    const ids = data.nodes.map((n: any) => n.id);
+    expect(ids).toContain("nodes/hub-note");
+    expect(ids).toContain("nodes/spoke-note");
+    expect(data.trace.selector_used).toBeNull();
+  });
+
+  it("selector path carries no score/via and keeps hop default", async () => {
+    const { data } = await ctx({ selector: "[[Hub Note]]" });
+    const ids = data.nodes.map((n: any) => n.id);
+    expect(ids).toContain("nodes/spoke-note");
+    expect(data.nodes[0]).not.toHaveProperty("score");
+  });
+});
+
 // ── source URLs / citations (CU-wdqcq00k73) ───────────────────────────────
 // The context payload must carry a resolvable source URL per node so that
 // Chat-with-the-nest and Set-up-agent can cite the source and render a
@@ -333,5 +474,121 @@ describe("POST /context — source URLs (citations)", () => {
     expect(
       resolveNodeUrl({ id: "nodes/brand-guidelines" }, { nestId, baseUrl: "" }),
     ).toBeUndefined();
+  });
+});
+
+// ── contextnest:// links are hop edges, like [[wikilinks]] (NestBench §6.4) ──
+// Control: a source links target A by [[wikilink]] and target B by a
+// contextnest:// markdown link at the same distance. Before the fix, hop
+// expansion only followed [[..]], so B was never returned at any hop count —
+// and the selector path ignored hops entirely.
+
+describe("POST /context — contextnest:// links are hop edges", () => {
+  const ctx = (payload: object) =>
+    jsonRequest(app, "POST", `/nests/${nestId}/context`, payload);
+  const ids = (res: any) => res.data.nodes.map((n: any) => n.id).sort();
+
+  beforeAll(async () => {
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Link Target A",
+      content: "# A\n\nReached by wikilink.",
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Link Target B",
+      content: "# B\n\nReached by URI.",
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Link Target C",
+      content: "# C\n\nOnly ever quoted in code.",
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Link Source",
+      content: [
+        "# Source",
+        "",
+        "Wiki: [[Link Target A]].",
+        "URI (pinned + anchored): [b](contextnest://nodes/link-target-b@1#b).",
+        "Dangling: [gone](contextnest://nodes/no-such-node@2).",
+        "Inline code: `[c](contextnest://nodes/link-target-c)`",
+        "```md",
+        "[c](contextnest://nodes/link-target-c)",
+        "```",
+      ].join("\n"),
+    });
+  });
+
+  it("[[Title]] seed: hops 0 is the seed only; hops 1-3 reach A and B alike, never C", async () => {
+    expect(ids(await ctx({ selector: "[[Link Source]]", hops: 0 }))).toEqual([
+      "nodes/link-source",
+    ]);
+    for (const hops of [1, 2, 3]) {
+      const res = await ctx({ selector: "[[Link Source]]", hops });
+      expect(res.status).toBe(200);
+      expect(ids(res)).toEqual([
+        "nodes/link-source",
+        "nodes/link-target-a",
+        "nodes/link-target-b",
+      ]);
+    }
+  });
+
+  it("engine selector seed: hops is honoured (was ignored), hops 0 unchanged", async () => {
+    const sel = "contextnest://nodes/link-source";
+    expect(ids(await ctx({ selector: sel, hops: 0 }))).toEqual(["nodes/link-source"]);
+    const res = await ctx({ selector: sel, hops: 1 });
+    expect(ids(res)).toEqual([
+      "nodes/link-source",
+      "nodes/link-target-a",
+      "nodes/link-target-b",
+    ]);
+    expect(res.data.trace.hops_used).toBe(1);
+  });
+
+  it("the URI edge is undirected: seeding B reaches the source", async () => {
+    const res = await ctx({ selector: "[[Link Target B]]", hops: 1 });
+    expect(ids(res)).toContain("nodes/link-source");
+  });
+});
+
+// ── prompt tag matches hop-expand too (behaviour change in this fix) ─────────
+// Before, the hop BFS was seeded only from [[Title]] matches, so a prompt that
+// compiled to a TAG match never expanded even with hops > 0. Now the compiled
+// selector's own matches seed it as well.
+
+describe("POST /context — prompt tag match with explicit hops", () => {
+  const ctx = (payload: object) =>
+    jsonRequest(app, "POST", `/nests/${nestId}/context`, payload);
+
+  beforeAll(async () => {
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Quartermaster Neighbour",
+      content: "# Neighbour\n\nOnly reachable by link.",
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Tagged Seed Doc",
+      content: "# Seed\n\nSee [n](contextnest://nodes/quartermaster-neighbour).",
+      tags: ["zebrafleet"],
+    });
+  });
+
+  it("hops 0: only the tag match; hops 1: its linked neighbour comes back via hop", async () => {
+    const base = await ctx({ prompt: "zebrafleet", hops: 0 });
+    const baseIds = base.data.nodes.map((n: any) => n.id);
+    expect(baseIds).toContain("nodes/tagged-seed-doc");
+    expect(base.data.trace.compiled.matched_titles).toEqual([]);
+    expect(baseIds).not.toContain("nodes/quartermaster-neighbour");
+
+    const { data } = await ctx({ prompt: "zebrafleet", hops: 1 });
+    const seed = data.nodes.find((n: any) => n.id === "nodes/tagged-seed-doc");
+    const nb = data.nodes.find((n: any) => n.id === "nodes/quartermaster-neighbour");
+    expect(seed.via).toBe("tag");
+    expect(nb).toEqual(expect.objectContaining({ via: "hop", score: 0 }));
+  });
+
+  it("a doc matched by both selector and [[Title]] seeds once and still expands", async () => {
+    const res = await ctx({ selector: "[[Tagged Seed Doc]] | #zebrafleet", hops: 1 });
+    const ids = res.data.nodes.map((n: any) => n.id);
+    expect(ids.filter((id: string) => id === "nodes/tagged-seed-doc")).toHaveLength(1);
+    expect(ids).toContain("nodes/quartermaster-neighbour");
   });
 });

@@ -5,22 +5,25 @@
  *   GET  /llms.txt  — public agent manual: endpoints, MCP, selector grammar,
  *                     hop/skip retrieval semantics, npm packages
  *   GET  /index     — the caller's grounded nest index (markdown or json)
- *   ALL  /mcp       — stateless MCP endpoint: nest_index + cross-nest read
- *                     tools that take a `nest` (id or name) argument
+ *   ALL  /mcp       — stateless MCP endpoint: nest_index + cross-nest tools
+ *                     that take a `nest` (id or name) argument
  *
- * Write tools stay on the per-nest endpoint (/nests/:id/mcp) — cross-nest
- * mutation through one socket makes authz mistakes easy; reads are gated
- * per call via resolveNestPermission. Nest-scoped API keys are honored:
- * the index and every cross-nest call are restricted to the scoped nest.
+ * Fan-out reads: `context_search`, `context_list`, `context_query`,
+ * `context_overview` accept `nest` as optional — omit to query ALL accessible
+ * nests and get combined results. Targeted reads (`context_get`, etc.) and
+ * all writes require an explicit `nest` argument.
  *
- * Two narrow exceptions to read-only, so single-connection clients (the
- * PromptOwl native tool) can bootstrap content: `nest_create` (caller owns
- * the new nest — no cross-nest authz to get wrong) and `context_create`
- * (gated by handleToolCall's own stewardship.canCreateInNest check, the
- * same PRIMARY write gate the per-nest endpoint uses). Everything else —
- * updates, governance, sharing — still requires the per-nest endpoint.
+ * Writes available here: `nest_create`, `context_create`, `context_update`,
+ * `context_delete`, `context_move`, `context_submit_review`. Each is gated
+ * per-call by the same permission checks the per-nest endpoint uses
+ * (handleToolCall's canCreateInNest / canUserEdit / canUserApprove).
+ *
+ * Governance tools that manage people or nest settings (`context_approve`,
+ * `context_reject`, `context_share_nest`, `context_stewards`, etc.) stay on
+ * the per-nest endpoint only.
  */
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
@@ -29,6 +32,12 @@ import { engineCache } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { requestBaseUrl } from "../shared/base-url.js";
+import {
+  attributeRequest,
+  clientToolField,
+  connectionClient,
+  type ClientMetadata,
+} from "../shared/client-metadata.js";
 import {
   resolveNestPermission,
   permissionLevel,
@@ -40,13 +49,20 @@ import {
   listPublicNests,
   createNest,
 } from "../nests/service.js";
-import { ValidationError } from "../shared/errors.js";
+import { ValidationError, ForbiddenError } from "../shared/errors.js";
 import {
   isSuspended,
   getSuspensionReason,
   getCurrentLicense,
 } from "../auth/license.js";
-import { handleToolCall, toCallToolResult, type ToolResult } from "./tools.js";
+import {
+  handleToolCall,
+  normalizeSearchLimit,
+  toCallToolResult,
+  TOOL_DEFINITIONS,
+  type ToolResult,
+} from "./tools.js";
+import { isDerivedAnnotationsNode } from "../nodes/service.js";
 import type { Nest } from "../shared/types.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
@@ -54,7 +70,24 @@ import type { Nest } from "../shared/types.js";
 // kill-switch + license gates that every per-nest write honors must be
 // enforced here or these two writes would bypass both. Reads stay open when
 // suspended/unlicensed, matching the REST policy.
-const SERVER_WRITE_TOOLS = new Set(["nest_create", "context_create"]);
+const SERVER_WRITE_TOOLS = new Set([
+  "nest_create",
+  "context_create",
+  "context_update",
+  "context_delete",
+  "context_move",
+  "context_submit_review",
+]);
+
+// Read tools that support fan-out when `nest` is omitted — search/list/query/overview
+// across ALL accessible nests. Tools that need an exact target (get, resolve, comments)
+// still require nest to be specified.
+const FANOUT_READ_TOOLS = new Set([
+  "context_search",
+  "context_list",
+  "context_query",
+  "context_overview",
+]);
 
 async function getUserEmail(userId: string): Promise<string> {
   const db = getDb();
@@ -157,7 +190,13 @@ export async function buildNestIndex(
       let document_count: number | null = null;
       try {
         const { storage } = await engineCache.get(n.id);
-        document_count = (await storage.discoverDocuments()).length;
+        // Excludes the derived `— Annotations` projections, like every
+        // listing does: this number is what an agent is told a nest holds
+        // before it decides what to read, so it has to match what
+        // context_list will actually return.
+        document_count = (await storage.discoverDocuments()).filter(
+          (d) => !isDerivedAnnotationsNode(d.id),
+        ).length;
       } catch {
         /* count unavailable */
       }
@@ -208,111 +247,60 @@ const NEST_ARG = {
   },
 } as const;
 
+// Optional nest argument for fan-out read tools — omit to search/list across all nests
+const NEST_ARG_OPTIONAL = {
+  nest: {
+    type: "string",
+    description:
+      "Target nest — id or name. Omit to search/list across ALL accessible nests.",
+  },
+} as const;
+
 /**
- * Nest-parameterized mirrors of the per-nest tools, plus nest_index and the
- * two bootstrap writes (nest_create, context_create). Same names as the
- * per-nest tools so agent muscle memory transfers; the extra `nest` argument
- * is the only difference.
+ * Per-nest tools the server-level endpoint also serves, with a `nest` arg
+ * added. Their schemas and descriptions are the PER-NEST definitions, not
+ * copies: the hand-kept subset drifted (no `status`/`approved_only` on list,
+ * no context_versions at all) and the SDK silently strips keys a schema
+ * doesn't declare, so `ctx` could send a field that vanished while the call
+ * reported success.
  */
+const SERVER_NEST_TOOLS = [
+  // Fan-out reads — `nest` optional: omit it to span every accessible nest.
+  ...FANOUT_READ_TOOLS,
+  // Targeted reads and writes — `nest` required.
+  "context_get",
+  "context_resolve",
+  "context_comments",
+  "context_versions",
+  "context_create",
+  "context_update",
+  "context_delete",
+  "context_move",
+  "context_submit_review",
+];
+
+function withNestArg(tool: (typeof TOOL_DEFINITIONS)[number]) {
+  const fanout = FANOUT_READ_TOOLS.has(tool.name);
+  const schema = tool.inputSchema as { properties?: object; required?: string[] };
+  return {
+    name: tool.name,
+    description: fanout
+      ? `${tool.description} On this server-level endpoint, omit \`nest\` to run it across ALL accessible nests (each hit names its nest).`
+      : `${tool.description} On this server-level endpoint, \`nest\` (id, name or slug) is required.`,
+    inputSchema: {
+      ...schema,
+      properties: { ...(fanout ? NEST_ARG_OPTIONAL : NEST_ARG), ...schema.properties },
+      required: [...(fanout ? [] : ["nest"]), ...(schema.required ?? [])],
+    },
+  };
+}
+
 export const SERVER_TOOL_DEFINITIONS = [
   {
     name: "nest_index",
     description:
-      "Grounded index of every nest these credentials can read: name, id, permission, document count. Call this FIRST, then target a nest with the other tools.",
+      "Grounded index of every nest these credentials can read: name, id, permission, document count. Call this FIRST.",
     inputSchema: { type: "object" as const, properties: {} },
-  },
-  {
-    name: "context_query",
-    description:
-      "Run a structured selector query against one nest. Selector grammar: #tag, type:X, [[Title]], scope:X, combined with +AND, |OR, -NOT.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        ...NEST_ARG,
-        query: { type: "string", description: "Selector query" },
-        hops: {
-          type: "number",
-          description: "Graph traversal depth from the matches (default: 2)",
-        },
-      },
-      required: ["nest", "query"],
-    },
-  },
-  {
-    name: "context_search",
-    description:
-      "Full-text keyword search across one nest — the same index-backed match as REST GET /search. Returns `count` (everything found) and the first `limit` hits.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        ...NEST_ARG,
-        query: { type: "string", description: "Search terms" },
-        limit: {
-          type: "number",
-          description: "Max hits to return (default 20, max 200)",
-        },
-      },
-      required: ["nest", "query"],
-    },
-  },
-  {
-    name: "context_get",
-    description: "Get the FULL content of a node in a nest by title or id.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        ...NEST_ARG,
-        title: { type: "string", description: "Title of the node" },
-        id: { type: "string", description: "ID of the node" },
-      },
-      required: ["nest"],
-    },
-  },
-  {
-    name: "context_list",
-    description:
-      "Browse one nest's contents with optional type, tag, or limit filters.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        ...NEST_ARG,
-        type: { type: "string", description: "Filter by node type" },
-        tag: { type: "string", description: "Filter by tag" },
-        limit: { type: "number", description: "Max nodes to return" },
-      },
-      required: ["nest"],
-    },
-  },
-  {
-    name: "context_overview",
-    description:
-      "Map of one nest: node count, types, tags, title+snippet per node.",
-    inputSchema: {
-      type: "object" as const,
-      properties: { ...NEST_ARG },
-      required: ["nest"],
-    },
-  },
-  {
-    name: "context_resolve",
-    description:
-      "Full deterministic context resolution against one nest — selector + hops + token budget, complete node bodies.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        ...NEST_ARG,
-        selector: { type: "string", description: "Selector query string" },
-        max_tokens: {
-          type: "number",
-          description: "Approximate token budget (default: 8000)",
-        },
-        hops: {
-          type: "number",
-          description: "Graph traversal depth from the matches (default: 2)",
-        },
-      },
-      required: ["nest", "selector"],
-    },
   },
   {
     name: "nest_create",
@@ -327,28 +315,11 @@ export const SERVER_TOOL_DEFINITIONS = [
       required: ["name"],
     },
   },
-  {
-    name: "context_create",
-    description:
-      "Create a new knowledge node (document) in a nest. Needs write permission on that nest. A `folder` path creates the folder implicitly — folders exist through the nodes placed in them.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        ...NEST_ARG,
-        title: { type: "string", description: "Descriptive title" },
-        content: { type: "string", description: "Markdown content body" },
-        type: { type: "string", description: "Node type (default: document)" },
-        tags: { type: "array", items: { type: "string" }, description: "Tags" },
-        scope: { type: "string", description: "Visibility scope" },
-        folder: {
-          type: "string",
-          description:
-            'Folder path under nodes/ (e.g. "gtm/deals"); segments are slugified',
-        },
-      },
-      required: ["nest", "title", "content"],
-    },
-  },
+  ...SERVER_NEST_TOOLS.map((name) => {
+    const tool = TOOL_DEFINITIONS.find((t) => t.name === name);
+    if (!tool) throw new Error(`server-level tool ${name} has no per-nest definition`);
+    return withNestArg(tool);
+  }),
 ];
 
 async function handleServerToolCall(
@@ -360,16 +331,17 @@ async function handleServerToolCall(
   baseUrl: string,
   apiKeyId: string | null,
   apiKeyLabel: string | null,
+  client?: ClientMetadata,
 ): Promise<ToolResult> {
   if (toolName === "nest_index") {
     const nests = await buildNestIndex(userId, nestScope);
-    if (!nests.length) return "No nests accessible with these credentials.";
-    return renderNestIndexMarkdown(nests, baseUrl);
+    // `data` is what `ctx vault list` reads to list each nest as `<alias>/<nest>`.
+    const data = { nests };
+    if (!nests.length) return { text: "No nests accessible with these credentials.", data };
+    return { text: renderNestIndexMarkdown(nests, baseUrl), data };
   }
 
-  // Kill-switch + license gate for the bootstrap writes — parity with the
-  // per-nest write path (app.ts nest access guard). Without this, a suspended
-  // or unlicensed server would still accept nest_create / context_create here.
+  // Kill-switch + license gate for writes — parity with per-nest write path.
   if (SERVER_WRITE_TOOLS.has(toolName)) {
     if (isSuspended()) {
       const reason = getSuspensionReason();
@@ -383,8 +355,6 @@ async function handleServerToolCall(
   }
 
   if (toolName === "nest_create") {
-    // A nest-scoped key is confined to its one nest — minting new nests
-    // would exceed the scope the key was issued for.
     if (nestScope) {
       return "This credential is scoped to a single nest and cannot create new ones.";
     }
@@ -396,22 +366,130 @@ async function handleServerToolCall(
       );
       return `Created nest "${nest.name}" (id: ${nest.id}). Add documents with context_create, retrieve with the other tools.`;
     } catch (err) {
-      if (err instanceof ValidationError) return err.message;
+      if (err instanceof ValidationError || err instanceof ForbiddenError) return err.message;
       throw err;
     }
   }
 
+  // ─── Fan-out reads when nest is omitted ────────────────────────────────
+  // For search/list/query/overview: run across ALL accessible nests and combine.
+  const nestArg = args.nest;
+  if (!nestArg && FANOUT_READ_TOOLS.has(toolName)) {
+    const nests = await buildNestIndex(userId, nestScope);
+    if (!nests.length) return "No nests accessible with these credentials.";
+
+    // Filter to nests with content (skip empty nests for fan-out)
+    const nonEmpty = nests.filter((n) => (n.document_count ?? 0) > 0);
+
+    // Run tool against each nest in parallel, combine results
+    const results = await Promise.allSettled(
+      nonEmpty.map(async (n) => {
+        const engine = await engineCache.get(n.id);
+        const result = await handleToolCall(toolName, args, {
+          storage: engine.storage,
+          queryEngine: engine.query,
+          versionManager: engine.versions,
+          nestId: n.id,
+          userId,
+          userEmail,
+          baseUrl,
+          // Same attribution the single-nest branch below passes (§9.4). A
+          // fan-out read is still one call per nest on the trace, and each row
+          // has to name the caller — without this the derived agent/session is
+          // dropped and only an explicit `client` in the args survives.
+          client,
+        });
+        return { nest: n, result };
+      }),
+    );
+
+    // Prose for chat clients (one section per nest); `data` for `ctx`, the
+    // per-nest payloads merged with every hit naming the nest it came from.
+    // Failed or erroring nests are skipped (best-effort, like nest_index) —
+    // unless EVERY nest errored: that is the caller's input (a malformed
+    // selector, say), not an empty result, so surface the error.
+    const parts: string[] = [];
+    let firstError: ToolResult | undefined;
+    let firstRejection: PromiseRejectedResult | undefined;
+    const tag = (n: IndexedNest, items: unknown) =>
+      Array.isArray(items) ? items.map((it) => ({ ...it, nest: { id: n.id, name: n.name } })) : [];
+    // Per-nest lists, merged below — kept apart so no nest can crowd out the rest.
+    const perNestDocs: unknown[][] = [];
+    const perNestHits: unknown[][] = [];
+    let count = 0;
+    let nodesTraversed = 0;
+    let hopsUsed = 0;
+    let mode: string | undefined;
+    for (const r of results) {
+      if (r.status !== "fulfilled") {
+        firstRejection ??= r;
+        continue;
+      }
+      const { nest: n, result } = r.value;
+      if (typeof result !== "string" && result.isError) {
+        firstError ??= result;
+        continue;
+      }
+      parts.push(`## ${n.name} (${n.id})\n\n${typeof result === "string" ? result : result.text}`);
+      const d = (typeof result === "string" ? undefined : result.data) as any;
+      if (!d) continue;
+      perNestDocs.push(tag(n, d.documents));
+      perNestHits.push(tag(n, d.results));
+      count += d.count ?? 0;
+      nodesTraversed += d.traversal?.nodes_traversed ?? 0;
+      hopsUsed = Math.max(hopsUsed, d.traversal?.hops_used ?? 0);
+      mode ??= d.traversal?.mode;
+    }
+    // Round-robin: each nest's first hit, then each nest's second, … Search
+    // carries no relevance score to rank by across nests (per nest it is a
+    // term-containment filter, title matches first), and a nest-by-nest concat
+    // cut at `limit` would let the first nests fill every slot.
+    const interleave = (lists: unknown[][]) => {
+      const out: unknown[] = [];
+      for (let i = 0; lists.some((l) => i < l.length); i++) {
+        for (const l of lists) if (i < l.length) out.push(l[i]);
+      }
+      return out;
+    };
+    if (!parts.length && firstError) return firstError;
+    // Same as a single-nest call that threw.
+    if (!parts.length && firstRejection) throw firstRejection.reason;
+    const documents = interleave(perNestDocs);
+    // The caps one nest applies, over the merged set (search 20, max 200;
+    // list 50) — otherwise N nests hand back N pages.
+    const listLimit =
+      typeof args.limit === "number" && args.limit >= 1 ? Math.floor(args.limit) : 50;
+    const data =
+      toolName === "context_search"
+        ? { results: interleave(perNestHits).slice(0, normalizeSearchLimit(args.limit)), count }
+        : toolName === "context_query"
+          ? { documents, traversal: { mode: mode ?? "selector", hops_used: hopsUsed, nodes_traversed: nodesTraversed } }
+          : { documents: documents.slice(0, listLimit) };
+
+    // Overview is prose only — an empty `documents` would read as an empty vault.
+    const reply = (text: string): ToolResult =>
+      toolName === "context_overview" ? text : { text, data };
+    if (!nonEmpty.length) {
+      return reply("All accessible nests are empty. Use context_create to add documents first.");
+    }
+    if (!parts.length) return reply("No results found across any accessible nests.");
+    return reply(parts.join("\n\n---\n\n"));
+  }
+
+  // ─── Single-nest operations (nest required) ────────────────────────────
   // One indistinguishable message for "doesn't exist", "out of key scope",
-  // and "no read grant" — otherwise the tool becomes an existence oracle
-  // for other users' private nests (probe by name, compare messages).
-  const inaccessible = `Nest not found or not accessible: "${args.nest}". Use nest_index to see what these credentials can read.`;
-  const nest = await resolveNestRef(String(args.nest ?? ""), userId);
+  // and "no read grant" — no existence oracle.
+  const inaccessible = `Nest not found or not accessible: "${nestArg}". Use nest_index to see what these credentials can read.`;
+
+  if (!nestArg) {
+    // Fan-out not supported for this tool — nest is required
+    return "This tool requires a `nest` argument. Use nest_index to see available nests.";
+  }
+
+  const nest = await resolveNestRef(String(nestArg), userId);
   if (!nest) return inaccessible;
   if (nestScope && nest.id !== nestScope) return inaccessible;
   if (!(await canRead(nest.id, userId))) return inaccessible;
-  // context_create needs no extra gate here: handleToolCall's own
-  // stewardship.canCreateInNest check is the canonical write gate (the
-  // per-nest endpoint relies on the same one).
 
   const engine = await engineCache.get(nest.id);
   return handleToolCall(toolName, args, {
@@ -424,6 +502,7 @@ async function handleServerToolCall(
     baseUrl,
     apiKeyId,
     apiKeyLabel,
+    client,
   });
 }
 
@@ -434,6 +513,7 @@ function createServerMcp(
   baseUrl: string,
   apiKeyId: string | null,
   apiKeyLabel: string | null,
+  c: Context<AuthEnv>,
 ): McpServer {
   const server = new McpServer(
     { name: "contextnest-server", version: "1.0.0" },
@@ -453,7 +533,12 @@ function createServerMcp(
       if (!required.includes(key)) field = field.optional();
       shape[key] = field;
     }
+    // Same §9.4 field the per-nest surface advertises.
+    Object.assign(shape, clientToolField);
     server.tool(tool.name, tool.description, shape, async (args) => {
+      // See mcp/routes.ts: resolved per call, because the handshake that
+      // reports `clientInfo` completes inside the transport.
+      // Its stash on the request is inert here too — see mcp/routes.ts.
       const out = await handleServerToolCall(
         tool.name,
         args,
@@ -463,6 +548,7 @@ function createServerMcp(
         baseUrl,
         apiKeyId,
         apiKeyLabel,
+        attributeRequest(c, undefined, connectionClient(server)),
       );
       return toCallToolResult(out);
     });
@@ -484,6 +570,7 @@ serverMcpRoutes.all("/", async (c) => {
     requestBaseUrl(c.req.url),
     c.get("apiKeyId") ?? null,
     c.get("apiKeyLabel") ?? null,
+    c,
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({
@@ -583,26 +670,61 @@ Other read endpoints (all under \`${B}/nests/<nest-id>\`):
 - \`GET /nodes/<node-id>?format=raw\` — direct consumption path: the node BODY as plain text (no JSON envelope; add \`&frontmatter=1\` for the stored YAML block)
 - \`GET /export?format=markdown\` — whole nest as one markdown file (optional \`selector\`, \`max_tokens\`)
 - \`GET /graph\` — ontology graph (nodes, links, tags, stewards)
+- \`GET /folders\` — folder tree; \`GET /nodes?folder=<path>\` — one folder level
+- \`POST /table-query\` — exact rows from a table node: \`{ "table": "[[Title]]", "query": "where <col> <op> <value> [select cols] [limit N]" }\`
+- \`GET /nodes/<node-id>/versions\` — history (who, when, approval state); \`/versions/<n>\` — one version
+- \`GET /nodes/<node-id>/comments\` — review threads (anchored quotes, replies, open/resolved)
 
 Write endpoints (need write permission):
 - \`POST /nodes\` — \`{ "title", "content", "tags"?, "type"?, "folder"? }\`
 - \`PATCH /nodes/<node-id>\` — \`{ "content"? , "append"?, "tags"?, "title"? }\`
-- \`DELETE /nodes/<node-id>\`
-- Governance: \`POST /nodes/<id>/submit-review\`, \`/approve\`, \`/reject\`
+- \`DELETE /nodes/<node-id>\`; \`POST /nodes/<id>/request-deletion\` when you lack delete rights
+- \`POST /nodes/<id>/move\` — \`{ "folder" }\`; history and comments follow
+- \`POST /nodes/<id>/revert\` — \`{ "targetVersion" }\` restores a past version as a new one
+- \`POST /nodes/<id>/comments\` — leave or reply to a review comment
+- Governance: \`POST /nodes/<id>/submit-review\`, \`/approve\`, \`/reject\`, \`/cancel-review\`
+- \`GET /review-queue\` — what is waiting on a steward in this nest
+
+## Your inbox (server-level)
+
+- \`GET ${B}/me/work\` — reviews waiting on you and handoffs, across every nest
+- \`GET ${B}/me/drafts\` — your documents never submitted for review
+- \`GET ${B}/me/notifications\` — watcher and review notifications
+
+## Say who you are: \`client\`
+
+Every write body and every MCP tool call takes an optional
+\`client\` object — \`{ "agent": "claude-code", "session_id": "s-9f2" }\`, plus any
+custom scalar keys. A write that seals a version records it on that version
+(\`GET /nodes/<id>/versions\` and \`context_versions\` serve it back); every call
+records it on this server's activity trace, which is how a READ gets attributed.
+
+Send it. Nothing requires it and no call is refused for omitting it, but a vault
+serving several agents cannot otherwise tell which of you wrote what. It is a
+label, never an identity claim: it is not authenticated, grants nothing, and is
+never part of a hash. Bounded — scalar values up to 512 chars, at most 16 custom
+keys beyond \`agent\` and \`session_id\`.
 
 ## MCP (Model Context Protocol)
 
 Streamable HTTP, stateless. Two endpoints:
 
-- \`${B}/mcp\` — server-level, one connection for everything readable.
-  Tools: \`nest_index\` (call first), then \`context_query\`, \`context_search\`,
-  \`context_get\`, \`context_list\`, \`context_overview\`, \`context_resolve\` —
-  each takes a \`nest\` argument (id or exact name) plus the same
-  selector/hops/max_tokens parameters as the REST API. Two bootstrap writes:
-  \`nest_create\` (new nest owned by the caller) and \`context_create\`
-  (new document in a writable nest; a \`folder\` path creates the folder).
-- \`${B}/nests/<nest-id>/mcp\` — per-nest, full toolset including writes and
-  governance (create/update, submit/approve/reject, stewards, sharing).
+- \`${B}/mcp\` — server-level, one connection for everything.
+  Tools: \`nest_index\` (call first), then:
+  - Fan-out reads (omit \`nest\` to search/list ALL nests): \`context_search\`,
+    \`context_list\`, \`context_query\`, \`context_overview\`
+  - Targeted reads (\`nest\` required): \`context_get\`, \`context_resolve\`, \`context_comments\`, \`context_versions\`
+  - Writes (\`nest\` required): \`nest_create\`, \`context_create\`, \`context_update\`,
+    \`context_delete\`, \`context_move\`, \`context_submit_review\`
+- \`${B}/nests/<nest-id>/mcp\` — per-nest, the full toolset. Same names as the
+  server-level tools without the \`nest\` argument, plus:
+  - read: \`context_init\` (operating instructions — call first), \`context_export\`, \`context_table_query\`, \`context_versions\`
+  - write: \`context_update\`, \`context_delete\`, \`context_move\`, \`context_request_deletion\`
+  - review: \`context_submit_review\`, \`context_approve\`, \`context_reject\`, \`context_review_queue\`, \`context_my_drafts\`
+  - comments: \`context_comment\`, \`context_resolve_comment\`
+  - people: \`context_stewards\`, \`context_assign_steward\`, \`context_share_nest\`, \`context_grant\`
+  - admin: \`context_deletion_queue\`, \`context_resolve_deletion\`, \`context_unsynced_list\`, \`context_sync_folder\`
+  - \`workflow_*\` (runs, edges, edge types) when the nest's workflow plane is on
   Sharing a slice is one call: \`context_grant\` with
   \`{ "email", "target_type": "document" | "folder", "target", "role": "read" | "write" }\`
   — \`target\` is a node id (\`nodes/win-loss-log\`) or a folder prefix
@@ -628,9 +750,11 @@ on the command line.
 export CONTEXTNEST_API_KEY=<api-key>
 # every nest these credentials can read, through the server-level endpoint
 ctx vault add contextnest --url ${B}/mcp --bearer-env CONTEXTNEST_API_KEY
-# or one nest
+ctx vault list                                  # lists contextnest/<nest> for each nest
+ctx search "pricing" --vault contextnest        # reads span every nest
+ctx update nodes/x --tags a,b --vault contextnest/<nest>   # a write names one nest
+# or pin one nest by its own endpoint
 ctx vault add mynest --url ${B}/nests/<nest-id>/mcp --bearer-env CONTEXTNEST_API_KEY
-ctx query "#gtm" --vault mynest
 \`\`\`
 
 Servers in "open" auth mode: drop \`--bearer-env\`. Pushing a local folder up

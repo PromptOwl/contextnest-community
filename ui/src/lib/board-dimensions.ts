@@ -62,10 +62,13 @@ export interface BoardConfig {
   tagNamespace?: string;
   /** Optional explicit column ordering; unknown-but-present keys append after. */
   columnOrder?: string[];
-  /** When true (the tag board), `columnOrder` is the EXHAUSTIVE column set:
-   *  only listed columns show, tags never promoted to a column don't appear,
-   *  and there is no Uncategorized catch-all. Folder/status leave this off and
-   *  keep auto-populating every present column. */
+  /** When true, `columnOrder` is the EXHAUSTIVE column set: only listed
+   *  columns show, tags never promoted to a column don't appear, and there is
+   *  no Uncategorized catch-all. A fresh tag board (no saved `columnOrder`
+   *  yet) leaves this off so every present tag auto-populates, same as
+   *  folder/status — it flips on the first time the user curates the board
+   *  (adds, removes, or reorders a column, all of which save `columnOrder`).
+   *  Folder/status never set this: they always auto-populate. */
   explicitColumns?: boolean;
   /** Columns to hide. A card whose only column(s) are hidden falls into
    *  UNCATEGORIZED; a multi-tag card keeps any still-shown column. */
@@ -74,10 +77,40 @@ export interface BoardConfig {
 
 export interface BoardColumn {
   key: string;
-  /** Heading text. For folder columns, just the folder's own name. */
+  /** Heading text. For folder columns, the full folder path, shortened from
+   *  the front (see `folderColumnLabel`) so a deep path still shows its leaf
+   *  segment — a shortened leaf-only label loses hierarchy and can't tell
+   *  "a/notes" from "b/notes" apart, but the CSS `truncate` the header uses
+   *  elides from the END, which for an untouched long path hides the leaf —
+   *  the one segment that actually names the folder. `title` carries the full,
+   *  unshortened text. */
   label: string;
-  /** Full, untrimmed name for the tooltip, since `label` may be shortened. */
+  /** Full, untrimmed name for the tooltip. Same as `label` for folder columns. */
   title: string;
+}
+
+/**
+ * Shortens a folder path for display, dropping segments from the front (the
+ * end closest to the root) until it fits within `maxChars`, so the leaf
+ * segment — the folder's actual name, and the last thing a browser's
+ * end-eliding `truncate` would clip — is always the part kept. The leaf is
+ * kept even if it alone exceeds `maxChars`; the header's own `truncate`
+ * handles that remaining overflow, clipping from a point that still shows the
+ * leaf's start rather than the path's root.
+ *
+ * `maxChars` defaults to roughly what fits in the board's column header
+ * (w-64, see MaturityBoard.tsx) before the browser starts eliding anyway.
+ */
+export function folderColumnLabel(path: string, maxChars = 28): string {
+  if (path.length <= maxChars) return path;
+  const segments = path.split("/");
+  for (let i = 1; i < segments.length; i++) {
+    const candidate = `…/${segments.slice(i).join("/")}`;
+    if (candidate.length <= maxChars || i === segments.length - 1) {
+      return candidate;
+    }
+  }
+  return path;
 }
 
 /**
@@ -188,9 +221,13 @@ export function resolveConfig(s: BoardSettings): BoardConfig {
       layout.columnOrder ??
       (s.dimension === "status" ? STATUS_ORDER : undefined),
     hiddenColumns: layout.hiddenColumns,
-    // The tag board is user-curated: start empty, show only added columns.
-    // Folder and status keep auto-populating every present column.
-    explicitColumns: s.dimension === "tag",
+    // The tag board is user-curatable, but starts auto-populated: every
+    // present tag is a column, exactly like folder/status, until the user
+    // touches the layout (add/remove/reorder) — that's the first time
+    // `columnOrder` is saved, and from then on it's the EXHAUSTIVE set (see
+    // the field doc above). A nest with many tags would otherwise render
+    // zero columns until each one is typed in by hand.
+    explicitColumns: s.dimension === "tag" && layout.columnOrder !== undefined,
   };
 }
 
@@ -252,47 +289,6 @@ function shownKeys(
   return keys.length > 0 ? keys : [UNCATEGORIZED];
 }
 
-/**
- * Folder headings: the folder's own name, and only as much of its parent path
- * as it takes to be unique.
- *
- * The full path is useless as a heading — an imported vault puts every folder
- * under one long root, so the headings all truncate to the same elided prefix.
- * The last segment alone is readable but collides (`content/social` and
- * `content/published/social` both read "social"), so colliding labels grow one
- * parent segment at a time until they separate: "content/social" vs
- * "published/social". Columns that were already unique keep their short name.
- */
-function disambiguateFolderLabels(keys: string[]): Map<string, string> {
-  const segments = new Map(keys.map((k) => [k, k.split("/")]));
-  const depth = new Map(keys.map((k) => [k, 1]));
-  const labelOf = (k: string) => segments.get(k)!.slice(-depth.get(k)!).join("/");
-
-  for (;;) {
-    const byLabel = new Map<string, string[]>();
-    for (const k of keys) {
-      const label = labelOf(k);
-      const group = byLabel.get(label);
-      if (group) group.push(k);
-      else byLabel.set(label, [k]);
-    }
-    // Deepen only the colliding ones. Terminates: each pass either deepens a
-    // key (bounded by its segment count) or changes nothing and stops.
-    let deepened = false;
-    for (const group of byLabel.values()) {
-      if (group.length < 2) continue;
-      for (const k of group) {
-        if (depth.get(k)! < segments.get(k)!.length) {
-          depth.set(k, depth.get(k)! + 1);
-          deepened = true;
-        }
-      }
-    }
-    if (!deepened) break;
-  }
-  return new Map(keys.map((k) => [k, labelOf(k)]));
-}
-
 function labelFor(key: string, config: BoardConfig): string {
   if (key === UNCATEGORIZED) return "Uncategorized";
   if (key === "" && config.dimension === "folder") return "(root)";
@@ -300,7 +296,19 @@ function labelFor(key: string, config: BoardConfig): string {
   // since the heading is rendered with CSS `capitalize`.
   if (config.dimension === "status")
     return STATUS_LABELS[key] ?? key.replace(/_/g, " ");
+  if (config.dimension === "folder") return folderColumnLabel(key);
   return key;
+}
+
+/**
+ * Whether the Board column header should get CSS `text-transform: capitalize`.
+ * Tag column keys/labels are the raw tag value (see `labelFor` above), the
+ * same value the card's tag chip renders uncapitalized — capitalizing only
+ * the header would make the two disagree on casing. Folder and status labels
+ * have no such chip to match, so they keep the capitalize styling.
+ */
+export function capitalizeColumnHeader(dimension: DimensionKind): boolean {
+  return dimension !== "tag";
 }
 
 function titleFor(key: string, config: BoardConfig): string {
@@ -355,15 +363,9 @@ export function buildColumns(
   const keys = [...ordered, ...rest];
   // UNCATEGORIZED always trails, regardless of columnOrder placement.
   if (needUncat) keys.push(UNCATEGORIZED);
-  const folderLabels =
-    config.dimension === "folder"
-      ? disambiguateFolderLabels(
-          keys.filter((k) => k !== UNCATEGORIZED && k !== ""),
-        )
-      : null;
   return keys.map((key) => ({
     key,
-    label: folderLabels?.get(key) ?? labelFor(key, config),
+    label: labelFor(key, config),
     title: titleFor(key, config),
   }));
 }

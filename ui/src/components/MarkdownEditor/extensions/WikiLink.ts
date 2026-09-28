@@ -4,7 +4,15 @@ import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
 export interface WikiLinkOptions {
-  onWikiLinkClick?: (title: string, id: string | null) => void;
+  /** `title` is the link's raw target (its internal node id for aliased
+   *  links, e.g. `nodes/<id>`). `displayText` is the human-readable alias
+   *  shown to the reader — pass it through so a broken link's create/blocked
+   *  fallback can use the readable title instead of the internal id. */
+  onWikiLinkClick?: (
+    title: string,
+    id: string | null,
+    displayText?: string | null,
+  ) => void;
   /**
    * Resolve a title to a document id so the decoration can advertise
    * whether the link is broken (purple/italic) or live (blue/solid).
@@ -223,8 +231,9 @@ export const WikiLink = Extension.create<WikiLinkOptions>({
             if (!target.classList.contains("wiki-link")) return false;
             const title = target.getAttribute("data-wiki-title");
             const id = target.getAttribute("data-wiki-id") || null;
+            const displayText = target.getAttribute("data-wiki-display");
             if (title && onWikiLinkClick) {
-              onWikiLinkClick(title, id);
+              onWikiLinkClick(title, id, displayText);
               return true;
             }
             return false;

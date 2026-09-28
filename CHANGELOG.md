@@ -1,5 +1,636 @@
 # @promptowl/contextnest-community
 
+## 1.26.0
+
+### Minor Changes
+
+- 1de7850: Email can now be sent through AWS SES as well as SMTP. Server settings → Notifications → Email has an SMTP / AWS SES choice; SES takes a region and optional access keys (leave them empty to use the server's IAM role). Credentials are verified on save, the SES secret is write-only, and saving one provider clears the other's settings. New settings: `EMAIL_PROVIDER`, `SES_REGION`, `SES_ACCESS_KEY_ID`, `SES_SECRET_ACCESS_KEY`. `GET /admin/settings` now also returns `email_provider`, `ses_region`, `ses_access_key_id` and `ses_secret_access_key_set`.
+- 1c96bd9: Only server admins can create nests by default. New `NEST_CREATION` setting (`admins` default, or `everyone`) gates `POST /nests`, folder import and the MCP `nest_create` tool with a `403` for anyone else, and `GET /health` reports it as `nest_creation`. Non-admins no longer see New Nest, Import Folder or Create First Nest; with no nests they see "You don't have access to any nests yet. Ask [admin] to share one." Set `NEST_CREATION=everyone`, or turn on Settings → General → Nest creation, to keep the old behaviour.
+- 61d583c: Nest-scoped API keys are now isolated to their nest. A key minted with `nest_id` could previously mint itself an unscoped whole-account key (`POST /auth/keys`), rotate itself to user-level, delete other nests, search and list every nest, and — owned by an admin — reach `/admin/*` and teammate management. A new app-wide guard makes a nest key deny-by-default outside its nest: it reaches its own nest, `/mcp` and `/index` (filtered), and `GET /nests` / `/search` / `/stats` narrowed to its nest; everything else answers `403` with `code: "nest_scoped_key"`. Minting or rotating a key onto a nest now requires access to that nest (`404` otherwise), and key responses report `nest_id`. In the app, the API keys page shows each key's scope ("All your nests" / "Nest: <name>") and has a scope picker, and a nest's Connect dialog can mint a key for that nest only, shown with the nest's MCP URL. Sessions and user-level keys are unchanged.
+- c8d328e: The Nests page shows a Pending invites card for nests shared with you that you haven't acted on yet. Accept opens the nest; Decline removes your own access to it. New endpoint `POST /me/nests/:nestId/leave` drops the caller's own collaborator row and settles the invite (`left: false` when the access came through a team or ownership).
+- e214fe8: Per-nest branding for public reader sites.
+
+  A nest owner or admin can now brand what readers see — the reader-mode docs site
+  and the nest's `/p` published links: a **logo**, a **banner** (image and/or
+  headline + subtext, shown on the home page), an **accent color** (links, the
+  current page, buttons), a **header background color**, an optional **page tint**,
+  a **site title**, **footer text + link**, and an optional **favicon**. Open it
+  from the nest's **Reader** button → **Branding → Customize**; the dialog has a
+  live preview.
+
+  Colors are strict `#rgb` / `#rrggbb` and applied as CSS custom properties. Text
+  on any color is picked automatically (black or white, whichever meets WCAG AA
+  4.5:1), and the accent used as link text is deepened until it reads at 4.5:1 on
+  the page. Images are uploaded nest assets (PNG/JPG/GIF/WebP — SVG stays
+  excluded) or `https://` image links.
+
+  On `/p` the CSP is unchanged: uploaded images are inlined as `data:` images
+  (already allowed); external https images are not shown there. HTML/artifact
+  publishes are the author's own page and are not wrapped.
+
+  `PATCH /nests/:id/branding` (owner / nest admin / server admin) replaces the
+  branding; `null` or `{}` resets it. Hiding "Powered by ContextNest" / "Secured by
+  PromptOwl" is server-admin only. `GET /nests/:id` returns the parsed
+  `nest.branding` (null when unbranded). Nests with no branding render exactly as
+  before; the server-wide `LOGO_URL` still brands the app shell and is the logo
+  fallback for a branded reader.
+
+### Patch Changes
+
+- ae96a3c: Ask for confirmation before rotating an API key. Rotate on the API keys page
+  and in the Connect dialog now opens a confirmation dialog that names the key
+  and warns that the current key
+  stops working immediately, instead of rotating on the first click.
+  Revoke on the API keys page uses the same in-app confirmation dialog instead
+  of the browser's native confirm popup.
+- 770c138: Fix Board's "Columns by: Folder" labeling nested folders with only their leaf
+  segment.
+
+  A folder column's label shortened to its own name unless it collided with
+  another folder of the same leaf name — so `no/such/folder` showed as just
+  `folder`, dropping the hierarchy, and only actual leaf-name collisions ever
+  grew back a distinguishing prefix. Folder column labels now always show the
+  full folder path, matching the tooltip.
+
+- 8fd23cf: Fix Board "Columns by: Folder" labels hiding the actual folder name for deeply nested paths.
+
+  Showing the folder column's full path (see previous fix) solved ambiguous
+  same-leaf-name folders, but for a path many subfolders deep the header's CSS
+  truncation elides from the end — hiding the leaf, the one segment that
+  actually names the folder, behind the ellipsis. Folder column labels now
+  shorten from the front instead: a long path shows `…/parent/folder` rather
+  than `folder-name-that-gets-cu…`, so the leaf stays visible while the
+  tooltip and drag/drop key still carry the untouched full path.
+
+- 5e39dbf: Fix the header breadcrumb overflowing the page for a nest with a very long,
+  space-less name.
+
+  A crumb's label only truncates once it's allowed to shrink below its text's
+  own width — as a flex item it wasn't, so an unbreakable name rendered at
+  full width, pushing the page past the viewport and leaving a horizontal
+  scrollbar with blank space past the (now too-narrow) header divider. Crumb
+  labels now shrink and ellipsize instead.
+
+- 98bfe37: Fix removing a collaborator showing a native browser confirmation popup instead of the app's styled dialog.
+
+  The native `window.confirm()` popup also displayed the deployment's internal
+  Cloud Run URL in its header. Removing a collaborator now opens the same
+  styled `AlertDialog` used elsewhere in the app; the remove action itself was
+  unaffected.
+
+- f893b4e: Show a success toast after removing a collaborator's access, so the admin
+  gets confirmation the removal went through instead of the row just
+  disappearing silently.
+- 0553113: Warn about inbound links before deleting a document. Both delete
+  confirmations (the editor menu and the Documents tab) now say how many
+  documents link to this one, e.g. "1 document links to this — deleting it
+  will break that link."
+- d7298a9: Show the document creator's display name instead of their email in the
+  document metadata ("Created by"). The email moves to the hover tooltip and is
+  still shown when the person has no display name.
+- e4ef5fd: Show a success toast after saving edits to an existing document. The save
+  navigates back to the nest before the editor's "Saved" hint could be seen, so
+  there was no confirmation the changes were stored. A save with no changes
+  keeps its existing "no changes" message.
+- 2822fcf: Show the document's "Created by" and "Collaborators" metadata on separate
+  lines instead of one wrapping row joined by a dot.
+- 691db10: Fix saving an existing document navigating to the Nest Overview page while
+  the address bar kept the document's `?doc=<id>` URL.
+
+  Clicking **Save** on an existing document reused the same "go back to the
+  nest" continuation as creating a brand-new one, so every save moved the app
+  view to Overview without touching the URL — leaving the breadcrumb and page
+  out of sync with `?doc=<id>` until a reload reopened the editor. Saving an
+  existing document now leaves the editor open on that document; only creating
+  a new document still returns to the nest.
+
+- 2934ae3: Fix dragging an unsupported file (SVG, PDF, .txt, ...) into the document editor: the "Drop to add an image or video" overlay is now skipped when the browser's drag-over MIME type identifies the file as unsupported, and dropping one now shows a toast naming the file and the accepted types instead of silently doing nothing.
+
+  The drop overlay only checked whether the drag carried files at all, not
+  whether any of them were an accepted image/video type, and `handleDrop`
+  returned early for a rejected file without any feedback — worse, without
+  calling `preventDefault()`, letting the browser fall back to navigating the
+  tab to the dropped file.
+
+- cef9513: Make deleting a folder clear, including empty ones. An empty folder now
+  shows its delete action without a hover, the confirmation and toast no longer
+  talk about deleting "0 documents", and an editor's deletion request on an
+  empty folder is accepted instead of failing with "Folder not found".
+- 8d305f0: The Teammate added window now says when the temporary password was already emailed, instead of always asking the admin to pass it on by hand. When PromptOwl sign-in is open to everyone, both that window and the invite email mention Sign in with PromptOwl using a PromptOwl account under the same email. `POST /auth/invite` returns two new fields, `emailed` and `promptowl_sign_in`. The same window warns "This person has no nests yet. Share one?" with a nest picker, so a new teammate doesn't land on an empty server.
+- f472c4f: Invited users get a guided sign-in. Invite emails, and share emails to someone who hasn't signed in yet, link to the login page with `?invite=<email>`: the email is prefilled, a banner explains how to get in, the PromptOwl button reads "Continue with PromptOwl" and passes the invited email on to PromptOwl. Signing in with a PromptOwl account under a different email warns that nests shared with the invited address won't show. A failed password login explains the invite options instead of a bare "Invalid credentials", and the self-registration errors no longer point at a "Set your password" option that doesn't exist.
+- 245ca28: Anyone added on someone else's behalf now gets a way to sign in. Sharing a nest, a document or a folder with a new email, adding them to a team, or assigning them as a steward (in the app or over MCP) creates their account with a real temporary password and emails it to them with a sign-in link — the same email a Teammates invite sends. Previously only the Teammates invite did this; the other paths created an account nobody could sign in to until an admin reset its password.
+- 7be9b34: A single answer from PromptOwl's licensing service can no longer unlicense a working server.
+
+  **Suspension now goes through the two-strike window it was designed for.** PromptOwl answers a suspended key with `valid: false` plus `suspended: true`. The server returned that `valid: false` as-is, so the license went invalid on the first strike. The 60s safety poll then saw valid → invalid and ran the full revocation, which logged every user out and deleted the stored key. The 1-hour confirmation window never got to run. A suspension flag now keeps the cached license: nothing changes during the window, and once the suspension is confirmed writes return 503 while reads keep working. A suspension never wipes sessions or deletes the key.
+
+  **An explicit rejection is acted on only after three in a row.** Previously the first `valid: false` cleared the cache and dropped the server to unlicensed with no grace: every non-GET returned 503, including MCP. That was stricter than the treatment of an unreachable licensing service. Now a previously valid key keeps serving until PromptOwl rejects it three consecutive times (about 3 minutes at the 60s poll), and any valid answer resets the count. Installing a key (`POST /license/install`) still fails immediately when PromptOwl rejects it. CU-wdqcq01kh5.
+
+- 274bea0: Fix inline text in angle brackets (e.g. `Array<string>`) being silently dropped when switching to the Rich editor, and in the read-only Preview.
+
+  CommonMark treats any `<word>` as a raw HTML tag, not just real markup. Once
+  parsed that way, an unrecognized tag name like `string` has no separate text
+  of its own to fall back to, so the Rich editor's ProseMirror parser dropped
+  it entirely and the read-only Preview's HTML-stripping erased it outright —
+  in both cases permanently, since saving and reopening re-parsed the already
+  corrupted text. Both pipelines now only treat a small allow-list of real HTML
+  tags (the ones this app actually round-trips, like the color-mark `<span>`)
+  as markup; anything else renders as the literal text it is.
+
+- 04957b4: Fix the My Work sidebar badge overcounting relative to what the My Work page
+  actually shows.
+
+  `GET /me/work`'s `pagination.total` was the raw `getReviewQueue` count: every
+  pending review in every nest the caller can _see_, regardless of who
+  requested it or whether the caller can approve it. But `items`/`waiting`
+  only ever surface a review that is the caller's own request or one they can
+  actually approve — a viewer/editor's nest with someone else's pending review
+  inflated `total` without that review ever appearing in either bucket. The
+  approve-capability check was also only resolved for nests appearing in the
+  current page of results instead of every nest the caller can see, so the
+  undercount/overcount shifted depending on pagination. `pagination.total`'s
+  review portion is now computed the same way `items`/`waiting` are: pending
+  reviews in nests the caller can approve, plus the caller's own pending
+  reviews elsewhere.
+
+- ecaeb3f: Fix the My Work sidebar badge undercounting when a pending deletion or archive
+  request is waiting.
+
+  `GET /me/work`'s `pagination.total` came straight from the review queue's
+  count, which only tallies pending reviews. Deletion and archive requests ride
+  the same `items`/`waiting` buckets the My Work page renders, but were never
+  folded into `total` — so a pending deletion/archive flag made the sidebar
+  badge undercount by one per flag, and a hard refresh didn't fix it since the
+  server was returning the wrong number, not a stale one. `total` now includes
+  the deletion/archive rows actually shown.
+
+- b254981: Separate archive and deletion requests from reviews in My Work. Reviews now
+  list first under the "Select all N reviews" bar; requests follow under their
+  own "N requests · approve or reject each one" header, since they are decided
+  one at a time and never join the bulk action.
+- 961cb06: Fix the nest header flashing the wrong Visibility and Reader Mode state on load.
+
+  Opening a nest previously showed the **Private**/**Reader: Off** defaults for
+  a moment before the real values arrived from the initial fetch, so a public
+  nest with Reader Mode on would briefly look private with reader mode off.
+  The visibility toggle/badge and the Reader Mode button in the nest header now
+  stay hidden until the nest's first fetch resolves, instead of rendering their
+  placeholder default state.
+
+- 284f300: The nest Overview now reads like the public docs reader: the folder index on the reader's card surface with nav-style rows, the nest's description as its lede, the document / folder / governance counts as one summary line instead of a grid of stat cards, and Recently edited in a side card. An empty nest gets a proper start page (New document, Import files, Add with AI). At phone width the nest name no longer truncates to a letter, the Overview's actions fit on screen, and the app header no longer scrolls sideways.
+- 0f57363: Hide "Move to folder" for PDF documents instead of offering an action the server always rejects.
+
+  A pdf node's binary is bound to its id, so `src/nodes/service.ts`'s
+  `moveNode` refuses every PDF move with "PDF documents can't be moved to
+  another folder yet." The UI didn't know that: both the document editor's
+  overflow menu and the documents-list row menu/drag-and-drop still offered
+  Move on a PDF, walking the user through a dialog that could never succeed.
+  Move is now withheld for PDF documents in both places (shared logic in
+  `nodeTypeSupportsMove`); every other action is unaffected.
+
+- 085d858: Fix the "Add a person" field's suggestion dropdown reopening with an empty
+  query (listing every server account) after adding a collaborator by pressing
+  Enter. The list now closes as soon as Enter submits the typed address,
+  instead of staying open and re-querying once the field cleared.
+- 4fed5f4: Fix the person picker opening its full suggestion list as soon as a dialog
+  opens. The Assign Steward dialog focuses its email field on open, and the list
+  opened on any focus, covering the Scope and Role fields. It now opens on
+  click, typing or ArrowDown. Applies to the collaborator and team pickers too.
+- 6235950: Fix folder names casing inconsistently between the authoring sidebar and
+  Reader navigation.
+
+  The authoring sidebar's `prettyFolder` title-cased every hyphen/underscore
+  word (`fold-er-tab` → `Fold Er Tab`), while Reader's `humanize` only
+  capitalized the first character of the whole slug (`Fold er tab`). Reader's
+  `humanize` — used for its folder section labels and breadcrumbs — now
+  title-cases each word the same way, so the same folder reads identically in
+  both surfaces.
+
+- 83b44b0: Re-inviting an existing email from Teammates no longer issues a new temporary password. `POST /auth/invite` now returns `409` for any existing user and leaves their credentials alone: "already a member" once they've signed in, or "already invited but hasn't signed in yet — use Reset password" otherwise. Previously a not-yet-signed-in user's first password was silently replaced.
+- 93655c9: Fix a rejected Server settings save (e.g. an invalid PostHog project key)
+  showing the same error twice, as a toast and in the inline banner. The error
+  now shows once, in the inline banner, which also switches to the tab holding
+  the rejected field.
+- 1bacb00: Single sign-on is now fully documented. CONFIGURATION.md → Single sign-on (OIDC) is a complete admin guide: prerequisites, a settings reference (env var ↔ UI field ↔ default), step-by-step setup for Microsoft Entra ID, Google, Okta, Keycloak and any other OIDC provider, what happens to existing password accounts, invites, API keys, MCP clients and Agent SSO, offboarding, shared-deployment limits, and a troubleshooting table giving the cause and fix for every `sso_error` code. UI locations now match the Admin rail (Admin → Server settings → Single sign-on, Admin → Teammates). The in-app How it works page has a Single sign-on section for server admins.
+- 1bbc356: Fix the "Teammate added" confirmation modal overflowing horizontally — the
+  temporary password field and the "Pick a nest…" dropdown extended past the
+  modal's edge and were clipped.
+
+  The modal's content area is a CSS grid; the temporary-password `<code>`
+  element was a flex item without `min-w-0`, so it kept its full unbroken-text
+  width when computing the grid column's minimum size. That blew the shared
+  column out past the dialog's max width, dragging every other field in the
+  modal — including the nest picker — along with it. The `<code>` element now
+  allows shrinking, so `break-all` can wrap it within the dialog like intended.
+
+- 4b80dbe: Fix the Teammates page "Last active" ignoring web-app activity. It only read
+  API-key usage, so someone working in the web app never moved it. It now takes
+  the latest of API-key use and web-session activity.
+- b29bd3c: Fix reloading (or directly opening) `/teams` showing the raw Teams API JSON
+  instead of the Teams page.
+
+  The client's Teams page URL is `/teams`, which collides with the top-level
+  `GET /teams` API route — in-app navigation never re-requests it, but a hard
+  reload or a bookmarked link issues a real `GET /teams`, which the API route
+  answered first with `{"teams": [...]}` instead of the app shell. A guard ahead
+  of the `/teams` route now serves the SPA shell for a real browser navigation
+  (same document-navigation check the SPA catch-all already uses) and leaves
+  the app's own API fetches untouched.
+
+- 5e0cf09: `contextnest://` links are graph edges, and a selector's `hops` actually expands
+
+  `POST /nests/:id/context` hop expansion and the ontology graph (`GET /nests/:id/graph`) only followed `[[wikilinks]]`. A node linked with the spec's own link form, `[text](contextnest://nodes/…)`, was never returned at any `hops`, and never drawn as an edge, while a `[[wikilink]]` at the same distance was. Both now follow `contextnest://` links, including pinned and anchored forms (`contextnest://nodes/foo@3#bar` links to `nodes/foo`). The target is matched by id only, so a dangling link draws nothing and can't attach to an unrelated node that happens to share its slug. Links quoted in inline code or fenced code blocks are ignored.
+
+  An explicit engine `selector` now honours `hops` as documented. Before, the engine ran in full mode, which ignores `hops`, so only `[[Title]]` selector parts were ever expanded. `hops: 0` results are unchanged. A selector request that omits `hops` gets the documented default of 2, so linked neighbours now come back where they previously did not.
+
+- 1d79e1e: Fix a YouTube/Vimeo (or uploaded video) URL placed right after an image losing its embedded player after save + reload.
+
+  The editor's image node is configured as a top-level block so `![alt](url)`
+  round-trips through markdown, but its serializer never closed its block —
+  so the paragraph written immediately after an image (a bare video URL) had
+  no blank line separating it from the image line. On reparse, CommonMark's
+  lazy-continuation rule folded the two into one paragraph, so the video URL
+  was no longer alone in its paragraph and Preview rendered it as a plain
+  link instead of an embedded player. The image serializer now closes its
+  block like every other block-level node does.
+
+- 5f10d90: Fix pressing Backspace at the start of the paragraph right after an embedded video merging that paragraph into the video's URL, corrupting the link and destroying the player.
+
+  The video player is a decoration over a plain paragraph whose text is the
+  bare URL, so a Backspace at the start of the following paragraph hit
+  ProseMirror's default `joinBackward` and appended the typed text straight
+  onto the URL. The editor now redirects the first Backspace into the video
+  paragraph instead of merging into it, leaving the video and its URL intact.
+
+- 6c78c5b: Fix Backspace below an embedded video still corrupting its URL. The earlier
+  fix moved the caret into the video's hidden URL text, so the next keystroke
+  edited the URL and removed the player. Backspace at the start of the line
+  below a video now selects the whole video (outlined), like an image; a second
+  Backspace deletes it cleanly. An empty line below the video is removed first.
+- 934caaa: Fix unresolved `[[…]]` links losing their broken-link styling in read-only views.
+
+  The editor already styles an unresolved `[[Title]]` link differently (purple,
+  dotted underline) from a resolved one (blue, solid), but the read-only
+  renderer used by the "Preview" toggle, Comment mode, and the nest View mode
+  rendered every link as resolved regardless of whether it actually pointed at
+  a document. Both now resolve the target the same way the hover preview does
+  and fall back to the broken-link style when it doesn't.
+
+- 98a4b50: Fix the New Document form prefilling with the internal node id
+  (`nodes/<id>`) instead of the wiki-link's human-readable title when clicking
+  a broken `[[Title]]` link.
+
+  Aliased wiki-links store `[[nodes/<id>|Title]]` — the internal node id as
+  the target, the readable title as the display alias. Once the target
+  document was deleted, the click handlers fell back to that raw target for
+  the create/blocked title instead of the alias, leaking the internal id into
+  the New Document form (and into the reviewer's "doesn't exist" message).
+  Broken links now prefill with the link's display text.
+
+## 1.25.0
+
+### Minor Changes
+
+- 34a6b6d: Server settings has a **Connecting agents** tab: verified setup steps for nine AI tools, all pointing at the one endpoint that reads across every nest a person can see.
+
+  An operator who stands a nest server up gets asked "how do I wire this into <tool>?" by everyone on their team, and every tool spells it differently — a flag on `claude mcp add`, a TOML table for Codex, a YAML block for Hermes, a web form for ChatGPT, Grok and Claude. Nothing in the product answered that, so the answer lived in whatever someone could reconstruct.
+
+  The new tab covers Claude (claude.ai and Desktop), ChatGPT, Grok, Perplexity, Claude Code, OpenAI Codex CLI, Hermes, Gemini CLI and Cursor, grouped by chat / command line / editors, with per-harness and copy-all buttons. Every one of them points at the server-level `/mcp` endpoint rather than a per-nest URL, so a person connects once and reads across the public nests plus whatever private nests they have access to — and nothing has to be redone when they are added to another nest.
+
+  Two things the panel now says that nothing said before: a **user-level** key is required, because a key scoped to one nest narrows that same endpoint back down to that nest (`nestScope`, `src/auth/middleware.ts`) and looks exactly like the connect-once promise being broken; and each person should use their own key, because a shared key makes all of them the same user to this server. In open mode no credential is mentioned at all. Where a surface only drives an OAuth client and this server has no authorization server to offer it — Perplexity today — the panel says so plainly instead of printing steps that end in a failed connection.
+
+  The text is a pure, unit-tested module (`ui/src/lib/agent-connect-docs.ts`), so the invariants are enforced rather than maintained by hand: no harness may render key material, none may render a per-nest URL, and open mode must drop every credential instruction.
+
+  `PUBLIC_BASE_URL` is now validated when it is saved. It has to be a plain `http(s)` URL, with no whitespace, quotes or shell characters (`" ' \` \ $ ; | & < > ( ) { }`). Those were previously accepted — the setting was stored after nothing more than a trim — and this value is rendered straight into the snippets above, including a `bash`block and quoted strings in`config.toml`, `config.yaml`and`mcp.json` that people paste verbatim. An admin who set a hostile value could therefore have run commands on the machine of everyone who followed the setup instructions. The panel strips the same characters when it renders, so a value stored before this check cannot reach a snippet either; existing values are not rewritten.
+
+- 4615fe8: `client` — caller attribution on every read and write.
+
+  Every node write and every MCP tool call now accepts an optional `client` object
+  naming the calling agent and its session, plus any custom scalar keys — create,
+  edit, submit for review, approve, reject, revert, import (`POST /nests/import`,
+  `POST /nests/unsynced/sync`) and bulk review on the REST side, every tool on the
+  MCP side:
+
+  ```jsonc
+  {
+    "title": "API Design",
+    "content": "…",
+    "client": { "agent": "claude-code", "session_id": "s-9f2" }
+  }
+  ```
+
+  Submitting for review seals it into the engine's own version chain, since that
+  is the entry a submission appends. Every other write that seals a version
+  records it on that version, so version history —
+  the REST list, `context_versions` (prose and structured payload alike), and the
+  history panel in the UI — answers "which agent wrote v7, in which session".
+  Every MCP tool call, and every REST call that accepts `client`, records it on the
+  activity trace — which is where a call that seals no version is attributed: a
+  read, and a rejection, which commits no content.
+  The admin Activity Trace shows it under the caller it belongs to. `editedBy` is
+  untouched and remains the authoritative authoring record.
+
+  Everything about it is optional — the object and each field within it. No
+  endpoint requires it, an unattributed call is a valid call, and a call carrying
+  none stores nothing rather than an empty `{}`: "not attributed" and "attributed
+  to nobody" are different claims.
+
+  The server fills what the transport already knows under anything the caller
+  sent, merged per key, so a caller that names its agent but no session keeps its
+  agent and still gains a session id: `agent` from the API key's label,
+  `session_id` from an `Mcp-Session-Id` header. `CONTEXTNEST_AGENT` /
+  `CONTEXTNEST_SESSION_ID` override those; `CONTEXTNEST_NO_ATTRIBUTION=1` derives
+  nothing, which matters because what is derived lands in an append-only history —
+  consent has to be available before the first write, not after. Nothing is
+  synthesized where the transport knows nothing: a placeholder session id would be
+  indistinguishable from a real one.
+
+  The field itself is the engine's: `clientField`, `clientMetadataSchema` and its
+  bounds are imported from `@promptowl/contextnest-engine/api` and never restated
+  here, so the CLI, the upstream MCP server and this edition all accept exactly
+  the same `client`. This release therefore requires engine ≥2.6.0. Only the
+  binding lives in this repo: what this server's transport can report about its
+  caller, and how the block is stored on version rows and the activity trace.
+
+  `client` is a label, not an identity claim: never authenticated, never used to
+  authorize, and deliberately not an input to any hash chain, so histories
+  recorded before the field existed keep verifying byte for byte. It is bounded
+  (scalar values ≤512 chars, ≤16 custom keys) because an untrusted caller writes
+  it into an append-only audit trail, and a near-miss on a reserved key
+  (`sessionId`, `Agent`) is rejected rather than filed as a custom key — which
+  would leave the write looking attributed while the slot readers check stays
+  empty. It is distinct from `metadata`, which is frontmatter and describes the
+  document rather than the call.
+
+  Specified in `CONTEXT_NEST_SPEC.md` §9.4 upstream (PromptOwl/ContextNest#107);
+  this is the Community Edition binding of it, over this server's own version
+  rows and activity trace.
+
+- a344cc5: New nest setting "Creators review their own documents" (`creator_is_reviewer`, off by default). In a governed nest, whoever creates a document becomes its reviewer steward and the first version publishes immediately; every later change — a teammate's or the creator's own — goes through review as usual, with separation of duties unchanged. Prime documents still start as drafts. Future creates only; nothing is stewarded retroactively.
+- cd9b298: MCP writes behave the same on every nest, and match the engine catalog.
+
+  - **`context_update` tags now replace the set** (the catalog's contract) instead of merging. Merging left no way to remove a tag over MCP. To add one, send the current tags plus the new one.
+  - **Frontmatter pasted into `content` is refused** on `context_create` / `context_update`, with a message saying to pass tags/status as parameters. It used to be stored as a second, dead frontmatter block in the body.
+  - **`context_move` returns `{ id, previous_id, title }` as structured data**, so `ctx move --vault <alias>` can read the result.
+  - **One `/mcp` connection works for `ctx` across every nest.** The server-level tools now use the per-nest tool schemas plus a `nest` argument (the hand-kept copies had drifted, and undeclared keys were silently dropped). Reads that omit `nest` (`context_search`, `context_list`, `context_query`) return merged structured results, each hit tagged `nest: { id, name }`. Hits are interleaved round-robin across nests (search has no cross-nest relevance score), so a `limit` never fills up from the first nests alone. `context_overview` stays prose-only. `context_versions` is now served there too.
+  - **`nest_index` returns the nests as structured data** alongside the markdown, which `ctx vault list` uses to list each nest as `<alias>/<nest>`.
+  - **`/llms.txt`** documents registering the server once and addressing a nest as `--vault <alias>/<nest>`.
+  - **`context_submit_review` takes `id`** on `/mcp` and no longer requires `title`, matching `context_versions`. A fan-out read that every nest rejects (a malformed selector, say) now returns that error instead of "No results found", and merged `list` / `search` cap their limits the way one nest does.
+
+- 0cf46c2: Upload PDFs as governed `pdf` documents.
+
+  `POST /nests/:id/nodes/pdf` (multipart `file`) turns a PDF into a document whose body is the PDF's extracted text — what agents read through `context_get`, which now also says `**Source file:** PDF, N pages` (and `no text layer` for a scan). The PDF itself is kept beside the document and bound to each version by sha256 (engine `context_import_pdf`, `@promptowl/contextnest-engine` 2.7). Uploads go through the same stewardship as any create or edit: a draft in a governed nest, a new version when the PDF is replaced. `GET /nests/:id/nodes/:nodeId/pdf` serves the binary through the node's read gate, so a public reader only ever gets the approved version's PDF.
+
+  In the app: Import → "Upload PDF", or drop a `.pdf` on the vault. A PDF document shows the PDF in the browser's viewer above its extracted text (read-only), with Download and Replace PDF, and a warning when the PDF has no text layer. New setting `PDF_MAX_MB` (default 25).
+
+- 5dc00db: Opening a nest to the Organization tier on a shared server now asks first — and says who it really reaches. Plus a "My nests" dashboard default.
+
+  A nest's **Organization** visibility means every authenticated account on this deployment. On a self-hosted server that is your company, so the tier flipped in one click with the hint "everyone signed in here can read". On the PromptOwl-hosted service one server holds many unrelated customers, so the same click made a nest readable by every one of them — under a label that sounded like "my organization". Only **Public** confirmed.
+
+  **A superadmin toggle names what the server is.** Settings → General → _This server hosts several organizations_ (`SHARED_DEPLOYMENT`, off by default, persisted like every other runtime setting, reported on `GET /health`). With it on, choosing Organization asks for the same acknowledgement Public does — and the server enforces it: `PATCH /nests/:id/visibility` to `org` without `acknowledge_public: true` returns `409 requires_acknowledgement`, so a client that bypasses the UI can't skip it either. The picker's hints and both dialogs then say the literal boundary: "every account on this server — other organizations included", and Public adds "including every account on this server". Off, nothing changes for a self-hosted install. Turning it on guards future changes only: nests already at Organization stay as they are until their admins narrow them — audit those first (the dashboard's _Organization_ scope lists every one).
+
+  **The dialog shows what strangers will see.** Every confirmation — the visibility picker's and the nest header's publish toggle — displays the nest's description, since that and the name are all a reader discovering the nest gets, and offers to write one when it is empty. Optional; it never blocks the change.
+
+  **Your nests first.** The dashboard opens on a new **My nests** scope (owned or shared with you) instead of everything you can read, so other people's org/public nests are a choice — _Organization_, _Public_ or _All nests_ in the same select — rather than the first screen. The choice is remembered per browser. `GET /nests` rows now carry `discovered: true` for nests reached through visibility alone, and **Shared with me** lists only nests somebody actually shared with you — a nest you can merely read because of its tier is no longer counted as one. A newcomer with nothing of their own sees "No nests of your own yet" with a _Browse all nests_ button, not "hidden by the current filter".
+
+- cd2b02c: YouTube and Vimeo links play in place.
+
+  Paste a YouTube or Vimeo URL on a line of its own and the document shows the video's player instead of a bare link — in the reader, version history, the artifact viewer and the editor (and its preview). The markdown on disk stays the plain URL, so agents, exports and the `/p` published pages see exactly what was written; published pages keep showing it as a link.
+
+  Only a bare URL embeds: a titled link (`[Watch the demo](https://youtu.be/…)`) and a link inside a sentence stay links. Recognised: `youtube.com/watch?v=…`, `youtu.be/…`, `youtube.com/shorts/…`, `youtube.com/embed/…` (a `t=`/`start=` time is kept), `vimeo.com/<id>` (including unlisted `vimeo.com/<id>/<hash>`) and `player.vimeo.com/video/<id>`. Hosts are matched exactly — anything else, including look-alike domains, stays a link. YouTube plays from `youtube-nocookie.com`; the player runs in a sandboxed, lazy-loaded frame. For an unlisted Vimeo video, paste the share link that includes its hash (`vimeo.com/<id>/<hash>`) — without it Vimeo refuses to play the video.
+
+  **Adding images and videos is obvious now.** The editor toolbar has a labelled **Image / video** button (icon-only on narrow screens) with two choices: _Upload image or video_ — with the accepted types and limits spelled out (PNG, JPG, GIF, WebP up to 10 MB · MP4, WebM up to 30 MB) — and _Embed YouTube or Vimeo link_, which checks the link and drops it in as its own line so the player shows (a link that isn't a YouTube/Vimeo video gets an inline error). Dragging a file over the editor shows "Drop to add an image or video"; pasting a screenshot or copied image uploads it the same way a drop does (before, a pasted image did nothing); and an empty document's placeholder mentions both. CSV / TSV import stays under the Upload button. None of this appears in a read-only, locked or preview document.
+
+### Patch Changes
+
+- 62cf2bc: An HTML artifact can be shared, published, linked, moved and deleted from its own page, the way a markdown document can.
+
+  A markdown document's top bar has Share (the nest) and a ⋮ menu with Copy link, Move to folder, Share this document, Publish and Delete. An artifact — a slide deck, dashboard or infographic an agent emitted as HTML — opened in a viewer that had none of them: Preview / Annotate / Edit source, History, Reload, Turn into a document, Comments and Open in new tab. The server already published and granted access to artifacts exactly as it does documents; the buttons just weren't there, so sharing an artifact meant going back to the nest list and finding its row menu.
+
+  The artifact page now carries the same visibility control, the same Share button and the same ⋮ menu, with the same gating — owners and admins share and publish, editors move and ask for deletion, viewers get Copy link, an archived nest withholds sharing — and a published artifact serves as HTML under the artifact sandbox as before. The two pages draw the menu from one list (`ui/src/lib/document-actions.ts`), so they can't drift apart again; that list is unit-tested for the role matrix.
+
+## 1.24.0
+
+### Minor Changes
+
+- d367e2f: Account page. The account menu's single **Account** entry opens `/account`: your avatar initial, name (edit in place), email with the Admin badge, and password (opens the change dialog). It replaces the Change password menu item. Backed by `PATCH /auth/profile { name }` — trimmed, ≤ 80 characters, empty clears the name so the email shows.
+- 4bf6f98: `POST /nests/:id/context` with a `prompt` returns the documents relevant to it, ranked — not the neighbourhood, and not the nest.
+
+  **Bodies count.** The prompt compiler matched tokens against tag names and titles only, so a natural-language question ("how do I run a conflict check?") usually compiled to nothing and came back empty — which pushed callers into dumping the whole nest as a stand-in — or compiled to one weak title while the real answer sat in another document's body. Every document is now scored against the prompt (title hits weigh most, then tags, then body words), unioned with the compiled matches, and anything under half the top score is dropped as noise. A prompt that matches nothing — a greeting — returns `nodes: []`. `trace.compiled.fallback` is `"fulltext"` when body scoring alone produced the answer.
+
+  **No hop noise by default.** A prompt used to inherit `hops: 2`, so every keyword match dragged in two hops of wikilink neighbours as full nodes, indistinguishable from the match — and a caller citing every node returned cited them all. The prompt path now defaults to `hops: 0`; pass `hops` to expand. Explicit `selector` requests keep their `hops: 2` default.
+
+  **Per-node relevance.** On the prompt path each entry in `nodes` carries `score` (0–1) and `via` (`"title"`, `"tag"`, `"fulltext"`, or `"hop"` for a neighbour pulled in by an explicit `hops`). `nodes` and the `context` blocks are ordered by score. Additive: selector-path responses are unchanged.
+
+  **The budget fills instead of stopping.** Budget-fitting used to stop at the first document that didn't fit, so one large document early in the list left the rest of `max_tokens` unused — a 38-document match could come back as one. A document that doesn't fit is now skipped and the next is tried; only when nothing fits at all does the best match go through oversized, so a non-empty result is never an empty answer. `GET /nests/:id/export?max_tokens=` fills the same way.
+
+- 75f6147: The document page reads like a page, not a form.
+
+  **An index beside the document.** Every nest you can see sits in a collapsible rail on the left, the current one opened into its views — Overview, Review queue (with its pending count), Board, Graph, Definitions, Workflows, gated the same way as the nest view switcher — and its folder → document tree with the open document highlighted, the same tree the nest's Documents tab shows. Moving between documents is one click; hide the rail and it stays hidden (per browser). On a phone the rail is a drawer.
+
+  **One top bar.** Where you are (nest › folder, status) on the left; what you can do on the right: last-edited time, the nest's visibility — an owner or admin flips private / organization / public right there, with the same going-public acknowledgement as the Share dialog — Share, Comments, Compare, Submit for review, Save, and everything else in ⋮ (version history, markdown source, copy link, move, share this document, publish, discard draft, delete). The sticky footer and the Title / Tags / Content labels and boxes are gone: the title is the heading, tags are a quiet row under it, and the body is the page.
+
+  **Click to write, select to format.** The body is prose until you click into it; the block toolbar appears with the caret and leaves with it, and highlighting text brings up the formatting bubble. The window scrolls, not a box inside the page.
+
+  **Comments stay out of the way.** The comments rail starts closed instead of taking a third of the width to say "No comments yet", and opens from the top bar (with the open-thread count), for a deep link to a thread, on entering comment mode, or when you pin a comment to a selection. Its state is remembered per browser.
+
+  **Fix: opening a document no longer says "Unsaved changes".** A document whose markdown didn't round-trip byte-for-byte through the editor — any document with a table — opened already dirty and wrote a spurious version on the first click-out. The editor normalising a freshly parsed table is no longer reported as an edit.
+
+  **Turn into.** A document can now become an agent, skill, tool, table or hosted artifact after the fact — ⋮ → _Turn into…_ on the document page, and _Turn into a document_ on an artifact's page — where the type used to be fixed at creation. `PATCH /nests/:id/nodes/:nodeId` accepts `type` with the same gate as create; converting to a skill defaults its trigger from the title, and converting away from a runnable type drops its schedule.
+
+  **The sidebar stays.** Leaving a document for the board, graph, review queue or definitions kept the index — it wraps every page inside a nest now, with the current view highlighted and Connect one row down, and the old tab strip only shows on phones or when the sidebar is hidden.
+
+  **Definitions is just the table.** Rows edit in place (click one; Enter or Ctrl+Enter saves, Escape cancels), a new term is the last row, and the duplicate-term warning appears under the row you're on. No form above the table.
+
+  On the dashboard the sidebar is the app's navigation — **Nests**, **My Work** and **My Drafts**, badges included — and each is its own page (`/`, `/my-work`, `/my-drafts`), so the tab strip above the nest grid is gone and a page can be bookmarked or shared. Each is its own component and chunk: opening `/` no longer fetches the inbox and drafts, and opening `/my-work` no longer fetches every nest — a page loads its own data when it opens, and the sidebar badges come from two one-row reads. Archived nests are a switch at the end of the Nests filter row instead of a fourth tab; the list, its filter/sort and restore are unchanged. Under a nest the sidebar keeps Overview and Review queue — with a badge when something is waiting — at the top, with Board · Graph · Definitions · Workflows folded under **Views** (remembered per browser, opened when you're on one of them).
+
+  **Nest views have their own URLs.** Board, Graph, Definitions and Workflows are `/nest/<id>/board` … (the old `?view=` links still open), each its own page behind the same folder registry the dashboard uses. The header shows a breadcrumb — Home › nest › page, or the document's title — everywhere.
+
+  **The nest page paints tab by tab.** Overview, Documents, Review, External Edits, Stewards and Collaborators each load their own data and show their own loader, so a slow disk scan for external edits no longer holds the whole page on one spinner. Each tab is its own chunk, loaded when first opened; so are the nest page, the editor and the settings pages.
+
+  **External edits come from the database.** Staged external edits are recorded as they are staged (who, when, source, hashes) and the External Edits list and its badge read that table instead of walking every document in the vault — on a deep folder tree that walk was the slowest request on the page. Existing installs rebuild the table on the nest's next index refresh (migration 043). `GET /nests/:id/external-edits?count=1` returns the total only.
+
+  **Fewer requests per page.** Opening a nest fetches its metadata once (it was four times), the sidebar tree loads one folder level at a time instead of the whole nest, comment counts load with the Documents tab rather than the Overview, and the Review-tab gate reads the comment feed only when nothing else already shows the tab. `/me/work` notification rows carry `nest_name`, so opening one needs no nest list.
+
+  **Editing.** The toolbar is always visible in edit mode and sticks under the top bar; the Type control (Document · Artifact · Table · Agent · Skill · Tool) sits on the page for existing documents too — picking another type is "Turn into", with a one-step confirmation. Markdown source moved to the toolbar, Discard draft to the bottom bar beside Save. The artifact page shares the document page's layout: same top bar, padded column, and a comments rail that opens on demand.
+
+  **Nest header.** Rename is a pencil beside the name; Import and New Document sit with New Folder on the tab row; a `+` on every sidebar folder creates a document there.
+
+### Patch Changes
+
+- 808d1d4: Archive requests in My Work use the same Approve / Reject buttons as review items. The two actions were a small outline button and a ghost link next to the green/red pair on review rows; both workflows now render the one shared pair.
+- cfeb7b2: An archived nest hides the controls that could only fail. In the nest view: Connect, the Reader Mode switch, Activity trace, and Assign / Remove / Edit steward. In a document: the visibility dropdown becomes a read-only badge, and Share, Share this document and Publish are gone. Everything read-only — version history, copy link, compare, comments — stays.
+- 56169a8: Sharing on an archived nest says it is archived. Opening a document's Share dialog in an archived nest showed the owner "Required permission: 'write', your permission: 'read'" — the archive cap in a permission's clothing — and offered a form that could only fail. Refusals on an archived nest now name the archive, and the dialog shows an archived notice with the add and remove controls gone; the existing roster stays visible for reference.
+- 960b5cd: An archived nest still shows who its documents are shared with. The archive cap dropped the owner to read-only, which also locked them out of the sharing roster, so the Share dialog opened empty. Owners and admins can read the roster of an archived nest again; sharing and unsharing stay refused until the nest is restored.
+- 9126dd0: An archived nest's owner is no longer told they cannot manage stewards. The steward gate read the archive-capped permission, so the owner (and the server admin) saw "You don't have permission to manage stewards" on their own archived nest. Standing is unchanged by archiving: the steward roster and the activity trace stay readable, and a change is refused as "This nest is archived".
+- 4e5dfdd: Community sites say Enabled / Disabled instead of Active / Inactive. The badge only ever reflected the admin switch — the server never contacts a site (SSO tickets are verified locally with the shared secret), so "Active" implied a reachability it could not know. The switch's tooltip says the same.
+- 3f32d34: `contextnest://` links in a document open like wiki links. A bare `contextnest://nodes/gtm/deals` in the text, or a `[label](contextnest://nodes/…)` link, now renders as a link to that page in the reader and the document view — click opens it, hover previews it. A `@checkpoint` pin or `#anchor` on the URI is ignored for resolution; tag, search and folder URIs have no page to open and stay plain text.
+- 2ddfb74: Coverage Gaps no longer reports "Every category has a steward" for a nest with no categories. With nothing tagged there is no coverage to evaluate, so the row now says "No categories yet" (or "No categories or stewards yet" when the nest has no stewards either) instead of a clean bill of health.
+- d18c3d6: Every nest now has its own URL: `/nest/<id>`.
+
+  Until now a nest — public or private — was only reachable as `/?nest=<id>`, a query-string deep link into the app shell, so there was nothing clean to share, embed, or bookmark. The app now writes the path form for every nest-scoped view (documents, graph, workflows, board, trace keep their `?doc=` / `?view=` / `?tab=` parameters after it), and the document "Copy link" action produces it too. Old `?nest=<id>` links and the links in notification emails keep working: they resolve the same way and are rewritten to the path form on load.
+
+- d367e2f: The document meta row separates creator and collaborators — `Created by <author> · Collaborators: <chips> N` — instead of running email, chips and count together. Adding a tag now confirms with a toast that names the tag and reminds that Save persists it. The comments rail header stays on one line so the Comment mode switch no longer sits below a wrapped label.
+- 8244e5e: Document and nest page polish. The app header's breadcrumb row stays pinned while a page scrolls, with the document and artifact toolbars sitting flush under it. A document's outline moves from a card above the body to the right rail, giving way to Comments when they are opened. The comments rail has more room and a header rule; related-document lists separate titles with a dot. The nest Overview waits for the document tree before it can say "No documents yet". Artifacts stored as markdown or plain text keep their line breaks in Annotate and render as formatted markdown in Preview.
+- 263665a: Three folder fixes in the nest view.
+
+  **New Document lands in the folder you're looking at.** With the Documents tab scoped to a folder, the header's New Document button always filed the document under the nest root. It now defaults to that folder; the editor's folder picker still lets you change it.
+
+  **Folder names keep their casing in the New Document picker.** The create-form breadcrumb and subfolder list rendered the raw storage slug (`a`) while every other surface showed `A`. They now use the same display name.
+
+  **Empty folders show on the Overview.** The Contents card hid the folder tree until the nest had at least one document, so folders created first were invisible even though the folder count had moved.
+
+- f571fd9: The Graph tab only offers layer toggles that have something to toggle. A nest with no stewards no longer shows a Stewardship switch or legend row, and the same goes for Categories and Links; Structure is always there.
+- b3218ad: How it works is now a page-by-page tour of the app (nests, documents, review, views, workspace, admin) instead of a workflow-plane manual; the Docs page frames the agent manual for people and points them at How it works; /llms.txt covers folders, tables, versions, comments, the /me inbox and the full per-nest MCP toolset.
+- 06d746f: Server Settings rejects a malformed product analytics key and says why. The PostHog key field saved any string, so a typo silently turned analytics on with a key that could never send an event. A key must now look like a PostHog project API key (`phc_` plus a long run of letters and digits); the inline message names the rule that failed — wrong prefix, stray characters, or too short — and nothing is written. Clearing the field still turns analytics off.
+- 3f13e09: "Preview as reader" for nests with Reader Mode on. Owners and editors always saw the authoring view, so checking what visitors get meant a logged-out browser. The Reader Mode dialog now has a Preview as reader button that shows the visitor-facing reader in place — approved documents and approved text only, exactly as a visitor sees them — with an Exit preview bar to return to the authoring view. Rights are unchanged while previewing.
+- c0a0911: Reader Mode shows the whole nest on first load. The public reader fetched only the root level and the first top-level folder, so every other folder sat collapsed until a visitor clicked it, and a home page that lived in a later folder never resolved — the reader opened empty. It now reads the nest's document list in one metadata-only request, lists every folder expanded, and opens the designated home page wherever it lives.
+- fe47446: Reader Mode is laid out as three cards that scroll on their own. The contents, article and "On this page" panels fill the window below the header and each scrolls internally, so the page never scrolls as a whole; the nest name heads the contents as a proper heading with a search box under it; the outline lists every heading of the open page, indented by level, exactly as the editor's outline does; Previous / Next are proper buttons after the article; and long nest, page and folder names truncate with a tooltip instead of stretching the layout.
+- 04bc5b3: Reader Mode's contents panel has a search box. Type part of a page title or a tag (with or without the `#`) and the tree gives way to the matching pages with their folder; clear it to get the tree back.
+- c0a2e6b: Reader Mode's contents and "On this page" columns share one height. Each column sized to its own content, so the hairlines framing the article ended at different points on every page. Both now take the same viewport-based height and scroll internally.
+- 9b9b250: "Request archive" shows its own spinner. In the nest removal dialog, pressing Request archive spun the Request deletion button instead — the dialog had one busy flag and always drew the spinner on the primary action. The spinner now follows the button that was pressed.
+- d367e2f: The document sidebar filters nests by name. The rail listed every nest flat with no way to narrow it; a small filter above the list (shown when there is more than one nest) does what the dashboard's filter already did. The current nest is never filtered out.
+- 68eb09b: UI neutrals move from warm stone to zinc so the sidebar and cards sit in the same family as the navy primary; both sidebar rails (app pages and a nest's views and tree) share one row style — same text size, icon size, height and spacing — and idle rows read darker.
+- 283b90d: Wiki links inserted from the editor carry the document's full path. The `[[` picker and the link dialog wrote `[[nodes/<slug>|Title]]` with the folder dropped, so a link to a page inside a folder pointed at a path that did not exist and only resolved by luck of the slug. They now write the full node id; existing short links still open through the slug fallback.
+
+## 1.23.0
+
+### Minor Changes
+
+- 0976b51: An agent can answer a comment, not just read one.
+
+  **Comment writes over MCP.** `context_comment` leaves a comment on a document — a new thread, or a reply into an existing one when given a thread id from `context_comments` — and `context_resolve_comment` marks a thread resolved or reopens it, recording who did it. They write to the same threads the web UI's comments panel shows, and carry the same side effects a comment left in the UI does: the person you `@`-mention is notified, and an artifact's derived `— Annotations` projection stays current. Commenting is read-tier, here as in the REST API, so a reviewer who can see a document can comment on it.
+
+  **Comments are readable from the cross-nest endpoint.** A client connected to the server-level MCP endpoint asking for a document's comments used to get `Tool context_comments not found` — for every node type. It's now declared there like the other read tools, nest-parameterised. (Writes stay on the per-nest endpoint.)
+
+  **A collaborator can read comments on their own unapproved draft.** `context_comments` used to gate on the same "no approved version → invisible to AI" rule as `context_get`/`context_export`, so a document with no approved version refused its comments to everyone, including the collaborator or steward who wrote it and can already see it in the UI. It now gates on per-node read access instead (`canReadNode`), matching the UI: a collaborator or steward who can read the node reads its threads even pre-approval, while a public reader — who couldn't see the draft either way — stays blocked until approval.
+
+  **A thread's replies keep their order.** Comment timestamps were stored to the second, with a random UUID as the tiebreaker, so two replies posted inside the same second came back in arbitrary order — in the thread and in the projection an agent reads. They're now stored to the millisecond. Existing comments are untouched and still sort correctly against new ones.
+
+- a71498b: Tag people in comments, and stop retyping addresses to add them.
+
+  **`@mentions` work in comments.** The comment box gets the same `@` autocomplete the document editor has, listing everyone who can reach the nest, and a posted comment's mentions are styled — resolved names as live references, a name matching nobody drawn as unresolved, so a typo can't pass for a delivered mention. The roster read behind it is read-tier (commenting is), so a read-only reviewer's picker works too; it stays members-only, so a nest that is public or org-visible still doesn't hand its member list to a passing reader.
+
+  **A tagged person actually hears about it.** Tagging someone in a comment now drops a row in their queue that links to the document, posts to the configured Slack/Teams/webhook connector, and emails them directly when SMTP is set up. Previously a comment mention notified nobody: the fan-out was wired to document saves only. Mentions in a document body reach the same channels — they used to be inbox-only. One write notifies at most 25 people, and one person can cause at most 50 outbound deliveries per nest per five minutes, so neither a comment naming a whole roster nor a stream of them can be used as an amplifier. Past the limit the comment still posts and the queue row still lands — only the email and channel message are skipped. The author is never notified about their own mention, an unresolvable name notifies nobody, and someone who can't open the document is skipped — a mention can't disclose a title. A mention in a comment on a hosted artifact now points at the artifact rather than at its derived annotations projection, and fires once instead of twice.
+
+  **The suggestions are scoped, with a toggle for servers that are one company.** By default the add-a-person fields only suggest people the inviter already shares a nest or team with — a server can host several unrelated organisations, and a full directory would show them each other's email addresses. An operator whose user table is their own staff can turn on **Settings → General → People directory → "Suggest everyone on this server"** (`PEOPLE_SUGGEST_ALL_USERS`) and get the whole directory. Neither setting changes who can be invited: an address that appears in no list is still valid to type.
+
+  **Adding people and teams autocompletes.** The add-a-person fields (nest collaborators, stewards, team members) suggest people you already work with — anyone on a nest or team you share — while still accepting a brand-new address, so inviting someone without an account works exactly as before. Team pickers (share a team onto a nest, add a team from the collaborator panel) are searchable instead of a flat dropdown.
+
+  With that toggle on, the `@` pickers (comment box and document editor) offer the whole directory too, and tagging someone who isn't on the nest adds them as a **read** collaborator before notifying — so the mention is an invite, not a dead tag. Only a write+ author can invite this way: a read-only reviewer's mention of an outsider still reaches nobody.
+
+  Per-nest connectors can now subscribe to the `mention` event (alongside the review and run events), and the channel delivery budget is only charged when a connector would actually post that kind.
+
+- 3b39d4f: Manage multiple official community site SSO connections from Server Settings, instead of just one.
+
+  Server admins previously configured a single official community site for one-click SSO auto-login via the `OFFICIAL_COMMUNITY_SSO_SECRET`/`PUBLIC_BASE_URL` env-var pair. **Settings → Community sites** now lets an admin add, edit, enable/disable, and remove any number of sites, each with its own name, URL, and secret (`GET/POST/PATCH/DELETE /admin/community-sites`, server-admin only — see `API.md`). `GET /auth/sso` tries an incoming ticket's signature against every active site's secret and validates its audience against this deployment's own `PUBLIC_BASE_URL` (a site's URL is a display/uniqueness field, not an audience value), so a ticket minted for a different deployment can't be replayed here.
+
+  The legacy env-var pair still works as an implicit extra site, so existing single-site deployments are unaffected — nothing to migrate.
+
+### Patch Changes
+
+- 43fcdef: Fix a stuck organization-visibility toggle and close UI gaps around archived nests.
+
+  The header's quick visibility toggle could take a private nest to organization or public, but couldn't walk an organization nest back to private — it only offered escalation to public. It now routes an organization-visibility nest to the Collaborators tab, where all three tiers (private/organization/public) are available.
+
+  Archived nests are read-only everywhere writes are gated on `deriveNestCaps`/`resolveEditorAccess`, not just on the nest and document list: the Board's new-folder input and drag-to-move, the Definitions page's add/edit/delete term UI, and the document editor's Save/Submit/Discard/Revert and delete controls all now stay hidden on an archived nest regardless of how it was reached (dashboard, deep link, wiki link, or a page refresh). The Archived tab itself now sorts by archive date instead of creation date, and opening a nest from that tab correctly reflects an anon-owned nest for a caretaker admin.
+
+  Server-side enforcement (an archived nest 403s any non-GET) was already correct; this closes the remaining UI-side gaps so the affordances never appear in the first place.
+
+  Public Docs Reader Mode also rendered empty for any nest whose documents live under a subfolder (the common docs-site shape): the reader only ever showed the root level fetched on mount, with no way to expand into a subfolder. NestView now eagerly fetches the nest's first top-level folder alongside root when reader mode is on, and Reader Mode's folder rows fetch their own level on click, reusing the same lazy per-folder fetch the Documents tab already relies on.
+
+  Two further Reader Mode fixes: the home/overview pane no longer duplicates the center pane when the reader is already viewing the home document itself (it falls back to the Contents table instead), and the left folder list and Contents fallback now cap their height and scroll internally — matching the document viewer's existing behavior — so a long list no longer misaligns the three panes or forces the whole page to scroll.
+
+  Three more Reader Mode fixes: navigating to any document left no way back to the overview/home doc — the center pane now shows a "Back to Overview" link whenever the reader is away from the home node. A folder in the left pane, once opened, could never be collapsed back, permanently eating vertical space — folder rows are now a collapse/expand toggle (defaulting open) with a chevron indicator. And the left folder list, center document, and right overview/contents panes now all share the same min/max height so the three columns line up instead of drifting out of alignment.
+
+  Fixed one more Reader Mode issue: every known folder's chevron defaulted to the "expanded" (down) icon even when its documents hadn't been fetched yet, so unopened folders looked open but showed nothing underneath. A folder's row now only defaults to expanded once its docs are actually loaded (root and the eager first-level folder); every other known folder defaults collapsed until clicked, so the icon always matches what's on screen.
+
+  Public Docs Reader Mode could previously only be turned on by the server (super) admin — a nest's own owner had no way to enable it for their own nest without asking an operator. `PATCH /nests/:id/reader-mode` and the "Reader: On/Off" button now also accept the nest's owner or an admin collaborator, on top of the server admin (who keeps access on every nest, same as before). A write or read collaborator, and anonymous visitors, remain refused.
+
+  Fixed a bug in the "My Work" Notifications panel where it always showed only the first 8 of the up to 50 unread notifications the server already fetches, with no way to reach the rest — clearing one of the visible 8 just pulled the 9th into its place, so the panel silently stayed capped at 8 forever. The panel now shows a "Show all (N)" toggle whenever there are more than 8, expanding to the full fetched list in a scrollable strip; "Show less" collapses it back to the compact 8-row preview.
+
+  Opening a notification (not just the per-row dismiss button) now marks it read too, so it drops out of the panel's unread-only list instead of staying there after being clicked — matching the dismiss button's behavior via a shared `dismissNotification` helper. The mark-read call already refreshes the cached `/me/work` read for any other consumer subscribed to it, so the notification stays gone after a refetch, not just in the local list.
+
+  Fixed the Documents tab's "Tags" and "Recently edited" facet bars showing stale, unfiltered data: they were always computed from the nest-wide census, so applying a status/type/author/date/search/tag filter narrowed the document list below them without touching the facets above it. Both now derive from the same filtered list the document list itself renders, so they narrow together — down to hidden when a filter matches nothing. The Overview tab's own "Recently edited" card is intentionally unaffected, since it has no filter of its own and is meant to summarize the whole nest.
+
+  Fixed the owner/admin notification for a pending **Request archive** ask, which still said the nest was "flagged for deletion" — deletion wording left over from the shared code path a `nest_archive` request rides. The `/me/work` inbox row (and the underlying Slack/webhook connector message) now says the nest "was requested to be archived by <user>", matching the archive terminology already used elsewhere in this flow (the queue badge, the verdict notification once the request is honored). A real node/folder deletion request is unaffected — it still reads "flagged for deletion".
+
+  An editor could already ask for a nest to be archived or deleted from NestView's overflow menu, but the same option was missing from the Dashboard's nest cards — an editor without NestView open had no way to raise the request at all. The card grid's bin icon now does double duty for a caller who isn't allowed to delete outright (an editor, or a non-owner nest admin): instead of deleting, it opens the same "request archive or deletion" dialog NestView offers, posting to the same endpoint. A caller who can already delete outright still gets the direct delete confirm, unchanged.
+
+  Fixed two more bugs in the archive-request flow QA found while re-testing: declining a pending `nest_archive` request told the requester "delete request rejected" — the reject verdict never made the same archive/deletion split the request and approve verdicts already made, so an archive ask that was turned down read as a deletion. It now says "Your archive request ... was rejected". Separately, the original "was requested to be archived" notification stayed unread in every admin's inbox forever, even after the request had been resolved (approved or declined) — it now gets marked read for everyone the moment the request is resolved, instead of only when someone happens to click it directly.
+
+- 6bc359e: Fix Board tag-column casing, a stuck Board add-column input, slow Board loads, raw-email mentions, a silent rename-cancel, missing Archived tab controls, and run-on validation/status messages.
+
+  The Board's **Columns by = Tag** column headers applied CSS `text-transform: capitalize` unconditionally, so a lowercase tag like `annotations` showed as `Annotations` in the header while the card's tag chip stayed lowercase. Tag headers now render the tag value verbatim, matching the chip; Folder and Status headers are unchanged.
+
+  The Board's add-column input is shared between Folder and Tag mode. An unsubmitted value typed in one mode (entered but not confirmed with Add) used to carry over when switching **Columns by**, showing a tag string in the folder input or vice versa. Switching dimensions now clears the input.
+
+  The Board's node fetch asked for every document's full body (`content=1`), which forces a vault crawl on every load and refresh — expensive on a large nest, and wasted, since the Board only buckets nodes by tag/folder/status and never reads a body. It already covered the whole nest (tag columns were never scoped to a folder), so this was a pure loading-time fix: the Board now fetches a metadata-only, body-free listing served straight from the node index, same source the document tree already uses.
+
+  An `@mention` picked from the `@` autocomplete saved as `@user@example.com`, which the read-only document viewer had no handling for — `remark-gfm`'s email autolink turned the domain half into a `mailto:` link, leaving the mention's `@` as a bare character next to a clickable full address. Mentions now render as a single `@name` chip, matching the live editor's styling, with no link and no exposed email. The live editor itself had the same leak: its mention decoration only added a CSS class to the raw text, so the full email stayed visible while editing even though the read view was fixed. It now hides the `@domain` remainder the same way `[[WikiLink]]` brackets are hidden today, showing just `@localpart` in both places.
+
+  Pressing Escape during an inline nest rename reverted the title on screen but still saved the edited name underneath: the revert was a batched `setState` that hadn't applied yet when the input's own synchronous `blur()` fired the pending save. Escape now cancels the save along with the visual revert, so the original name stays persisted.
+
+  The Archived tab was a flat list with no way to search or sort, unlike the live Nests tab. It now offers a name filter and a "Date archived / Name" sort, shown once there are more than 5 archived nests, matching the live tab's own threshold and affordances.
+
+  The workflow-cycle rejection message ("These steps loop back on each other: ... A flow can't return to a step it already ran.") and the Version History "Never published" hint each ran the specific result and the general explanation together as one sentence. Both now put a line break between them for easier scanning; no wording changed.
+
+  The Board's **Columns by = Tag** view rendered zero columns on a nest with many tags: the tag board is user-curatable (adding/removing a column persists an explicit, exhaustive `columnOrder`), but a nest nobody had curated yet had no saved `columnOrder` at all, and an empty/undefined order was being treated as "curated to nothing" — so every tag in the nest was there in the data but none of it had a column to land in. A fresh tag board (no saved `columnOrder` yet) now auto-populates a column for every tag actually present, exactly like Folder and Status already do; it only switches to the curated, exhaustive-list behavior the moment the user adds, removes, or reorders a column, which is unchanged and keeps any already-curated board exactly as it was.
+
+  The `\n\n` added to the workflow-cycle rejection message split the string, but the message is displayed inside a plain `<div>`/`{error}` text node in `WorkflowsView.tsx`, and the browser's default `white-space: normal` collapses newline characters like any other whitespace — so the two sentences still rendered on one line despite the source string having a line break. The two error containers that can show this message (the Edges tab's inline error, and the workflow canvas's connect/save error) now add `whitespace-pre-line`, which preserves `\n` as a line break while still collapsing ordinary runs of spaces/tabs, so the existing `\n\n` in the message now actually renders as a blank line between the cycle path and the explanation.
+
+  The workflow-cycle rejection message's `\n\n` was later collapsed back down to a single `\n` in `edge-routes.ts`/`flow-graph.ts`, which silently undid the line-break fix above (the `whitespace-pre-line` CSS had nothing to split on) and left `test/edges.test.ts`/`test/edge-types.test.ts` asserting a `\n\n` the source no longer produced. Restored the double newline in all three throw sites so the rendered line break and the tests both match the source again. Also added `aria-hidden="true"` to the live editor's hidden `@domain` decoration so the masked part of an email mention is skipped by assistive tech, not just visually hidden.
+
+- e190cb6: The Connect dialog's client tabs stopped asking for two copies where one would do, and stopped showing two different clients the same block.
+
+  **MCP tab is one paste again.** It used to show the endpoint and the `Authorization` header as two separate snippets, each with its own Copy button — a user had to copy both and hand-splice them into their client's config. They're now one `mcpServers` JSON stanza with a single Copy button, the same shape Cursor and VS Code already expect.
+
+  **Claude tab and MCP tab no longer look identical.** Merging the MCP tab into one JSON block gave it the same `{ "mcpServers": { ... } }` envelope the Claude tab already used, so the two read as the same content pasted twice, even though they target different transports — Claude Desktop only speaks stdio and bridges through `mcp-remote`, while the MCP tab is direct Streamable HTTP for clients that support it natively. Each snippet is now labelled with the client it's actually for.
+
+  **Claude Code gets a one-shot command instead of a file to edit.** The Claude tab only ever showed Claude Desktop's `claude_desktop_config.json`, hand-edited and bridged through `mcp-remote` — but Claude Code (the CLI) registers and persists an MCP server itself, with no file to open. The tab now leads with `claude mcp add --transport http <nest> <url> --header "..."` as the primary path; the file-based Claude Desktop config stays below it as a clearly separate option for the GUI app, which has no CLI.
+
+  Key generation is unchanged — still a separate step on the API Keys page, not inlined into the modal, since an account can hold multiple keys and there's no single one to pre-fill here.
+
+- b86acc1: Fix a nest's document count drifting above the number of files it holds.
+
+  Commenting on an artifact creates the derived `— Annotations` node that carries the feedback into the context path. Every listing hides it — that is the point — but three counts didn't: the dashboard card, the dashboard's running total, and the document count MCP's `nest_index` reports to an agent all counted it as a file. So a nest read one document high per commented artifact, and the gap never closed, which looks exactly like a stale cache.
+
+  The exclusion is also case-correct and consistent across backends. SQLite's `LIKE` folds ASCII case and ignores collation, Postgres's doesn't — so a document imported from a file named `Deck--Annotations.md` (imports keep a file's case in its id) was dropped from the count on SQLite and kept on Postgres. It is a real document either way, and now counts on both.
+
+  The card's "recent activity" still reflects a comment — a comment is activity on the nest, even though it isn't a file. A document a person actually titled something ending in "Annotations" is still a file and still counts.
+
+## 1.22.0
+
+### Minor Changes
+
+- 2bc8689: My Drafts can submit a selection for review in bulk, alongside the existing bulk Discard. The submit dialog covers one draft or many, and a batch where some submissions fail reports both what landed and what didn't.
+- 1c1071e: Add the `org` nest visibility tier — readable by everyone signed in to this deployment.
+
+  **The missing middle.** Nest visibility was `private` or `public`, so sharing a nest company-wide meant adding every person as a collaborator or opening it to the internet. `org` is the tier in between: any authenticated user of this deployment can read it; anonymous callers still get nothing. Community has no tenant model and teams are a group you _attach_ to a nest rather than an org boundary — a self-hosted install already IS one organization, so deployment membership is the boundary. `PATCH /nests/:id/visibility` accepts `org`, and unlike `public` it needs no `acknowledge_public`: it crosses no organizational boundary. Like public readers, org readers see approved content only.
+
+  **Discovery follows access.** An org nest joins the readable union and the discovery listing for an authenticated caller, and neither for anon — an org nest nobody could find would be reachable only by a passed-around link, which is not what "available to the organization" means.
+
+  **The migration rebuilds `nests`, carefully.** SQLite cannot alter a CHECK constraint in place, and `nests` is the most-referenced table in the schema: 27 tables point at `nests(id)`, every one `ON DELETE CASCADE`, on a connection that runs `foreign_keys = ON`. A plain `DROP TABLE` would take every node-index row, version, steward, grant and run with it — verified, not theorised: with the pragma left on, a control run deleted every child row. So `041_nest_visibility_org` toggles `foreign_keys` **outside** the transaction (the pragma is a no-op inside one), derives the replacement table from the live schema rather than a hardcoded column list (other branches add columns to `nests`, and a stale list drops them silently), and refuses to record itself unless `PRAGMA foreign_key_check` comes back clean. Postgres needs none of it — its constraint swap is catalogue-only.
+
+  **The UI can set the tier, not just report it.** The visibility control (Collaborators tab and Share dialog) is now a three-way select — Private / Organization / Public — with the acknowledgement dialog still guarding the `public` choice alone. The nest header keeps its two-state shortcut for the common private ↔ public flip, and every surface that showed a visibility label — header badge for viewers, dashboard card badge, dashboard access filter — now knows the third value. Previously anything that was not literally `public` rendered as "Private — only people added below can see this nest," which for an org nest told the owner the opposite of the truth.
+
+- 2bc8689: Optional PostHog product analytics, off by default. Set `POSTHOG_KEY` / `POSTHOG_HOST` by environment or from Settings → Advanced to point an instance at your own project; the browser only receives the key while `TELEMETRY_ENABLED` is on, so that switch still governs everything the server sends outward. posthog-js loads only when a key is configured.
+
+### Patch Changes
+
+- 1105713: Fix archive request copy: an archive request no longer reads as a deletion in My Work — it shows an ARCHIVE badge, an Approve action, and an archive confirmation instead of "Delete document".
+- c857fe1: A partly-failed bulk submit for review now retries only the drafts that failed. The dialog previously kept the full original selection, so a retry resubmitted documents already in review and reported them as failures.
+- 2bc8689: Clearer document and folder messaging: Version History no longer says saving publishes a draft (Submit for review does), the tag input says a tag was "adjusted" rather than "simplified", and the folder-creation toast names the folder the way the Contents tree does. An unresolvable `?nest=` link now renders inside the app shell, with the header and navigation still in reach, instead of a bare full-page error.
+- 2fb9242: Give the agent setup prompt failure branches, so a first read that fails is recoverable instead of terminal.
+
+  Copy the "Set up an agent" prompt into a coding agent and, if anything goes wrong, it used to have one instruction: stop. That is the wrong answer on an unlicensed server, where the documented first call is blocked but the nest is still perfectly readable — and it is the wrong answer in a sandbox whose network policy blocks the host, where retrying can never help.
+
+  The prompt now branches on what actually came back. **503** means the server has no licence, so it points at `GET /export?format=markdown`, which is not gated and returns every document with its text in one call. **401** means the key is wrong or was never expanded from the environment. **403** distinguishes the server refusing you — usually a key scoped to another nest, which you can fix — from a gateway refusing on your behalf, which you cannot. **No response at all** means the environment cannot reach the host, so the answer is a connector your client dials server-side rather than another attempt.
+
+  Three smaller corrections come with it. The key is now located (`CONTEXTNEST_API_KEY`) rather than merely requested, since the old copy asked the agent to ask for it while forbidding it in chat and naming no other channel. Write capability is stated only where it is true — on an unlicensed server writes are blocked along with everything else non-GET, and claiming otherwise made agents distrust the rest of the brief. And the prompt no longer tells agents to assume a `nodes/` id prefix, which exists on nests created in the app and not on imported ones; it says to reuse the id exactly as the server returned it.
+
+- 2bc8689: Browser Back can no longer slip past the editor's unsaved-changes prompt: repeated presses are matched by the guard, and a second Back keeps the dialog already being answered instead of replacing it.
+- 2bc8689: Workflow cycle errors read in plain language instead of "flow edges must form a DAG", and when two cards share a title the trail writes each one with its node id so every step names a single card.
+
 ## 1.21.1
 
 ### Patch Changes

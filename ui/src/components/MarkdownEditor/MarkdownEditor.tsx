@@ -35,6 +35,7 @@ import { DragHandle } from "@tiptap/extension-drag-handle-react";
 import { NodeRange } from "@tiptap/extension-node-range";
 import type { Transaction } from "@tiptap/pm/state";
 import { Markdown, type MarkdownStorage } from "tiptap-markdown";
+import { serializeImageNode } from "../../lib/image-markdown-serializer";
 
 // tiptap-markdown's storage isn't in TipTap's Storage type; cast.
 // TextStyle/Color have no dedicated markdown syntax, so with no explicit
@@ -125,16 +126,19 @@ function normalizeLinkUrl(
   return { url: parsed.toString(), error: null };
 }
 
-// Obsidian wiki link: `[[nodes/<slug>|Title]]` — full path + alias.
-function formatWikiLink(slug: string, title: string): string {
-  const safeSlug = (slug || title).trim();
-  const display = (title || slug).trim();
-  if (!safeSlug) return "";
-  const target = safeSlug.startsWith("nodes/") ? safeSlug : `nodes/${safeSlug}`;
+// Obsidian wiki link: `[[nodes/<folder>/<slug>|Title]]` — the full node id
+// as the target (a bare slug would resolve wrong once two folders share
+// one), plus the title as the alias.
+function formatWikiLink(nodeId: string, title: string): string {
+  const safeId = (nodeId || title).trim();
+  const display = (title || nodeId).trim();
+  if (!safeId) return "";
+  const target = safeId.startsWith("nodes/") ? safeId : `nodes/${safeId}`;
   return `[[${target}|${display}]] `;
 }
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
@@ -183,6 +187,7 @@ import {
   Table as TableIcon,
   FileSpreadsheet,
   Upload,
+  Video,
   Info,
   ChevronRight,
   Columns2,
@@ -211,6 +216,7 @@ import {
 } from "@/components/ui/dialog";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../../lib/queries";
+import { escapeUnknownInlineHtml } from "../../lib/html-tag-allowlist";
 import {
   detectTrigger,
   matchMembers,
@@ -218,6 +224,7 @@ import {
   type MentionMember,
 } from "./picker-match";
 import { WikiLink, clearWikiExistsCache } from "./extensions/WikiLink";
+import { resolveWikiTarget, previewSnippet } from "@/lib/wiki-preview";
 import { CodeBlock } from "./extensions/CodeBlock";
 import { tableExtensions } from "./extensions/Table";
 import { Callout } from "./extensions/Callout";
@@ -226,6 +233,22 @@ import { columnExtensions } from "./extensions/Columns";
 import { TableControls } from "./TableControls";
 import { TaskCheckbox } from "./extensions/TaskCheckbox";
 import { VideoPreview } from "./extensions/VideoPreview";
+import {
+  MEDIA_ACCEPT,
+  MEDIA_FILE_RE,
+  MEDIA_HELPER_TEXT,
+  VIDEO_FILE_RE,
+  IMAGE_MAX_UPLOAD_BYTES,
+  VIDEO_MAX_UPLOAD_BYTES,
+  editorPlaceholder,
+  isFileDrag,
+  isUnsupportedFileDrag,
+  mediaAffordances,
+  pickMediaFile,
+  shouldUploadPastedMedia,
+  unsupportedMediaDropMessage,
+  validateEmbedInput,
+} from "@/lib/editor-media";
 import { Mention } from "./extensions/Mention";
 import {
   SearchReplace,
@@ -238,10 +261,13 @@ import {
 } from "./extensions/SearchReplace";
 import { DocumentViewer } from "../DocumentViewer";
 import "./editor-styles.css";
+import { useAuth } from "../../auth/AuthContext";
 
 export interface MarkdownEditorHandle {
-  /** Insert `[[nodes/<slug>|Title]]` at cursor. */
-  insertWikiLink: (slug: string, title: string) => void;
+  /** Insert `[[<node id>|Title]]` at cursor. */
+  insertWikiLink: (nodeId: string, title: string) => void;
+  /** Put the caret at the start of the body (Enter from the title). */
+  focus: () => void;
 }
 
 interface MarkdownEditorProps {
@@ -262,8 +288,14 @@ interface MarkdownEditorProps {
    *  picked file, resolve to its asset URL. Omit to hide the button
    *  (e.g. contexts with no asset storage). */
   onUploadImage?: (file: File) => Promise<string>;
-  /** Click on a `[[Title]]` decoration inside the editor. */
-  onWikiLinkClick?: (title: string, id: string | null) => void;
+  /** Click on a `[[Title]]` decoration inside the editor. `displayText` is
+   *  the human-readable alias (for aliased links `title` is the internal
+   *  node id — see `formatWikiLink`). */
+  onWikiLinkClick?: (
+    title: string,
+    id: string | null,
+    displayText?: string | null,
+  ) => void;
   /** Click on an `@name` decoration. */
   onMentionClick?: (name: string) => void;
   placeholder?: string;
@@ -273,6 +305,15 @@ interface MarkdownEditorProps {
    *  brand-new document wants focus on the Title field first. Default
    *  preserves the existing Notion/Obsidian-style caret-ready feel. */
   autofocus?: "end" | false;
+  /** "boxed" (default): a bordered field with its own scroll viewport and an
+   *  always-on toolbar — a form control. "page": the document IS the page
+   *  (Notion-style) — no border, the window scrolls, and the block toolbar
+   *  only appears while the editor has focus; inline formatting comes from
+   *  the selection bubble. */
+  variant?: "boxed" | "page";
+  /** Rendered at the toolbar's right end — the document page puts its
+   *  document-level switches (source view, Turn into) there. */
+  toolbarEnd?: React.ReactNode;
 }
 
 export const MarkdownEditor = forwardRef<
@@ -290,10 +331,12 @@ export const MarkdownEditor = forwardRef<
     onUploadImage,
     onWikiLinkClick,
     onMentionClick,
-    placeholder = "Start writing...",
+    placeholder,
     editable = true,
     className,
     autofocus = "end",
+    variant = "boxed",
+    toolbarEnd,
   }: MarkdownEditorProps,
   ref: ForwardedRef<MarkdownEditorHandle>,
 ) {
@@ -303,9 +346,41 @@ export const MarkdownEditor = forwardRef<
   // source and the preview lied about how the document would render.
   // The editor stays mounted, hidden, so toggling back keeps caret and undo.
   const [previewing, setPreviewing] = useState(false);
+  // Page mode shows the block toolbar only while writing. Toolbar buttons
+  // preventDefault on mousedown, so clicking one never blurs the editor.
+  const isPage = variant === "page";
   const [previewMarkdown, setPreviewMarkdown] = useState("");
   const qc = useQueryClient();
   const effectiveEditable = editable && !previewing;
+  // Same target resolution as DocumentEditor's own read view (lib/wiki-preview),
+  // so the "Preview" toggle's broken-link styling and hover preview match the
+  // view/comment modes instead of styling every `[[…]]` as resolved.
+  const { data: previewNodesData } = useQuery({
+    ...reads.nodes(nestId ?? ""),
+    enabled: !!nestId && previewing,
+  });
+  const previewFor = useCallback(
+    (target: string) => {
+      const nodes = (previewNodesData?.nodes ?? []) as Array<{
+        id: string;
+        title: string;
+        content?: string;
+      }>;
+      const node = resolveWikiTarget(nodes, target);
+      if (!node) return null;
+      return { title: node.title, snippet: previewSnippet(node.content ?? "") };
+    },
+    [previewNodesData],
+  );
+  // Image / video affordances (toolbar menu, drop overlay) — none in a
+  // read-only / locked / preview doc. See lib/editor-media.ts.
+  const media = mediaAffordances({
+    editable,
+    previewing,
+    canUpload: !!onUploadImage,
+  });
+  // "Drop to add an image or video" overlay while a file is dragged over.
+  const [fileDragOver, setFileDragOver] = useState(false);
 
   // Inline autocomplete state, shared by both triggers: `[[` searches the
   // nest's documents, `@` searches its people. One popup, one keyboard
@@ -462,7 +537,11 @@ export const MarkdownEditor = forwardRef<
         codeBlock: false,
       }),
       CodeBlock,
-      Placeholder.configure({ placeholder }),
+      // Caller's placeholder verbatim; the default also says media can be
+      // dropped in / linked (only when an uploader is wired).
+      Placeholder.configure({
+        placeholder: editorPlaceholder(placeholder, !!onUploadImage),
+      }),
       Link.configure({
         // Plain click opens link in new tab. Edit URL: caret inside link →
         // toolbar Link button (setLink uses extendMarkRange).
@@ -475,9 +554,18 @@ export const MarkdownEditor = forwardRef<
       }),
       TaskList,
       TaskItem.configure({ nested: true }),
-      // Inline images — required for tiptap-markdown to round-trip ![alt](url)
-      // instead of dropping it. Rendering constrained via editor-styles.css.
-      TiptapImage.configure({ inline: false, allowBase64: false }),
+      // Block-level images — required for tiptap-markdown to round-trip
+      // ![alt](url) instead of dropping it. Rendering constrained via
+      // editor-styles.css. Custom markdown serializer: the built-in one
+      // (inherited from an inline-image assumption) never closes the
+      // image's block, which drops the blank line before whatever follows
+      // it — see image-markdown-serializer.ts for why that silently breaks
+      // a video URL placed right after an image.
+      TiptapImage.extend({
+        addStorage() {
+          return { markdown: { serialize: serializeImageNode } };
+        },
+      }).configure({ inline: false, allowBase64: false }),
       // `==text==` highlight. multicolor lets the color marks set a bg.
       Highlight.configure({ multicolor: true }),
       // Text color mark. Persisted via the html:true raw-HTML fallback below
@@ -556,7 +644,7 @@ export const MarkdownEditor = forwardRef<
         transformCopiedText: true,
       }),
     ],
-    content,
+    content: escapeUnknownInlineHtml(content),
     editable,
     // Caret-ready on open so you can type immediately (Notion/Obsidian
     // feel). "end" lands at doc end; placeholder shows when empty. A
@@ -564,7 +652,16 @@ export const MarkdownEditor = forwardRef<
     // instead (see DocumentEditor's initial-focus effect).
     autofocus,
     immediatelyRender: false,
-    onUpdate: ({ editor }) => {
+    onUpdate: ({ editor, transaction }) => {
+      // Only a transaction the USER made counts as an edit. Plugins append
+      // their own doc-changing transactions to any dispatch — prosemirror-
+      // tables' fixTables normalises a freshly parsed table on the first
+      // transaction after load, even an empty one (the mention repaint
+      // below) or a click that only moves the selection. tiptap still emits
+      // `update` for those, and re-serialising then reported markdown that
+      // never round-trips byte-for-byte (`|---|` → `| --- |`) as "Unsaved
+      // changes" on open, with a spurious version on the first blur.
+      if (!transaction.docChanged) return;
       const md = getEditorMarkdown(editor);
       const isEmpty =
         editor.isEmpty || editor.getText().trim().length === 0;
@@ -572,8 +669,9 @@ export const MarkdownEditor = forwardRef<
     },
     editorProps: {
       attributes: {
-        class:
-          "prose prose-sm dark:prose-invert max-w-none focus:outline-none min-h-[300px] px-6 py-4",
+        class: isPage
+          ? "prose dark:prose-invert max-w-none focus:outline-none min-h-[40vh] py-2"
+          : "prose prose-sm dark:prose-invert max-w-none focus:outline-none min-h-[300px] px-6 py-4",
       },
       // CSV/TSV paste → markdown table. Deliberately conservative: only
       // fires on plain-text clipboards that look unambiguously tabular
@@ -584,6 +682,26 @@ export const MarkdownEditor = forwardRef<
       handlePaste: (_view, event) => {
         const ed = editorRef.current;
         if (!ed || !event.clipboardData) return false;
+        // A pasted image/video file (a screenshot, a copied image) uploads
+        // and inserts exactly like a drop. Before this, handlePaste only knew
+        // tables and a pasted screenshot silently did nothing. Never in a
+        // read-only / locked / preview doc.
+        // Inside a code block or table it falls through, like everything else.
+        const pastedMedia = pickMediaFile(event.clipboardData.files);
+        if (
+          pastedMedia &&
+          shouldUploadPastedMedia({
+            hasMediaFile: true,
+            canUpload: !!onUploadImageRef.current,
+            editable: ed.isEditable,
+            inCodeBlock: ed.isActive("codeBlock"),
+            inTable: ed.isActive("table"),
+          })
+        ) {
+          event.preventDefault();
+          void runMediaUploadRef.current(ed, pastedMedia);
+          return true;
+        }
         if (ed.isActive("codeBlock") || ed.isActive("table")) return false;
         const html = event.clipboardData.getData("text/html");
         if (html && /<table[\s>]/i.test(html)) return false;
@@ -599,9 +717,12 @@ export const MarkdownEditor = forwardRef<
         });
       },
       // Image/video file dropped onto the editor → same upload + insert
-      // as the toolbar picker, at the drop position. Anything else falls
-      // through (return false) so ProseMirror's default drop handling —
-      // text drags, in-editor block moves — is untouched.
+      // as the toolbar picker, at the drop position. An unsupported file
+      // type is rejected with a toast (handled, not left to fall through —
+      // an unhandled file drop can otherwise navigate the tab to the file).
+      // A drag with no files at all still falls through (return false) so
+      // ProseMirror's default drop handling — text drags, in-editor block
+      // moves — is untouched.
       handleDrop: (view, event) => {
         const ed = editorRef.current;
         const upload = onUploadImageRef.current;
@@ -611,7 +732,11 @@ export const MarkdownEditor = forwardRef<
         // never upload/insert into a locked or preview-mode doc.
         if (!ed.isEditable) return false;
         const file = files[0];
-        if (!MEDIA_FILE_RE.test(file.name)) return false;
+        if (!MEDIA_FILE_RE.test(file.name)) {
+          event.preventDefault();
+          toast.error(unsupportedMediaDropMessage(file.name));
+          return true;
+        }
         event.preventDefault();
         if (files.length > 1) {
           toast("Only the first file was uploaded — drop one file at a time.");
@@ -687,7 +812,12 @@ export const MarkdownEditor = forwardRef<
 
   useEffect(() => {
     if (editor && editor.isEditable !== effectiveEditable) {
-      editor.setEditable(effectiveEditable);
+      // emitUpdate=false: tiptap's setEditable emits a synthetic `update`
+      // by default, which re-serialized the (unchanged) document and reported
+      // it as an edit — any markdown that doesn't round-trip byte-for-byte
+      // (a `|---|` table row comes back as `| --- |`) opened as "Unsaved
+      // changes" and wrote a spurious version on the first blur.
+      editor.setEditable(effectiveEditable, false);
     }
   }, [editor, effectiveEditable]);
 
@@ -797,6 +927,9 @@ export const MarkdownEditor = forwardRef<
     };
   }, [wikiPopupOpen, nestId]);
 
+  // Never offer the author to themselves (the server skips a self-mention;
+  // `members` stays whole so others' mentions of them still resolve).
+  const me = useAuth().adminStatus?.me?.email?.toLowerCase();
   // Filter client-side as the query changes. Empty query (just `[[` or `@`)
   // lists everything so users can browse without typing.
   useEffect(() => {
@@ -806,7 +939,10 @@ export const MarkdownEditor = forwardRef<
     }
     if (pickerPopup.kind === "mention") {
       setPickerResults(
-        matchMembers(members, pickerPopup.query).map((m) => ({
+        matchMembers(
+          members.filter((m) => m.email.toLowerCase() !== me),
+          pickerPopup.query,
+        ).map((m) => ({
           key: m.email,
           primary: m.name || m.email.split("@")[0],
           secondary: m.email,
@@ -828,7 +964,7 @@ export const MarkdownEditor = forwardRef<
           key: n.id,
           primary: n.title,
           secondary: n.id,
-          insert: formatWikiLink(slugFromNodeId(n.id), n.title),
+          insert: formatWikiLink(n.id, n.title),
         })),
     );
   }, [
@@ -837,6 +973,7 @@ export const MarkdownEditor = forwardRef<
     currentNodeId,
     wikiNodesVersion,
     members,
+    me,
   ]);
 
   // Sync external content only when not focused — avoids selection
@@ -845,15 +982,20 @@ export const MarkdownEditor = forwardRef<
     if (!editor) return;
     if (editor.isFocused) return;
     if (content === getEditorMarkdown(editor)) return;
-    editor.commands.setContent(content, { emitUpdate: false });
+    editor.commands.setContent(escapeUnknownInlineHtml(content), {
+      emitUpdate: false,
+    });
   }, [content, editor]);
 
   useImperativeHandle(
     ref,
     (): MarkdownEditorHandle => ({
-      insertWikiLink: (slug, title) => {
+      insertWikiLink: (nodeId, title) => {
         if (!editor) return;
-        editor.chain().focus().insertContent(formatWikiLink(slug, title)).run();
+        editor.chain().focus().insertContent(formatWikiLink(nodeId, title)).run();
+      },
+      focus: () => {
+        editor?.chain().focus("start").run();
       },
     }),
     [editor],
@@ -1244,7 +1386,9 @@ export const MarkdownEditor = forwardRef<
   };
 
   if (!editor) {
-    return (
+    return isPage ? (
+      <div className="animate-pulse bg-muted/20 h-[40vh] rounded-md" />
+    ) : (
       <div className="border rounded-lg bg-background shadow-sm">
         <div className="h-12 bg-muted/40 rounded-t-lg border-b" />
         <div className="animate-pulse bg-muted/20 h-[300px] rounded-b-lg" />
@@ -1256,21 +1400,59 @@ export const MarkdownEditor = forwardRef<
     <div
       ref={wrapperRef}
       className={cn(
-        "relative border rounded-lg bg-background shadow-sm",
+        "relative",
+        isPage ? "" : "border rounded-lg bg-background shadow-sm",
         className,
       )}
+      data-variant={variant}
+      // Drop-overlay bookkeeping only — the drop itself is still ProseMirror's
+      // handleDrop (the overlay is pointer-events-none, so it never eats it).
+      onDragOver={(e) => {
+        if (media.dropOverlay && isFileDrag(e.dataTransfer?.types)) {
+          const show = !isUnsupportedFileDrag(e.dataTransfer?.items);
+          if (fileDragOver !== show) setFileDragOver(show);
+        }
+      }}
+      onDragLeave={(e) => {
+        const next = e.relatedTarget as Node | null;
+        if (!next || !e.currentTarget.contains(next)) setFileDragOver(false);
+      }}
+      onDropCapture={() => setFileDragOver(false)}
     >
+      {media.dropOverlay && fileDragOver && (
+        <div
+          className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg border-2 border-dashed border-primary/60 bg-background/80"
+          data-testid="markdown-editor-drop-overlay"
+        >
+          <span className="flex items-center gap-2 text-sm font-medium text-foreground">
+            <ImagePlus className="h-4 w-4" />
+            Drop to add an image or video
+          </span>
+        </div>
+      )}
+      {/* Page mode: the toolbar is always there in edit mode — it is what says
+          "this is an editor". It sticks a little under the document top bar
+          (h-12) so the two bars read as separate surfaces while scrolling. */}
       {editable && (
-        <div className="sticky top-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/75 border-b">
+        <div
+          className={cn(
+            "sticky z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/75",
+            isPage
+              ? "top-14 -mx-2 mb-3 rounded-md border shadow-sm"
+              : "top-0 border-b",
+          )}
+          data-testid="markdown-editor-toolbar"
+        >
           <Toolbar
             editor={editor}
             onLink={setLink}
             onRequestDocLink={onRequestDocLink}
             onMediaFile={
-              onUploadImage
+              media.upload
                 ? (file) => void runMediaUpload(editor, file)
                 : undefined
             }
+            canEmbed={media.embed}
             uploading={uploading}
             previewing={previewing}
             onTogglePreview={() =>
@@ -1279,13 +1461,19 @@ export const MarkdownEditor = forwardRef<
                 return !p;
               })
             }
+            end={toolbarEnd}
           />
         </div>
       )}
 
       {/* Find/replace bar (Cmd+F). Sticky under the toolbar. */}
       {editable && searchOpen && (
-        <div className="sticky top-0 z-30 flex flex-wrap items-center gap-1 border-b bg-background/95 px-2 py-1 backdrop-blur">
+        <div
+          className={cn(
+            "sticky z-30 flex flex-wrap items-center gap-1 border-b bg-background/95 px-2 py-1 backdrop-blur",
+            isPage ? "top-[6.75rem]" : "top-0",
+          )}
+        >
           <Search className="h-3.5 w-3.5 text-muted-foreground" />
           <Input
             autoFocus
@@ -1359,8 +1547,8 @@ export const MarkdownEditor = forwardRef<
           // top-edge selection overflow the boundary and flip to `bottom`, where
           // it's fully visible; z-50 on the menu keeps it above the toolbar.
           options={{
-            flip: { boundary: scrollRef.current ?? undefined, padding: 8 },
-            shift: { boundary: scrollRef.current ?? undefined, padding: 8 },
+            flip: { boundary: (isPage ? undefined : scrollRef.current) ?? undefined, padding: 8 },
+            shift: { boundary: (isPage ? undefined : scrollRef.current) ?? undefined, padding: 8 },
           }}
           className="z-50 flex items-center gap-0.5 rounded-md border bg-popover p-1 shadow-md"
         >
@@ -1473,7 +1661,10 @@ export const MarkdownEditor = forwardRef<
       {previewing && (
         <DocumentViewer
           content={previewMarkdown}
-          onWikiLinkClick={(title) => onWikiLinkClick?.(title, null)}
+          onWikiLinkClick={(title, displayText) =>
+            onWikiLinkClick?.(title, null, displayText)
+          }
+          previewFor={nestId ? previewFor : undefined}
         />
       )}
 
@@ -1481,7 +1672,7 @@ export const MarkdownEditor = forwardRef<
         ref={scrollRef}
         editor={editor}
         className={cn(
-          "min-h-[60vh] max-h-[60vh] overflow-y-auto",
+          isPage ? "min-h-[40vh]" : "min-h-[60vh] max-h-[60vh] overflow-y-auto",
           previewing && "hidden",
         )}
         // Click the empty area below the last block → caret to doc end.
@@ -1506,7 +1697,12 @@ export const MarkdownEditor = forwardRef<
 
       {/* Footer: word/char count + outline toggle. */}
       {editable && (
-        <div className="flex items-center gap-3 border-t px-3 py-1 text-xs text-muted-foreground">
+        <div
+          className={cn(
+            "flex items-center gap-3 py-1 text-xs text-muted-foreground",
+            isPage ? "mt-4 opacity-60 hover:opacity-100" : "border-t px-3",
+          )}
+        >
           <button
             type="button"
             onMouseDown={(e) => e.preventDefault()}
@@ -1892,20 +2088,8 @@ function insertDelimitedTable(
   return true;
 }
 
-// Media the editor can upload into nest assets — mirrors the server
-// allowlist in src/nests/asset-routes.ts (SVG deliberately excluded there;
-// stored-XSS surface).
-const MEDIA_ACCEPT =
-  "image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm";
-const MEDIA_FILE_RE = /\.(png|jpe?g|gif|webp|mp4|webm)$/i;
-const VIDEO_FILE_RE = /\.(mp4|webm)$/i;
-// Client-side mirrors of the server's per-type caps — fail fast with a
-// friendly toast instead of shipping the file upstream to be rejected.
-// Video mirrors the server default (config.VIDEO_MAX_BYTES = 30 MB), kept under
-// Cloud Run's 32 MiB request limit. If a deployment raises VIDEO_MAX_MB, bump
-// this to match so the client doesn't reject an upload the server would accept.
-const IMAGE_MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
-const VIDEO_MAX_UPLOAD_BYTES = 30 * 1024 * 1024; // 30 MB
+// Media allowlist + size caps live in lib/editor-media.ts (shared with the
+// toolbar's helper text and the paste/drop pickers).
 
 /**
  * Upload an image/video via the caller's asset uploader and insert the
@@ -1961,9 +2145,11 @@ function Toolbar({
   onLink,
   onRequestDocLink,
   onMediaFile,
+  canEmbed,
   uploading,
   previewing,
   onTogglePreview,
+  end,
 }: {
   editor: Editor;
   onLink: () => void;
@@ -1971,9 +2157,12 @@ function Toolbar({
   /** Picked image/video file. Parent owns the shared single-flight
    *  upload guard (toolbar + drag-drop) and the insert. */
   onMediaFile?: (file: File) => void;
+  /** Show "Embed YouTube or Vimeo link" (false in read-only / preview). */
+  canEmbed: boolean;
   uploading: boolean;
   previewing: boolean;
   onTogglePreview: () => void;
+  end?: React.ReactNode;
 }) {
   const roving = useRovingFocus<HTMLDivElement>();
   // Hidden file input driven by the "Insert table from CSV" toolbar button.
@@ -2013,6 +2202,31 @@ function Toolbar({
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-picking the same file
     if (file) onMediaFile?.(file);
+  };
+
+  // "Embed YouTube or Vimeo link": validated with toEmbedUrl (via
+  // validateEmbedInput), inserted as the bare URL on its own paragraph — the
+  // VideoPreview decoration shows the player, the markdown stays the URL.
+  const [embedDialog, setEmbedDialog] = useState<{
+    open: boolean;
+    url: string;
+    error: string | null;
+  }>({ open: false, url: "", error: null });
+  const confirmEmbed = () => {
+    const res = validateEmbedInput(embedDialog.url);
+    if (!res.ok) {
+      setEmbedDialog((d) => ({ ...d, error: res.error }));
+      return;
+    }
+    editor
+      .chain()
+      .focus()
+      .insertContent({
+        type: "paragraph",
+        content: [{ type: "text", text: res.url }],
+      })
+      .run();
+    setEmbedDialog({ open: false, url: "", error: null });
   };
   // In preview mode every formatting affordance is irrelevant — collapse
   // the toolbar to just the toggle so the user has one obvious way back
@@ -2141,9 +2355,54 @@ function Toolbar({
       >
         <TableIcon className="h-3.5 w-3.5" />
       </ToolbarButton>
-      {/* One "Upload" control for every file the editor can ingest — image
-          and CSV/TSV share the same intent, so they share one menu instead
-          of two buttons in different toolbar groups. */}
+      {/* Labelled, not icon-only: "you can add images and videos" should be
+          obvious, not a tooltip on an upload glyph. The label collapses to
+          the icon on narrow toolbars. */}
+      {(onMediaFile || canEmbed) && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              title="Add an image or video"
+              // Match ToolbarButton: don't blur the editor before the menu opens.
+              onMouseDown={(e) => e.preventDefault()}
+              className="h-7 gap-1 px-2"
+              disabled={uploading}
+              data-testid="markdown-editor-media-button"
+            >
+              <ImagePlus className="h-3.5 w-3.5" />
+              <span className="hidden text-xs sm:inline">Image / video</span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            {onMediaFile && (
+              <DropdownMenuItem onSelect={pickMedia} className="items-start">
+                <Upload className="mr-2 mt-0.5 h-4 w-4" />
+                <span className="flex flex-col">
+                  <span>Upload image or video</span>
+                  <span className="text-xs text-muted-foreground">
+                    {MEDIA_HELPER_TEXT}
+                  </span>
+                </span>
+              </DropdownMenuItem>
+            )}
+            {canEmbed && (
+              <DropdownMenuItem
+                onSelect={() =>
+                  setEmbedDialog({ open: true, url: "", error: null })
+                }
+              >
+                <Video className="mr-2 h-4 w-4" />
+                Embed YouTube or Vimeo link
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+      {/* Other file imports (CSV / TSV → table). Images and videos have
+          their own labelled button above. */}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
@@ -2160,12 +2419,6 @@ function Toolbar({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start">
-          {onMediaFile && (
-            <DropdownMenuItem onSelect={pickMedia}>
-              <ImagePlus className="mr-2 h-4 w-4" />
-              Image or video
-            </DropdownMenuItem>
-          )}
           <DropdownMenuItem onSelect={pickCsv}>
             <FileSpreadsheet className="mr-2 h-4 w-4" />
             Table from CSV / TSV
@@ -2188,6 +2441,52 @@ function Toolbar({
           onChange={onMediaPicked}
         />
       )}
+      <Dialog
+        open={embedDialog.open}
+        onOpenChange={(open) =>
+          setEmbedDialog((d) => (open ? d : { open: false, url: "", error: null }))
+        }
+      >
+        <DialogContent className="sm:max-w-[440px]">
+          <DialogHeader>
+            <DialogTitle>Embed a video</DialogTitle>
+            <DialogDescription>
+              Paste a YouTube or Vimeo link. It plays in place; the document
+              keeps the plain link.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-1">
+            <Label htmlFor="embed-url" className="text-xs">Video link</Label>
+            <Input
+              id="embed-url"
+              autoFocus
+              placeholder="https://www.youtube.com/watch?v=…"
+              value={embedDialog.url}
+              onChange={(e) =>
+                setEmbedDialog((d) => ({ ...d, url: e.target.value, error: null }))
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  confirmEmbed();
+                }
+              }}
+            />
+            {embedDialog.error && (
+              <p className="text-xs text-destructive">{embedDialog.error}</p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setEmbedDialog({ open: false, url: "", error: null })}
+            >
+              Cancel
+            </Button>
+            <Button onClick={confirmEmbed}>Embed</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Divider />
 
@@ -2236,10 +2535,13 @@ function Toolbar({
         <Eye className="h-3.5 w-3.5" />
       </ToolbarButton>
 
-      <div className="ml-auto text-xs text-muted-foreground hidden sm:flex items-center gap-2 px-1">
-        <span>[[wiki]]</span>
-        <span>@mention</span>
-        <span>[ ] task</span>
+      <div className="ml-auto flex items-center gap-1">
+        <div className="hidden items-center gap-2 px-1 text-xs text-muted-foreground lg:flex">
+          <span>[[wiki]]</span>
+          <span>@mention</span>
+          <span>[ ] task</span>
+        </div>
+        {end}
       </div>
     </div>
   );

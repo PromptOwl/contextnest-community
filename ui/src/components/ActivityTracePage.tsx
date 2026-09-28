@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
+  ScrollText,
   ChevronLeft,
   ChevronRight,
   Loader2,
@@ -18,6 +19,7 @@ import {
   Search,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { PageTitle } from "@/components/ui/page-title";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -28,6 +30,7 @@ import {
 } from "@/components/ui/select";
 import * as api from "../lib/api";
 import { formatServerDate } from "../lib/dates";
+import { formatClient, type ClientAttribution } from "../lib/client-attribution";
 
 interface TraceRow {
   id: number;
@@ -40,6 +43,10 @@ interface TraceRow {
   caller: string | null;
   status: number | null;
   duration_ms: number | null;
+  /** Caller attribution the call carried (§9.4) — which agent, in which
+   *  session. Absent when it carried none. Self-reported, never authenticated:
+   *  `caller` above is the identity this server actually verified. */
+  client?: ClientAttribution;
 }
 
 const PAGE_SIZE = 25;
@@ -48,7 +55,8 @@ export function ActivityTracePage({
   onBack,
   nestId,
 }: {
-  onBack: () => void;
+  /** Nest-scoped only: the way out of the nest. The app page has the rail. */
+  onBack?: () => void;
   /** Nest-scoped steward mode: fetch this nest's rows only, hide the nest column. */
   nestId?: string;
 }) {
@@ -115,14 +123,18 @@ export function ActivityTracePage({
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" onClick={onBack}>
+      <div className="flex items-start gap-2">
+        {onBack && (
+          <Button variant="ghost" size="sm" onClick={onBack} className="mt-1">
             <ArrowLeft className="h-4 w-4 mr-1" /> Back
           </Button>
-          <h1 className="text-lg font-semibold">Activity trace</h1>
-        </div>
-        <div className="flex items-center gap-2">
+        )}
+        <PageTitle
+          icon={ScrollText}
+          title="Activity trace"
+          className="mb-0 flex-1"
+          actions={
+        <>
           <Select value={kind} onValueChange={(v) => setKind(v as any)}>
             <SelectTrigger className="h-8 w-28">
               <SelectValue />
@@ -150,7 +162,9 @@ export function ActivityTracePage({
               <RefreshCw className="h-3.5 w-3.5" />
             )}
           </Button>
-        </div>
+        </>
+          }
+        />
       </div>
 
       {error && <p className="text-sm text-red-500">{error}</p>}
@@ -202,6 +216,14 @@ export function ActivityTracePage({
                 )}
                 <td className="max-w-[180px] truncate" title={r.caller || ""}>
                   {r.caller || "—"}
+                  {r.client && (
+                    <div
+                      className="text-[11px] text-muted-foreground truncate font-mono"
+                      title={formatClient(r.client)}
+                    >
+                      {formatClient(r.client)}
+                    </div>
+                  )}
                 </td>
                 <td>
                   {r.status == null ? (

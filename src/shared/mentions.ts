@@ -37,11 +37,53 @@ export function extractMentions(markdown: string): string[] {
   return names;
 }
 
+/**
+ * The text with its mentions removed — for using a message as a search
+ * query, where `@alice` is who to tell, not what to look for. Same pattern
+ * as extractMentions, so the two can't drift; code spans keep their `@`
+ * because there it is source, not a mention.
+ */
+export function stripMentions(text: string): string {
+  const spans: Array<[number, number]> = [];
+  // Blanked to the SAME length, so the match offsets map back onto `text`.
+  const code = (text || "")
+    .replace(/```[\s\S]*?```/g, (m) => " ".repeat(m.length))
+    .replace(/`[^`\n]*`/g, (m) => " ".repeat(m.length));
+  let match;
+  MENTION.lastIndex = 0;
+  while ((match = MENTION.exec(code)) !== null) {
+    // The leading whitespace (if any) belongs to the separator, not the
+    // mention; keep it so neighbouring words don't fuse.
+    const lead = match[0].startsWith("@") ? 0 : 1;
+    spans.push([match.index + lead, match.index + match[0].length]);
+  }
+  let out = text || "";
+  for (const [start, end] of spans.reverse()) {
+    out = out.slice(0, start) + out.slice(end);
+  }
+  return out.replace(/\s+/g, " ").trim();
+}
+
 /** Mentions present in `next` that weren't in `previous`. */
 export function newMentions(previous: string, next: string): string[] {
   const before = new Set(extractMentions(previous).map((n) => n.toLowerCase()));
   return extractMentions(next).filter((n) => !before.has(n.toLowerCase()));
 }
+
+/**
+ * Most people one write may notify.
+ *
+ * A mention costs an access check, an inbox row, an email and a slice of a
+ * connector post per recipient, and commenting is a READ-tier action with no
+ * per-actor rate limit — so one comment naming a large nest's whole roster,
+ * reposted, is an amplifier. Nobody tags this many people in one comment on
+ * purpose; a write that names more notifies the first few and stops.
+ *
+ * Applied to resolved candidates, not to the parsed names: capping the parse
+ * would corrupt `newMentions`, whose diff needs the FULL set of names on both
+ * sides to tell an added name from one that was already there.
+ */
+export const MAX_MENTION_RECIPIENTS = 25;
 
 export interface MentionablePerson {
   email: string;

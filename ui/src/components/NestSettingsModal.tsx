@@ -22,6 +22,7 @@ import {
   Loader2,
   Info,
   UserCheck,
+  UserPen,
   Star,
   ShieldCheck,
 } from "lucide-react";
@@ -38,6 +39,7 @@ interface NestSettingsModalProps {
   requirePushConfirmation: boolean;
   /** True only for a server superadmin — gates the push-confirmation switch. */
   isServerAdmin: boolean;
+  creatorIsReviewer: boolean;
   /** False hides the stewardship section. Server still enforces. */
   canManageStewardship: boolean;
   onClose: () => void;
@@ -47,6 +49,7 @@ interface NestSettingsModalProps {
     primeOnlyReview: boolean;
     primeTags: string[];
     requirePushConfirmation: boolean;
+    creatorIsReviewer: boolean;
   }) => void;
 }
 
@@ -59,6 +62,7 @@ export function NestSettingsModal({
   primeTags,
   requirePushConfirmation,
   isServerAdmin,
+  creatorIsReviewer,
   canManageStewardship,
   onClose,
   onChanged,
@@ -68,6 +72,7 @@ export function NestSettingsModal({
   const [primeOnly, setPrimeOnly] = useState(primeOnlyReview);
   const [pushConfirm, setPushConfirm] = useState(requirePushConfirmation);
   const [primeTagText, setPrimeTagText] = useState(primeTags.join(", "));
+  const [creatorReviews, setCreatorReviews] = useState(creatorIsReviewer);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Acknowledgement required only when the caller is turning stewardship
@@ -150,12 +155,14 @@ export function NestSettingsModal({
     // 403 would otherwise reject the whole PATCH for a non-superadmin).
     const pushConfirmChanged =
       isServerAdmin && pushConfirm !== requirePushConfirmation;
+    const creatorReviewsChanged = creatorReviews !== creatorIsReviewer;
     if (
       !stewardshipChanged &&
       !selfApproveChanged &&
       !primeOnlyChanged &&
       !primeTagsChanged &&
-      !pushConfirmChanged
+      !pushConfirmChanged &&
+      !creatorReviewsChanged
     ) {
       onClose();
       return;
@@ -168,9 +175,8 @@ export function NestSettingsModal({
         ...(selfApproveChanged ? { allow_self_approve: selfApprove } : {}),
         ...(primeOnlyChanged ? { prime_only_review: primeOnly } : {}),
         ...(primeTagsChanged ? { prime_tags: nextPrimeTags } : {}),
-        ...(pushConfirmChanged
-          ? { require_push_confirmation: pushConfirm }
-          : {}),
+        ...(pushConfirmChanged ? { require_push_confirmation: pushConfirm } : {}),
+        ...(creatorReviewsChanged ? { creator_is_reviewer: creatorReviews } : {}),
       });
       // Trust the server's response, not our optimistic local state, in
       // case the permission check rejected silently or the DB rejected.
@@ -178,7 +184,8 @@ export function NestSettingsModal({
         result.stewardship_enabled !== enabled ||
         result.allow_self_approve !== selfApprove ||
         result.prime_only_review !== primeOnly ||
-        (pushConfirmChanged && result.require_push_confirmation !== pushConfirm)
+        (pushConfirmChanged && result.require_push_confirmation !== pushConfirm) ||
+        result.creator_is_reviewer !== creatorReviews
       ) {
         setError(
           "Server did not accept the change. You may not have permission to change these settings.",
@@ -194,6 +201,7 @@ export function NestSettingsModal({
         primeOnlyReview: result.prime_only_review,
         primeTags: result.prime_tags,
         requirePushConfirmation: result.require_push_confirmation,
+        creatorIsReviewer: result.creator_is_reviewer,
       });
     } catch (err: any) {
       setError(err.message);

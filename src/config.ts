@@ -381,6 +381,54 @@ export const config = {
     return process.env.OIDC_DEPARTMENT_TAGGING === "true";
   },
   /**
+   * Widen the add-a-person suggestions (GET /people/suggest) from "people you
+   * already work with" to every registered account on this server.
+   *
+   * OFF BY DEFAULT, and the default is the point. On a single-company
+   * self-hosted server every account is a colleague, so the whole directory is
+   * the useful answer and this saves asking someone for their address. On the
+   * PromptOwl-hosted deployment, one server holds many unrelated customers —
+   * so the same list is one customer's staff being offered another customer's
+   * email addresses. The hosted deployment leaves this unset; a self-hosted
+   * operator who knows their user table is their own staff turns it on.
+   *
+   * Narrows nothing when off: the default scoping (shared nests and teams,
+   * plus everything for a server admin, who administers the accounts anyway)
+   * is unchanged. Suggestions never gate the add either way — an address that
+   * appears in no list is still valid to type, so this only ever affects what
+   * is *offered*, never who can be invited. Superadmin-togglable at runtime
+   * via /admin/settings.
+   */
+  get PEOPLE_SUGGEST_ALL_USERS(): boolean {
+    return process.env.PEOPLE_SUGGEST_ALL_USERS === "true";
+  },
+  /**
+   * Who may create nests. "admins" (default): server admins only, until the
+   * server is on a paid plan. "everyone": any signed-in user. Open mode is
+   * unaffected (everyone is admin there).
+   */
+  get NEST_CREATION(): "admins" | "everyone" {
+    return process.env.NEST_CREATION?.trim().toLowerCase() === "everyone"
+      ? "everyone"
+      : "admins";
+  },
+  /**
+   * This server hosts several unrelated organizations (the PromptOwl-hosted
+   * deployment) rather than one company (a self-hosted install).
+   *
+   * OFF BY DEFAULT. Nest visibility 'org' means "every authenticated account
+   * on this deployment" (src/shared/access.ts) — on a single-company server
+   * that IS the organization, so the tier is safe to flip in one click. On a
+   * shared server it is every customer, so with this on: flipping a nest to
+   * 'org' needs the same explicit acknowledgement 'public' always needs
+   * (PATCH /nests/:id/visibility 409s without it — the server enforces it, not only the UI), and
+   * the UI words both tiers to say so. Exposed on /health as
+   * `shared_deployment`. Superadmin-togglable at runtime via /admin/settings.
+   */
+  get SHARED_DEPLOYMENT(): boolean {
+    return process.env.SHARED_DEPLOYMENT === "true";
+  },
+  /**
    * Path to the .env file the server reads its config from and the license
    * install flow persists PROMPTOWL_KEY into. Defaults UNDER DATA_ROOT (not
    * $cwd) so it lands on the writable, volume-mounted, restart-surviving path
@@ -396,6 +444,19 @@ export const config = {
   },
   get TELEMETRY_INTERVAL_MS() {
     return parseInt(process.env.TELEMETRY_INTERVAL_MS || "3600000", 10);
+  },
+  /**
+   * PostHog product analytics. Empty key = off, which is the default: a
+   * self-hosted operator brings their own project. The key is a public client
+   * key by design (the browser sends it), so /health may hand it out — but
+   * only while TELEMETRY_ENABLED is on, so one switch stops all outbound
+   * usage data. Editable at runtime from the admin Settings page.
+   */
+  get POSTHOG_KEY(): string {
+    return (process.env.POSTHOG_KEY || "").trim();
+  },
+  get POSTHOG_HOST(): string {
+    return (process.env.POSTHOG_HOST || "").trim() || "https://us.i.posthog.com";
   },
   /**
    * Activity-trace retention window in days (the api_events table behind
@@ -496,6 +557,34 @@ export const config = {
     return process.env.TYPE_TABLE_ENABLED !== "false";
   },
   /**
+   * Hootie in the nest: the floating assistant on every page of the UI and
+   * its POST /nests/:id/chat route (default ON). Superadmin-editable at
+   * runtime via /admin/settings (hootie_enabled). Off → the route 404s and
+   * the launcher is hidden. Answering additionally needs the server-wide
+   * ANTHROPIC_API_KEY; without one the route answers 503, not 404 — the
+   * feature is on, it just isn't configured yet.
+   */
+  get HOOTIE_ENABLED(): boolean {
+    return process.env.HOOTIE_ENABLED !== "false";
+  },
+  /** Model Hootie answers with. Superadmin-editable at runtime via
+   *  /admin/settings (hootie_model). A gateway-side name (`ollama/…`,
+   *  `gpt-…`) is fine when ANTHROPIC_BASE_URL points at one. */
+  get HOOTIE_MODEL(): string {
+    return process.env.HOOTIE_MODEL || "claude-opus-5";
+  },
+  /**
+   * Where the Anthropic-shaped model calls go. Empty = Anthropic directly.
+   * Set to a LiteLLM (or PromptOwl) gateway to route Hootie AND agent runs
+   * through it — one setting: the runner honours the same variable via the
+   * run bundle's env floor. Superadmin-editable (anthropic_base_url).
+   * Never a per-user vendor key: that is the shadow-AI hole the gateway
+   * exists to close.
+   */
+  get ANTHROPIC_BASE_URL(): string {
+    return (process.env.ANTHROPIC_BASE_URL || "").trim().replace(/\/$/, "");
+  },
+  /**
    * Sub-agent runs: lets a run spawn nested runs (an external runner calling
    * back into POST /run for a child agent). Gated SEPARATELY from the base
    * plane because recursion is the risky surface — unbounded fan-out,
@@ -552,6 +641,27 @@ export const config = {
       return null;
     }
     return raw;
+  },
+  /**
+   * Email transport: "smtp" (SMTP_URL, default) or "ses" (AWS SES via the SDK,
+   * for deployments that can't use SMTP). Anything else falls back to smtp.
+   */
+  get EMAIL_PROVIDER(): "smtp" | "ses" {
+    return process.env.EMAIL_PROVIDER?.trim().toLowerCase() === "ses" ? "ses" : "smtp";
+  },
+  /** AWS region for SES, e.g. us-east-1. Required when EMAIL_PROVIDER=ses. */
+  get SES_REGION(): string | null {
+    return process.env.SES_REGION?.trim() || null;
+  },
+  /**
+   * Optional static SES credentials. Both unset → the AWS default credential
+   * chain (IAM role, AWS_* env, shared profile). The secret is write-only.
+   */
+  get SES_ACCESS_KEY_ID(): string | null {
+    return process.env.SES_ACCESS_KEY_ID?.trim() || null;
+  },
+  get SES_SECRET_ACCESS_KEY(): string | null {
+    return process.env.SES_SECRET_ACCESS_KEY?.trim() || null;
   },
   /**
    * From address for notification emails. Shape-validated here (not only in
@@ -687,5 +797,17 @@ export const config = {
       10,
     );
     return Number.isFinite(n) && n > 0 ? n : 7 * 24 * 60 * 60 * 1000;
+  },
+
+  /**
+   * Max PDF upload size in bytes (POST /nests/:id/nodes/pdf). Default 25 MB —
+   * under Cloud Run's 32 MiB HTTP/1 request-body limit, with room for the
+   * multipart framing, so an oversized PDF is refused by our own check (413
+   * with a clear message) rather than by the platform. Read per request, so a
+   * change takes effect without a restart. Override via PDF_MAX_MB.
+   */
+  get PDF_MAX_BYTES() {
+    const mb = parseInt(process.env.PDF_MAX_MB || "25", 10);
+    return (Number.isFinite(mb) && mb > 0 ? mb : 25) * 1024 * 1024;
   },
 };

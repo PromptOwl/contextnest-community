@@ -12,11 +12,60 @@ import type { UnsyncedFolder } from "./api";
 
 export type NestScope =
   | "all"
+  | "mine"
   | "owned"
   | "shared"
+  | "org"
   | "public"
   | "synced"
   | "unsynced";
+
+/**
+ * The scope the dashboard opens on. "My nests" — owned or shared with me —
+ * rather than everything I can read: on a shared server every customer's
+ * org/public nest is readable, and a first screen full of strangers' nests
+ * is noise at best and a leak of who else is here at worst. Discovery stays
+ * one select away (Organization / Public / All). (CU-wdqcq02mek)
+ */
+export const DEFAULT_NEST_SCOPE: NestScope = "mine";
+
+/** The shape of a nest row the scope rule needs — a subset of the list
+ *  response so callers can pass the raw row. */
+export interface ScopedNest {
+  is_owner?: boolean;
+  permission?: string | null;
+  visibility?: string | null;
+  /** Reachable through visibility alone — no membership (the dashboard's
+   *  listPublicNests extras). */
+  discovered?: boolean;
+}
+
+export function nestOwned(n: ScopedNest): boolean {
+  return n.is_owner ?? (n.permission ?? "owner") === "owner";
+}
+
+/** Does this registered nest belong in the scope? The text query is applied
+ *  separately; this is the access rule only. */
+export function nestInScope(n: ScopedNest, scope: NestScope): boolean {
+  switch (scope) {
+    case "mine":
+      return !n.discovered;
+    case "owned":
+      return nestOwned(n);
+    case "shared":
+      // Shared WITH me — someone granted it. A discovered nest is one I can
+      // only read because of its visibility tier, which nobody chose to share
+      // with me; listing it here would put every other customer's org nest in
+      // a scope that reads as a personal invitation. (CU-wdqcq02mek)
+      return !nestOwned(n) && !n.discovered;
+    case "org":
+      return n.visibility === "org";
+    case "public":
+      return n.visibility === "public";
+    default:
+      return true;
+  }
+}
 
 /** Registered nests are hidden only by the unsynced-only scope. */
 export function scopeShowsNests(scope: NestScope): boolean {
@@ -24,15 +73,18 @@ export function scopeShowsNests(scope: NestScope): boolean {
 }
 
 /**
- * Unsynced folders survive the unscoped and unsynced-only views only, and
- * then only when they match the text query (label or path).
+ * Unsynced folders survive the unscoped, "mine" and unsynced-only views only,
+ * and then only when they match the text query (label or path). "mine"
+ * keeps them because it is the default scope and a pending folder on the
+ * operator's own disk is theirs — hiding it there would hide every waiting
+ * import from every fresh dashboard.
  */
 export function visibleUnsynced(
   folders: UnsyncedFolder[],
   scope: NestScope,
   query: string,
 ): UnsyncedFolder[] {
-  if (scope !== "all" && scope !== "unsynced") return [];
+  if (scope !== "all" && scope !== "mine" && scope !== "unsynced") return [];
   const q = query.trim().toLowerCase();
   if (!q) return folders;
   return folders.filter(

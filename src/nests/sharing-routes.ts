@@ -10,10 +10,15 @@ import {
   resolveUserRoles,
   getStewardRolesForUser,
 } from "../governance/stewardship-service.js";
+import { resolveCallerEmail } from "../governance/access-guard.js";
 import { addCollaborator } from "./sharing-service.js";
-import { listNestPeople } from "./people-service.js";
+import { listNestPeople, withDirectory } from "./people-service.js";
 import { setReaderMode } from "./service.js";
-import { isServerAdminUserId } from "../shared/access.js";
+import {
+  isServerAdminUserId,
+  resolveNestAccess,
+  permissionLevel,
+} from "../shared/access.js";
 import { config } from "../config.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import type { NestCollaborator } from "../shared/types.js";
@@ -52,7 +57,7 @@ sharingRoutes.get("/collaborators", async (c) => {
   // a collaborator row. Same read, same write-tier gate, one round trip.
   return c.json({
     collaborators: enriched,
-    people: await listNestPeople(nestId),
+    people: await withDirectory(await listNestPeople(nestId)),
   });
 });
 
@@ -118,27 +123,81 @@ sharingRoutes.delete("/collaborators/:collabId", async (c) => {
   return c.json({ removed: true });
 });
 
+// GET /nests/:nestId/mentionable — the roster the @mention pickers need.
+//
+// READ tier, unlike GET /collaborators (write tier, so a public nest's read
+// tier can't enumerate member emails). Commenting is a read-tier action, and a
+// read-only reviewer is the person most likely to tag someone — so the picker
+// has to work for them. The property the write tier was protecting is kept by
+// a narrower rule: you may see the roster if you are ON it. A caller who
+// reaches this nest only through its visibility ('public' to anyone, 'org' to
+// any signed-in user) is not on the roster and is refused.
+sharingRoutes.get("/mentionable", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const people = await listNestPeople(nestId);
+  const callerEmail = (await resolveCallerEmail(userId)).toLowerCase();
+  const onRoster = people.some((p) => p.email.toLowerCase() === callerEmail);
+  if (!onRoster) {
+    // A server admin (and any write-tier caller, who can read the fuller
+    // roster anyway) is not necessarily a listed person — don't lock them out
+    // of their own nest's picker.
+    const access = await resolveNestAccess(nestId, userId);
+    if (permissionLevel(access.permission) < permissionLevel("write")) {
+      throw new ForbiddenError("Only people on this nest can see its roster");
+    }
+  }
+  // Name + email only: the picker shows a person and inserts their address.
+  // `source` (owner/collaborator/team/steward/grant) stays out — how someone
+  // got access is not the mention picker's business. Gate above is on the
+  // roster; the directory widening applies only after it.
+  return c.json({
+    people: (await withDirectory(people)).map((p) => ({ email: p.email, name: p.name })),
+  });
+});
+
 // PATCH /nests/:nestId/visibility
 sharingRoutes.patch("/visibility", async (c) => {
   const body = await c.req.json<{
     visibility?: string;
     acknowledge_public?: boolean;
   }>();
-  if (!body.visibility || !["private", "public"].includes(body.visibility)) {
-    throw new ValidationError("visibility must be private or public");
+  if (
+    !body.visibility ||
+    !["private", "org", "public"].includes(body.visibility)
+  ) {
+    throw new ValidationError("visibility must be private, org or public");
   }
 
   // Outside-org publish guardrail: flipping a nest to public makes it readable
   // by anyone on the internet, outside your organization. Require an explicit
   // acknowledgement so this can never happen on a stray click. Going back to
-  // private needs no acknowledgement.
-  if (body.visibility === "public" && body.acknowledge_public !== true) {
+  // private needs no acknowledgement. 'org' stays inside the deployment — on
+  // a single-company server that crosses no organizational boundary, but on
+  // a SHARED deployment (the PromptOwl-hosted server) the deployment is many
+  // customers, so 'org' needs the same acknowledgement there. Enforced here,
+  // not only in the UI, so a client that bypasses the UI can't skip it.
+  const ack = body.acknowledge_public === true;
+  const shared = config.SHARED_DEPLOYMENT;
+  if (body.visibility === "public" && !ack) {
     return c.json(
       {
         error: "Publishing this nest requires acknowledgement.",
         requires_acknowledgement: true,
+        warning: shared
+          ? "This makes the nest readable by anyone on the internet — including every account on this server, which belongs to other organizations too."
+          : "This makes the nest readable by anyone on the internet, outside your organization.",
+      },
+      409,
+    );
+  }
+  if (body.visibility === "org" && shared && !ack) {
+    return c.json(
+      {
+        error: "Opening this nest to the organization requires acknowledgement.",
+        requires_acknowledgement: true,
         warning:
-          "This makes the nest readable by anyone on the internet, outside your organization.",
+          "This server is shared: 'Organization' makes the nest readable by every account on this server, including other organizations — not just yours.",
       },
       409,
     );
@@ -166,16 +225,22 @@ sharingRoutes.patch("/visibility", async (c) => {
 
 // PATCH /nests/:nestId/reader-mode — configure Public Docs Reader Mode.
 //
-// Superadmin-only. The access middleware already requires the "admin" tier for
-// the reader-mode resource (which folds in the server/super admin), but a plain
-// nest-admin collaborator also clears that tier — so hard-gate here on
-// isServerAdminUserId, the same gate as /nests/unsynced and /admin/*.
+// The server admin can configure reader mode on ANY nest (same gate as
+// /nests/unsynced and /admin/*), and — same rule as the steward roster above
+// — so can the nest's own owner/admin: the access middleware already
+// requires the "admin" tier for this resource, so this just stops short of
+// widening past what that tier already grants instead of hard-gating past it
+// to superadmin-only.
 sharingRoutes.patch("/reader-mode", async (c) => {
   const userId = c.get("userId");
+  const nestId = c.req.param("nestId")!;
   if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
-    throw new ForbiddenError(
-      "Only the server admin can configure reader mode",
-    );
+    const access = await resolveNestAccess(nestId, userId);
+    if (permissionLevel(access.permission) < permissionLevel("admin")) {
+      throw new ForbiddenError(
+        "Only the nest owner, a nest admin, or the server admin can configure reader mode",
+      );
+    }
   }
 
   const body = await c.req.json<{
@@ -209,7 +274,6 @@ sharingRoutes.patch("/reader-mode", async (c) => {
   }
 
   const db = getDb();
-  const nestId = c.req.param("nestId")!;
   const exists = (await db.get("SELECT id FROM nests WHERE id = ?", [
     nestId,
   ])) as { id: string } | undefined;

@@ -6,8 +6,12 @@
  * not the prefix. Every snippet carries a placeholder the user substitutes
  * after copying, so snippets are reusable templates that leak no secret.
  *
- * Creating and rotating keys lives on the API keys page (`onManageKeys`),
- * not here. Per-nest rotation was a trap: an account holds several keys,
+ * The one key this dialog mints is a nest-only key ("Create a key for this
+ * nest only"): it reaches this nest and nothing else, pairs with the per-nest
+ * MCP URL, and minting it disturbs no other client. Once this nest has one,
+ * the dialog shows it with Rotate (that key only) instead of minting another.
+ * Revoking and all-nests keys live on the API keys page (`onManageKeys`).
+ * Rotating an all-nests key here was a trap: an account holds several keys,
  * one per place it connects from, and a rotate fired from whichever nest
  * happened to be open would kill clients wired to the others. Plaintext is
  * still revealed exactly once, by KeyRevealModal (exported below, rendered
@@ -24,6 +28,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { ReasonDialog } from "./governance";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -42,14 +47,23 @@ import {
   MessageSquareText,
   ChevronDown,
   Terminal,
+  RefreshCw,
 } from "lucide-react";
 import * as api from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads, useApiKeys } from "../lib/queries";
+import { nestOnlyKeyLabel } from "../lib/api-key-scope";
 import {
   nestChatPrompt,
   nestSetupPrompt,
   envFileContents,
   ctxCliConnectSnippet,
+  claudeDesktopConfig,
+  claudeCodeCommand,
+  mcpHttpConfig,
+  slugify,
+  KEY_PLACEHOLDER,
 } from "../lib/connect";
 import { useAuth } from "../auth/AuthContext";
 
@@ -62,8 +76,6 @@ interface ConnectModalProps {
    *  inside a nest — a rotate started here used to kill every other client. */
   onManageKeys?: () => void;
 }
-
-const KEY_PLACEHOLDER = "<paste-your-api-key-here>";
 
 export function ConnectModal({
   isOpen,
@@ -92,6 +104,44 @@ export function ConnectModal({
   const [showMore, setShowMore] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
+
+  // "Create a key for this nest only" — the key names come from the account's
+  // key list so the default name never collides (the server refuses duplicates).
+  const qc = useQueryClient();
+  const canMintKey = authenticated && authMode !== "open";
+  const { data: keyData } = useApiKeys({ enabled: isOpen && canMintKey });
+  const [mintingNestKey, setMintingNestKey] = useState<string | null>(null);
+  const [nestKey, setNestKey] = useState<{
+    key: string;
+    kind: "generated" | "rotated";
+  } | null>(null);
+  const [rotateTarget, setRotateTarget] = useState<{ id: string; name: string } | null>(null);
+  // This nest already has a key → show it with Rotate instead of minting another.
+  const existingNestKeys = (keyData?.keys ?? []).filter(
+    (k) => k.nest_id === nestId,
+  );
+  const mintNestKey = async (keyId?: string) => {
+    setError(null);
+    setMintingNestKey(keyId ?? "new");
+    try {
+      if (keyId) {
+        const rotated = await api.rotateApiKey({ key_id: keyId });
+        setNestKey({ key: rotated.api_key, kind: "rotated" });
+      } else {
+        const label = nestOnlyKeyLabel(
+          nestName,
+          (keyData?.keys ?? []).map((k) => k.label),
+        );
+        const minted = await api.createApiKey({ label, nest_id: nestId });
+        setNestKey({ key: minted.api_key, kind: "generated" });
+      }
+    } catch (err: any) {
+      setError(err?.message || "Couldn't create a key for this nest.");
+    } finally {
+      qc.invalidateQueries({ queryKey: reads.apiKeys().queryKey });
+      setMintingNestKey(null);
+    }
+  };
 
   // Clear a stale export error when the dialog reopens.
   useEffect(() => {
@@ -135,32 +185,14 @@ export function ConnectModal({
     }
   };
 
-  // Claude Desktop only speaks stdio in claude_desktop_config.json — it has no
-  // native http/url/headers transport (that shape is for Claude Code / Cursor,
-  // see the MCP tab). Bridge to our Streamable-HTTP endpoint with mcp-remote.
-  const claudeConfig = JSON.stringify(
-    {
-      mcpServers: {
-        [slugify(nestName)]: {
-          command: "npx",
-          // Open mode needs no credential — omit the auth header so the copied
-          // config connects as-is.
-          args: [
-            "-y",
-            "mcp-remote",
-            mcpUrl,
-            ...(authMode === "open"
-              ? []
-              : ["--header", `Authorization: Bearer ${KEY_PLACEHOLDER}`]),
-          ],
-        },
-      },
-    },
-    null,
-    2,
-  );
+  const isOpenMode = authMode === "open";
+  // Config-building logic lives in lib/connect.ts (pure, unit-tested there) —
+  // see claudeDesktopConfig / claudeCodeCommand / mcpHttpConfig.
+  const claudeConfig = claudeDesktopConfig(nestName, mcpUrl, isOpenMode);
+  const claudeCodeCmd = claudeCodeCommand(nestName, mcpUrl, isOpenMode);
+  const mcpConfig = mcpHttpConfig(nestName, mcpUrl, isOpenMode);
 
-  const showOpenModeBanner = authMode === "open";
+  const showOpenModeBanner = isOpenMode;
   const showLoginBanner = !authenticated && authMode === "key";
 
   const authHeaderFlag = showOpenModeBanner
@@ -295,11 +327,64 @@ export function ConnectModal({
                 )}
               </div>
               <p className="text-xs text-muted-foreground">
-                Use the key you already have — any of your keys works on every
-                nest you can see. Need a new one, or lost the plaintext? Create
-                or rotate it on the API keys page; keys are shown only once,
-                when they're created.
+                Use the key you already have — an all-nests key works here too.
+                Handing this nest to an agent or integration that shouldn't see
+                anything else? Create a key for this nest only: it works with
+                this nest's MCP URL below, and every other nest, your account
+                and your API keys answer 403. Revoke keys on the API keys page;
+                a key is shown only once, when it's created or rotated.
               </p>
+              {existingNestKeys.length > 0 ? (
+                existingNestKeys.map((k) => (
+                  <div
+                    key={k.id}
+                    className="flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5"
+                  >
+                    <div className="min-w-0 text-xs">
+                      <span className="font-medium">
+                        {k.label || "Untitled key"}
+                      </span>{" "}
+                      <code className="font-mono text-muted-foreground">
+                        {k.key_prefix}…
+                      </code>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="shrink-0"
+                      disabled={mintingNestKey !== null}
+                      onClick={() =>
+                        setRotateTarget({ id: k.id, name: k.label || "Untitled key" })
+                      }
+                    >
+                      {mintingNestKey === k.id ? (
+                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                      )}
+                      Rotate
+                    </Button>
+                  </div>
+                ))
+              ) : (
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className="shrink-0"
+                    disabled={mintingNestKey !== null || !keyData}
+                    onClick={() => mintNestKey()}
+                  >
+                    {mintingNestKey ? (
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Key className="mr-1.5 h-3.5 w-3.5" />
+                    )}
+                    Create a key for this nest only
+                  </Button>
+                </div>
+              )}
+              <Snippet label="This nest's MCP URL" value={mcpUrl} />
             </div>
           )}
 
@@ -366,11 +451,38 @@ export function ConnectModal({
                 </ol>
               </TabsContent>
 
-              {/* Claude Desktop */}
+              {/* Claude */}
               <TabsContent value="claude" className="space-y-4 pt-4">
                 <div>
                   <p className="text-sm mb-3">
-                    Add this to your{" "}
+                    <strong>Claude Code</strong> (the CLI) registers a server with
+                    one command — it persists the config itself, no file to find
+                    or edit.
+                    {!showOpenModeBanner && (
+                      <>
+                        {" "}
+                        Replace{" "}
+                        <code className="text-[11px] bg-muted px-1 rounded">
+                          {KEY_PLACEHOLDER}
+                        </code>{" "}
+                        with your generated key.
+                      </>
+                    )}
+                  </p>
+                  <Snippet
+                    label="Run in your terminal (Claude Code CLI)"
+                    value={claudeCodeCmd}
+                    multiline
+                  />
+                  <p className="text-xs text-muted-foreground mt-2">
+                    Takes effect on your next Claude Code session — the nest's
+                    context tools then appear in the tools panel.
+                  </p>
+                </div>
+                <div className="border-t pt-3">
+                  <p className="text-sm mb-3">
+                    Using <strong>Claude Desktop</strong> (the GUI app) instead?
+                    It has no CLI, so add this to your{" "}
                     <code className="text-xs bg-muted px-1 py-0.5 rounded">
                       claude_desktop_config.json
                     </code>
@@ -385,7 +497,11 @@ export function ConnectModal({
                       </>
                     )}
                   </p>
-                  <Snippet label="Config" value={claudeConfig} multiline />
+                  <Snippet
+                    label="Claude Desktop config (via mcp-remote bridge)"
+                    value={claudeConfig}
+                    multiline
+                  />
                   <p className="text-xs text-muted-foreground mt-2">
                     Location:{" "}
                     <code className="text-[10px]">
@@ -398,23 +514,24 @@ export function ConnectModal({
                     </code>{" "}
                     (Mac)
                   </p>
+                  <p className="text-xs text-muted-foreground mt-2">
+                    Claude Desktop config runs a local command, so this uses{" "}
+                    <code className="text-[10px]">mcp-remote</code> to bridge to
+                    the server's HTTP endpoint — you need{" "}
+                    <a
+                      href="https://nodejs.org"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline"
+                    >
+                      Node.js
+                    </a>{" "}
+                    installed (it provides{" "}
+                    <code className="text-[10px]">npx</code>). Restart Claude
+                    Desktop after editing; the nest's context tools then appear
+                    in the tools panel.
+                  </p>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  Claude Desktop config runs a local command, so this uses{" "}
-                  <code className="text-[10px]">mcp-remote</code> to bridge to the
-                  server's HTTP endpoint — you need{" "}
-                  <a
-                    href="https://nodejs.org"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="underline"
-                  >
-                    Node.js
-                  </a>{" "}
-                  installed (it provides <code className="text-[10px]">npx</code>).
-                  Restart Claude Desktop after editing; the nest's context tools
-                  then appear in the tools panel.
-                </p>
               </TabsContent>
 
               {/* Raw MCP */}
@@ -423,26 +540,25 @@ export function ConnectModal({
                   <p className="text-sm mb-3">
                     Streamable HTTP MCP endpoint with 21 tools (11 content + 7
                     governance + 3 admin/sync). Works with native HTTP MCP
-                    clients (Claude Code, Cursor, VS Code); for Claude Desktop
-                    use the Claude Desktop tab.
+                    clients (Cursor, VS Code) as a JSON config; Claude Code has
+                    its own one-command setup and Claude Desktop needs a
+                    bridge — see the Claude tab for both.
                     {!showOpenModeBanner && (
                       <>
                         {" "}
-                        Pass your API key in an{" "}
+                        Replace{" "}
                         <code className="text-[11px] bg-muted px-1 rounded">
-                          Authorization
+                          {KEY_PLACEHOLDER}
                         </code>{" "}
-                        header.
+                        with your generated key.
                       </>
                     )}
                   </p>
-                  <Snippet label="MCP Endpoint" value={mcpUrl} />
-                  {!showOpenModeBanner && (
-                    <Snippet
-                      label="Authorization header"
-                      value={`Bearer ${KEY_PLACEHOLDER}`}
-                    />
-                  )}
+                  <Snippet
+                    label="Direct HTTP config (Cursor, VS Code, Claude Code — not Claude Desktop)"
+                    value={mcpConfig}
+                    multiline
+                  />
                   <Snippet
                     label={`From the ctx CLI (2.2+)${showOpenModeBanner ? "" : " — export CONTEXTNEST_API_KEY first"}`}
                     value={ctxAliasSnippet}
@@ -768,7 +884,47 @@ export function ConnectModal({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {nestKey && (
+        <KeyRevealModal
+          apiKey={nestKey.key}
+          kind={nestKey.kind}
+          nestId={nestId}
+          scopedTo={{ nestName, mcpUrl }}
+          onClose={() => setNestKey(null)}
+        />
+      )}
+      <RotateKeyConfirm
+        target={rotateTarget}
+        onConfirm={(id) => mintNestKey(id)}
+        onClose={() => setRotateTarget(null)}
+      />
     </>
+  );
+}
+
+/** Rotating kills the old key on the spot — ask first, naming the key. */
+export function RotateKeyConfirm({
+  target,
+  onConfirm,
+  onClose,
+}: {
+  target: { id: string; name: string } | null;
+  onConfirm: (id: string) => Promise<unknown>;
+  onClose: () => void;
+}) {
+  if (!target) return null;
+  return (
+    <ReasonDialog
+      open
+      onOpenChange={(open) => !open && onClose()}
+      title={`Rotate "${target.name}"?`}
+      description="The current key stops working immediately — anything still using it needs the new one."
+      confirmLabel="Rotate key"
+      destructive
+      onConfirm={async () => {
+        await onConfirm(target.id);
+      }}
+    />
   );
 }
 
@@ -788,11 +944,15 @@ export function KeyRevealModal({
   kind,
   onClose,
   nestId,
+  scopedTo,
 }: {
   apiKey: string;
   kind: "generated" | "rotated";
   onClose: () => void;
   nestId?: string;
+  /** Set when the key is nest-only: says so, and pairs it with the one MCP
+   *  URL it works with. */
+  scopedTo?: { nestName: string; mcpUrl: string };
 }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
@@ -862,6 +1022,16 @@ export function KeyRevealModal({
             <Download className="mr-1.5 h-3.5 w-3.5" />
             Download .env
           </Button>
+          {scopedTo && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+              <p className="mb-1.5">
+                This key works for <strong>{scopedTo.nestName}</strong> only.
+                Use it with this nest's MCP URL — other nests, your account and
+                your API keys refuse it.
+              </p>
+              <Snippet label="MCP URL" value={scopedTo.mcpUrl} />
+            </div>
+          )}
           <p className="text-xs text-muted-foreground">
             Copy it, or download a ready{" "}
             <code className="text-[11px]">.env</code> (server URL + key) to hand
@@ -924,14 +1094,5 @@ function CopyButton({ value }: { value: string }) {
         <Copy className="h-3 w-3" />
       )}
     </Button>
-  );
-}
-
-function slugify(s: string) {
-  return (
-    s
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "") || "nest"
   );
 }

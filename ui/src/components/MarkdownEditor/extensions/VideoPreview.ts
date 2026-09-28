@@ -1,14 +1,11 @@
 import { Extension } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import { classifyVideoText, type VideoMatch } from "../../../lib/video-embed";
 
-// Same-origin nest video assets only — mirrors ASSET_VIDEO_RE in
-// DocumentViewer.tsx (and SAFE_NAME in src/nests/asset-routes.ts). Kept in
-// lockstep manually, same as MEDIA_FILE_RE/VIDEO_FILE_RE already are between
-// MarkdownEditor.tsx and the server allowlist.
-export const ASSET_VIDEO_RE =
-  /^\/nests\/[^/]+\/assets\/[0-9a-f-]{36}\.(mp4|webm)$/;
+// One matcher for the read view and the editor — see ui/src/lib/video-embed.ts.
+export { ASSET_VIDEO_RE } from "../../../lib/video-embed";
 
 function createVideoWidget(url: string): HTMLVideoElement {
   const video = document.createElement("video");
@@ -19,33 +16,95 @@ function createVideoWidget(url: string): HTMLVideoElement {
   return video;
 }
 
+// YouTube / Vimeo player. Wrapped in a non-editable box so clicks and the
+// caret don't land "inside" the iframe as editor content. Same sandbox/allow
+// set as DocumentViewer's EmbedVideo — see the note there on why
+// allow-scripts + allow-same-origin is acceptable only because embedUrl is
+// pinned to youtube-nocookie.com / player.vimeo.com by toEmbedUrl.
+function createIframeWidget(
+  embedUrl: string,
+  provider: string,
+): HTMLDivElement {
+  const wrap = document.createElement("div");
+  wrap.className = "cn-video-embed cn-video-embed--iframe";
+  wrap.contentEditable = "false";
+  const iframe = document.createElement("iframe");
+  iframe.src = embedUrl;
+  iframe.title = provider === "youtube" ? "YouTube video" : "Vimeo video";
+  iframe.loading = "lazy";
+  iframe.allow = "fullscreen; picture-in-picture; encrypted-media";
+  iframe.allowFullscreen = true;
+  iframe.referrerPolicy = "strict-origin-when-cross-origin";
+  iframe.setAttribute(
+    "sandbox",
+    "allow-scripts allow-same-origin allow-presentation allow-popups",
+  );
+  wrap.appendChild(iframe);
+  return wrap;
+}
+
+function widgetFor(match: VideoMatch): {
+  key: string;
+  toDOM: () => HTMLElement;
+} {
+  return match.kind === "asset"
+    ? { key: `video-asset:${match.src}`, toDOM: () => createVideoWidget(match.src) }
+    : {
+        key: `video-embed:${match.embedUrl}`,
+        toDOM: () => createIframeWidget(match.embedUrl, match.provider),
+      };
+}
+
+// The same video can appear more than once in a doc; keys must stay unique
+// or ProseMirror may hand one paragraph's player to another. The n-th repeat
+// (in document order) gets `#n` — stable while typing elsewhere, and the
+// first occurrence keeps the bare key.
+function uniqueKey(key: string, seen: Map<string, number>): string {
+  const n = (seen.get(key) ?? 0) + 1;
+  seen.set(key, n);
+  return n === 1 ? key : `${key}#${n}`;
+}
+
 /**
- * Find every paragraph whose sole content is a same-origin asset video URL
- * and return the decorations that hide the raw text and show a <video>
- * widget in its place. Exported (model-only, no DOM needed to collect them)
- * so the matching logic is unit-testable against a real ProseMirror doc,
- * same as collectWikiLinkDecorations in WikiLink.ts.
+ * Find every paragraph whose sole content is a video URL — a same-origin
+ * asset video, or a bare YouTube/Vimeo URL (see classifyVideoText) — and
+ * return the decorations that hide the raw text and show a player widget in
+ * its place. Exported (model-only, no DOM needed to collect them) so the
+ * matching logic is unit-testable against a real ProseMirror doc, same as
+ * collectWikiLinkDecorations in WikiLink.ts.
+ *
+ * Widgets carry a `key` so ProseMirror reuses the existing DOM across
+ * transactions instead of rebuilding it — without one, every keystroke
+ * would recreate (and reload) the player.
  */
 export function collectVideoPreviewDecorations(
   doc: ProseMirrorNode,
 ): Decoration[] {
   const decorations: Decoration[] = [];
+  const seen = new Map<string, number>();
   doc.descendants((node, pos) => {
     if (node.type.name !== "paragraph" || node.childCount !== 1) return;
     const child = node.firstChild;
     if (!child?.isText || !child.text) return;
-    if (!ASSET_VIDEO_RE.test(child.text)) return;
+    const linkMark = child.marks.find((m) => m.type.name === "link");
+    const match = classifyVideoText(
+      child.text,
+      linkMark ? (linkMark.attrs.href as string | null) : undefined,
+    );
+    if (!match) return;
 
-    const url = child.text;
     const start = pos + 1;
     const end = start + child.nodeSize;
+    const { key: baseKey, toDOM } = widgetFor(match);
+    const key = uniqueKey(baseKey, seen);
     decorations.push(
       Decoration.inline(start, end, { class: "video-url-hidden" }),
     );
     decorations.push(
-      Decoration.widget(start, () => createVideoWidget(url), {
+      Decoration.widget(start, toDOM, {
         side: -1,
         ignoreSelection: true,
+        key,
       }),
     );
   });
@@ -53,17 +112,49 @@ export function collectVideoPreviewDecorations(
 }
 
 /**
+ * The video player is just a decoration over a plain paragraph whose text is
+ * the URL — so a Backspace at the start of the paragraph right after it hits
+ * ProseMirror's default `joinBackward`, which merges the two paragraphs and
+ * appends the typed text straight onto the URL, corrupting it (and visually
+ * destroying the player, since the merged paragraph no longer matches
+ * classifyVideoText). This finds that case — empty selection, caret at the
+ * very start of a text block, immediately preceded by a video paragraph — so
+ * the caller can select the whole video (returned `pos` is its start) instead
+ * of merging into it. Exported and doc-only (no view/DOM needed) so it's
+ * unit-testable the same way collectVideoPreviewDecorations is.
+ */
+export function findBackspaceIntoVideo(
+  doc: ProseMirrorNode,
+  from: number,
+): { pos: number } | null {
+  const $from = doc.resolve(from);
+  if ($from.parentOffset !== 0) return null;
+  const before = $from.before($from.depth);
+  if (before <= 0) return null;
+  const prevNode = doc.resolve(before).nodeBefore;
+  if (!prevNode || prevNode.type.name !== "paragraph") return null;
+  if (prevNode.childCount !== 1) return null;
+  const child = prevNode.firstChild;
+  if (!child?.isText || !child.text) return null;
+  const linkMark = child.marks.find((m) => m.type.name === "link");
+  const match = classifyVideoText(
+    child.text,
+    linkMark ? (linkMark.attrs.href as string | null) : undefined,
+  );
+  return match ? { pos: before - prevNode.nodeSize } : null;
+}
+
+/**
  * uploadAndInsertMedia (in this directory's MarkdownEditor.tsx) inserts an
  * uploaded video as a paragraph whose sole content is the bare asset URL —
  * DocumentViewer.tsx's read view upgrades that to a <video> player, but the
  * TipTap editing surface (including its own "preview" toggle) rendered it
- * as literal text. This decorates any paragraph that is *only* a
- * same-origin asset video URL with an inline <video> widget and visually
- * hides the raw URL text — the same "text stays the source of truth,
- * decoration renders it nicely" approach WikiLink/TaskCheckbox already use,
- * so no schema or markdown-serialization changes are needed (the .md on
- * disk, and old docs that already have a bare-URL video line, are
- * unaffected — this re-scans on every render).
+ * as literal text. This decorates any paragraph that is *only* a video URL
+ * (asset, or a bare YouTube/Vimeo link) with an inline player widget and
+ * visually hides the raw URL text — the same "text stays the source of
+ * truth, decoration renders it nicely" approach WikiLink/TaskCheckbox
+ * already use, so no schema or markdown-serialization changes are needed
+ * (the .md on disk keeps the bare URL — this re-scans on every render).
  */
 export const VideoPreview = Extension.create({
   name: "videoPreview",
@@ -78,6 +169,24 @@ export const VideoPreview = Extension.create({
               state.doc,
               collectVideoPreviewDecorations(state.doc),
             );
+          },
+          // Backspace right after a video selects the whole video, like an
+          // image, instead of merging into it — see findBackspaceIntoVideo.
+          // Putting the caret in the hidden URL (the old fix) let the next
+          // keystroke edit the URL and kill the player. A second Backspace
+          // deletes the video cleanly; an empty line below it goes first.
+          handleKeyDown(view, event) {
+            if (event.key !== "Backspace") return false;
+            const { state } = view;
+            if (!state.selection.empty) return false;
+            const target = findBackspaceIntoVideo(state.doc, state.selection.from);
+            if (!target) return false;
+            const { $from } = state.selection;
+            const tr = state.tr;
+            if ($from.parent.content.size === 0) tr.delete($from.before(), $from.after());
+            tr.setSelection(NodeSelection.create(tr.doc, target.pos));
+            view.dispatch(tr.scrollIntoView());
+            return true;
           },
         },
       }),

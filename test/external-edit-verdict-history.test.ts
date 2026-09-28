@@ -207,4 +207,13 @@ describe("external edit verdicts are recorded in document history", () => {
     expect(verdict.actor).toBe("owner@acme.com");
     expect(verdict.note).toBe("checked with ops");
   }, 30000);
+
+  it("?count=1 answers with the total only — the badge read", async () => {
+    await stageDrift("\n\nCounted paragraph.\n");
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/external-edits`, undefined, owner.apiKey);
+    const count = await jsonRequest(app, "GET", `/nests/${nestId}/external-edits?count=1`, undefined, owner.apiKey);
+    expect(count.status).toBe(200);
+    expect(count.data).toEqual({ total: list.data.total });
+    expect(count.data.total).toBeGreaterThan(0);
+  });
 });

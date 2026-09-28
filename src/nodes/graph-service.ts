@@ -1,11 +1,16 @@
 /**
  * Ontology graph assembly — a read-only view over data the nest already holds:
- * nodes, their resolved [[wikilink]] edges, the tags/categories they carry, and
- * the stewardship overlay (who owns which node / tag / nest). No new storage;
- * pure assembly so the UI can render the ontology and surface governance gaps.
+ * nodes, edges resolved from [[wikilinks]] and shared tags, the tags/categories
+ * they carry, and the stewardship overlay (who owns which node / tag / nest).
+ * No new storage; pure assembly so the UI can render the ontology and surface
+ * governance gaps.
  */
 
-import type { ContextNode } from "@promptowl/contextnest-engine";
+import {
+  contextLinkTarget,
+  extractContextLinks,
+  type ContextNode,
+} from "@promptowl/contextnest-engine";
 import { engineCache } from "./engine.js";
 import { isDerivedAnnotationsNode } from "./service.js";
 import { filterAccessible } from "../governance/access-guard.js";
@@ -57,7 +62,8 @@ export interface GraphTag {
  * is truncated for the hairball cap.
  */
 export interface GraphSignals {
-  /** Nodes with no inbound or outbound [[wikilink]]. */
+  /** Nodes with no inbound/outbound [[wikilink]] and no shared tag with
+   *  another node. */
   orphans: GraphNode[];
   /** Categories no tag-scope steward owns (a nest-wide steward does NOT
    *  count — that's the over-centralised case we want to surface, not hide). */
@@ -108,9 +114,38 @@ export function extractWikiTargets(body: string): string[] {
 }
 
 /**
+ * Node ids linked from a body by the spec's own link form (§1.7):
+ * `[text](contextnest://nodes/x)` or `<contextnest://nodes/x>`, including the
+ * checkpoint-pinned / anchored forms (`contextnest://nodes/x@3#section`) —
+ * the pin and anchor address a version/section OF the node, so the edge is to
+ * the node itself, exactly as `[[nodes/x]]` would be.
+ *
+ * Parsing and pin/anchor stripping are the engine's `extractContextLinks` /
+ * `contextLinkTarget` (linear, skip code spans), so this repo does not fork link syntax.
+ * Folder / tag / search URIs and cross-namespace links come back as strings
+ * that match no node id and are dropped by the id-only resolution callers do.
+ * Returned targets are ids and must be resolved by id ONLY — never by title
+ * or bare slug, or a dangling `contextnest://nodes/gone` could attach to an
+ * unrelated `other/gone`.
+ */
+export function extractContextTargets(body: string): string[] {
+  // Set, not Array#includes: a body with thousands of distinct targets must
+  // not dedupe quadratically. Insertion order is kept.
+  const out = new Set<string>();
+  if (!body) return [];
+  for (const uri of extractContextLinks(body)) {
+    const t = contextLinkTarget(uri);
+    if (t) out.add(t);
+  }
+  return [...out];
+}
+
+/**
  * Build the ontology graph for a nest, gated to what the caller can read.
- * Links are de-duplicated, directed, and only kept when both ends resolve to an
+ * Links are de-duplicated and only kept when both ends resolve to an
  * accessible node (so the view never dangles into hidden/missing targets).
+ * [[wikilink]] and contextnest:// link edges are directed; tag-cooccurrence edges are inherently
+ * undirected and stored in one canonical (sorted) direction.
  */
 export async function buildNestGraph(
   nestId: string,
@@ -168,6 +203,18 @@ export async function buildNestGraph(
       allLinks.push({ source: d.id, target: targetId });
     }
   }
+  // contextnest:// links are edges too (id-only resolution — see
+  // extractContextTargets). Same dedupe key, so a doc linking a node both ways
+  // draws one edge.
+  for (const d of accessible) {
+    for (const targetId of extractContextTargets(d.body || "")) {
+      if (!idSet.has(targetId) || targetId === d.id) continue;
+      const key = `${d.id}->${targetId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      allLinks.push({ source: d.id, target: targetId });
+    }
+  }
 
   // Tag counts + tag→doc-ids index (the latter powers exact bottleneck share).
   const tagCounts = new Map<string, number>();
@@ -183,6 +230,23 @@ export async function buildNestGraph(
   const tags: GraphTag[] = [...tagCounts.entries()]
     .map(([name, count]) => ({ name, count }))
     .sort((a, b) => b.count - a.count);
+
+  // A shared tag is a relationship too, same as a [[wikilink]] — pair up every
+  // two docs that carry a tag in common and merge into the same edge set (so
+  // orphan detection and the rendered graph both see it). Reuses `seen` from
+  // the wikilink pass above so a pair already linked by wikilink doesn't get
+  // a redundant duplicate edge.
+  for (const docIds of tagToDocs.values()) {
+    const ids = [...docIds].sort();
+    for (let i = 0; i < ids.length; i++) {
+      for (let j = i + 1; j < ids.length; j++) {
+        const key = `${ids[i]}->${ids[j]}`;
+        if (seen.has(key) || seen.has(`${ids[j]}->${ids[i]}`)) continue;
+        seen.add(key);
+        allLinks.push({ source: ids[i], target: ids[j] });
+      }
+    }
+  }
 
   // ── Stewards (identity-masked for sub-write callers) ──
   // Skip the roster entirely for public/anon readers (even masked, the roster

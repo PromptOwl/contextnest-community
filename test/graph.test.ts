@@ -6,7 +6,7 @@ import {
   jsonRequest,
   resetAuthRateLimit,
 } from "./helpers.js";
-import { extractWikiTargets } from "../src/nodes/graph-service.js";
+import { extractContextTargets, extractWikiTargets } from "../src/nodes/graph-service.js";
 import { createStewardRecord } from "../src/governance/stewardship-service.js";
 import { setStewardshipEnabled } from "../src/nests/service.js";
 
@@ -17,6 +17,79 @@ describe("graph: wikilink extraction", () => {
       "Gamma",
     ]);
     expect(extractWikiTargets("no links at all")).toEqual([]);
+  });
+});
+
+describe("graph: contextnest:// link extraction", () => {
+  it("strips pin, anchor and trailing slash; handles autolinks; de-duplicates", () => {
+    expect(
+      extractContextTargets(
+        [
+          "[pinned](contextnest://nodes/foo@3#bar)",
+          "[anchored](contextnest://nodes/baz#setup) <contextnest://nodes/qux@12>",
+          "[again](contextnest://nodes/foo) [folder](contextnest://nodes/dir/)",
+        ].join("\n"),
+      ),
+    ).toEqual(["nodes/foo", "nodes/baz", "nodes/qux", "nodes/dir"]);
+  });
+
+  it("ignores links inside inline code and fenced code", () => {
+    expect(
+      extractContextTargets(
+        "`[x](contextnest://nodes/inline)`\n```\n[y](contextnest://nodes/fenced)\n```\n",
+      ),
+    ).toEqual([]);
+    expect(extractContextTargets("")).toEqual([]);
+  });
+
+  it("stays linear on an adversarial run of brackets", () => {
+    const evil = "[".repeat(50_000) + "](contextnest://nodes/x";
+    const t0 = Date.now();
+    // Only the final `[](…` is a real link; the 50k unclosed `[` must not
+    // each rescan the line.
+    expect(extractContextTargets(evil)).toEqual(["nodes/x"]);
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+});
+
+describe("graph: contextnest:// links are ontology edges", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string; userId: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("open");
+    owner = await registerUser(app, "uri-owner@acme.com", "Owner");
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "URI Graph" }, owner.apiKey);
+    nestId = nest.data.nest.id;
+    const add = (title: string, content: string) =>
+      jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title, content }, owner.apiKey);
+    await add("Target A", "a");
+    await add("Target B", "b");
+    // `gone` is a stray bare-slug collision bait: a dangling nodes/x/gone URI
+    // must NOT attach to it via slug resolution.
+    await add("Gone", "bait");
+    await add(
+      "Source",
+      "[[Target A]] and [b](contextnest://nodes/target-b@1#top) and [x](contextnest://nodes/elsewhere/gone)\n```\n[c](contextnest://nodes/gone)\n```",
+    );
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("draws the URI edge like the wikilink edge; dangling and code-fenced URIs draw nothing", async () => {
+    const { status, data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/graph`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(status).toBe(200);
+    const edgeKeys = data.links.map((l: any) => `${l.source}->${l.target}`).sort();
+    expect(edgeKeys).toEqual(["nodes/source->nodes/target-a", "nodes/source->nodes/target-b"]);
   });
 });
 
@@ -341,5 +414,57 @@ describe("graph: steward gating and node dedup", () => {
     );
     expect(data.stewards).toHaveLength(0);
     expect(data.stewardEdges).toHaveLength(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tag-based edges (CU-wdqcq02g16)
+//
+// A shared tag is a relationship, same as a [[wikilink]] — two docs with no
+// wikilink between them but a common tag should still produce a graph edge
+// and neither should read as an orphan.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("graph: tag-based edges", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("open");
+    owner = await registerUser(app, "owner@acme.com", "Owner");
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "TagEdges" }, owner.apiKey);
+    nestId = nest.data.nest.id;
+
+    // Delta and Epsilon share a tag but carry no [[wikilink]] to each other.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Delta", content: "No wikilinks here.", tags: ["market-z"] },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Epsilon", content: "No wikilinks here either.", tags: ["market-z"] },
+      owner.apiKey,
+    );
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("connects docs that share a tag, even with no [[wikilink]] between them", async () => {
+    const { data } = await jsonRequest(app, "GET", `/nests/${nestId}/graph`, undefined, owner.apiKey);
+    const edgeKeys = data.links.map((l: any) => `${l.source}->${l.target}`);
+    expect(edgeKeys).toContain("nodes/delta->nodes/epsilon");
+
+    // Tag-connected docs are not orphans.
+    const orphanIds = data.signals.orphans.map((n: any) => n.id);
+    expect(orphanIds).not.toContain("nodes/delta");
+    expect(orphanIds).not.toContain("nodes/epsilon");
   });
 });

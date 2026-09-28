@@ -17,14 +17,16 @@
  * artifact's *extracted text* (the same text the nest indexes), per the W3C
  * TextQuote anchor model.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import type { AnnotationThread } from "../lib/api";
 import { extractText, buildAnchor } from "../lib/artifact-text";
+import { DocumentViewer } from "./DocumentViewer";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { cn } from "@/lib/utils";
 import {
   Dialog,
@@ -36,8 +38,8 @@ import {
 } from "@/components/ui/dialog";
 import { VersionHistoryModal, type VersionHistoryData } from "./governance";
 import {
-  ArrowLeft, Loader2, MessageSquarePlus, ExternalLink, RefreshCw,
-  Eye, Highlighter, Check, RotateCcw, Send, History, Code2, X,
+  ArrowLeft, Loader2, MessageSquare, MessageSquarePlus, ExternalLink, RefreshCw,
+  Eye, Highlighter, Check, RotateCcw, Send, History, Code2, X, FileText, Users,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -66,6 +68,22 @@ interface ArtifactViewerProps {
    *  ?thread= deep link). */
   initialThreadId?: string;
   onBack: () => void;
+  /** The artifact was turned back into a markdown document — the host page
+   *  re-reads the node and renders the editor instead. */
+  onTurnedInto?: () => void;
+  /**
+   * The document page's ⋮ menu (copy link, share this document, publish,
+   * move, delete…), built by DocumentEditor from document-actions.ts so an
+   * artifact offers exactly what a markdown document does (CU-wdqcq02gy8).
+   * The viewer's own History button stays; callers leave that entry out.
+   */
+  actions?: OverflowAction[];
+  /** The nest's visibility tier (control or read-only badge), as the
+   *  markdown page's top bar shows it. Rendered before Share. */
+  visibilityControl?: ReactNode;
+  /** Share the whole nest — the same top-bar Share the markdown page has.
+   *  Undefined when the caller may not share (below admin, or archived). */
+  onShareNest?: () => void;
 }
 
 function fmtTime(s: string): string {
@@ -83,12 +101,46 @@ export function ArtifactViewer({
   reviewerOnly = false,
   initialThreadId,
   onBack,
+  onTurnedInto,
+  actions,
+  visibilityControl,
+  onShareNest,
 }: ArtifactViewerProps) {
   const [mode, setMode] = useState<"preview" | "annotate" | "edit">("preview");
+  // The annotations rail, like the document page's comments rail: closed by
+  // default, opened by its top-bar toggle, by a ?thread deep link, or by
+  // switching to Annotate (which exists to write one).
+  const [commentsOpen, setCommentsOpen] = useState(!!initialThreadId);
+  useEffect(() => {
+    if (mode === "annotate") setCommentsOpen(true);
+  }, [mode]);
+  // "Turn into document" — the reverse of DocumentEditor's Turn into… The
+  // HTML body is kept; the markdown editor shows it as source to rework.
+  const [confirmTurnInto, setConfirmTurnInto] = useState(false);
+  const [turningInto, setTurningInto] = useState(false);
+  const turnIntoDocument = async () => {
+    setTurningInto(true);
+    try {
+      await api.updateNode(nestId, nodeId, { type: "document" });
+      toast.success("Turned into a document");
+      setConfirmTurnInto(false);
+      onTurnedInto?.();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to convert");
+    } finally {
+      setTurningInto(false);
+    }
+  };
   const qc = useQueryClient();
   const [threads, setThreads] = useState<AnnotationThread[]>([]);
   const [loadingThreads, setLoadingThreads] = useState(true);
   const [extractedText, setExtractedText] = useState<string>("");
+  // The served body as fetched. An artifact is normally HTML for the iframe,
+  // but a markdown/plain file stored as an artifact is not — the browser
+  // would render it as one run-on paragraph, so Preview renders it as
+  // markdown instead. null until fetched.
+  const [rawBody, setRawBody] = useState<string | null>(null);
+  const bodyIsHtml = rawBody == null || /^s*</.test(rawBody);
   const [textLoading, setTextLoading] = useState(false);
   const [snapshot, setSnapshot] = useState<number | null>(snapshotVersion ?? null);
   const [iframeKey, setIframeKey] = useState(0);
@@ -207,6 +259,9 @@ export function ArtifactViewer({
         setShowVersions(false);
         setViewingVersion(v);
         setMode("preview");
+        // The body cache describes the live snapshot, not the pinned one.
+        setExtractedText("");
+        setRawBody(null);
         setIframeKey((k) => k + 1);
       });
     },
@@ -215,6 +270,8 @@ export function ArtifactViewer({
 
   const exitVersionView = useCallback(() => {
     setViewingVersion(null);
+    setExtractedText("");
+    setRawBody(null);
     setIframeKey((k) => k + 1);
   }, []);
 
@@ -235,6 +292,7 @@ export function ArtifactViewer({
       // describe the pre-restore body.
       setSnapshot(null);
       setExtractedText("");
+      setRawBody(null);
       setNodeMeta(null);
       setEditDraft("");
       setIframeKey((k) => k + 1);
@@ -305,6 +363,7 @@ export function ArtifactViewer({
       // the governance path working, not a bug.
       setSnapshot(null);
       setExtractedText("");
+      setRawBody(null);
       setIframeKey((k) => k + 1);
       setMode("preview");
       toast.success(
@@ -365,19 +424,22 @@ export function ArtifactViewer({
     setTextLoading(true);
     try {
       const { html, snapshot: served } = await api.fetchArtifactHtml(
-        nestId, nodeId, snapshot, iframeKey,
+        nestId, nodeId, viewingVersion ?? snapshot, iframeKey,
       );
       setExtractedText(extractText(html));
-      if (served != null) setSnapshot(served);
+      setRawBody(html);
+      // A pinned read reports the pinned version, not the live snapshot.
+      if (served != null && viewingVersion == null) setSnapshot(served);
     } catch (e: any) {
       toast.error(e?.message || "Failed to load artifact text");
     } finally {
       setTextLoading(false);
     }
-  }, [extractedText, textLoading, nestId, nodeId, snapshot, iframeKey]);
+  }, [extractedText, textLoading, nestId, nodeId, snapshot, viewingVersion, iframeKey]);
 
+  // Preview needs the body too, to know whether it is HTML at all.
   useEffect(() => {
-    if (mode === "annotate") void ensureText();
+    if (mode === "annotate" || mode === "preview") void ensureText();
   }, [mode, ensureText]);
 
   // Capture a selection inside the extracted-text panel. The panel renders the
@@ -468,18 +530,19 @@ export function ArtifactViewer({
   }, [threads]);
 
   return (
-    <div>
-      {/* Header */}
-      <div className="flex items-center justify-between gap-3 mb-4">
+    <div className="flex min-h-full flex-col">
+      {/* Top bar — the same sticky h-12 bar the document page has. */}
+      <div className="sticky top-16 z-30 flex h-12 items-center justify-between gap-3 border-b bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-3">
         <div className="flex items-center gap-2 min-w-0">
           <Button
             variant="ghost"
             size="icon"
+            className="h-8 w-8"
             onClick={() => guardEditLeave(onBack)}
           >
-            <ArrowLeft className="h-5 w-5" />
+            <ArrowLeft className="h-4 w-4" />
           </Button>
-          <h1 className="text-xl font-semibold truncate">{title || nodeId}</h1>
+          <h1 className="text-sm font-medium truncate">{title || nodeId}</h1>
           <Badge variant="secondary" className="shrink-0 gap-1">
             Artifact
           </Badge>
@@ -558,17 +621,66 @@ export function ArtifactViewer({
           >
             <RefreshCw className="h-4 w-4" />
           </Button>
+          {!viewOnly && !reviewerOnly && onTurnedInto && (
+            <Button
+              variant="outline"
+              size="icon"
+              title={editDirty ? "Save or discard the source edits first" : "Turn into a document"}
+              disabled={editDirty}
+              onClick={() => setConfirmTurnInto(true)}
+              data-testid="artifact-turn-into-document"
+            >
+              <FileText className="h-4 w-4" />
+            </Button>
+          )}
+          {visibilityControl}
+          {onShareNest && (
+            <Button
+              variant="outline"
+              size="icon"
+              title="Share this nest — people, teams, visibility"
+              onClick={onShareNest}
+              data-testid="artifact-share-nest"
+            >
+              <Users className="h-4 w-4" />
+            </Button>
+          )}
+          <Button
+            variant={commentsOpen ? "secondary" : "outline"}
+            size="icon"
+            title={commentsOpen ? "Hide annotations" : "Show annotations"}
+            aria-pressed={commentsOpen}
+            onClick={() => setCommentsOpen((o) => !o)}
+            data-testid="artifact-comments-toggle"
+            className="relative"
+          >
+            <MessageSquare className="h-4 w-4" />
+            {openThreads.length > 0 && (
+              <span className="absolute -right-1 -top-1 rounded-full bg-primary px-1 text-[10px] font-semibold leading-4 text-primary-foreground">
+                {openThreads.length}
+              </span>
+            )}
+          </Button>
           <a href={hostedUrl} target="_blank" rel="noopener noreferrer">
             <Button variant="outline" size="icon" title="Open in new tab">
               <ExternalLink className="h-4 w-4" />
             </Button>
           </a>
+          {actions && actions.length > 0 && (
+            <OverflowMenu
+              actions={actions}
+              variant="outline"
+              testId="artifact-viewer-more"
+            />
+          )}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-4">
+      {/* Body: the artifact in a padded column, the annotations rail beside it
+          when open — the document page's layout. */}
+      <div className="flex flex-1 flex-col items-stretch lg:flex-row lg:items-start">
         {/* Artifact pane */}
-        <div className="border rounded-lg overflow-hidden bg-background min-h-[70vh] flex flex-col">
+        <div className="flex min-w-0 flex-1 flex-col px-5 py-6 sm:px-10 sm:py-8 min-h-[calc(100vh-7rem)]">
           {viewingVersion != null && (
             <div className="px-3 py-2 border-b bg-amber-50 text-xs text-amber-900 flex items-center justify-between gap-2 flex-wrap">
               <span>
@@ -609,8 +721,8 @@ export function ArtifactViewer({
             </div>
           )}
           {mode === "edit" ? (
-            <div className="flex-1 flex flex-col min-h-[70vh]">
-              <div className="px-3 py-2 border-b bg-muted/30 text-xs text-muted-foreground">
+            <div className="flex-1 flex flex-col">
+              <div className="mb-3 text-xs text-muted-foreground">
                 {isLocked
                   ? "Locked while awaiting steward review — resolve the review before editing."
                   : "Editing raw HTML source. Saving creates a new version, like any document edit."}
@@ -627,9 +739,9 @@ export function ArtifactViewer({
                     readOnly={isLocked}
                     spellCheck={false}
                     placeholder="Paste the artifact's HTML (a self-contained slide deck, dashboard, infographic)…"
-                    className="flex-1 w-full min-h-[50vh] bg-background p-3 font-mono text-xs leading-relaxed resize-none focus:outline-none"
+                    className="flex-1 w-full min-h-[60vh] rounded-lg border bg-background p-4 font-mono text-sm leading-relaxed resize-y shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
                   />
-                  <div className="px-3 py-2 border-t flex items-center justify-between gap-2">
+                  <div className="sticky bottom-0 z-20 mt-auto -mx-5 flex items-center justify-between gap-2 border-t bg-background/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:-mx-10">
                     <span className="text-xs text-muted-foreground">
                       {nodeMeta?.version != null ? `Editing v${nodeMeta.version}` : ""}
                       {editDirty ? " · unsaved changes" : ""}
@@ -667,6 +779,11 @@ export function ArtifactViewer({
                 </>
               )}
             </div>
+          ) : mode === "preview" && !bodyIsHtml ? (
+            <DocumentViewer
+              content={rawBody ?? ""}
+              className="flex-1 min-h-[70vh] max-h-none overflow-visible rounded-lg border bg-background"
+            />
           ) : mode === "preview" ? (
             <iframe
               key={iframeKey}
@@ -675,10 +792,10 @@ export function ArtifactViewer({
               // Defense-in-depth alongside the server's CSP `sandbox` header.
               // No `allow-same-origin` → opaque origin, no host cookie/storage.
               sandbox="allow-scripts allow-popups allow-modals"
-              className="w-full flex-1 min-h-[70vh] bg-white"
+              className="w-full flex-1 min-h-[70vh] rounded-lg border bg-white"
             />
           ) : (
-            <div className="flex-1 flex flex-col min-h-[70vh]">
+            <div className="flex-1 flex flex-col min-h-[70vh] rounded-lg border bg-background">
               <div className="px-3 py-2 border-b bg-muted/30 text-xs text-muted-foreground">
                 Select text below to anchor a comment to it. This is the
                 artifact's extracted text — the same text the nest indexes.
@@ -700,8 +817,13 @@ export function ArtifactViewer({
           )}
         </div>
 
-        {/* Annotation sidebar */}
-        <div className="border rounded-lg bg-background flex flex-col max-h-[78vh]">
+        {/* Annotations rail — beside the artifact, the document page's rail
+            shape; hidden (not unmounted) when closed so threads stay loaded. */}
+        <aside
+          className={`w-full shrink-0 border-t lg:w-80 lg:border-t-0 lg:border-l lg:sticky lg:top-28 lg:self-start lg:max-h-[calc(100vh-7rem)] flex flex-col min-h-0 max-h-[70vh]${commentsOpen ? "" : " hidden"}`}
+          data-testid="artifact-comments-rail"
+          aria-hidden={!commentsOpen}
+        >
           <div className="px-3 py-2 border-b flex items-center justify-between">
             <span className="text-sm font-medium">
               Annotations
@@ -817,7 +939,7 @@ export function ArtifactViewer({
               </>
             )}
           </div>
-        </div>
+        </aside>
       </div>
 
       {/* Version history — same modal DocumentEditor opens; artifact bodies
@@ -846,7 +968,29 @@ export function ArtifactViewer({
               : undefined
           }
         />
+
       )}
+      <Dialog open={confirmTurnInto} onOpenChange={(o) => { if (!turningInto) setConfirmTurnInto(o); }}>
+        <DialogContent className="sm:max-w-[440px]">
+          <DialogHeader>
+            <DialogTitle>Turn into a document?</DialogTitle>
+            <DialogDescription>
+              The HTML stays as the body, opened in the markdown editor's source
+              view for you to rework. It stops being hosted as a page until it
+              is turned back into an artifact.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmTurnInto(false)} disabled={turningInto}>
+              Cancel
+            </Button>
+            <Button onClick={() => void turnIntoDocument()} disabled={turningInto} data-testid="artifact-turn-into-confirm">
+              {turningInto ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+              Turn into document
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Confirm for the banner's "Restore this version" (the history modal
           carries its own confirm inside VersionHistory). */}

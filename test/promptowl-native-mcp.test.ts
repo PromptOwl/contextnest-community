@@ -134,12 +134,15 @@ describe("PromptOwl service ticket on /index and /mcp", () => {
     expect(res.status).toBe(401);
   });
 
-  it("rejects an expired ticket", async () => {
+  it("rejects an expired ticket with a distinguishable message", async () => {
     const now = Math.floor(Date.now() / 1000);
     const res = await app.request("/index", {
       headers: bearer(serviceTicket({ exp: now - 300 })),
     });
     expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.code).toBe("ticket_expired");
+    expect(body.error.toLowerCase()).toContain("expired");
   });
 
   it("still accepts plain cnst_ API keys (regression)", async () => {

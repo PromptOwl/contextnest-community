@@ -7,6 +7,7 @@
 
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
+import { nowMsExpr } from "../db/sql.js";
 import { nowExpr } from "../db/sql.js";
 import * as versions from "../governance/version-service.js";
 import { engineCache } from "../nodes/engine.js";
@@ -137,10 +138,13 @@ export async function createThread(
     input.snapshotVersion ?? (await versions.getApprovedVersion(nestId, nodeId)) ?? null;
 
   await db.transaction(async (tx) => {
+    // created_at written explicitly, to the millisecond, rather than left to
+    // the column default's second resolution — see nowMsExpr. Threads and
+    // their comments are both ordered by it.
     await tx.run(
       `INSERT INTO annotation_threads
-         (id, nest_id, node_id, snapshot_version, anchor_json, status, created_by)
-       VALUES (?, ?, ?, ?, ?, 'open', ?)`,
+         (id, nest_id, node_id, snapshot_version, anchor_json, status, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, 'open', ?, ${nowMsExpr(db)})`,
       [
         id,
         nestId,
@@ -151,7 +155,8 @@ export async function createThread(
       ],
     );
     await tx.run(
-      "INSERT INTO annotation_comments (id, thread_id, author, body) VALUES (?, ?, ?, ?)",
+      `INSERT INTO annotation_comments (id, thread_id, author, body, created_at)
+       VALUES (?, ?, ?, ?, ${nowMsExpr(db)})`,
       [uuid(), id, authorEmail, body],
     );
   });
@@ -191,11 +196,12 @@ export async function addComment(
   }
   await getScopedThreadRow(threadId, nestId, nodeId);
 
-  await getDb()
-    .run(
-      "INSERT INTO annotation_comments (id, thread_id, author, body) VALUES (?, ?, ?, ?)",
-      [uuid(), threadId, authorEmail, trimmed],
-    );
+  const db = getDb();
+  await db.run(
+    `INSERT INTO annotation_comments (id, thread_id, author, body, created_at)
+     VALUES (?, ?, ?, ?, ${nowMsExpr(db)})`,
+    [uuid(), threadId, authorEmail, trimmed],
+  );
 
   return rowToThread((await getThreadRow(threadId))!);
 }
@@ -375,7 +381,15 @@ export async function syncAnnotationsNode(
     const derivedId = derivedAnnotationsId(nodeId);
 
     try {
-      await updateNode(nestId, derivedId, { content: markdown }, userEmail);
+      // A projection, not a person's writing: its `@names` were already
+      // notified where they were typed (see WriteOptions).
+      await updateNode(
+        nestId,
+        derivedId,
+        { content: markdown },
+        userEmail,
+        { notifyMentions: false },
+      );
     } catch (err) {
       if (err instanceof NotFoundError) {
         await createNode(
@@ -388,6 +402,7 @@ export async function syncAnnotationsNode(
             tags: ["annotations"],
           },
           userEmail,
+          { notifyMentions: false, creatorReviews: false },
         );
       } else {
         throw err;

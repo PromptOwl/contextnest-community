@@ -13,14 +13,17 @@ import {
   resolveHostedNodeId,
 } from "./service.js";
 import { ARTIFACT_NODE_TYPE, type AnnotationAnchor } from "./types.js";
+import { notifyCommentMentions } from "../governance/mention-notify.js";
+import { requestBaseUrl } from "../shared/base-url.js";
 
 /**
  * Routes for hosted-artifact annotations + sandboxed serving.
  *
  * Mounted at /nests/:nestId/nodes (BEFORE the greedy nodeRoutes catch-all).
- * Writes are gated to `write` permission by the per-nest middleware in app.ts;
- * here we additionally enforce node read-access so you can't annotate a node
- * you can't see.
+ * Annotating is a READ-tier collaboration action: the per-nest middleware in
+ * app.ts (isAnnotationAction) deliberately admits these POSTs at read so a
+ * read-only reviewer can comment. Each handler therefore enforces node
+ * read-access itself, so you can't annotate a node you can't see.
  */
 export const annotationRoutes = new Hono<AuthEnv>();
 
@@ -74,6 +77,13 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
     },
     userEmail,
   );
+  await notifyCommentMentions({
+    nestId,
+    nodeId,
+    body: input.body,
+    actorEmail: userEmail,
+    baseUrl: requestBaseUrl(c.req.url),
+  });
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread }, 201);
 });
@@ -102,6 +112,13 @@ export async function handleAnnotationReply(
   }
 
   const thread = await addComment(nestId, nodeId, threadId, userEmail, input.body);
+  await notifyCommentMentions({
+    nestId,
+    nodeId,
+    body: input.body,
+    actorEmail: userEmail,
+    baseUrl: requestBaseUrl(c.req.url),
+  });
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread });
 }

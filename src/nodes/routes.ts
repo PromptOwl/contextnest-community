@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import { parseDocument, readPdfBinary } from "@promptowl/contextnest-engine";
+import type { NestStorage } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
@@ -7,6 +9,7 @@ import { ValidationError, NotFoundError } from "../shared/errors.js";
 // id is rejected up front by the assertSafeNodeId chokepoint mounted on
 // /nests/:nestId/nodes/:nodeId{.+} in app.ts — covers every node route across
 // this + the annotations + governance routers, so handlers here can trust nodeId.
+import { attributeRequest } from "../shared/client-metadata.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { getDb } from "../db/client.js";
 import * as versions from "../governance/version-service.js";
@@ -146,6 +149,7 @@ nodeRoutes.post("/", async (c) => {
     schedule?: string;
     folder?: string;
     prime?: boolean;
+    client?: unknown;
   }>();
 
   if (!body.title || !body.content) {
@@ -200,6 +204,7 @@ nodeRoutes.post("/", async (c) => {
       schedule: body.schedule,
       folder: body.folder,
       prime: body.prime,
+      client: attributeRequest(c, body.client),
     },
     authorEmail,
   );
@@ -292,7 +297,7 @@ nodeRoutes.post("/:nodeId{.+}/discard", async (c) => {
 nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const { versions: versionManager } = await engineCache.get(nestId);
+  const { storage, versions: versionManager } = await engineCache.get(nestId);
 
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
@@ -304,8 +309,8 @@ nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
   }
 
   const body = await c.req
-    .json<{ targetVersion?: number }>()
-    .catch(() => ({}) as { targetVersion?: number });
+    .json<{ targetVersion?: number; client?: unknown }>()
+    .catch(() => ({}) as { targetVersion?: number; client?: unknown });
   const targetVersion = Number(body.targetVersion);
   if (!Number.isInteger(targetVersion) || targetVersion < 1) {
     throw new ValidationError("targetVersion (a positive integer) is required");
@@ -319,11 +324,30 @@ nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
       `Version ${targetVersion} not found for ${nodeId}`,
     );
   }
+  // A pdf node's body can't be written back as text — it is whatever its PDF
+  // extracts to. Restoring a pdf version re-imports that version's binary
+  // (resolved from the archive and hash-verified by the engine), which brings
+  // its text back with it.
+  let restoredPdf: Buffer | null = null;
+  if (pdfMetaOf(nodeId, raw)) {
+    try {
+      restoredPdf = await readPdfBinary(storage as unknown as NestStorage, nodeId, {
+        version: targetVersion,
+      });
+    } catch (err) {
+      console.error("[pdf] revert could not read the version's binary", nestId, nodeId, targetVersion, err);
+      throw new NotFoundError(`The PDF of version ${targetVersion} is not available to restore.`);
+    }
+  }
   const content = bodyOnly(nodeId, raw);
   const { node, version } = await updateNode(
     nestId,
     nodeId,
-    { content, changeNote: `Restored from version ${targetVersion}` },
+    {
+      ...(restoredPdf ? { pdf: { bytes: new Uint8Array(restoredPdf) } } : { content }),
+      changeNote: `Restored from version ${targetVersion}`,
+      client: attributeRequest(c, body.client),
+    },
     userEmail,
   );
   await trackEvent("node.revert", { nestId, nodeId, targetVersion });
@@ -471,8 +495,11 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   // the person who was granted edit rights a read-only document.
   (response as any).myGrant = await resolveNodeGrant(nestId, userId, nodeId);
 
-  // Public readers see approved version body only.
-  if (publicReader) {
+  // Public readers see approved version body only. ?approved_only=1 asks for
+  // the same body on purpose — an owner previewing the public reader — and
+  // mirrors the listing's flag; it narrows what is served, never widens it.
+  const approvedOnly = c.req.query("approved_only") === "1" || c.req.query("approved_only") === "true";
+  if (publicReader || approvedOnly) {
     const approved = await versions.getApprovedVersion(nestId, nodeId);
     if (approved != null) {
       // Kept for the raw path: frontmatter=1 must serve the APPROVED
@@ -484,6 +511,13 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
           approved,
         );
         response.content = bodyOnly(nodeId, approvedRaw);
+        // A pdf node's `pdf:` block must describe the same version as the
+        // body — the approved one, whose binary is what /pdf serves here —
+        // not the live draft's.
+        if (response.type === "pdf") {
+          const approvedPdf = pdfMetaOf(nodeId, approvedRaw);
+          if (approvedPdf) response.pdf = approvedPdf;
+        }
       } catch (err) {
         console.error(
           "reconstructVersion failed (public single)",
@@ -504,6 +538,13 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
         });
       }
       return c.json({ node: response });
+    }
+    // Nothing approved yet. A public reader never gets here (canReadNode
+    // refused them above), but an owner asking for approved_only would fall
+    // through to their own draft — under a "this is what visitors see"
+    // banner. The honest answer is the one a visitor gets: no such page.
+    if (approvedOnly) {
+      throw new NotFoundError("This document has no approved version yet.");
     }
   }
 
@@ -554,7 +595,12 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     changeNote?: string;
     schedule?: string;
     prime?: boolean | null;
+    client?: unknown;
+    type?: string;
   }>();
+  if (body.type !== undefined && typeof body.type !== "string") {
+    throw new ValidationError("type must be a string");
+  }
 
   // Conflict detection via X-Base-Version header — REST-only contract.
   const baseVersionHeader = c.req.header("X-Base-Version");
@@ -589,6 +635,8 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       changeNote: body.changeNote,
       schedule: body.schedule,
       prime: body.prime,
+      client: attributeRequest(c, body.client),
+      type: body.type,
     },
     authorEmail,
   );
@@ -608,6 +656,15 @@ nodeRoutes.delete("/:nodeId{.+}", async (c) => {
 });
 
 // ─── Helpers ────────────────────────────────────────────────────────────
+
+/** The `pdf:` block recorded in a (reconstructed) raw document, if any. */
+function pdfMetaOf(nodeId: string, raw: string) {
+  try {
+    return parseDocument(`${nodeId}.md`, raw, nodeId).frontmatter.pdf;
+  } catch {
+    return undefined;
+  }
+}
 
 async function getUserEmail(c: any): Promise<string> {
   const userId = c.get("userId");

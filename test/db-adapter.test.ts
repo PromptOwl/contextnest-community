@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { translatePlaceholders } from "../src/db/adapter.postgres.js";
-import { nowExpr, insertOrIgnore, insertOrReplace } from "../src/db/sql.js";
+import {
+  nowExpr,
+  suffixOf,
+  insertOrIgnore,
+  insertOrReplace,
+} from "../src/db/sql.js";
 import type { DatabaseAdapter } from "../src/db/adapter.js";
 
 // Minimal fake adapters — the dialect helpers only read `.dialect`.
@@ -51,6 +56,34 @@ describe("nowExpr", () => {
   it("uses a UTC to_char form on Postgres matching SQLite's text format", () => {
     expect(nowExpr(postgres)).toContain("to_char");
     expect(nowExpr(postgres)).toContain("YYYY-MM-DD HH24:MI:SS");
+  });
+});
+
+describe("suffixOf", () => {
+  it("uses each dialect's own trailing-substring function", () => {
+    expect(suffixOf(sqlite, "node_id", 13)).toBe("substr(node_id, -13)");
+    expect(suffixOf(postgres, "node_id", 13)).toBe("right(node_id, 13)");
+  });
+
+  it("compares case-sensitively on SQLite, which LIKE would not", async () => {
+    // The reason this helper exists: SQLite's LIKE folds ASCII case and
+    // ignores COLLATE, so `'x--Annotations' LIKE '%--annotations'` is true
+    // there and false on Postgres. Executed, not asserted from the docs.
+    const { default: Database } = await import("better-sqlite3");
+    const db = new Database(":memory:");
+    const like = (id: string) =>
+      db.prepare(`SELECT ? LIKE '%--annotations' AS m`).get(id) as { m: number };
+    const suffix = (id: string) =>
+      db
+        .prepare(`SELECT ${suffixOf(sqlite, "?", 13)} = ? AS m`)
+        .get(id, "--annotations") as { m: number };
+
+    expect(like("x--Annotations").m).toBe(1); // LIKE: the bug
+    expect(suffix("x--Annotations").m).toBe(0); // suffixOf: case-sensitive
+    expect(suffix("x--annotations").m).toBe(1);
+    // Shorter than the suffix: the whole string, which compares unequal.
+    expect(suffix("short").m).toBe(0);
+    db.close();
   });
 });
 

@@ -211,3 +211,21 @@ describe("mention notifications", () => {
     expect((await inbox(owner)).filter((n) => n.kind === "mention")).toHaveLength(0);
   });
 });
+
+describe("stripMentions", () => {
+  it("removes both mention forms and keeps the words around them", async () => {
+    const { stripMentions } = await import("../src/shared/mentions.js");
+    expect(stripMentions("@alice@acme.com how do requests authenticate?")).toBe(
+      "how do requests authenticate?",
+    );
+    expect(stripMentions("ask @(Bob Jones) and @carol about the runbook")).toBe(
+      "ask and about the runbook",
+    );
+  });
+  it("leaves an @ inside code alone — there it is source, not a mention", async () => {
+    const { stripMentions } = await import("../src/shared/mentions.js");
+    expect(stripMentions("what does `@decorator` do? @alice")).toBe(
+      "what does `@decorator` do?",
+    );
+  });
+});

@@ -12,7 +12,85 @@ Two methods, evaluated in order:
 
 Anonymous open mode (`AUTH_MODE=open`) bypasses auth on most read endpoints.
 
+### Nest-scoped API keys
+
+A key minted with `nest_id` reaches **that one nest and nothing else**. It is deny-by-default: a request outside the list below answers **403** `{ "error": "This API key is scoped to one nest and can't …", "code": "nest_scoped_key" }`, before the route's own checks run, so a route added later is closed to nest keys until it is allowed on purpose.
+
+| A nest-scoped key **can** reach | Notes |
+|---|---|
+| `/nests/<its nest>` and everything under it, including `/nests/<its nest>/mcp` | The owner's permission on that nest still applies. |
+| `GET /nests`, `GET /search`, `GET /stats` | Narrowed to its nest — other nests never appear. |
+| `/mcp`, `GET /index` | Already filtered to its nest. |
+| `/runs/<id>/*` | Only runs in its nest (403 otherwise). |
+| `GET /health`, `GET /license/status`, `GET /llms.txt`, `GET /auth/admin-status` | Public / self-describing. |
+
+Everything else is **403 `nest_scoped_key`** — notably `/auth/keys*` (a nest key can't mint, rotate, list or revoke keys, so it can't trade itself for a whole-account key), `POST /nests`, every other nest (`/nests/<other>/…` answers 403 "API key not authorized for this nest"; its MCP transport answers with a JSON-RPC error envelope), `/admin/*`, `/auth/teammates`, `/auth/invite`, `/auth/users/*`, `/auth/admin/*`, `/auth/profile`, `/auth/password`, `/teams*`, `/people*` and `/me/*` — even when the key's owner is a server admin. A session cookie sent alongside the key wins, as everywhere else. User-level keys (no `nest_id`) and sessions are unaffected.
+
 All bodies are JSON unless noted. All errors return `{ "error": "msg" }` with appropriate HTTP status.
+
+## Caller attribution (`client`)
+
+`edited_by` names a person and a read names nobody, so neither answers *which
+agent, in which session*. Every write body below, and every MCP tool call, takes
+an optional `client` object that does ([spec §9.4](https://github.com/PromptOwl/ContextNest/blob/main/CONTEXT_NEST_SPEC.md)):
+
+```json
+{ "title": "API Design", "content": "…",
+  "client": { "agent": "claude-code", "session_id": "s-9f2", "run": 7 } }
+```
+
+- `agent` and `session_id` are reserved; any other key is custom and is recorded
+  verbatim. Values are scalars (string / number / boolean).
+- A write that creates a version records it **on that version** — it comes back
+  on `GET .../versions` and on MCP `context_versions` (in the prose and the
+  structured payload). Every path that seals a version takes it: create, edit,
+  approve, revert, and import (`POST /nests/import`, `POST /nests/unsynced/sync`,
+  which stamp every row they seed), plus `POST /review-queue/bulk`, whose one
+  block rides every approval in the batch. `POST .../submit-review` seals it
+  into the engine's own version chain (`history.yaml`), which is the entry that
+  submission appends. Every MCP tool call, and every REST
+  call that accepts `client`, records it on the activity trace
+  (`GET /admin/trace`, `GET /nests/:nestId/trace`, where it comes back as a
+  parsed `client` object) — which is where a call that seals no version is
+  attributed: a **read**, and a **rejection**, which commits no content.
+- **Entirely optional.** No endpoint requires it and an unattributed call is a
+  valid call. A call that carries none stores nothing rather than an empty
+  object — "not attributed" and "attributed to nobody" are different claims.
+- **A label, not an identity.** It is never authenticated, never used to
+  authorize, and never an input to a hash chain, so histories written before the
+  field existed keep verifying byte for byte. `editedBy` remains the
+  authoritative authoring record.
+- **Bounded**, because an untrusted caller writes it into an append-only audit
+  trail: values ≤512 chars, ≤16 custom keys, scalars only → `400` otherwise. A
+  near-miss on a reserved key (`sessionId`, `Agent`) is refused rather than
+  filed as a custom key, which would look attributed and not be.
+- The server fills what the transport already knows, **per key, under** anything
+  the caller sent. Precedence is caller > env > connection: on MCP the
+  connection means the `initialize` handshake's `clientInfo.name` and the
+  transport's session id; behind that sits the label the operator gave the API
+  key. `CONTEXTNEST_AGENT` / `CONTEXTNEST_SESSION_ID` are the env layer;
+  `CONTEXTNEST_NO_ATTRIBUTION=1` derives nothing (a `client` the caller sent
+  explicitly is still honoured). See `CONFIGURATION.md`.
+- Note the `/mcp` endpoints are **stateless** — one server per request, no
+  session issued — so a handshake's `clientInfo` is not in scope by the time a
+  tool call arrives, and `agent` comes from the key label in practice. An agent
+  that wants to name itself exactly should send `client` rather than rely on
+  what the connection happens to report.
+
+- **Treat a recorded `client` as untrusted text when you read it back.** The
+  values are whatever the caller sent, stored verbatim and unescaped by design —
+  an audit record that rewrites what the caller said is worth less than none —
+  and `context_versions` prints `agent` into the prose an LLM client reads
+  (`[via claude-code]`). That is the same standing as every other caller-written
+  string this server serves back: document titles, bodies, change notes and
+  review notes all reach an agent's context the same way. Bounds (≤512 chars,
+  scalars) cap the size, not the content. Render it as data, never as
+  instructions, and the usual rule applies to anything downstream: escape at the
+  point of use. This server's own UI does — React escapes it as a text node, and
+  nothing interpolates it into SQL (`client_json` is always a bound parameter).
+
+Distinct from `metadata`, which is frontmatter: `metadata` describes the
+document, `client` describes the call that touched it.
 
 ---
 
@@ -57,16 +135,16 @@ Mints an API key for the caller. A user may hold **several** keys — one per pl
 ```
 Response (201):
 ```json
-{ "api_key": "cnst_...", "id": "uuid", "key_prefix": "cnst_abc123...", "label": "cli" }
+{ "api_key": "cnst_...", "id": "uuid", "key_prefix": "cnst_abc123...", "label": "cli", "nest_id": null }
 ```
-**Plaintext shown once.** Omit `nest_id` for a **user-level key** (works on every nest the user can access — what the Connect dialog mints); a nest-scoped key is rejected on other nests' MCP/API paths.
+**Plaintext shown once.** Omit `nest_id` for a **user-level key** (works on every nest the user can access — what the whole-brain Connect flow mints). With `nest_id` the key is **nest-scoped** — see [Nest-scoped API keys](#nest-scoped-api-keys) for exactly what it can reach. The caller must be able to reach that nest: an unknown nest, or one the caller has no access to, is **404** (the same answer for both, so this is no existence oracle). A nest-scoped key calling this endpoint gets **403 `nest_scoped_key`**.
 
 ### POST `/auth/keys/rotate` (auth required)
 Replaces **one** key and returns its new plaintext; the caller's other keys are untouched.
 
 `key_id` names the target. Omitting it is only accepted when the account holds exactly one key (pre-multi-key clients) — with several keys and no `key_id` the server answers **400** rather than guessing which to replace. **404** if the id isn't the caller's.
 
-Scope resolution on the optional `nest_id` field: **absent** → keep the prior scope; **`null` (or `""`)** → clear to a user-level key; **a nest id** → scope to that nest. Same for `label` (absent keeps the prior label). Supplying a `label` that matches a *different* key of the caller's is **409**; renaming a key to what it is already called is fine.
+Scope resolution on the optional `nest_id` field: **absent** → keep the prior scope; **`null` (or `""`)** → clear to a user-level key; **a nest id** → scope to that nest (**404** unless the caller can reach it, and the old key is left alone). The response reports the new key's `nest_id`. Un-scoping has to come from a session or a user-level key — a nest-scoped key calling any `/auth/keys*` route gets **403 `nest_scoped_key`**. Same for `label` (absent keeps the prior label). Supplying a `label` that matches a *different* key of the caller's is **409**; renaming a key to what it is already called is fine.
 ```json
 { "key_id": "uuid", "label": "optional", "nest_id": "optional" }
 ```
@@ -82,14 +160,20 @@ Revoke one key. 404 if the id isn't the caller's. Anything still using it stops 
 { "current_password": "...", "new_password": "..." }
 ```
 
+### PATCH `/auth/profile` (auth required)
+Set the caller's display name (≤ 80 chars, trimmed). An empty string clears it, so the UI shows the email. Needs a session or API key even under `AUTH_MODE=open` — the anonymous caller gets `401`.
+```json
+{ "name": "Alan" }
+```
+Response: `{ "ok": true, "name": "Alan" }`
+
 ### POST `/auth/invite` (admin only)
 Creates an invited user and returns a **temporary password** (once) for the admin to hand off. No API key is minted — teammates sign in with the temp password, then mint their own key from the Connect modal.
 ```json
 { "email": "teammate@x.com" }
 ```
 - New email → user row with `is_invited = 1` and a temporary password.
-- Existing, not-yet-claimed email (`is_invited = 1`, hasn't logged in) → refreshes the temp password.
-- Existing, claimed email (has logged in or set their own password, `is_invited = 0`) → `409`; use Reset password instead.
+- Any existing email → `409`, credentials untouched. The error says "already a member" once they've signed in (`is_invited = 0`), or "already invited but hasn't signed in yet" (`is_invited = 1`, including people a nest was shared with). Use Reset password to issue a new temporary password.
 
 `is_invited` clears to `0` on the teammate's first successful login (or when they set their own password).
 
@@ -98,9 +182,12 @@ Response (201):
 {
   "temporary_password": "...",
   "user": { "id": "...", "email": "..." },
+  "promptowl_sign_in": true,
+  "emailed": true,
   "message": "Share this temporary password securely — it won't be shown again."
 }
 ```
+`emailed` — email is configured, so the invite email (password + sign-in link) was sent. `promptowl_sign_in` — PromptOwl sign-in is open to everyone, so the teammate may use it instead (the email says so too).
 
 ### GET `/auth/teammates` (admin only)
 Returns all users + key counts. **Sorted: admins first, then `created_at DESC`.**
@@ -142,7 +229,7 @@ Returns whether the caller is the license admin + license metadata.
 Device-flow login. Also gated by `PROMPTOWL_SIGN_IN_GATE`.
 
 ### GET `/auth/sso`
-One-click SSO auto-login from PromptOwl (**official deployment only**). PromptOwl redirects a signed-in user here with a short-lived, single-use, audience-bound HS256 JWT ticket (`?ticket=...`). The server verifies the signature with `OFFICIAL_COMMUNITY_SSO_SECRET`, checks `aud` against `PUBLIC_BASE_URL`, enforces one-time-use via the ticket's `jti`, then provisions the user and starts a session (same provisioning + `PROMPTOWL_SIGN_IN_GATE` as `/auth/promptowl`). On success → `302` to `/`; on failure → `302` to `/?sso_error=<code>` (the SPA shows a toast). **When `OFFICIAL_COMMUNITY_SSO_SECRET` is unset** (i.e. every self-hosted server) the feature is disabled and the endpoint bounces to `/?sso_error=not_supported`. That is the domain lock: without the shared secret no ticket can be verified, so the feature stays exclusive to the official community regardless of this redirect. Error codes: `not_supported`, `missing_ticket`, `invalid_ticket`, `bad_audience`, `ticket_used`, `rate_limited`, `sign_in_restricted`, `service_error` (DB/internal fault while redeeming the ticket).
+One-click SSO auto-login from an **official community site** (**not for self-hosted deployments** — see below). A trusted site redirects a signed-in user here with a short-lived, single-use, audience-bound HS256 JWT ticket (`?ticket=...`). The server tries the ticket's signature against every configured official community site's secret (`GET/POST/PATCH/DELETE /admin/community-sites`, plus the legacy `OFFICIAL_COMMUNITY_SSO_SECRET`/`PUBLIC_BASE_URL` env-var pair for backward compatibility), checks `aud` against this deployment's own `PUBLIC_BASE_URL` (not the matched site's `url`, which is a display/uniqueness field only), enforces one-time-use via the ticket's `jti`, then provisions the user and starts a session (same provisioning + `PROMPTOWL_SIGN_IN_GATE` as `/auth/promptowl`). On success → `302` to `/`; on failure → `302` to `/?sso_error=<code>` (the SPA shows a toast). **When no official community site is configured** (i.e. every self-hosted server, by default) the feature is disabled and the endpoint bounces to `/?sso_error=not_supported`. That is the domain lock: without a matching secret no ticket can be verified, so the feature stays exclusive to configured official sites regardless of this redirect. Error codes: `not_supported`, `missing_ticket`, `invalid_ticket`, `bad_audience`, `ticket_used`, `rate_limited`, `sign_in_restricted`, `service_error` (DB/internal fault while redeeming the ticket).
 
 ### GET `/auth/oidc/login`
 Starts generic **OIDC single sign-on** (Microsoft Entra ID, Google, or any spec-compliant IdP). Superadmin-configurable via `/admin/settings` (`oidc_*` fields) or the `OIDC_*` env vars — see `CONFIGURATION.md → Single sign-on (OIDC)`. Entirely separate from the PromptOwl flows above.
@@ -150,12 +237,12 @@ Starts generic **OIDC single sign-on** (Microsoft Entra ID, Google, or any spec-
 When enabled and fully configured: fetches the issuer's discovery document (cached in-process ~5 min), mints `state` + `nonce` + a PKCE S256 verifier into three short-lived (10 min) httpOnly `SameSite=Lax` cookies scoped to `Path=/auth/oidc`, and `302`s to the IdP's authorization endpoint with `response_type=code&scope=openid email profile`. When disabled/unconfigured → `302` to `/?sso_error=disabled` / `not_configured`. Rate-limited per IP.
 
 ### GET `/auth/oidc/callback`
-The redirect URI (`<base url>/auth/oidc/callback` — register this exact URI at your IdP). Verifies the `state` param against the flow cookie, exchanges the code at the token endpoint (client secret + PKCE verifier), validates the ID token with the issuer's JWKS (signature, `iss`, `aud` = client id, `exp`, and the `nonce` claim against the flow cookie), extracts the email (`email`, falling back to `preferred_username` for Entra; normalized trim+lowercase), and enforces `oidc_allowed_domains`. Existing users are signed in; unknown users are JIT-provisioned when `oidc_auto_provision` is on (name from the `name` claim), else refused. Every successful login also upserts `users.department` from the optional string `department` claim (trimmed, whitespace collapsed, capped at 120 chars; absent claim clears the stored value) — read by the `oidc_department_tagging` feature (see `CONFIGURATION.md → Department auto-tagging`). On success → session cookie (identical to a password login) + `302` to `/`. On any failure → `302` to `/?sso_error=<code>`; codes: `disabled`, `not_configured`, `discovery_failed`, `provider_error`, `state_mismatch`, `exchange_failed`, `invalid_token`, `email_not_verified` (ID token carries `email_verified: false` — an absent claim is trusted; see the trust assumption in `CONFIGURATION.md → Single sign-on (OIDC)`), `domain_not_allowed`, `not_invited`, `rate_limited`, `service_error`. Flow cookies are cleared on every outcome. Rate-limited per IP.
+The redirect URI (`<base url>/auth/oidc/callback` — register this exact URI at your IdP). Verifies the `state` param against the flow cookie, exchanges the code at the token endpoint (client secret + PKCE verifier), validates the ID token with the issuer's JWKS (signature, `iss`, `aud` = client id, `exp`, and the `nonce` claim against the flow cookie), extracts the email (`email`, falling back to `preferred_username` for Entra; normalized trim+lowercase), and enforces `oidc_allowed_domains`. Existing users are signed in; unknown users are JIT-provisioned when `oidc_auto_provision` is on (name from the `name` claim), else refused. Every successful login also upserts `users.department` from the optional string `department` claim (trimmed, whitespace collapsed, capped at 120 chars; absent claim clears the stored value) — read by the `oidc_department_tagging` feature (see `CONFIGURATION.md → Department auto-tagging`). On success → session cookie (identical to a password login) + `302` to `/`. On any failure → `302` to `/?sso_error=<code>`; codes: `disabled`, `not_configured`, `discovery_failed`, `provider_error`, `state_mismatch`, `exchange_failed`, `invalid_token`, `email_not_verified` (ID token carries `email_verified: false` — an absent claim is trusted; see the trust assumption in `CONFIGURATION.md → Single sign-on (OIDC)`), `domain_not_allowed`, `not_invited`, `rate_limited`, `service_error` (cause and fix for each: `CONFIGURATION.md → Troubleshooting SSO sign-in`). Flow cookies are cleared on every outcome. Rate-limited per IP.
 
 ### GET `/auth/oidc/logout`
 RP-initiated logout for an SSO session. Deletes the current session server-side and clears the session cookie plus the `cnst_sso_session` marker. If the issuer advertises an `end_session_endpoint` (Entra/Okta/Keycloak; Google does not), `302`s the browser through it with `post_logout_redirect_uri=<base url>/` so the IdP session ends too; otherwise `302`s straight to `/`. Always clears cookies and always lands on `/`, even if discovery is unreachable. The SPA navigates here (instead of `POST /auth/logout`) only when the non-httpOnly `cnst_sso_session` marker cookie — set on OIDC callback success — is present, so password sessions keep the plain logout.
 
-Related `/admin/settings` fields (GET/PATCH, superadmin only): `oidc_enabled`, `oidc_issuer` (https URL), `oidc_client_id`, `oidc_client_secret` (**write-only** — PATCH sets/replaces, `null` clears; GET returns only `oidc_client_secret_set: boolean`), `oidc_allowed_domains` (comma-separated), `oidc_auto_provision`, `oidc_department_tagging` (append `dept:<slugified-department>` to a new document's tags on create — create-only, no-op for users without a stored department). Enabling is refused unless issuer + client id + secret are all present.
+Related `/admin/settings` fields (GET/PATCH, server admin only — the license admin or a superadmin): `oidc_enabled`, `oidc_issuer` (https URL), `oidc_client_id`, `oidc_client_secret` (**write-only** — PATCH sets/replaces, `null` clears; GET returns only `oidc_client_secret_set: boolean`), `oidc_allowed_domains` (comma-separated), `oidc_auto_provision`, `oidc_department_tagging` (append `dept:<slugified-department>` to a new document's tags on create — create-only, no-op for users without a stored department). Enabling is refused unless issuer + client id + secret are all present.
 
 ### POST `/auth/token-exchange`
 Exchange an IdP ID token for a short-lived, scoped **MCP bearer** (RFC 8693-shaped) — for an external agent acting on behalf of a user your IdP already authenticated. No session, no API key. **Off by default; security-critical** — see `CONFIGURATION.md → Agent SSO (token exchange)`.
@@ -175,7 +262,7 @@ Related `/admin/settings` fields (GET/PATCH, superadmin only): `sso_token_exchan
 A nest = a context vault (folder of markdown documents + governance state).
 
 ### GET `/nests`
-Returns owned + shared nests. Archived nests are **absent** — as they are from every other listing, the work inbox, cross-nest search and the MCP index. Each row carries `pinned` — the calling user's own bookmark (see `POST /nests/:nestId/pin`).
+Returns owned + shared nests. Archived nests are **absent** — as they are from every other listing, the work inbox, cross-nest search and the MCP index. Each row carries `pinned` — the calling user's own bookmark (see `POST /nests/:nestId/pin`). Nests reachable through `org`/`public` visibility alone are included too and carry `discovered: true` (owned and shared rows carry `false`) — the dashboard's default *My nests* scope leaves them out.
 ```json
 { "nests": [{ "id": "...", "user_id": "...", "name": "...", "slug": "...", "visibility": "private", "created_at": "..." }] }
 ```
@@ -187,6 +274,8 @@ Returns owned + shared nests. Archived nests are **absent** — as they are from
 { "name": "My Nest", "description": "optional" }
 ```
 Response (201): `{ "nest": { ... } }`
+
+With `NEST_CREATION=admins` (the default) only a server admin may create or import a nest; anyone else gets `403` ("Only a server admin can create nests on this server…"). The same rule covers `POST /nests/import` and the MCP `nest_create` tool. `GET /health` reports it as `nest_creation`.
 
 ### GET `/nests/:nestId`
 ```json
@@ -230,6 +319,7 @@ Pins are per `(user, nest)` in the `nest_pins` table and cascade with the nest. 
   "prime_only_review": false,
   "prime_tags": ["prime-document"],
   "require_push_confirmation": false
+  "creator_is_reviewer": false
 }
 ```
 
@@ -244,6 +334,7 @@ Every field is optional; only the ones present are changed.
 - `prime_only_review` — in a governed nest, only **prime** documents need approval; everything else self-publishes. Off by default.
 - `prime_tags` — tags that mark a document prime. Accepts an array or a comma-separated string; stored and returned normalized (no leading `#`, lowercased, deduped). See `STEWARDSHIP.md → Prime documents`.
 - `require_push_confirmation` — the **Push Confirmation Gate** (see below). **Superadmin-only to SET**: a PATCH carrying this field from anyone who is not a server superadmin is refused with a per-field `403` (`{ "error": ..., "field": "require_push_confirmation" }`) and no other field in the same body is applied. Readable by anyone who can read the nest. Off by default.
+- `creator_is_reviewer` — in a governed nest, whoever creates a document becomes its document-scope `reviewer` and v1 publishes immediately; later changes go through review as usual (the creator approves teammates' changes, another reviewer approves the creator's). Prime documents still draft. Future creates only. Off by default. See `STEWARDSHIP.md → Creators review their own documents`.
 
 Turning stewardship **off** wipes stewards and pending reviews and is owner-only; the other fields are non-destructive and never change the state of anything already published.
 
@@ -324,7 +415,15 @@ Reviewer-only. `GET` → `{ allowlist: [{ user_id, key_id, user_email, key_label
 ```json
 { "visibility": "public", "acknowledge_public": true }
 ```
-- **Outside-org publish guardrail.** Setting `visibility: "public"` **requires** `acknowledge_public: true`. Without it the request is rejected `409`:
+- **`visibility`** is one of:
+  | value | who can read without being added |
+  |---|---|
+  | `private` | nobody — owner, collaborators and stewards only |
+  | `org` | any **authenticated** user of this deployment (a self-hosted install is one organization). Anonymous callers get nothing. |
+  | `public` | anyone, including anonymous callers |
+  `org` and `public` readers see **approved content only** — drafts and pending versions stay with collaborators and stewards.
+  Under `AUTH_MODE=open` every caller resolves to the anonymous user, so there is no "other authenticated user" for `org` to admit: on an open-mode deployment `org` behaves as `private`. Use it on a deployment with real logins.
+- **Outside-org publish guardrail.** Setting `visibility: "public"` **requires** `acknowledge_public: true`. `org` does not on a single-organization server — it stays inside the deployment, so it crosses no organizational boundary. On a **shared deployment** (`SHARED_DEPLOYMENT=true` / Settings → General → *This server hosts several organizations* — the PromptOwl-hosted service) the deployment *is* several organizations, so `org` requires the same `acknowledge_public: true` and the `warning` names that boundary. Without the acknowledgement the request is rejected `409`:
   ```json
   {
     "error": "Publishing this nest requires acknowledgement.",
@@ -332,7 +431,15 @@ Reviewer-only. `GET` → `{ allowlist: [{ user_id, key_id, user_email, key_label
     "warning": "This makes the nest readable by anyone on the internet, outside your organization."
   }
   ```
-  Going back to `private` needs no acknowledgement.
+  On a shared deployment, `org` without the acknowledgement is rejected the same way, with its own warning:
+  ```json
+  {
+    "error": "Opening this nest to the organization requires acknowledgement.",
+    "requires_acknowledgement": true,
+    "warning": "This server is shared: 'Organization' makes the nest readable by every account on this server, including other organizations — not just yours."
+  }
+  ```
+  Going back to `private` needs no acknowledgement. `GET /health` reports `shared_deployment` so a client can word its own confirmation the same way.
 
 ### PATCH `/nests/:nestId/reader-mode` (server-admin / superadmin only)
 Configure **Public Docs Reader Mode** — a clean, read-only public docs view of the nest. Superadmin-gated via `isServerAdminUserId` (license admin OR `access.yaml` super_admins ∪ the DB-granted set; the same gate as `/nests/unsynced` and `/admin/*`). A plain nest-owner/admin who is not a superadmin gets `403`.
@@ -356,6 +463,41 @@ Response (200) echoes the persisted row:
 { "reader_mode": 1, "reader_home_node": "welcome" }
 ```
 The two additive columns (`nests.reader_mode`, `nests.reader_home_node`) also surface on `GET /nests/:nestId` via the `SELECT *` nest payload.
+
+### PATCH `/nests/:nestId/branding` (nest owner / nest admin / server admin)
+Per-nest branding for the public reader (reader mode) and the nest's `/p` published pages. The body **replaces** the nest's branding; `null`, an empty body, or `{}` resets it to unbranded.
+```json
+{
+  "site_title": "Acme Docs",
+  "logo_url": "/nests/<nestId>/assets/<uuid>.png",
+  "banner_url": "https://cdn.example.com/banner.jpg",
+  "banner_headline": "Acme Handbook",
+  "banner_subtext": "Everything we know, versioned.",
+  "accent_color": "#e11d48",
+  "header_bg_color": "#0f172a",
+  "page_tint_color": "#fef2f2",
+  "footer_text": "© Acme Corp",
+  "footer_link_url": "https://acme.example.com/",
+  "footer_link_label": "acme.example.com",
+  "favicon_url": "/nests/<nestId>/assets/<uuid>.png",
+  "hide_powered_by": false
+}
+```
+Every field is optional. Rules (any violation → `400`, nothing saved):
+- **Colors** (`accent_color`, `header_bg_color`, `page_tint_color`): `#rgb` or `#rrggbb` only; stored as lowercase `#rrggbb`. Anything else — named colors, `red; background:url(…)`, `var()` — is refused.
+- **Images** (`logo_url`, `banner_url`, `favicon_url`): an image asset uploaded to **this** nest (`POST /nests/:nestId/assets` → `/nests/<nestId>/assets/<uuid>.<png|jpg|gif|webp>`, must exist), or an `https://` URL (no credentials) whose path ends in `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp`. `javascript:`, `data:`, `http:`, protocol-relative, SVG, video assets and other nests' assets are refused.
+- **`footer_link_url`**: an `https://` URL.
+- **Text** (`site_title` ≤ 120, `banner_headline` ≤ 120, `banner_subtext` ≤ 280, `footer_text` ≤ 280, `footer_link_label` ≤ 80): plain text, no control characters; always rendered escaped.
+- **Unknown keys** are refused — there is no free-form CSS or JS.
+- **`hide_powered_by`** (boolean): hides "Powered by ContextNest" in the reader and "Secured by PromptOwl · ContextNest" on `/p`. Turning it on is **server-admin only** (`403` for a nest owner/admin). A non-admin edit that omits the field keeps the stored value — a non-admin full clear (`null` / `{}`) included, which then stores `{ "hide_powered_by": true }`; a non-admin may turn it off explicitly.
+
+Gate: the access middleware requires the `admin` tier for this resource (owner, admin collaborator, or server admin); the handler re-checks it. Editors and viewers get `403`, anonymous callers `401`.
+
+Response (200): `{ "branding": { …normalised… } }` or `{ "branding": null }`.
+
+**Reading it.** There is no separate GET: `GET /nests/:nestId` returns `nest.branding` (parsed and re-validated against the write rules — a stored URL that no longer passes is dropped; `null` when unbranded) in place of the raw `branding_json` column. It is therefore readable exactly by whoever can read the nest — an anonymous reader of a public nest sees it; a private nest still `404`s.
+
+**Where it applies.** The SPA reader (read-only callers in reader mode, and an owner's "Preview as reader") uses it for the header logo + title (falling back to the server `LOGO_URL` and the nest name), the banner on the home page, accent/header/page-tint colors, footer, favicon and tab title. On `/p`, the markdown document view, the gate page and the comment shell pick up the colors, title, logo, banner and footer; **the CSP is unchanged** — uploaded images are inlined as `data:` URIs (already allowed by `img-src data:`), and external https images are not rendered there. HTML/artifact publishes are served untouched.
 
 ### GET `/nests/unsynced` (server-admin only outside open mode)
 Lists folders under `DATA_ROOT` that aren't nests yet — typically dropped in by the starter CLI or copied in manually. Each entry is a sync candidate. Reflects server-side filesystem state, so in non-open mode only a server admin — the license admin or any superadmin (`access.yaml` ∪ granted; same resolution as `/admin/*`) — sees it (everyone else gets `403`).
@@ -455,6 +597,24 @@ Changing an existing collaborator's level stays admin-only.
 
 ### DELETE `/nests/:nestId/collaborators/:collabId` (admin)
 Removing a collaborator stays admin-only.
+
+### GET `/nests/:nestId/mentionable` (read+, members only)
+```json
+{ "people": [{ "email": "owner@x.com", "name": "Olive Owner" }] }
+```
+Everyone who can reach the nest (owner, collaborators, shared-team members, stewards, grant holders) — the roster the `@mention` pickers offer and validate against. With `PEOPLE_SUGGEST_ALL_USERS` on, every registered account follows the roster; mentioning one of them from a write+ account adds them to the nest as a `read` collaborator (see `POST /comments`).
+
+Read-tier, because commenting is read-tier and a read-only reviewer is the person most likely to tag someone. The property `GET /collaborators` protects with its write tier is kept by a narrower rule: **you may see the roster if you are on it.** A caller who reaches the nest only through its visibility (`public`, or `org`) is not on the roster → `403`. Write+ callers pass regardless (they can read the fuller roster anyway).
+
+### GET `/people/suggest?q=&limit=` (auth required)
+```json
+{ "people": [{ "email": "c@x.com", "name": "Carl Colleague", "source": "nest" }] }
+```
+Server-wide, not nest-scoped: the people the caller **already works with** — anyone on a nest they own or collaborate on (its owner, collaborators, active stewards) and anyone on a team they own or belong to. `source` ∈ `nest` / `team` / `directory`. For a server admin the directory is every user; `GET /auth/teammates` remains the admin-only full roster.
+
+Scope is deliberately narrow by default, because a single server may hold several unrelated organisations: `PEOPLE_SUGGEST_ALL_USERS` (off by default, Settings → General → People directory) widens it to every registered account, which is right for a single-company deployment and wrong for a shared one. A server admin always sees every account.
+
+`q` filters on name or address (substring, case-insensitive); `limit` caps the list (default and max 20). Suggestions are a convenience for the add-a-person pickers — an address that appears nowhere here is still valid to submit (that is how you invite someone with no account yet), and the add itself re-checks permission and the escalation cap.
 
 ---
 
@@ -665,7 +825,7 @@ Optional query params, applied before the per-node enrichment:
 ```
 - `schedule` is present only on runnable nodes (`type` `agent`/`skill`); omitted otherwise.
 - `author` = the doc's creator (frontmatter author, else the first version's author); `null` for old imports with neither. `collaborators` = distinct version authors ∪ document-scope grant holders, minus the author, sorted. Both also appear on the single-node GET below.
-- Public readers (callers who reach a `visibility: public` nest without being its owner or a collaborator) do **not** receive `collaborators` — the field is omitted, and `author` falls back to the frontmatter value only, never to a version author. The roster is treated as private to the nest's members, like draft content.
+- Public readers (callers who reach a `visibility: public` or `visibility: org` nest without being its owner or a collaborator) do **not** receive `collaborators` — the field is omitted, and `author` falls back to the frontmatter value only, never to a version author. The roster is treated as private to the nest's members, like draft content.
 
 ### POST `/nests/:nestId/nodes`
 ```json
@@ -677,7 +837,8 @@ Optional query params, applied before the per-node enrichment:
   "scope": "team",
   "status": "draft",
   "folder": "gtm/deals",
-  "schedule": "0 6 * * *"
+  "schedule": "0 6 * * *",
+  "client": { "agent": "claude-code", "session_id": "s-9f2" }
 }
 ```
 - Slug derived from title → `nodes/<slug>`.
@@ -686,6 +847,7 @@ Optional query params, applied before the per-node enrichment:
 - Optional `schedule` (free-form cron/interval string, opaque to the server) — **only valid when `type` is `agent` or `skill`**; sent on any other type → `400`. Stored in frontmatter metadata and echoed back on every node response. See [§9 `GET /runnables`](#get-nestsnestidrunnables-read).
 - Optional `prime` (boolean) flags the document as **prime** — it then always requires steward approval, whoever writes it. Owner/admin only; any other caller sending the field gets `403`. Omit to inherit from the nest's `prime_tags`; `false` exempts this document from an otherwise-prime tag. Echoed back on every node response as `prime` (absent when inherited). See `STEWARDSHIP.md → Prime documents`.
 - If stewardship enabled → status defaults `draft`. Else `approved`.
+- Optional `client` — caller attribution, recorded on the version this create seals. See [Caller attribution](#caller-attribution-client).
 - Auto-syncs tag index for steward resolution.
 
 Response (201): `{ "node": { ... }, "stewards": [...] }`.
@@ -749,11 +911,14 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
   "content": "...",
   "tags": ["..."],
   "changeNote": "fixed typo",
-  "schedule": "0 7 * * *"
+  "schedule": "0 7 * * *",
+  "client": { "agent": "claude-code", "session_id": "s-9f2" }
 }
 ```
 Requires nest write permission.
+- `client` — caller attribution, recorded on the version this edit seals. See [Caller attribution](#caller-attribution-client).
 - `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
+- `type` — re-type the node in place (the editor's "Turn into…"): `document`, `artifact`, `table`, `agent`, `skill`, `tool`, or any other engine type. Same gate as create — the artifact/table feature flags and the accepted set (`400` otherwise). The body is kept as-is. Converting to `skill` defaults the trigger from the title; converting away from a runnable type drops its `schedule`.
 - `prime` — owner/admin only (`403` otherwise). `true`/`false` set the document-scope flag, `null` clears it back to tag/nest inheritance. An edit that makes the document prime is itself gated, so it lands as a draft awaiting approval.
 
 ### DELETE `/nests/:nestId/nodes/:nodeId`
@@ -762,6 +927,23 @@ Write permission. Hidden in UI for reviewer/viewer; server still enforces.
 A node with a pending review is frozen — `423` — for callers who can't clear that review. Approvers (nest owner, admin, assigned reviewer) go through: they can reject and then delete, so the lock only cost them a round trip. Same rule on `POST /nodes/:nodeId/move`; editing under review is unchanged (still author-only).
 
 Purges everything keyed to the node id — version history, review requests, the approved-version pin, tag index, annotations and their comments, review comments, watchers, schedules, trigger hooks, workflow edges, document-scoped stewards and document grants — and leaves a deletion tombstone for `GET /changes`. Node ids derive from titles, so a later document can land on the same id; it must inherit none of the old one's readers, reviewers or history. Run traces are kept: they record what happened, not what exists. `POST /nests/:nestId/nodes/:nodeId/move` carries that same set to the new id instead of dropping it (folder grants excepted — they cover a path prefix, so a moved doc leaves one share and joins another).
+
+### POST `/nests/:nestId/nodes/pdf`
+Upload a PDF as a governed `pdf` document. Multipart: `file` (required), optional `title` (default: the file name), `folder`, `tags` (repeat the field or comma-separate), `nodeId`, `changeNote`. Write permission (nest-scope steward editors too, as for `POST /nodes`).
+
+The engine's `context_import_pdf` extracts the text — the node body, one `<!-- page N -->` marker per page — and stores the PDF beside the node as `<id>.pdf`, bound by sha256 in the node's `pdf:` frontmatter block. Governance is exactly a create's: in a governed nest the upload lands as a draft (or publishes when a create by that person would); without stewards it publishes.
+
+- `nodeId` of an existing `pdf` node → the PDF is replaced as a **new version** of that node (same review lock, draft/publish rule and version rows as `PATCH`). The prior binary stays in history. Identical bytes are a no-op. A replace is two engine writes (stage the new PDF, then the same update/publish a text edit makes); if the second fails, the node's previous file and PDF are put back before the error is returned.
+- `400` — no `file`, not a PDF (checked by the `%PDF-` header, not the extension), an encrypted/unreadable PDF, or `nodeId` names a node that is not a pdf. `413` — larger than `PDF_MAX_MB` (default 25 MB). Nothing is written on any refusal.
+- A PDF with no text layer (a scan) imports with an empty body and `pdf.text_layer: false`; there is no OCR.
+- Returns `201` `{ node, version, stewards? }` on create, `200` `{ node, version }` on replace. `node.pdf` is the `pdf:` block (`file`, `sha256`, `bytes`, `pages`, `text_layer`, `extractor`, `extractor_version`, `extracted_at`).
+
+A pdf node's text is read-only: `PATCH` with a `content`/`append` that changes it → `409` (re-upload instead; echoing the stored body back is accepted). A pdf node can't be converted to another type or another type to `pdf` (`400`), can't be moved to another folder yet (`400`), and `POST /nodes` with `type: "pdf"` → `400`. `POST …/revert` re-imports the target version's PDF; `POST …/discard` restores the sealed version's PDF (the response carries a `warning` if that binary can't be restored); `DELETE` removes the binary with the node.
+
+### GET `/nests/:nestId/nodes/:nodeId/pdf`
+The PDF binary, gated exactly like `GET /nodes/:nodeId`. A public reader (or `?approved_only=1`) always gets the **approved** version's bytes — never a draft's — whatever version is asked for; other readers get the current working copy, or `?version=N`. Every response is verified against the sha256 its version records (a mismatch is refused, not served).
+
+Headers: `Content-Type: application/pdf`, `Content-Disposition: inline; filename="<slug>.pdf"` (`?download=1` → `attachment`), `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-cache`, and an `ETag` of the sha256 (`If-None-Match` → `304`). `404` when the node has no such version or no approved version (public). An id that is not a pdf node falls through to the node route, so a document whose own id ends in `/pdf` still reads.
 
 ### POST `/nests/:nestId/assets`
 Multipart upload (field `file`) of an image or video referenced from documents. Write permission.
@@ -777,6 +959,9 @@ SVG is deliberately not accepted (stored-XSS surface). Returns `201` with `{ fil
 
 ### GET `/nests/:nestId/assets/:file`
 Serves the asset bytes with the correct content-type and immutable caching. Read permission. Only server-minted `<uuid>.<ext>` names are accepted.
+
+### Watchers — GET/POST/DELETE `/nests/:nestId/nodes/:nodeId/watchers`
+"Tag a person to this node." Watchers of a document are notified when it changes or lands for review; watchers of an agent hear when its output does. `POST` body `{ email }` (write); `DELETE …/watchers?email=` (write). All three return `{ "watchers": [ … ] }`. Watchers follow a `move` and are purged by a `DELETE` of the node.
 
 ---
 
@@ -901,6 +1086,14 @@ Cancels the pending review. Returns node to `draft`.
 Allowed for the person who submitted it (withdrawing your own submission) and
 for anyone with approve rights on the node. Anyone else gets 403 — read access
 to the nest alone is not enough.
+
+### GET `/nests/:nestId/external-edits`
+Query: `?refresh=true` to rescan the disk first; `?count=1` to get the total only.
+
+Pending external (on-disk) edits awaiting approval, newest first. The list is computed by scanning every document's suggestions, so `?count=1` saves bytes (`{ "total": n }`), not server time — the UI uses it for the tab badge.
+```json
+{ "entries": [{ "suggestion_id": "...", "document_id": "nodes/foo", "source": "out-of-band-edit", "detected_at": "...", "actor": "..." }], "total": 1 }
+```
 
 ### GET `/nests/:nestId/review-queue`
 Query: `?status=pending&limit=50&offset=0`
@@ -1069,6 +1262,16 @@ tab badge binds to `counts.changes` (actionable items), not the feed length.
 The UI deep-links a comment item to its document with the thread focused via
 `?nest=<id>&doc=<nodeId>&thread=<threadId>`.
 
+### Notification rows (`GET /me/work` → `notifications`, `GET /me/notifications`)
+
+Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review verdicts, document deletion flags, mentions); nest-level rows have `node_id: null`.
+
+Unread `nest_invite` rows are what the Nests page shows as **Pending invites**. Accept marks them read (`POST /me/notifications/read`) and opens the nest.
+
+### POST `/me/nests/:nestId/leave`
+
+Decline a nest invite. Removes the caller's **own** collaborator row on that nest (never anyone else's) and marks its `nest_invite` rows read. Response: `{ "left": true }`. Access that isn't a direct collaborator row — ownership, or a share through a team — isn't touched: `{ "left": false }`, and the invite rows are still marked read.
+
 ### GET `/me/drafts`
 
 Query: `?limit=25&offset=0&q=&sort=updated|title` (limit clamps to 1–100, offset to ≥ 0)
@@ -1131,6 +1334,11 @@ Each version may also include `resolvedBy` + `resolutionStatus`, the steward who
 approved or rejected it, joined from `review_requests` (`node_versions` stores
 the status but not the resolver's email).
 
+`client` is the caller attribution the write carried — which agent, in which
+session (see [Caller attribution](#caller-attribution-client)). Absent on every
+version whose write sent none, which includes every version written before the
+field existed.
+
 `externalEditVerdicts` carries the verdicts on out-of-band (direct filesystem)
 edits, oldest first, read from the engine's append-only chain-event log. They sit
 beside the version list rather than inside it because a **rejection commits no
@@ -1155,6 +1363,7 @@ approved version.
       "status": "pending_review",
       "changeNote": "...",
       "content": "",
+      "client": { "agent": "claude-code", "session_id": "s-9f2" },
       "diff": "Index: v2\n===...\n--- v2\tv2\n+++ v2\tv3\n@@ -1,4 +1,5 @@\n title: doc\n-old line\n+new line\n"
     },
     {
@@ -1232,6 +1441,42 @@ List comments on a node. Optional `status` = `open` | `resolved`.
 Leave a comment. Body: `{ body, version?, anchor?{start,end,text?}, parentId? }`.
 `parentId` threads a reply. Returns `201 { comment }`. Empty body → `400`.
 
+**`@mentions` notify.** Every name in the comment body — `@user@host`,
+`@localpart`, or `@(Display Name)` — is resolved against the nest's people
+(`GET /nests/:nestId/mentionable`) and each person named gets a `mention` row
+in `GET /me/notifications` linking the document, plus a message on the
+configured connector and an email to their own address when SMTP is set up.
+A channel message names who was mentioned (a room is not a person); the inbox
+row and the email address the recipient directly. The author is never notified
+about their own mention, a name matching nobody
+(or matching two people ambiguously) notifies nobody, and a recipient who
+can't open the document is skipped — so a mention can't disclose a title.
+Unlike a document body, where only names a save *adds* notify, every name in a
+comment notifies: the comment itself is the new event. At most 25 people are
+notified per write (`MAX_MENTION_RECIPIENTS`) — commenting is read-tier and
+unthrottled, so a comment naming a large roster would otherwise be an
+amplifier; names are taken in order of appearance. With `PEOPLE_SUGGEST_ALL_USERS`
+on, a name that matches a registered account off the nest is an invite: a
+write+ author's mention adds them as a `read` collaborator and then notifies;
+a read-only author's mention of an outsider still reaches nobody.
+
+The *stream* of them is bounded too: per nest per 5 minutes, one person may
+cause 50 mention **emails** (`MENTION_DELIVERY_BUDGET`) and 25 mention
+**channel posts** (`MENTION_CHANNEL_BUDGET`) — separate pools, because emails
+scale with how many people were named while a channel post is one message per
+comment. Separate also so the email allowance doesn't depend on something
+invisible: the connector dispatch is a no-op on a nest with no connector
+configured, and a shared pool would have spent the token before it could say
+so, quietly halving the email budget on exactly the deployments least likely to
+have a connector. Past that the comment still posts and the
+inbox rows still land — the queue is the recipient's own record and costs one
+insert — and only the external fan-out is skipped, with a server-log warning.
+The budget sits on delivery rather than on comment creation deliberately: an
+agent working through a review posts a comment per finding, which is exactly
+what `context_comment` is for, and throttling the write would break it. The same applies to the
+annotation thread endpoints (§ Hosted artifacts), which are what the UI's
+comments panel posts.
+
 ### POST `/nests/:nestId/nodes/:nodeId/comments/:commentId/resolve`
 Mark a comment resolved. Records `resolvedBy` + `resolvedAt`. Returns `{ comment }`.
 
@@ -1242,6 +1487,17 @@ suggestions ("proposed an edit", read from nest storage) + reviews
 (`review_requests`); newest first, `?limit=` (default 100). Each entry:
 `{ type, nodeId, actor, at, detail?, refId? }` where `type` ∈
 `comment | comment_resolved | edit | edit_proposed | review_requested | review_resolved`.
+
+
+### Annotations — anchored threads the editor's Comment mode shows
+
+The comments above are flat per-node threads. **Annotations** are the highlight-anchored threads the editor's Comment mode and the artifact viewer show; MCP's `context_comments` / `context_comment` / `context_resolve_comment` operate on these. Read permission to view, write to post.
+
+- `GET /nests/:nestId/nodes/:nodeId/annotations` — list threads with their replies and `open` / `resolved` status.
+- `POST /nests/:nestId/nodes/:nodeId/annotations` — open a thread. Body: `{ body, anchor?: { start, end, text }, snapshotVersion? }`. No `anchor` = a whole-document (or whole-artifact) thread.
+- `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/comments` — reply. Body: `{ body }`.
+- `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/resolve` · `/reopen`.
+- `GET /nests/:nestId/comment-counts` — `{ "<nodeId>": <open thread count>, … }` for the whole nest in one call (the UI's "most commented" sort).
 
 ---
 
@@ -1412,20 +1668,23 @@ Body (give `prompt` OR `selector`; everything else optional):
   "include_drafts": false
 }
 ```
-- `prompt` — natural language, compiled to a selector server-side.
-- `selector` — explicit selector grammar (e.g. `#auth`). Wins over `prompt`.
-- `max_tokens` — budget, floored at 50, default 4000. Nodes past the budget are dropped (`trace.truncated_by_budget`).
+- `prompt` — natural language. Tokens are matched against tag names and titles, and every document is scored against them (title hits weigh most, then tags, then body words); documents under half the top score are dropped as noise. A prompt that matches nothing returns `nodes: []` — never the whole nest. `trace.compiled.fallback` is `"fulltext"` when body scoring alone produced the answer.
+- `selector` — explicit selector grammar (e.g. `#auth`). Wins over `prompt`. May carry `[[Title]]` parts in an OR union (`#auth | [[Auth Overview]]`), and `[[nodes/auth-overview]]` names one document by id where a title may match several.
+- `hops` — link expansion depth (`[[wikilinks]]` and `contextnest://` links, both directions). Defaults to `0` for a `prompt` (neighbours of a keyword match are not answers to the question) and `2` for a `selector`.
+- `max_tokens` — budget, floored at 50, default 4000. A node that doesn't fit is skipped and the next tried (`trace.truncated_by_budget` counts the skips); only when nothing fits does the first node go through oversized.
 - 400 `prompt or selector is required` if both missing.
 - Each node carries a `url` deep link, and its context block a matching `_source: <url>_` line, so answers can cite sources. Built from `PUBLIC_BASE_URL`, falling back to the request origin; omitted when neither resolves.
+- On the `prompt` path each node also carries `score` (0–1; title hits weigh most, then tags, then body) and `via` (`"title"` | `"tag"` | `"fulltext"` | `"hop"`). `nodes` and the `context` blocks are ordered by score, so the budget keeps the best matches. Cite `via != "hop"`. Selector-path responses omit both fields.
 
 Response (200):
 ```json
 {
   "context": "# Auth Overview\n\n_tags: #auth #security_\n_source: http://localhost:3838/?nest=<nestId>&doc=nodes/auth-overview_\n\n# Auth\n\n...",
-  "nodes": [{ "id": "nodes/auth-overview", "title": "Auth Overview", "url": "http://localhost:3838/?nest=<nestId>&doc=nodes/auth-overview", "tags": ["#auth"], "type": "document" }],
+  "nodes": [{ "id": "nodes/auth-overview", "title": "Auth Overview", "url": "http://localhost:3838/?nest=<nestId>&doc=nodes/auth-overview", "tags": ["#auth"], "type": "document", "score": 0.67, "via": "tag" }],
   "trace": {
     "selector_used": "#auth",
     "from_prompt": "how does auth work",
+    "compiled": { "matched_tags": ["auth"], "matched_titles": [], "unmatched_tokens": ["work"], "fallback": null },
     "included": 1,
     "permission_filtered": 0,
     "truncated_by_budget": 0,
@@ -1514,6 +1773,50 @@ Identities/attribution and the governance overlay (stewards, reviews, comments, 
 curl -OJ 'http://localhost:3838/nests/<nestId>/export?format=bundle'
 curl -OJ 'http://localhost:3838/nests/<nestId>/export?format=bundle&includeDrafts=1'
 ```
+
+### POST `/nests/:nestId/table-query`
+Deterministic fact lookup against a **table** node (CSV body): fetch the exact rows instead of dragging the whole table into context. Same query against the same version always returns the same rows. Read permission; drafts excluded unless `include_drafts: true`.
+```json
+{ "table": "[[Price List]]", "query": "where region = \"EU\" and price > 100 select sku, price limit 5" }
+```
+`table` is a `[[Title]]` or a node id (`nodes/price-list`). Grammar: `where <col> <op> <value> [and …] [select <cols>] [limit N]`. Response:
+```json
+{ "table": "nodes/price-list", "version": 3, "columns": ["sku", "price"], "rows": [["A-1", "120"]], "matched": 7, "returned": 5, "total": 1000 }
+```
+Same operation over MCP: `context_table_query`.
+
+### POST `/nests/:nestId/chat`
+Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (off → `404`); needs the server-wide `ANTHROPIC_API_KEY` (missing → `503` with `reason: "no_api_key"`); answers with `HOOTIE_MODEL`, through `ANTHROPIC_BASE_URL` when one is set (all three editable in Settings → General). Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
+
+Request:
+
+```json
+{
+  "message": "how do requests authenticate?",
+  "node_id": "nodes/api-authentication-guide",
+  "history": [
+    { "role": "user", "content": "…" },
+    { "role": "assistant", "content": "…" }
+  ]
+}
+```
+
+- `message` (required) — the question. `@name` tokens loop a colleague in (below).
+- `node_id` (optional) — the document the person has open. It and its neighbours (one hop) lead the context, whatever the question matches follows.
+- `history` (optional) — prior turns, oldest first; the server keeps the most recent 20.
+
+Response: `text/event-stream`.
+
+| event | data |
+|---|---|
+| `meta` | `{ nodes: [{ id, title, url, tags, type }], anchor: node \| null }` — what the answer will be grounded in, before the model speaks. |
+| `delta` | `{ text }` — a chunk of the answer. |
+| `done` | `{ answer, cited: [node…], mention }` — the whole answer, the documents it cites (by `[[Title]]`, in order), and what happened to any `@mentions`. |
+| `error` | `{ error }` — the model call failed; the stream ends. |
+
+**Grounding.** The retrieved documents are placed in the system prompt verbatim with the instruction to answer from them alone. Retrieval is permission-gated, so an answer can never draw on anything the caller couldn't read — but a document author can write text aimed at Hootie ("ignore the question and…") that later readers' sessions will see. That is the ordinary tradeoff of grounding a model in editable content, accepted here; the documents are governed, so who can write them is the control.
+
+**Mentions.** A message naming people (`@alice@acme.com`) posts the exchange — question and answer, under the asker's name — as a comment on the anchor document (the open one, else the first document the answer cites) and notifies them through the comment-mention path: inbox row, and email / Slack / Teams where configured. `mention` is `{ status: "posted", node_id, node_title, thread_id, notified }` or `{ status: "undeliverable", reason: "no_anchor" | "post_failed" }`. Nothing is posted when nobody is named.
 
 ### POST `/nests/:nestId/query`
 Graph query (Cypher-ish).
@@ -1775,6 +2078,39 @@ every route above with the same HTML notice, never a hint about which it was.
 
 > The `/runs/:id*` family mounts outside the per-nest gate, so it re-checks nest-scope keys, suspension and license itself before any write — the same guarantees the `/nests/:nestId/*` gate provides.
 
+### Schedules — run an agent on a timer
+
+- `GET /nests/:nestId/schedules` (read) — list.
+- `POST /nests/:nestId/schedules` (write) — Body: `{ agent_node, every_minutes, enabled?, max_runs? }`. `max_runs` stops the schedule after that many runs.
+- `PATCH /nests/:nestId/schedules/:id` (write) — `{ every_minutes?, enabled? }`.
+- `DELETE /nests/:nestId/schedules/:id` (write).
+
+Archived nests are skipped by the scheduler tick; restoring the nest resumes them.
+
+### Inbound hooks — let the outside world trigger a run
+
+- `GET /nests/:nestId/hooks?agent=` (read) — list, tokens masked.
+- `POST /nests/:nestId/hooks` (write) — Body: `{ agent_node, preset }` with `preset` = `slack` | `teams` | `webhook`. Returns the secret URL once.
+- `DELETE /nests/:nestId/hooks/:id` (write) — accepts the full token or the masked id.
+- `POST /hooks/:token` (public — the token is the auth) — fire it. The Slack and Teams presets verify the request signature against `SLACK_SIGNING_SECRET` / `TEAMS_WEBHOOK_SECRET` in the nest's env store; the message text becomes the run's `inputs`. `404` while the nest is archived.
+
+### Env — per-nest secrets for tools and the runner
+
+- `GET /nests/:nestId/env` (write+) — names and masked tails only; values are never read back.
+- `PUT /nests/:nestId/env` (write+) — `{ key, value }` creates or replaces.
+- `DELETE /nests/:nestId/env/:key` (write+).
+
+Values ride to the runner inside the run bundle. `ANTHROPIC_API_KEY` here overrides the server-wide default from Settings.
+
+### Connectors — governance events out to a channel
+
+Not behind the workflow-plane flag: connectors fire on review events too.
+
+- `GET /nests/:nestId/connectors` (read).
+- `POST /nests/:nestId/connectors` (write) — Body: `{ channel, url, events }`. `channel` = `slack` | `teams` | `webhook`; `url` is a literal `https://…` or `env:KEY` to pull it from the env store; `events` is a non-empty array of `review_requested`, `review_approved`, `review_rejected`, `run_failed`, `mention`, or `["*"]`.
+- `PATCH /nests/:nestId/connectors/:id` (write) — `{ enabled?, events?, url? }`.
+- `DELETE /nests/:nestId/connectors/:id` (write).
+
 ---
 
 ## 9. MCP
@@ -1786,6 +2122,8 @@ Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually;
 
 **Denials are JSON-RPC.** Gate rejections on the MCP transport path return a JSON-RPC error envelope — `{ "jsonrpc": "2.0", "id": <echoed>, "error": { "code": -32000, "message": "<what failed — actionable reason>" } }` — instead of plain `{error}` JSON, so external clients (PromptOwl, Claude Desktop, Cursor) surface *why* a connection failed: key scoped to a different nest, server suspended, license required, or nest not found / no access.
 
+**Every tool takes `client`.** The `{ agent, session_id, …custom }` block described in [Caller attribution](#caller-attribution-client) is advertised on every tool's input schema, reads included — a write that seals a version records it there (`context_versions` serves it back), and every call records it on the activity trace. It is never authenticated and never used to authorize. Omitted, the server fills what the connection reports (the API key's label, an `Mcp-Session-Id` header) under anything the caller sent, per key.
+
 **Titles are unique on this surface.** `context_get`, `context_update`, `context_versions`, `context_delete`, and `context_move` each resolve a document by title or by id (an id wins when both are sent, and an ambiguous title refuses rather than guessing). Title addressing is what makes uniqueness matter, so `context_create` refuses a title already used anywhere in the nest — including in another folder — and answers with the existing node's id plus what to do instead (`context_update` to change it, `context_move` to refile it). A duplicate would otherwise be unreachable by every tool here. REST `POST /nodes` keeps the looser rule (same title in a different folder is fine); both surfaces refuse a create whose id is already taken.
 
 **`context_search` is the REST search.** The tool runs the same index-backed match as `GET /nests/:id/search` — terms against the cached discovery set (title, body, type, tags), title hits first — and gates the *hits* with the same `filterAccessible` rule (public readers: approved-only; governed nests: steward coverage or a share grant), so the two surfaces return the same documents in the same order. It takes an optional `limit` (default 20, max 200) and answers `{ results, count }`: `count` is everything found, `results` the first `limit` hits, each with its LLM-visible body (approved version under stewardship; a hit with no approved version yet is listed but carries no body). It used to resolve every document's gated body *before* matching — one permission lookup plus one version reconstruction per node — which is what timed out `ctx search --vault <remote>` on large governed nests.
@@ -1794,6 +2132,15 @@ Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually;
 - `context_request_deletion` — flag a document (by title/id), a `folder`, or the whole `nest` with a required `reason`. Read-tier: anyone who can see a thing may ask for its deletion. Nothing is removed; a refused `context_delete` now names this tool.
 - `context_deletion_queue` — pending (or `declined`) requests with their reasons and request ids.
 - `context_resolve_deletion` — `delete` or `decline` (note required) by request id. **Owner/admin only** — the transport is read-tier, so this per-tool check is the only thing between a viewer and a deleted nest.
+
+**Comments read AND write.** `context_comments` reads a document's threads (anchored quotes, replies, open/resolved) — the same annotation store the web UI's comments panel shows. Two write tools close the loop so an agent handed feedback can answer it rather than only read it:
+
+- `context_comment` — leave a comment. Omit `thread` to open a new whole-document thread; pass a `thread` id from `context_comments` to reply into it. One tool for both, because they differ only by that argument.
+- `context_resolve_comment` — resolve a thread, or `reopen: true` to put it back. The caller is recorded as the resolver, exactly as in the UI.
+
+Both are **read-tier**, matching REST (`isAnnotationAction` in `app.ts`): a reviewer who can see the document may comment on it. The transport is read-tier too, so each tool re-checks `canReadNode` itself — that check is the real gate. Deliberately *not* gated on an approved version: a reviewer comments on drafts, and writing a comment discloses nothing (the caller supplies the text), whereas *reading* threads stays gated because anchors quote draft body text. Both run the same side effects the REST routes do — the `@mention` fan-out (so tagging a human notifies them) and the derived `— Annotations` re-projection for artifacts, so an agent's comment doesn't leave that node stale. A `thread` that belongs to another document is refused by name rather than silently opening a new thread.
+
+`context_comments` is also available on the **server-level** endpoint (nest-parameterised, read-only). Comment visibility matches UI node visibility: collaborators/stewards who can read the node may read its threads even before approval; public readers remain blocked until the document is approved. Comment *writes* stay per-nest with the other write tools.
 
 **`context_my_drafts`** mirrors `GET /me/drafts`, nest-scoped: the caller's own unsubmitted (or rejected) documents in this nest, with their path and version. Capped at the 100 most recent; the reply says so explicitly when there are more, so an agent can't read a capped page as the whole set. Self-scoped by construction — it only ever returns rows the caller authored, in a nest they already hold read on, so it needs no permission check of its own. It exists because an agent otherwise cannot see its own unsubmitted work: a draft has no review request, so `context_review_queue` never lists it, and `context_query` skips it (only approved versions are AI-readable). The response names `context_submit_review` as the next step.
 
@@ -1821,14 +2168,15 @@ Execute (the runner contract — the agent IS the runner):
 
 The official PromptOwl deployment connects on its users' behalf without storing
 a `cnst_` key: it mints a short-lived HS256 **service ticket** signed with the
-shared `OFFICIAL_COMMUNITY_SSO_SECRET` (see `CONFIGURATION.md`). The ticket
+shared secret configured for it as an official community site (`/admin/community-sites`,
+or the legacy `OFFICIAL_COMMUNITY_SSO_SECRET` env var — see `CONFIGURATION.md`). The ticket
 carries `scope: "mcp"`, an `aud` bound to this server's `PUBLIC_BASE_URL`, a
 ~5-minute `exp`, and **no `jti`**. It resolves to an already-existing account by
 email — native access never auto-provisions.
 
 Accepted as a `Bearer` on exactly these paths (everything else still requires a
 real credential):
-- `GET /index` and the server-level `ALL /mcp` — cross-nest index + read tools.
+- `GET /index` and the server-level `ALL /mcp` — cross-nest index + read tools (including `context_comments`).
 - `POST /nests/:id/context` and `GET /nests/:id/nodes` — retrieval + doc listing.
 - `ALL /nests/:id/mcp` — the per-nest MCP transport, so a block granted read &
   write on one nest reaches that nest's write tools. Per-nest permission,
@@ -1848,6 +2196,9 @@ enforced on both sides, not by trusting the issuer.
 ---
 
 ## 10. Admin / operator
+
+### GET `/health` (no auth)
+`{ "status": "ok" | "suspended", "version": "<server version>", … }`. Needs no key (like `/llms.txt` and public `/p/:slug` pages) — use it for liveness probes. `suspended` means the license was revoked and writes are refused until a valid key is installed.
 
 ### Superadmins — GET/POST `/admin/super-admins`, DELETE `/admin/super-admins/:email` (server-admin only)
 Grant and revoke **superadmins** (server-wide admins) from the API/UI instead of only via `access.yaml`. The effective superadmin set is the union of three sources, surfaced per row as `source`:
@@ -1880,6 +2231,23 @@ An email present in several sources shows its least-revocable origin (`license` 
 - `404` — email has no granted row.
 
 Grants persist in the database and are loaded into the in-memory resolution cache at startup and after every grant/revoke, so they survive restarts. Surfaced in the UI on **Teammates → Superadmins** with per-source badges, add-by-email, and confirm-to-revoke.
+
+### Community sites — GET/POST `/admin/community-sites`, PATCH/DELETE `/admin/community-sites/:id` (server-admin only)
+Manage the **official community sites** trusted for one-click SSO auto-login (`GET /auth/sso` — see above). Each row is a `{ name, url, secret, is_active }` connection; `url` is a display/uniqueness field, not used for audience binding. `GET /auth/sso` tries an incoming ticket's signature against every *active* site's secret, and validates the ticket's `aud` claim against this deployment's own `PUBLIC_BASE_URL` (the same value for every candidate). Replaces the single `OFFICIAL_COMMUNITY_SSO_SECRET`/`PUBLIC_BASE_URL` env-var pair with a DB-backed list for the *secret* side — the env-var pair still works as an implicit extra "legacy" entry, so existing single-site deployments are unaffected. Surfaced in the UI at **Settings → Community sites**.
+
+Same server-admin guard as `/admin/super-admins` (license admin, any effective superadmin; open mode: always allowed).
+
+**GET `/admin/community-sites`** → `200 { community_sites: [{ id, name, url, secret_set, is_active, created_at, updated_at }] }`. `secret` is **write-only** — never returned, only whether one is set.
+
+**POST `/admin/community-sites`** with `{ name, url, secret, is_active? }` → `201` with the row shape above (`is_active` defaults to `true`).
+- `400` — missing name, invalid/non-http(s) url, or a secret under 16 characters.
+- `409` — a site with this url already exists.
+
+**PATCH `/admin/community-sites/:id`** — any subset of `{ name, url, secret, is_active }`; omit `secret` to keep the current one. Same validation and `409` as POST. `404` if the id doesn't exist.
+
+**DELETE `/admin/community-sites/:id`** → `200 { ok: true, id }`. `404` if the id doesn't exist.
+
+Active sites are loaded into an in-memory cache at startup and refreshed after every write, so `GET /auth/sso` never blocks on a DB round trip per request.
 
 ### GET `/admin/trace` (server-admin only)
 Operator activity trail — one newest-first row per API request and per MCP tool call, so the server admin has a single place to audit what every client and agent did. Server-admin only: the license admin, or a `super_admin` in `access.yaml` (open mode: always allowed). Everyone else gets `403`. Cross-tenant data; not scoped to a nest.
@@ -1957,6 +2325,7 @@ For any `/nests/:nestId/...` request, the middleware computes:
 - Required level by path:
   - `/collaborators`, `/visibility` → `admin`
   - `/reader-mode` → `admin` at the middleware, then the handler hard-gates on `isServerAdminUserId` (superadmin only)
+  - `/branding` → `admin` at the middleware (owner, admin collaborator, or server admin), re-checked in the handler; `hide_powered_by: true` additionally requires the server admin
   - Stewardship action paths (`/approve`, `/reject`, `/submit-review`, `/cancel-review`) → `read` (handler enforces fine-grained steward gating)
   - Other non-GET → `write`
   - GET → `read`

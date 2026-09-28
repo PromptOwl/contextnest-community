@@ -8,7 +8,7 @@ import { trackEvent } from "../telemetry/tracker.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
 import { isServerAdminUserId } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
-import { ValidationError } from "../shared/errors.js";
+import { ValidationError, ForbiddenError } from "../shared/errors.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
 import { rm } from "fs/promises";
 import type { Nest } from "../shared/types.js";
@@ -250,6 +250,35 @@ export async function setPrimeOnlyReview(
 }
 
 /**
+ * Whether the person who creates a document becomes its reviewer. Off (the
+ * default) leaves review assignment to the roster. On, a create in a governed
+ * nest stewards the author as a document-scope reviewer and publishes v1 —
+ * the GitHub posture: anyone writes, the author gates changes to their own
+ * document. Separation of duties is untouched: the author's later edits still
+ * go to the nest's other reviewers.
+ */
+export async function nestCreatorIsReviewer(nestId: string): Promise<boolean> {
+  const db = getDb();
+  const row = (await db.get(
+    "SELECT creator_is_reviewer FROM nests WHERE id = ?",
+    [nestId],
+  )) as { creator_is_reviewer: number } | undefined;
+  return !!row?.creator_is_reviewer;
+}
+
+/** Toggle creator-reviews for a nest (admin-only). Future creates only. */
+export async function setCreatorIsReviewer(
+  nestId: string,
+  enabled: boolean,
+): Promise<void> {
+  const db = getDb();
+  await db.run("UPDATE nests SET creator_is_reviewer = ? WHERE id = ?", [
+    enabled ? 1 : 0,
+    nestId,
+  ]);
+}
+
+/**
  * Tags that mark a document prime, normalized and deduped. Stored as a comma
  * list on the nest; an empty/blank value means "no tag marks a doc prime"
  * (document-level flags still apply).
@@ -385,11 +414,25 @@ export async function renameNest(
   return (await db.get("SELECT * FROM nests WHERE id = ?", [nestId])) as Nest;
 }
 
+/** NEST_CREATION=admins: only a server admin may create or import a nest. */
+export async function assertCanCreateNest(userId: string): Promise<void> {
+  if (
+    config.AUTH_MODE === "open" ||
+    config.NEST_CREATION === "everyone" ||
+    (await isServerAdminUserId(userId))
+  )
+    return;
+  throw new ForbiddenError(
+    "Only a server admin can create nests on this server. Ask your admin to share a nest with you.",
+  );
+}
+
 export async function createNest(
   userId: string,
   name: string,
   description?: string,
 ): Promise<Nest> {
+  await assertCanCreateNest(userId);
   const id = uuid();
   const db = getDb();
 
@@ -446,6 +489,7 @@ export async function createNest(
  * nest lists as real with silently missing documents.
  */
 export async function importNest(userId: string, name: string): Promise<Nest> {
+  await assertCanCreateNest(userId);
   const nm = plainName(name || "", "name is required");
 
   const db = getDb();
@@ -551,11 +595,12 @@ export async function listNests(
 ): Promise<Nest[]> {
   const db = getDb();
   const scope = opts.archived ? "archived_at IS NOT NULL" : LIVE_ONLY;
+  const orderBy = opts.archived ? "archived_at DESC" : "created_at DESC";
   // Own rows + (for admin/open) all anon-owned. Public discovery is
   // listPublicNests; route layer dedupes by id.
   if (userId === ANON_USER_ID) {
     return (await db.all(
-      `SELECT * FROM nests WHERE user_id = ? AND ${scope} ORDER BY created_at DESC`,
+      `SELECT * FROM nests WHERE user_id = ? AND ${scope} ORDER BY ${orderBy}`,
       [ANON_USER_ID],
     )) as Nest[];
   }
@@ -563,13 +608,13 @@ export async function listNests(
     config.AUTH_MODE === "open" || (await isLicenseAdminUserId(userId));
   if (!includeAnon) {
     return (await db.all(
-      `SELECT * FROM nests WHERE user_id = ? AND ${scope} ORDER BY created_at DESC`,
+      `SELECT * FROM nests WHERE user_id = ? AND ${scope} ORDER BY ${orderBy}`,
       [userId],
     )) as Nest[];
   }
   return (await db.all(
     `SELECT * FROM nests WHERE (user_id = ? OR user_id = ?) AND ${scope}
-      ORDER BY created_at DESC`,
+      ORDER BY ${orderBy}`,
     [userId, ANON_USER_ID],
   )) as Nest[];
 }
@@ -767,12 +812,19 @@ export async function listVisibleNests(
   // category an admin sees; another user's private nest still stays hidden.
   const includeAnon =
     config.AUTH_MODE === "open" || (await isServerAdminUserId(userId));
-  // Param order follows the `?`s in the SQL below: nc, u, [g], n.user_id, [anon].
+  // Which visibilities alone confer read, mirroring resolveNestAccess: 'public'
+  // to anyone, 'org' only to an authenticated member of this deployment. Anon
+  // must not pick up org nests through the readable union.
+  const visibleByVisibility =
+    userId === ANON_USER_ID ? ["public"] : ["public", "org"];
+  // Param order follows the `?`s in the SQL below: nc, u, [g], n.user_id,
+  // [visibility…], [anon].
   const params = [
     userId,
     userId,
     ...(opts.readable ? [userId] : []),
     userId,
+    ...(opts.readable ? visibleByVisibility : []),
     ...(includeAnon ? [ANON_USER_ID] : []),
   ];
   const rows = (await db.all(
@@ -788,7 +840,7 @@ export async function listVisibleNests(
         AND (n.user_id = ?
          OR nc.user_id IS NOT NULL
          OR s.id IS NOT NULL
-         ${opts.readable ? "OR g.id IS NOT NULL OR n.visibility = 'public'" : ""}
+         ${opts.readable ? `OR g.id IS NOT NULL OR n.visibility IN (${visibleByVisibility.map(() => "?").join(", ")})` : ""}
          ${includeAnon ? "OR n.user_id = ?" : ""})
       ORDER BY n.created_at DESC`,
     params,
@@ -806,12 +858,22 @@ export async function listVisibleNests(
   return rows;
 }
 
-/** Public nests not owned/shared by caller. Route dedupes vs listNests. */
+/**
+ * Nests a caller can read WITHOUT membership, and doesn't already own or
+ * collaborate on. Route dedupes vs listNests.
+ *
+ * 'org' joins 'public' here for an authenticated caller: an org nest that
+ * couldn't be discovered would be reachable only by someone passing you the
+ * link, which is not what "available to the organization" means. Anonymous
+ * callers stay on 'public' alone.
+ */
 export async function listPublicNests(userId: string): Promise<Nest[]> {
   const db = getDb();
+  const visibilities =
+    userId === ANON_USER_ID ? ["public"] : ["public", "org"];
   return (await db.all(
     `SELECT n.* FROM nests n
-       WHERE n.visibility = 'public'
+       WHERE n.visibility IN (${visibilities.map(() => "?").join(", ")})
          AND ${LIVE_ONLY_N}
          AND n.user_id != ?
          AND NOT EXISTS (
@@ -819,7 +881,7 @@ export async function listPublicNests(userId: string): Promise<Nest[]> {
            WHERE nc.nest_id = n.id AND nc.user_id = ?
          )
        ORDER BY n.created_at DESC`,
-    [userId, userId],
+    [...visibilities, userId, userId],
   )) as Nest[];
 }
 

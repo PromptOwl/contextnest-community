@@ -4,6 +4,7 @@ import type {
   VersionManager,
   ContextNode,
 } from "@promptowl/contextnest-engine";
+import { parseDocument } from "@promptowl/contextnest-engine";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import * as versions from "../governance/version-service.js";
@@ -28,6 +29,14 @@ import { addCollaborator } from "../nests/sharing-service.js";
 import { holdWriteIfGated } from "../nests/push-confirmation-service.js";
 import { queryTableNode } from "../tables/query.js";
 import {
+  addComment,
+  createThread,
+  getThread,
+  setThreadStatus,
+  syncAnnotationsNode,
+} from "../annotations/service.js";
+import { notifyCommentMentions } from "../governance/mention-notify.js";
+import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
 } from "../nests/unsynced-service.js";
@@ -49,6 +58,11 @@ import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
+import {
+  mergeClient,
+  parseClientMetadata,
+  type ClientMetadata,
+} from "../shared/client-metadata.js";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 
 /** Upper bound on caller-set traversal depth — real graphs terminate long
@@ -114,6 +128,7 @@ function toolError(
     | "DOCUMENT_ALREADY_EXISTS"
     | "UNAUTHORIZED_ACTION"
     | "VERSION_NOT_FOUND"
+    | "VALIDATION_FAILED"
     | "VAULT_BUSY"
     | "PENDING_CONFIRMATION"
     | "INTERNAL",
@@ -159,6 +174,30 @@ function summarizeNode(node: ContextNode, body: string | null) {
   };
 }
 
+/**
+ * `**Source file:** PDF, N pages[, no text layer]` for a pdf node — tells an
+ * agent the body is text extracted from a PDF, and when it is empty because
+ * the PDF is a scan rather than because the document says nothing.
+ *
+ * Describes the version whose body is being returned: under stewardship
+ * `body` is the APPROVED snapshot (frontmatter included), whose `pdf:` block
+ * can differ from the live draft's, so it is read from there when present.
+ */
+function pdfSourceLine(node: ContextNode, body: string | null): string | null {
+  if ((node.frontmatter.type || "document") !== "pdf") return null;
+  let pdf = node.frontmatter.pdf;
+  if (body && body.startsWith("---")) {
+    try {
+      pdf = parseDocument(`${node.id}.md`, body, node.id).frontmatter.pdf ?? pdf;
+    } catch {
+      // Unparseable snapshot: fall back to the live block.
+    }
+  }
+  if (!pdf) return "**Source file:** PDF";
+  const pages = `${pdf.pages} page${pdf.pages === 1 ? "" : "s"}`;
+  return `**Source file:** PDF, ${pages}${pdf.text_layer ? "" : ", no text layer"}`;
+}
+
 export interface McpToolContext {
   storage: NestStorage;
   queryEngine: GraphQueryEngine;
@@ -173,6 +212,14 @@ export interface McpToolContext {
    *  what "always allow" whitelists. Null for a cookie-authenticated call. */
   apiKeyId?: string | null;
   apiKeyLabel?: string | null;
+  /**
+   * Caller attribution for this call (spec §9.4) — what the TRANSPORT could
+   * derive, already merged with whatever the tool call itself sent (caller
+   * wins, per key). Set by handleToolCall; a tool never reads `args.client`.
+   *
+   * A label, never an identity: no gate below may branch on it.
+   */
+  client?: ClientMetadata;
 }
 
 export const TOOL_DEFINITIONS = [
@@ -330,6 +377,46 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "context_comment",
+    description:
+      "Leave a comment on a document — the same threads the web UI's comments panel shows. Omit `thread` to open a new one; pass a thread id (from context_comments) to reply to it. Use this to answer feedback you were given, or to raise something you noticed while working. Anyone who can read the document may comment; `@name` in the body notifies that person.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the node" },
+        id: { type: "string", description: "ID of the node" },
+        body: { type: "string", description: "The comment text" },
+        thread: {
+          type: "string",
+          description:
+            "Thread id to reply to (from context_comments). Omit to open a new thread on the document.",
+        },
+      },
+      required: ["body"],
+    },
+  },
+  {
+    name: "context_resolve_comment",
+    description:
+      "Mark a comment thread resolved once you have addressed it, or reopen one that was closed too early. Records you as the resolver, exactly as the web UI does. Resolve only threads you actually acted on.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the node" },
+        id: { type: "string", description: "ID of the node" },
+        thread: {
+          type: "string",
+          description: "Thread id, from context_comments",
+        },
+        reopen: {
+          type: "boolean",
+          description: "Reopen the thread instead of resolving it",
+        },
+      },
+      required: ["thread"],
+    },
+  },
+  {
     name: "context_create",
     description:
       "Create a new knowledge node in the vault. The title must not already be in use — these tools resolve documents by title, so a duplicate is refused rather than filed as an unreachable twin. To change an existing document use context_update; to refile it use context_move.",
@@ -388,7 +475,8 @@ export const TOOL_DEFINITIONS = [
         tags: {
           type: "array",
           items: { type: "string" },
-          description: "Tags to add",
+          description:
+            "The node's full tag set — REPLACES the existing tags (same as the engine catalog). To add one, send the current tags plus the new one; to remove one, send the set without it.",
         },
         status: {
           type: "string",
@@ -578,10 +666,15 @@ export const TOOL_DEFINITIONS = [
       type: "object" as const,
       properties: {
         title: { type: "string", description: "Title of the node to submit" },
+        id: {
+          type: "string",
+          description:
+            'Node id / path (e.g. "nodes/gtm/deals/win-loss-log"). Use instead of title when two nodes share a title or the title is unknown.',
+        },
         note: { type: "string", description: "Optional note for the reviewer" },
         priority: { type: "string", description: "Priority: low, normal (default), high, urgent" },
       },
-      required: ["title"],
+      // One of id or title — see context_update.
     },
   },
   {
@@ -787,8 +880,42 @@ export async function handleToolCall(
 ): Promise<ToolResult> {
   const started = Date.now();
   let status = 200;
+  // Caller attribution, resolved once for the whole call: what the caller sent
+  // wins per KEY over what the transport derived, so a call naming its agent
+  // but no session still gains a session id (§9.4.2). Validated here rather
+  // than in each tool — an out-of-bounds `client` is a refusal, not a 500, and
+  // never a partial write.
+  let client: ClientMetadata | undefined;
   try {
-    return await runTool(toolName, args, ctx);
+    client = mergeClient(ctx.client, parseClientMetadata(args.client));
+  } catch (err) {
+    void logTraceEvent({
+      kind: "mcp",
+      tool: toolName,
+      nestId: ctx.nestId,
+      userId: ctx.userId,
+      userEmail: ctx.userEmail,
+      status: 400,
+      durationMs: Date.now() - started,
+    });
+    return toolError((err as Error).message, "VALIDATION_FAILED");
+  }
+  const attributed: McpToolContext = { ...ctx, client };
+  // An agent that sends a whole file (frontmatter + body) as `content` used to
+  // get a second, dead frontmatter block stored inside the body. Refuse and say
+  // where those fields go instead.
+  if (
+    (toolName === "context_create" || toolName === "context_update") &&
+    typeof args.content === "string" &&
+    /^\s*---\r?\n[\w-]+:/.test(args.content)
+  ) {
+    return toolError(
+      "`content` is the markdown body only — it starts with a YAML frontmatter block, which would be stored as body text. Drop the `---` block and pass tags/status as parameters; the server owns the frontmatter.",
+      "VALIDATION_FAILED",
+    );
+  }
+  try {
+    return await runTool(toolName, args, attributed);
   } catch (err) {
     // Vault write-lock timeout: map to a typed, retryable tool error HERE —
     // one seam covering both MCP surfaces — before the SDK flattens the throw
@@ -811,6 +938,9 @@ export async function handleToolCall(
       userEmail: ctx.userEmail,
       status,
       durationMs: Date.now() - started,
+      // Reads record attribution HERE — the activity trace is this edition's
+      // §9.2 access trace, and a read seals no version to carry it.
+      client,
     });
   }
 }
@@ -1119,6 +1249,7 @@ async function runTool(
         node.frontmatter.tags?.length
           ? `**Tags:** ${node.frontmatter.tags.join(" ")}`
           : null,
+        pdfSourceLine(node, body),
       ]
         .filter(Boolean)
         .join("\n");
@@ -1262,12 +1393,13 @@ async function runTool(
         node = docs.find((n) => n.id === args.id);
       }
       if (!node) return `Node not found: ${args.title || args.id}`;
-      // Gate the same way context_get/context_export do: under stewardship a
-      // node with no approved version is invisible to AI. Its threads embed
-      // draft body text (anchor.quote) and paraphrases in comment bodies, so
-      // serving them would leak unapproved content through the side door.
-      if ((await resolveLlmBody(ctx, node)) === null) {
-        return `Node "${node.frontmatter.title}" has no approved version yet — not available to AI.`;
+      // Gate by per-node read access. Collaborators/stewards who can read the
+      // node in the UI may also read its comment threads over MCP even when the
+      // document is not yet approved. Public readers remain blocked by
+      // canReadNode until approval. This preserves privacy while letting
+      // collaborators address feedback and resubmit.
+      if (!(await canReadNode(nestId, node.id, ctx.userId, userEmail))) {
+        return `Node not found: ${args.title || args.id}`;
       }
       const threads = await listThreads(nestId, node.id);
       if (!threads.length)
@@ -1287,6 +1419,116 @@ async function runTool(
         })
         .join("\n\n");
       return `# Comments on "${node.frontmatter.title}" — ${threads.length} thread(s), ${openCount} open\n\n${sections}`;
+    }
+
+    // ── Comments: write half of context_comments ──────────────────────────
+    //
+    // Both cases target the annotation store the UI's comments panel uses, so
+    // an agent's comment and a human's are the same object, and both carry the
+    // side effects the REST routes carry: the @mention fan-out and the derived
+    // `— Annotations` projection an artifact's agents read back.
+    //
+    // PRIMARY permission gate, like context_create's: the /mcp middleware
+    // admits read-tier callers (the transport is always POST), so the check
+    // here is the real one. Commenting is READ-tier — the same rule REST
+    // applies in app.ts (isAnnotationAction) — so canReadNode is the bar, not
+    // write access. Deliberately NOT gated on an approved version: a reviewer
+    // comments on a draft, and unlike reading a thread, writing one discloses
+    // nothing (the caller supplies the text).
+    case "context_comment":
+    case "context_resolve_comment": {
+      const body = String(args.body ?? "");
+      const isResolve = toolName === "context_resolve_comment";
+      // Plain strings, like every other missing-argument answer in this file
+      // (`folder is required — …`, `reason is required — …`): a toolError
+      // envelope carries a machine-readable `code`, and every code in that
+      // union describes a state of the vault, not a malformed call.
+      if (!isResolve && !body.trim()) {
+        return "body is required — the comment text.";
+      }
+      const threadId = args.thread ? String(args.thread) : "";
+      if (isResolve && !threadId) {
+        return "thread is required — the id from context_comments.";
+      }
+
+      const docs = await storage.discoverDocuments();
+      let node: ContextNode | undefined;
+      if (args.title) {
+        node = docs.find(
+          (n) =>
+            n.frontmatter.title.toLowerCase() ===
+            String(args.title).toLowerCase(),
+        );
+      } else if (args.id) {
+        node = docs.find((n) => n.id === String(args.id));
+      }
+      if (!node) {
+        return toolError(
+          `Node not found: ${args.title || args.id || "(no title or id given)"}`,
+          "DOCUMENT_NOT_FOUND",
+        );
+      }
+      if (!(await canReadNode(nestId, node.id, ctx.userId, userEmail))) {
+        // Same shape as the not-found above, and it never repeats the resolved
+        // title — otherwise the refusal confirms what the caller guessed.
+        return toolError(
+          `Node not found: ${args.title || args.id}`,
+          "DOCUMENT_NOT_FOUND",
+        );
+      }
+      const label = node.frontmatter.title || node.id;
+
+      // A thread id has to belong to THIS node: the services scope their own
+      // lookups, but saying so here turns an opaque failure into an
+      // instruction the agent can act on.
+      if (threadId) {
+        const existing = await getThread(threadId);
+        if (!existing || existing.nodeId !== node.id || existing.nestId !== nestId) {
+          return toolError(
+            `Thread ${threadId} is not a thread on "${label}". Call context_comments to list its threads.`,
+            "DOCUMENT_NOT_FOUND",
+          );
+        }
+      }
+
+      if (isResolve) {
+        const reopen = args.reopen === true;
+        const thread = await setThreadStatus(
+          nestId,
+          node.id,
+          threadId,
+          reopen ? "open" : "resolved",
+          userEmail,
+        );
+        await syncAnnotationsNode(nestId, node.id, userEmail);
+        return reopen
+          ? `Reopened the thread on "${label}". It is back in the open list for whoever picks it up.`
+          : `Resolved the thread on "${label}", recorded against ${thread.resolvedBy}.`;
+      }
+
+      const thread = threadId
+        ? await addComment(nestId, node.id, threadId, userEmail, body)
+        : await createThread(nestId, node.id, { body, anchor: null }, userEmail);
+      // The confirmation deliberately doesn't report the thread's comment
+      // count: writing is admitted on a node whose threads the caller may not
+      // be allowed to READ (the approval gate applies to context_comments, not
+      // here), so the reply should tell them what THEY did and nothing about
+      // what is already in the thread.
+      await notifyCommentMentions({
+        nestId,
+        nodeId: node.id,
+        body,
+        actorEmail: userEmail,
+        // Without this the notification still reaches the person, but its
+        // "Open document" link falls back to PUBLIC_BASE_URL and comes out
+        // empty when that isn't configured — every other notifying tool in
+        // this file passes it, and the REST route passes requestBaseUrl.
+        baseUrl: ctx.baseUrl,
+      });
+      await syncAnnotationsNode(nestId, node.id, userEmail);
+      return threadId
+        ? `Replied on "${label}", in thread ${thread.id}.`
+        : `Commented on "${label}" — opened thread ${thread.id}. Reply to it by passing that id as \`thread\`.`;
     }
 
     case "context_create": {
@@ -1373,6 +1615,7 @@ async function runTool(
             tags: args.tags,
             scope: args.scope,
             folder: args.folder,
+            client: ctx.client,
           },
           userEmail,
         );
@@ -1408,20 +1651,18 @@ async function runTool(
           "UNAUTHORIZED_ACTION",
         );
       }
-      // updateNode replaces tags; this tool's contract is "Tags to add", so
-      // merge against the current set here rather than in the service.
-      const mergedTags = args.tags
-        ? [...new Set([...(node.frontmatter.tags || []), ...args.tags])]
-        : undefined;
+      // Tags REPLACE, per the engine catalog's context_update. This used to
+      // merge ("Tags to add"), which left no way to remove a tag over MCP.
       const { node: updated, version } = await updateNode(
         nestId,
         node.id,
         {
           content: args.content,
           append: args.append,
-          tags: mergedTags,
+          tags: args.tags,
           status: args.status,
           changeNote: args.changeNote,
+          client: ctx.client,
         },
         userEmail,
       );
@@ -1482,10 +1723,12 @@ async function runTool(
         args.folder,
         userEmail,
       );
+      // `data` is what `ctx move` reads; the prose is for chat clients.
+      const data = { id: moved.id, previous_id: previousId, title: moved.frontmatter.title };
       if (previousId === moved.id) {
-        return `**${moved.frontmatter.title}** is already at \`${moved.id}\` — nothing to move.`;
+        return { text: `**${moved.frontmatter.title}** is already at \`${moved.id}\` — nothing to move.`, data };
       }
-      return `Moved **${moved.frontmatter.title}**: \`${previousId}\` → \`${moved.id}\``;
+      return { text: `Moved **${moved.frontmatter.title}**: \`${previousId}\` → \`${moved.id}\``, data };
     }
 
     // ─── Governance Tool Handlers ──────────────────────────────────────
@@ -1766,25 +2009,24 @@ async function runTool(
     }
 
     case "context_submit_review": {
-      const docs = await storage.discoverDocuments();
-      const node = docs.find(
-        (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
-      );
-      if (!node) return toolError(`Node not found: ${args.title}`, "DOCUMENT_NOT_FOUND");
+      const resolved = await resolveTargetNode(storage, args);
+      if (typeof resolved === "string") return toolError(resolved, "DOCUMENT_NOT_FOUND");
+      const node = resolved;
+      const nodeLabel = args.title || args.id;
 
       // Defense-in-depth: submitting a draft for review is an edit-level
       // action — gate it with the same per-node edit check.
       const submitCheck = await stewardship.canUserEdit(ctx.nestId, node.id, userEmail);
       if (!submitCheck.allowed) {
         return toolError(
-          `You don't have permission to submit "${args.title}" for review: ${submitCheck.reason}`,
+          `You don't have permission to submit "${nodeLabel}" for review: ${submitCheck.reason}`,
           "UNAUTHORIZED_ACTION",
         );
       }
 
       const currentVersion = await versions.getCurrentVersion(ctx.nestId, node.id);
       if (currentVersion === 0)
-        return toolError(`No versions found for "${args.title}"`, "VERSION_NOT_FOUND");
+        return toolError(`No versions found for "${nodeLabel}"`, "VERSION_NOT_FOUND");
 
       try {
         const request = await reviews.submitForReview({
@@ -1795,6 +2037,7 @@ async function runTool(
           note: args.note,
           priority: args.priority as any,
           baseUrl: ctx.baseUrl,
+          client: ctx.client,
         });
 
         const resolved = await stewardship.resolveStewardsForNode(
@@ -1807,7 +2050,7 @@ async function runTool(
           : "";
 
         return {
-          text: `Submitted "${args.title}" v${currentVersion} for review (${request.priority} priority).${stewardList}`,
+          text: `Submitted "${nodeLabel}" v${currentVersion} for review (${request.priority} priority).${stewardList}`,
           // No catalog shape to conform to — `context_submit_review` is a
           // governance-namespace operation and that namespace is declared but
           // unimplemented in the engine (`api/index.ts`, NAMESPACES). So this
@@ -1857,6 +2100,7 @@ async function runTool(
           approvedBy: ctx.userEmail,
           note: args.note,
           baseUrl: ctx.baseUrl,
+          client: ctx.client,
         });
 
         return `Approved "${args.title}" v${request.version}. This version is now live for AI queries.${args.note ? `\nNote: ${args.note}` : ""}`;
@@ -1906,7 +2150,11 @@ async function runTool(
       const list = allVersions
         .map(
           (v) =>
-            `- **v${v.version}** ${v.status}${v.version === approved ? " (AI-active)" : ""} — by ${v.editedBy} at ${v.editedAt}${v.changeNote ? ` "${v.changeNote}"` : ""}`,
+            `- **v${v.version}** ${v.status}${v.version === approved ? " (AI-active)" : ""} — by ${v.editedBy} at ${v.editedAt}${v.changeNote ? ` "${v.changeNote}"` : ""}${
+              // §9.4: which agent wrote it. In the prose as well as the
+              // structured payload — a chat client reads only this half.
+              v.client?.agent ? ` [via ${v.client.agent}]` : ""
+            }`,
         )
         .join("\n");
 
@@ -1930,6 +2178,10 @@ async function runTool(
             edited_by: v.editedBy,
             edited_at: v.editedAt,
             note: v.changeNote,
+            // §9.4: which agent wrote this version, in which session. Omitted
+            // (not `{}`) when the write carried no attribution — "not
+            // attributed" and "attributed to nobody" are different claims.
+            ...(v.client ? { client: v.client } : {}),
           })),
         },
       };
@@ -2021,23 +2273,11 @@ async function runTool(
         const { createGrant } = await import("../governance/grants-service.js");
         // Resolve the grantee — mint a placeholder invited user if unknown,
         // same as collaborator/document sharing.
-        const db = (await import("../db/client.js")).getDb();
         const { normalizeEmail } = await import("../shared/email.js");
         const e = normalizeEmail(String(args.email || ""));
         if (!e) return "email is required.";
-        let row = (await db.get("SELECT id FROM users WHERE LOWER(email) = ?", [e])) as
-          | { id: string }
-          | undefined;
-        if (!row) {
-          const { hashPassword } = await import("../auth/keys.js");
-          const { v4: uuid } = await import("uuid");
-          const id = uuid();
-          await db.run(
-            "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-            [id, e, null, await hashPassword(uuid())],
-          );
-          row = { id };
-        }
+        const { findOrCreateInvitedUser } = await import("../auth/invited-user.js");
+        const row = await findOrCreateInvitedUser(e, { invitedBy: ctx.userEmail });
         await createGrant({
           nestId: ctx.nestId,
           targetType: targetType as any,
@@ -2079,6 +2319,7 @@ async function runTool(
           userId,
           args.name,
           userEmail,
+          ctx.client,
         );
         return `Synced folder "${args.name}" → nest **${nest.name}** (${nest.id}) with ${documents} document(s).`;
       } catch (err: any) {

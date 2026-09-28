@@ -14,7 +14,7 @@ Every nest is either **ungoverned** or **governed**, controlled by the `stewards
 | Stewards | Not shown | Assignable by scope |
 | Reads gated by permission | No | Yes (in key mode) |
 
-Flip the flag any time via **Settings → Stewardship**. Existing approved docs stay approved; existing drafts remain drafts.
+Flip the flag any time via the nest's **Settings → Stewardship**. Existing approved docs stay approved; existing drafts remain drafts.
 
 ## What a steward is
 
@@ -43,8 +43,8 @@ If nothing matches and no steward resolves, the **nest owner** is the implicit s
 ## The approval flow
 
 1. **Author** creates or edits a doc. In governed mode it saves as a **draft**.
-2. **Author** clicks **Submit for Review**. The doc becomes **pending** and appears in the review queue for anyone whose scope resolves to that doc.
-3. A **Reviewer steward** opens the review queue, reads the doc, clicks **Approve** or **Reject**. Rejecting requires a note.
+2. **Author** clicks **Submit for Review**. The doc becomes **pending** and appears in the review queue for anyone whose scope resolves to that doc — and in their **My Work** page across nests. Until someone acts the author can withdraw it back to draft.
+3. A **Reviewer steward** opens the review queue (or My Work), reads the doc, clicks **Approve** or **Reject**. Rejecting requires a note.
 4. On approve, the doc becomes **approved** and is now AI-readable. The approved version number is pinned (`approvedVersion`), so subsequent drafts don't automatically replace it — AI keeps getting the last blessed version until a new one is approved.
 
 ### Auto-publish owner & admin edits (`allow_self_approve`)
@@ -90,6 +90,30 @@ Prime documents carry a **Prime** badge in the nest's document list, with a tool
 
 Flipping any of this only affects **future** writes. Marking a published document prime doesn't unpublish it; the next edit is what needs approval.
 
+## Creators review their own documents (`creator_is_reviewer`)
+
+A per-nest flag (**off** by default; nest Settings → "Creators review their own documents") for the GitHub posture: anyone with write access creates documents, and the person who created a document is the one who approves changes to it.
+
+When it's on, creating a document in a governed nest does two things:
+
+1. **The author is stewarded as a document-scope `reviewer`** of that document — exactly the row an admin would otherwise add by hand (`POST /nests/:id/stewards` with `scope: "document"`, or the `documents:` section of `stewards.yaml`). The nest owner is skipped; they already approve everything.
+2. **The first version publishes immediately.** The author is the document's reviewer, so nobody else needs to bless v1. This holds for the owner too: with this on, the owner's own new documents publish at v1 whether or not `allow_self_approve` is on — the two settings are independent, and this one only ever touches v1.
+
+The row is written **before** the publish decision, so v1 only publishes when the author really can approve the next change. If a document-scope row for the author already exists on that id with a lesser role (an admin stewarded the id ahead of time), it is left alone and v1 lands as a draft instead. If the row can't be written, the create fails with nothing written.
+
+Everything after v1 is the ordinary review cycle, and separation of duties is untouched:
+
+| | Who approves |
+|---|---|
+| A teammate edits the document | The creator (plus any tag- or nest-level reviewer, and admins) |
+| The creator edits their own document | Another reviewer — the creator can't approve their own submission |
+
+**Prime wins.** A prime document still lands as a draft: its creator is made its reviewer, but someone else has to approve the first version.
+
+Only **future** creates are affected. Turning it on doesn't steward anyone on existing documents, and turning it off leaves every steward row it created in place — remove them from the Stewards tab like any other. Every create surface participates (the editor, the REST and MCP APIs, and `ctx push` — the pusher authored what they pushed); the derived annotations document is the one exception, since nobody authored it.
+
+Like prime, this only applies to **governed** nests. With stewardship off there is nothing to review, so the flag is inert until you turn stewardship on.
+
 ## Who sees what
 
 Governance gates two things: who can **approve**, and who can **read**.
@@ -113,10 +137,11 @@ Super-admins administer **every** nest on the server without being added per-nes
 A super-admin can:
 
 - Read every document (bypasses the read gate, even with stewardship enabled)
-- Change a nest's visibility (public / private)
+- Change a nest's visibility (private / org / public)
 - Add, remove, and re-role collaborators
 - Add, remove, and re-role stewards
 - Approve and reject pending versions in any nest's review queue
+- Manage the official community sites trusted for SSO auto-login (**Server settings → Community sites**, or `GET/POST /admin/community-sites` — see `API.md`)
 
 What a super-admin **cannot** do (owner-only operations):
 

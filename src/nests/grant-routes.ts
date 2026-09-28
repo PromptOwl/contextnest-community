@@ -12,11 +12,11 @@ import { ValidationError, ForbiddenError, NotFoundError } from "../shared/errors
 import { normalizeEmail } from "../shared/email.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import {
-  canManageStewards,
   resolveStewardsForNode,
 } from "../governance/stewardship-service.js";
 import { resolveTeamRolesForUser } from "../governance/teams-service.js";
 import { resolveNestAccess } from "../shared/access.js";
+import { config } from "../config.js";
 import {
   canEditWith,
   collabPermToRole,
@@ -34,10 +34,28 @@ import {
 
 export const grantRoutes = new Hono<AuthEnv>();
 
-async function requireManage(c: any, nestId: string): Promise<void> {
-  if (!(await canManageStewards(nestId, c.get("userId")))) {
+/**
+ * Owner / nest admin / server admin may manage sharing. Archiving caps every
+ * caller at 'read', which would lock the owner out of even SEEING who a
+ * document is shared with — so the roster (readOnly) gates on the standing
+ * the caller would have if the nest were live, and only changes are refused,
+ * with the archive named as the reason.
+ */
+async function requireManage(
+  c: any,
+  nestId: string,
+  opts: { readOnly?: boolean } = {},
+): Promise<void> {
+  if (config.AUTH_MODE === "open") return;
+  const access = await resolveNestAccess(nestId, c.get("userId"));
+  if (access.rawPermission !== "owner" && access.rawPermission !== "admin") {
     throw new ForbiddenError(
       "Only a nest admin, the nest owner, or the server admin can manage sharing.",
+    );
+  }
+  if (access.archived && !opts.readOnly) {
+    throw new ForbiddenError(
+      "This nest is archived, so it is read-only. Restore it to change sharing.",
     );
   }
 }
@@ -46,19 +64,8 @@ async function requireManage(c: any, nestId: string): Promise<void> {
  *  unknown address (they claim it by registering — same as collaborator
  *  invites). */
 async function resolveGrantee(email: string): Promise<string> {
-  const db = getDb();
-  const e = normalizeEmail(email);
-  const existing = (await db.get("SELECT id FROM users WHERE LOWER(email) = ?", [e])) as
-    | { id: string }
-    | undefined;
-  if (existing) return existing.id;
-  const { hashPassword } = await import("../auth/keys.js");
-  const id = uuid();
-  await db.run(
-    "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-    [id, e, null, await hashPassword(uuid())],
-  );
-  return id;
+  const { findOrCreateInvitedUser } = await import("../auth/invited-user.js");
+  return (await findOrCreateInvitedUser(email)).id;
 }
 
 /**
@@ -177,7 +184,7 @@ grantRoutes.post("/", async (c) => {
 // GET /nests/:nestId/grants — the sharing roster.
 grantRoutes.get("/", async (c) => {
   const nestId = c.req.param("nestId")!;
-  await requireManage(c, nestId);
+  await requireManage(c, nestId, { readOnly: true });
   const grants = await listGrants(nestId);
   // Annotate with the grantee email so the UI shows who, not a uuid.
   const db = getDb();

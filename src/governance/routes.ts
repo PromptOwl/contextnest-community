@@ -11,6 +11,7 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { ValidationError, ConflictError } from "../shared/errors.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requestBaseUrl } from "../shared/base-url.js";
+import { attributeRequest } from "../shared/client-metadata.js";
 import { getDb } from "../db/client.js";
 import * as stewardship from "./stewardship-service.js";
 import * as reviews from "./review-service.js";
@@ -26,6 +27,7 @@ import {
   deleteNode,
   deleteFolder,
   isIdUnderFolder,
+  vaultFolderExists,
 } from "../nodes/service.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
 import {
@@ -34,6 +36,7 @@ import {
   canRequestDeletion,
 } from "./access-guard.js";
 import { handleAnnotationReply } from "../annotations/routes.js";
+import { notifyCommentMentions } from "./mention-notify.js";
 
 // ═════════════════════════════════════════════════════════════════════════
 // Nest-level routes (mounted at /:nestId)
@@ -231,6 +234,7 @@ governanceRoutes.post("/review-queue/bulk", async (c) => {
     nodeIds?: string[];
     action?: "approve" | "reject";
     note?: string;
+    client?: unknown;
   }>();
   // Every route that turns a caller-supplied id into a storage read goes
   // through this chokepoint. The pending-review row lookup would refuse a
@@ -255,6 +259,9 @@ governanceRoutes.post("/review-queue/bulk", async (c) => {
 
   const userEmail = await getUserEmail(c);
   const baseUrl = requestBaseUrl(c.req.url);
+  // One batch is one call: validated once, recorded on the batch's trace row,
+  // and carried onto every version the approvals seal (§9.4).
+  const client = attributeRequest(c, body.client);
   const results: Array<{ nodeId: string; ok: boolean; error?: string }> = [];
   for (const nodeId of nodeIds) {
     try {
@@ -266,6 +273,7 @@ governanceRoutes.post("/review-queue/bulk", async (c) => {
           note: body.note,
           override: false,
           baseUrl,
+          client,
         });
       } else {
         await reviews.reject({
@@ -397,12 +405,15 @@ governanceRoutes.post("/request-deletion", async (c) => {
     throw new ValidationError("target (the folder path) is required");
   }
 
-  // A folder only exists while documents sit under it — refuse a flag on one
-  // that isn't there, or the queue fills with requests that delete nothing.
+  // Refuse a flag on a folder that isn't there (no documents under it and no
+  // empty directory), or the queue fills with requests that delete nothing.
   if (body.targetType === "folder") {
     const { storage } = await engineCache.get(nestId);
     const docs = await storage.discoverDocuments();
-    if (!docs.some((d) => isIdUnderFolder(d.id, target))) {
+    if (
+      !docs.some((d) => isIdUnderFolder(d.id, target)) &&
+      !(await vaultFolderExists(nestId, target))
+    ) {
       return c.json({ error: `Folder not found: ${target}` }, 404);
     }
   }
@@ -554,6 +565,8 @@ governanceRoutes.get("/feed", async (c) => {
 
 // GET /nests/:nestId/external-edits
 // List pending external (direct filesystem) edits awaiting approval.
+// ?count=1 answers with the total only — for the tab badge, which has no use
+// for the entries (the list is ~40 kB on a busy nest).
 governanceRoutes.get("/external-edits", async (c) => {
   const nestId = c.req.param("nestId")!;
   const refresh = c.req.query("refresh") === "true";
@@ -561,6 +574,7 @@ governanceRoutes.get("/external-edits", async (c) => {
     await externalEdits.scanNestForDrift(nestId, "user:refresh");
   }
   const entries = await externalEdits.listNestExternalEdits(nestId);
+  if (c.req.query("count") === "1") return c.json({ total: entries.length });
   return c.json({ entries, total: entries.length });
 });
 
@@ -787,8 +801,9 @@ governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
     parentId?: string;
   }>();
   const author = await getUserEmail(c);
+  let comment;
   try {
-    const comment = await comments.createComment({
+    comment = await comments.createComment({
       nestId,
       nodeId,
       author,
@@ -797,13 +812,25 @@ governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
       anchor: body.anchor,
       parentId: body.parentId,
     });
-    return c.json({ comment }, 201);
   } catch (err) {
     // Empty body / dangling parent are user errors, not 500s.
     throw new ValidationError(
       err instanceof Error ? err.message : String(err),
     );
   }
+  // Tagging someone in a comment reaches them: inbox row + configured
+  // channels. Outside the try above, whose catch turns anything thrown into a
+  // 400 — the fan-out swallows its own failures, and a notification problem is
+  // not a bad request. Awaited like the document-save fan-out: a local insert
+  // is cheaper than returning before it lands.
+  await notifyCommentMentions({
+    nestId,
+    nodeId,
+    body: comment.body,
+    actorEmail: author,
+    baseUrl: requestBaseUrl(c.req.url),
+  });
+  return c.json({ comment }, 201);
 });
 
 // POST /nests/:nestId/nodes/:nodeId/comments/:commentId/resolve
@@ -848,7 +875,11 @@ governanceNodeRoutes.get("/:nodeId{.+}/activity", async (c) => {
 governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const body = await c.req.json<{ note?: string; priority?: string }>();
+  const body = await c.req.json<{
+    note?: string;
+    priority?: string;
+    client?: unknown;
+  }>();
 
   const currentVersion = await versions.getCurrentVersion(nestId, nodeId);
   if (currentVersion === 0) {
@@ -867,6 +898,9 @@ governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
       note: body.note,
       priority: body.priority as any,
       baseUrl: requestBaseUrl(c.req.url),
+      // Submitting seals the draft into the engine's append-only chain, so the
+      // block lands on that entry as well as on this request's trace row.
+      client: attributeRequest(c, body.client),
     });
   } catch (err) {
     // The service throws a plain Error for duplicate submissions —
@@ -1021,7 +1055,11 @@ governanceNodeRoutes.post(
 governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const body = await c.req.json<{ note?: string; override?: boolean }>();
+  const body = await c.req.json<{
+    note?: string;
+    override?: boolean;
+    client?: unknown;
+  }>();
 
   const userEmail = await getUserEmail(c);
   const isAdmin = isSuperAdmin(userEmail);
@@ -1034,6 +1072,7 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
       note: body.note,
       override: body.override && isAdmin,
       baseUrl: requestBaseUrl(c.req.url),
+      client: attributeRequest(c, body.client),
     });
     return c.json({ review: request });
   } catch (err: any) {
@@ -1045,13 +1084,19 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
 governanceNodeRoutes.post("/:nodeId{.+}/reject", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const body = await c.req.json<{ note?: string }>();
+  const body = await c.req.json<{ note?: string; client?: unknown }>();
 
   if (!body.note) {
     throw new ValidationError("Rejection note is required");
   }
 
   const userEmail = await getUserEmail(c);
+  // A rejection commits no content, so it seals no version to carry the block.
+  // The activity trace is the only place it can land — which is the reason to
+  // record it, not a reason to skip it: "who rejected this, from what agent"
+  // is exactly the question the trace exists to answer. Validated here too, so
+  // an out-of-bounds `client` is refused on this route like every other.
+  attributeRequest(c, body.client);
 
   try {
     const request = await reviews.reject({

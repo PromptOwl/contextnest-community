@@ -130,7 +130,7 @@ export async function assertNoFlowCycle(
 ): Promise<void> {
   if (fromNode === toNode) {
     throw new ConflictError(
-      `cycle: ${await nodeTrail(db, nestId, [fromNode])} cannot flow into itself`,
+      `This step loops back on itself: ${await nodeTrail(db, nestId, [fromNode])}.\n\nA flow can't return to a step it already ran.`,
     );
   }
   const rows = (await db.all(
@@ -162,7 +162,7 @@ export async function assertNoFlowCycle(
       // then close the loop with the new edge fromNode→toNode.
       path.reverse().push(toNode);
       throw new ConflictError(
-        `cycle: ${await nodeTrail(db, nestId, path)} — flow edges must form a DAG`,
+        `These steps loop back on each other: ${await nodeTrail(db, nestId, path)}.\n\nA flow can't return to a step it already ran.`,
       );
     }
     for (const nb of adj.get(cur) ?? []) {

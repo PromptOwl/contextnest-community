@@ -77,4 +77,29 @@ describe("resolveEditorAccess", () => {
     ).toBe(false);
     expect(access({ isNew: true, permission: "write" }).canAuthorNew).toBe(true);
   });
+
+  it("forces view-only on an archived nest regardless of role", () => {
+    // Mirrors deriveNestCaps' early return in lib/nest-caps: an owner or
+    // admin caretaker reopening an archived nest still can't save.
+    expect(
+      access({ isOwner: true, permission: "owner", isArchived: true }).isViewOnly,
+    ).toBe(true);
+    expect(
+      access({ isAdmin: true, permission: "admin", isArchived: true }).isViewOnly,
+    ).toBe(true);
+    expect(
+      access({
+        isNew: true,
+        permission: "write",
+        isArchived: true,
+      }).isViewOnly,
+    ).toBe(true);
+    expect(
+      access({
+        nodeRoles: ["editor", "reviewer"],
+        permission: "write",
+        isArchived: true,
+      }).canEditContent,
+    ).toBe(false);
+  });
 });

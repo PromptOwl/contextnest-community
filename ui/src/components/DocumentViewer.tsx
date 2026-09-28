@@ -15,6 +15,10 @@
  * GFM: tables, task lists, strikethrough, footnotes, and autolinks come
  * from `remark-gfm`.
  *
+ * Mentions: `@user@example.com` and `@(Name With Spaces)` render as an
+ * `@name` chip via `remarkMentions`, instead of the raw address `remark-gfm`
+ * would otherwise autolink.
+ *
  * Math: `$…$` / `$$…$$` parse via `remark-math` and typeset with KaTeX.
  * Invalid TeX renders in red instead of throwing.
  *
@@ -31,14 +35,27 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { remarkMathNoCurrency } from "@/lib/markdown-math";
+import { remarkMentions } from "@/lib/markdown-mentions";
+import { stripKnownHtmlTags } from "@/lib/html-tag-allowlist";
 import type { Plugin } from "unified";
 import type { Root, Text } from "mdast";
 import { visit } from "unist-util-visit";
 import { cn } from "@/lib/utils";
+import {
+  ASSET_VIDEO_RE,
+  classifyVideoParagraph,
+  type VideoProvider,
+} from "@/lib/video-embed";
+import { CONTEXT_URI_PREFIX, CONTEXT_URI_RE, contextUriDocPath, contextUriLabel } from "@/lib/context-uri";
+import { wikiLinkIsBroken } from "@/lib/wiki-preview";
 
-const wikiLinkRegex = /\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]/g;
+// `[[target]]`, `[[target|Display]]`, or a bare `contextnest://nodes/…` URI.
+const wikiLinkRegex = new RegExp(
+  `\\[\\[([^\\]|\\n]+)(?:\\|([^\\]\\n]+))?\\]\\]|(${CONTEXT_URI_RE.source})`,
+  "g",
+);
 
-// `[[Title]]` / `[[Title|Display]]` → synthetic `wikilink` hast element.
+// `[[Title]]` / `[[Title|Display]]` / `contextnest://…` → synthetic `wikilink` hast element.
 // Custom hName sidesteps react-markdown's urlTransform allowlist (no `wiki:` scheme to sanitize).
 const remarkWikiLinks: Plugin<[], Root> = () => (tree) => {
   visit(tree, "text", (node: Text, index, parent) => {
@@ -55,22 +72,23 @@ const remarkWikiLinks: Plugin<[], Root> = () => (tree) => {
       if (m.index > lastIndex) {
         newChildren.push({ type: "text", value: text.slice(lastIndex, m.index) });
       }
-      const target = m[1].trim();
-      const display = (m[2] ?? m[1]).trim();
-      newChildren.push({
-        type: "wikiLink",
-        data: {
-          hName: "wikilink",
-          hProperties: {
-            "data-wiki-target": target,
-            "data-wiki-display": display,
-          },
-          // «Title» is Hootie's wiki-link convention — the guillemets read as
-          // "this points at another document" without relying on link colour
-          // alone. The target and the hover preview use the bare title.
-          hChildren: [{ type: "text", value: `«${display}»` }],
-        },
-      });
+      let target: string;
+      let display: string;
+      if (m[3]) {
+        // A URI that names no document (tag/, search/, a folder) stays text.
+        const path = contextUriDocPath(m[3]);
+        if (!path) {
+          newChildren.push({ type: "text", value: m[3] });
+          lastIndex = wikiLinkRegex.lastIndex;
+          continue;
+        }
+        target = path;
+        display = contextUriLabel(path);
+      } else {
+        target = m[1].trim();
+        display = (m[2] ?? m[1]).trim();
+      }
+      newChildren.push(wikiLinkNode(target, display));
       lastIndex = wikiLinkRegex.lastIndex;
     }
     if (lastIndex < text.length) {
@@ -79,7 +97,38 @@ const remarkWikiLinks: Plugin<[], Root> = () => (tree) => {
     parent.children.splice(index, 1, ...newChildren);
     return index + newChildren.length;
   });
+  // `[label](contextnest://nodes/…)` — a real markdown link whose scheme
+  // react-markdown would otherwise strip; it is the same wiki link with the
+  // label as its display.
+  visit(tree, "link", (node: any, index, parent) => {
+    if (!parent || index === null || index === undefined) return;
+    if (typeof node.url !== "string" || !node.url.startsWith(CONTEXT_URI_PREFIX)) return;
+    const path = contextUriDocPath(node.url);
+    if (!path) return;
+    const label = (node.children ?? [])
+      .map((c: any) => (c.type === "text" ? c.value : ""))
+      .join("")
+      .trim();
+    parent.children.splice(index, 1, wikiLinkNode(path, label || contextUriLabel(path)));
+  });
 };
+
+function wikiLinkNode(target: string, display: string) {
+  return {
+    type: "wikiLink",
+    data: {
+      hName: "wikilink",
+      hProperties: {
+        "data-wiki-target": target,
+        "data-wiki-display": display,
+      },
+      // «Title» is Hootie's wiki-link convention — the guillemets read as
+      // "this points at another document" without relying on link colour
+      // alone. The target and the hover preview use the bare title.
+      hChildren: [{ type: "text", value: `«${display}»` }],
+    },
+  };
+}
 
 // `<span style="color: #rrggbb">…</span>` — the one raw-HTML shape the
 // editor itself writes (its text-color swatches). remark tokenizes raw HTML
@@ -133,29 +182,25 @@ const remarkColorSpans: Plugin<[], Root> = () => (tree) => {
 // Stored docs are markdown-only, but legacy content can carry stray inline
 // HTML (e.g. an unmatched color <span> from an old save, or hand-authored
 // HTML). react-markdown renders raw HTML as literal text — turn html nodes
-// into plain text with tags stripped so only the inner text shows. Fenced
-// code is a `code` node, never `html`, so code samples are untouched.
+// into plain text with real tags stripped so only the inner text shows.
+// Fenced code is a `code` node, never `html`, so code samples are untouched.
+//
+// remark's raw-HTML tokenizer treats ANY `<word>` as a tag per CommonMark,
+// so generic-type prose like "Array<string>" tokenizes as an `html` node
+// too, with no separate text for "string" to fall back to — stripping it
+// unconditionally used to erase it. Only strip tags this app actually
+// treats as markup (see html-tag-allowlist.ts); anything else stays as the
+// literal text it is.
 const remarkStripHtml: Plugin<[], Root> = () => (tree) => {
   visit(tree, "html", (node: any) => {
     node.type = "text";
-    // Loop until stable: a single pass of /<[^>]*>/g can leave behind
-    // fragments that reassemble into another tag (e.g. `<scr<script>ipt>`).
-    let value = node.value || "";
-    let prev: string;
-    do {
-      prev = value;
-      value = value.replace(/<[^>]*>/g, "");
-    } while (value !== prev);
-    node.value = value;
+    node.value = stripKnownHtmlTags(node.value || "");
   });
 };
 
-// Same-origin nest video assets only: a root-relative /nests/<id>/assets/
-// path with a server-minted uuid name (mirrors SAFE_NAME in
-// src/nests/asset-routes.ts). External URLs never match — they stay plain
-// links, no exceptions.
-const ASSET_VIDEO_RE =
-  /^\/nests\/[^/]+\/assets\/[0-9a-f-]{36}\.(mp4|webm)$/;
+// Which URLs become a player (same-origin asset videos, allowlisted
+// YouTube/Vimeo links) lives in lib/video-embed.ts, shared with the editor's
+// VideoPreview decoration. Other external URLs stay plain links.
 
 // stopPropagation: block parent click-to-edit when using the controls.
 const AssetVideo = ({ src }: { src: string }) => (
@@ -168,17 +213,60 @@ const AssetVideo = ({ src }: { src: string }) => (
   />
 );
 
+// YouTube / Vimeo player for a paragraph that is only a bare provider URL.
+// `embedUrl` comes from toEmbedUrl — always youtube-nocookie.com/embed or
+// player.vimeo.com/video, never the author's raw URL. Sandboxed: the player
+// needs scripts + its own origin to run, presentation for fullscreen, and
+// popups for "Watch on YouTube"; no top-navigation, no forms.
+// allow-scripts + allow-same-origin together would let a framed document
+// lift its own sandbox — that's only acceptable because the frame is
+// cross-origin to us and its src is pinned to those two provider origins by
+// toEmbedUrl's exact host allowlist. It's the standard trade-off every
+// YouTube/Vimeo embed makes (the player's JS and postMessage API need both).
+// Never reuse this sandbox string for an author-controlled URL.
+// stopPropagation: block parent click-to-edit around the player.
+const EmbedVideo = ({
+  embedUrl,
+  provider,
+}: {
+  embedUrl: string;
+  provider: VideoProvider;
+}) => (
+  <div
+    className="not-prose my-4 aspect-video w-full max-w-3xl"
+    onClick={(e) => e.stopPropagation()}
+  >
+    <iframe
+      src={embedUrl}
+      title={provider === "youtube" ? "YouTube video" : "Vimeo video"}
+      className="h-full w-full rounded-md border-0"
+      loading="lazy"
+      allow="fullscreen; picture-in-picture; encrypted-media"
+      allowFullScreen
+      referrerPolicy="strict-origin-when-cross-origin"
+      sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"
+    />
+  </div>
+);
+
 export interface DocumentViewerProps {
   /** The raw markdown source to render. Should NOT be HTML; use a
    *  read-only TipTap surface for HTML-stored legacy docs. */
   content: string;
-  /** Called when the user clicks a `[[WikiLink]]`. Receives the title
-   *  (post-trim), not the optional display alias. */
-  onWikiLinkClick?: (title: string) => void;
+  /** Called when the user clicks a `[[WikiLink]]`. `title` is the raw
+   *  target (post-trim) — for aliased links this is the internal node id,
+   *  not what the reader sees. `displayText` is the human-readable alias,
+   *  so callers building a "create this document" fallback can use a
+   *  readable title instead of the internal id. */
+  onWikiLinkClick?: (title: string, displayText?: string) => void;
   /** Hover-preview lookup for a wiki-link target; return null for no
    *  preview (unknown target). Synchronous — caller caches the list. */
   previewFor?: (target: string) => { title: string; snippet: string } | null;
   className?: string;
+  /** Render `[[wikilinks]]` as ordinary links (no «guillemets»). The
+   *  guillemets mark "points at another document" for authors; a public
+   *  docs reader expects links that read like links. */
+  plainLinks?: boolean;
 }
 
 export function DocumentViewer({
@@ -186,6 +274,7 @@ export function DocumentViewer({
   onWikiLinkClick,
   previewFor,
   className,
+  plainLinks = false,
 }: DocumentViewerProps) {
   // One hover-preview at a time; opens after a short debounce so quick
   // mouse passes don't flash popovers. Fixed-positioned at the cursor.
@@ -234,6 +323,7 @@ export function DocumentViewer({
       <ReactMarkdown
         remarkPlugins={[
           remarkGfm,
+          remarkMentions,
           remarkMath,
           remarkMathNoCurrency,
           remarkColorSpans,
@@ -247,39 +337,61 @@ export function DocumentViewer({
             h1: heading("h1"),
             h2: heading("h2"),
             h3: heading("h3"),
+            // `@user` mention chip — see remarkMentions above. Plain span,
+            // not a link: nothing to navigate to in the read-only viewer,
+            // and the full email stays out of the visible text.
+            mention: ({ children }: any) => (
+              <span className="mention mention-user">{children}</span>
+            ),
             wikilink: ({ children, ...props }: any) => {
               const target = (props["data-wiki-target"] ?? "") as string;
+              const display = (props["data-wiki-display"] ?? target) as string;
+              const exists = !wikiLinkIsBroken(target, previewFor);
               return (
                 <button
                   type="button"
-                  className="wiki-link wiki-link-exists bg-transparent border-0 p-0 m-0 cursor-pointer"
-                  title={previewFor ? undefined : `Open "${target}"`}
+                  className={
+                    plainLinks
+                      ? "bg-transparent border-0 p-0 m-0 cursor-pointer text-primary underline underline-offset-2 decoration-primary/40 hover:decoration-primary font-normal"
+                      : `wiki-link ${exists ? "wiki-link-exists" : "wiki-link-broken"} bg-transparent border-0 p-0 m-0 cursor-pointer`
+                  }
+                  title={
+                    !previewFor
+                      ? `Open "${target}"`
+                      : exists
+                        ? undefined
+                        : `"${display}" not found in this nest`
+                  }
                   onClick={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
                     hidePreview();
-                    onWikiLinkClick?.(target);
+                    onWikiLinkClick?.(target, display);
                   }}
                   onMouseEnter={(e) =>
                     showPreview(target, e.clientX, e.clientY)
                   }
                   onMouseLeave={hidePreview}
                 >
-                  {children}
+                  {plainLinks ? display : children}
                 </button>
               );
             },
             // The editor inserts uploaded videos as the bare asset URL on
-            // its own line — a paragraph whose sole text child is a
-            // same-origin asset video URL renders as the player.
+            // its own line — a paragraph whose sole content is a same-origin
+            // asset video URL renders as the <video> player. A paragraph that
+            // is only a bare (gfm-autolinked) YouTube/Vimeo URL renders as
+            // the provider's player; titled links and links in prose don't.
             p: ({ node, children, ...props }: any) => {
-              const kids = node?.children;
-              if (
-                kids?.length === 1 &&
-                kids[0].type === "text" &&
-                ASSET_VIDEO_RE.test(kids[0].value.trim())
-              ) {
-                return <AssetVideo src={kids[0].value.trim()} />;
+              const video = classifyVideoParagraph(node?.children);
+              if (video?.kind === "asset") return <AssetVideo src={video.src} />;
+              if (video?.kind === "embed") {
+                return (
+                  <EmbedVideo
+                    embedUrl={video.embedUrl}
+                    provider={video.provider}
+                  />
+                );
               }
               return <p {...props}>{children}</p>;
             },
