@@ -63,6 +63,7 @@ import {
   pdfNodeRoutes,
   PDF_UPLOAD_PATH,
   pdfMaxRequestBytes,
+  pdfTooLargeMessage,
 } from "./nodes/pdf-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
 import {
@@ -420,16 +421,20 @@ export function createApp(): Hono<AuthEnv> {
     if (lenStr) {
       const len = parseInt(lenStr, 10);
       const isPost = c.req.method === "POST";
+      const isPdf = isPost && PDF_UPLOAD_PATH.test(c.req.path);
       const cap =
         isPost && ASSET_UPLOAD_PATH.test(c.req.path)
           ? Math.max(config.MAX_BODY_BYTES, ASSET_MAX_REQUEST_BYTES)
-          : isPost && PDF_UPLOAD_PATH.test(c.req.path)
+          : isPdf
             ? Math.max(config.MAX_BODY_BYTES, pdfMaxRequestBytes())
             : config.MAX_BODY_BYTES;
       if (Number.isFinite(len) && len > cap) {
         return c.json(
           {
-            error: `Request body too large (${len} bytes, max ${cap})`,
+            // A PDF gets the same message as the route's own gates.
+            error: isPdf
+              ? pdfTooLargeMessage(len)
+              : `Request body too large (${len} bytes, max ${cap})`,
           },
           413,
         );

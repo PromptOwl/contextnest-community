@@ -63,12 +63,14 @@ export function pdfMaxRequestBytes(): number {
   return config.PDF_MAX_BYTES + 1024 * 1024;
 }
 
+/** The one 413 message for an oversized PDF, whichever gate refuses it. */
+export function pdfTooLargeMessage(bytes?: number): string {
+  const size = bytes === undefined ? "" : `${(bytes / (1024 * 1024)).toFixed(1)} MB, `;
+  return `PDF too large (${size}max ${config.PDF_MAX_BYTES / (1024 * 1024)} MB)`;
+}
+
 function tooLarge(bytes: number): PayloadTooLargeError {
-  return new PayloadTooLargeError(
-    `PDF too large (${(bytes / (1024 * 1024)).toFixed(1)} MB, max ${
-      config.PDF_MAX_BYTES / (1024 * 1024)
-    } MB)`,
-  );
+  return new PayloadTooLargeError(pdfTooLargeMessage(bytes));
 }
 
 /** A multipart field as one trimmed string ("" when absent or a file). */
@@ -113,13 +115,7 @@ pdfNodeRoutes.post(
   (c, next) =>
     bodyLimit({
       maxSize: pdfMaxRequestBytes(),
-      onError: (c) =>
-        c.json(
-          {
-            error: `PDF too large (max ${config.PDF_MAX_BYTES / (1024 * 1024)} MB)`,
-          },
-          413,
-        ),
+      onError: (c) => c.json({ error: pdfTooLargeMessage() }, 413),
     })(c, next),
   async (c) => {
     const nestId = c.req.param("nestId")!;
