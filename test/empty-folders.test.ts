@@ -172,4 +172,25 @@ describe("nodes: empty folders", () => {
       "scratch",
     );
   });
+
+  // CU-wdqcq02h4y — an editor asks for an empty folder to go; it used to 404.
+  it("a deletion request on an empty folder is accepted", async () => {
+    await jsonRequest(app, "POST", `/nests/${nestId}/folders`, { folder: "stale" }, dev.apiKey);
+    const req = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/request-deletion`,
+      { targetType: "folder", target: "stale", reason: "unused" },
+      dev.apiKey,
+    );
+    expect(req.status).toBe(201);
+    const missing = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/request-deletion`,
+      { targetType: "folder", target: "never-made", reason: "x" },
+      dev.apiKey,
+    );
+    expect(missing.status).toBe(404);
+  });
 });

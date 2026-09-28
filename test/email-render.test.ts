@@ -82,6 +82,18 @@ describe("renderEmail", () => {
     expect(html).toContain("abc123def456ghij");
     expect(html).toContain(">Temporary password<");
     expect(html).toContain(">Sign in<");
+    // PromptOwl sign-in is only offered when the server allows it.
+    expect(text).not.toContain("Sign in with PromptOwl");
+    const po = renderEmail({
+      status: "invited",
+      docTitle: "ContextNest",
+      path: "",
+      actor: "new@acme.com",
+      tempPassword: "abc123def456ghij",
+      promptowlSignIn: true,
+    });
+    expect(po.text).toContain("Sign in with PromptOwl, using a PromptOwl account under this same email");
+    expect(po.html).toContain("Sign in with PromptOwl");
   });
 
   it("renders a steward assignment with role and scope", () => {

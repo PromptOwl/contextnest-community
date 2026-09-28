@@ -3,11 +3,19 @@ import { Eye, EyeOff } from "lucide-react";
 import * as api from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
 import { useAuth } from "../auth/AuthContext";
+import { toast } from "sonner";
+
+// Invite and share emails link here with ?invite=<email> — the address the
+// invite went to, used to prefill and guide the sign-in.
+const inviteEmail =
+  typeof window !== "undefined"
+    ? new URLSearchParams(window.location.search).get("invite")?.trim() || null
+    : null;
 
 export function Login() {
   const { loginSuccess, logoUrl } = useAuth();
   const [mode, setMode] = useState<"login" | "register" | "promptowl">("login");
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(inviteEmail ?? "");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -101,7 +109,12 @@ export function Login() {
           : undefined,
       );
     } catch (err: any) {
-      setError(err.message);
+      // Same hint for every address — it must not reveal who was invited.
+      setError(
+        mode === "login" && err.status === 401
+          ? `Invalid email or password. If you were invited, ${showPromptOwl ? "continue with PromptOwl using the invited email, or " : ""}use the temporary password from your invite email, or ask your admin to reset it.`
+          : err.message,
+      );
     } finally {
       setLoading(false);
     }
@@ -112,9 +125,13 @@ export function Login() {
     setLoading(true);
     try {
       const device = await api.startDeviceAuth();
-      setDeviceUrl(device.verificationUrl);
+      // Pass the invited address on so PromptOwl can offer it at sign-in/up.
+      const url = inviteEmail
+        ? `${device.verificationUrl}${device.verificationUrl.includes("?") ? "&" : "?"}email=${encodeURIComponent(inviteEmail)}`
+        : device.verificationUrl;
+      setDeviceUrl(url);
       setDeviceCode(device.deviceCode);
-      window.open(device.verificationUrl, "_blank", "noopener,noreferrer");
+      window.open(url, "_blank", "noopener,noreferrer");
 
       // Poll for approval. Only "pending" keeps the loop alive — any
       // other status (denied/rejected/expired/cancelled/unknown) is
@@ -124,6 +141,15 @@ export function Login() {
         const poll = await api.pollDeviceAuth(device.deviceCode, device.clientSecret);
         if (poll.status === "approved" && poll.token) {
           const exchange = await api.exchangePromptOwlToken(poll.token);
+          // A different PromptOwl account won't see what was shared with the
+          // invited address — say so rather than land them on an empty server.
+          const signedInAs = exchange.user?.email?.toLowerCase();
+          if (inviteEmail && signedInAs && signedInAs !== inviteEmail.toLowerCase()) {
+            toast.warning(
+              `You signed in as ${signedInAs}, but the invite was for ${inviteEmail}. Nests shared with ${inviteEmail} won't show here — sign out and continue with PromptOwl using that email.`,
+              { duration: 15000 },
+            );
+          }
           loginSuccess(
             exchange.user
               ? {
@@ -181,6 +207,19 @@ export function Login() {
           <p className="text-sm text-muted-foreground">Community Server</p>
         </div>
 
+        {inviteEmail && !deviceUrl && (
+          <div className="rounded-md border border-primary/30 bg-primary/5 p-3 text-sm space-y-1">
+            <p>
+              You were invited as <strong>{inviteEmail}</strong>.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {showPromptOwl
+                ? "Continue with PromptOwl using this email — you can create a PromptOwl account there if you don't have one. Or sign in below with the temporary password from your invite email."
+                : "Sign in below with the temporary password from your invite email."}
+            </p>
+          </div>
+        )}
+
         {/* PromptOwl Login — hidden when the gate restricts it (server
             still enforces). Admin reaches it via ?admin=1. */}
         {showPromptOwl && (
@@ -189,7 +228,11 @@ export function Login() {
             disabled={loading}
             className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg border border-border bg-card hover:bg-secondary text-sm font-medium transition-colors"
           >
-            {loading && deviceUrl ? "Waiting for approval..." : "Login with PromptOwl"}
+            {loading && deviceUrl
+              ? "Waiting for approval..."
+              : inviteEmail
+                ? "Continue with PromptOwl"
+                : "Login with PromptOwl"}
           </button>
         )}
 

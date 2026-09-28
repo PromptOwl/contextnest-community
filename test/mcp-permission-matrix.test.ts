@@ -397,31 +397,45 @@ describe("MCP transport denials — JSON-RPC envelope with reason", () => {
 
   // Regression for the ConnectModal key-scope trap: rotating with
   // nest_id: null must CLEAR the per-nest scope (omitting the field keeps
-  // it), so a key minted by an older scoped build can be un-scoped.
-  it("rotate with nest_id: null clears the scope", async () => {
-    // owner2's second nest — the scoped key can't reach it (403)...
-    const second = await jsonRequest(
-      app,
-      "POST",
-      "/nests",
-      { name: "Side Nest 2" },
-      scopedKey,
+  // it), so a key minted by an older scoped build can be un-scoped. The
+  // un-scoping has to come from the owner's session — a nest-scoped key may
+  // neither create nests nor rotate keys (it would be minting itself a
+  // whole-account key).
+  it("rotate with nest_id: null clears the scope (from a session)", async () => {
+    const login = await app.request("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "owner2@acme.com", password: "testpass" }),
+    });
+    const cookie = (login.headers.get("set-cookie") || "").split(";")[0];
+
+    // The scoped key itself can't un-scope or create a nest.
+    const selfRotate = await jsonRequest(
+      app, "POST", "/auth/keys/rotate", { nest_id: null }, scopedKey,
     );
-    // (creating a nest is not nest-scoped; if this ever 403s, adjust)
-    expect(second.status).toBe(201);
-    const secondId = second.data.nest.id;
+    expect(selfRotate.status).toBe(403);
+    expect(selfRotate.data.code).toBe("nest_scoped_key");
+    const escape = await jsonRequest(app, "POST", "/nests", { name: "Escape" }, scopedKey);
+    expect(escape.status).toBe(403);
+
+    // owner2's second nest — the scoped key can't reach it (403)...
+    const secondRes = await app.request("/nests", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ name: "Side Nest 2" }),
+    });
+    expect(secondRes.status).toBe(201);
+    const secondId = (await secondRes.json()).nest.id;
     const blocked = await mcpCall(scopedKey, "tools/list", {}, 10, secondId);
     expect(blocked.status).toBe(403);
 
     // ...rotate to user-level, and the fresh key reaches both nests.
     const rotate = await app.request("/auth/keys/rotate", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${scopedKey}`,
-      },
+      headers: { "Content-Type": "application/json", Cookie: cookie },
       body: JSON.stringify({ nest_id: null }),
     });
+    expect(rotate.status).toBe(200);
     const userKey = (await rotate.json()).api_key;
     for (const target of [sideNestId, secondId]) {
       const { status } = await mcpCall(userKey, "tools/list", {}, 11, target);

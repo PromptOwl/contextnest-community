@@ -8,7 +8,7 @@ import { trackEvent } from "../telemetry/tracker.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
 import { isServerAdminUserId } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
-import { ValidationError } from "../shared/errors.js";
+import { ValidationError, ForbiddenError } from "../shared/errors.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
 import { rm } from "fs/promises";
 import type { Nest } from "../shared/types.js";
@@ -384,11 +384,25 @@ export async function renameNest(
   return (await db.get("SELECT * FROM nests WHERE id = ?", [nestId])) as Nest;
 }
 
+/** NEST_CREATION=admins: only a server admin may create or import a nest. */
+export async function assertCanCreateNest(userId: string): Promise<void> {
+  if (
+    config.AUTH_MODE === "open" ||
+    config.NEST_CREATION === "everyone" ||
+    (await isServerAdminUserId(userId))
+  )
+    return;
+  throw new ForbiddenError(
+    "Only a server admin can create nests on this server. Ask your admin to share a nest with you.",
+  );
+}
+
 export async function createNest(
   userId: string,
   name: string,
   description?: string,
 ): Promise<Nest> {
+  await assertCanCreateNest(userId);
   const id = uuid();
   const db = getDb();
 
@@ -445,6 +459,7 @@ export async function createNest(
  * nest lists as real with silently missing documents.
  */
 export async function importNest(userId: string, name: string): Promise<Nest> {
+  await assertCanCreateNest(userId);
   const nm = plainName(name || "", "name is required");
 
   const db = getDb();

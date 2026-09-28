@@ -44,13 +44,17 @@ describe("resolveWikiTarget", () => {
 
 describe("breadcrumbFor / sectionLabel", () => {
   it("turns the folder path into readable crumbs and leaves the leaf off", () => {
-    expect(breadcrumbFor("nodes/docs/protocol/source-nodes/writing-source-nodes")).toEqual(["Docs", "Protocol", "Source nodes"]);
+    expect(breadcrumbFor("nodes/docs/protocol/source-nodes/writing-source-nodes")).toEqual(["Docs", "Protocol", "Source Nodes"]);
     expect(breadcrumbFor("nodes/docs/welcome")).toEqual(["Docs"]);
     expect(breadcrumbFor("nodes/readme")).toEqual([]);
   });
   it("labels a folder from its slug", () => {
-    expect(sectionLabel("docs/platform/hosted-nest")).toBe("Hosted nest");
+    expect(sectionLabel("docs/platform/hosted-nest")).toBe("Hosted Nest");
     expect(sectionLabel("Root")).toBe("General");
+  });
+  it("matches the authoring sidebar's title-case convention for multi-word folders", () => {
+    expect(sectionLabel("fold-er-tab")).toBe("Fold Er Tab");
+    expect(sectionLabel("script-x")).toBe("Script X");
   });
 });
 

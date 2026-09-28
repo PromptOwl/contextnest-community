@@ -1108,7 +1108,8 @@ async function vaultFolderPaths(
         ? e.path.slice(prefix.length + 1)
         : e.path,
     )
-    .filter(Boolean);
+    // A flat nest shares its root with the uploads dir (<nest>/assets) — not a document folder.
+    .filter((p) => p && !(!prefix && (p === "assets" || p.startsWith("assets/"))));
 }
 
 /**
@@ -2907,8 +2908,9 @@ async function vaultFolderDir(nestId: string, rel: string): Promise<string> {
 }
 
 /** Is this folder already a directory in the vault? */
-async function vaultFolderExists(nestId: string, rel: string): Promise<boolean> {
+export async function vaultFolderExists(nestId: string, rel: string): Promise<boolean> {
   if (!rel) return false;
+  assertSafeFolder(rel);
   try {
     return (await stat(await vaultFolderDir(nestId, rel))).isDirectory();
   } catch {

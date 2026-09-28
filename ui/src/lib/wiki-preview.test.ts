@@ -12,7 +12,7 @@
  * through to "create" (permissions allowing) instead of a dead end.
  */
 import { describe, it, expect } from "vitest";
-import { decideWikiLinkAction, resolveWikiTarget } from "./wiki-preview";
+import { decideWikiLinkAction, resolveWikiTarget, wikiLinkIsBroken } from "./wiki-preview";
 
 const nodes = [
   { id: "nodes/roadmap", title: "Roadmap" },
@@ -43,6 +43,29 @@ describe("decideWikiLinkAction", () => {
     const action = decideWikiLinkAction([], "Meeting Notes", true);
     expect(action.kind).toBe("create");
   });
+
+  it("uses displayText, not the raw internal id, as the create title for a broken aliased link", () => {
+    // Aliased links store `[[nodes/<id>|Title]]` (see formatWikiLink) — once
+    // the target node is deleted, `target` is a dangling `nodes/<id>`, which
+    // isn't fit to show the user or prefill the New Document form with.
+    const action = decideWikiLinkAction([], "nodes/test-abc123", true, "TEST");
+    expect(action).toEqual({ kind: "create", title: "TEST" });
+  });
+
+  it("falls back to the raw target when there is no displayText", () => {
+    const action = decideWikiLinkAction([], "Launch Plan", true, undefined);
+    expect(action).toEqual({ kind: "create", title: "Launch Plan" });
+  });
+
+  it("falls back to the raw target when displayText is blank", () => {
+    const action = decideWikiLinkAction([], "nodes/test-abc123", true, "   ");
+    expect(action).toEqual({ kind: "create", title: "nodes/test-abc123" });
+  });
+
+  it("uses displayText for the blocked title too", () => {
+    const action = decideWikiLinkAction([], "nodes/test-abc123", false, "TEST");
+    expect(action).toEqual({ kind: "blocked", title: "TEST" });
+  });
 });
 
 describe("resolveWikiTarget (existing behavior, unchanged)", () => {
@@ -51,5 +74,24 @@ describe("resolveWikiTarget (existing behavior, unchanged)", () => {
   });
   it("returns null for no match", () => {
     expect(resolveWikiTarget(nodes, "nope")).toBeNull();
+  });
+});
+
+describe("wikiLinkIsBroken", () => {
+  const previewFor = (target: string) => {
+    const node = resolveWikiTarget(nodes, target);
+    return node ? { title: node.title, snippet: "" } : null;
+  };
+
+  it("is not broken when the target resolves", () => {
+    expect(wikiLinkIsBroken("Roadmap", previewFor)).toBe(false);
+  });
+
+  it("is broken when the target doesn't resolve", () => {
+    expect(wikiLinkIsBroken("Deleted Doc", previewFor)).toBe(true);
+  });
+
+  it("stays optimistic (not broken) when there's no previewFor to resolve against", () => {
+    expect(wikiLinkIsBroken("Anything", undefined)).toBe(false);
   });
 });

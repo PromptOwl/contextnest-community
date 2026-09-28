@@ -1,7 +1,7 @@
 /**
  * MyWorkPage — My Work (/my-work): the cross-nest review inbox, what you are waiting on, and watcher notifications.
  */
-import { useState, useEffect } from "react";
+import { Fragment, useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import * as api from "../../../lib/api";
 import {
@@ -17,6 +17,7 @@ import {
   Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle,
 } from "lucide-react";
 import { BULK_REVIEW_LIMIT } from "../../../lib/constants";
+import { splitWorkItems } from "../../../lib/my-work-groups";
 import { toast } from "sonner";
 import { relTime, formatServerDate } from "../../../lib/dates";
 import { Button } from "@/components/ui/button";
@@ -106,8 +107,7 @@ export default function MyWorkPage() {
     dropWorkItem(w);
   };
 
-  /** Review rows in the inbox — the only ones a batch decision applies to. */
-  const reviewItems = work.items.filter((w) => w.type === "review");
+  const { reviews: reviewItems, requests: requestItems } = splitWorkItems(work.items);
   const workKey = (w: api.WorkItem) => `${w.nest_id}:${w.node_id}`;
 
   // The cap is per call and a call is per nest, so what matters is the biggest
@@ -460,11 +460,16 @@ export default function MyWorkPage() {
                       )}
                     </div>
                   )}
-                  {work.items.map((w) => {
+                  {[...reviewItems, ...requestItems].map((w, i) => {
                     const key = `${w.nest_id}:${w.node_id}`;
                     return (
+                      <Fragment key={key}>
+                      {i === reviewItems.length && (
+                        <div className="bg-muted/40 px-4 py-2 text-sm text-muted-foreground">
+                          {requestItems.length} {requestItems.length === 1 ? "request" : "requests"} · approve or reject each one
+                        </div>
+                      )}
                       <div
-                        key={key}
                         className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 group"
                       >
                         {reviewItems.length > 1 && (
@@ -548,6 +553,7 @@ export default function MyWorkPage() {
                           )}
                         </div>
                       </div>
+                      </Fragment>
                     );
                   })}
                 </div>

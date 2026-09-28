@@ -277,6 +277,15 @@ describe("/runs/:id access control (outside the nest gate)", () => {
     // to provide, and the one /runs/:id previously skipped.
     await resetAuthRateLimit();
     const roamer = await registerUser(app, "roamer@x.com", "Roamer");
+    // A key can only be scoped to a nest its owner can reach, so roamer needs
+    // a seat on `nestId` before scoping a key to it.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: roamer.email, permission: "read" },
+      owner.apiKey,
+    );
     // Scope roamer's key to `nestId`, then hit the outsider-nest run. The
     // response must be the SCOPE 403 (not authorized for this nest), proving
     // the scope check runs on /runs/:id — the gap the review flagged.
