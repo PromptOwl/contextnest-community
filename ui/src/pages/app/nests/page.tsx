@@ -82,14 +82,15 @@ export default function NestsPage() {
     isLoading: loading,
     refetch: refetchNests,
   } = useNests();
-  const allNests = nestsData?.nests ?? [];
+  const nestsWithPending = nestsData?.nests ?? [];
   // Nests shared with the caller whose invite is still unread live only in the
-  // Pending invites card — they join the grid once accepted.
+  // Pending invites card — every grid, count and empty state below leaves them
+  // out until the invite is accepted.
   const { data: unreadData } = useQuery(reads.unreadNotifications());
-  const pendingNestIds = useMemo(
-    () => pendingInviteNestIds(unreadData?.notifications),
-    [unreadData],
-  );
+  const allNests = useMemo(() => {
+    const pending = pendingInviteNestIds(unreadData?.notifications);
+    return nestsWithPending.filter((n: any) => !pending.has(n.id));
+  }, [nestsWithPending, unreadData]);
   // Nest creation is admins-only unless the server opens it (NEST_CREATION) —
   // non-admins never see a create/import CTA they can't use.
   const { data: health } = useQuery(reads.health());
@@ -148,7 +149,7 @@ export default function NestsPage() {
     if (!scopeShowsNests(nestScope)) return [];
     const q = nestQuery.trim().toLowerCase();
     const matched = allNests.filter((n: any) => {
-      if (!nestInScope(n, nestScope) || pendingNestIds.has(n.id)) return false;
+      if (!nestInScope(n, nestScope)) return false;
       if (!q) return true;
       return (
         (n.name ?? "").toLowerCase().includes(q) ||
@@ -169,7 +170,7 @@ export default function NestsPage() {
             String(a.last_activity ?? a.created_at ?? ""),
           );
     });
-  }, [allNests, nestQuery, nestScope, nestSort, pendingNestIds]);
+  }, [allNests, nestQuery, nestScope, nestSort]);
   const nests = filteredNests.slice(0, nestPageSize);
   // The Documents browser offers a clear affordance whenever a control is
   // narrowing its list; the Dashboard only offered one once nothing matched,
@@ -451,7 +452,7 @@ export default function NestsPage() {
           />
 
           <PendingInvites
-            nests={allNests}
+            nests={nestsWithPending}
             onOpen={(n) =>
               onSelectNest(n.id, n.name, n.is_owner ?? false, n.user_id === ANON_USER_ID)
             }
