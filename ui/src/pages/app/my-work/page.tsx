@@ -464,7 +464,7 @@ export default function MyWorkPage() {
                     const key = `${w.nest_id}:${w.node_id}`;
                     return (
                       <Fragment key={key}>
-                      {reviewItems.length > 1 && i === reviewItems.length && (
+                      {i === reviewItems.length && (
                         <div className="bg-muted/40 px-4 py-2 text-sm text-muted-foreground">
                           {requestItems.length} {requestItems.length === 1 ? "request" : "requests"} · approve or reject each one
                         </div>
