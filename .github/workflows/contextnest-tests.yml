@@ -24,6 +24,12 @@ on:
   push:
     branches: [ "main" ]
 
+  # Runs on PRs into development/main — also the only way to watch the
+  # pipeline before the workflow file reaches main (workflow_dispatch is
+  # offered by GitHub only for workflows present on the default branch)
+  pull_request:
+    branches: [ "main", "development" ]
+
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
     inputs:
