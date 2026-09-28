@@ -1969,6 +1969,10 @@ export function NestView({
           nestId={nestId}
           nestName={nestName}
           openMode={authMode === "open"}
+          onOpenConnect={() => {
+            setShowGenerate(false);
+            setShowConnect(true);
+          }}
         />
       )}
 
