@@ -4,8 +4,8 @@
  * to $GITHUB_STEP_SUMMARY (visible directly in the GitHub Actions run tab).
  *
  * Ported from TheOwl's tests/scripts/generate-ci-summary.js (CommonJS there;
- * this repo is ESM). Run automatically by contextnest-tests.yml after the
- * test step.
+ * this repo is ESM). Run automatically by contextnest-community-tests.yml
+ * after the test step.
  */
 
 import fs from 'fs';

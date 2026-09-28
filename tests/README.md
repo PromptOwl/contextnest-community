@@ -105,8 +105,9 @@ Reports land in `tests/test-results/` (HTML report at
 
 ## CI
 
-`.github/workflows/contextnest-tests.yml` runs the suite on GitHub Actions
-(manual dispatch + push to main) against the environment URL configured in
+`.github/workflows/contextnest-community-tests.yml` runs the suite on GitHub
+Actions (PRs into development/main, push to main, and manual dispatch) against
+the environment URL configured in
 repository variables, with credentials from repository secrets
 (`TEST_ACCOUNT1_USER`, `TEST_ACCOUNT1_PW`, …). The HTML report and traces are
 uploaded as a workflow artifact.

@@ -1,4 +1,4 @@
-# contextnest-tests.yml — Playwright e2e suite for ContextNest Community.
+# contextnest-community-tests.yml — Playwright e2e suite for ContextNest Community.
 #
 # Mirrors TheOwl's Playwright pipeline (theowl-tests.yml): manual dispatch +
 # push to main, chromium-only install, ordered test-suite run against a
@@ -17,7 +17,7 @@
 #   vars.TEST_URL                target server URL (defaults to the QA Cloud Run
 #                                alias https://nest-dev.promptowl.ai)
 
-name: ContextNest E2E (Playwright)
+name: ContextNest Community Tests
 
 on:
   # Runs on merge to main
