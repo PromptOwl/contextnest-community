@@ -46,6 +46,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { NestPageHeader } from "./NestPageHeader";
+import { UploadingOverlay } from "./UploadingOverlay";
 import {
   deriveNestCaps,
   isNestArchived,
@@ -1049,7 +1050,8 @@ export function NestView({
   // artifact (commentable in the ArtifactViewer's Annotate pane). Title comes
   // from the filename. A single dropped file opens straight into its editor.
   const [dragOver, setDragOver] = useState(false);
-  const [importing, setImporting] = useState(false);
+  // What is being uploaded (file name or "N files"), or null when idle.
+  const [importing, setImporting] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [importMenuOpen, setImportMenuOpen] = useState(false);
   // Phone width: Share folds into the ⋮ menu so the header actions keep one row.
@@ -1072,7 +1074,7 @@ export function NestView({
         toast.error("Drop .md, .html or .pdf files to add them to this vault.");
         return;
       }
-      setImporting(true);
+      setImporting(files.length === 1 ? files[0].name : `${files.length} files`);
       const createdIds: string[] = [];
       try {
         for (const file of files) {
@@ -1111,7 +1113,7 @@ export function NestView({
           if (createdIds.length === 1) onOpenDocument(createdIds[0]);
         }
       } finally {
-        setImporting(false);
+        setImporting(null);
       }
     },
     [nestId, fetchData, onOpenDocument],
@@ -1194,13 +1196,7 @@ export function NestView({
           </div>
         </div>
       )}
-      {importing && (
-        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-background/60">
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" /> Importing…
-          </div>
-        </div>
-      )}
+      {importing && <UploadingOverlay title="Uploading…" detail={importing} />}
       {/* Header — the row shared by every nest-scoped page. Only the actions
           passed as children differ from Board/Graph/Definitions/Workflows. */}
       <NestPageHeader
