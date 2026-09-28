@@ -210,7 +210,10 @@ function TextField({
   const isPassword = type === "password";
   const [reveal, setReveal] = useState(false);
   return (
-    <div className="relative flex-1">
+    <div className="flex-1">
+      {/* The reveal button spans the input alone, so an error line below
+          doesn't stretch it. */}
+      <div className="relative">
       <Input
         id={id}
         value={value}
@@ -226,13 +229,14 @@ function TextField({
           type="button"
           tabIndex={-1}
           onClick={() => setReveal((r) => !r)}
-          className="absolute top-0 right-0 flex h-9 items-center px-2.5 text-muted-foreground hover:text-foreground"
+          className="absolute inset-y-0 right-0 flex items-center px-2.5 text-muted-foreground hover:text-foreground"
           title={reveal ? "Hide" : "Show"}
           aria-label={reveal ? "Hide value" : "Show value"}
         >
           {reveal ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
         </button>
       )}
+      </div>
       {error && <p className="mt-1 text-xs text-destructive">{error}</p>}
     </div>
   );
