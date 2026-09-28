@@ -139,7 +139,13 @@ export function PdfDocumentPanel({
                     data-testid="pdf-replace-note"
                   />
                   <DialogFooter>
-                    <Button variant="ghost" onClick={() => setNoteOpen(false)}>
+                    <Button
+                      variant="ghost"
+                      onClick={() => {
+                        setNoteOpen(false);
+                        setChangeNote("");
+                      }}
+                    >
                       Cancel
                     </Button>
                     <Button
