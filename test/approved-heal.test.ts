@@ -29,6 +29,12 @@ async function seed(statuses: string[], pin: number): Promise<string> {
     });
   }
   await versions.setApprovedVersion(nestId, nodeId, pin, "a@x");
+  // An old approval stamp, so a refreshed approved_at is visible.
+  const { getDb } = await import("../src/db/client.js");
+  await getDb().run(
+    "UPDATE approved_versions SET approved_at = '2000-01-01 00:00:00' WHERE nest_id = ? AND node_id = ?",
+    [nestId, nodeId],
+  );
   return nodeId;
 }
 
@@ -61,6 +67,15 @@ describe("reconstructApproved", () => {
     expect(after.pin).toBe(4);
     expect(after.count).toBe(4);
     expect(after.notes).toEqual(["Approved version moved from v3 to v4 — v3 could not be rebuilt"]);
+    // Credited to the server, not the reviewer who approved v3.
+    const { getDb } = await import("../src/db/client.js");
+    const { APPROVED_HEAL_AUTHOR } = await import("../src/governance/version-service.js");
+    const pinRow = (await getDb().get(
+      "SELECT approved_by, approved_at FROM approved_versions WHERE nest_id = ? AND node_id = ?",
+      [nestId, nodeId],
+    )) as { approved_by: string; approved_at: string };
+    expect(pinRow.approved_by).toBe(APPROVED_HEAL_AUTHOR);
+    expect(pinRow.approved_at).not.toBe("2000-01-01 00:00:00");
 
     // A stale caller still holding v3 gets v4 and changes nothing more.
     expect(await reconstructApproved(engine([3]), nestId, nodeId, 3)).toEqual({ raw: "body v4", version: 4 });
