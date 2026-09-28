@@ -22,11 +22,15 @@ const roleDefinitions = [
     alias: process.env.TEST_ACCOUNT1_ALIAS,
     email: process.env.TEST_ACCOUNT1_USER,
     password: process.env.TEST_ACCOUNT1_PW,
+    // 'manual' (email/password form) or 'promptowl' (device-auth flow —
+    // the credentials are then the PromptOwl account's, not local ones)
+    method: process.env.TEST_ACCOUNT1_METHOD || 'manual',
   },
   {
     alias: process.env.TEST_ACCOUNT2_ALIAS,
     email: process.env.TEST_ACCOUNT2_USER,
     password: process.env.TEST_ACCOUNT2_PW,
+    method: process.env.TEST_ACCOUNT2_METHOD || 'manual',
   },
 ].filter((role) => role.alias && role.email && role.password); // Filter out undefined roles
 

@@ -15,9 +15,11 @@
 import { test, expect } from '../../src/lib/base_test.js';
 import { samples } from '../../src/lib/roles.js';
 
-// Get the first available role for testing
-const availableRoles = Object.values(samples);
-const primaryRole = availableRoles[0] || null;
+// The login-form tests need an account with manual (email/password)
+// credentials — a promptowl-method role signs in through the device flow,
+// so its password is not valid on the community login form.
+const manualRole =
+  Object.values(samples).find((r) => (r.method || 'manual') === 'manual') || null;
 
 test.describe('Email Login Flow', () => {
   /**
@@ -44,7 +46,7 @@ test.describe('Email Login Flow', () => {
 
     test('TC-001: should complete full email login flow and render the app shell', async ({ loginPage, appShellPage, nestsPage }) => {
       // Skip test if no roles are configured
-      test.skip(!primaryRole, 'No test roles configured. Set TEST_ACCOUNT1_* in environment.');
+      test.skip(!manualRole, 'No manual-login role configured. Set TEST_ACCOUNT*_ (method: manual) in environment.');
 
       // Step 1: User opens the application — login screen renders
       await loginPage.goto();
@@ -55,7 +57,7 @@ test.describe('Email Login Flow', () => {
       await expect(loginPage.submitButton).toBeVisible();
 
       // Step 2: User enters valid email credentials
-      await loginPage.login(primaryRole.email, primaryRole.password);
+      await loginPage.login(manualRole.email, manualRole.password);
 
       // Step 3 & 4: System authenticates and the app shell renders in place
       await loginPage.waitForLoginSuccess();
@@ -96,10 +98,10 @@ test.describe('Email Login Flow', () => {
     });
 
     test('TC-004: should keep the session across a page reload', async ({ loginPage, appShellPage, page }) => {
-      test.skip(!primaryRole, 'No test roles configured. Set TEST_ACCOUNT1_* in environment.');
+      test.skip(!manualRole, 'No manual-login role configured. Set TEST_ACCOUNT*_ (method: manual) in environment.');
 
       // Log in fresh
-      await loginPage.performLogin(primaryRole.email, primaryRole.password);
+      await loginPage.performLogin(manualRole.email, manualRole.password);
 
       // Reload — the cnst_session cookie must keep the user signed in
       await page.reload();
@@ -113,7 +115,8 @@ test.describe('Email Login Flow', () => {
    */
   test.describe('Stored Session Tests', () => {
     test('TC-005: should reach the nests dashboard with a stored session', async ({ primary_user }) => {
-      test.skip(!primaryRole, 'No test roles configured. Set TEST_ACCOUNT1_* in environment.');
+      // Works for any auth method — the session was stored by setup-auth.
+      test.skip(!samples.primary_user, 'primary_user is not configured.');
 
       await primary_user.initialize();
       const { appShellPage, nestsPage } = primary_user;

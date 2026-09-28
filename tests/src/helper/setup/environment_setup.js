@@ -15,6 +15,8 @@ import fs from 'fs';
 import { samples as roles } from '../../lib/roles.js';
 import logger from '../logger/logger.js';
 import { initializeRun, getRunId } from '../../lib/entity_registry.js';
+import LoginPage from '../../page_factory/auth/login_page.js';
+import PromptOwlDevicePage from '../../page_factory/auth/promptowl_device_page.js';
 
 // Define path for cookies storage
 const cookiesDir = 'tests/src/cookies_storage';
@@ -57,6 +59,18 @@ async function validateSession(role) {
       return false;
     }
 
+    // A stored session from a different server (e.g. after switching ENV
+    // between local and dev) must not be reused — its cookie belongs to the
+    // wrong host and every API call would 401.
+    const baseHost = process.env.BASE_URL ? new URL(process.env.BASE_URL).hostname : null;
+    const cookieDomain = (sessionCookie.domain || '').replace(/^\./, '');
+    if (baseHost && cookieDomain && baseHost !== cookieDomain && !baseHost.endsWith(`.${cookieDomain}`)) {
+      logger.warn(
+        `Stored session for ${role.alias} belongs to ${cookieDomain}, but BASE_URL is ${baseHost} — will perform login.`
+      );
+      return false;
+    }
+
     // expires is in seconds since epoch (-1 means session cookie)
     const nowSeconds = Date.now() / 1000;
     if (sessionCookie.expires && sessionCookie.expires > 0 && sessionCookie.expires < nowSeconds) {
@@ -90,24 +104,39 @@ async function performLogin(page, role) {
       throw new Error('BASE_URL environment variable is not defined');
     }
 
-    logger.info(`Performing login for ${role.alias}`);
+    logger.info(`Performing ${role.method === 'promptowl' ? 'PromptOwl' : 'manual'} login for ${role.alias}`);
 
-    // Navigate to the root — unauthenticated visitors get the login screen
-    await page.goto('/');
-    logger.info('Navigated to login screen');
+    const loginPage = new LoginPage(page, role.alias);
+    await loginPage.goto();
 
-    // Fill in credentials (test IDs on ui/src/components/Login.tsx)
-    await page.getByTestId('login-email-input').fill(role.email);
-    logger.info(`Filled email: ${role.email}`);
+    if (role.method === 'promptowl') {
+      // "Login with PromptOwl" starts device auth and opens the PromptOwl
+      // app in a popup; approving there logs the original tab in.
+      const popupPromise = page.context().waitForEvent('page');
+      await loginPage.promptowlButton.click();
+      const popup = await popupPromise;
 
-    await page.getByTestId('login-password-input').fill(role.password);
-    logger.info('Filled password');
+      // The community page renders the device link too — authoritative even
+      // after the popup itself redirected to the PromptOwl login page.
+      const deviceUrl = await page
+        .locator('a[href*="/device"]')
+        .first()
+        .getAttribute('href', { timeout: 10000 })
+        .catch(() => popup.url());
 
-    await page.getByTestId('login-submit-button').click();
-    logger.info('Clicked login button');
+      const devicePage = new PromptOwlDevicePage(popup, role.alias);
+      await devicePage.authorize(role, deviceUrl);
 
-    // Wait for successful login — the app shell's user menu appears
-    await page.getByTestId('user-menu-trigger').waitFor({ state: 'visible', timeout: 30000 });
+      // The community tab polls every 2s and swaps in the app shell.
+      await loginPage.waitForLoginSuccess(60000);
+      await popup.close().catch(() => {});
+    } else {
+      await loginPage.login(role.email, role.password);
+
+      // Wait for successful login — the app shell's user menu appears
+      await loginPage.waitForLoginSuccess(30000);
+    }
+
     logger.info(`Login successful for ${role.alias}`);
 
     // Save authentication state

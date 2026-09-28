@@ -10,6 +10,10 @@
 #   secrets.TEST_ACCOUNT1_PW     e2e account password
 #   secrets.TEST_ACCOUNT2_USER   optional second account (multi-user stewardship tests)
 #   secrets.TEST_ACCOUNT2_PW     optional second account password
+#   secrets.VERCEL_BYPASS_SECRET Vercel protection bypass for the PromptOwl
+#                                device-auth popup (dev.promptowl.ai)
+#   vars.TEST_ACCOUNT1_METHOD    "promptowl" to sign account 1 in via device
+#   vars.TEST_ACCOUNT2_METHOD    auth instead of the login form (default: manual)
 #   vars.TEST_URL                target server URL (defaults to the QA Cloud Run
 #                                alias https://nest-dev.promptowl.ai)
 
@@ -77,9 +81,12 @@ jobs:
           TEST_ACCOUNT1_USER: ${{ secrets.TEST_ACCOUNT1_USER }}
           TEST_ACCOUNT1_PW: ${{ secrets.TEST_ACCOUNT1_PW }}
           TEST_ACCOUNT1_ALIAS: primary_user
+          TEST_ACCOUNT1_METHOD: ${{ vars.TEST_ACCOUNT1_METHOD }}
           TEST_ACCOUNT2_USER: ${{ secrets.TEST_ACCOUNT2_USER }}
           TEST_ACCOUNT2_PW: ${{ secrets.TEST_ACCOUNT2_PW }}
           TEST_ACCOUNT2_ALIAS: secondary_user
+          TEST_ACCOUNT2_METHOD: ${{ vars.TEST_ACCOUNT2_METHOD }}
+          VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_BYPASS_SECRET }}
           BASE_URL: ${{ vars.TEST_URL || 'https://nest-dev.promptowl.ai' }}
           ENVIRONMENT_NAME: ${{ github.event.inputs.environment || 'dev' }}
         run: |

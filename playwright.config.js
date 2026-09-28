@@ -193,6 +193,12 @@ export default defineConfig({
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     actionTimeout: parseInt(process.env.PLAYWRIGHT_TIMEOUT) || 30000,
+    // PromptOwl device-auth popups open dev.promptowl.ai, which sits behind
+    // Vercel deployment protection for a fresh browser. Same escape hatch as
+    // TheOwl's pipeline: send the bypass header on every request.
+    ...(process.env.VERCEL_BYPASS_SECRET
+      ? { extraHTTPHeaders: { 'x-vercel-protection-bypass': process.env.VERCEL_BYPASS_SECRET } }
+      : {}),
     // Optional overrides: PLAYWRIGHT_SLOW_MO slows every action for debugging;
     // PLAYWRIGHT_CHROMIUM_PATH points at a system Chromium when the
     // Playwright-managed download is unavailable (e.g. sandboxed CI).

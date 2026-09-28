@@ -21,14 +21,31 @@ class LoginPage {
     this.page = page;
     this.roleAlias = roleAlias;
 
-    // Selectors — test IDs live on ui/src/components/Login.tsx
-    this.emailInput = page.getByTestId('login-email-input');
-    this.passwordInput = page.getByTestId('login-password-input');
-    this.submitButton = page.getByTestId('login-submit-button');
-    this.nameInput = page.getByTestId('login-name-input');
-    this.registerToggle = page.getByTestId('login-register-toggle');
-    this.promptowlButton = page.getByTestId('login-promptowl-button');
-    this.errorMessage = page.getByTestId('login-error');
+    // Selectors — test IDs live on ui/src/components/Login.tsx. Each one
+    // falls back to a stable attribute of the same element so the suite can
+    // run against a deployed bundle that predates the test IDs (they ship
+    // with this framework's branch).
+    this.emailInput = page
+      .getByTestId('login-email-input')
+      .or(page.getByPlaceholder('Email', { exact: true }));
+    this.passwordInput = page
+      .getByTestId('login-password-input')
+      .or(page.getByPlaceholder('Password', { exact: true }));
+    this.submitButton = page
+      .getByTestId('login-submit-button')
+      .or(page.getByRole('button', { name: 'Login', exact: true }));
+    this.nameInput = page
+      .getByTestId('login-name-input')
+      .or(page.getByPlaceholder('Name', { exact: true }));
+    this.registerToggle = page
+      .getByTestId('login-register-toggle')
+      .or(page.getByRole('button', { name: 'Register', exact: true }));
+    this.promptowlButton = page
+      .getByTestId('login-promptowl-button')
+      .or(page.getByRole('button', { name: /with PromptOwl$/ }));
+    this.errorMessage = page
+      .getByTestId('login-error')
+      .or(page.locator('p.text-destructive'));
 
     // Post-login landmark: the app shell's user menu (ui/src/App.tsx)
     this.userMenuTrigger = page.getByTestId('user-menu-trigger');
