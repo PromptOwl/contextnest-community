@@ -193,6 +193,7 @@ function TextField({
   placeholder,
   onChange,
   type = "text",
+  error,
 }: {
   /** Set it when a <Label htmlFor> points here, or the label labels nothing. */
   id?: string;
@@ -200,6 +201,8 @@ function TextField({
   placeholder?: string;
   onChange: (v: string) => void;
   type?: string;
+  /** The server's reason this field was rejected on the last save. */
+  error?: string;
 }) {
   // Secret fields get a show/hide toggle so an admin can verify what they
   // typed. noAutofill stays keyed on the DECLARED type (password), so revealing
@@ -214,7 +217,8 @@ function TextField({
         type={isPassword && reveal ? "text" : type}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
-        className={isPassword ? "flex-1 pr-9" : "flex-1"}
+        aria-invalid={!!error}
+        className={`flex-1 ${isPassword ? "pr-9" : ""} ${error ? "border-destructive focus-visible:ring-destructive" : ""}`}
         {...noAutofill(type)}
       />
       {isPassword && (
@@ -222,13 +226,14 @@ function TextField({
           type="button"
           tabIndex={-1}
           onClick={() => setReveal((r) => !r)}
-          className="absolute inset-y-0 right-0 flex items-center px-2.5 text-muted-foreground hover:text-foreground"
+          className="absolute top-0 right-0 flex h-9 items-center px-2.5 text-muted-foreground hover:text-foreground"
           title={reveal ? "Hide" : "Show"}
           aria-label={reveal ? "Hide value" : "Show value"}
         >
           {reveal ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
         </button>
       )}
+      {error && <p className="mt-1 text-xs text-destructive">{error}</p>}
     </div>
   );
 }
@@ -312,6 +317,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   // Error from the last failed save (shape validation or SMTP verify), shown
   // inline near the fields. Cleared on the next edit or a successful save.
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Per-field reasons from the same failed save, shown on the fields themselves.
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   // Controlled tab so a failed save can jump the admin to the tab holding the
   // rejected field — otherwise the error banner points at fields on a tab
   // they've navigated away from.
@@ -416,6 +423,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
     setDraft((d) => (d ? { ...d, ...patch } : d));
     // Any edit invalidates a prior save error — let the admin retry cleanly.
     setSaveError(null);
+    setFieldErrors({});
   };
 
   // null and "" are equivalent for the nullable string fields (backend stores
@@ -452,6 +460,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
     for (const k of dirtyKeys) (patch as Record<string, unknown>)[k] = draft[k];
     setSaving(true);
     setSaveError(null);
+    setFieldErrors({});
     try {
       await onUpdate(patch);
     } catch (e: any) {
@@ -462,8 +471,9 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
       // field name (`fieldErrors`) — match on that exactly; fall back to "the
       // first tab with an edited field" only if the body carried no field keys.
       setSaveError(e?.message || "Failed to save settings");
-      const fieldErrors: Record<string, string> = e?.body?.fieldErrors ?? {};
-      const badFields = Object.keys(fieldErrors);
+      const errs: Record<string, string> = e?.body?.fieldErrors ?? {};
+      setFieldErrors(errs);
+      const badFields = Object.keys(errs);
       const owns = (t: (typeof TABS)[number]) =>
         badFields.some((f) => (t.keys as string[]).includes(f));
       const offending = badFields.length
@@ -477,6 +487,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   const discard = () => {
     if (settings) setDraft(settings);
     setSaveError(null);
+    setFieldErrors({});
   };
 
   // "Send test" for the Slack/Teams webhook cards. The server tests the SAVED
@@ -695,6 +706,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               </CardHeader>
               <CardContent>
                 <TextField
+                  error={fieldErrors.public_base_url}
                   value={draft.public_base_url ?? ""}
                   placeholder="https://nest.yourcompany.com"
                   onChange={(v) => set({ public_base_url: v })}
@@ -743,6 +755,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                       : "Not set — runs can't execute until a key exists here or in a nest's Tool environment."}
                 </div>
                 <TextField
+                  error={fieldErrors.anthropic_api_key}
                   type="password"
                   value={
                     typeof draft.anthropic_api_key === "string"
@@ -802,6 +815,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 <div className="space-y-1.5">
                   <Label htmlFor="hootie-model">Model</Label>
                   <TextField
+                    error={fieldErrors.hootie_model}
                     id="hootie-model"
                     value={draft.hootie_model ?? ""}
                     placeholder="claude-opus-5"
@@ -1047,6 +1061,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                         )}
                       </div>
                       <TextField
+                        error={fieldErrors.oidc_issuer}
                         value={draft.oidc_issuer ?? ""}
                         placeholder="https://login.microsoftonline.com/{tenant}/v2.0"
                         onChange={(v) => set({ oidc_issuer: v })}
@@ -1080,6 +1095,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                         : "Not set."}
                   </div>
                   <TextField
+                    error={fieldErrors.oidc_client_secret}
                     type="password"
                     value={
                       typeof draft.oidc_client_secret === "string"
@@ -1159,6 +1175,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     Allowed email domains
                   </div>
                   <TextField
+                    error={fieldErrors.oidc_allowed_domains}
                     value={draft.oidc_allowed_domains ?? ""}
                     placeholder="acme.com, contractors.acme.com — empty allows any"
                     onChange={(v) => set({ oidc_allowed_domains: v })}
@@ -1317,6 +1334,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                         : "Not set. Use a long random string — this signs the MCP tokens the exchange mints."}
                   </div>
                   <TextField
+                    error={fieldErrors.mcp_signing_secret}
                     type="password"
                     value={
                       typeof draft.mcp_signing_secret === "string"
@@ -1352,6 +1370,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     Token lifetime (seconds)
                   </div>
                   <TextField
+                    error={fieldErrors.mcp_token_ttl_seconds}
                     type="number"
                     value={String(draft.mcp_token_ttl_seconds ?? 300)}
                     placeholder="300"
@@ -1449,6 +1468,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               </CardHeader>
               <CardContent>
                 <TextField
+                  error={fieldErrors.slack_webhook_url}
                   type="password"
                   value={draft.slack_webhook_url ?? ""}
                   placeholder="https://hooks.slack.com/services/…"
@@ -1472,6 +1492,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               </CardHeader>
               <CardContent>
                 <TextField
+                  error={fieldErrors.msteams_webhook_url}
                   type="password"
                   value={draft.msteams_webhook_url ?? ""}
                   placeholder="https://….logic.azure.com/workflows/…"
@@ -1513,6 +1534,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 </div>
                 {(draft.email_provider ?? "smtp") === "smtp" ? (
                   <TextField
+                    error={fieldErrors.smtp_url}
                     type="password"
                     value={draft.smtp_url ?? ""}
                     placeholder="smtps://user:pass@smtp.example.com:465"
@@ -1521,6 +1543,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 ) : (
                   <>
                     <TextField
+                      error={fieldErrors.ses_region}
                       value={draft.ses_region ?? ""}
                       placeholder="AWS region — us-east-1"
                       onChange={(v) => set({ ses_region: v })}
@@ -1531,6 +1554,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                       onChange={(v) => set({ ses_access_key_id: v })}
                     />
                     <TextField
+                      error={fieldErrors.ses_secret_access_key}
                       type="password"
                       value={
                         typeof draft.ses_secret_access_key === "string"
@@ -1561,11 +1585,13 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   </>
                 )}
                 <TextField
+                  error={fieldErrors.notify_email_from}
                   value={draft.notify_email_from ?? ""}
                   placeholder="From — nest@yourcompany.com"
                   onChange={(v) => set({ notify_email_from: v })}
                 />
                 <TextField
+                  error={fieldErrors.notify_email_to}
                   value={draft.notify_email_to ?? ""}
                   placeholder="To — team@yourcompany.com, ops@yourcompany.com"
                   onChange={(v) => set({ notify_email_to: v })}
@@ -1608,11 +1634,13 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               </CardHeader>
               <CardContent className="space-y-3">
                 <TextField
+                  error={fieldErrors.posthog_key}
                   value={draft.posthog_key ?? ""}
                   placeholder="Project API key — phc_..."
                   onChange={(v) => set({ posthog_key: v })}
                 />
                 <TextField
+                  error={fieldErrors.posthog_host}
                   value={draft.posthog_host ?? ""}
                   placeholder="Host — https://us.i.posthog.com"
                   onChange={(v) => set({ posthog_host: v })}
