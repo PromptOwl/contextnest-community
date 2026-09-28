@@ -26,6 +26,7 @@ import {
 } from "../../../lib/dashboard-scope";
 import { canRequestNestRemoval } from "../../../lib/nest-caps";
 import { filterAndSortArchivedNests } from "../../../lib/archived-nests";
+import { pendingInviteNestIds } from "../../../lib/pending-invites";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
@@ -86,12 +87,7 @@ export default function NestsPage() {
   // Pending invites card — they join the grid once accepted.
   const { data: unreadData } = useQuery(reads.unreadNotifications());
   const pendingNestIds = useMemo(
-    () =>
-      new Set(
-        (unreadData?.notifications ?? [])
-          .filter((n) => n.kind === "nest_invite")
-          .map((n) => n.nest_id),
-      ),
+    () => pendingInviteNestIds(unreadData?.notifications),
     [unreadData],
   );
   // Nest creation is admins-only unless the server opens it (NEST_CREATION) —
@@ -1585,7 +1581,8 @@ function PendingInvites({
   const [busy, setBusy] = useState<string | null>(null);
   const invites = (data?.notifications ?? []).filter((n) => n.kind === "nest_invite");
   // One row per nest, even if it was shared more than once.
-  const pending = nests.filter((nest) => invites.some((i) => i.nest_id === nest.id));
+  const pendingIds = pendingInviteNestIds(data?.notifications);
+  const pending = nests.filter((nest) => pendingIds.has(nest.id));
   if (pending.length === 0) return null;
 
   const settle = (nestId: string) =>
