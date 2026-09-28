@@ -20,7 +20,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { X, Send, Loader2, MessageSquareText, KeyRound, Database } from "lucide-react";
+import { X, ArrowUp, Loader2, KeyRound, Database, RotateCcw, AlertCircle, FileText } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "../auth/AuthContext";
@@ -173,8 +173,9 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
     requestAnimationFrame(() => inputRef.current?.focus());
   };
 
-  const send = useCallback(async () => {
-    const message = draft.trim();
+  // `text` sends a suggestion chip as-is; otherwise the draft goes.
+  const send = useCallback(async (text?: string) => {
+    const message = (text ?? draft).trim();
     if (!message || busy || !scope) return;
     const nestId = scope.nestId;
     const nodeId = override ? null : (page?.nodeId ?? null);
@@ -255,11 +256,16 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
           type="button"
           onClick={() => setOpen(true)}
           aria-label="Ask Hootie"
-          title="Ask Hootie"
           data-testid="hootie-launcher"
-          className="fixed bottom-5 right-5 z-40 flex h-12 w-12 items-center justify-center rounded-full border bg-background shadow-lg transition hover:scale-105 hover:shadow-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="group fixed bottom-5 right-5 z-40 flex h-14 items-center gap-2 rounded-full bg-primary pl-2 pr-2 text-primary-foreground shadow-lg ring-4 ring-primary/15 transition-all hover:pr-5 hover:shadow-xl focus:outline-none focus-visible:ring-primary/40"
         >
-          <img src={hootieIcon} alt="" className="h-7 w-7" />
+          <span className="flex h-10 w-10 items-center justify-center rounded-full bg-background">
+            <img src={hootieIcon} alt="" className="h-7 w-7" />
+          </span>
+          {/* Label slides out on hover/focus; the owl alone is the resting state. */}
+          <span className="max-w-0 overflow-hidden whitespace-nowrap text-sm font-medium transition-all duration-200 group-hover:max-w-[8rem] group-focus-visible:max-w-[8rem]">
+            Ask Hootie
+          </span>
         </button>
       )}
 
@@ -269,21 +275,38 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
           role="dialog"
           aria-label="Hootie"
           data-testid="hootie-panel"
-          className="fixed bottom-5 right-5 z-40 flex h-[min(60vh,560px)] max-h-[calc(100vh-2.5rem)] w-[min(420px,calc(100vw-2.5rem))] flex-col overflow-hidden rounded-xl border bg-background shadow-2xl"
+          className="fixed bottom-5 right-5 z-40 flex h-[min(680px,calc(100vh-2.5rem))] w-[min(420px,calc(100vw-2.5rem))] flex-col overflow-hidden rounded-2xl border bg-background shadow-2xl ring-1 ring-black/5 animate-in fade-in slide-in-from-bottom-4 zoom-in-95 duration-200"
         >
-          <header className="flex items-start gap-3 border-b px-4 py-3">
-            <img src={hootieIcon} alt="" className="mt-0.5 h-7 w-7 shrink-0" />
+          <header className="flex items-center gap-3 bg-primary px-4 py-3 text-primary-foreground">
+            <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-background">
+              <img src={hootieIcon} alt="" className="h-6 w-6" />
+              <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-emerald-400 ring-2 ring-primary" />
+            </span>
             <div className="min-w-0 flex-1">
               <div className="text-sm font-semibold leading-tight">Hootie</div>
-              <div className="truncate text-xs text-muted-foreground" title={scopeLabel}>
+              <div className="truncate text-xs text-primary-foreground/75" title={scopeLabel}>
                 {scopeLabel}
               </div>
             </div>
+            {messages.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  abortRef.current?.abort();
+                  setMessages([]);
+                }}
+                aria-label="New conversation"
+                title="New conversation"
+                className="rounded-md p-1.5 text-primary-foreground/75 hover:bg-primary-foreground/10 hover:text-primary-foreground"
+              >
+                <RotateCcw className="h-4 w-4" />
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setOpen(false)}
               aria-label="Close Hootie"
-              className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+              className="rounded-md p-1.5 text-primary-foreground/75 hover:bg-primary-foreground/10 hover:text-primary-foreground"
             >
               <X className="h-4 w-4" />
             </button>
@@ -295,41 +318,46 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
             <PickNest nests={nests} onPick={pickNest} />
           ) : (
             <>
-              <div ref={listRef} className="flex-1 overflow-y-auto px-4 py-3">
+              <div ref={listRef} className="flex-1 overflow-y-auto bg-muted/30 px-4 py-4">
                 {messages.length === 0 && (
-                  <div className="mt-6 space-y-2 text-center text-sm text-muted-foreground">
-                    <MessageSquareText className="mx-auto h-6 w-6 opacity-60" />
-                    <p>
-                      Ask anything about{" "}
-                      {!override && page?.nodeId ? "this document" : scope.nestName}.
-                    </p>
-                    <p className="text-xs">
-                      <kbd className="rounded border px-1">@</kbd> loops a colleague in ·{" "}
-                      <kbd className="rounded border px-1">/</kbd> switches nest
-                    </p>
-                  </div>
+                  <Welcome
+                    onDocument={!override && !!page?.nodeId}
+                    subject={
+                      !override && page?.nodeId
+                        ? nodeTitle ?? "this document"
+                        : scope.nestName
+                    }
+                    onAsk={(q) => void send(q)}
+                  />
                 )}
-                <ul className="space-y-3">
+                <ul className="space-y-4">
                   {messages.map((m) => (
                     <li key={m.id} data-testid={`hootie-${m.role}`}>
                       {m.role === "user" ? (
-                        <div className="ml-8 whitespace-pre-wrap rounded-2xl rounded-br-sm bg-primary px-3 py-2 text-sm text-primary-foreground">
+                        <div className="ml-auto w-fit max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-primary px-3.5 py-2 text-sm text-primary-foreground shadow-sm">
                           {m.content}
                         </div>
                       ) : (
-                        <AnswerBubble
-                          message={m}
-                          nestId={scope.nestId}
-                          onOpenNode={onOpenNode}
-                        />
+                        <div className="flex items-start gap-2">
+                          <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border bg-background shadow-sm">
+                            <img src={hootieIcon} alt="" className="h-[18px] w-[18px]" />
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <AnswerBubble
+                              message={m}
+                              nestId={scope.nestId}
+                              onOpenNode={onOpenNode}
+                            />
+                          </div>
+                        </div>
                       )}
                     </li>
                   ))}
                 </ul>
               </div>
 
-              <div className="border-t px-3 py-3">
-                <div className="relative">
+              <div className="border-t bg-background px-3 pb-2.5 pt-3">
+                <div className="relative rounded-xl border bg-background shadow-sm transition focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/15">
                   {slash !== null && slashMatches.length > 0 && (
                     <ul
                       role="listbox"
@@ -368,9 +396,9 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
                     onValueChange={setDraft}
                     members={members}
                     rows={2}
-                    placeholder="Ask Hootie…  ( @ mention · / nest )"
+                    placeholder="Ask Hootie anything…"
                     data-testid="hootie-input"
-                    className="w-full resize-none rounded-md border bg-background px-3 py-2 pr-10 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    className="block w-full resize-none rounded-xl border-0 bg-transparent px-3.5 py-2.5 pr-12 text-sm placeholder:text-muted-foreground/70 focus:outline-none"
                     onKeyDown={(e) => {
                       if (slash !== null && slashMatches.length > 0) {
                         if (e.key === "ArrowDown") {
@@ -409,14 +437,15 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
                     onClick={() => void send()}
                     disabled={busy || !draft.trim() || slash !== null}
                     aria-label="Send"
-                    className="absolute bottom-2 right-2 rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
+                    className="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm transition hover:opacity-90 disabled:bg-muted disabled:text-muted-foreground disabled:shadow-none"
                   >
-                    {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                    {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
                   </button>
                 </div>
-                <p className="mt-1.5 text-[11px] text-muted-foreground">
-                  Answers come only from what you can read in this nest. Tagging someone posts the
-                  exchange as a comment and notifies them.
+                <p className="mt-2 text-center text-[11px] text-muted-foreground">
+                  <kbd className="rounded border bg-muted px-1 font-sans">@</kbd> tag a colleague ·{" "}
+                  <kbd className="rounded border bg-muted px-1 font-sans">/</kbd> switch nest · answers
+                  use only what you can read
                 </p>
               </div>
             </>
@@ -435,9 +464,11 @@ function NoKeyNotice({
   onOpenSettings?: () => void;
 }) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-sm">
-      <KeyRound className="h-6 w-6 text-muted-foreground" />
-      <p className="font-medium">Hootie needs an API key</p>
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 bg-muted/30 px-6 text-center text-sm">
+      <span className="flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/10 ring-8 ring-amber-500/5">
+        <KeyRound className="h-6 w-6 text-amber-600 dark:text-amber-400" />
+      </span>
+      <p className="text-base font-semibold">Hootie needs an API key</p>
       <p className="text-muted-foreground">
         {isAdmin
           ? "Add an Anthropic API key under Settings → General and Hootie can answer from your nests."
@@ -486,6 +517,49 @@ function PickNest({
   );
 }
 
+/** Empty-conversation greeting with a few starter questions for the scope. */
+function Welcome({
+  onDocument,
+  subject,
+  onAsk,
+}: {
+  onDocument: boolean;
+  subject: string;
+  onAsk: (question: string) => void;
+}) {
+  const starters = onDocument
+    ? ["Summarize this document", "What are the key points here?", "What's unclear or missing?"]
+    : ["What's in this nest?", "Summarize the main topics", "Where should I start?"];
+  return (
+    <div className="flex flex-col items-center px-2 pt-6 text-center">
+      <span className="flex h-16 w-16 items-center justify-center rounded-full bg-primary/10 ring-8 ring-primary/5">
+        <img src={hootieIcon} alt="" className="h-10 w-10" />
+      </span>
+      <h2 className="mt-4 text-base font-semibold">Hi, I'm Hootie</h2>
+      <p className="mt-1 text-sm text-muted-foreground">
+        Ask me anything about <span className="font-medium text-foreground">{subject}</span>.
+      </p>
+      <div className="mt-5 flex w-full flex-col gap-2" data-testid="hootie-starters">
+        {starters.map((q) => (
+          <button
+            key={q}
+            type="button"
+            onClick={() => onAsk(q)}
+            className="flex items-center gap-2 rounded-xl border bg-background px-3 py-2 text-left text-sm shadow-sm transition hover:border-primary/40 hover:bg-accent"
+          >
+            {onDocument ? (
+              <FileText className="h-3.5 w-3.5 shrink-0 text-primary" />
+            ) : (
+              <Database className="h-3.5 w-3.5 shrink-0 text-primary" />
+            )}
+            {q}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /**
  * An answer with its citations. `[[Title]]` in the text becomes a chip for a
  * cited node; a wiki link the server didn't resolve stays as plain text, so
@@ -518,17 +592,27 @@ function AnswerBubble({
 
   if (message.failed) {
     return (
-      <div className="mr-8 rounded-2xl rounded-bl-sm border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-        {message.content}
+      <div className="flex items-start gap-2 rounded-2xl rounded-tl-md border border-destructive/30 bg-destructive/5 px-3.5 py-2.5 text-sm text-destructive">
+        <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+        <span>{message.content}</span>
       </div>
     );
   }
   return (
-    <div className="mr-4">
-      <div className="rounded-2xl rounded-bl-sm bg-muted px-3 py-2 text-sm">
+    <div>
+      <div className="rounded-2xl rounded-tl-md border bg-background px-3.5 py-2.5 text-sm shadow-sm">
         {message.pending && !message.content ? (
-          <span className="inline-flex items-center gap-2 text-muted-foreground">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" /> Reading the nest…
+          <span className="inline-flex items-center gap-2 text-muted-foreground" aria-label="Hootie is thinking">
+            <span className="flex gap-1">
+              {[0, 150, 300].map((d) => (
+                <span
+                  key={d}
+                  className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/60"
+                  style={{ animationDelay: `${d}ms` }}
+                />
+              ))}
+            </span>
+            <span className="text-xs">Reading the nest…</span>
           </span>
         ) : (
           <div className="prose prose-sm dark:prose-invert max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
@@ -542,7 +626,7 @@ function AnswerBubble({
                       <button
                         type="button"
                         onClick={() => onOpenNode(nestId, id)}
-                        className="inline-flex items-center rounded border bg-background px-1.5 py-0.5 align-baseline text-xs font-medium no-underline hover:bg-accent"
+                        className="inline-flex items-center rounded-md border border-primary/20 bg-primary/5 px-1.5 py-0.5 align-baseline text-xs font-medium text-primary no-underline hover:bg-primary/10"
                         data-testid="hootie-citation"
                       >
                         {children}
@@ -569,10 +653,11 @@ function AnswerBubble({
               key={n.id}
               type="button"
               onClick={() => onOpenNode(nestId, n.id)}
-              className="rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+              className="inline-flex max-w-full items-center gap-1 rounded-full border bg-background px-2 py-0.5 text-[11px] text-muted-foreground hover:border-primary/40 hover:text-foreground"
               title={n.id}
             >
-              {n.title}
+              <FileText className="h-3 w-3 shrink-0" />
+              <span className="truncate">{n.title}</span>
             </button>
           ))}
         </div>
