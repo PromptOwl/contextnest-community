@@ -4,12 +4,11 @@
  * full values. Values leave the server exactly once per run, inside the run
  * bundle (which already requires write permission to obtain).
  *
- * Values are encrypted at rest (see shared/secret-box) — the key lives in
- * SECRETS_KEY or a file outside the database, so a dump, replica or backup of
- * the database does not hand over the credentials with it. It is still a
- * convenience store for self-hosted deployments, not a vault: anyone who can
- * reach both the database and the key material, or ask for a run bundle, gets
- * the values.
+ * Values are encrypted at rest (see shared/secret-box), so a row read in
+ * isolation — a log, an export, one table's replica — is not the credential.
+ * It is still a convenience store, not a vault: with the default key (kept in
+ * this database) a full dump opens them, and anyone who can ask for a run
+ * bundle gets the values.
  */
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";

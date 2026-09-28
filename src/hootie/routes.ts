@@ -344,9 +344,11 @@ function buildSystemPrompt(params: {
   blocks: string[];
 }): string {
   const { nestName, userEmail, anchor, blocks } = params;
+  // A document that contains `</documents>` would close the block early and
+  // everything after it would read as instructions — defuse the tag in the body.
   const context =
     blocks.length > 0
-      ? blocks.join("\n\n---\n\n")
+      ? blocks.join("\n\n---\n\n").replace(/<\/documents>/gi, "</ documents>")
       : "(nothing in the nest matched this question)";
   return [
     `You are Hootie, the assistant inside the ContextNest nest "${nestName}". You are talking with ${userEmail}.`,

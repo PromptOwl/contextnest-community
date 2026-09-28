@@ -94,10 +94,36 @@ describe("server settings — secrets at rest", () => {
     expect(stored!.env_at_write!.startsWith("enc.v1.")).toBe(true);
   });
 
+  it("seals every credential setting, including ones added after this shipped", async () => {
+    // SES arrived in a later merge; a secret missing from the list stays
+    // plaintext silently, so each one is pinned here.
+    env = setupTestEnv();
+    vi.resetModules();
+    const { initDb } = await import("../src/db/client.js");
+    const { persistSetting } = await import("../src/db/settings.js");
+    await initDb();
+    for (const name of [
+      "ANTHROPIC_API_KEY",
+      "OIDC_CLIENT_SECRET",
+      "MCP_SIGNING_SECRET",
+      "SMTP_URL",
+      "SLACK_WEBHOOK_URL",
+      "MSTEAMS_WEBHOOK_URL",
+      "SES_SECRET_ACCESS_KEY",
+      "PROMPTOWL_KEY",
+    ]) {
+      await persistSetting(name, `secret-for-${name}`);
+      const stored = (await row(name))!.value!;
+      expect(stored, name).not.toContain(`secret-for-${name}`);
+      expect(stored.startsWith("enc.v1."), name).toBe(true);
+    }
+  });
+
   it("a setting that is not a credential stays readable in the database", async () => {
     // Encryption is for secrets. Being able to see what a server is
     // configured to DO is worth keeping.
     env = setupTestEnv();
+    vi.resetModules();
     const { persistSetting } = await import("../src/db/settings.js");
     const { initDb } = await import("../src/db/client.js");
     await initDb();
@@ -107,6 +133,7 @@ describe("server settings — secrets at rest", () => {
 
   it("reads a row written before encryption existed, and re-seals it on the next write", async () => {
     env = setupTestEnv();
+    vi.resetModules();
     const { initDb, getDb } = await import("../src/db/client.js");
     const { loadServerSettings, persistSetting } = await import("../src/db/settings.js");
     await initDb();

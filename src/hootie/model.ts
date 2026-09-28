@@ -8,6 +8,7 @@
  * credential; there is no per-user key.
  */
 import Anthropic from "@anthropic-ai/sdk";
+import { config } from "../config.js";
 
 export interface ModelTurn {
   role: "user" | "assistant";
@@ -84,24 +85,26 @@ export async function* streamAnswer(params: {
 export function describeModelError(err: unknown): string {
   const e = err as { status?: number; error?: { error?: { message?: string } } };
   const detail = (e?.error?.error?.message || "").toLowerCase();
+  // Behind a gateway the rejection is the gateway's, not Anthropic's.
+  const provider = config.ANTHROPIC_BASE_URL ? "The model gateway" : "Anthropic";
   if (detail.includes("credit balance") || detail.includes("billing")) {
     return "Hootie's Anthropic account is out of credit. A server admin needs to add credit in the Anthropic console (Plans & Billing).";
   }
   switch (e?.status) {
     case 401:
     case 403:
-      return "Anthropic rejected this server's API key. A server admin can replace it under Settings → General.";
+      return `${provider} rejected this server's API key. A server admin can replace it under Settings → General.`;
     case 404:
-      return `No model named "${process.env.HOOTIE_MODEL || "claude-opus-5"}" is available on this key. A server admin can change it under Settings → General.`;
+      return `No model named "${config.HOOTIE_MODEL}" is available on this key. A server admin can change it under Settings → General.`;
     case 413:
       return "That question plus the documents behind it are too large for one request. Try asking something narrower.";
     case 429:
-      return "Anthropic is rate-limiting this server right now. Try again in a moment.";
+      return `${provider} is rate-limiting this server right now. Try again in a moment.`;
     case 529:
       return "The model is overloaded right now. Try again in a moment.";
   }
   if (typeof e?.status === "number" && e.status >= 500) {
-    return "Anthropic is having trouble right now. Try again in a moment.";
+    return `${provider} is having trouble right now. Try again in a moment.`;
   }
   return "Hootie couldn't reach the model. Try again in a moment.";
 }

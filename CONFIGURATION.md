@@ -881,10 +881,11 @@ on the next boot.
 
 **Credentials are encrypted at rest.** The secret rows — `ANTHROPIC_API_KEY`,
 `OIDC_CLIENT_SECRET`, `MCP_SIGNING_SECRET`, `SMTP_URL`, `SLACK_WEBHOOK_URL`,
-`MSTEAMS_WEBHOOK_URL`, `PROMPTOWL_KEY` — and every value in a nest's Tool environment
-(`nest_env`) are stored AES-256-GCM encrypted, so a database dump, replica or backup
-does not carry the credentials with it. Non-secret settings stay readable: what a server
-is configured to do is worth being able to see.
+`MSTEAMS_WEBHOOK_URL`, `SES_SECRET_ACCESS_KEY`, `PROMPTOWL_KEY` — and every value in a
+nest's Tool environment (`nest_env`) are stored AES-256-GCM encrypted, so a row read in
+isolation is not the credential. Non-secret settings stay readable: what a server is
+configured to do is worth being able to see. One known exception: the license
+validation cache (`license_cache`) is still keyed by the license key itself.
 
 The master key needs nothing configured: on first use the server generates one and
 stores it in the database (`server_settings`, key `SECRETS_MASTER_KEY`), so it survives
