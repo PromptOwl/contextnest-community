@@ -15,17 +15,7 @@ export interface ModelTurn {
   content: string;
 }
 
-/**
- * Stream the assistant's answer as text chunks.
- *
- * Adaptive thinking stays on (the model's default); effort is capped at
- * `medium` because a grounded Q&A over a few documents doesn't need more, and
- * a chat panel is latency-sensitive. `max_tokens` caps a runaway answer, not
- * a normal one: a cited chat reply is a few hundred tokens, and 4096 leaves
- * room for a long list without letting a loop run to the model's ceiling.
- * `signal` cancels the stream when the client hangs up.
- */
-export async function* streamAnswer(params: {
+interface AnswerParams {
   apiKey: string;
   model: string;
   /** A gateway (LiteLLM, PromptOwl) speaking /v1/messages; null = Anthropic. */
@@ -33,25 +23,73 @@ export async function* streamAnswer(params: {
   system: string;
   turns: ModelTurn[];
   signal?: AbortSignal;
-}): AsyncGenerator<string> {
+}
+
+/**
+ * Models (per gateway) that rejected the tuned request and answered the bare
+ * one. The model name is admin-set and may be an older Claude or a gateway
+ * model that knows nothing of adaptive thinking; remembered so only the first
+ * question pays the extra round trip.
+ */
+const plainModels = new Set<string>();
+
+/**
+ * Stream the assistant's answer as text chunks.
+ *
+ * Adaptive thinking at `medium` effort: a grounded Q&A over a few documents
+ * doesn't need more, and a chat panel is latency-sensitive. `max_tokens` caps
+ * a runaway answer, not a normal one. No temperature / top_p / top_k — current
+ * Claude models reject them outright. `signal` cancels on client hang-up.
+ *
+ * Not every model takes thinking or effort (Haiku 4.5 and older Claude reject
+ * both; gateway models vary), so a 400 before any output retries once with
+ * the bare request. The model is only remembered as plain when that retry
+ * works — a 400 that fails both ways (no credit, bad input) changes nothing.
+ */
+export async function* streamAnswer(params: AnswerParams): AsyncGenerator<string> {
   const client = clientFor(params.apiKey, params.baseUrl ?? null);
+  const key = `${params.baseUrl ?? ""}|${params.model}`;
+  if (plainModels.has(key)) {
+    yield* answer(client, params, false);
+    return;
+  }
+  const state = { started: false };
+  try {
+    yield* answer(client, params, true, state);
+  } catch (err) {
+    if (state.started || (err as { status?: number })?.status !== 400) throw err;
+    yield* answer(client, params, false);
+    plainModels.add(key);
+  }
+}
+
+async function* answer(
+  client: Anthropic,
+  params: AnswerParams,
+  tuned: boolean,
+  state = { started: false },
+): AsyncGenerator<string> {
   const stream = client.messages.stream(
-    {
-      model: params.model,
-      max_tokens: 4096,
-      // The system prompt carries the retrieved context, which is the bulk of
-      // the request and identical across a conversation's turns — cache it.
-      system: [
+    tuned
+      ? {
+          model: params.model,
+          max_tokens: 4096,
+          // The system prompt carries the retrieved context — the bulk of the
+          // request, identical across a conversation's turns — so cache it.
+          system: [
+            { type: "text", text: params.system, cache_control: { type: "ephemeral" } },
+          ],
+          messages: params.turns,
+          thinking: { type: "adaptive" },
+          output_config: { effort: "medium" },
+        }
+      : // The bare request every Messages-speaking model accepts.
         {
-          type: "text",
-          text: params.system,
-          cache_control: { type: "ephemeral" },
+          model: params.model,
+          max_tokens: 4096,
+          system: params.system,
+          messages: params.turns,
         },
-      ],
-      messages: params.turns,
-      thinking: { type: "adaptive" },
-      output_config: { effort: "medium" },
-    },
     { signal: params.signal },
   );
   for await (const event of stream) {
@@ -59,6 +97,7 @@ export async function* streamAnswer(params: {
       event.type === "content_block_delta" &&
       event.delta.type === "text_delta"
     ) {
+      state.started = true;
       yield event.delta.text;
     }
   }
