@@ -17,6 +17,7 @@ import { AlertTriangle, Download, FileType, Loader2, Upload } from "lucide-react
 import { toast } from "sonner";
 import * as api from "../lib/api";
 import { Button } from "@/components/ui/button";
+import { UploadingOverlay } from "./UploadingOverlay";
 
 function formatBytes(n: number): string {
   if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
@@ -45,11 +46,12 @@ export function PdfDocumentPanel({
   onReplaced?: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const [replacing, setReplacing] = useState(false);
+  // Name of the PDF being uploaded as the replacement, or null when idle.
+  const [replacing, setReplacing] = useState<string | null>(null);
   const src = api.pdfUrl(nestId, nodeId, { approvedOnly });
 
   const replace = async (file: File) => {
-    setReplacing(true);
+    setReplacing(file.name);
     try {
       await api.createPdfNode(nestId, file, { nodeId });
       toast.success("PDF replaced — saved as a new version.");
@@ -57,12 +59,13 @@ export function PdfDocumentPanel({
     } catch (e: any) {
       toast.error(e?.message || "Couldn't replace the PDF.");
     } finally {
-      setReplacing(false);
+      setReplacing(null);
     }
   };
 
   return (
     <div className="mb-6 space-y-3" data-testid="pdf-document-panel">
+      {replacing && <UploadingOverlay title="Replacing PDF…" detail={replacing} />}
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         <span className="inline-flex items-center gap-1.5 font-medium text-foreground/80">
           <FileType className="h-3.5 w-3.5 text-rose-500" />
@@ -100,7 +103,7 @@ export function PdfDocumentPanel({
                 variant="outline"
                 size="sm"
                 className="h-7"
-                disabled={replacing}
+                disabled={!!replacing}
                 onClick={() => inputRef.current?.click()}
                 title="Upload a new PDF — the text is re-extracted and saved as a new version"
                 data-testid="pdf-replace"
