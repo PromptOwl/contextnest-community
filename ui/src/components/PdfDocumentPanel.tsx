@@ -17,6 +17,10 @@ import { AlertTriangle, Download, FileType, Loader2, Upload } from "lucide-react
 import { toast } from "sonner";
 import * as api from "../lib/api";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
 import { UploadingOverlay } from "./UploadingOverlay";
 
 function formatBytes(n: number): string {
@@ -48,18 +52,22 @@ export function PdfDocumentPanel({
   const inputRef = useRef<HTMLInputElement | null>(null);
   // Name of the PDF being uploaded as the replacement, or null when idle.
   const [replacing, setReplacing] = useState<string | null>(null);
+  // Optional note for the new version, asked for before the file is picked.
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [changeNote, setChangeNote] = useState("");
   const src = api.pdfUrl(nestId, nodeId, { approvedOnly });
 
   const replace = async (file: File) => {
     setReplacing(file.name);
     try {
-      await api.createPdfNode(nestId, file, { nodeId });
+      await api.createPdfNode(nestId, file, { nodeId, changeNote });
       toast.success("PDF replaced — saved as a new version.");
       onReplaced?.();
     } catch (e: any) {
       toast.error(e?.message || "Couldn't replace the PDF.");
     } finally {
       setReplacing(null);
+      setChangeNote("");
     }
   };
 
@@ -104,7 +112,7 @@ export function PdfDocumentPanel({
                 size="sm"
                 className="h-7"
                 disabled={!!replacing}
-                onClick={() => inputRef.current?.click()}
+                onClick={() => setNoteOpen(true)}
                 title="Upload a new PDF — the text is re-extracted and saved as a new version"
                 data-testid="pdf-replace"
               >
@@ -115,6 +123,37 @@ export function PdfDocumentPanel({
                 )}
                 Replace PDF
               </Button>
+              <Dialog open={noteOpen} onOpenChange={setNoteOpen}>
+                <DialogContent className="max-w-md">
+                  <DialogHeader>
+                    <DialogTitle>Replace PDF</DialogTitle>
+                    <DialogDescription>
+                      The new file is saved as a new version. Say what changed, if you like.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <Input
+                    autoFocus
+                    value={changeNote}
+                    onChange={(e) => setChangeNote(e.target.value)}
+                    placeholder="Change note (optional)"
+                    data-testid="pdf-replace-note"
+                  />
+                  <DialogFooter>
+                    <Button variant="ghost" onClick={() => setNoteOpen(false)}>
+                      Cancel
+                    </Button>
+                    <Button
+                      onClick={() => {
+                        setNoteOpen(false);
+                        inputRef.current?.click();
+                      }}
+                    >
+                      <Upload className="h-4 w-4 mr-1.5" />
+                      Choose PDF
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
             </>
           )}
         </div>
