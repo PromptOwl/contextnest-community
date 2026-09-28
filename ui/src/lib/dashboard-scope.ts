@@ -92,3 +92,14 @@ export function visibleUnsynced(
       f.label.toLowerCase().includes(q) || f.name.toLowerCase().includes(q),
   );
 }
+
+/**
+ * The scope to open on, given the one remembered from last visit. Narrow
+ * scopes are kept; the broad ones that show other organizations' nests (All,
+ * Organization, Public) fall back to the default, so they are always a fresh
+ * choice rather than the first screen. (CU-wdqcq02qzc)
+ */
+const REMEMBERED_SCOPES: NestScope[] = ["mine", "owned", "shared", "synced", "unsynced"];
+export function restoredNestScope(saved: string | null): NestScope {
+  return REMEMBERED_SCOPES.includes(saved as NestScope) ? (saved as NestScope) : DEFAULT_NEST_SCOPE;
+}

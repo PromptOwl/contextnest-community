@@ -22,6 +22,7 @@ import {
   visibleUnsynced,
   nestInScope,
   DEFAULT_NEST_SCOPE,
+  restoredNestScope,
   type NestScope,
 } from "../../../lib/dashboard-scope";
 import { canRequestNestRemoval } from "../../../lib/nest-caps";
@@ -64,7 +65,6 @@ import { ImportFolderModal } from "../../../components/ImportFolderModal";
  *  not mount 50 cards on load. */
 const NEST_PAGE_SIZE = 24;
 const NEST_SCOPE_KEY = "cn:dashboard:nestScope";
-const NEST_SCOPES: NestScope[] = ["all", "mine", "owned", "shared", "org", "public", "synced", "unsynced"];
 
 // relTime / formatServerDate live in lib/dates: SQL-default timestamps arrive
 // as UTC with no zone, which new Date() would read as local time.
@@ -125,13 +125,11 @@ export default function NestsPage() {
   // just bounds how many cards are mounted at once.
   const [nestQuery, setNestQuery] = useState("");
   const [nestSort, setNestSort] = useState<"activity" | "name">("activity");
-  // Scope opens on "My nests" and is remembered per browser: on a shared
-  // server the discovered org/public nests are other people's, so they are a
-  // choice, not the first screen (CU-wdqcq02mek).
+  // Scope opens on "My nests"; a narrow scope is remembered per browser, but
+  // All / Organization / Public never become the first screen (CU-wdqcq02qzc).
   const [nestScope, setNestScopeState] = useState<NestScope>(() => {
     try {
-      const saved = localStorage.getItem(NEST_SCOPE_KEY);
-      if (saved && NEST_SCOPES.includes(saved as NestScope)) return saved as NestScope;
+      return restoredNestScope(localStorage.getItem(NEST_SCOPE_KEY));
     } catch {
       /* storage blocked — fall through to the default */
     }
