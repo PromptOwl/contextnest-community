@@ -1976,7 +1976,13 @@ export function DocumentsTab({
           folder={folderTarget}
           canManage={canManage}
           onClose={() => setFolderTarget(null)}
-          onDone={fetchData}
+          onDone={() => {
+            // A deleted folder (or its parent) can't stay the active filter.
+            const gone = folderTarget.path;
+            if (canManage && folderFilter && (folderFilter === gone || folderFilter.startsWith(gone + "/")))
+              setFolderFilter(null);
+            fetchData();
+          }}
         />
       )}
 

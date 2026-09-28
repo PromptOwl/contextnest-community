@@ -1827,7 +1827,13 @@ export function NestView({
               folder={overviewDeleteFolder}
               canManage={canManage}
               onClose={() => setOverviewDeleteFolder(null)}
-              onDone={fetchData}
+              onDone={() => {
+                // Don't leave Documents filtered to a folder that's gone.
+                const gone = overviewDeleteFolder.path;
+                if (canManage && folderFilter && (folderFilter === gone || folderFilter.startsWith(gone + "/")))
+                  setFolderFilter(null);
+                fetchData();
+              }}
             />
           )}
         </TabsContent>
