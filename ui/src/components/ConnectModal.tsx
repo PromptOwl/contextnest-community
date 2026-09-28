@@ -28,6 +28,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -114,6 +124,7 @@ export function ConnectModal({
     key: string;
     kind: "generated" | "rotated";
   } | null>(null);
+  const [rotateTarget, setRotateTarget] = useState<{ id: string; name: string } | null>(null);
   // This nest already has a key → show it with Rotate instead of minting another.
   const existingNestKeys = (keyData?.keys ?? []).filter(
     (k) => k.nest_id === nestId,
@@ -352,8 +363,7 @@ export function ConnectModal({
                       className="shrink-0"
                       disabled={mintingNestKey !== null}
                       onClick={() =>
-                        confirmRotate(k.label || "Untitled key") &&
-                        mintNestKey(k.id)
+                        setRotateTarget({ id: k.id, name: k.label || "Untitled key" })
                       }
                     >
                       {mintingNestKey === k.id ? (
@@ -892,15 +902,49 @@ export function ConnectModal({
           onClose={() => setNestKey(null)}
         />
       )}
+      <RotateKeyConfirm
+        target={rotateTarget}
+        onConfirm={(id) => mintNestKey(id)}
+        onClose={() => setRotateTarget(null)}
+      />
     </>
   );
 }
 
 /** Rotating kills the old key on the spot — ask first, naming the key. */
-export const confirmRotate = (name: string) =>
-  window.confirm(
-    `Rotate "${name}"? The current key stops working immediately — anything still using it needs the new one.`,
+export function RotateKeyConfirm({
+  target,
+  onConfirm,
+  onClose,
+}: {
+  target: { id: string; name: string } | null;
+  onConfirm: (id: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <AlertDialog open={target !== null} onOpenChange={(open) => !open && onClose()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Rotate "{target?.name}"?</AlertDialogTitle>
+          <AlertDialogDescription>
+            The current key stops working immediately — anything still using it
+            needs the new one.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={() => target && onConfirm(target.id)}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            data-testid="rotate-key-confirm"
+          >
+            Rotate key
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
+}
 
 /**
  * Standalone modal that surfaces a freshly minted / rotated plaintext

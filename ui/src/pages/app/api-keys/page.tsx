@@ -42,7 +42,7 @@ import {
   keyScope,
 } from "../../../lib/api-key-scope";
 import { parseServerDate } from "../../../lib/dates";
-import { KeyRevealModal, confirmRotate } from "../../../components/ConnectModal";
+import { KeyRevealModal, RotateKeyConfirm } from "../../../components/ConnectModal";
 
 function when(value: string | null): string {
   if (!value) return "never";
@@ -68,6 +68,7 @@ export default function ApiKeysPage() {
   const [scope, setScope] = useState<string>(ALL_NESTS);
   // One id at a time: which row is mid-request, so only its button spins.
   const [busy, setBusy] = useState<string | null>(null);
+  const [rotateTarget, setRotateTarget] = useState<{ id: string; name: string } | null>(null);
   const [reveal, setReveal] = useState<{
     apiKey: string;
     kind: "generated" | "rotated";
@@ -262,14 +263,7 @@ export default function ApiKeysPage() {
                     variant="outline"
                     size="sm"
                     disabled={busy === k.id}
-                    onClick={() =>
-                      confirmRotate(name) &&
-                      run(
-                        k.id,
-                        () => api.rotateApiKey({ key_id: k.id }),
-                        "rotated",
-                      )
-                    }
+                    onClick={() => setRotateTarget({ id: k.id, name })}
                   >
                     {busy === k.id ? (
                       <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
@@ -300,6 +294,13 @@ export default function ApiKeysPage() {
         value) or revoke it and make another.
       </p>
 
+      <RotateKeyConfirm
+        target={rotateTarget}
+        onConfirm={(id) =>
+          run(id, () => api.rotateApiKey({ key_id: id }), "rotated")
+        }
+        onClose={() => setRotateTarget(null)}
+      />
       {reveal && (
         <KeyRevealModal
           apiKey={reveal.apiKey}
