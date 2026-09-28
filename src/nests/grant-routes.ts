@@ -64,19 +64,8 @@ async function requireManage(
  *  unknown address (they claim it by registering — same as collaborator
  *  invites). */
 async function resolveGrantee(email: string): Promise<string> {
-  const db = getDb();
-  const e = normalizeEmail(email);
-  const existing = (await db.get("SELECT id FROM users WHERE LOWER(email) = ?", [e])) as
-    | { id: string }
-    | undefined;
-  if (existing) return existing.id;
-  const { hashPassword } = await import("../auth/keys.js");
-  const id = uuid();
-  await db.run(
-    "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-    [id, e, null, await hashPassword(uuid())],
-  );
-  return id;
+  const { findOrCreateInvitedUser } = await import("../auth/invited-user.js");
+  return (await findOrCreateInvitedUser(email)).id;
 }
 
 /**

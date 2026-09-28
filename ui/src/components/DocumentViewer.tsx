@@ -36,6 +36,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { remarkMathNoCurrency } from "@/lib/markdown-math";
 import { remarkMentions } from "@/lib/markdown-mentions";
+import { stripKnownHtmlTags } from "@/lib/html-tag-allowlist";
 import type { Plugin } from "unified";
 import type { Root, Text } from "mdast";
 import { visit } from "unist-util-visit";
@@ -46,6 +47,7 @@ import {
   type VideoProvider,
 } from "@/lib/video-embed";
 import { CONTEXT_URI_PREFIX, CONTEXT_URI_RE, contextUriDocPath, contextUriLabel } from "@/lib/context-uri";
+import { wikiLinkIsBroken } from "@/lib/wiki-preview";
 
 // `[[target]]`, `[[target|Display]]`, or a bare `contextnest://nodes/…` URI.
 const wikiLinkRegex = new RegExp(
@@ -180,20 +182,19 @@ const remarkColorSpans: Plugin<[], Root> = () => (tree) => {
 // Stored docs are markdown-only, but legacy content can carry stray inline
 // HTML (e.g. an unmatched color <span> from an old save, or hand-authored
 // HTML). react-markdown renders raw HTML as literal text — turn html nodes
-// into plain text with tags stripped so only the inner text shows. Fenced
-// code is a `code` node, never `html`, so code samples are untouched.
+// into plain text with real tags stripped so only the inner text shows.
+// Fenced code is a `code` node, never `html`, so code samples are untouched.
+//
+// remark's raw-HTML tokenizer treats ANY `<word>` as a tag per CommonMark,
+// so generic-type prose like "Array<string>" tokenizes as an `html` node
+// too, with no separate text for "string" to fall back to — stripping it
+// unconditionally used to erase it. Only strip tags this app actually
+// treats as markup (see html-tag-allowlist.ts); anything else stays as the
+// literal text it is.
 const remarkStripHtml: Plugin<[], Root> = () => (tree) => {
   visit(tree, "html", (node: any) => {
     node.type = "text";
-    // Loop until stable: a single pass of /<[^>]*>/g can leave behind
-    // fragments that reassemble into another tag (e.g. `<scr<script>ipt>`).
-    let value = node.value || "";
-    let prev: string;
-    do {
-      prev = value;
-      value = value.replace(/<[^>]*>/g, "");
-    } while (value !== prev);
-    node.value = value;
+    node.value = stripKnownHtmlTags(node.value || "");
   });
 };
 
@@ -252,9 +253,12 @@ export interface DocumentViewerProps {
   /** The raw markdown source to render. Should NOT be HTML; use a
    *  read-only TipTap surface for HTML-stored legacy docs. */
   content: string;
-  /** Called when the user clicks a `[[WikiLink]]`. Receives the title
-   *  (post-trim), not the optional display alias. */
-  onWikiLinkClick?: (title: string) => void;
+  /** Called when the user clicks a `[[WikiLink]]`. `title` is the raw
+   *  target (post-trim) — for aliased links this is the internal node id,
+   *  not what the reader sees. `displayText` is the human-readable alias,
+   *  so callers building a "create this document" fallback can use a
+   *  readable title instead of the internal id. */
+  onWikiLinkClick?: (title: string, displayText?: string) => void;
   /** Hover-preview lookup for a wiki-link target; return null for no
    *  preview (unknown target). Synchronous — caller caches the list. */
   previewFor?: (target: string) => { title: string; snippet: string } | null;
@@ -342,20 +346,27 @@ export function DocumentViewer({
             wikilink: ({ children, ...props }: any) => {
               const target = (props["data-wiki-target"] ?? "") as string;
               const display = (props["data-wiki-display"] ?? target) as string;
+              const exists = !wikiLinkIsBroken(target, previewFor);
               return (
                 <button
                   type="button"
                   className={
                     plainLinks
                       ? "bg-transparent border-0 p-0 m-0 cursor-pointer text-primary underline underline-offset-2 decoration-primary/40 hover:decoration-primary font-normal"
-                      : "wiki-link wiki-link-exists bg-transparent border-0 p-0 m-0 cursor-pointer"
+                      : `wiki-link ${exists ? "wiki-link-exists" : "wiki-link-broken"} bg-transparent border-0 p-0 m-0 cursor-pointer`
                   }
-                  title={previewFor ? undefined : `Open "${target}"`}
+                  title={
+                    !previewFor
+                      ? `Open "${target}"`
+                      : exists
+                        ? undefined
+                        : `"${display}" not found in this nest`
+                  }
                   onClick={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
                     hidePreview();
-                    onWikiLinkClick?.(target);
+                    onWikiLinkClick?.(target, display);
                   }}
                   onMouseEnter={(e) =>
                     showPreview(target, e.clientX, e.clientY)

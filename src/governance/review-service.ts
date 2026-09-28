@@ -608,6 +608,12 @@ export async function getReviewQueue(params: {
   nestIds?: string[];
   status?: ReviewRequestStatus | ReviewRequestStatus[];
   stewardEmail?: string;
+  // SQL-level "requested by" filter (distinct from stewardEmail, which
+  // post-filters by steward resolution). Used by /me/work to get an exact
+  // COUNT of a caller's own pending requests in nests they can't otherwise
+  // approve — a JS post-filter over one paginated page can't produce an
+  // accurate total.
+  requestedByEmail?: string;
   limit?: number;
   offset?: number;
 }): Promise<{ requests: ReviewRequest[]; total: number }> {
@@ -640,6 +646,11 @@ export async function getReviewQueue(params: {
       `status IN (${statuses.map(() => "?").join(",")})`,
     );
     args.push(...statuses);
+  }
+
+  if (params.requestedByEmail) {
+    whereClauses.push("requested_by = ?");
+    args.push(params.requestedByEmail);
   }
 
   const where =

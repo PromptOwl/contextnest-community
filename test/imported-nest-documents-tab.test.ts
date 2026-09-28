@@ -8,6 +8,8 @@
  * an empty "drag files here" dropzone over a nest that plainly has content.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import {
   setupTestEnv,
   createTestApp,
@@ -105,5 +107,29 @@ describe("imported nest — documents tab data", () => {
       "market/recipes/recipe-competitive",
       "market/recipes/recipe-market-sizing",
     ]);
+  });
+});
+
+describe("imported nest — uploads dir is not a folder", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  afterAll(() => env.cleanup());
+
+  it("keeps <nest>/assets out of the census and the folder tree", async () => {
+    env = setupTestEnv();
+    const app = await createTestApp("key");
+    const owner = await registerUser(app, "owner@assets.test");
+    const { data } = await jsonRequest(
+      app, "POST", "/nests/import",
+      { name: "flat", files: [mdFile("guides/one.md", "One")] },
+      owner.apiKey,
+    );
+    const nestId = data.nest.id;
+    // A flat nest's root is the nest dir, so uploads land beside its folders.
+    mkdirSync(join(env.dataDir, "nests", nestId, "assets"), { recursive: true });
+
+    const census = await jsonRequest(app, "GET", `/nests/${nestId}/census`, undefined, owner.apiKey);
+    const folders = await jsonRequest(app, "GET", `/nests/${nestId}/folders`, undefined, owner.apiKey);
+    expect(census.data.census.folders.map((f: any) => f.path)).toEqual(["guides"]);
+    expect(folders.data.folders.map((f: any) => f.path)).toEqual(["guides"]);
   });
 });

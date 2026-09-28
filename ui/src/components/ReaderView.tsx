@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { ChevronRight, ChevronDown, ChevronLeft, Menu, BookOpen, Folder, FolderOpen, FileText, Search, X } from "lucide-react";
 import { FolderTree } from "./FolderTree";
 import { DocumentViewer } from "./DocumentViewer";
@@ -8,6 +8,7 @@ import { conventionKey, isHomeNode } from "@/lib/nest-caps";
 import { extractHeadings } from "@/lib/toc";
 import { breadcrumbFor, commonRootFolder, neighbours, readingOrder, resolveWikiTarget, sectionLabel, stripLeadingTitle, displayTitle, orderWithinFolder, ancestorsOf, READER_SIDE_COLUMN_CLASS, READER_CARD_CLASS, searchNodes } from "@/lib/reader";
 import { relTime } from "@/lib/dates";
+import { brandingToCssVars, brandedDocumentTitle, cssUrl, isBranded, type NestBranding } from "@/lib/branding";
 
 /**
  * Public Docs Reader Mode — the read-only face of a nest.
@@ -54,6 +55,8 @@ export interface ReaderViewProps {
   loadedFolders?: Set<string>;
   /** Serve approved bodies only — an owner previewing what a visitor gets. */
   approvedOnly?: boolean;
+  /** Per-nest branding (nest.branding). Null/absent → the reader renders exactly as unbranded. */
+  branding?: NestBranding | null;
 }
 
 export function ReaderView({
@@ -69,7 +72,9 @@ export function ReaderView({
   loadingFolders,
   loadedFolders,
   approvedOnly = false,
+  branding = null,
 }: ReaderViewProps) {
+  const branded = isBranded(branding);
   const homeNode = useMemo(() => {
     if (readerHomeNode) {
       const exact = nodes.find((n) => isHomeNode(n, readerHomeNode));
@@ -92,6 +97,10 @@ export function ReaderView({
   useEffect(() => {
     if (!selectedId && homeNode) setSelectedIdState(homeNode.id);
   }, [homeNode, selectedId]);
+  // The shell can move the reader too (header brand → home), so follow `?doc=`.
+  useEffect(() => {
+    setSelectedIdState(initialDoc ?? homeNode?.id ?? null);
+  }, [initialDoc]);
 
   // Per-node markdown cache; an in-flight set so the two effects that can
   // both ask for the same node on first mount don't fetch it twice.
@@ -226,13 +235,14 @@ export function ReaderView({
     />
   );
 
-  return (
+  const grid = (
     // Desktop: the three cards fill the viewport below the shell header
     // (4rem + 1px border, 1rem main padding each side, 3rem footer) and
     // scroll on their own — the page itself never scrolls. --reader-offset
-    // lets a wrapper (the preview banner) claim part of that height. Phone:
+    // lets a wrapper (the preview banner) claim part of that height, and
+    // --reader-banner the branded banner (unset — 0 — when unbranded). Phone:
     // cards stack and the page scrolls.
-    <div className="mx-auto w-full max-w-[88rem] lg:grid lg:h-[calc(100vh-9.25rem-var(--reader-offset,0px))] lg:grid-cols-[16rem_minmax(0,1fr)_14rem] lg:gap-5">
+    <div className="mx-auto w-full max-w-[88rem] lg:grid lg:h-[calc(100vh-9.25rem-var(--reader-offset,0px)-var(--reader-banner,0px))] lg:grid-cols-[16rem_minmax(0,1fr)_14rem] lg:gap-5">
       {/* Nav — a card that scrolls on its own at desktop width, a disclosure above the article on a phone. */}
       <aside className={READER_SIDE_COLUMN_CLASS + " " + READER_CARD_CLASS + " mb-4 lg:mb-0"}>
         <button
@@ -433,6 +443,94 @@ export function ReaderView({
         </nav>
       </aside>
     </div>
+  );
+
+  // Unbranded: exactly the reader as it was — no wrapper, no variables.
+  if (!branded) return grid;
+
+  // The banner is the landing page's hero: on the home page (or every page
+  // when the nest has no home page), never on the pages a reader is working
+  // through, where it would only push the article down.
+  const showBanner =
+    !!(branding!.banner_url || branding!.banner_headline) && (!homeNode || selectedId === homeNode.id);
+  return (
+    <div
+      data-reader-branded=""
+      style={{
+        ...(brandingToCssVars(branding, readerTheme()) as CSSProperties),
+        ...(showBanner ? ({ "--reader-banner": "11rem" } as CSSProperties) : {}),
+      }}
+    >
+      <BrandTitle branding={branding!} nestName={nestName} pageTitle={selectedNode ? title : null} />
+      {showBanner && <ReaderBanner branding={branding!} />}
+      {grid}
+    </div>
+  );
+}
+
+/** "dark" when the app shell is in dark mode (a `.dark` class on <html>). */
+function readerTheme(): "light" | "dark" {
+  return typeof document !== "undefined" && document.documentElement.classList.contains("dark") ? "dark" : "light";
+}
+
+/**
+ * Tab title and favicon while a branded reader is on screen; both are put back
+ * when it unmounts (leaving the reader, exiting an owner's preview).
+ */
+function BrandTitle({ branding, nestName, pageTitle }: { branding: NestBranding; nestName: string; pageTitle: string | null }) {
+  const next = brandedDocumentTitle(pageTitle, branding, nestName);
+  useEffect(() => {
+    const prev = document.title;
+    document.title = next;
+    return () => {
+      document.title = prev;
+    };
+  }, [next]);
+  const favicon = branding.favicon_url || null;
+  useEffect(() => {
+    if (!favicon) return;
+    const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (!link) return;
+    const prev = link.href;
+    link.href = favicon;
+    return () => {
+      link.href = prev;
+    };
+  }, [favicon]);
+  return null;
+}
+
+/**
+ * The branded hero. Bounded height (7rem phone → 10rem desktop — the reader's
+ * desktop grid subtracts 11rem for it via --reader-banner). With an image the
+ * text sits on a dark scrim, so white is always legible; without one the
+ * banner is the accent itself with its auto-contrast foreground.
+ */
+function ReaderBanner({ branding }: { branding: NestBranding }) {
+  const img = branding.banner_url || null;
+  const hasAccent = !!branding.accent_color;
+  return (
+    <section
+      aria-label={branding.banner_headline || branding.site_title || "Banner"}
+      className="relative mx-auto mb-4 flex h-28 w-full max-w-[88rem] flex-col justify-end overflow-hidden rounded-lg border px-5 py-4 sm:h-36 sm:px-8 lg:h-40"
+      style={
+        img
+          ? { backgroundImage: cssUrl(img), backgroundSize: "cover", backgroundPosition: "center", color: "#ffffff" }
+          : {
+              background: hasAccent ? "var(--reader-accent)" : "hsl(var(--primary))",
+              color: hasAccent ? "var(--reader-accent-fg)" : "hsl(var(--primary-foreground))",
+            }
+      }
+    >
+      {img && <div aria-hidden className="absolute inset-0 bg-gradient-to-t from-black/65 via-black/25 to-black/0" />}
+      {img && hasAccent && <div aria-hidden className="absolute inset-x-0 bottom-0 h-1" style={{ background: "var(--reader-accent)" }} />}
+      {branding.banner_headline && (
+        <h2 className="relative max-w-3xl truncate text-xl font-semibold tracking-tight sm:text-2xl lg:text-3xl">{branding.banner_headline}</h2>
+      )}
+      {branding.banner_subtext && (
+        <p className="relative mt-1 line-clamp-2 max-w-3xl text-sm opacity-90 sm:text-base">{branding.banner_subtext}</p>
+      )}
+    </section>
   );
 }
 

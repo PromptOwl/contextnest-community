@@ -1,6 +1,6 @@
 import { Extension } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { classifyVideoText, type VideoMatch } from "../../../lib/video-embed";
 
@@ -112,6 +112,39 @@ export function collectVideoPreviewDecorations(
 }
 
 /**
+ * The video player is just a decoration over a plain paragraph whose text is
+ * the URL — so a Backspace at the start of the paragraph right after it hits
+ * ProseMirror's default `joinBackward`, which merges the two paragraphs and
+ * appends the typed text straight onto the URL, corrupting it (and visually
+ * destroying the player, since the merged paragraph no longer matches
+ * classifyVideoText). This finds that case — empty selection, caret at the
+ * very start of a text block, immediately preceded by a video paragraph — so
+ * the caller can select the whole video (returned `pos` is its start) instead
+ * of merging into it. Exported and doc-only (no view/DOM needed) so it's
+ * unit-testable the same way collectVideoPreviewDecorations is.
+ */
+export function findBackspaceIntoVideo(
+  doc: ProseMirrorNode,
+  from: number,
+): { pos: number } | null {
+  const $from = doc.resolve(from);
+  if ($from.parentOffset !== 0) return null;
+  const before = $from.before($from.depth);
+  if (before <= 0) return null;
+  const prevNode = doc.resolve(before).nodeBefore;
+  if (!prevNode || prevNode.type.name !== "paragraph") return null;
+  if (prevNode.childCount !== 1) return null;
+  const child = prevNode.firstChild;
+  if (!child?.isText || !child.text) return null;
+  const linkMark = child.marks.find((m) => m.type.name === "link");
+  const match = classifyVideoText(
+    child.text,
+    linkMark ? (linkMark.attrs.href as string | null) : undefined,
+  );
+  return match ? { pos: before - prevNode.nodeSize } : null;
+}
+
+/**
  * uploadAndInsertMedia (in this directory's MarkdownEditor.tsx) inserts an
  * uploaded video as a paragraph whose sole content is the bare asset URL —
  * DocumentViewer.tsx's read view upgrades that to a <video> player, but the
@@ -136,6 +169,24 @@ export const VideoPreview = Extension.create({
               state.doc,
               collectVideoPreviewDecorations(state.doc),
             );
+          },
+          // Backspace right after a video selects the whole video, like an
+          // image, instead of merging into it — see findBackspaceIntoVideo.
+          // Putting the caret in the hidden URL (the old fix) let the next
+          // keystroke edit the URL and kill the player. A second Backspace
+          // deletes the video cleanly; an empty line below it goes first.
+          handleKeyDown(view, event) {
+            if (event.key !== "Backspace") return false;
+            const { state } = view;
+            if (!state.selection.empty) return false;
+            const target = findBackspaceIntoVideo(state.doc, state.selection.from);
+            if (!target) return false;
+            const { $from } = state.selection;
+            const tr = state.tr;
+            if ($from.parent.content.size === 0) tr.delete($from.before(), $from.after());
+            tr.setSelection(NodeSelection.create(tr.doc, target.pos));
+            view.dispatch(tr.scrollIntoView());
+            return true;
           },
         },
       }),

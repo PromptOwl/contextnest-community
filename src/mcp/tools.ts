@@ -2234,23 +2234,11 @@ async function runTool(
         const { createGrant } = await import("../governance/grants-service.js");
         // Resolve the grantee — mint a placeholder invited user if unknown,
         // same as collaborator/document sharing.
-        const db = (await import("../db/client.js")).getDb();
         const { normalizeEmail } = await import("../shared/email.js");
         const e = normalizeEmail(String(args.email || ""));
         if (!e) return "email is required.";
-        let row = (await db.get("SELECT id FROM users WHERE LOWER(email) = ?", [e])) as
-          | { id: string }
-          | undefined;
-        if (!row) {
-          const { hashPassword } = await import("../auth/keys.js");
-          const { v4: uuid } = await import("uuid");
-          const id = uuid();
-          await db.run(
-            "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-            [id, e, null, await hashPassword(uuid())],
-          );
-          row = { id };
-        }
+        const { findOrCreateInvitedUser } = await import("../auth/invited-user.js");
+        const row = await findOrCreateInvitedUser(e, { invitedBy: ctx.userEmail });
         await createGrant({
           nestId: ctx.nestId,
           targetType: targetType as any,

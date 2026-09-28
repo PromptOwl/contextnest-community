@@ -16,6 +16,8 @@ import { visibleDocuments, documentsTabIsEmpty, hasActiveFilters as hasActiveFil
 import { documentFacets } from "../../lib/document-facets";
 import { activityTimestamp } from "../../lib/node-sort";
 import { linkHealth } from "../../lib/link-health";
+import { findBacklinks, inboundLinkWarning } from "../../lib/backlinks";
+import { nodeTypeSupportsMove } from "../../lib/document-actions";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
   parseSavedFilters, serializeSavedFilters,
@@ -170,6 +172,12 @@ export function DocumentsTab({
   const [deletionTarget, setDeletionTarget] = useState<any | null>(null);
   // Node pending a plain delete confirm (for callers who can delete outright).
   const [deleteNodeTarget, setDeleteNodeTarget] = useState<any | null>(null);
+  // Its confirm warns about docs linking to it, which needs every body — read
+  // the (shared, cached) full listing only while that dialog is open.
+  const deleteLinks = useQuery({ ...reads.nodes(nestId), enabled: !!deleteNodeTarget });
+  const deleteBacklinks = deleteNodeTarget
+    ? findBacklinks(deleteLinks.data?.nodes ?? [], deleteNodeTarget).length
+    : 0;
 
   // Folder pending deletion (admin) or a deletion request (everyone else).
   const [folderTarget, setFolderTarget] = useState<
@@ -400,7 +408,9 @@ export function DocumentsTab({
     if (canManage) {
       const { deleted } = await api.deleteFolder(nestId, folder.path);
       toast.success(
-        `Deleted ${folder.label} — ${deleted} document${deleted === 1 ? "" : "s"}`,
+        deleted === 0
+          ? `Deleted ${folder.label}`
+          : `Deleted ${folder.label} — ${deleted} document${deleted === 1 ? "" : "s"}`,
       );
     } else {
       await api.requestTargetDeletion(nestId, "folder", folder.path, reason);
@@ -1137,6 +1147,7 @@ export function DocumentsTab({
                   // so reorganizing an under-review doc stays possible.
                   const canMove =
                     canEditNode(node) &&
+                    nodeTypeSupportsMove(nodeType) &&
                     (node.status !== "pending_review" ||
                       isOwner ||
                       isAdmin ||
@@ -1655,7 +1666,9 @@ export function DocumentsTab({
                               (canManage || !folderFlagPending(node.path)) && (
                               <button
                                 type="button"
-                                className={`rounded p-0.5 opacity-0 group-hover/fh:opacity-100 ${
+                                // An empty folder's only useful action is
+                                // removing it, so it shows without a hover.
+                                className={`rounded p-0.5 ${node.total === 0 ? "" : "opacity-0"} group-hover/fh:opacity-100 focus-visible:opacity-100 ${
                                   canManage
                                     ? "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
                                     : "text-muted-foreground hover:text-primary hover:bg-primary/10"
@@ -1968,7 +1981,11 @@ export function DocumentsTab({
               : `Request deletion of "${folderTarget.label}"`
           }
           description={
-            canManage
+            folderTarget.total === 0
+              ? canManage
+                ? "This folder is empty — deleting it just removes it from the tree."
+                : "A nest admin reviews this. The folder is empty, so nothing else is removed."
+              : canManage
               ? `This deletes all ${folderTarget.total} document${folderTarget.total === 1 ? "" : "s"} in this folder and its subfolders, with their history, comments and annotations. It cannot be undone.`
               : `A nest admin reviews this. Honouring it deletes all ${folderTarget.total} document${folderTarget.total === 1 ? "" : "s"} in this folder. Nothing is removed yet.`
           }
@@ -1987,6 +2004,7 @@ export function DocumentsTab({
           onOpenChange={(o) => !o && setDeleteNodeTarget(null)}
           title={`Delete "${deleteNodeTarget.title}"?`}
           description="This removes the document, its version history, comments and annotations. It cannot be undone."
+          warning={inboundLinkWarning(deleteBacklinks)}
           confirmLabel="Delete document"
           destructive
           onConfirm={handleDeleteNode}

@@ -31,7 +31,11 @@ import { isStewardshipEnabled } from "../nests/service.js";
 import { countThreadsByNode } from "../annotations/service.js";
 import { permissionLevel, isPublicReader } from "../shared/access.js";
 import { exportNestBundle } from "../nests/bundle-service.js";
-import { buildNestGraph, extractWikiTargets } from "./graph-service.js";
+import {
+  buildNestGraph,
+  extractContextTargets,
+  extractWikiTargets,
+} from "./graph-service.js";
 import {
   listNodesForCaller,
   listNestFolders,
@@ -369,10 +373,18 @@ queryRoutes.post("/context", async (c) => {
     nodesTraversed = result.nodesTraversed;
   }
 
-  // Hop-expand title matches over the wikilink graph (both directions) so
-  // "[[Title]] + hops" pulls the same neighborhood the engine would for a
-  // selector match — and the same one the graph view highlights.
-  if (titleMatches.length > 0 && hops > 0) {
+  // Hop-expand over the link graph (both directions) — [[wikilinks]] AND
+  // contextnest:// links — from the title matches AND the selector's own
+  // matches. The engine call above runs full:true, and the engine's full mode
+  // ignores `hops`, so without seeding from `documents` here a selector's
+  // advertised hop expansion was a no-op. hops:0 skips this block entirely,
+  // so hops:0 results are unchanged. Same neighbourhood the graph view draws.
+  // De-duplicated by id: a doc can match both the selector and a [[Title]]
+  // part (`[[Hub Note]] | #hub`), and should seed the frontier once.
+  const hopSeeds = [
+    ...new Map([...documents, ...titleMatches].map((d) => [d.id, d])).values(),
+  ];
+  if (hopSeeds.length > 0 && hops > 0) {
     const byTitle = new Map(
       allDocs.map((d: ContextNode) => [
         String(d.frontmatter.title || "").toLowerCase(),
@@ -393,9 +405,14 @@ queryRoutes.post("/context", async (c) => {
         const t = byId.get(target) ?? byTitle.get(target.toLowerCase());
         if (t && t.id !== d.id) link(d.id, t.id);
       }
+      // contextnest:// targets are ids — resolve by id only.
+      for (const target of extractContextTargets(d.body || "")) {
+        const t = byId.get(target);
+        if (t && t.id !== d.id) link(d.id, t.id);
+      }
     }
-    const seen = new Set(titleMatches.map((d) => d.id));
-    let frontier = titleMatches.map((d) => d.id);
+    const seen = new Set(hopSeeds.map((d) => d.id));
+    let frontier = hopSeeds.map((d) => d.id);
     for (let depth = 0; depth < hops && frontier.length; depth++) {
       const next: string[] = [];
       for (const id of frontier) {

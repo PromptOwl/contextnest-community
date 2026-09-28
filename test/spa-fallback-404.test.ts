@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
-import { setupTestEnv, createTestApp } from "./helpers";
+import { setupTestEnv, createTestApp, registerUser, authed } from "./helpers";
 
 // The SPA catch-all used to answer EVERY unmatched GET with the index.html
 // shell and a 200. Non-browser callers parse what they get, so a mistyped API
@@ -113,5 +113,33 @@ describe("unmatched-route fallback", () => {
     });
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("<!DOCTYPE html");
+  });
+
+  // GET /teams is both the Teams API and the browser URL for the client's
+  // Teams page — a hard reload used to be answered by the API's raw
+  // `{"teams": [...]}` instead of the app shell. The guard in app.ts checks
+  // the same document-navigation signal as the catch-all above, ahead of the
+  // teamRoutes mount.
+  it("serves the SPA shell for a browser navigation to /teams", async () => {
+    const app = await createTestApp("key");
+    const res = await app.request("http://localhost/teams", {
+      headers: {
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Sec-Fetch-Mode": "navigate",
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("<!DOCTYPE html");
+  });
+
+  it("still answers GET /teams with JSON for the app's own API call", async () => {
+    const app = await createTestApp("key");
+    const user = await registerUser(app, "teams-guard@example.com");
+    const res = await app.request("http://localhost/teams", {
+      headers: { Accept: "application/json", ...authed(user.apiKey) },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    await expect(res.json()).resolves.toEqual({ teams: [] });
   });
 });
