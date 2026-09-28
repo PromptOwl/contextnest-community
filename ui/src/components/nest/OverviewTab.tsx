@@ -12,7 +12,7 @@
  * Documents tab makes. Actions are callbacks into NestView.
  */
 import { useEffect, useMemo, useState, type ComponentType, type ReactNode } from "react";
-import { ArrowUpRight, ChevronDown, ChevronRight, FileText, Folder, FolderOpen, Loader2, Plus, Sparkles, Upload } from "lucide-react";
+import { ArrowUpRight, ChevronDown, ChevronRight, FileText, Folder, FolderOpen, Loader2, Plus, Sparkles, Trash2, Upload } from "lucide-react";
 import type { KnownFolder } from "../FolderTree";
 import { FolderTree, prettyFolderPath } from "../FolderTree";
 import { typePill } from "./node-display";
@@ -52,6 +52,8 @@ interface Props {
   onImport?: () => void;
   /** Omitted when the header doesn't offer Add with AI either (read-only). */
   onAddWithAI?: () => void;
+  /** Delete (or request deletion of) a folder; omitted for read-only callers. */
+  onDeleteFolder?: (folder: { path: string; label: string; total: number }) => void;
 }
 
 /** Top-level folders opened on arrival, and documents shown per folder before "View all". */
@@ -91,6 +93,7 @@ export function OverviewTab({
   onOpenReview,
   onImport,
   onAddWithAI,
+  onDeleteFolder,
 }: Props) {
   // Folder rows: open once loaded, closed until then; a click wins either way.
   const [overrides, setOverrides] = useState<Map<string, boolean>>(() => new Map());
@@ -185,6 +188,11 @@ export function OverviewTab({
                     onToggle={() => toggle(node.path)}
                     onOpenFolder={() => onOpenFolder(node.path)}
                     onNewDoc={canWrite ? () => onOpenDocument("new", { folder: node.path }) : undefined}
+                    onDelete={
+                      onDeleteFolder
+                        ? () => onDeleteFolder({ path: node.path, label: prettyFolderPath(node.path), total: node.total })
+                        : undefined
+                    }
                   />
                 )}
                 renderDoc={(n) =>
@@ -253,6 +261,7 @@ function FolderRow({
   onToggle,
   onOpenFolder,
   onNewDoc,
+  onDelete,
 }: {
   label: string;
   path: string;
@@ -262,6 +271,7 @@ function FolderRow({
   onToggle: () => void;
   onOpenFolder: () => void;
   onNewDoc?: () => void;
+  onDelete?: () => void;
 }) {
   const where = prettyFolderPath(path);
   const expandable = total > 0;
@@ -293,6 +303,11 @@ function FolderRow({
       <button type="button" onClick={onOpenFolder} className={ROW_ACTION} title={`Open ${where} in Documents`} aria-label={`Open ${where} in Documents`}>
         <ArrowUpRight className="h-3.5 w-3.5" />
       </button>
+      {onDelete && (
+        <button type="button" onClick={onDelete} className={ROW_ACTION + " hover:text-destructive"} title={`Delete ${where}`} aria-label={`Delete ${where}`}>
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      )}
       <span className={META + " pr-2"} aria-label={`${total} document${total === 1 ? "" : "s"}`}>
         {total}
       </span>

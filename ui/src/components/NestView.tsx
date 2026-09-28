@@ -54,6 +54,7 @@ import {
 import { foldersCoveredBy } from "../lib/reader";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
+import { FolderDeleteDialog, type FolderDeleteTarget } from "./nest/FolderDeleteDialog";
 // Each tab is its own chunk, loaded when first opened.
 const ExternalEditsTab = lazyChunk(() => import("./nest/ExternalEditsTab").then((m) => ({ default: m.ExternalEditsTab })));
 const StewardsTab = lazyChunk(() => import("./nest/StewardsTab").then((m) => ({ default: m.StewardsTab })));
@@ -1050,6 +1051,8 @@ export function NestView({
   const [importing, setImporting] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [importMenuOpen, setImportMenuOpen] = useState(false);
+  // Folder picked for deletion from the Overview index.
+  const [overviewDeleteFolder, setOverviewDeleteFolder] = useState<FolderDeleteTarget | null>(null);
   // Phone width: Share folds into the ⋮ menu so the header actions keep one row.
   const isPhone = useMediaQuery("(max-width: 639px)");
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
@@ -1791,8 +1794,25 @@ export function NestView({
             onImport={canEditDocs && !isReadOnly ? () => setImportMenuOpen(true) : undefined}
             // Same gate as the header's Add with AI button.
             onAddWithAI={!isReadOnly ? () => setShowGenerate(true) : undefined}
+            // Same gate as the Documents tree's folder trash icon.
+            onDeleteFolder={!isReadOnly && (canManage || canEditDocs) ? setOverviewDeleteFolder : undefined}
           />
           </Suspense>
+          {overviewDeleteFolder && (
+            <FolderDeleteDialog
+              nestId={nestId}
+              folder={overviewDeleteFolder}
+              canManage={canManage}
+              onClose={() => setOverviewDeleteFolder(null)}
+              onDone={() => {
+                // Don't leave Documents filtered to a folder that's gone.
+                const gone = overviewDeleteFolder.path;
+                if (canManage && folderFilter && (folderFilter === gone || folderFilter.startsWith(gone + "/")))
+                  setFolderFilter(null);
+                fetchData();
+              }}
+            />
+          )}
         </TabsContent>
 
         <TabsContent value="documents" className="space-y-4">

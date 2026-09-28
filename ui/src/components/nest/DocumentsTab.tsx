@@ -17,6 +17,7 @@ import { documentFacets } from "../../lib/document-facets";
 import { activityTimestamp } from "../../lib/node-sort";
 import { linkHealth } from "../../lib/link-health";
 import { findBacklinks, inboundLinkWarning } from "../../lib/backlinks";
+import { FolderDeleteDialog } from "./FolderDeleteDialog";
 import { nodeTypeSupportsMove } from "../../lib/document-actions";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
@@ -398,24 +399,6 @@ export function DocumentsTab({
   const handleRequestDeletion = async (reason: string) => {
     await api.requestNodeDeletion(nestId, deletionTarget!.id, reason);
     toast.success("Deletion requested — a nest admin will review it");
-    fetchData();
-  };
-
-  // Folder: admins delete it outright (every doc under it), everyone else
-  // raises a request. One handler — the dialog it came from set the mode.
-  const handleFolderDeletion = async (reason: string) => {
-    const folder = folderTarget!;
-    if (canManage) {
-      const { deleted } = await api.deleteFolder(nestId, folder.path);
-      toast.success(
-        deleted === 0
-          ? `Deleted ${folder.label}`
-          : `Deleted ${folder.label} — ${deleted} document${deleted === 1 ? "" : "s"}`,
-      );
-    } else {
-      await api.requestTargetDeletion(nestId, "folder", folder.path, reason);
-      toast.success("Deletion requested — a nest admin will review it");
-    }
     fetchData();
   };
 
@@ -895,6 +878,22 @@ export function DocumentsTab({
                       title={`New document in this folder`}
                     >
                       <Plus className="h-3.5 w-3.5 mr-1" /> New here
+                    </Button>
+                  )}
+                  {/* An empty folder (census total, not just filtered out) can
+                      go right from here — same gate as the tree's trash icon. */}
+                  {knownFolders.find((f) => f.path === folderFilter)?.total === 0 &&
+                    (canManage || (canEditDocs && !folderFlagPending(folderFilter))) && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive"
+                      onClick={() =>
+                        setFolderTarget({ path: folderFilter, label: prettyFolderPath(folderFilter), total: 0 })
+                      }
+                      data-testid="delete-filtered-folder"
+                    >
+                      <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete folder
                     </Button>
                   )}
                 </div>
@@ -1972,29 +1971,18 @@ export function DocumentsTab({
       )}
 
       {folderTarget && (
-        <ReasonDialog
-          open
-          onOpenChange={(o) => !o && setFolderTarget(null)}
-          title={
-            canManage
-              ? `Delete "${folderTarget.label}"?`
-              : `Request deletion of "${folderTarget.label}"`
-          }
-          description={
-            folderTarget.total === 0
-              ? canManage
-                ? "This folder is empty — deleting it just removes it from the tree."
-                : "A nest admin reviews this. The folder is empty, so nothing else is removed."
-              : canManage
-              ? `This deletes all ${folderTarget.total} document${folderTarget.total === 1 ? "" : "s"} in this folder and its subfolders, with their history, comments and annotations. It cannot be undone.`
-              : `A nest admin reviews this. Honouring it deletes all ${folderTarget.total} document${folderTarget.total === 1 ? "" : "s"} in this folder. Nothing is removed yet.`
-          }
-          // Admins confirm; a request must say why.
-          label={canManage ? undefined : "Why should it be deleted?"}
-          placeholder="e.g. superseded by the new API docs"
-          confirmLabel={canManage ? "Delete folder" : "Request deletion"}
-          destructive={canManage}
-          onConfirm={handleFolderDeletion}
+        <FolderDeleteDialog
+          nestId={nestId}
+          folder={folderTarget}
+          canManage={canManage}
+          onClose={() => setFolderTarget(null)}
+          onDone={() => {
+            // A deleted folder (or its parent) can't stay the active filter.
+            const gone = folderTarget.path;
+            if (canManage && folderFilter && (folderFilter === gone || folderFilter.startsWith(gone + "/")))
+              setFolderFilter(null);
+            fetchData();
+          }}
         />
       )}
 
