@@ -171,7 +171,7 @@ nodeRoutes.post("/", async (c) => {
       nestId,
       userId: c.get("userId"),
       keyId,
-      keyLabel: c.get("apiKeyLabel"),
+      keyLabel: c.get("apiKeyLabel") ?? null,
       userEmail: authorEmail,
       payload: {
         documents: [

@@ -53,7 +53,6 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
       // Cookie sessions carry no API key — a pending row raised by the browser
       // is attributed to the user, not a key (key_id null = all their keys).
       c.set("apiKeyId", null);
-      c.set("apiKeyLabel", null);
       return next();
     }
   }
@@ -79,7 +78,7 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
       // Attribute the request to the exact key it came in on, so pending-push
       // rows record who pushed and the allowlist can key on the credential.
       c.set("apiKeyId", record.id);
-      c.set("apiKeyLabel", record.label ?? null);
+      if (record.label) c.set("apiKeyLabel", record.label);
       return next();
     }
   }

@@ -58,7 +58,7 @@ pushRoutes.post("/publish", async (c) => {
     nestId,
     userId,
     keyId,
-    keyLabel: c.get("apiKeyLabel"),
+    keyLabel: c.get("apiKeyLabel") ?? null,
     userEmail: email,
     payload: body,
   });
