@@ -135,7 +135,11 @@ export function OverviewTab({
       {/* The index — the reader's article card. */}
       <section aria-labelledby="nest-overview-heading" className={"min-w-0 " + READER_CARD_CLASS + " px-5 py-6 sm:px-8 sm:py-8"}>
         {empty ? (
-          <EmptyNest canWrite={canWrite} onOpenDocument={onOpenDocument} onImport={onImport} onAddWithAI={onAddWithAI} />
+          <>
+            {/* The description is the nest's lede whether or not it has pages yet. */}
+            {description && <p className="mb-6 max-w-[65ch] text-[17px] leading-7 text-muted-foreground" data-testid="nest-overview-description">{description}</p>}
+            <EmptyNest canWrite={canWrite} onOpenDocument={onOpenDocument} onImport={onImport} onAddWithAI={onAddWithAI} />
+          </>
         ) : (
           <>
             {/* The reader's page header: title, lede, provenance. */}
@@ -338,7 +342,7 @@ function MoreRow({ more, onOpen }: { more: MoreMarker["more"]; onOpen: () => voi
 
 /**
  * A nest with nothing in it: the three ways a first page gets here. Import
- * opens the nest's own Import menu, so any source it grows (PDF upload) is
+ * opens the nest's own Import dialog, so any source it grows (PDF upload) is
  * offered here without a second list of items.
  */
 function EmptyNest({
