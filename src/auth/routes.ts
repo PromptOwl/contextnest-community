@@ -1341,7 +1341,12 @@ authRoutes.get("/teammates", async (c) => {
   const teammates = await db.all(
     `SELECT u.id, u.email, u.name, u.is_invited,
          (SELECT COUNT(*) FROM api_keys WHERE user_id = u.id) as key_count,
-         (SELECT MAX(last_used_at) FROM api_keys WHERE user_id = u.id) as last_active
+         -- Latest of API-key use and web-session activity (same text format).
+         (SELECT MAX(t) FROM (
+            SELECT last_used_at AS t FROM api_keys WHERE user_id = u.id
+            UNION ALL
+            SELECT last_seen_at FROM sessions WHERE user_id = u.id
+          ) activity) as last_active
        FROM users u
        WHERE u.id != ?
        ORDER BY u.created_at DESC`,

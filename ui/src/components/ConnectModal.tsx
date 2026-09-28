@@ -28,6 +28,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { ReasonDialog } from "./governance";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -114,6 +115,7 @@ export function ConnectModal({
     key: string;
     kind: "generated" | "rotated";
   } | null>(null);
+  const [rotateTarget, setRotateTarget] = useState<{ id: string; name: string } | null>(null);
   // This nest already has a key → show it with Rotate instead of minting another.
   const existingNestKeys = (keyData?.keys ?? []).filter(
     (k) => k.nest_id === nestId,
@@ -351,7 +353,9 @@ export function ConnectModal({
                       variant="outline"
                       className="shrink-0"
                       disabled={mintingNestKey !== null}
-                      onClick={() => mintNestKey(k.id)}
+                      onClick={() =>
+                        setRotateTarget({ id: k.id, name: k.label || "Untitled key" })
+                      }
                     >
                       {mintingNestKey === k.id ? (
                         <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
@@ -889,7 +893,38 @@ export function ConnectModal({
           onClose={() => setNestKey(null)}
         />
       )}
+      <RotateKeyConfirm
+        target={rotateTarget}
+        onConfirm={(id) => mintNestKey(id)}
+        onClose={() => setRotateTarget(null)}
+      />
     </>
+  );
+}
+
+/** Rotating kills the old key on the spot — ask first, naming the key. */
+export function RotateKeyConfirm({
+  target,
+  onConfirm,
+  onClose,
+}: {
+  target: { id: string; name: string } | null;
+  onConfirm: (id: string) => Promise<unknown>;
+  onClose: () => void;
+}) {
+  if (!target) return null;
+  return (
+    <ReasonDialog
+      open
+      onOpenChange={(open) => !open && onClose()}
+      title={`Rotate "${target.name}"?`}
+      description="The current key stops working immediately — anything still using it needs the new one."
+      confirmLabel="Rotate key"
+      destructive
+      onConfirm={async () => {
+        await onConfirm(target.id);
+      }}
+    />
   );
 }
 

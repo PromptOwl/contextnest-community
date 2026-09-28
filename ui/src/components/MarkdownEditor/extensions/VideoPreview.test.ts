@@ -25,11 +25,11 @@ function paragraph(text: string, href?: string) {
 }
 
 describe("findBackspaceIntoVideo", () => {
-  it("redirects the caret into a video paragraph instead of merging", () => {
+  it("targets the start of the video paragraph (to select it) instead of merging", () => {
     const video = paragraph(YT);
     const doc = schema.nodes.doc.create(null, [video, paragraph("Hello")]);
     const from = video.nodeSize + 1; // start of the paragraph after the video
-    expect(findBackspaceIntoVideo(doc, from)).toEqual({ pos: video.nodeSize - 1 });
+    expect(findBackspaceIntoVideo(doc, from)).toEqual({ pos: 0 });
   });
 
   it("does nothing when the caret isn't at the start of the paragraph", () => {
@@ -55,7 +55,7 @@ describe("findBackspaceIntoVideo", () => {
     const video = paragraph(asset);
     const doc = schema.nodes.doc.create(null, [video, paragraph("Hello")]);
     expect(findBackspaceIntoVideo(doc, video.nodeSize + 1)).toEqual({
-      pos: video.nodeSize - 1,
+      pos: 0,
     });
   });
 
@@ -63,7 +63,7 @@ describe("findBackspaceIntoVideo", () => {
     const video = paragraph(YT, YT);
     const doc = schema.nodes.doc.create(null, [video, paragraph("Hello")]);
     expect(findBackspaceIntoVideo(doc, video.nodeSize + 1)).toEqual({
-      pos: video.nodeSize - 1,
+      pos: 0,
     });
   });
 

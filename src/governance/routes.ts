@@ -27,6 +27,7 @@ import {
   deleteNode,
   deleteFolder,
   isIdUnderFolder,
+  vaultFolderExists,
 } from "../nodes/service.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
 import {
@@ -404,12 +405,15 @@ governanceRoutes.post("/request-deletion", async (c) => {
     throw new ValidationError("target (the folder path) is required");
   }
 
-  // A folder only exists while documents sit under it — refuse a flag on one
-  // that isn't there, or the queue fills with requests that delete nothing.
+  // Refuse a flag on a folder that isn't there (no documents under it and no
+  // empty directory), or the queue fills with requests that delete nothing.
   if (body.targetType === "folder") {
     const { storage } = await engineCache.get(nestId);
     const docs = await storage.discoverDocuments();
-    if (!docs.some((d) => isIdUnderFolder(d.id, target))) {
+    if (
+      !docs.some((d) => isIdUnderFolder(d.id, target)) &&
+      !(await vaultFolderExists(nestId, target))
+    ) {
       return c.json({ error: `Folder not found: ${target}` }, 404);
     }
   }

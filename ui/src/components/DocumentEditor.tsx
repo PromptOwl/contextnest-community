@@ -9,7 +9,7 @@ import {
 } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invalidateForPath, keys, reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { setNavGuard, bypassNavGuard } from "../lib/nav-guard";
@@ -129,7 +129,8 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import type { PendingChange } from "../lib/api";
-import { findBacklinks, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
+import { findBacklinks, inboundLinkWarning, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
+import { displayNameFor } from "../lib/person-name";
 import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
@@ -374,6 +375,15 @@ export function DocumentEditor({
     grant: myGrant,
     isArchived,
   });
+  // Creator's display name from the nest roster (same cached read the comments
+  // panel makes); the email stays on hover, and is the fallback. Read-only
+  // collaborators are on the roster too, so only signed-out readers skip it
+  // (an off-roster caller's 403 isn't retried and just keeps the email).
+  const { data: roster } = useQuery({
+    ...reads.mentionable(nestId),
+    enabled: !!nestId && !isNew && !!adminStatus?.me,
+  });
+  const authorName = author ? displayNameFor(author, roster?.people) : null;
   // Who deletes outright: the nest admin/owner tier, plus the person who wrote
   // the document — asking permission to delete your own work is the wrong
   // default. Everyone else goes through the request path. The server still
@@ -1440,13 +1450,16 @@ export function DocumentEditor({
       // `afterSave` (below) navigates away on create (onSaved → back to the
       // nest), unmounting this editor before "Saved"/justSaved could ever be
       // seen — so a fresh create needs its own toast to confirm what actually
-      // happened (published vs. saved as a draft awaiting review).
+      // happened (published vs. saved as a draft awaiting review). An edit
+      // navigates away too, so it gets one as well.
       if (isNew && savedId) {
         toast.success(
           createdStatus === "published"
             ? `"${title.trim() || "Untitled"}" published — it's now live and available for use.`
             : `"${title.trim() || "Untitled"}" saved as a draft.`,
         );
+      } else if (!isNew && !noop) {
+        toast.success(`"${title.trim() || "Untitled"}" saved.`);
       }
       // The document is clean now, but React has not re-rendered yet: the
       // app-level nav guard registered by the effect below still closes over
@@ -1826,6 +1839,7 @@ export function DocumentEditor({
               ? "This removes the document, its version history, comments and annotations. It cannot be undone."
               : "A nest admin reviews this and either deletes the document or rejects with a note. Nothing is removed yet."
           }
+          warning={canDeleteDirectly ? inboundLinkWarning(backlinks.length) : undefined}
           // Deleting your own work needs no justification; asking for someone
           // else's does.
           label={canDeleteDirectly ? undefined : "Why should it be deleted?"}
@@ -2802,13 +2816,12 @@ export function DocumentEditor({
               document grantees, server-resolved). Hidden entirely for docs
               with no recorded author (old imports) and no collaborators. */}
                 {!isNew && (author || collaborators.length > 0) && (
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                  <div className="flex flex-col items-start gap-1 text-xs text-muted-foreground">
                     {author && (
                       <span className="inline-flex items-center gap-1.5">
-                        Created by <span className="font-medium text-foreground/80">{author}</span>
+                        Created by <span className="font-medium text-foreground/80" title={author}>{authorName}</span>
                       </span>
                     )}
-                    {author && collaborators.length > 0 && <span aria-hidden>·</span>}
                     {collaborators.length > 0 && (
                       <span
                         className="inline-flex items-center gap-1.5"

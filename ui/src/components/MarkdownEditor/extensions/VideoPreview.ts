@@ -1,6 +1,6 @@
 import { Extension } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
+import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { classifyVideoText, type VideoMatch } from "../../../lib/video-embed";
 
@@ -119,8 +119,8 @@ export function collectVideoPreviewDecorations(
  * destroying the player, since the merged paragraph no longer matches
  * classifyVideoText). This finds that case — empty selection, caret at the
  * very start of a text block, immediately preceded by a video paragraph — so
- * the caller can redirect the caret into the video paragraph instead of
- * merging into it. Exported and doc-only (no view/DOM needed) so it's
+ * the caller can select the whole video (returned `pos` is its start) instead
+ * of merging into it. Exported and doc-only (no view/DOM needed) so it's
  * unit-testable the same way collectVideoPreviewDecorations is.
  */
 export function findBackspaceIntoVideo(
@@ -141,7 +141,7 @@ export function findBackspaceIntoVideo(
     child.text,
     linkMark ? (linkMark.attrs.href as string | null) : undefined,
   );
-  return match ? { pos: before - 1 } : null;
+  return match ? { pos: before - prevNode.nodeSize } : null;
 }
 
 /**
@@ -170,19 +170,21 @@ export const VideoPreview = Extension.create({
               collectVideoPreviewDecorations(state.doc),
             );
           },
-          // First Backspace right after a video moves the caret into the
-          // video paragraph instead of merging it into the current one — see
-          // findBackspaceIntoVideo. A second Backspace from there behaves
-          // normally (editing the URL text directly), same as clicking in.
+          // Backspace right after a video selects the whole video, like an
+          // image, instead of merging into it — see findBackspaceIntoVideo.
+          // Putting the caret in the hidden URL (the old fix) let the next
+          // keystroke edit the URL and kill the player. A second Backspace
+          // deletes the video cleanly; an empty line below it goes first.
           handleKeyDown(view, event) {
             if (event.key !== "Backspace") return false;
             const { state } = view;
             if (!state.selection.empty) return false;
             const target = findBackspaceIntoVideo(state.doc, state.selection.from);
             if (!target) return false;
-            const tr = state.tr.setSelection(
-              TextSelection.near(state.doc.resolve(target.pos), -1),
-            );
+            const { $from } = state.selection;
+            const tr = state.tr;
+            if ($from.parent.content.size === 0) tr.delete($from.before(), $from.after());
+            tr.setSelection(NodeSelection.create(tr.doc, target.pos));
             view.dispatch(tr.scrollIntoView());
             return true;
           },

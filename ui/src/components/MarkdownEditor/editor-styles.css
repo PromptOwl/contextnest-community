@@ -36,6 +36,12 @@
   margin: 0.5rem 0;
 }
 
+/* Backspace from the line below selects the whole video (VideoPreview). */
+.ProseMirror-selectednode .cn-video-embed {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 2px;
+}
+
 /* YouTube / Vimeo player widget (VideoPreview → createIframeWidget): a
    responsive 16:9 box, capped so it doesn't fill a wide editor. */
 .cn-video-embed--iframe {
