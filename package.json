@@ -58,6 +58,7 @@
     "lint:mcp-schemas": "node scripts/check-mcp-schemas.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:playwright": "playwright test --project=test-suite",
     "prepublishOnly": "npm run build",
     "version-packages": "changeset version && npm install --package-lock-only",
     "release": "npm run build && changeset publish"
@@ -91,6 +92,7 @@
   "devDependencies": {
     "@changesets/changelog-github": "^0.7.0",
     "@changesets/cli": "^2.31.0",
+    "@playwright/test": "^1.59.1",
     "@radix-ui/react-alert-dialog": "^1.1.11",
     "@radix-ui/react-avatar": "^1.1.0",
     "@radix-ui/react-checkbox": "^1.1.1",
@@ -164,7 +166,8 @@
     "tsx": "^4.19.4",
     "typescript": "^5.7.3",
     "vite": "6.4.3",
-    "vitest": "3.2.6"
+    "vitest": "3.2.6",
+    "winston": "^3.19.0"
   },
   "overrides": {
     "shell-quote": "1.8.4",

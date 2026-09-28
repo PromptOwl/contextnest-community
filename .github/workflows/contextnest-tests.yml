@@ -1,0 +1,108 @@
+# contextnest-tests.yml — Playwright e2e suite for ContextNest Community.
+#
+# Mirrors TheOwl's Playwright pipeline (theowl-tests.yml): manual dispatch +
+# push to main, chromium-only install, ordered test-suite run against a
+# deployed environment, CI dashboard in the run summary, HTML report + traces
+# uploaded as an artifact.
+#
+# Required GitHub configuration (Settings → Secrets and variables → Actions):
+#   secrets.TEST_ACCOUNT1_USER   e2e account email (registered on the target server)
+#   secrets.TEST_ACCOUNT1_PW     e2e account password
+#   secrets.TEST_ACCOUNT2_USER   optional second account (multi-user stewardship tests)
+#   secrets.TEST_ACCOUNT2_PW     optional second account password
+#   vars.TEST_URL                target server URL (defaults to the QA Cloud Run
+#                                alias https://nest-dev.promptowl.ai)
+
+name: ContextNest E2E (Playwright)
+
+on:
+  # Runs on merge to main
+  push:
+    branches: [ "main" ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to run tests against'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+      project:
+        description: 'Playwright project to run'
+        required: false
+        default: 'test-suite'
+        type: choice
+        options:
+          - test-suite
+          - auth
+
+env:
+  NODE_VERSION: '20'
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Display run parameters
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "🚀 Manual workflow triggered!"
+          echo "Environment: ${{ github.event.inputs.environment || 'dev' }}"
+          echo "Project: ${{ github.event.inputs.project || 'test-suite' }}"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Chromium only — every project uses Desktop Chrome
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        env:
+          TEST_ACCOUNT1_USER: ${{ secrets.TEST_ACCOUNT1_USER }}
+          TEST_ACCOUNT1_PW: ${{ secrets.TEST_ACCOUNT1_PW }}
+          TEST_ACCOUNT1_ALIAS: primary_user
+          TEST_ACCOUNT2_USER: ${{ secrets.TEST_ACCOUNT2_USER }}
+          TEST_ACCOUNT2_PW: ${{ secrets.TEST_ACCOUNT2_PW }}
+          TEST_ACCOUNT2_ALIAS: secondary_user
+          BASE_URL: ${{ vars.TEST_URL || 'https://nest-dev.promptowl.ai' }}
+          ENVIRONMENT_NAME: ${{ github.event.inputs.environment || 'dev' }}
+        run: |
+          echo "🔐 Using test account credentials for E2E tests"
+          echo "🌐 Testing against: $BASE_URL"
+          echo "🏷️  Environment: $ENVIRONMENT_NAME"
+          npx playwright test --project=${{ github.event.inputs.project || 'test-suite' }}
+
+      # Renders directly in the Actions run tab (no download needed)
+      - name: Generate CI Dashboard
+        if: always()
+        continue-on-error: true
+        env:
+          TEST_URL: ${{ vars.TEST_URL || 'https://nest-dev.promptowl.ai' }}
+          PLAYWRIGHT_PROJECT: ${{ github.event.inputs.project || 'test-suite' }}
+        run: node tests/scripts/generate-ci-summary.js
+
+      # HTML report + traces, screenshots, videos
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: tests/test-results/
+          retention-days: 30
+          if-no-files-found: warn
