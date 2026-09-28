@@ -85,6 +85,9 @@ const TABS: {
       "public_base_url",
       "logo_url",
       "anthropic_api_key",
+      "anthropic_base_url",
+      "hootie_enabled",
+      "hootie_model",
       "nest_creation",
       "people_suggest_all_users",
       "shared_deployment",
@@ -185,11 +188,14 @@ const noAutofill = (type: string) =>
 
 /** Controlled text input bound straight to the draft (no per-field Save). */
 function TextField({
+  id,
   value,
   placeholder,
   onChange,
   type = "text",
 }: {
+  /** Set it when a <Label htmlFor> points here, or the label labels nothing. */
+  id?: string;
   value: string;
   placeholder?: string;
   onChange: (v: string) => void;
@@ -203,6 +209,7 @@ function TextField({
   return (
     <div className="relative flex-1">
       <Input
+        id={id}
         value={value}
         type={isPassword && reveal ? "text" : type}
         placeholder={placeholder}
@@ -722,8 +729,9 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 <CardDescription>
                   The server-wide model key. Runners pick it up automatically
                   (every nest, unless a nest overrides it in its Tool
-                  environment). No key, no LLM calls. Stored server-side; shown
-                  masked.
+                  environment). No key, no LLM calls. Checked against the
+                  provider when you save, so a bad key is refused here rather
+                  than failing later. Stored server-side; shown masked.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -763,6 +771,63 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     Keep current key
                   </button>
                 )}
+              </CardContent>
+            </Card>
+
+            {/* Hootie in the nest — the assistant on every page. Sits under
+                the key it depends on: switching it on without a key gives
+                everyone a panel that explains what's missing, not a broken
+                one, so the two settings read together. */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Hootie</CardTitle>
+                <CardDescription>
+                  The assistant in the corner of every page. It answers from
+                  what the person asking can read in the nest, cites the
+                  documents it used, and lets them @tag a colleague — which
+                  posts the exchange as a comment and notifies them. Uses the
+                  Anthropic API key above; without one the panel says so.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    Hootie in the nest — {draft.hootie_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.hootie_enabled}
+                    onCheckedChange={(v) => set({ hootie_enabled: v })}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="hootie-model">Model</Label>
+                  <TextField
+                    id="hootie-model"
+                    value={draft.hootie_model ?? ""}
+                    placeholder="claude-opus-5"
+                    onChange={(v) => set({ hootie_model: v })}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    The model Hootie answers with. Through a gateway this is the
+                    gateway's name for it (<code>ollama/llama3.2</code>,{" "}
+                    <code>gpt-5</code>, …).
+                  </p>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="anthropic-base-url">Model gateway URL</Label>
+                  <TextField
+                    id="anthropic-base-url"
+                    value={draft.anthropic_base_url ?? ""}
+                    placeholder="http://gateway:4000 — empty calls Anthropic directly"
+                    onChange={(v) => set({ anthropic_base_url: v })}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Route every model call — Hootie and agent runs — through a
+                    LiteLLM or PromptOwl gateway with the key above as its
+                    virtual key: budgets, spend logs, and any model the gateway
+                    fronts. Empty means Anthropic directly.
+                  </p>
+                </div>
               </CardContent>
             </Card>
 

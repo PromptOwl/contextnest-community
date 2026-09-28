@@ -17,6 +17,7 @@ import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, type LicenseStatus } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
+import { HootiePanel, type HootieScope } from "./components/HootiePanel";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
@@ -339,6 +340,49 @@ export default function App() {
     },
     [qc],
   );
+
+  // Hootie's citation chips. In the nest you're already in, keep the standing
+  // you were admitted with; anywhere else, resolve it off the nest list the
+  // same way a search hit does.
+  const openNodeFromHootie = useCallback(
+    async (nestId: string, nodeId: string) => {
+      if ("nestId" in view && view.nestId === nestId) {
+        setView({
+          page: "document",
+          nestId,
+          nestName: view.nestName,
+          nodeId,
+          isOwner: view.isOwner,
+          isAnonOwned: view.isAnonOwned,
+        });
+        return;
+      }
+      const list = await qc.fetchQuery(reads.nestList()).catch(() => null);
+      const nest = (list as any)?.nests?.find((n: any) => n.id === nestId);
+      setView({
+        page: "document",
+        nestId,
+        nestName: nest?.name ?? nestId,
+        nodeId,
+        isOwner: nest?.is_owner ?? false,
+        isAnonOwned: nest?.user_id === ANON_USER_ID,
+      });
+    },
+    [qc, view, setView],
+  );
+  // What Hootie is looking at: the nest of any nest page, plus the document
+  // when the page is one. Null on the dashboard and the app pages.
+  const hootieScope: HootieScope | null =
+    "nestId" in view
+      ? {
+          nestId: view.nestId,
+          nestName: view.nestName,
+          nodeId:
+            view.page === "document" && view.nodeId !== "new"
+              ? view.nodeId
+              : undefined,
+        }
+      : null;
 
   // Only bound where QuickOpen can actually render — inside a nest (scoped to
   // it) or on the dashboard (across every nest). Anywhere else the shortcut
@@ -1732,6 +1776,17 @@ export default function App() {
       )}
 
       </div>
+      {/* Hootie: always mounted below the shell so the conversation outlives
+          the page it started on. Hidden by the server flag inside. */}
+      {(authenticated || authMode === "open") && (
+        <HootiePanel
+          page={hootieScope}
+          onOpenNode={(nestId, nodeId) => void openNodeFromHootie(nestId, nodeId)}
+          onOpenSettings={
+            isAdmin ? () => setView({ page: "dashboard", tab: "settings" }) : undefined
+          }
+        />
+      )}
       {showConnect && "nestId" in view && (
         <ConnectModal
           isOpen

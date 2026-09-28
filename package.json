@@ -69,6 +69,7 @@
     ]
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.127.0",
     "@aws-sdk/client-sesv2": "3.1139.0",
     "@hono/node-server": "^1.13.8",
     "@modelcontextprotocol/sdk": "^1.12.1",

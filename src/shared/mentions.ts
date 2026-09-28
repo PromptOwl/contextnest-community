@@ -37,6 +37,33 @@ export function extractMentions(markdown: string): string[] {
   return names;
 }
 
+/**
+ * The text with its mentions removed — for using a message as a search
+ * query, where `@alice` is who to tell, not what to look for. Same pattern
+ * as extractMentions, so the two can't drift; code spans keep their `@`
+ * because there it is source, not a mention.
+ */
+export function stripMentions(text: string): string {
+  const spans: Array<[number, number]> = [];
+  // Blanked to the SAME length, so the match offsets map back onto `text`.
+  const code = (text || "")
+    .replace(/```[\s\S]*?```/g, (m) => " ".repeat(m.length))
+    .replace(/`[^`\n]*`/g, (m) => " ".repeat(m.length));
+  let match;
+  MENTION.lastIndex = 0;
+  while ((match = MENTION.exec(code)) !== null) {
+    // The leading whitespace (if any) belongs to the separator, not the
+    // mention; keep it so neighbouring words don't fuse.
+    const lead = match[0].startsWith("@") ? 0 : 1;
+    spans.push([match.index + lead, match.index + match[0].length]);
+  }
+  let out = text || "";
+  for (const [start, end] of spans.reverse()) {
+    out = out.slice(0, start) + out.slice(end);
+  }
+  return out.replace(/\s+/g, " ").trim();
+}
+
 /** Mentions present in `next` that weren't in `previous`. */
 export function newMentions(previous: string, next: string): string[] {
   const before = new Set(extractMentions(previous).map((n) => n.toLowerCase()));

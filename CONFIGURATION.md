@@ -95,13 +95,17 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `PROMPTOWL_TEAMS_ENABLED` | _(unset — off)_ | Lets users who signed in with PromptOwl import their PromptOwl teams as local teams. Off by default; set `true` to enable, or toggle from Server settings → Advanced. When off, `GET/POST /teams/promptowl` return `404` and the PromptOwl Teams panel is hidden. Independent of `PROMPTOWL_SIGN_IN_GATE`. |
 | `TYPE_ARTIFACT_ENABLED` | `true` | Set `false` to disable creation of **artifact** nodes server-wide (existing artifact nodes stay readable — never data loss). Runnable types (agent/skill/tool) are gated by `FEATURE_WORKFLOW_PLANE`, not here. Also editable from Settings (`/admin/settings`). |
 | `TYPE_TABLE_ENABLED` | `true` | Same as above for **table** nodes. |
+| `HOOTIE_ENABLED` | `true` | Hootie in the nest — the assistant on every page of the UI and its `POST /nests/:id/chat` route. Set `false` to switch it off (the launcher disappears and the route answers `404`). Also toggleable from Settings → General. Answering needs `ANTHROPIC_API_KEY`; without one the feature stays on but the panel explains what's missing and the route answers `503`. Questions are budgeted per user across all nests (30 per 5 minutes); in `AUTH_MODE=open` every caller is the one anonymous user, so the budget is shared by everyone on that server. |
+| `HOOTIE_MODEL` | `claude-opus-5` | The model Hootie answers with. Also editable from Settings → General. Through a gateway, use the gateway's name for it (`ollama/llama3.2`, `gpt-5`, …). |
+| `ANTHROPIC_BASE_URL` | _(unset — Anthropic directly)_ | A LiteLLM or PromptOwl gateway speaking `/v1/messages`. When set, **every** model call this server makes goes through it — Hootie, and agent runs via the run bundle's env floor — with `ANTHROPIC_API_KEY` as the gateway's virtual key: budgets, spend logs, and any model the gateway fronts. Also editable from Settings → General. |
 | `FEATURE_WORKFLOW_PLANE` | _(unset — off)_ | Enables the workflow plane: typed edges, edge-type registry, governed runs. Optional feature; also toggleable from Settings. |
 | `FEATURE_SUBAGENT_RUNS` | _(unset — off)_ | Lets runs spawn nested sub-agent runs (recursion). Gated separately from the plane; requires `FEATURE_WORKFLOW_PLANE`. Also toggleable from Server settings → Advanced (turning the plane off forces this off too). Opens a recursion surface — enable only after reviewing the depth/fan-out caps. |
 | `SUBAGENT_MAX_DEPTH` | `8` | Max sub-agent nesting depth (clamped 1..32) — bounds the call tree's HEIGHT so it stays finite/haltable. |
 | `SUBAGENT_MAX_CHILDREN` | `16` | Max direct children a single run may spawn (clamped 1..128) — bounds the call tree's WIDTH. Together with `SUBAGENT_MAX_DEPTH` this caps total tree size so a runner can't fork-bomb the DB. |
 | `RUN_MAX_STEPS` | `10000` | Max steps a single run may accumulate (clamped 10..100000) — bounds a runaway/hostile runner's step log. |
 | `RUN_MAX_CONCURRENT_ROOTS` | `50` | Max concurrently-running root (depth-0) runs per nest (clamped 1..1000). The subagent caps bound a single tree; this bounds how many trees can run at once, so triggers can't flood a nest. |
-| `ANTHROPIC_API_KEY` | _(unset)_ | Server-wide default runner key for workflow-plane agent runs. Never returned by the API — the health endpoint reports presence only, and Settings shows a masked tail. |
+| `ANTHROPIC_API_KEY` | _(unset)_ | Server-wide default runner key for workflow-plane agent runs, and the key Hootie answers with. Never returned by the API — the health endpoint reports presence only, and Settings shows a masked tail. |
+| `SECRETS_KEY` | _(unset — a key is generated and stored in the database)_ | Master key for the credentials this server stores encrypted (the secret settings rows and every nest Tool-environment value). Any string; it is hashed to 32 bytes. Optional, and stronger than the default when your deployment has a secret manager: the key then lives outside the database it protects. Values already written under the generated key cannot be read after you set it. See [Runtime settings persistence](#runtime-settings-persistence). |
 | `SLACK_WEBHOOK_URL` | _(unset — connector off)_ | Slack incoming-webhook URL for governance-event notifications (review submitted/approved/rejected, collaborator added). `https://` only — the URL embeds a secret. Also editable from Settings in the UI. |
 | `MSTEAMS_WEBHOOK_URL` | _(unset — connector off)_ | Microsoft Teams incoming-webhook URL for the same governance events, posted as Adaptive Cards. `https://` only — the URL embeds a secret. Also editable from Settings in the UI. See [Microsoft Teams notifications](#microsoft-teams-notifications). |
 | `EMAIL_PROVIDER` | `smtp` | Email transport: `smtp` (uses `SMTP_URL`) or `ses` (AWS SES through the AWS SDK, for servers that can't use SMTP). Also editable from Settings. |
@@ -874,6 +878,33 @@ So you can always override any setting from the deploy config, while UI edits ma
 to keys you don't set in the environment stay put. Clearing a setting in the UI
 writes a tombstone, so a value you removed is not resurrected from the environment
 on the next boot.
+
+**Credentials are encrypted at rest.** The secret rows — `ANTHROPIC_API_KEY`,
+`OIDC_CLIENT_SECRET`, `MCP_SIGNING_SECRET`, `SMTP_URL`, `SLACK_WEBHOOK_URL`,
+`MSTEAMS_WEBHOOK_URL`, `SES_SECRET_ACCESS_KEY`, `PROMPTOWL_KEY` — and every value in a
+nest's Tool environment (`nest_env`) are stored AES-256-GCM encrypted, so a row read in
+isolation is not the credential. Non-secret settings stay readable: what a server is
+configured to do is worth being able to see. One known exception: the license
+validation cache (`license_cache`) is still keyed by the license key itself.
+
+The master key needs nothing configured: on first use the server generates one and
+stores it in the database (`server_settings`, key `SECRETS_MASTER_KEY`), so it survives
+redeploys, is shared by every instance, and travels with your database backups. That row
+is not a setting — it is never loaded into the process environment and never returned by
+the settings API.
+
+Set **`SECRETS_KEY`** in the deploy environment to supply the key yourself instead; it
+takes precedence over the stored one, and any string works (it is hashed to 32 bytes).
+This is the stronger arrangement, because the key then lives somewhere the database is
+not: a database dump alone cannot open the values. With the stored key, a dump that
+includes that row includes the key — the encryption protects against a value being read
+or logged incidentally, not against an attacker holding the whole database. If you set
+`SECRETS_KEY` on a server that already wrote values under the stored key, it cannot read
+them: the server still boots, logs which settings it could not open, and treats each as
+unset so an admin can re-enter it.
+
+Values written before any of this existed are read back as plaintext and re-encrypted the
+next time they are saved — nothing to migrate.
 
 ### Cloud Run + Cloud SQL (PostgreSQL)
 
