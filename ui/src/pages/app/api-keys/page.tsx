@@ -43,6 +43,7 @@ import {
 } from "../../../lib/api-key-scope";
 import { parseServerDate } from "../../../lib/dates";
 import { KeyRevealModal, RotateKeyConfirm } from "../../../components/ConnectModal";
+import { ReasonDialog } from "../../../components/governance";
 
 function when(value: string | null): string {
   if (!value) return "never";
@@ -69,6 +70,7 @@ export default function ApiKeysPage() {
   // One id at a time: which row is mid-request, so only its button spins.
   const [busy, setBusy] = useState<string | null>(null);
   const [rotateTarget, setRotateTarget] = useState<{ id: string; name: string } | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<{ id: string; name: string } | null>(null);
   const [reveal, setReveal] = useState<{
     apiKey: string;
     kind: "generated" | "rotated";
@@ -109,13 +111,7 @@ export default function ApiKeysPage() {
     }
   }
 
-  async function revoke(id: string, name: string) {
-    if (
-      !window.confirm(
-        `Revoke "${name}"? Anything still using this key stops working immediately.`,
-      )
-    )
-      return;
+  async function revoke(id: string) {
     setBusy(id);
     try {
       await api.deleteApiKey(id);
@@ -276,7 +272,7 @@ export default function ApiKeysPage() {
                     variant="ghost"
                     size="sm"
                     disabled={busy === k.id}
-                    onClick={() => revoke(k.id, name)}
+                    onClick={() => setRevokeTarget({ id: k.id, name })}
                     aria-label={`Revoke ${name}`}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
@@ -301,6 +297,17 @@ export default function ApiKeysPage() {
         }
         onClose={() => setRotateTarget(null)}
       />
+      {revokeTarget && (
+        <ReasonDialog
+          open
+          onOpenChange={(open) => !open && setRevokeTarget(null)}
+          title={`Revoke "${revokeTarget.name}"?`}
+          description="Anything still using this key stops working immediately."
+          confirmLabel="Revoke key"
+          destructive
+          onConfirm={() => revoke(revokeTarget.id)}
+        />
+      )}
       {reveal && (
         <KeyRevealModal
           apiKey={reveal.apiKey}

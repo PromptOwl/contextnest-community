@@ -28,16 +28,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
+import { ReasonDialog } from "./governance";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -918,31 +909,22 @@ export function RotateKeyConfirm({
   onClose,
 }: {
   target: { id: string; name: string } | null;
-  onConfirm: (id: string) => void;
+  onConfirm: (id: string) => Promise<unknown>;
   onClose: () => void;
 }) {
+  if (!target) return null;
   return (
-    <AlertDialog open={target !== null} onOpenChange={(open) => !open && onClose()}>
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>Rotate "{target?.name}"?</AlertDialogTitle>
-          <AlertDialogDescription>
-            The current key stops working immediately — anything still using it
-            needs the new one.
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction
-            onClick={() => target && onConfirm(target.id)}
-            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            data-testid="rotate-key-confirm"
-          >
-            Rotate key
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
+    <ReasonDialog
+      open
+      onOpenChange={(open) => !open && onClose()}
+      title={`Rotate "${target.name}"?`}
+      description="The current key stops working immediately — anything still using it needs the new one."
+      confirmLabel="Rotate key"
+      destructive
+      onConfirm={async () => {
+        await onConfirm(target.id);
+      }}
+    />
   );
 }
 
