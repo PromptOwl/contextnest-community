@@ -1130,13 +1130,14 @@ export interface PdfMeta {
 export async function createPdfNode(
   nestId: string,
   file: File,
-  opts: { title?: string; folder?: string; tags?: string[]; nodeId?: string } = {},
+  opts: { title?: string; folder?: string; tags?: string[]; nodeId?: string; changeNote?: string } = {},
 ) {
   const form = new FormData();
   form.append("file", file);
   if (opts.title) form.append("title", opts.title);
   if (opts.folder) form.append("folder", opts.folder);
   if (opts.nodeId) form.append("nodeId", opts.nodeId);
+  if (opts.changeNote?.trim()) form.append("changeNote", opts.changeNote.trim());
   for (const t of opts.tags ?? []) form.append("tags", t);
   const res = await fetch(`/nests/${nestId}/nodes/pdf`, {
     method: "POST",

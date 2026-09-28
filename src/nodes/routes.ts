@@ -13,6 +13,7 @@ import { attributeRequest } from "../shared/client-metadata.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { getDb } from "../db/client.js";
 import * as versions from "../governance/version-service.js";
+import { reconstructApproved } from "../governance/approved-body.js";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import {
@@ -465,16 +466,18 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   // mirrors the listing's flag; it narrows what is served, never widens it.
   const approvedOnly = c.req.query("approved_only") === "1" || c.req.query("approved_only") === "true";
   if (publicReader || approvedOnly) {
-    const approved = await versions.getApprovedVersion(nestId, nodeId);
+    let approved = await versions.getApprovedVersion(nestId, nodeId);
     if (approved != null) {
       // Kept for the raw path: frontmatter=1 must serve the APPROVED
       // snapshot's stored frontmatter, never the live working copy's.
       let approvedRaw = "";
       try {
-        approvedRaw = await versionManager.reconstructVersion(
+        ({ raw: approvedRaw, version: approved } = await reconstructApproved(
+          versionManager,
+          nestId,
           nodeId,
           approved,
-        );
+        ));
         response.content = bodyOnly(nodeId, approvedRaw);
         // A pdf node's `pdf:` block must describe the same version as the
         // body — the approved one, whose binary is what /pdf serves here —

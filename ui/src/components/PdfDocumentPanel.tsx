@@ -17,6 +17,11 @@ import { AlertTriangle, Download, FileType, Loader2, Upload } from "lucide-react
 import { toast } from "sonner";
 import * as api from "../lib/api";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
+import { UploadingOverlay } from "./UploadingOverlay";
 
 function formatBytes(n: number): string {
   if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
@@ -45,24 +50,30 @@ export function PdfDocumentPanel({
   onReplaced?: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const [replacing, setReplacing] = useState(false);
+  // Name of the PDF being uploaded as the replacement, or null when idle.
+  const [replacing, setReplacing] = useState<string | null>(null);
+  // Optional note for the new version, asked for before the file is picked.
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [changeNote, setChangeNote] = useState("");
   const src = api.pdfUrl(nestId, nodeId, { approvedOnly });
 
   const replace = async (file: File) => {
-    setReplacing(true);
+    setReplacing(file.name);
     try {
-      await api.createPdfNode(nestId, file, { nodeId });
+      await api.createPdfNode(nestId, file, { nodeId, changeNote });
       toast.success("PDF replaced — saved as a new version.");
       onReplaced?.();
     } catch (e: any) {
       toast.error(e?.message || "Couldn't replace the PDF.");
     } finally {
-      setReplacing(false);
+      setReplacing(null);
+      setChangeNote("");
     }
   };
 
   return (
     <div className="mb-6 space-y-3" data-testid="pdf-document-panel">
+      {replacing && <UploadingOverlay title="Replacing PDF…" detail={replacing} />}
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         <span className="inline-flex items-center gap-1.5 font-medium text-foreground/80">
           <FileType className="h-3.5 w-3.5 text-rose-500" />
@@ -100,8 +111,8 @@ export function PdfDocumentPanel({
                 variant="outline"
                 size="sm"
                 className="h-7"
-                disabled={replacing}
-                onClick={() => inputRef.current?.click()}
+                disabled={!!replacing}
+                onClick={() => setNoteOpen(true)}
                 title="Upload a new PDF — the text is re-extracted and saved as a new version"
                 data-testid="pdf-replace"
               >
@@ -112,6 +123,43 @@ export function PdfDocumentPanel({
                 )}
                 Replace PDF
               </Button>
+              <Dialog open={noteOpen} onOpenChange={setNoteOpen}>
+                <DialogContent className="max-w-md">
+                  <DialogHeader>
+                    <DialogTitle>Replace PDF</DialogTitle>
+                    <DialogDescription>
+                      The new file is saved as a new version. Say what changed, if you like.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <Input
+                    autoFocus
+                    value={changeNote}
+                    onChange={(e) => setChangeNote(e.target.value)}
+                    placeholder="Change note (optional)"
+                    data-testid="pdf-replace-note"
+                  />
+                  <DialogFooter>
+                    <Button
+                      variant="ghost"
+                      onClick={() => {
+                        setNoteOpen(false);
+                        setChangeNote("");
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      onClick={() => {
+                        setNoteOpen(false);
+                        inputRef.current?.click();
+                      }}
+                    >
+                      <Upload className="h-4 w-4 mr-1.5" />
+                      Choose PDF
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
             </>
           )}
         </div>

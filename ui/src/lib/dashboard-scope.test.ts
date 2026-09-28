@@ -7,6 +7,7 @@ import {
   visibleUnsynced,
   nestInScope,
   DEFAULT_NEST_SCOPE,
+  restoredNestScope,
   type NestScope,
 } from "./dashboard-scope";
 
@@ -85,5 +86,24 @@ describe("nestInScope — which registered nests a scope keeps", () => {
     expect(visibleUnsynced(folders, "mine", "")).toHaveLength(2);
     expect(visibleUnsynced(folders, "mine", "bill").map((f) => f.label)).toEqual(["billing"]);
     expect(scopeShowsNests("mine")).toBe(true);
+  });
+});
+
+describe("restoredNestScope", () => {
+  it("keeps a remembered narrow scope", () => {
+    for (const s of ["mine", "owned", "shared", "synced", "unsynced"]) {
+      expect(restoredNestScope(s)).toBe(s);
+    }
+  });
+
+  it("opens broad scopes back on My nests", () => {
+    for (const s of ["all", "org", "public"]) {
+      expect(restoredNestScope(s)).toBe(DEFAULT_NEST_SCOPE);
+    }
+  });
+
+  it("falls back to the default when nothing or junk is stored", () => {
+    expect(restoredNestScope(null)).toBe(DEFAULT_NEST_SCOPE);
+    expect(restoredNestScope("bogus")).toBe(DEFAULT_NEST_SCOPE);
   });
 });
