@@ -18,7 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { AlertCircle, Loader2 } from "lucide-react";
+import { AlertCircle, AlertTriangle, Loader2 } from "lucide-react";
 import { formatServerDate } from "@/lib/dates";
 
 interface ReasonDialogProps {
@@ -26,6 +26,8 @@ interface ReasonDialogProps {
   onOpenChange: (open: boolean) => void;
   title: string;
   description?: string;
+  /** A side effect worth stopping for, shown highlighted under the description. */
+  warning?: string;
   /** Textarea label. Omit for a confirm-only dialog (no reason collected). */
   label?: string;
   /** Collect the text, but let the action go ahead without it — an approval
@@ -57,6 +59,7 @@ export function ReasonDialog({
   onOpenChange,
   title,
   description,
+  warning,
   label,
   optionalReason,
   placeholder,
@@ -109,6 +112,17 @@ export function ReasonDialog({
           <DialogTitle>{title}</DialogTitle>
           {description && <DialogDescription>{description}</DialogDescription>}
         </DialogHeader>
+
+        {warning && (
+          <div
+            className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900"
+            role="alert"
+            data-testid="reason-dialog-warning"
+          >
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            {warning}
+          </div>
+        )}
 
         {priorDecline && (
           <div

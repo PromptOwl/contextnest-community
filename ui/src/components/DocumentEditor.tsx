@@ -1834,10 +1834,10 @@ export function DocumentEditor({
           }
           description={
             canDeleteDirectly
-              ? "This removes the document, its version history, comments and annotations. It cannot be undone." +
-                inboundLinkWarning(backlinks.length)
+              ? "This removes the document, its version history, comments and annotations. It cannot be undone."
               : "A nest admin reviews this and either deletes the document or rejects with a note. Nothing is removed yet."
           }
+          warning={canDeleteDirectly ? inboundLinkWarning(backlinks.length) : undefined}
           // Deleting your own work needs no justification; asking for someone
           // else's does.
           label={canDeleteDirectly ? undefined : "Why should it be deleted?"}

@@ -2003,10 +2003,8 @@ export function DocumentsTab({
           open
           onOpenChange={(o) => !o && setDeleteNodeTarget(null)}
           title={`Delete "${deleteNodeTarget.title}"?`}
-          description={
-            "This removes the document, its version history, comments and annotations. It cannot be undone." +
-            inboundLinkWarning(deleteBacklinks)
-          }
+          description="This removes the document, its version history, comments and annotations. It cannot be undone."
+          warning={inboundLinkWarning(deleteBacklinks)}
           confirmLabel="Delete document"
           destructive
           onConfirm={handleDeleteNode}
