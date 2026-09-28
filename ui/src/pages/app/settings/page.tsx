@@ -879,19 +879,20 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <div className="flex items-center justify-between">
+                <div className="flex items-start justify-between gap-4 pb-4">
                   <div className="pr-4">
                     <div className="text-sm font-medium">
                       Suggest everyone on this server
                     </div>
                     <p className="text-xs text-muted-foreground mt-0.5">
-                      Off, the pickers only suggest people the inviter already
-                      shares a nest or team with. On, they suggest every
-                      registered account — right when this server is one
-                      organisation, wrong when it hosts several, because it
-                      shows them each other's email addresses. Either way
-                      anyone can still be invited by typing their address.
+                      When enabled, the pickers suggest every registered
+                      account on this server.
                     </p>
+                    <ul className="text-xs text-muted-foreground mt-1.5 space-y-0.5">
+                      <li><b className="text-foreground/80">Off:</b> only people the inviter already shares a nest or team with.</li>
+                      <li><b className="text-foreground/80">On:</b> every registered account — right when this server is one organisation, wrong when it hosts several, because it shows users each other's email addresses.</li>
+                      <li><b className="text-foreground/80">In either state:</b> anyone can still be invited by typing their email address.</li>
+                    </ul>
                   </div>
                   <Switch
                     checked={draft.people_suggest_all_users}
@@ -905,13 +906,12 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     </div>
                     <p className="text-xs text-muted-foreground mt-0.5">
                       A nest's Organization tier is readable by every account
-                      on this server. Off, that is one company and the tier
-                      applies in one click. On — the PromptOwl-hosted service,
-                      or any install shared by unrelated customers — opening a
-                      nest to Organization asks for the same acknowledgement as
-                      Public (enforced by the server, not only the UI), and the visibility picker
-                      says who the tier really reaches.
+                      on this server.
                     </p>
+                    <ul className="text-xs text-muted-foreground mt-1.5 space-y-0.5">
+                      <li><b className="text-foreground/80">Off:</b> the server is one company and the Organization tier applies in one click.</li>
+                      <li><b className="text-foreground/80">On:</b> for the PromptOwl-hosted service, or any install shared by unrelated customers — opening a nest to Organization asks for the same acknowledgement as Public. Enforced by the server, not only the UI, and the visibility picker explains who the tier really reaches.</li>
+                    </ul>
                   </div>
                   <Switch
                     checked={draft.shared_deployment}
