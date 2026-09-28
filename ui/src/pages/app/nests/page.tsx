@@ -82,6 +82,18 @@ export default function NestsPage() {
     refetch: refetchNests,
   } = useNests();
   const allNests = nestsData?.nests ?? [];
+  // Nests shared with the caller whose invite is still unread live only in the
+  // Pending invites card — they join the grid once accepted.
+  const { data: unreadData } = useQuery(reads.unreadNotifications());
+  const pendingNestIds = useMemo(
+    () =>
+      new Set(
+        (unreadData?.notifications ?? [])
+          .filter((n) => n.kind === "nest_invite")
+          .map((n) => n.nest_id),
+      ),
+    [unreadData],
+  );
   // Nest creation is admins-only unless the server opens it (NEST_CREATION) —
   // non-admins never see a create/import CTA they can't use.
   const { data: health } = useQuery(reads.health());
@@ -142,7 +154,7 @@ export default function NestsPage() {
     if (!scopeShowsNests(nestScope)) return [];
     const q = nestQuery.trim().toLowerCase();
     const matched = allNests.filter((n: any) => {
-      if (!nestInScope(n, nestScope)) return false;
+      if (!nestInScope(n, nestScope) || pendingNestIds.has(n.id)) return false;
       if (!q) return true;
       return (
         (n.name ?? "").toLowerCase().includes(q) ||
@@ -163,7 +175,7 @@ export default function NestsPage() {
             String(a.last_activity ?? a.created_at ?? ""),
           );
     });
-  }, [allNests, nestQuery, nestScope, nestSort]);
+  }, [allNests, nestQuery, nestScope, nestSort, pendingNestIds]);
   const nests = filteredNests.slice(0, nestPageSize);
   // The Documents browser offers a clear affordance whenever a control is
   // narrowing its list; the Dashboard only offered one once nothing matched,
