@@ -1,5 +1,291 @@
 # @promptowl/contextnest-community
 
+## 1.26.0
+
+### Minor Changes
+
+- 1de7850: Email can now be sent through AWS SES as well as SMTP. Server settings → Notifications → Email has an SMTP / AWS SES choice; SES takes a region and optional access keys (leave them empty to use the server's IAM role). Credentials are verified on save, the SES secret is write-only, and saving one provider clears the other's settings. New settings: `EMAIL_PROVIDER`, `SES_REGION`, `SES_ACCESS_KEY_ID`, `SES_SECRET_ACCESS_KEY`. `GET /admin/settings` now also returns `email_provider`, `ses_region`, `ses_access_key_id` and `ses_secret_access_key_set`.
+- 1c96bd9: Only server admins can create nests by default. New `NEST_CREATION` setting (`admins` default, or `everyone`) gates `POST /nests`, folder import and the MCP `nest_create` tool with a `403` for anyone else, and `GET /health` reports it as `nest_creation`. Non-admins no longer see New Nest, Import Folder or Create First Nest; with no nests they see "You don't have access to any nests yet. Ask [admin] to share one." Set `NEST_CREATION=everyone`, or turn on Settings → General → Nest creation, to keep the old behaviour.
+- 61d583c: Nest-scoped API keys are now isolated to their nest. A key minted with `nest_id` could previously mint itself an unscoped whole-account key (`POST /auth/keys`), rotate itself to user-level, delete other nests, search and list every nest, and — owned by an admin — reach `/admin/*` and teammate management. A new app-wide guard makes a nest key deny-by-default outside its nest: it reaches its own nest, `/mcp` and `/index` (filtered), and `GET /nests` / `/search` / `/stats` narrowed to its nest; everything else answers `403` with `code: "nest_scoped_key"`. Minting or rotating a key onto a nest now requires access to that nest (`404` otherwise), and key responses report `nest_id`. In the app, the API keys page shows each key's scope ("All your nests" / "Nest: <name>") and has a scope picker, and a nest's Connect dialog can mint a key for that nest only, shown with the nest's MCP URL. Sessions and user-level keys are unchanged.
+- c8d328e: The Nests page shows a Pending invites card for nests shared with you that you haven't acted on yet. Accept opens the nest; Decline removes your own access to it. New endpoint `POST /me/nests/:nestId/leave` drops the caller's own collaborator row and settles the invite (`left: false` when the access came through a team or ownership).
+- e214fe8: Per-nest branding for public reader sites.
+
+  A nest owner or admin can now brand what readers see — the reader-mode docs site
+  and the nest's `/p` published links: a **logo**, a **banner** (image and/or
+  headline + subtext, shown on the home page), an **accent color** (links, the
+  current page, buttons), a **header background color**, an optional **page tint**,
+  a **site title**, **footer text + link**, and an optional **favicon**. Open it
+  from the nest's **Reader** button → **Branding → Customize**; the dialog has a
+  live preview.
+
+  Colors are strict `#rgb` / `#rrggbb` and applied as CSS custom properties. Text
+  on any color is picked automatically (black or white, whichever meets WCAG AA
+  4.5:1), and the accent used as link text is deepened until it reads at 4.5:1 on
+  the page. Images are uploaded nest assets (PNG/JPG/GIF/WebP — SVG stays
+  excluded) or `https://` image links.
+
+  On `/p` the CSP is unchanged: uploaded images are inlined as `data:` images
+  (already allowed); external https images are not shown there. HTML/artifact
+  publishes are the author's own page and are not wrapped.
+
+  `PATCH /nests/:id/branding` (owner / nest admin / server admin) replaces the
+  branding; `null` or `{}` resets it. Hiding "Powered by ContextNest" / "Secured by
+  PromptOwl" is server-admin only. `GET /nests/:id` returns the parsed
+  `nest.branding` (null when unbranded). Nests with no branding render exactly as
+  before; the server-wide `LOGO_URL` still brands the app shell and is the logo
+  fallback for a branded reader.
+
+### Patch Changes
+
+- ae96a3c: Ask for confirmation before rotating an API key. Rotate on the API keys page
+  and in the Connect dialog now opens a confirmation dialog that names the key
+  and warns that the current key
+  stops working immediately, instead of rotating on the first click.
+  Revoke on the API keys page uses the same in-app confirmation dialog instead
+  of the browser's native confirm popup.
+- 770c138: Fix Board's "Columns by: Folder" labeling nested folders with only their leaf
+  segment.
+
+  A folder column's label shortened to its own name unless it collided with
+  another folder of the same leaf name — so `no/such/folder` showed as just
+  `folder`, dropping the hierarchy, and only actual leaf-name collisions ever
+  grew back a distinguishing prefix. Folder column labels now always show the
+  full folder path, matching the tooltip.
+
+- 8fd23cf: Fix Board "Columns by: Folder" labels hiding the actual folder name for deeply nested paths.
+
+  Showing the folder column's full path (see previous fix) solved ambiguous
+  same-leaf-name folders, but for a path many subfolders deep the header's CSS
+  truncation elides from the end — hiding the leaf, the one segment that
+  actually names the folder, behind the ellipsis. Folder column labels now
+  shorten from the front instead: a long path shows `…/parent/folder` rather
+  than `folder-name-that-gets-cu…`, so the leaf stays visible while the
+  tooltip and drag/drop key still carry the untouched full path.
+
+- 5e39dbf: Fix the header breadcrumb overflowing the page for a nest with a very long,
+  space-less name.
+
+  A crumb's label only truncates once it's allowed to shrink below its text's
+  own width — as a flex item it wasn't, so an unbreakable name rendered at
+  full width, pushing the page past the viewport and leaving a horizontal
+  scrollbar with blank space past the (now too-narrow) header divider. Crumb
+  labels now shrink and ellipsize instead.
+
+- 98bfe37: Fix removing a collaborator showing a native browser confirmation popup instead of the app's styled dialog.
+
+  The native `window.confirm()` popup also displayed the deployment's internal
+  Cloud Run URL in its header. Removing a collaborator now opens the same
+  styled `AlertDialog` used elsewhere in the app; the remove action itself was
+  unaffected.
+
+- f893b4e: Show a success toast after removing a collaborator's access, so the admin
+  gets confirmation the removal went through instead of the row just
+  disappearing silently.
+- 0553113: Warn about inbound links before deleting a document. Both delete
+  confirmations (the editor menu and the Documents tab) now say how many
+  documents link to this one, e.g. "1 document links to this — deleting it
+  will break that link."
+- d7298a9: Show the document creator's display name instead of their email in the
+  document metadata ("Created by"). The email moves to the hover tooltip and is
+  still shown when the person has no display name.
+- e4ef5fd: Show a success toast after saving edits to an existing document. The save
+  navigates back to the nest before the editor's "Saved" hint could be seen, so
+  there was no confirmation the changes were stored. A save with no changes
+  keeps its existing "no changes" message.
+- 2822fcf: Show the document's "Created by" and "Collaborators" metadata on separate
+  lines instead of one wrapping row joined by a dot.
+- 691db10: Fix saving an existing document navigating to the Nest Overview page while
+  the address bar kept the document's `?doc=<id>` URL.
+
+  Clicking **Save** on an existing document reused the same "go back to the
+  nest" continuation as creating a brand-new one, so every save moved the app
+  view to Overview without touching the URL — leaving the breadcrumb and page
+  out of sync with `?doc=<id>` until a reload reopened the editor. Saving an
+  existing document now leaves the editor open on that document; only creating
+  a new document still returns to the nest.
+
+- 2934ae3: Fix dragging an unsupported file (SVG, PDF, .txt, ...) into the document editor: the "Drop to add an image or video" overlay is now skipped when the browser's drag-over MIME type identifies the file as unsupported, and dropping one now shows a toast naming the file and the accepted types instead of silently doing nothing.
+
+  The drop overlay only checked whether the drag carried files at all, not
+  whether any of them were an accepted image/video type, and `handleDrop`
+  returned early for a rejected file without any feedback — worse, without
+  calling `preventDefault()`, letting the browser fall back to navigating the
+  tab to the dropped file.
+
+- cef9513: Make deleting a folder clear, including empty ones. An empty folder now
+  shows its delete action without a hover, the confirmation and toast no longer
+  talk about deleting "0 documents", and an editor's deletion request on an
+  empty folder is accepted instead of failing with "Folder not found".
+- 8d305f0: The Teammate added window now says when the temporary password was already emailed, instead of always asking the admin to pass it on by hand. When PromptOwl sign-in is open to everyone, both that window and the invite email mention Sign in with PromptOwl using a PromptOwl account under the same email. `POST /auth/invite` returns two new fields, `emailed` and `promptowl_sign_in`. The same window warns "This person has no nests yet. Share one?" with a nest picker, so a new teammate doesn't land on an empty server.
+- f472c4f: Invited users get a guided sign-in. Invite emails, and share emails to someone who hasn't signed in yet, link to the login page with `?invite=<email>`: the email is prefilled, a banner explains how to get in, the PromptOwl button reads "Continue with PromptOwl" and passes the invited email on to PromptOwl. Signing in with a PromptOwl account under a different email warns that nests shared with the invited address won't show. A failed password login explains the invite options instead of a bare "Invalid credentials", and the self-registration errors no longer point at a "Set your password" option that doesn't exist.
+- 245ca28: Anyone added on someone else's behalf now gets a way to sign in. Sharing a nest, a document or a folder with a new email, adding them to a team, or assigning them as a steward (in the app or over MCP) creates their account with a real temporary password and emails it to them with a sign-in link — the same email a Teammates invite sends. Previously only the Teammates invite did this; the other paths created an account nobody could sign in to until an admin reset its password.
+- 7be9b34: A single answer from PromptOwl's licensing service can no longer unlicense a working server.
+
+  **Suspension now goes through the two-strike window it was designed for.** PromptOwl answers a suspended key with `valid: false` plus `suspended: true`. The server returned that `valid: false` as-is, so the license went invalid on the first strike. The 60s safety poll then saw valid → invalid and ran the full revocation, which logged every user out and deleted the stored key. The 1-hour confirmation window never got to run. A suspension flag now keeps the cached license: nothing changes during the window, and once the suspension is confirmed writes return 503 while reads keep working. A suspension never wipes sessions or deletes the key.
+
+  **An explicit rejection is acted on only after three in a row.** Previously the first `valid: false` cleared the cache and dropped the server to unlicensed with no grace: every non-GET returned 503, including MCP. That was stricter than the treatment of an unreachable licensing service. Now a previously valid key keeps serving until PromptOwl rejects it three consecutive times (about 3 minutes at the 60s poll), and any valid answer resets the count. Installing a key (`POST /license/install`) still fails immediately when PromptOwl rejects it. CU-wdqcq01kh5.
+
+- 274bea0: Fix inline text in angle brackets (e.g. `Array<string>`) being silently dropped when switching to the Rich editor, and in the read-only Preview.
+
+  CommonMark treats any `<word>` as a raw HTML tag, not just real markup. Once
+  parsed that way, an unrecognized tag name like `string` has no separate text
+  of its own to fall back to, so the Rich editor's ProseMirror parser dropped
+  it entirely and the read-only Preview's HTML-stripping erased it outright —
+  in both cases permanently, since saving and reopening re-parsed the already
+  corrupted text. Both pipelines now only treat a small allow-list of real HTML
+  tags (the ones this app actually round-trips, like the color-mark `<span>`)
+  as markup; anything else renders as the literal text it is.
+
+- 04957b4: Fix the My Work sidebar badge overcounting relative to what the My Work page
+  actually shows.
+
+  `GET /me/work`'s `pagination.total` was the raw `getReviewQueue` count: every
+  pending review in every nest the caller can _see_, regardless of who
+  requested it or whether the caller can approve it. But `items`/`waiting`
+  only ever surface a review that is the caller's own request or one they can
+  actually approve — a viewer/editor's nest with someone else's pending review
+  inflated `total` without that review ever appearing in either bucket. The
+  approve-capability check was also only resolved for nests appearing in the
+  current page of results instead of every nest the caller can see, so the
+  undercount/overcount shifted depending on pagination. `pagination.total`'s
+  review portion is now computed the same way `items`/`waiting` are: pending
+  reviews in nests the caller can approve, plus the caller's own pending
+  reviews elsewhere.
+
+- ecaeb3f: Fix the My Work sidebar badge undercounting when a pending deletion or archive
+  request is waiting.
+
+  `GET /me/work`'s `pagination.total` came straight from the review queue's
+  count, which only tallies pending reviews. Deletion and archive requests ride
+  the same `items`/`waiting` buckets the My Work page renders, but were never
+  folded into `total` — so a pending deletion/archive flag made the sidebar
+  badge undercount by one per flag, and a hard refresh didn't fix it since the
+  server was returning the wrong number, not a stale one. `total` now includes
+  the deletion/archive rows actually shown.
+
+- b254981: Separate archive and deletion requests from reviews in My Work. Reviews now
+  list first under the "Select all N reviews" bar; requests follow under their
+  own "N requests · approve or reject each one" header, since they are decided
+  one at a time and never join the bulk action.
+- 961cb06: Fix the nest header flashing the wrong Visibility and Reader Mode state on load.
+
+  Opening a nest previously showed the **Private**/**Reader: Off** defaults for
+  a moment before the real values arrived from the initial fetch, so a public
+  nest with Reader Mode on would briefly look private with reader mode off.
+  The visibility toggle/badge and the Reader Mode button in the nest header now
+  stay hidden until the nest's first fetch resolves, instead of rendering their
+  placeholder default state.
+
+- 284f300: The nest Overview now reads like the public docs reader: the folder index on the reader's card surface with nav-style rows, the nest's description as its lede, the document / folder / governance counts as one summary line instead of a grid of stat cards, and Recently edited in a side card. An empty nest gets a proper start page (New document, Import files, Add with AI). At phone width the nest name no longer truncates to a letter, the Overview's actions fit on screen, and the app header no longer scrolls sideways.
+- 0f57363: Hide "Move to folder" for PDF documents instead of offering an action the server always rejects.
+
+  A pdf node's binary is bound to its id, so `src/nodes/service.ts`'s
+  `moveNode` refuses every PDF move with "PDF documents can't be moved to
+  another folder yet." The UI didn't know that: both the document editor's
+  overflow menu and the documents-list row menu/drag-and-drop still offered
+  Move on a PDF, walking the user through a dialog that could never succeed.
+  Move is now withheld for PDF documents in both places (shared logic in
+  `nodeTypeSupportsMove`); every other action is unaffected.
+
+- 085d858: Fix the "Add a person" field's suggestion dropdown reopening with an empty
+  query (listing every server account) after adding a collaborator by pressing
+  Enter. The list now closes as soon as Enter submits the typed address,
+  instead of staying open and re-querying once the field cleared.
+- 4fed5f4: Fix the person picker opening its full suggestion list as soon as a dialog
+  opens. The Assign Steward dialog focuses its email field on open, and the list
+  opened on any focus, covering the Scope and Role fields. It now opens on
+  click, typing or ArrowDown. Applies to the collaborator and team pickers too.
+- 6235950: Fix folder names casing inconsistently between the authoring sidebar and
+  Reader navigation.
+
+  The authoring sidebar's `prettyFolder` title-cased every hyphen/underscore
+  word (`fold-er-tab` → `Fold Er Tab`), while Reader's `humanize` only
+  capitalized the first character of the whole slug (`Fold er tab`). Reader's
+  `humanize` — used for its folder section labels and breadcrumbs — now
+  title-cases each word the same way, so the same folder reads identically in
+  both surfaces.
+
+- 83b44b0: Re-inviting an existing email from Teammates no longer issues a new temporary password. `POST /auth/invite` now returns `409` for any existing user and leaves their credentials alone: "already a member" once they've signed in, or "already invited but hasn't signed in yet — use Reset password" otherwise. Previously a not-yet-signed-in user's first password was silently replaced.
+- 93655c9: Fix a rejected Server settings save (e.g. an invalid PostHog project key)
+  showing the same error twice, as a toast and in the inline banner. The error
+  now shows once, in the inline banner, which also switches to the tab holding
+  the rejected field.
+- 1bacb00: Single sign-on is now fully documented. CONFIGURATION.md → Single sign-on (OIDC) is a complete admin guide: prerequisites, a settings reference (env var ↔ UI field ↔ default), step-by-step setup for Microsoft Entra ID, Google, Okta, Keycloak and any other OIDC provider, what happens to existing password accounts, invites, API keys, MCP clients and Agent SSO, offboarding, shared-deployment limits, and a troubleshooting table giving the cause and fix for every `sso_error` code. UI locations now match the Admin rail (Admin → Server settings → Single sign-on, Admin → Teammates). The in-app How it works page has a Single sign-on section for server admins.
+- 1bbc356: Fix the "Teammate added" confirmation modal overflowing horizontally — the
+  temporary password field and the "Pick a nest…" dropdown extended past the
+  modal's edge and were clipped.
+
+  The modal's content area is a CSS grid; the temporary-password `<code>`
+  element was a flex item without `min-w-0`, so it kept its full unbroken-text
+  width when computing the grid column's minimum size. That blew the shared
+  column out past the dialog's max width, dragging every other field in the
+  modal — including the nest picker — along with it. The `<code>` element now
+  allows shrinking, so `break-all` can wrap it within the dialog like intended.
+
+- 4b80dbe: Fix the Teammates page "Last active" ignoring web-app activity. It only read
+  API-key usage, so someone working in the web app never moved it. It now takes
+  the latest of API-key use and web-session activity.
+- b29bd3c: Fix reloading (or directly opening) `/teams` showing the raw Teams API JSON
+  instead of the Teams page.
+
+  The client's Teams page URL is `/teams`, which collides with the top-level
+  `GET /teams` API route — in-app navigation never re-requests it, but a hard
+  reload or a bookmarked link issues a real `GET /teams`, which the API route
+  answered first with `{"teams": [...]}` instead of the app shell. A guard ahead
+  of the `/teams` route now serves the SPA shell for a real browser navigation
+  (same document-navigation check the SPA catch-all already uses) and leaves
+  the app's own API fetches untouched.
+
+- 5e0cf09: `contextnest://` links are graph edges, and a selector's `hops` actually expands
+
+  `POST /nests/:id/context` hop expansion and the ontology graph (`GET /nests/:id/graph`) only followed `[[wikilinks]]`. A node linked with the spec's own link form, `[text](contextnest://nodes/…)`, was never returned at any `hops`, and never drawn as an edge, while a `[[wikilink]]` at the same distance was. Both now follow `contextnest://` links, including pinned and anchored forms (`contextnest://nodes/foo@3#bar` links to `nodes/foo`). The target is matched by id only, so a dangling link draws nothing and can't attach to an unrelated node that happens to share its slug. Links quoted in inline code or fenced code blocks are ignored.
+
+  An explicit engine `selector` now honours `hops` as documented. Before, the engine ran in full mode, which ignores `hops`, so only `[[Title]]` selector parts were ever expanded. `hops: 0` results are unchanged. A selector request that omits `hops` gets the documented default of 2, so linked neighbours now come back where they previously did not.
+
+- 1d79e1e: Fix a YouTube/Vimeo (or uploaded video) URL placed right after an image losing its embedded player after save + reload.
+
+  The editor's image node is configured as a top-level block so `![alt](url)`
+  round-trips through markdown, but its serializer never closed its block —
+  so the paragraph written immediately after an image (a bare video URL) had
+  no blank line separating it from the image line. On reparse, CommonMark's
+  lazy-continuation rule folded the two into one paragraph, so the video URL
+  was no longer alone in its paragraph and Preview rendered it as a plain
+  link instead of an embedded player. The image serializer now closes its
+  block like every other block-level node does.
+
+- 5f10d90: Fix pressing Backspace at the start of the paragraph right after an embedded video merging that paragraph into the video's URL, corrupting the link and destroying the player.
+
+  The video player is a decoration over a plain paragraph whose text is the
+  bare URL, so a Backspace at the start of the following paragraph hit
+  ProseMirror's default `joinBackward` and appended the typed text straight
+  onto the URL. The editor now redirects the first Backspace into the video
+  paragraph instead of merging into it, leaving the video and its URL intact.
+
+- 6c78c5b: Fix Backspace below an embedded video still corrupting its URL. The earlier
+  fix moved the caret into the video's hidden URL text, so the next keystroke
+  edited the URL and removed the player. Backspace at the start of the line
+  below a video now selects the whole video (outlined), like an image; a second
+  Backspace deletes it cleanly. An empty line below the video is removed first.
+- 934caaa: Fix unresolved `[[…]]` links losing their broken-link styling in read-only views.
+
+  The editor already styles an unresolved `[[Title]]` link differently (purple,
+  dotted underline) from a resolved one (blue, solid), but the read-only
+  renderer used by the "Preview" toggle, Comment mode, and the nest View mode
+  rendered every link as resolved regardless of whether it actually pointed at
+  a document. Both now resolve the target the same way the hover preview does
+  and fall back to the broken-link style when it doesn't.
+
+- 98a4b50: Fix the New Document form prefilling with the internal node id
+  (`nodes/<id>`) instead of the wiki-link's human-readable title when clicking
+  a broken `[[Title]]` link.
+
+  Aliased wiki-links store `[[nodes/<id>|Title]]` — the internal node id as
+  the target, the readable title as the display alias. Once the target
+  document was deleted, the click handlers fell back to that raw target for
+  the create/blocked title instead of the alias, leaking the internal id into
+  the New Document form (and into the reviewer's "doesn't exist" message).
+  Broken links now prefill with the link's display text.
+
 ## 1.25.0
 
 ### Minor Changes
