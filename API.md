@@ -2255,7 +2255,26 @@ For any `/nests/:nestId/...` request, the middleware computes:
 
 Returns 403 `Insufficient permissions` if not met. Open-mode (`AUTH_MODE=open`) treats everyone as `owner`.
 
-License gate: any non-GET request OR any governance path requires a valid PromptOwl license (`/license/install`). 503 `License required` otherwise.
+License gate: any non-GET request OR any governance path requires a valid PromptOwl license (`/license/install`). Otherwise 503. **Who hears why:** a server admin (open mode, license owner, superadmin), or the key's owner after it lapsed, gets `{ "error": "License required", "reason": "...", "setup_url": "/setup", "trial", "expires_at", "days_left", "license_reason", "grace_ends_at", "contact": { "url", "email" } }` (or `"Server suspended by PromptOwl"` with `reason`, `contact`, `contact_url`). Everyone else gets only `{ "error": "This workspace is read-only right now. Your administrator has been notified.", "read_only": true }`, with no licensing vocabulary. The server-level `/mcp` write tools and run writes follow the same rule.
+
+---
+
+## License
+
+The server validates its key with PromptOwl (`POST {PROMPTOWL_API_URL}/api/license/validate`) at startup and every 60s. Each check sends the key plus `stats: { users, nests }` (the head-count the license is billed on) and `server: { version, public_url }`. It is part of validation, so it is sent even with `TELEMETRY_ENABLED=false`, and it never includes content.
+
+- **Seats are reported, never enforced.** Over the licensed seats, new people still join. The admin sees a private notice, and PromptOwl follows up.
+- **Expiry has a 14-day grace period on PromptOwl's side.** While `reason` is `expired_grace` the server works normally until `grace_ends_at`.
+- **A lapse makes the server read-only, with no lock-out.** When PromptOwl rejects the key 3 checks in a row (about 3 min) or a suspension is confirmed (the two-strike 1h window), writes return 503 as above. Reads keep working. Sessions and the installed key are kept, so a renewal or reactivation restores the server on the next check with nothing to reinstall.
+
+### GET `/license/status` (public)
+`{ valid, tier, org, owner_email, suspended, suspended_reason, limits, setup_required }`. `setup_required` is true only for a server that has never been licensed; the UI shows the activation screen then. A lapsed license is not a setup case. Carries no lapse reason, dates, head-count or contact.
+
+### GET `/admin/license` (server admin, or the key's owner)
+`{ valid, tier, org, owner_email, suspended, suspended_reason, trial, expires_at, days_left, reason, grace_ends_at, contact: { url, email }, seats: { licensed, used, over_limit, at_limit }, pending_rejections, last_checked_at }`. `seats.licensed` is null when there is no seat limit. `pending_rejections` counts rejections not yet acted on (3 make the server read-only). Drives Settings → License and the admin license banner.
+
+### POST `/license/install`
+`{ key }`. Public while the server has never been licensed. Once it has a license owner, only a server admin or that owner may replace the key (401/403 otherwise). A rejected key returns 400 with an operator-facing `error` plus the same term fields.
 
 ---
 

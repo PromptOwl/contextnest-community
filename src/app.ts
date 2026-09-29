@@ -115,7 +115,16 @@ import {
   getSuspensionReason,
   getCurrentLicense,
   installLicenseKey,
+  getLastLicenseCheck,
+  getLicenseOwnerEmail,
+  getPendingRejections,
+  licensedSeats,
+  DEFAULT_LICENSE_CONTACT,
+  type LicenseInfo,
 } from "./auth/license.js";
+import { countSeatsUsed } from "./auth/seats.js";
+import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "./auth/license-copy.js";
+import { SERVICE_VERSION } from "./shared/version.js";
 import { persistSetting } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
 import { publicBaseUrlError } from "./shared/public-base-url.js";
@@ -123,7 +132,7 @@ import { isOidcReady } from "./auth/oidc.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 
 // Resolve UI static files. In built mode this file lives at dist/index.js,
 // so siblings of __dirname include dist/web3. In dev (`tsx src/index.ts`)
@@ -132,16 +141,6 @@ import { existsSync, readFileSync } from "node:fs";
 // serveStatic wants a path relative to CWD.
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-// Built mode puts this file at dist/app.js, dev at src/app.ts — package.json
-// is one level up from either.
-const SERVICE_VERSION = (() => {
-  try {
-    return JSON.parse(readFileSync(join(HERE, "..", "package.json"), "utf8"))
-      .version as string;
-  } catch {
-    return "unknown";
-  }
-})();
 const UI_DIR_CANDIDATES = [
   join(HERE, "web3"),
   join(process.cwd(), "dist", "web3"),
@@ -150,6 +149,46 @@ const UI_DIR_ABS =
   UI_DIR_CANDIDATES.find((p) => existsSync(p)) || UI_DIR_CANDIDATES[0];
 const UI_DIR_REL = relative(process.cwd(), UI_DIR_ABS) || ".";
 
+/** Whole days until an ISO date (negative once past); null = no date. */
+function daysUntil(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const ms = Date.parse(iso) - Date.now();
+  return isNaN(ms) ? null : Math.ceil(ms / 86_400_000);
+}
+
+/** License-term fields shared by /license/status, /admin/license and a
+ *  rejected install: what the license is, when it ends, why PromptOwl last
+ *  refused it, and who to talk to. */
+function licenseTerms(lic: LicenseInfo | null | undefined) {
+  return {
+    trial: !!lic?.trial,
+    expires_at: lic?.expiresAt ?? null,
+    days_left: daysUntil(lic?.expiresAt),
+    reason: lic?.reason ?? null,
+    grace_ends_at: lic?.graceEndsAt ?? null,
+    contact: lic?.contact ?? DEFAULT_LICENSE_CONTACT,
+  };
+}
+
+/** Operator-facing message for a key PromptOwl refused at install time. */
+function rejectedKeyMessage(info: LicenseInfo): string {
+  const contact = info.contact ?? DEFAULT_LICENSE_CONTACT;
+  const talk = `Talk to PromptOwl (${contact.url} or ${contact.email}) to renew or get a new key.`;
+  switch (info.reason) {
+    case "expired": {
+      const when = info.expiresAt
+        ? ` on ${new Date(info.expiresAt).toDateString()}`
+        : "";
+      return `This ${info.trial ? "trial" : "license"} ended${when}, so the key wasn't saved. ${talk}`;
+    }
+    case "deactivated":
+      return `This license key has been deactivated, so it wasn't saved. ${talk}`;
+    case "suspended":
+      return `This license is suspended, so it wasn't saved. ${talk}`;
+    default:
+      return "PromptOwl rejected this license key. It wasn't saved. Verify the key is correct and active, then try again.";
+  }
+}
 // True for a browser loading this URL as a page (hard reload, typed/bookmarked
 // link), false for the app's own fetch()es and other programmatic callers.
 // Sec-Fetch-Mode is sent by every current browser on navigation; the Accept
@@ -581,6 +620,11 @@ export function createApp(): Hono<AuthEnv> {
   app.route("/auth", authRoutes);
 
   // ─── License setup endpoints (public — needed before unlock) ──────────
+  // Public, so it says nothing about WHY a license lapsed (trial ended,
+  // deactivated…) — that is between PromptOwl and the admin, on
+  // GET /admin/license. `setup_required` is true only for a server that has
+  // never been licensed; a workspace whose license lapsed stays usable
+  // read-only instead of dropping everyone onto the activation screen.
   app.get("/license/status", (c) => {
     const lic = getCurrentLicense();
     return c.json({
@@ -591,10 +635,55 @@ export function createApp(): Hono<AuthEnv> {
       suspended: !!lic?.suspended,
       suspended_reason: lic?.suspendedReason || null,
       limits: lic?.limits || null,
+      setup_required: !lic?.valid && !getLicenseOwnerEmail(),
     });
   });
 
+  // License detail for the people who can act on it — server admins and the
+  // key's owner (even once it lapsed): the Settings → License tab and the
+  // admin banner, including the live seat count.
+  app.use("/admin/license", flexAuthMiddleware);
+  app.get("/admin/license", async (c) => {
+    if (!(await canSeeLicenseDetail(c.get("userId"))))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const lic = getCurrentLicense();
+    const licensed = licensedSeats(lic);
+    const used = await countSeatsUsed();
+    return c.json({
+      valid: !!lic?.valid,
+      tier: lic?.tier || "none",
+      org: lic?.org || null,
+      owner_email: lic?.ownerEmail || null,
+      suspended: !!lic?.suspended,
+      suspended_reason: lic?.suspendedReason || null,
+      ...licenseTerms(lic),
+      seats: {
+        licensed,
+        used,
+        over_limit: licensed != null && used > licensed,
+        at_limit: licensed != null && used >= licensed,
+      },
+      // Consecutive rejections PromptOwl has sent that haven't been acted on
+      // yet (3 drop the license) — the "we're checking your license" banner.
+      pending_rejections: getPendingRejections(),
+      last_checked_at: getLastLicenseCheck(),
+    });
+  });
+
+  // Installing the FIRST key is public — that's how a fresh server gets set
+  // up. Once the server has a license owner, replacing the key is theirs (or
+  // a server admin's) to do: a lapsed license must not let any visitor paste
+  // their own key and become this server's admin.
+  app.use("/license/install", async (c, next) =>
+    getLicenseOwnerEmail() ? flexAuthMiddleware(c, next) : next(),
+  );
   app.post("/license/install", async (c) => {
+    if (getLicenseOwnerEmail() && !(await canSeeLicenseDetail(c.get("userId")))) {
+      return c.json(
+        { error: "Only the server admin can replace this server's license key." },
+        403,
+      );
+    }
     let body: { key?: string };
     try {
       body = await c.req.json();
@@ -614,8 +703,8 @@ export function createApp(): Hono<AuthEnv> {
         return c.json(
           {
             valid: false,
-            error:
-              "PromptOwl rejected this license key. It wasn't saved. Verify the key is correct and active, then try again.",
+            error: rejectedKeyMessage(info),
+            ...licenseTerms(info),
           },
           400,
         );
@@ -2070,10 +2159,16 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     // Kill switch: if suspended, block writes but allow reads
+    // Only admins hear why; everyone else gets the neutral read-only line.
     if (isSuspended() && c.req.method !== "GET") {
+      if (!(await canSeeLicenseDetail(userId))) {
+        return deny(503, NEUTRAL_READ_ONLY, { read_only: true });
+      }
+      const lic = getCurrentLicense();
       return deny(503, "Server suspended by PromptOwl", {
         reason: getSuspensionReason(),
-        contact: "support@promptowl.ai",
+        contact: (lic?.contact ?? DEFAULT_LICENSE_CONTACT).email,
+        contact_url: (lic?.contact ?? DEFAULT_LICENSE_CONTACT).url,
       });
     }
 
@@ -2127,9 +2222,19 @@ export function createApp(): Hono<AuthEnv> {
       if (needsLicense) {
         const lic = getCurrentLicense();
         if (!lic?.valid) {
+          if (!(await canSeeLicenseDetail(userId))) {
+            return deny(503, NEUTRAL_READ_ONLY, { read_only: true });
+          }
+          // licenseTerms carries the machine reason code; expose it as
+          // license_reason so it doesn't clobber the human-readable reason.
+          const { reason: licenseReason, ...terms } = licenseTerms(lic);
           return deny(503, "License required", {
+            ...terms,
+            license_reason: licenseReason,
             reason:
-              "This server has no valid PromptOwl license installed. Ask the server admin to install one via the setup screen or POST /license/install.",
+              lic?.reason === "expired"
+                ? "This server's PromptOwl license has ended, so it is read-only until it is renewed. Nothing has been deleted."
+                : "This server has no valid PromptOwl license installed. Ask the server admin to install one via the setup screen or POST /license/install.",
             setup_url: "/setup",
           });
         }

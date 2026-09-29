@@ -44,6 +44,7 @@ import { copyTextWithToast } from "../../../lib/clipboard";
 import { getAdminSettings, updateAdminSettings } from "../../../lib/api";
 import { useAuth } from "../../../auth/AuthContext";
 import { AgentConnectPanel } from "./AgentConnectPanel";
+import { LicensePanel } from "./LicensePanel";
 import { toast } from "sonner";
 
 interface SettingsPageProps {
@@ -141,6 +142,11 @@ const TABS: {
     // Docs only — nothing here persists, so no keys for the unsaved dot.
     id: "agents",
     label: "Connecting agents",
+    keys: [],
+  },
+  {
+    id: "license",
+    label: "License",
     keys: [],
   },
   {
@@ -1971,6 +1977,10 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               publicBaseUrl={draft.public_base_url}
               openMode={authMode === "open"}
             />
+          </TabsContent>
+
+          <TabsContent value="license" className="space-y-4">
+            {activeTab === "license" && <LicensePanel />}
           </TabsContent>
         </Tabs>
       )}

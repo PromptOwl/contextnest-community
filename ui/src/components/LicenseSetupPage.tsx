@@ -4,12 +4,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { installLicense } from "../lib/api";
+import { DEFAULT_CONTACT } from "../lib/license-messages";
 
 interface Props {
   onActivated: () => void;
+  /** Set when an admin opened this to replace a lapsed key (vs first setup). */
+  onCancel?: () => void;
 }
 
-export function LicenseSetupPage({ onActivated }: Props) {
+export function LicenseSetupPage({ onActivated, onCancel }: Props) {
   const [key, setKey] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -54,12 +57,16 @@ export function LicenseSetupPage({ onActivated }: Props) {
           <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-primary/10">
             <ShieldCheck className="h-6 w-6 text-primary" />
           </div>
-          <h1 className="text-2xl font-bold">Activate ContextNest Community</h1>
+          <h1 className="text-2xl font-bold">
+            {onCancel ? "Install a new license key" : "Activate ContextNest Community"}
+          </h1>
           <p className="text-sm text-muted-foreground">
-            This server is in setup mode. Paste a PromptOwl license key to
-            unlock write access.
+            {onCancel
+              ? "Paste the new PromptOwl license key for this server. The workspace unlocks as soon as it validates."
+              : "This server is in setup mode. Paste a PromptOwl license key to unlock write access."}
           </p>
         </div>
+
 
         <div className="border rounded-lg p-6 space-y-4 bg-card">
           <div className="space-y-2">
@@ -98,6 +105,16 @@ export function LicenseSetupPage({ onActivated }: Props) {
             )}
           </div>
 
+          {onCancel && !warning && (
+            <Button
+              className="w-full"
+              variant="ghost"
+              onClick={onCancel}
+              data-testid="license-setup-cancel"
+            >
+              Back to the workspace
+            </Button>
+          )}
           {warning ? (
             <Button
               className="w-full"
@@ -150,6 +167,26 @@ export function LicenseSetupPage({ onActivated }: Props) {
           <p className="text-xs pt-2">
             Reads stay available without a license. Writes (nest/node create,
             update, delete) require activation.
+          </p>
+          <p className="text-xs">
+            New keys start with a free 30-day trial. To license this server
+            for your team, or for help with an existing key,{" "}
+            <a
+              href={DEFAULT_CONTACT.url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary underline"
+            >
+              talk to PromptOwl
+            </a>{" "}
+            or email{" "}
+            <a
+              href={`mailto:${DEFAULT_CONTACT.email}`}
+              className="text-primary underline"
+            >
+              {DEFAULT_CONTACT.email}
+            </a>
+            .
           </p>
         </div>
       </div>

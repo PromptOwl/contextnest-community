@@ -65,7 +65,16 @@ export function setupTestEnv() {
  */
 export async function createTestApp(
   authMode: "open" | "key" = "open",
-  opts: { superAdmins?: string[]; ownerEmail?: string } = {},
+  opts: {
+    superAdmins?: string[];
+    ownerEmail?: string;
+    /** License limits the mocked license reports. Read on every call, so a
+     *  test can mutate maxUsers after seeding users (seat-limit tests). */
+    licenseLimits?: { maxUsers: number; maxNests: number };
+    /** Fields merged over the mocked license on every call — mutate it to
+     *  flip the server to lapsed/suspended mid-suite. */
+    licenseOverrides?: Record<string, unknown>;
+  } = {},
 ) {
   process.env.AUTH_MODE = authMode;
   vi.resetModules();
@@ -82,10 +91,11 @@ export async function createTestApp(
         valid: true,
         tier: "test",
         org: "Test Org",
-        limits: null,
+        limits: opts.licenseLimits ?? null,
         suspended: false,
         suspendedReason: null,
         ownerEmail: opts.ownerEmail ?? null,
+        ...(opts.licenseOverrides ?? {}),
       }),
       // isLicenseAdminEmail reads the module-internal currentLicense, which
       // is never populated in tests. Override it so the ownerEmail opt drives

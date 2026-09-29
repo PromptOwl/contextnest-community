@@ -14,6 +14,7 @@ import { readDocPagePrefs, writeDocPagePrefs } from "./lib/doc-page";
 import { shouldReturnToNestOnSave } from "./lib/document-save-nav";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
+import { LicenseBanner } from "./components/LicenseNotice";
 import { getLicenseStatus, type LicenseStatus } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
@@ -288,6 +289,8 @@ export default function App() {
     null,
   );
   const [licenseLoading, setLicenseLoading] = useState(true);
+  // An admin replacing a lapsed key from the license banner.
+  const [installingKey, setInstallingKey] = useState(false);
   // Logout flow: confirm dialog → call logout() → sonner success toast.
   // The Toaster portal lives at the root of the tree (rendered below)
   // so the toast survives the view swap that logout triggers (Login
@@ -965,10 +968,28 @@ export default function App() {
     );
   }
 
-  // Setup gate: no valid license = force operator through install
-  // before anything else loads.
-  if (licenseStatus && !licenseStatus.valid) {
+  // Setup gate: a server that has never been licensed goes through install
+  // before anything else loads. A workspace whose license LAPSED does not —
+  // it stays open read-only, admins get the specifics in the license banner
+  // (with "Install a new key" → the screen below), everyone else a neutral
+  // line. setup_required is absent only on a pre-v2 server: keep the old gate.
+  if (
+    licenseStatus &&
+    !licenseStatus.valid &&
+    licenseStatus.setup_required !== false
+  ) {
     return <LicenseSetupPage onActivated={refreshLicense} />;
+  }
+  if (installingKey) {
+    return (
+      <LicenseSetupPage
+        onActivated={() => {
+          setInstallingKey(false);
+          refreshLicense();
+        }}
+        onCancel={() => setInstallingKey(false)}
+      />
+    );
   }
 
   // Logout chrome (confirm dialog + success toast) lives at the top of
@@ -1473,6 +1494,13 @@ export default function App() {
       <main
         className={`${shellWidth} min-w-0 overflow-x-clip${withSidebar ? "" : " px-4 py-4"}`}
       >
+        {/* License specifics for admins; a neutral read-only line for
+            everyone else, and only once the workspace is read-only. */}
+        <LicenseBanner
+          isAdmin={isAdmin}
+          status={licenseStatus}
+          onInstallKey={() => setInstallingKey(true)}
+        />
         {/* A ?nest link that didn't resolve. Falling through to the dashboard
             made a stale bookmark look like it had simply opened the app, with
             no way to tell "deleted" from "no access" from "bad link"
