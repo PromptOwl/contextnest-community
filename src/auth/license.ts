@@ -4,6 +4,7 @@ import { SERVICE_VERSION } from "../shared/version.js";
 import { getDb } from "../db/client.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { persistSetting } from "../db/settings.js";
+import { encryptSecret, tryDecryptSecret } from "../shared/secret-box.js";
 
 export interface LicenseSeats {
   /** Seats the license covers; null = unlimited. */
@@ -31,6 +32,12 @@ export interface LicenseInfo {
   limits: {
     maxNests: number;
     maxUsers: number;
+    // Pricing entitlement (see getEntitlement). Optional: a PromptOwl that
+    // predates it sends none, and the server then runs as Free.
+    plan?: LicensePlan;
+    maxAccountOwners?: number | null;
+    maxSubscribers?: number | null;
+    byok?: boolean;
   } | null;
   suspended: boolean;
   suspendedReason: string | null;
@@ -57,6 +64,98 @@ let currentLicense: LicenseInfo | null = null;
 
 export function getCurrentLicense(): LicenseInfo | null {
   return currentLicense;
+}
+
+// ─── Pricing entitlement ────────────────────────────────────────────────
+// PromptOwl owns the plan; we read it from validate `limits`. A missing field
+// takes the plan's default, and no plan means Free. null = unlimited.
+
+export type LicensePlan = "free" | "trial" | "self_hosted" | "enterprise";
+
+export interface Entitlement {
+  plan: LicensePlan;
+  /** Billed users: Account Owners, nest owners, admins, reviewers. */
+  maxUsers: number | null;
+  maxAccountOwners: number | null;
+  /** Editors. Free has none: adding one is a paid action. */
+  maxSubscribers: number | null;
+  /** Own provider keys (Enterprise only); otherwise models run on credits. */
+  byok: boolean;
+}
+
+const PLAN_DEFAULTS: Record<LicensePlan, Omit<Entitlement, "plan">> = {
+  free: { maxUsers: 10, maxAccountOwners: 1, maxSubscribers: 0, byok: false },
+  trial: { maxUsers: 30, maxAccountOwners: null, maxSubscribers: null, byok: false },
+  self_hosted: { maxUsers: 30, maxAccountOwners: null, maxSubscribers: null, byok: false },
+  enterprise: { maxUsers: null, maxAccountOwners: null, maxSubscribers: null, byok: true },
+};
+
+/** A cap from PromptOwl: null = unlimited, a whole number = the cap, anything
+ *  else (missing, malformed) = the plan's default. */
+function capOr(v: unknown, fallback: number | null): number | null {
+  if (v === null) return null;
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : fallback;
+}
+
+export function entitlementOf(lic: LicenseInfo | null | undefined): Entitlement {
+  const l = lic?.valid ? lic.limits : null;
+  const plan: LicensePlan =
+    l?.plan && l.plan in PLAN_DEFAULTS ? l.plan : "free";
+  const d = PLAN_DEFAULTS[plan];
+  // Limits only count once PromptOwl names a plan: an older PromptOwl's
+  // maxUsers (0 = unlimited) must not lift a Free server's cap.
+  if (!l?.plan) return { plan, ...d };
+  const maxUsers = capOr(l.maxUsers, d.maxUsers);
+  return {
+    plan,
+    maxUsers: maxUsers === 0 ? null : maxUsers, // 0 = unlimited, as licensedSeats
+    maxAccountOwners: capOr(l.maxAccountOwners, d.maxAccountOwners),
+    maxSubscribers: capOr(l.maxSubscribers, d.maxSubscribers),
+    byok: typeof l.byok === "boolean" ? l.byok : d.byok,
+  };
+}
+
+export function getEntitlement(): Entitlement {
+  return entitlementOf(currentLicense);
+}
+
+// ─── Model gateway ──────────────────────────────────────────────────────
+// The license's LiteLLM key (models on PromptOwl credits). Kept off LicenseInfo,
+// which routes echo back; encrypted in license_cache, dropped once invalid.
+
+export interface ModelGateway {
+  baseUrl: string;
+  key: string;
+}
+
+let currentGateway: ModelGateway | null = null;
+
+export function getModelGateway(): ModelGateway | null {
+  return currentGateway;
+}
+
+function parseGateway(raw: unknown): ModelGateway | null {
+  const g = (raw && typeof raw === "object" ? raw : {}) as {
+    baseUrl?: unknown;
+    key?: unknown;
+  };
+  return typeof g.baseUrl === "string" &&
+    /^https?:\/\/[^\s"'<>]+$/i.test(g.baseUrl) &&
+    typeof g.key === "string" &&
+    g.key.length > 0
+    ? { baseUrl: g.baseUrl.replace(/\/+$/, ""), key: g.key }
+    : null;
+}
+
+async function gatewayFromCache(stored: string | null | undefined): Promise<ModelGateway | null> {
+  if (!stored) return null;
+  const plain = await tryDecryptSecret(stored, "the license model gateway key");
+  if (!plain) return null;
+  try {
+    return parseGateway(JSON.parse(plain));
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -391,10 +490,12 @@ type CachedLicenseRow = {
   limits_json: string;
   validated_at: string;
   owner_email: string | null;
+  gateway_json?: string | null;
 };
 
-function fromCache(cached: CachedLicenseRow): LicenseInfo {
+async function fromCache(cached: CachedLicenseRow): Promise<LicenseInfo> {
   if (cached.owner_email) lastOwnerEmail = cached.owner_email;
+  currentGateway = await gatewayFromCache(cached.gateway_json);
   return withMeta({
     valid: true,
     tier: cached.tier,
@@ -420,6 +521,7 @@ export async function validateLicense(
 ): Promise<LicenseInfo> {
   const info = await _validateLicenseImpl(!!opts.forceFresh, !!opts.strict);
   currentLicense = info;
+  if (!info.valid) currentGateway = null;
   return info;
 }
 
@@ -487,7 +589,8 @@ async function _validateLicenseImpl(
       valid?: boolean;
       tier?: string;
       org?: string;
-      limits?: { maxNests: number; maxUsers: number };
+      limits?: LicenseInfo["limits"];
+      gateway?: unknown;
       suspended?: boolean;
       suspended_reason?: string;
       owner_email?: string | null;
@@ -603,13 +706,17 @@ async function _validateLicenseImpl(
       rejectionStreak = 0;
       rejectionKey = null;
       const limitsJson = data.limits ? JSON.stringify(data.limits) : null;
+      currentGateway = parseGateway(data.gateway);
+      const gatewayJson = currentGateway
+        ? await encryptSecret(JSON.stringify(currentGateway))
+        : null;
       await db.run(
         insertOrReplace(
           db,
-          `INSERT INTO license_cache (key, tier, org, limits_json, owner_email, validated_at)
-           VALUES (?, ?, ?, ?, ?, ${nowExpr(db)})`,
+          `INSERT INTO license_cache (key, tier, org, limits_json, owner_email, gateway_json, validated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ${nowExpr(db)})`,
           ["key"],
-          `tier = excluded.tier, org = excluded.org, limits_json = excluded.limits_json, owner_email = excluded.owner_email, validated_at = ${nowExpr(db)}`,
+          `tier = excluded.tier, org = excluded.org, limits_json = excluded.limits_json, owner_email = excluded.owner_email, gateway_json = excluded.gateway_json, validated_at = ${nowExpr(db)}`,
         ),
         [
           key,
@@ -617,6 +724,7 @@ async function _validateLicenseImpl(
           data.org || null,
           limitsJson,
           data.owner_email || null,
+          gatewayJson,
         ],
       );
     }

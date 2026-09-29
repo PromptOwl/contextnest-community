@@ -569,3 +569,88 @@ describe("license contract v2", () => {
     expect(license.getCurrentLicense()?.valid).toBe(true);
   });
 });
+
+describe("pricing entitlement", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  beforeEach(() => {
+    env = setupTestEnv();
+  });
+  afterEach(() => {
+    env.cleanup();
+    vi.restoreAllMocks();
+  });
+
+  const lic = (limits: Record<string, unknown> | null, valid = true) =>
+    ({ valid, tier: "team", org: null, limits, suspended: false, suspendedReason: null, ownerEmail: null }) as any;
+
+  it("runs as Free with no license, or when PromptOwl names no plan", async () => {
+    const { entitlementOf } = await loadLicense();
+    const free = { plan: "free", maxUsers: 10, maxAccountOwners: 1, maxSubscribers: 0, byok: false };
+    expect(entitlementOf(null)).toEqual(free);
+    expect(entitlementOf(lic({ plan: "enterprise" }, false))).toEqual(free);
+    // An older PromptOwl's maxUsers 0 (= unlimited) must not lift the Free cap.
+    expect(entitlementOf(lic({ maxUsers: 0, maxNests: 0 }))).toEqual(free);
+  });
+
+  it("takes PromptOwl's caps over the plan defaults; null = unlimited", async () => {
+    const { entitlementOf } = await loadLicense();
+    expect(entitlementOf(lic({ plan: "enterprise" }))).toEqual({
+      plan: "enterprise", maxUsers: null, maxAccountOwners: null, maxSubscribers: null, byok: true,
+    });
+    expect(
+      entitlementOf(lic({ plan: "self_hosted", maxUsers: 45, maxSubscribers: 12, maxAccountOwners: null })),
+    ).toEqual({ plan: "self_hosted", maxUsers: 45, maxAccountOwners: null, maxSubscribers: 12, byok: false });
+    // Malformed fields fall back to the plan's default; an unknown plan is Free.
+    expect(entitlementOf(lic({ plan: "free", maxUsers: "lots", maxSubscribers: -1 }))).toMatchObject({
+      maxUsers: 10, maxSubscribers: 0,
+    });
+    expect(entitlementOf(lic({ plan: "platinum" })).plan).toBe("free");
+  });
+
+  it("caches the model gateway encrypted and restores it from the cache", async () => {
+    process.env.PROMPTOWL_KEY = "pk_gw_1";
+    mockFetch({
+      body: {
+        valid: true,
+        tier: "team",
+        limits: { plan: "self_hosted", maxUsers: 30 },
+        gateway: { baseUrl: "https://llm.promptowl.ai/", key: "sk-litellm-secret" },
+      },
+    });
+    const license = await loadLicense();
+    await license.validateLicense();
+    expect(license.getModelGateway()).toEqual({ baseUrl: "https://llm.promptowl.ai", key: "sk-litellm-secret" });
+    expect(license.getEntitlement().plan).toBe("self_hosted");
+
+    const { getDb } = await import("../src/db/client.js");
+    const row = (await getDb().get("SELECT gateway_json FROM license_cache WHERE key = ?", ["pk_gw_1"])) as {
+      gateway_json: string;
+    };
+    expect(row.gateway_json.startsWith("enc.v1.")).toBe(true);
+    expect(row.gateway_json).not.toContain("sk-litellm-secret");
+
+    // A fresh process reads it back from the cache without calling PromptOwl.
+    const fetchMock = mockFetch({ reject: new Error("should not be called") });
+    const again = await loadLicense();
+    await again.validateLicense();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(again.getModelGateway()?.key).toBe("sk-litellm-secret");
+  });
+
+  it("drops the gateway when it is malformed or the license stops being valid", async () => {
+    process.env.PROMPTOWL_KEY = "pk_gw_2";
+    mockFetch({ body: { valid: true, tier: "team", gateway: { baseUrl: "javascript:alert(1)", key: "k" } } });
+    const license = await loadLicense();
+    await license.validateLicense();
+    expect(license.getModelGateway()).toBeNull();
+
+    mockFetch({ body: { valid: true, tier: "team", gateway: { baseUrl: "https://llm.promptowl.ai", key: "k2" } } });
+    await license.validateLicense({ forceFresh: true });
+    expect(license.getModelGateway()?.key).toBe("k2");
+
+    mockFetch({ body: { valid: false, reason: "deactivated" } });
+    await license.validateLicense({ forceFresh: true, strict: true });
+    expect(license.getCurrentLicense()?.valid).toBe(false);
+    expect(license.getModelGateway()).toBeNull();
+  });
+});

@@ -1570,6 +1570,18 @@ export function runMigrations(db: Database.Database): void {
     }
     recordMigration("044_client_attribution");
   }
+
+  // 046: license_cache.gateway_json — the license's LiteLLM key, encrypted.
+  //   046 because 045 is taken by two in-flight branches (ids match by string).
+  if (!hasMigration("046_license_cache_gateway")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(license_cache)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("gateway_json")) {
+      db.exec("ALTER TABLE license_cache ADD COLUMN gateway_json TEXT");
+    }
+    recordMigration("046_license_cache_gateway");
+  }
 }
 
 /**
