@@ -26,9 +26,7 @@ import {
   bodyOnly,
   deleteNode,
   deleteFolder,
-  discardDraft,
   isIdUnderFolder,
-  restoreVersion,
   vaultFolderExists,
 } from "../nodes/service.js";
 import * as agentActivity from "./agent-activity-service.js";
@@ -595,32 +593,15 @@ governanceRoutes.post("/agent-activity/undo", async (c) => {
   const nodeId = typeof body.nodeId === "string" ? assertSafeNodeId(body.nodeId) : "";
   const version = Number(body.version);
   const userEmail = await getUserEmail(c);
-  const plan = await agentActivity.planUndo({ nestId, nodeId, version, userEmail });
-  const client = attributeRequest(c, body.client);
-
-  let result: { effect: agentActivity.UndoEffect; version: number | null; status?: string };
-  if (plan.effect === "restore") {
-    const restored = await restoreVersion(nestId, nodeId, plan.restoreTo!, userEmail, {
-      client,
-      changeNote: agentActivity.undoChangeNote(plan),
-    });
-    const row = await versions.getVersion(nestId, nodeId, restored.version);
-    result = { effect: "restore", version: restored.version, status: row?.status };
-  } else if (plan.effect === "discard") {
-    const discarded = await discardDraft(nestId, nodeId, userEmail);
-    result = { effect: discarded.deleted ? "delete" : "discard", version: discarded.version };
-  } else {
-    await deleteNode(nestId, nodeId, userEmail, { client });
-    result = { effect: "delete", version: null };
-  }
-  await trackEvent("node.undo_agent_change", { nestId, nodeId, version, effect: result.effect });
-  return c.json({
-    ok: true,
+  const result = await agentActivity.undoChange({
+    nestId,
     nodeId,
-    undone: version,
-    ...(plan.restoreTo !== undefined && result.effect === "restore" ? { restoredVersion: plan.restoreTo } : {}),
-    ...result,
+    version,
+    userEmail,
+    client: attributeRequest(c, body.client),
   });
+  await trackEvent("node.undo_agent_change", { nestId, nodeId, version, effect: result.effect });
+  return c.json({ ok: true, nodeId, undone: version, ...result });
 });
 
 // GET /nests/:nestId/external-edits

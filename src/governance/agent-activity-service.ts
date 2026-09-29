@@ -39,6 +39,12 @@ import {
 } from "../shared/client-metadata.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
 import type { EffectiveRole } from "./roles.js";
+import {
+  deleteNodeIfUnchanged,
+  discardDraft,
+  restoreVersion,
+} from "../nodes/service.js";
+import { getVersion } from "./version-service.js";
 
 export type AgentActivityKind = "create" | "update" | "restore" | "delete";
 export type UndoEffect = "restore" | "discard" | "delete";
@@ -197,27 +203,41 @@ const DELETE_VERDICT: UndoVerdict = {
   reason: "Deletions can't be undone here — deleting a document purges its history.",
 };
 
+/** Checks run this many at a time — enough to overlap the queries without
+ *  flooding the pool on a long page. */
+const CHECK_BATCH = 25;
+
 /**
- * Which of `nodeIds` the caller can undo on. A nest-wide owner/admin/reviewer
- * covers all of them; otherwise only documents their steward rows cover, each
- * checked for an approve-capable role.
+ * Who may undo what, resolved once per request and memoized per document.
+ * A nest-wide owner/admin/reviewer covers everything (deletions included);
+ * otherwise only documents their steward rows cover, each checked for an
+ * approve-capable role.
  */
-async function undoableNodes(
-  nestId: string,
-  userEmail: string,
-  nodeIds: string[],
-): Promise<{ all: boolean; nodes: Set<string> }> {
+async function undoAccess(nestId: string, userEmail: string) {
   if (isSteward(await resolveNestWideRoles(nestId, userEmail))) {
-    return { all: true, nodes: new Set(nodeIds) };
+    return { all: true, allowed: async (_ids: string[]) => new Set(_ids) };
   }
   const coverage = await stewardCoverageForUser(nestId, userEmail);
-  const candidates = nodeIds.filter((id) => coverage.nestWide || coverage.nodeIds.has(id));
-  const nodes = new Set<string>();
-  for (const id of candidates) {
-    if (await canUndo(nestId, id, userEmail)) nodes.add(id);
-  }
-  return { all: false, nodes };
+  const memo = new Map<string, boolean>();
+  return {
+    all: false,
+    allowed: async (ids: string[]) => {
+      const todo = ids.filter(
+        (id) => !memo.has(id) && (coverage.nestWide || coverage.nodeIds.has(id)),
+      );
+      for (let i = 0; i < todo.length; i += CHECK_BATCH) {
+        const batch = todo.slice(i, i + CHECK_BATCH);
+        const verdicts = await Promise.all(batch.map((id) => canUndo(nestId, id, userEmail)));
+        batch.forEach((id, j) => memo.set(id, verdicts[j]));
+      }
+      return new Set(ids.filter((id) => memo.get(id) === true));
+    },
+  };
 }
+
+/** Largest window the stream will scan to fill one page. A document-scoped
+ *  steward on a busy nest may see few rows; past this they page on. */
+const MAX_SCAN = 20_000;
 
 export async function getAgentActivity(params: {
   nestId: string;
@@ -232,19 +252,18 @@ export async function getAgentActivity(params: {
   const { nestId, userEmail, limit, offset } = params;
   const onlyAgents = params.scope !== "all" || !!params.agent;
   const db = getDb();
-  const window = offset + limit + 1;
 
+  // SQL narrows to rows that mention an agent; the exact check (a top-level
+  // `agent`, equal to the one asked for) runs on the parsed client below.
   const agentFilter = onlyAgents ? ` AND client_json LIKE ? ESCAPE '\\'` : "";
   const agentArgs = onlyAgents ? [agentPattern(params.agent)] : [];
+  const keep = (clientJson: string | null) => {
+    if (!onlyAgents) return true;
+    const a = agentOf(deserializeClient(clientJson));
+    return !!a && (!params.agent || a === params.agent);
+  };
 
-  const versionRows = (await db.all(
-    `SELECT node_id, version, author, status, change_note, client_json, created_at
-       FROM node_versions
-      WHERE nest_id = ? AND author NOT LIKE ?${agentFilter}
-      ORDER BY created_at DESC, version DESC
-      LIMIT ?`,
-    [nestId, SYSTEM_LIKE, ...agentArgs, window],
-  )) as Array<{
+  type VersionRow = {
     node_id: string;
     version: number;
     author: string;
@@ -252,37 +271,61 @@ export async function getAgentActivity(params: {
     change_note: string | null;
     client_json: string | null;
     created_at: string;
-  }>;
-  const deletionRows = (await db.all(
-    `SELECT node_id, deleted_by, deleted_at, client_json
-       FROM node_deletions
-      WHERE nest_id = ?${agentFilter}
-      ORDER BY deleted_at DESC
-      LIMIT ?`,
-    [nestId, ...agentArgs, window],
-  )) as Array<{ node_id: string; deleted_by: string | null; deleted_at: string; client_json: string | null }>;
-
+  };
+  type DeletionRow = { node_id: string; deleted_by: string | null; deleted_at: string; client_json: string | null };
   type Raw =
-    | { src: "version"; at: string; row: (typeof versionRows)[number] }
-    | { src: "deletion"; at: string; row: (typeof deletionRows)[number] };
-  const merged: Raw[] = [
-    ...versionRows.map((row) => ({ src: "version" as const, at: toIso(row.created_at), row })),
-    ...deletionRows.map((row) => ({ src: "deletion" as const, at: toIso(row.deleted_at), row })),
-  ].sort((a, b) => {
-    if (a.at !== b.at) return a.at < b.at ? 1 : -1;
-    // Same instant, same document: the higher version is the later change.
-    const va = a.src === "version" ? Number(a.row.version) : Number.MAX_SAFE_INTEGER;
-    const vb = b.src === "version" ? Number(b.row.version) : Number.MAX_SAFE_INTEGER;
-    return vb - va;
-  });
+    | { src: "version"; at: string; row: VersionRow }
+    | { src: "deletion"; at: string; row: DeletionRow };
 
-  // Keep only what the caller could undo — before paging, so a page is never
-  // silently short because rows were dropped after the slice.
-  const allNodes = [...new Set(merged.map((m) => m.row.node_id))];
-  const access = await undoableNodes(nestId, userEmail, allNodes);
-  const visible = merged.filter((m) =>
-    m.src === "deletion" ? access.all : access.nodes.has(m.row.node_id),
-  );
+  const access = await undoAccess(nestId, userEmail);
+  const need = offset + limit + 1;
+  // Access filtering drops rows AFTER the SQL window, so a document-scoped
+  // steward could get a short page (and a wrong hasMore) from one fixed
+  // window. Widen the window until the page fills or both sources run dry.
+  let window = need;
+  let visible: Raw[] = [];
+  for (;;) {
+    const versionRows = (await db.all(
+      `SELECT node_id, version, author, status, change_note, client_json, created_at
+         FROM node_versions
+        WHERE nest_id = ? AND author NOT LIKE ?${agentFilter}
+        ORDER BY created_at DESC, version DESC
+        LIMIT ?`,
+      [nestId, SYSTEM_LIKE, ...agentArgs, window],
+    )) as VersionRow[];
+    const deletionRows = (await db.all(
+      `SELECT node_id, deleted_by, deleted_at, client_json
+         FROM node_deletions
+        WHERE nest_id = ?${agentFilter}
+        ORDER BY deleted_at DESC
+        LIMIT ?`,
+      [nestId, ...agentArgs, window],
+    )) as DeletionRow[];
+
+    const merged: Raw[] = [
+      ...versionRows
+        .filter((row) => keep(row.client_json))
+        .map((row) => ({ src: "version" as const, at: toIso(row.created_at), row })),
+      ...(access.all ? deletionRows : [])
+        .filter((row) => keep(row.client_json))
+        .map((row) => ({ src: "deletion" as const, at: toIso(row.deleted_at), row })),
+    ].sort((a, b) => {
+      if (a.at !== b.at) return a.at < b.at ? 1 : -1;
+      // Same instant, same document: the higher version is the later change.
+      const va = a.src === "version" ? Number(a.row.version) : Number.MAX_SAFE_INTEGER;
+      const vb = b.src === "version" ? Number(b.row.version) : Number.MAX_SAFE_INTEGER;
+      return vb - va;
+    });
+
+    const allowed = await access.allowed([
+      ...new Set(merged.filter((m) => m.src === "version").map((m) => m.row.node_id)),
+    ]);
+    visible = merged.filter((m) => m.src === "deletion" || allowed.has(m.row.node_id));
+
+    const exhausted = versionRows.length < window && deletionRows.length < window;
+    if (visible.length >= need || exhausted || window >= MAX_SCAN) break;
+    window = Math.min(window * 4, MAX_SCAN);
+  }
   const page = visible.slice(offset, offset + limit);
 
   const liveIds = [...new Set(page.filter((m) => m.src === "version").map((m) => m.row.node_id))];
@@ -385,4 +428,62 @@ export async function planUndo(params: {
  *  stream labels it a restore. */
 export function undoChangeNote(plan: UndoPlan): string {
   return `Undo of v${plan.version}${plan.agent ? ` by ${plan.agent}` : ""} — restored version ${plan.restoreTo}`;
+}
+
+export interface UndoResult {
+  effect: UndoEffect;
+  /** The version the undo wrote (restore), fell back to (discard), or null. */
+  version: number | null;
+  /** Status of the version a restore wrote — "draft" in a governed nest
+   *  where the undoer doesn't auto-publish. */
+  status?: string;
+  restoredVersion?: number;
+}
+
+/**
+ * Carry out a plan through the normal write paths. Each is told the head the
+ * plan was made against (`expectHead`) and re-checks it inside the node's
+ * write lock, so an edit that lands between planUndo and here is refused with
+ * a 409, never overwritten — and a delete never purges a change nobody saw.
+ */
+export async function applyUndo(params: {
+  nestId: string;
+  nodeId: string;
+  userEmail: string;
+  plan: UndoPlan;
+  client?: ClientMetadata;
+}): Promise<UndoResult> {
+  const { nestId, nodeId, userEmail, plan, client } = params;
+  if (plan.effect === "restore") {
+    const restored = await restoreVersion(nestId, nodeId, plan.restoreTo!, userEmail, {
+      client,
+      changeNote: undoChangeNote(plan),
+      expectHead: plan.version,
+    });
+    const row = await getVersion(nestId, nodeId, restored.version);
+    return {
+      effect: "restore",
+      version: restored.version,
+      restoredVersion: plan.restoreTo,
+      ...(row?.status ? { status: row.status } : {}),
+    };
+  }
+  if (plan.effect === "discard") {
+    const discarded = await discardDraft(nestId, nodeId, userEmail, { expectHead: plan.version });
+    return { effect: discarded.deleted ? "delete" : "discard", version: discarded.version };
+  }
+  await deleteNodeIfUnchanged(nestId, nodeId, userEmail, plan.version, { client });
+  return { effect: "delete", version: null };
+}
+
+/** Plan and apply in one call — what the undo route runs. */
+export async function undoChange(params: {
+  nestId: string;
+  nodeId: string;
+  version: number;
+  userEmail: string;
+  client?: ClientMetadata;
+}): Promise<UndoResult> {
+  const plan = await planUndo(params);
+  return applyUndo({ ...params, plan });
 }

@@ -422,3 +422,173 @@ describe("agent activity: license gate", () => {
     expect(res.status).not.toBe(503);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Review round 1 (PR #342): paging for document-scoped stewards, the race
+// between the check and the write, and a rejected draft.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("agent activity: a document-scoped reviewer still gets full pages", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let rev: { apiKey: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@scope.com", "Owner");
+    rev = await registerUser(app, "rev@scope.com", "Rev");
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Scoped" }, owner.apiKey);
+    nestId = data.nest.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "rev@scope.com", permission: "read" },
+      owner.apiKey,
+    );
+    const nestPath = join(env.dataDir, "nests", nestId);
+    mkdirSync(nestPath, { recursive: true });
+    writeFileSync(
+      join(nestPath, "stewards.yaml"),
+      `nest:
+  - email: owner@scope.com, role: reviewer, can_approve: true
+documents:
+  nodes/covered:
+    - email: rev@scope.com, role: reviewer, can_approve: true
+`,
+    );
+    await jsonRequest(app, "POST", `/nests/${nestId}/stewards/sync`, {}, owner.apiKey);
+
+    // The one document rev stewards is the OLDEST agent change; eight newer
+    // agent changes land on documents rev can't undo.
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Covered", content: "c", client: HOOTIE }, owner.apiKey);
+    for (let i = 0; i < 8; i++) {
+      await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: `Other ${i}`, content: "o", client: HOOTIE }, owner.apiKey);
+    }
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("fills the page past rows the reviewer can't see, and reports hasMore honestly", async () => {
+    const { status, data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/agent-activity?limit=1`,
+      undefined,
+      rev.apiKey,
+    );
+    expect(status).toBe(200);
+    expect(data.items.map((i: any) => i.nodeId)).toEqual(["nodes/covered"]);
+    expect(data.hasMore).toBe(false);
+  });
+});
+
+describe("agent activity: a change that lands between the check and the write is never overwritten", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let nestId: string;
+  let svc: typeof import("../src/governance/agent-activity-service.js");
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    // Same module graph as the app (createTestApp reset it).
+    svc = await import("../src/governance/agent-activity-service.js");
+    owner = await registerUser(app, "owner@race.com", "Owner");
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Race" }, owner.apiKey);
+    nestId = data.nest.id;
+  });
+
+  afterAll(() => env.cleanup());
+
+  const readNode = (id: string) =>
+    jsonRequest(app, "GET", `/nests/${nestId}/nodes/${id}`, undefined, owner.apiKey);
+
+  it("refuses a restore when a person edited after the undo was planned", async () => {
+    const made = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Race Doc", content: "v1", client: HOOTIE }, owner.apiKey);
+    const id = made.data.node.id;
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${id}`, { content: "agent v2", client: HOOTIE }, owner.apiKey);
+
+    const plan = await svc.planUndo({ nestId, nodeId: id, version: 2, userEmail: "owner@race.com" });
+    expect(plan.effect).toBe("restore");
+    await asHuman(() => jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${id}`, { content: "human v3" }, owner.apiKey));
+
+    await expect(
+      svc.applyUndo({ nestId, nodeId: id, userEmail: "owner@race.com", plan }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect((await readNode(id)).data.node.content).toContain("human v3");
+  });
+
+  it("refuses to delete a created document that a person edited after the undo was planned", async () => {
+    const made = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Race Create", content: "agent made", client: HOOTIE }, owner.apiKey);
+    const id = made.data.node.id;
+
+    const plan = await svc.planUndo({ nestId, nodeId: id, version: 1, userEmail: "owner@race.com" });
+    expect(plan.effect).toBe("delete");
+    await asHuman(() => jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${id}`, { content: "a person kept it" }, owner.apiKey));
+
+    await expect(
+      svc.applyUndo({ nestId, nodeId: id, userEmail: "owner@race.com", plan }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    const node = await readNode(id);
+    expect(node.status).toBe(200);
+    expect(node.data.node.content).toContain("a person kept it");
+  });
+});
+
+describe("agent activity: a rejected agent draft can be undone", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let writer: { apiKey: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@rej.com", "Owner");
+    writer = await registerUser(app, "writer@rej.com", "Writer");
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Rejected" }, owner.apiKey);
+    nestId = data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: "writer@rej.com", permission: "write" }, owner.apiKey);
+    const nestPath = join(env.dataDir, "nests", nestId);
+    mkdirSync(nestPath, { recursive: true });
+    writeFileSync(
+      join(nestPath, "stewards.yaml"),
+      `nest:
+  - email: owner@rej.com, role: reviewer, can_approve: true
+`,
+    );
+    await jsonRequest(app, "POST", `/nests/${nestId}/stewards/sync`, {}, owner.apiKey);
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/settings`, { allow_self_approve: true }, owner.apiKey);
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("discards the rejected draft and puts the published version back", async () => {
+    const made = await asHuman(() =>
+      jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Handbook", content: "# Handbook\n\npublished" }, owner.apiKey),
+    );
+    const id = made.data.node.id;
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${id}`, { content: "# Handbook\n\nagent draft", client: HOOTIE }, writer.apiKey);
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${id}/submit-review`, {}, writer.apiKey);
+    const rejected = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${id}/reject`, { note: "no" }, owner.apiKey);
+    expect(rejected.status).toBeLessThan(300);
+
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/agent-activity`, undefined, owner.apiKey);
+    const row = list.data.items.find((i: any) => i.nodeId === id && i.agent === "hootie");
+    expect(row.status).toBe("rejected");
+    expect(row.undo).toEqual(expect.objectContaining({ available: true, effect: "discard" }));
+
+    const res = await jsonRequest(app, "POST", `/nests/${nestId}/agent-activity/undo`, { nodeId: id, version: row.version }, owner.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data.effect).toBe("discard");
+    const node = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${id}`, undefined, owner.apiKey);
+    expect(node.data.node.content).toContain("published");
+    expect(node.data.node.content).not.toContain("agent draft");
+  });
+});

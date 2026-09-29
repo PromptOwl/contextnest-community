@@ -1385,6 +1385,25 @@ export interface WriteOptions {
    * authored.
    */
   creatorReviews?: boolean;
+  /**
+   * The version the caller last saw as this node's head. Checked INSIDE the
+   * write lock, so a change that landed between the caller's look and this
+   * write is refused (409) instead of overwritten. The agent-activity undo
+   * uses it: its "nothing changed since" check has to hold at write time.
+   */
+  expectHead?: number;
+}
+
+/** Refuse the write if the node's head moved past what the caller saw.
+ *  Call inside the node's write lock. */
+async function assertHead(nestId: string, nodeId: string, expectHead: number | undefined): Promise<void> {
+  if (expectHead === undefined) return;
+  const current = await versions.getCurrentVersion(nestId, nodeId);
+  if (current !== expectHead) {
+    throw new ConflictError(
+      `This document changed while you were looking at it (now v${current}, you saw v${expectHead}). Reload and try again.`,
+    );
+  }
 }
 
 export interface NodeMutationResult {
@@ -2055,6 +2074,7 @@ export async function updateNode(
 ): Promise<NodeMutationResult> {
   return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
     try {
+      await assertHead(nestId, nodeId, opts.expectHead);
       const { storage, versions: versionManager } = await engineCache.get(
         nestId
       );
@@ -2708,8 +2728,10 @@ export async function discardDraft(
   nestId: string,
   nodeId: string,
   userEmail: string,
+  opts: Pick<WriteOptions, "expectHead"> = {},
 ): Promise<{ deleted: boolean; version: number | null; warning?: string }> {
   return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
+    await assertHead(nestId, nodeId, opts.expectHead);
     await assertNotReviewLocked(nestId, nodeId, userEmail, "discarding");
 
     const sealed = await versions.getSealedVersion(nestId, nodeId);
@@ -2793,7 +2815,7 @@ export async function restoreVersion(
   nodeId: string,
   targetVersion: number,
   userEmail: string,
-  opts: { client?: ClientMetadata; changeNote?: string } = {},
+  opts: { client?: ClientMetadata; changeNote?: string; expectHead?: number } = {},
 ): Promise<NodeMutationResult> {
   const { storage, versions: versionManager } = await engineCache.get(nestId);
   let raw: string;
@@ -2828,7 +2850,27 @@ export async function restoreVersion(
       client: opts.client,
     },
     userEmail,
+    { expectHead: opts.expectHead },
   );
+}
+
+/**
+ * deleteNode, refused if the node's head moved past `expectHead`. deleteNode
+ * takes no lock of its own (discardDraft calls it from inside one), so this
+ * holds the node's write lock across the check and the delete — a delete
+ * purges history, so it must never land on a change the caller didn't see.
+ */
+export async function deleteNodeIfUnchanged(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+  expectHead: number,
+  opts: { client?: ClientMetadata } = {},
+): Promise<void> {
+  return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
+    await assertHead(nestId, nodeId, expectHead);
+    await deleteNode(nestId, nodeId, userEmail, opts);
+  });
 }
 
 export async function deleteNode(
