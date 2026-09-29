@@ -32,7 +32,7 @@ import {
   resolveUserRoles,
   stewardCoverageForUser,
 } from "./stewardship-service.js";
-import { SYSTEM_AUTHOR_PREFIX } from "./version-service.js";
+import { SYSTEM_AUTHOR_PREFIX, getVersion } from "./version-service.js";
 import {
   deserializeClient,
   type ClientMetadata,
@@ -44,7 +44,6 @@ import {
   discardDraft,
   restoreVersion,
 } from "../nodes/service.js";
-import { getVersion } from "./version-service.js";
 
 export type AgentActivityKind = "create" | "update" | "restore" | "delete";
 export type UndoEffect = "restore" | "discard" | "delete";
@@ -215,7 +214,7 @@ const CHECK_BATCH = 25;
  */
 async function undoAccess(nestId: string, userEmail: string) {
   if (isSteward(await resolveNestWideRoles(nestId, userEmail))) {
-    return { all: true, allowed: async (_ids: string[]) => new Set(_ids) };
+    return { all: true, allowed: async (ids: string[]) => new Set(ids) };
   }
   const coverage = await stewardCoverageForUser(nestId, userEmail);
   const memo = new Map<string, boolean>();

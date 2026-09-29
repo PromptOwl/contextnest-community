@@ -592,3 +592,43 @@ describe("agent activity: a rejected agent draft can be undone", () => {
     expect(node.data.node.content).not.toContain("agent draft");
   });
 });
+
+describe("agent activity: a reviewer with no coverage on the document can't undo it", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let rev: { apiKey: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@cov.com", "Owner");
+    rev = await registerUser(app, "rev@cov.com", "Rev");
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Coverage" }, owner.apiKey);
+    nestId = data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: "rev@cov.com", permission: "read" }, owner.apiKey);
+    const nestPath = join(env.dataDir, "nests", nestId);
+    mkdirSync(nestPath, { recursive: true });
+    writeFileSync(
+      join(nestPath, "stewards.yaml"),
+      `nest:
+  - email: owner@cov.com, role: reviewer, can_approve: true
+documents:
+  nodes/theirs:
+    - email: rev@cov.com, role: reviewer, can_approve: true
+`,
+    );
+    await jsonRequest(app, "POST", `/nests/${nestId}/stewards/sync`, {}, owner.apiKey);
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("403s a read-tier reviewer undoing a document outside their coverage, and leaves it alone", async () => {
+    const made = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Not Theirs", content: "keep", client: HOOTIE }, owner.apiKey);
+    const id = made.data.node.id;
+    const res = await jsonRequest(app, "POST", `/nests/${nestId}/agent-activity/undo`, { nodeId: id, version: 1 }, rev.apiKey);
+    expect(res.status).toBe(403);
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${id}`, undefined, owner.apiKey)).status).toBe(200);
+  });
+});
