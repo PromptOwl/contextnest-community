@@ -914,7 +914,12 @@ export interface HeadlessKey {
 }
 
 export async function getNestHeadless(nestId: string) {
-  return request<{ enabled: boolean; keys: HeadlessKey[] }>(`/nests/${nestId}/headless`);
+  return request<{
+    enabled: boolean;
+    keys: HeadlessKey[];
+    /** Who keeps their seat — headless doesn't remove existing access. */
+    shared_with?: { collaborators: number; teams: number; grants: number };
+  }>(`/nests/${nestId}/headless`);
 }
 
 export async function setNestHeadless(nestId: string, enabled: boolean) {

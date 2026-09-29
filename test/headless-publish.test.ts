@@ -111,7 +111,12 @@ describe("turning headless publishing on", () => {
   it("starts off, with no keys", async () => {
     const { status, data } = await jsonRequest(app, "GET", `/nests/${nestId}/headless`, undefined, owner.apiKey);
     expect(status).toBe(200);
-    expect(data).toEqual({ enabled: false, keys: [] });
+    expect(data).toMatchObject({ enabled: false, keys: [] });
+  });
+
+  it("says who keeps their seat — collaborators aren't affected by headless", async () => {
+    const { data } = await jsonRequest(app, "GET", `/nests/${nestId}/headless`, undefined, owner.apiKey);
+    expect(data.shared_with).toEqual({ collaborators: 2, teams: 0, grants: 0 });
   });
 
   it("refuses to mint a key while it is off", async () => {

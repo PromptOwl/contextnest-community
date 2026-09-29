@@ -65,9 +65,12 @@ const NEST_GET = new Set(["", "/nodes", "/search", "/context"]);
 /** Nest-level POST routes that are retrieval queries, not mutations. */
 const NEST_POST = new Set(["/context", "/query", "/table-query"]);
 /** Node sub-resources a key may NOT read: history, discussion, governance,
- *  and the raw files behind hosted artifacts and PDFs. */
+ *  and the raw files behind hosted artifacts and PDFs. A node id contains
+ *  slashes, so this branch has to name what it refuses —
+ *  test/headless-reader-verdict.test.ts fails when a node sub-route is
+ *  registered that this list doesn't cover. */
 const NODE_SUBRESOURCE =
-  /\/(versions(\/\d+)?|comments|annotations(\/.*)?|activity|reviews|stewards|watchers|hosted|pdf|can-access|can-approve|can-edit|external-edits)$/;
+  /\/(versions(\/\d+)?|comments|annotations(\/.*)?|activity|reviews|stewards|watchers|hosted|pdf|can-access|can-approve|can-edit|external-edits(\/[^/]+)?)$/;
 
 function segmentMatches(seg: string, nestId: string): boolean {
   if (seg === nestId) return true;

@@ -45,3 +45,19 @@ export function connectSnippet(origin: string, nestId: string, apiKey: string): 
     `ctx search "your question" --vault my-nest`,
   ].join("\n");
 }
+
+/** Headless governs people without a seat — existing collaborators, team
+ *  shares and document grantees keep their access. Says so, or null when
+ *  nobody is shared. */
+export function sharedSeatsNote(
+  shared: { collaborators: number; teams: number; grants: number } | undefined,
+): string | null {
+  if (!shared) return null;
+  const parts = [
+    shared.collaborators && `${shared.collaborators} collaborator${shared.collaborators === 1 ? "" : "s"}`,
+    shared.teams && `${shared.teams} team${shared.teams === 1 ? "" : "s"}`,
+    shared.grants && `${shared.grants} document share${shared.grants === 1 ? "" : "s"}`,
+  ].filter(Boolean);
+  if (!parts.length) return null;
+  return `${parts.join(", ")} keep their current access — API-only applies to everyone else. Remove them on this tab if they shouldn't see the nest.`;
+}

@@ -47,3 +47,16 @@ describe("connectSnippet", () => {
     expect(s).toContain("cnst_abc");
   });
 });
+
+import { sharedSeatsNote } from "../ui/src/lib/headless";
+
+describe("sharedSeatsNote", () => {
+  it("says who keeps access, or nothing when nobody is shared", () => {
+    expect(sharedSeatsNote(undefined)).toBeNull();
+    expect(sharedSeatsNote({ collaborators: 0, teams: 0, grants: 0 })).toBeNull();
+    const n = sharedSeatsNote({ collaborators: 2, teams: 1, grants: 0 })!;
+    expect(n).toMatch(/2 collaborators/);
+    expect(n).toMatch(/1 team/);
+    expect(n).toMatch(/keep/i);
+  });
+});

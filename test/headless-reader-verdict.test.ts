@@ -85,3 +85,37 @@ describe("headlessReaderVerdict", () => {
     }
   });
 });
+
+// Node sub-resources are the one place the allowlist has to name what it
+// refuses (a node id itself contains slashes, so "/nodes/<id>" can't be told
+// apart structurally). This keeps that list complete: every GET sub-route
+// registered under a node, now or later, must be refused to an access key
+// unless it's added to ALLOWED_NODE_SUBROUTES here on purpose.
+import { readFileSync, readdirSync, statSync } from "fs";
+import { join } from "path";
+
+const ALLOWED_NODE_SUBROUTES: string[] = [];
+
+function srcFiles(dir: string): string[] {
+  return readdirSync(dir).flatMap((f) => {
+    const p = join(dir, f);
+    return statSync(p).isDirectory() ? srcFiles(p) : p.endsWith(".ts") ? [p] : [];
+  });
+}
+
+describe("node sub-route completeness", () => {
+  it("every registered GET /nodes/:id/<sub> route is refused to an access key", () => {
+    const subs = new Set<string>();
+    for (const f of srcFiles("src")) {
+      const text = readFileSync(f, "utf8");
+      for (const m of text.matchAll(/\.(?:get|head|all)\(\s*"\/:nodeId\{\.\+\}(\/[^"]+)"/g)) {
+        subs.add(m[1].replace(/:version\{\[0-9\]\+\}/, "3").replace(/:[A-Za-z]+(\{[^}]*\})?/g, "x"));
+      }
+    }
+    expect(subs.size).toBeGreaterThan(5);
+    const open = [...subs].filter(
+      (s) => !ALLOWED_NODE_SUBROUTES.includes(s) && ok("GET", `/nests/${N}/nodes/nodes/guide${s}`),
+    );
+    expect(open).toEqual([]);
+  });
+});

@@ -24,6 +24,7 @@ import {
   connectSnippet,
   headlessToggleBlockReason,
   keyLastUsedLabel,
+  sharedSeatsNote,
   validateKeyLabel,
 } from "../lib/headless";
 
@@ -37,6 +38,7 @@ export function HeadlessAccessPanel({ nestId, onError }: Props) {
   const visibility = (meta.data as any)?.nest?.visibility as string | undefined;
   const [enabled, setEnabled] = useState(false);
   const [keys, setKeys] = useState<api.HeadlessKey[]>([]);
+  const [seats, setSeats] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [label, setLabel] = useState("");
@@ -48,6 +50,7 @@ export function HeadlessAccessPanel({ nestId, onError }: Props) {
       const res = await api.getNestHeadless(nestId);
       setEnabled(res.enabled);
       setKeys(res.keys);
+      setSeats(sharedSeatsNote(res.shared_with));
     } catch (err: any) {
       onError?.(err?.message || "Couldn't load API-only access");
     } finally {
@@ -117,6 +120,7 @@ export function HeadlessAccessPanel({ nestId, onError }: Props) {
             open, browse, export or edit the nest, or see drafts.
           </p>
           {blocked && <p className="text-xs text-amber-600">{blocked}</p>}
+          {seats && <p className="text-xs text-muted-foreground">{seats}</p>}
         </div>
         <Switch
           id="headless-switch"

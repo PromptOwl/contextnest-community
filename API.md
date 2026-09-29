@@ -391,7 +391,7 @@ Publish a **private** nest API-only and mint read-only access keys for it (what 
 | `POST /nests/:nestId/headless/keys` | `{ "label": "Acme Corp" }` | `201 { "key": {…}, "api_key": "cnst_…" }` — the token is returned **once**. `400` without a label (max 80 chars), `409` while headless is off. |
 | `DELETE /nests/:nestId/headless/keys/:keyId` | — | `{ "revoked": true }` — the key and its identity are gone for good. `404` for an unknown key. |
 
-While a nest is headless, `PATCH /nests/:nestId/visibility` to `org` or `public` answers `409`. Deleting the nest deletes its access keys. Connect a key with ctx:
+Headless governs **people without a seat**: the owner, collaborators, team shares, stewards and document/folder grantees keep the access they already have (someone has to maintain the nest). `GET /nests/:nestId/headless` returns `shared_with` (collaborator + team-share + grant counts) so a client can say so before publishing. While a nest is headless, `PATCH /nests/:nestId/visibility` to `org` or `public` answers `409`. Deleting the nest deletes its access keys. Connect a key with ctx:
 ```bash
 export NEST_KEY=cnst_…
 ctx vault add my-nest --url https://<server>/nests/<nestId>/mcp --bearer-env NEST_KEY

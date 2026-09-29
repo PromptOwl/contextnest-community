@@ -136,6 +136,12 @@ function toolError(
   return { text, isError: true, data: { code, message: text } };
 }
 
+/** What a headless access key gets for a tool it may not call (CU-wdqcq0314u)
+ *  — the same shape on both MCP surfaces. */
+export function headlessToolError(toolName: string): ToolResult {
+  return toolError(headlessToolRefusal(toolName), "UNAUTHORIZED_ACTION");
+}
+
 /**
  * Tool return value → MCP CallToolResult. Used by both MCP endpoints
  * (per-nest routes.ts and server-level server-routes.ts).
@@ -145,12 +151,6 @@ function toolError(
  * catalog payload gets it attached as `structuredContent`, which is where a
  * machine caller looks.
  */
-/** What a headless access key gets for a tool it may not call (CU-wdqcq0314u)
- *  — the same shape on both MCP surfaces. */
-export function headlessToolError(toolName: string): ToolResult {
-  return toolError(headlessToolRefusal(toolName), "UNAUTHORIZED_ACTION");
-}
-
 export function toCallToolResult(out: ToolResult) {
   if (typeof out === "string") {
     return { content: [{ type: "text" as const, text: out }] };

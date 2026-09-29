@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { getDb } from "../db/client.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import { NotFoundError, ValidationError } from "../shared/errors.js";
+import { parseSharedTeams } from "../governance/teams-service.js";
 import {
   isNestHeadless,
   listHeadlessKeys,
@@ -29,8 +30,25 @@ headlessRoutes.get("/headless", async (c) => {
   return c.json({
     enabled: await isNestHeadless(nestId),
     keys: await listHeadlessKeys(nestId),
+    // Headless governs people WITHOUT a seat; everyone below keeps the access
+    // they have. Counted so the panel can say so before publishing.
+    shared_with: await sharedWith(nestId),
   });
 });
+
+async function sharedWith(nestId: string) {
+  const db = getDb();
+  const count = async (sql: string) =>
+    Number(((await db.get(sql, [nestId])) as { c: number | string }).c);
+  const row = (await db.get("SELECT shared_teams FROM nests WHERE id = ?", [nestId])) as
+    | { shared_teams: string | null }
+    | undefined;
+  return {
+    collaborators: await count("SELECT COUNT(*) AS c FROM nest_collaborators WHERE nest_id = ?"),
+    teams: parseSharedTeams(row?.shared_teams ?? null).length,
+    grants: await count("SELECT COUNT(DISTINCT user_id) AS c FROM grants WHERE nest_id = ?"),
+  };
+}
 
 headlessRoutes.put("/headless", async (c) => {
   const nestId = c.req.param("nestId")!;
