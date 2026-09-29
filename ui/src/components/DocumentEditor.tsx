@@ -80,10 +80,13 @@ import {
   Globe,
   Building2,
   Lock,
+  Activity,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { documentActions } from "../lib/document-actions";
+import { canSeeActivityLog } from "../lib/activity-log";
+import { ActivityLogPanel } from "./ActivityLogPanel";
 import { toast } from "sonner";
 import {
   MarkdownEditor,
@@ -252,6 +255,8 @@ export function DocumentEditor({
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
   const [showPublish, setShowPublish] = useState(false);
+  // Admin activity log for this document (CU-wdqcq03aw2).
+  const [showActivity, setShowActivity] = useState(false);
   // Share THIS document with one person (a grant), as opposed to the whole
   // nest above. Same owner/admin gate the /grants routes enforce.
   const [showShareDoc, setShowShareDoc] = useState(false);
@@ -1725,6 +1730,9 @@ export function DocumentEditor({
       deletionRequested,
       isOwnDeletionRequest,
       includeVersionHistory: opts.includeVersionHistory,
+      // Owner / nest admin (or server admin) — the people GET /activity-log
+      // lets in; the server refuses everyone else regardless.
+      canSeeActivity: isAdmin || canSeeActivityLog(permission),
     }).map((a) => {
       const base = {
         label: a.label,
@@ -1735,6 +1743,8 @@ export function DocumentEditor({
       switch (a.key) {
         case "history":
           return { ...base, icon: History, onSelect: openVersions };
+        case "activity":
+          return { ...base, icon: Activity, onSelect: () => setShowActivity(true) };
         case "copy-link":
           return {
             ...base,
@@ -1953,6 +1963,14 @@ export function DocumentEditor({
           nodeId={nodeId}
           nodeTitle={title || nodeId}
           onClose={() => setShowPublish(false)}
+        />
+      )}
+      {showActivity && (
+        <ActivityLogPanel
+          nestId={nestId}
+          scope={{ kind: "node", nodeId }}
+          label={title || nodeId}
+          onClose={() => setShowActivity(false)}
         />
       )}
     </>

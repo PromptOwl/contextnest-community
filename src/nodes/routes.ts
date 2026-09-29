@@ -1,3 +1,4 @@
+import { recordNodeAccess } from "../governance/access-log.js";
 import { Hono } from "hono";
 import { parseDocument } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
@@ -403,6 +404,17 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     }
   }
   const response = toNodeResponse(node);
+  // The read got past every gate — record it for the admin activity log
+  // (fire-and-forget, throttled; never slows or fails the read).
+  recordNodeAccess({
+    nestId,
+    nodeIds: [node.id],
+    action: "read",
+    surface: "api",
+    userId,
+    userEmail,
+    client: c.get("clientMetadata"),
+  });
   const publicReader = await isPublicReader(nestId, userId);
 
   // Author + collaborators (same additive fields as the list response).

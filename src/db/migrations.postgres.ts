@@ -78,6 +78,7 @@ const HISTORICAL_MIGRATIONS = [
   "043_node_suggestion_details",
   "044_client_attribution",
   "046_deletion_client_attribution",
+  "047_node_access_events",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -648,6 +649,25 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- (nest_id, id) composite (migration 026): the per-nest trace view
     -- (GET /nests/:id/trace) filters by nest_id and pages newest-first by id.
     CREATE INDEX IF NOT EXISTS idx_api_events_nest_ts ON api_events(nest_id, id);
+
+    -- document access events (migration 047): reads, retrievals and exports,
+    -- which seal no version. node_id NULL = whole-nest export. Throttled and
+    -- pruned in governance/access-log.ts.
+    CREATE TABLE IF NOT EXISTS node_access_events (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      ts TEXT NOT NULL,
+      nest_id TEXT NOT NULL,
+      node_id TEXT,
+      action TEXT NOT NULL CHECK(action IN ('read', 'retrieve', 'export')),
+      surface TEXT NOT NULL CHECK(surface IN ('api', 'mcp')),
+      user_id TEXT,
+      user_email TEXT,
+      client_json TEXT,
+      detail TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_node_access_node ON node_access_events(nest_id, node_id, id);
+    CREATE INDEX IF NOT EXISTS idx_node_access_nest ON node_access_events(nest_id, id);
+    CREATE INDEX IF NOT EXISTS idx_node_access_ts ON node_access_events(ts);
 
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,

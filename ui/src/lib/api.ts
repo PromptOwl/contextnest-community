@@ -1584,6 +1584,62 @@ export async function undoAgentChange(nestId: string, nodeId: string, version: n
   });
 }
 
+// ─── Admin activity log (CU-wdqcq03aw2) ──────────────────────────────────
+
+export type ActivityLogType =
+  | "created"
+  | "edited"
+  | "restored"
+  | "review_requested"
+  | "approved"
+  | "rejected"
+  | "review_cancelled"
+  | "commented"
+  | "comment_resolved"
+  | "deleted"
+  | "read"
+  | "retrieved"
+  | "exported";
+
+export interface ActivityLogItem {
+  id: string;
+  type: ActivityLogType;
+  /** null for a whole-nest event (a full export). */
+  nodeId: string | null;
+  title?: string;
+  actor: string;
+  agent?: string;
+  at: string;
+  version?: number;
+  detail?: string;
+  surface?: "api" | "mcp";
+}
+
+export type ActivityLogScope =
+  | { kind: "node"; nodeId: string }
+  | { kind: "folder"; folder: string }
+  | { kind: "nest" };
+
+/** Admin-only: who changed, reviewed, read, retrieved or exported a document,
+ *  a folder, or the nest. 403 for anyone but the owner / a nest admin. */
+export async function getActivityLog(
+  nestId: string,
+  scope: ActivityLogScope,
+  opts: { types?: ActivityLogType[]; actor?: string; limit?: number; offset?: number } = {},
+) {
+  const params = new URLSearchParams({
+    limit: String(opts.limit ?? 50),
+    offset: String(opts.offset ?? 0),
+  });
+  if (scope.kind === "node") params.set("node", scope.nodeId);
+  if (scope.kind === "folder") params.set("folder", scope.folder);
+  if (opts.types?.length) params.set("type", opts.types.join(","));
+  if (opts.actor) params.set("actor", opts.actor);
+  return request<{ items: ActivityLogItem[]; limit: number; offset: number; hasMore: boolean }>(
+    `/nests/${encodeURIComponent(nestId)}/activity-log?${params.toString()}`,
+  );
+}
+
 export async function submitForReview(
   nestId: string,
   nodeId: string,
