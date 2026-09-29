@@ -22,6 +22,7 @@
  * `context_reject`, `context_share_nest`, `context_stewards`, etc.) stay on
  * the per-nest endpoint only.
  */
+import { HEADLESS_READER_SERVER_TOOLS, headlessToolRefusal, isServiceUser } from "../auth/headless.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -331,6 +332,12 @@ async function handleServerToolCall(
   baseUrl: string,
   client?: ClientMetadata,
 ): Promise<ToolResult> {
+  // Headless access keys (CU-wdqcq0314u): nest_create and every other
+  // server-only tool are refused here; per-nest tools are re-checked in
+  // handleToolCall.
+  if (!HEADLESS_READER_SERVER_TOOLS.has(toolName) && (await isServiceUser(userId))) {
+    return { text: headlessToolRefusal(toolName), isError: true, data: { code: "UNAUTHORIZED_ACTION", message: headlessToolRefusal(toolName) } };
+  }
   if (toolName === "nest_index") {
     const nests = await buildNestIndex(userId, nestScope);
     // `data` is what `ctx vault list` reads to list each nest as `<alias>/<nest>`.
@@ -508,13 +515,17 @@ function createServerMcp(
   nestScope: string | null,
   baseUrl: string,
   c: Context<AuthEnv>,
+  headless = false,
 ): McpServer {
   const server = new McpServer(
     { name: "contextnest-server", version: "1.0.0" },
     { capabilities: { tools: {} } },
   );
 
-  for (const tool of SERVER_TOOL_DEFINITIONS) {
+  const toolDefs = headless
+    ? SERVER_TOOL_DEFINITIONS.filter((t) => HEADLESS_READER_SERVER_TOOLS.has(t.name))
+    : SERVER_TOOL_DEFINITIONS;
+  for (const tool of toolDefs) {
     const props = (tool.inputSchema as any).properties || {};
     const required = (tool.inputSchema as any).required || [];
     const shape: Record<string, z.ZodTypeAny> = {};
@@ -561,6 +572,7 @@ serverMcpRoutes.all("/", async (c) => {
     c.get("nestScope"),
     requestBaseUrl(c.req.url),
     c,
+    await isServiceUser(userId),
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({

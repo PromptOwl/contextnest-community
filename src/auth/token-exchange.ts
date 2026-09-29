@@ -176,10 +176,13 @@ async function resolveUser(
 ): Promise<{ id: string }> {
   const db = getDb();
   const existing = (await db.get(
-    "SELECT id FROM users WHERE LOWER(email) = ?",
+    "SELECT id, is_service FROM users WHERE LOWER(email) = ?",
     [email],
-  )) as { id: string } | undefined;
-  if (existing) return withDepartment(existing, department);
+  )) as { id: string; is_service: number | null } | undefined;
+  // An access key's identity (CU-wdqcq0314u) is not an account anyone can
+  // exchange a token for.
+  if (existing?.is_service) throw new ExchangeError("no_account", 403);
+  if (existing) return withDepartment({ id: existing.id }, department);
 
   // Fail CLOSED on JIT. Unlike browser login there is no human at a login
   // page here: auto-provision with no domain allowlist means anyone holding a
