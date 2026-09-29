@@ -26,9 +26,13 @@ import {
   bodyOnly,
   deleteNode,
   deleteFolder,
+  discardDraft,
   isIdUnderFolder,
+  restoreVersion,
   vaultFolderExists,
 } from "../nodes/service.js";
+import * as agentActivity from "./agent-activity-service.js";
+import { trackEvent } from "../telemetry/tracker.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
 import {
   canReadNode,
@@ -561,6 +565,62 @@ governanceRoutes.get("/feed", async (c) => {
     offset,
   });
   return c.json({ ...result, filter, limit, offset });
+});
+
+// GET /nests/:nestId/agent-activity?scope=agents|all&agent=&limit=&offset=
+// What agents did to this nest — every write whose `client` names an agent,
+// plus deletions — newest first, each with an undo verdict. Owners, admins and
+// reviewers only: the list holds just the documents the caller could undo.
+governanceRoutes.get("/agent-activity", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const scope = c.req.query("scope") === "all" ? "all" : "agents";
+  const agent = c.req.query("agent")?.trim() || undefined;
+  const limit = parseLimit(c.req.query("limit"), 50, 200);
+  const offsetRaw = parseInt(c.req.query("offset") ?? "", 10);
+  const offset = Number.isNaN(offsetRaw) || offsetRaw < 0 ? 0 : Math.min(offsetRaw, 10_000);
+  const userEmail = await getUserEmail(c);
+  const page = await agentActivity.getAgentActivity({ nestId, userEmail, scope, agent, limit, offset });
+  return c.json({ ...page, scope, ...(agent ? { agent } : {}) });
+});
+
+// POST /nests/:nestId/agent-activity/undo — body { nodeId, version }.
+// Undo one change through the normal write paths (restore the previous
+// version as a new one / discard a draft / delete a created document). 409
+// with the reason when the document changed since or the change is in review.
+governanceRoutes.post("/agent-activity/undo", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const body = await c.req
+    .json<{ nodeId?: unknown; version?: unknown; client?: unknown }>()
+    .catch(() => ({}) as { nodeId?: unknown; version?: unknown; client?: unknown });
+  const nodeId = typeof body.nodeId === "string" ? assertSafeNodeId(body.nodeId) : "";
+  const version = Number(body.version);
+  const userEmail = await getUserEmail(c);
+  const plan = await agentActivity.planUndo({ nestId, nodeId, version, userEmail });
+  const client = attributeRequest(c, body.client);
+
+  let result: { effect: agentActivity.UndoEffect; version: number | null; status?: string };
+  if (plan.effect === "restore") {
+    const restored = await restoreVersion(nestId, nodeId, plan.restoreTo!, userEmail, {
+      client,
+      changeNote: agentActivity.undoChangeNote(plan),
+    });
+    const row = await versions.getVersion(nestId, nodeId, restored.version);
+    result = { effect: "restore", version: restored.version, status: row?.status };
+  } else if (plan.effect === "discard") {
+    const discarded = await discardDraft(nestId, nodeId, userEmail);
+    result = { effect: discarded.deleted ? "delete" : "discard", version: discarded.version };
+  } else {
+    await deleteNode(nestId, nodeId, userEmail, { client });
+    result = { effect: "delete", version: null };
+  }
+  await trackEvent("node.undo_agent_change", { nestId, nodeId, version, effect: result.effect });
+  return c.json({
+    ok: true,
+    nodeId,
+    undone: version,
+    ...(plan.restoreTo !== undefined && result.effect === "restore" ? { restoredVersion: plan.restoreTo } : {}),
+    ...result,
+  });
 });
 
 // GET /nests/:nestId/external-edits

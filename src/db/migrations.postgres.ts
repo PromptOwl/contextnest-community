@@ -77,6 +77,7 @@ const HISTORICAL_MIGRATIONS = [
   "042_community_sites",
   "043_node_suggestion_details",
   "044_client_attribution",
+  "046_deletion_client_attribution",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -618,8 +619,10 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       node_id TEXT NOT NULL,
       deleted_by TEXT,
       deleted_at TEXT NOT NULL,
+      client_json TEXT,            -- caller attribution (migration 046)
       PRIMARY KEY (nest_id, node_id)
     );
+    ALTER TABLE node_deletions ADD COLUMN IF NOT EXISTS client_json TEXT;
     CREATE INDEX IF NOT EXISTS idx_node_deletions_time
       ON node_deletions(nest_id, deleted_at);
 

@@ -84,6 +84,8 @@ export const keys = {
     [...keys.nest(nestId), "deletion-requests", status] as const,
   feed: (nestId: string, filter: string, limit: number, offset: number) =>
     [...keys.nest(nestId), "feed", filter, limit, offset] as const,
+  agentActivity: (nestId: string, scope: string, agent: string, offset: number) =>
+    [...keys.nest(nestId), "agent-activity", scope, agent, offset] as const,
 
   node: (nestId: string, nodeId: string) =>
     [...keys.nodes(nestId), "node", nodeId] as const,

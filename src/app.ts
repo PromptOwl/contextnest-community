@@ -2107,6 +2107,12 @@ export function createApp(): Hono<AuthEnv> {
       // "deletion-requests" can't drag plain node reads behind the gate.
       const isDeletionQueuePath =
         parts.length === 2 && parts[1] === "deletion-requests";
+      // The agent-activity stream and its undo (CU-wdqcq0314v) are governance
+      // views over version history. Exact segments, so a node slugged
+      // "agent-activity" stays an ordinary node read.
+      const isAgentActivityPath =
+        parts[1] === "agent-activity" &&
+        (parts.length === 2 || (parts.length === 3 && parts[2] === "undo"));
       const isGovernance =
         path.includes("/stewards") ||
         path.includes("/review-queue") ||
@@ -2122,7 +2128,8 @@ export function createApp(): Hono<AuthEnv> {
         isCommentPath ||
         isActivityPath ||
         isFeedPath ||
-        isDeletionQueuePath;
+        isDeletionQueuePath ||
+        isAgentActivityPath;
       const needsLicense = c.req.method !== "GET" || isGovernance;
       if (needsLicense) {
         const lic = getCurrentLicense();
@@ -2278,7 +2285,11 @@ export function createApp(): Hono<AuthEnv> {
       path.includes("/reject") ||
       path.includes("/submit-review") ||
       path.includes("/cancel-review") ||
-      /\/review-queue\/bulk$/.test(path);
+      /\/review-queue\/bulk$/.test(path) ||
+      // Undoing an agent's change is a reviewer's call (the handler checks
+      // owner/admin/reviewer on the document), so a read-tier reviewer must
+      // reach it. Exact segments — never a node path.
+      (parts.length === 3 && parts[1] === "agent-activity" && parts[2] === "undo");
     // Hosted-artifact annotations are a read-tier collaboration action:
     // anyone who can SEE the artifact (notably read-only reviewers — the people
     // most likely to annotate) may open a thread, reply, resolve or reopen.

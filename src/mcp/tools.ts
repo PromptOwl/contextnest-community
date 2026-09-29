@@ -1655,7 +1655,7 @@ async function runTool(
           "UNAUTHORIZED_ACTION",
         );
       }
-      await deleteNode(nestId, node.id, userEmail);
+      await deleteNode(nestId, node.id, userEmail, { client: ctx.client });
       return {
         text: `Deleted node: **${node.frontmatter.title}** (${node.id})`,
         data: {

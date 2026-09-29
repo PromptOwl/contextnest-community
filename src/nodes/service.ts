@@ -31,7 +31,7 @@ import {
   VaultBusyError,
   isVaultLockTimeout,
 } from "../shared/errors.js";
-import type { ClientMetadata } from "../shared/client-metadata.js";
+import { serializeClient, type ClientMetadata } from "../shared/client-metadata.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
@@ -2777,10 +2777,69 @@ export async function discardDraft(
   });
 }
 
+/**
+ * Restore an old version by writing its reconstructed content as a NEW version
+ * through updateNode — history is append-only, nothing is lost, and the write
+ * takes the same governance path any edit does (review lock, draft vs publish).
+ * Shared by POST …/revert and the agent-activity undo.
+ *
+ * A pdf node's body can't be written back as text — it is whatever its PDF
+ * extracts to. Restoring a pdf version re-imports that version's binary
+ * (resolved from the archive and hash-verified by the engine), which brings
+ * its text back with it.
+ */
+export async function restoreVersion(
+  nestId: string,
+  nodeId: string,
+  targetVersion: number,
+  userEmail: string,
+  opts: { client?: ClientMetadata; changeNote?: string } = {},
+): Promise<NodeMutationResult> {
+  const { storage, versions: versionManager } = await engineCache.get(nestId);
+  let raw: string;
+  try {
+    raw = await versionManager.reconstructVersion(nodeId, targetVersion);
+  } catch {
+    throw new NotFoundError(`Version ${targetVersion} not found for ${nodeId}`);
+  }
+  let pdfMeta: unknown;
+  try {
+    pdfMeta = parseDocument(`${nodeId}.md`, raw, nodeId).frontmatter.pdf;
+  } catch {
+    pdfMeta = undefined;
+  }
+  let restoredPdf: Buffer | null = null;
+  if (pdfMeta) {
+    try {
+      restoredPdf = await readPdfBinary(storage as unknown as NestStorage, nodeId, {
+        version: targetVersion,
+      });
+    } catch (err) {
+      console.error("[pdf] restore could not read the version's binary", nestId, nodeId, targetVersion, err);
+      throw new NotFoundError(`The PDF of version ${targetVersion} is not available to restore.`);
+    }
+  }
+  return updateNode(
+    nestId,
+    nodeId,
+    {
+      ...(restoredPdf ? { pdf: { bytes: new Uint8Array(restoredPdf) } } : { content: bodyOnly(nodeId, raw) }),
+      changeNote: opts.changeNote ?? `Restored from version ${targetVersion}`,
+      client: opts.client,
+    },
+    userEmail,
+  );
+}
+
 export async function deleteNode(
   nestId: string,
   nodeId: string,
   userEmail: string,
+  opts: {
+    /** Caller attribution (§9.4) for the tombstone — the one record a delete
+     *  leaves, so it is where "which agent deleted this" has to live. */
+    client?: ClientMetadata;
+  } = {},
 ): Promise<void> {
   const { storage } = await engineCache.get(nestId);
 
@@ -2831,11 +2890,12 @@ export async function deleteNode(
     // GET /changes can tell external mirrors a doc was removed. Upsert:
     // delete → recreate → delete again just refreshes the timestamp.
     await tx.run(
-      `INSERT INTO node_deletions (nest_id, node_id, deleted_by, deleted_at)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO node_deletions (nest_id, node_id, deleted_by, deleted_at, client_json)
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(nest_id, node_id) DO UPDATE
-         SET deleted_by = excluded.deleted_by, deleted_at = excluded.deleted_at`,
-      [nestId, nodeId, userEmail, new Date().toISOString()],
+         SET deleted_by = excluded.deleted_by, deleted_at = excluded.deleted_at,
+             client_json = excluded.client_json`,
+      [nestId, nodeId, userEmail, new Date().toISOString(), serializeClient(opts.client)],
     );
   });
 

@@ -1570,6 +1570,21 @@ export function runMigrations(db: Database.Database): void {
     }
     recordMigration("044_client_attribution");
   }
+
+  // 046: attribute deletions (CU-wdqcq0314v). A delete purges every row tied
+  //   to the node, so its tombstone is the only record left — which makes it
+  //   where "which agent deleted this" has to live for the agent-activity
+  //   stream. Same nullable, never-hashed annotation as 044. (045 is taken by
+  //   045_mcp_oauth on another branch; ids match by string.)
+  if (!hasMigration("046_deletion_client_attribution")) {
+    const cols = (
+      db.prepare(`PRAGMA table_info(node_deletions)`).all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (cols.length && !cols.includes("client_json")) {
+      db.exec(`ALTER TABLE node_deletions ADD COLUMN client_json TEXT`);
+    }
+    recordMigration("046_deletion_client_attribution");
+  }
 }
 
 /**
