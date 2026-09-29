@@ -219,6 +219,9 @@ export async function getHealth() {
     subagent_max_depth?: number;
     subagent_max_children?: number;
     runner_key_configured?: boolean;
+    /** Hootie in the nest (default ON). Off → the launcher is hidden and
+     *  POST /nests/:id/chat 404s. */
+    hootie_enabled?: boolean;
     /** PostHog project key, or null when analytics is unconfigured or usage
      *  telemetry is switched off. The browser needs it to send events. */
     posthog_key?: string | null;
@@ -253,6 +256,14 @@ export interface AdminSettings {
    *  the type only — existing nodes still read/render/version. */
   type_artifact_enabled: boolean;
   type_table_enabled: boolean;
+  /** Hootie in the nest (default ON). */
+  hootie_enabled: boolean;
+  /** Model Hootie answers with (default claude-opus-5; a gateway-side name
+   *  such as `ollama/…` when routed through a gateway). */
+  hootie_model: string;
+  /** Model gateway (LiteLLM / PromptOwl) for Hootie AND agent runs;
+   *  "" = Anthropic directly. */
+  anthropic_base_url: string;
   subagent_runs_enabled: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
@@ -1119,13 +1130,14 @@ export interface PdfMeta {
 export async function createPdfNode(
   nestId: string,
   file: File,
-  opts: { title?: string; folder?: string; tags?: string[]; nodeId?: string } = {},
+  opts: { title?: string; folder?: string; tags?: string[]; nodeId?: string; changeNote?: string } = {},
 ) {
   const form = new FormData();
   form.append("file", file);
   if (opts.title) form.append("title", opts.title);
   if (opts.folder) form.append("folder", opts.folder);
   if (opts.nodeId) form.append("nodeId", opts.nodeId);
+  if (opts.changeNote?.trim()) form.append("changeNote", opts.changeNote.trim());
   for (const t of opts.tags ?? []) form.append("tags", t);
   const res = await fetch(`/nests/${nestId}/nodes/pdf`, {
     method: "POST",
@@ -2860,4 +2872,113 @@ export async function triggerRun(
       }),
     },
   );
+}
+
+// ─── Hootie in the nest ──────────────────────────────────────────────────
+
+export interface HootieNode {
+  id: string;
+  title: string;
+  url?: string;
+  tags: string[];
+  type: string;
+}
+
+export type HootieMention =
+  | {
+      status: "posted";
+      node_id: string;
+      node_title: string;
+      thread_id: string;
+      notified: number;
+    }
+  | { status: "undeliverable"; reason: "no_anchor" | "post_failed" };
+
+export interface HootieTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/**
+ * Ask Hootie about a nest. The route streams server-sent events; each one is
+ * handed to the matching callback as it lands so the panel renders the answer
+ * while it is still being written. Resolves when the stream closes.
+ *
+ * Non-2xx responses (feature off, no key, 400, 429) throw the same ApiError
+ * shape as request(), with the JSON body on `err.body`.
+ */
+export async function chatWithHootie(
+  nestId: string,
+  body: { message: string; node_id?: string | null; history?: HootieTurn[] },
+  on: {
+    meta?: (m: { nodes: HootieNode[]; anchor: HootieNode | null }) => void;
+    delta?: (text: string) => void;
+    done?: (d: {
+      answer: string;
+      cited: HootieNode[];
+      mention: HootieMention | null;
+    }) => void;
+    error?: (message: string) => void;
+  },
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/nests/${nestId}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    let data: any;
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = { error: text.slice(0, 200) };
+    }
+    if (res.status === 401 && typeof window !== "undefined") {
+      window.dispatchEvent(new Event("auth:unauthorized"));
+    }
+    const err = new Error(data.error || `Request failed: ${res.status}`) as ApiError;
+    err.status = res.status;
+    err.body = data;
+    throw err;
+  }
+  if (!res.body) return;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const dispatch = (chunk: string) => {
+    let event = "message";
+    const data: string[] = [];
+    for (const line of chunk.split("\n")) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+    }
+    if (data.length === 0) return;
+    let payload: any;
+    try {
+      payload = JSON.parse(data.join("\n"));
+    } catch {
+      return;
+    }
+    if (event === "meta") on.meta?.(payload);
+    else if (event === "delta") on.delta?.(payload.text ?? "");
+    else if (event === "done") on.done?.(payload);
+    else if (event === "error") on.error?.(payload.error ?? "Something went wrong.");
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    // Events are separated by a blank line; keep any partial tail for the
+    // next read.
+    let at: number;
+    while ((at = buffer.indexOf("\n\n")) >= 0) {
+      dispatch(buffer.slice(0, at));
+      buffer = buffer.slice(at + 2);
+    }
+  }
+  if (buffer.trim()) dispatch(buffer);
 }

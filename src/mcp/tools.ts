@@ -8,6 +8,7 @@ import { parseDocument } from "@promptowl/contextnest-engine";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import * as versions from "../governance/version-service.js";
+import { reconstructApproved } from "../governance/approved-body.js";
 import { loadStewardsConfig } from "../governance/stewards-parser.js";
 import {
   canReadNode,
@@ -854,7 +855,7 @@ async function resolveLlmBody(
     : await versions.getApprovedVersion(ctx.nestId, node.id);
   if (approved == null) return null;
   try {
-    return await ctx.versionManager.reconstructVersion(node.id, approved);
+    return (await reconstructApproved(ctx.versionManager, ctx.nestId, node.id, approved)).raw;
   } catch (err) {
     console.error("reconstructVersion failed", node.id, approved, err);
     return null;

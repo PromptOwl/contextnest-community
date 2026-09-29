@@ -226,6 +226,7 @@ export function Login() {
           <button
             onClick={handlePromptOwl}
             disabled={loading}
+            data-testid="login-promptowl-button"
             className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg border border-border bg-card hover:bg-secondary text-sm font-medium transition-colors"
           >
             {loading && deviceUrl
@@ -303,6 +304,7 @@ export function Login() {
                   placeholder="Name"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
+                  data-testid="login-name-input"
                   className="w-full px-3 py-2 rounded-md border border-input bg-background text-sm"
                 />
               )}
@@ -312,6 +314,7 @@ export function Login() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
+                data-testid="login-email-input"
                 className="w-full px-3 py-2 rounded-md border border-input bg-background text-sm"
               />
               <div className="relative">
@@ -321,6 +324,7 @@ export function Login() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   required
+                  data-testid="login-password-input"
                   className="w-full px-3 py-2 pr-9 rounded-md border border-input bg-background text-sm"
                 />
                 <button
@@ -340,6 +344,7 @@ export function Login() {
               <button
                 type="submit"
                 disabled={loading}
+                data-testid="login-submit-button"
                 className="w-full py-2.5 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50"
               >
                 {loading ? "..." : mode === "register" ? "Create Account" : "Login"}
@@ -349,7 +354,7 @@ export function Login() {
         )}
 
         {error && (
-          <p className="text-sm text-destructive text-center">{error}</p>
+          <p className="text-sm text-destructive text-center" data-testid="login-error">{error}</p>
         )}
 
         {/* Self sign-up link — open mode only. Invited users don't self-serve:
@@ -359,7 +364,7 @@ export function Login() {
             {mode === "login" ? (
               <>
                 No account?{" "}
-                <button onClick={() => setMode("register")} className="text-primary underline">
+                <button onClick={() => setMode("register")} data-testid="login-register-toggle" className="text-primary underline">
                   Register
                 </button>
               </>

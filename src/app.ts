@@ -37,6 +37,8 @@ import { resolveNodeGrant } from "./governance/grants-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
+import { hootieRoutes } from "./hootie/routes.js";
+import { verifyModelKey } from "./hootie/model.js";
 import { mcpRoutes } from "./mcp/routes.js";
 import { edgeTypeRoutes } from "./workflow/edge-type-routes.js";
 import { edgeRoutes } from "./workflow/edge-routes.js";
@@ -61,6 +63,7 @@ import {
   pdfNodeRoutes,
   PDF_UPLOAD_PATH,
   pdfMaxRequestBytes,
+  pdfTooLargeMessage,
 } from "./nodes/pdf-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
 import {
@@ -418,16 +421,20 @@ export function createApp(): Hono<AuthEnv> {
     if (lenStr) {
       const len = parseInt(lenStr, 10);
       const isPost = c.req.method === "POST";
+      const isPdf = isPost && PDF_UPLOAD_PATH.test(c.req.path);
       const cap =
         isPost && ASSET_UPLOAD_PATH.test(c.req.path)
           ? Math.max(config.MAX_BODY_BYTES, ASSET_MAX_REQUEST_BYTES)
-          : isPost && PDF_UPLOAD_PATH.test(c.req.path)
+          : isPdf
             ? Math.max(config.MAX_BODY_BYTES, pdfMaxRequestBytes())
             : config.MAX_BODY_BYTES;
       if (Number.isFinite(len) && len > cap) {
         return c.json(
           {
-            error: `Request body too large (${len} bytes, max ${cap})`,
+            // A PDF gets the same message as the route's own gates.
+            error: isPdf
+              ? pdfTooLargeMessage(len)
+              : `Request body too large (${len} bytes, max ${cap})`,
           },
           413,
         );
@@ -515,6 +522,11 @@ export function createApp(): Hono<AuthEnv> {
       // API would refuse it — existing nodes of the type stay readable.
       type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
       type_table_enabled: config.TYPE_TABLE_ENABLED,
+      // Hootie in the nest (default ON). Off → POST /nests/:id/chat 404s and
+      // the UI hides the launcher. Whether it can actually answer is
+      // runner_key_configured above — the UI shows the launcher whenever the
+      // feature is on and explains the missing key, rather than hiding it.
+      hootie_enabled: config.HOOTIE_ENABLED,
       // This server hosts several organizations (PromptOwl-hosted) rather than
       // one. The visibility picker words 'Organization' and 'Public' by it and
       // confirms before 'org'; the server enforces the same in
@@ -657,6 +669,9 @@ export function createApp(): Hono<AuthEnv> {
     promptowl_teams_enabled: config.PROMPTOWL_TEAMS_ENABLED,
     type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
     type_table_enabled: config.TYPE_TABLE_ENABLED,
+    hootie_enabled: config.HOOTIE_ENABLED,
+    hootie_model: config.HOOTIE_MODEL,
+    anthropic_base_url: config.ANTHROPIC_BASE_URL,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
@@ -827,6 +842,41 @@ export function createApp(): Hono<AuthEnv> {
         value: body.type_table_enabled ? null : "false",
       });
     }
+    if ("hootie_enabled" in body) {
+      pending.push({
+        name: "HOOTIE_ENABLED",
+        value: body.hootie_enabled ? null : "false",
+      });
+    }
+    if ("hootie_model" in body) {
+      const v = String(body.hootie_model ?? "").trim();
+      if (!v) addError("hootie_model", "Model is required — e.g. claude-opus-5.");
+      else if (v.length > 200 || /\s/.test(v))
+        addError("hootie_model", "Model must be a single identifier with no spaces.");
+      else pending.push({ name: "HOOTIE_MODEL", value: v === "claude-opus-5" ? null : v });
+    }
+    // Empty clears the row (direct Anthropic). Otherwise an http(s) origin
+    // (+ optional path) with no trailing slash, so the SDK joins /v1/messages
+    // onto it cleanly.
+    if ("anthropic_base_url" in body) {
+      const v = String(body.anthropic_base_url ?? "").trim().replace(/\/$/, "");
+      if (!v) pending.push({ name: "ANTHROPIC_BASE_URL", value: null });
+      else {
+        let ok = false;
+        try {
+          const u = new URL(v);
+          ok = (u.protocol === "http:" || u.protocol === "https:") && !!u.host;
+        } catch {
+          ok = false;
+        }
+        if (!ok)
+          addError(
+            "anthropic_base_url",
+            "Model gateway URL must be an http(s) URL, e.g. http://gateway:4000 — or empty to call Anthropic directly.",
+          );
+        else pending.push({ name: "ANTHROPIC_BASE_URL", value: v });
+      }
+    }
     if ("anthropic_api_key" in body) {
       const v = body.anthropic_api_key;
       if (v === null || v === "") {
@@ -834,7 +884,18 @@ export function createApp(): Hono<AuthEnv> {
       } else if (typeof v !== "string" || !v.trim().startsWith("sk-")) {
         addError("anthropic_api_key", 'Anthropic API key must start with "sk-" (or be empty to clear it).');
       } else {
-        pending.push({ name: "ANTHROPIC_API_KEY", value: v.trim() });
+        // Shape is not validity: a well-formed key that Anthropic rejects
+        // saves cleanly and then fails on the first question someone asks.
+        // One call settles it here, against the gateway THIS patch leaves in
+        // place (it may be setting one in the same request).
+        const key = v.trim();
+        const patchedBase = pending.find((p) => p.name === "ANTHROPIC_BASE_URL");
+        const baseUrl = patchedBase
+          ? patchedBase.value
+          : config.ANTHROPIC_BASE_URL || null;
+        const rejected = await verifyModelKey(key, baseUrl);
+        if (rejected) addError("anthropic_api_key", rejected);
+        else pending.push({ name: "ANTHROPIC_API_KEY", value: key });
       }
     }
     if ("subagent_runs_enabled" in body) {
@@ -2131,7 +2192,7 @@ export function createApp(): Hono<AuthEnv> {
     // (whole-nest views). parts.length===2 pins the exact /nests/:id/<route>.
     const isReadQuery =
       parts.length === 2 &&
-      ["context", "query", "search", "export"].includes(parts[1]);
+      ["context", "query", "search", "export", "chat"].includes(parts[1]);
 
     // MCP transport is read-tier (isMcpTransport, declared above with the
     // deny helper): the Streamable HTTP protocol is ALWAYS POST — even
@@ -2520,6 +2581,8 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
   nestsApp.route("/:nestId/nodes", nodeRoutes);
   nestsApp.route("/:nestId", queryRoutes);
+  // Hootie chat — read-tier like /context (it IS /context plus a model call).
+  nestsApp.route("/:nestId", hootieRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
   nestsApp.route("/:nestId", brandingRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);

@@ -23,6 +23,8 @@ interface Props {
   nestName: string;
   /** Show the "open mode — no key needed" note instead of the auth header. */
   openMode?: boolean;
+  /** Swap this modal for Connect, where the API key is minted. */
+  onOpenConnect?: () => void;
 }
 
 function CopyBlock({ label, text }: { label: string; text: string }) {
@@ -59,7 +61,7 @@ function CopyBlock({ label, text }: { label: string; text: string }) {
   );
 }
 
-export function GenerateContextModal({ isOpen, onClose, nestId, nestName, openMode }: Props) {
+export function GenerateContextModal({ isOpen, onClose, nestId, nestName, openMode, onOpenConnect }: Props) {
   const serverUrl =
     typeof window !== "undefined" ? window.location.origin : "https://your-server";
 
@@ -148,7 +150,18 @@ ${authLine}  -H "Content-Type: application/json" \\
               <Key className="h-3.5 w-3.5 mt-0.5 shrink-0" />
               <span>
                 Writes need an API key (<code>Bearer cnst_*</code>). Mint one in{" "}
-                <strong>Connect</strong> — it's shown once; set it as{" "}
+                {onOpenConnect ? (
+                  <button
+                    type="button"
+                    onClick={onOpenConnect}
+                    className="font-semibold text-primary underline underline-offset-2 hover:text-primary/80"
+                  >
+                    Connect
+                  </button>
+                ) : (
+                  <strong>Connect</strong>
+                )}{" "}
+                — it's shown once; set it as{" "}
                 <code>$CNST_KEY</code> for the snippets above.
               </span>
             </div>

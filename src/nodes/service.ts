@@ -34,6 +34,7 @@ import {
 import type { ClientMetadata } from "../shared/client-metadata.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
+import { reconstructApproved } from "../governance/approved-body.js";
 import { syncNodeTags, removeNodeFromTagIndex } from "../governance/tag-index-service.js";
 import {
   isStewardshipEnabled,
@@ -977,13 +978,16 @@ export async function listNodesForCaller(
       }
 
       if (approvedVersions) {
-        const approved = approvedVersions.get(doc.id);
+        let approved = approvedVersions.get(doc.id);
         if (approved != null) {
           try {
-            const raw = await versionManager.reconstructVersion(
+            let raw: string;
+            ({ raw, version: approved } = await reconstructApproved(
+              versionManager,
+              nestId,
               doc.id,
               approved
-            );
+            ));
             r.content = bodyOnly(doc.id, raw);
           } catch (err) {
             console.error(
