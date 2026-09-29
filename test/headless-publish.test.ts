@@ -306,6 +306,53 @@ describe("a key over REST", () => {
     expect((await jsonRequest(app, "POST", "/auth/keys", { label: "x" }, readerKey)).status).toBe(403);
     expect((await jsonRequest(app, "GET", "/me/work", undefined, readerKey)).status).toBe(403);
   });
+
+  it("sees only the nest's public face — no owner id, team shares or settings", async () => {
+    const { data } = await jsonRequest(app, "GET", `/nests/${nestId}`, undefined, readerKey);
+    expect(data.nest).toMatchObject({ id: nestId, name: "Distillation" });
+    for (const hidden of ["user_id", "shared_teams", "stewardship_enabled", "headless", "reader_mode", "visibility"]) {
+      expect(data.nest, hidden).not.toHaveProperty(hidden);
+    }
+    expect(data.permission).toBe("read");
+    // The owner still gets the whole row (regression).
+    const own = await jsonRequest(app, "GET", `/nests/${nestId}`, undefined, owner.apiKey);
+    expect(own.data.nest).toHaveProperty("user_id");
+  });
+
+  it("can't read the folder tree or the glossary (they aren't approval-gated)", async () => {
+    for (const p of [`/nests/${nestId}/folders`, `/nests/${nestId}/definitions`]) {
+      const { status, data } = await jsonRequest(app, "GET", p, undefined, readerKey);
+      expect(status, p).toBe(403);
+      expect(data.code, p).toBe("headless_reader");
+    }
+  });
+
+  it("HEAD never gets a key more than a read collaborator gets", async () => {
+    // (The nest gate treats every non-GET, HEAD included, as write-tier for all
+    // readers — pre-existing, not changed here. What matters is that a key is
+    // never ahead of a real read collaborator.)
+    const head = (path: string, key: string) =>
+      app.request(path, { method: "HEAD", headers: { Authorization: `Bearer ${key}` } }).then((r: any) => r.status);
+    expect(await head(`/nests/${nestId}/nodes`, readerKey)).toBe(await head(`/nests/${nestId}/nodes`, collabReader.apiKey));
+    expect(await head(`/nests/${nestId}/export`, readerKey)).toBe(403);
+  });
+
+  it("a signed-in person's cookie sent along with the key doesn't widen the key", async () => {
+    const login = await app.request("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: writer.email, password: "testpass" }),
+    });
+    const cookie = login.headers.get("set-cookie") || "";
+    expect(cookie).toContain("cnst_session=");
+    const res = await app.request(`/nests/${nestId}/nodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${readerKey}`, Cookie: cookie },
+      body: JSON.stringify({ title: "Via cookie", content: "x" }),
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("headless_reader");
+  });
 });
 
 describe("the key's identity is not a person", () => {
@@ -384,6 +431,39 @@ describe("the key's identity is not a person", () => {
 });
 
 describe("lifecycle", () => {
+  it("a paused key's nest drops out of its /nests and /index, and comes back", async () => {
+    const ids = async (path: string) => {
+      const { data } = await jsonRequest(app, "GET", path, undefined, readerKey);
+      return JSON.stringify(data);
+    };
+    await jsonRequest(app, "PUT", `/nests/${nestId}/headless`, { enabled: false }, owner.apiKey);
+    expect(await ids("/nests")).not.toContain(nestId);
+    expect(await ids("/index?format=json")).not.toContain(nestId);
+    await jsonRequest(app, "PUT", `/nests/${nestId}/headless`, { enabled: true }, owner.apiKey);
+    expect(await ids("/nests")).toContain(nestId);
+    expect(await ids("/index?format=json")).toContain(nestId);
+  });
+
+  it("revoking is all-or-nothing: a failure part-way leaves the key and its identity intact", async () => {
+    const { getDb } = await import("../src/db/client.js");
+    const { mintHeadlessKey, revokeHeadlessKey } = await import("../src/auth/headless.js");
+    const db = getDb();
+    const { key } = await mintHeadlessKey(nestId, "Atomic", owner.userId);
+    const svc = (await db.get("SELECT user_id FROM api_keys WHERE id = ?", [key.id])) as { user_id: string };
+    // A row that references the identity without ON DELETE CASCADE makes the
+    // final DELETE FROM users fail — after the key and reader rows are gone,
+    // unless the whole revoke is one transaction.
+    await db.run(
+      "INSERT INTO nests (id, user_id, name, slug) VALUES (?, ?, ?, ?)",
+      ["pin-nest", svc.user_id, "Pin", "pin"],
+    );
+    await expect(revokeHeadlessKey(nestId, key.id)).rejects.toThrow();
+    expect(await db.get("SELECT id FROM api_keys WHERE id = ?", [key.id])).toBeTruthy();
+    expect(await db.get("SELECT user_id FROM headless_readers WHERE key_id = ?", [key.id])).toBeTruthy();
+    await db.run("DELETE FROM nests WHERE id = ?", ["pin-nest"]);
+    expect(await revokeHeadlessKey(nestId, key.id)).toBe(true);
+  });
+
   it("turning publishing off pauses every key; turning it on resumes them", async () => {
     await jsonRequest(app, "PUT", `/nests/${nestId}/headless`, { enabled: false }, owner.apiKey);
     const paused = await jsonRequest(app, "GET", `/nests/${nestId}`, undefined, readerKey);

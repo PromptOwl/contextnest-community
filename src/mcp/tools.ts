@@ -4,7 +4,6 @@ import type {
   VersionManager,
   ContextNode,
 } from "@promptowl/contextnest-engine";
-import { HEADLESS_READER_TOOLS, headlessToolRefusal, isServiceUser } from "../auth/headless.js";
 import { parseDocument } from "@promptowl/contextnest-engine";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
@@ -65,6 +64,7 @@ import {
   type ClientMetadata,
 } from "../shared/client-metadata.js";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
+import { HEADLESS_READER_TOOLS, headlessToolRefusal, isServiceUser } from "../auth/headless.js";
 
 /** Upper bound on caller-set traversal depth — real graphs terminate long
  *  before this; the cap just fences a misbehaving client from a runaway query. */
@@ -145,6 +145,12 @@ function toolError(
  * catalog payload gets it attached as `structuredContent`, which is where a
  * machine caller looks.
  */
+/** What a headless access key gets for a tool it may not call (CU-wdqcq0314u)
+ *  — the same shape on both MCP surfaces. */
+export function headlessToolError(toolName: string): ToolResult {
+  return toolError(headlessToolRefusal(toolName), "UNAUTHORIZED_ACTION");
+}
+
 export function toCallToolResult(out: ToolResult) {
   if (typeof out === "string") {
     return { content: [{ type: "text" as const, text: out }] };
@@ -910,7 +916,7 @@ export async function handleToolCall(
       status: 403,
       durationMs: Date.now() - started,
     });
-    return toolError(headlessToolRefusal(toolName), "UNAUTHORIZED_ACTION");
+    return headlessToolError(toolName);
   }
   // An agent that sends a whole file (frontmatter + body) as `content` used to
   // get a second, dead frontmatter block stored inside the body. Refuse and say

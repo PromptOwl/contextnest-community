@@ -4,7 +4,6 @@ import { hashApiKey, parseBearerToken } from "./keys.js";
 import { getSessionIdFromRequest, resolveSession } from "./sessions.js";
 
 import { HEADLESS_READER_CODE, headlessReaderVerdict } from "./headless.js";
-
 import type { AuthEnv } from "./middleware.js";
 
 /**

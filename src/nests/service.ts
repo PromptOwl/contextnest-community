@@ -1,5 +1,4 @@
 import { mkdirSync } from "fs";
-import { revokeAllHeadlessKeys } from "../auth/headless.js";
 import { v4 as uuid } from "uuid";
 import { NestStorage } from "@promptowl/contextnest-engine";
 import { getDb } from "../db/client.js";
@@ -7,6 +6,7 @@ import { config } from "../config.js";
 import { resolveNestPath } from "../shared/paths.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
+import { revokeAllHeadlessKeys } from "../auth/headless.js";
 import { isServerAdminUserId } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { ValidationError, ForbiddenError } from "../shared/errors.js";

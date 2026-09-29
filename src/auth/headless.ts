@@ -58,10 +58,12 @@ export function headlessToolRefusal(tool: string): string {
 
 const PUBLIC_PATHS = new Set(["/health", "/license/status", "/llms.txt", "/auth/admin-status"]);
 
-/** Nest-level GET routes a key may read (the part after /nests/:id). */
-const NEST_GET = new Set(["", "/nodes", "/search", "/context", "/definitions", "/folders"]);
+/** Nest-level GET routes a key may read (the part after /nests/:id). Not the
+ *  folder tree or the glossary: neither is approval-gated (folders are read
+ *  off disk, so a draft-only folder's name would show), and ctx needs neither. */
+const NEST_GET = new Set(["", "/nodes", "/search", "/context"]);
 /** Nest-level POST routes that are retrieval queries, not mutations. */
-const NEST_POST = new Set(["/context", "/query", "/table-query", "/mcp"]);
+const NEST_POST = new Set(["/context", "/query", "/table-query"]);
 /** Node sub-resources a key may NOT read: history, discussion, governance,
  *  and the raw files behind hosted artifacts and PDFs. */
 const NODE_SUBRESOURCE =
@@ -96,6 +98,11 @@ export function headlessReaderVerdict(method: string, rawPath: string, scope: st
   const m = /^\/nests\/([^/]+)(\/.*)?$/.exec(path);
   if (!m || !segmentMatches(m[1], scope)) return false;
   const rest = m[2] ?? "";
+
+  // The per-nest MCP transport, any method (clients probe with GET, close with
+  // DELETE) — same as /mcp above. Every tool call on it is gated by
+  // HEADLESS_READER_TOOLS in handleToolCall.
+  if (rest === "/mcp") return true;
 
   if (isGet) {
     if (NEST_GET.has(rest)) return true;
@@ -178,7 +185,13 @@ export async function mintHeadlessKey(
       [serviceId, nestId, keyId, label, createdBy],
     );
   });
-  const [key] = (await listHeadlessKeys(nestId)).filter((k) => k.id === keyId);
+  const key = (await db.get(
+    `SELECT k.id, hr.label, k.key_prefix, k.created_at, k.last_used_at
+       FROM headless_readers hr JOIN api_keys k ON k.id = hr.key_id
+      WHERE k.id = ?`,
+    [keyId],
+  )) as HeadlessKeySummary | undefined;
+  if (!key) throw new Error("access key was not saved");
   return { key, apiKey };
 }
 
@@ -190,11 +203,13 @@ export async function revokeHeadlessKey(nestId: string, keyId: string): Promise<
     [nestId, keyId],
   )) as { user_id: string } | undefined;
   if (!row) return false;
-  await removeServiceIdentities(db, [row.user_id]);
+  // One transaction: a failure part-way must not leave a dead key's identity
+  // behind (or a live key without its reader row).
+  await db.transaction((tx) => removeServiceIdentities(tx, [row.user_id]));
   return true;
 }
 
-/** Every access key of a nest, gone — called when the nest is deleted. */
+/** Every access key of a nest, gone — called inside deleteNest's transaction. */
 export async function revokeAllHeadlessKeys(db: Querier, nestId: string): Promise<void> {
   const rows = (await db.all("SELECT user_id FROM headless_readers WHERE nest_id = ?", [
     nestId,
@@ -204,8 +219,8 @@ export async function revokeAllHeadlessKeys(db: Querier, nestId: string): Promis
 
 async function removeServiceIdentities(db: Querier, userIds: string[]): Promise<void> {
   for (const id of userIds) {
-    // Explicit, not left to ON DELETE CASCADE: SQLite only cascades with
-    // foreign_keys on, and api_keys/sessions/api_events reference users too.
+    // Explicit, not left to ON DELETE CASCADE: api_keys references users with
+    // no cascade, and headless_readers only cascades where foreign_keys is on.
     await db.run("DELETE FROM headless_readers WHERE user_id = ?", [id]);
     await db.run("DELETE FROM api_keys WHERE user_id = ?", [id]);
     await db.run("DELETE FROM users WHERE id = ? AND is_service = 1", [id]);
