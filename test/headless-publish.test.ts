@@ -94,7 +94,7 @@ beforeAll(async () => {
   );
   await jsonRequest(
     app, "POST", `/nests/${nestId}/nodes`,
-    { title: "Unreviewed", content: "# Unreviewed\n\nNever approved." }, owner.apiKey,
+    { title: "Unreviewed", content: "# Unreviewed\n\nNever approved.", tags: ["secretdrafttag"], folder: "secretfolder" }, owner.apiKey,
   );
 
   for (const [u, permission] of [[writer, "write"], [collabReader, "read"]] as const) {
@@ -219,6 +219,34 @@ describe("a key reads approved content over MCP (what ctx uses)", () => {
   it("context_search works", async () => {
     const { isError } = await tool(readerKey, "context_search", { query: "Guide" });
     expect(isError).toBe(false);
+  });
+
+  it("never shows a draft-only document's title, tag or folder in any read tool", async () => {
+    // The fixture is real: the owner does see all three.
+    const own = [
+      (await tool(owner.apiKey, "context_list", {})).text,
+      (await tool(owner.apiKey, "context_search", { query: "secretdrafttag" })).text,
+      (await tool(owner.apiKey, "context_overview", {})).text,
+    ].join("\n");
+    expect(own).toMatch(/Unreviewed/);
+    const ownIds = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, owner.apiKey);
+    expect(JSON.stringify(ownIds.data)).toMatch(/secretfolder/);
+
+    for (const [name, args] of [
+      ["context_overview", {}],
+      ["context_list", {}],
+      ["context_search", { query: "Unreviewed" }],
+      ["context_search", { query: "secretdrafttag" }],
+      ["context_query", { selector: "#secretdrafttag" }],
+      ["context_resolve", { title: "Unreviewed" }],
+    ] as const) {
+      const { text } = await tool(readerKey, name, args as any);
+      // A "no match" reply echoes the caller's own query — strip that echo.
+      const echoed = Object.values(args).map(String);
+      let out = text;
+      for (const e of echoed) out = out.split(e).join("<query>");
+      expect(out, `${name} ${JSON.stringify(args)}`).not.toMatch(/Unreviewed|secretdrafttag|secretfolder/);
+    }
   });
 
   it("refuses write, history, export and comment tools even when called by name", async () => {
