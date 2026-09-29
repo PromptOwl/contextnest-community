@@ -289,6 +289,15 @@ export async function getScopedActivity(params: {
 
   if (want("access")) {
     const s = scopeSql(scope, "e.node_id", true);
+    // A whole-nest export (node_id NULL) is only this document's history if
+    // the document existed then — not for one created afterwards.
+    const since = scope.nodeId
+      ? ((await db.get(
+          `SELECT MIN(created_at) AS t FROM node_versions WHERE nest_id = ? AND node_id = ?`,
+          [nestId, scope.nodeId],
+        )) as { t: string | null } | undefined)?.t
+      : null;
+    const sinceIso = since ? toIso(since) : null;
     const a = actorSql(actor, ["COALESCE(e.user_email, u.email)"]);
     const actions = (["read", "retrieved", "exported"] as const)
       .filter((t) => wanted.has(t))
@@ -304,6 +313,7 @@ export async function getScopedActivity(params: {
         [nestId, ...actions, ...s.args, ...a.args, window],
       )) as any[];
       for (const r of rows) {
+        if (sinceIso && r.node_id == null && toIso(r.ts) < sinceIso.slice(0, 19)) continue;
         const client = deserializeClient(r.client_json);
         push({
           id: `a:${r.id}`,

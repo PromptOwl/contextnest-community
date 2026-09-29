@@ -249,6 +249,34 @@ describe("scoped activity log (document / folder / nest)", () => {
     expect(bad.status).toBe(400);
   });
 
+  it("doesn't keep what people searched for, only how the document was pulled", async () => {
+    resetAccessThrottle();
+    await jsonRequest(app, "GET", `/nests/${nestId}/search?q=falcon%20secret%20plan`, undefined, editor.apiKey);
+    const { data } = await nodeLog(pricingId, "&type=retrieved");
+    expect(data.items.length).toBeGreaterThan(0);
+    expect(JSON.stringify(data.items)).not.toContain("secret plan");
+    expect(data.items[0].detail).toBe("search");
+  });
+
+  it("doesn't show a document an export that happened before it existed", async () => {
+    resetAccessThrottle();
+    await app.request(`/nests/${nestId}/export?format=markdown`, { headers: authed(editor.apiKey) });
+    await flushAccessLog();
+    await new Promise((r) => setTimeout(r, 1100)); // SQLite datetime('now') is second-resolution
+    const made = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Brand New", content: "made after the export", folder: "ops" },
+      owner.apiKey,
+    );
+    const { data } = await nodeLog(made.data.node.id, "&type=exported");
+    expect(data.items).toEqual([]);
+    // …while an older document still shows it.
+    const old = await nodeLog(pricingId, "&type=exported");
+    expect(old.data.items.length).toBeGreaterThan(0);
+  });
+
   it("regression: reads, version history and the existing per-node activity are unchanged", async () => {
     const read = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${pricingId}`, undefined, editor.apiKey);
     expect(read.status).toBe(200);

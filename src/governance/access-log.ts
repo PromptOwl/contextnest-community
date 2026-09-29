@@ -20,6 +20,9 @@
  *   - pruned on the activity trace's retention window.
  *
  * `client` is self-reported attribution (§9.4) — shown, never trusted.
+ * `detail` names the surface ("search", "context_get"), never what the caller
+ * typed: admins read this log, and a search box or a Hootie prompt is not
+ * theirs to read.
  */
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
@@ -58,7 +61,8 @@ export interface AccessEvent {
   userId?: string | null;
   userEmail?: string | null;
   client?: ClientMetadata;
-  /** Short free text, e.g. "markdown export" or the search query. */
+  /** How it was accessed ("search", "markdown export (12 documents)").
+   *  Never the caller's query or prompt text. */
   detail?: string;
 }
 
@@ -75,12 +79,32 @@ function admit(
   const key = `${actor}|${nestId}|${nodeId ?? "*"}|${e.action}|${e.surface}|${agent}`;
   const prev = lastSeen.get(key);
   if (prev !== undefined && now - prev < THROTTLE_MS) return false;
-  if (lastSeen.size >= THROTTLE_MAX_KEYS) lastSeen.clear();
+  // Evict the oldest tenth rather than clearing: a full clear re-records
+  // everything at exactly the moment the server is busiest. Map iteration is
+  // insertion order, and a key is re-inserted when refreshed, so the first
+  // entries are the stalest.
+  if (lastSeen.size >= THROTTLE_MAX_KEYS) {
+    let drop = Math.ceil(THROTTLE_MAX_KEYS / 10);
+    for (const k of lastSeen.keys()) {
+      lastSeen.delete(k);
+      if (--drop <= 0) break;
+    }
+  }
+  lastSeen.delete(key);
   lastSeen.set(key, now);
   return true;
 }
 
-async function write(e: AccessEvent, targets: Array<string | null>): Promise<void> {
+/** Undo admit() for keys whose insert failed, so the next access is retried
+ *  rather than suppressed for the whole window. */
+function release(actor: string, e: AccessEvent, targets: Array<string | null>) {
+  const agent = typeof e.client?.agent === "string" ? e.client.agent : "";
+  for (const nodeId of targets) {
+    lastSeen.delete(`${actor}|${e.nestId}|${nodeId ?? "*"}|${e.action}|${e.surface}|${agent}`);
+  }
+}
+
+async function write(e: AccessEvent, targets: Array<string | null>, actor: string): Promise<void> {
   try {
     const db = getDb();
     const ts = new Date().toISOString();
@@ -104,7 +128,9 @@ async function write(e: AccessEvent, targets: Array<string | null>): Promise<voi
       }
     }
   } catch {
-    /* recording access must never break a read */
+    // Recording access must never break a read — but a failed insert must
+    // not silence this actor for the rest of the window either.
+    release(actor, e, targets);
   }
 }
 
@@ -126,7 +152,7 @@ export function recordNodeAccess(e: AccessEvent): void {
         );
     const targets = ids.filter((id) => admit(actor, e.nestId, id, e, now));
     if (!targets.length) return;
-    const p = write(e, targets);
+    const p = write(e, targets, actor);
     pending.add(p);
     void p.finally(() => pending.delete(p));
   } catch {

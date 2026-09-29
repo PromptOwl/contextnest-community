@@ -361,7 +361,7 @@ export async function resolveContext(params: {
     surface: "api",
     userId,
     userEmail,
-    detail: selector ? `context: ${selector}` : "context",
+    detail: "context",
   });
 
   return {

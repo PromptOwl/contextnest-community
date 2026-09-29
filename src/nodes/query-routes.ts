@@ -312,7 +312,7 @@ queryRoutes.post("/query", async (c) => {
     userId,
     userEmail,
     client: c.get("clientMetadata"),
-    detail: `query: ${body.query}`,
+    detail: "query",
   });
 
   return c.json({
@@ -352,7 +352,7 @@ queryRoutes.get("/search", async (c) => {
     userId,
     userEmail,
     client: c.get("clientMetadata"),
-    detail: `search: ${q}`,
+    detail: "search",
   });
 
   return c.json({
@@ -585,7 +585,7 @@ queryRoutes.get("/export", async (c) => {
     userId,
     userEmail,
     client: c.get("clientMetadata"),
-    detail: selector ? `markdown export: ${selector}` : `markdown export (${included.length} documents)`,
+    detail: `markdown export (${included.length} documents${selector ? ", selector" : ""})`,
   });
 
   return c.body(nodesToMarkdown(included), 200, {
