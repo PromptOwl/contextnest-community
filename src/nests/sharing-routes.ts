@@ -217,10 +217,21 @@ sharingRoutes.patch("/visibility", async (c) => {
       409,
     );
   }
-  const result = await db.run("UPDATE nests SET visibility = ? WHERE id = ?", [
-    body.visibility,
-    nestId,
-  ]);
+  // Widening is conditional on the nest not being headless (CU-wdqcq0314u), so
+  // a headless toggle racing this request can't leave it both public and
+  // headless. A zero-row result is then told apart from "no such nest" below.
+  const result = await db.run(
+    body.visibility === "private"
+      ? "UPDATE nests SET visibility = ? WHERE id = ?"
+      : "UPDATE nests SET visibility = ? WHERE id = ? AND COALESCE(headless, 0) = 0",
+    [body.visibility, nestId],
+  );
+  if (result.changes === 0 && body.visibility !== "private" && (await isNestHeadless(nestId))) {
+    return c.json(
+      { error: "This nest is published API-only (headless), so it stays private." },
+      409,
+    );
+  }
   // A zero-row update means the nest id didn't resolve — report it instead of
   // echoing success, which previously let the UI flip to a state the DB never
   // took (the "made it private but it still shows public" symptom).

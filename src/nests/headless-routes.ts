@@ -71,7 +71,14 @@ headlessRoutes.put("/headless", async (c) => {
       409,
     );
   }
-  await db.run("UPDATE nests SET headless = ? WHERE id = ?", [body.enabled ? 1 : 0, nestId]);
+  // Conditional on still being private, so a visibility change racing this
+  // request can't leave a nest both public and headless.
+  const res = body.enabled
+    ? await db.run("UPDATE nests SET headless = 1 WHERE id = ? AND visibility = 'private'", [nestId])
+    : await db.run("UPDATE nests SET headless = 0 WHERE id = ?", [nestId]);
+  if (body.enabled && res.changes === 0) {
+    return c.json({ error: "The nest is no longer private — make it private first." }, 409);
+  }
   return c.json({ enabled: body.enabled });
 });
 

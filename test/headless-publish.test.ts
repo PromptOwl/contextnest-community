@@ -449,6 +449,18 @@ describe("lifecycle", () => {
     expect(await ids("/index?format=json")).toContain(nestId);
   });
 
+  it("revokes a key that was actually used over MCP and REST (FKs on)", async () => {
+    const minted = await jsonRequest(app, "POST", `/nests/${nestId}/headless/keys`, { label: "Used" }, owner.apiKey);
+    const key = minted.data.api_key;
+    expect((await tool(key, "context_get", { id: "nodes/guide" })).isError).toBe(false);
+    expect((await tool(key, "context_create", { title: "no", content: "x" })).isError).toBe(true);
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, key)).status).toBe(200);
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/export`, undefined, key)).status).toBe(403);
+    const { status } = await jsonRequest(app, "DELETE", `/nests/${nestId}/headless/keys/${minted.data.key.id}`, undefined, owner.apiKey);
+    expect(status).toBe(200);
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}`, undefined, key)).status).toBe(401);
+  });
+
   it("revoking is all-or-nothing: a failure part-way leaves the key and its identity intact", async () => {
     const { getDb } = await import("../src/db/client.js");
     const { mintHeadlessKey, revokeHeadlessKey } = await import("../src/auth/headless.js");
