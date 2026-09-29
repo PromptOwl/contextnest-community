@@ -100,6 +100,7 @@ import {
   AppError,
   ValidationError,
   VaultBusyError,
+  PlanLimitError,
   isVaultLockTimeout,
 } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish } from "./config.js";
@@ -118,11 +119,11 @@ import {
   getLastLicenseCheck,
   getLicenseOwnerEmail,
   getPendingRejections,
-  licensedSeats,
+  getEntitlement,
   DEFAULT_LICENSE_CONTACT,
   type LicenseInfo,
 } from "./auth/license.js";
-import { countSeatsUsed } from "./auth/seats.js";
+import { countBilled, assertCanGrant, assertCanAddAccountOwner } from "./auth/seats.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "./auth/license-copy.js";
 import { SERVICE_VERSION } from "./shared/version.js";
 import { persistSetting } from "./db/settings.js";
@@ -647,9 +648,14 @@ export function createApp(): Hono<AuthEnv> {
     if (!(await canSeeLicenseDetail(c.get("userId"))))
       return c.json({ error: "Only the server admin can view this." }, 403);
     const lic = getCurrentLicense();
-    const licensed = licensedSeats(lic);
-    const used = await countSeatsUsed();
+    const ent = getEntitlement();
+    const licensed = ent.maxUsers;
+    const billed = await countBilled();
+    const used = billed.users;
     return c.json({
+      plan: ent.plan,
+      subscribers: { licensed: ent.maxSubscribers, used: billed.subscribers },
+      max_account_owners: ent.maxAccountOwners,
       valid: !!lic?.valid,
       tier: lic?.tier || "none",
       org: lic?.org || null,
@@ -1555,6 +1561,9 @@ export function createApp(): Hono<AuthEnv> {
     if (isLicenseOwner || isSuperAdmin(email)) {
       return c.json({ error: "This user is already a superadmin." }, 409);
     }
+    // A superadmin is an Account Owner, and bills as a user (pricing §3).
+    await assertCanAddAccountOwner(email);
+    await assertCanGrant([{ userId: (user as { id: string }).id, next: "user" }]);
 
     const grantedBy = (await resolveCallerEmail(c.get("userId"))).toLowerCase();
     try {
@@ -2768,6 +2777,9 @@ export function createApp(): Hono<AuthEnv> {
       return c.json({ error: busy.message }, 503, {
         "Retry-After": String(busy.retryAfterSeconds),
       });
+    }
+    if (err instanceof PlanLimitError) {
+      return c.json({ error: err.message, code: "plan_limit", limit: err.limit, max: err.max }, 402);
     }
     if (err instanceof AppError) {
       return c.json({ error: err.message }, err.statusCode as any);

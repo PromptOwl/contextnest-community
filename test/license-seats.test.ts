@@ -1,8 +1,9 @@
 /**
  * Seats + license status + who hears what (license contract v2, amendment 1).
  *
- * Seats are never enforced: over the limit, new people still join, and only
- * the admin sees a private notice. When the license lapses, the server goes
+ * Joining is never refused: over the limit, new people still sign up, and only
+ * the admin sees a private notice (role grants are capped — plan-limits.test.ts).
+ * When the license lapses, the server goes
  * read-only; the admin/owner is told why, everyone else gets one neutral line
  * with no licensing vocabulary in it.
  */
@@ -26,12 +27,8 @@ let nestId: string;
 // Both are read by the mocked license on every call.
 const limits = { maxUsers: 0, maxNests: 0 };
 const overrides: Record<string, unknown> = {};
-
-async function seatsUsed(): Promise<number> {
-  const { getDb } = await import("../src/db/client.js");
-  const row = (await getDb().get("SELECT COUNT(*) as c FROM users")) as { c: number };
-  return Number(row.c);
-}
+// The pricing entitlement, also read on every call.
+const entitlement: Record<string, any> = {};
 
 beforeAll(async () => {
   env = setupTestEnv();
@@ -39,6 +36,7 @@ beforeAll(async () => {
     ownerEmail: "owner@co.com",
     licenseLimits: limits,
     licenseOverrides: overrides,
+    entitlement,
   });
   owner = await registerUser(app, "owner@co.com");
   member = await registerUser(app, "member@co.com");
@@ -64,25 +62,22 @@ describe("seats are reported, never enforced", () => {
     expect(inv.status).toBe(201);
   });
 
-  it("/admin/license shows the live head-count and the over-limit flag", async () => {
-    limits.maxUsers = 2;
+  it("/admin/license counts billed users against the plan's cap", async () => {
+    // Billed users: the license owner (Account Owner) and member (owns a nest).
+    // late@ and invitee@ hold no role, so they're free viewers.
+    entitlement.maxUsers = 1;
     const res = await jsonRequest(app, "GET", "/admin/license", undefined, owner.apiKey);
     expect(res.status).toBe(200);
-    const used = await seatsUsed();
-    expect(res.data.seats).toEqual({
-      licensed: 2,
-      used,
-      over_limit: used > 2,
-      at_limit: used >= 2,
-    });
-    expect(res.data.seats.over_limit).toBe(true);
+    expect(res.data.seats).toEqual({ licensed: 1, used: 2, over_limit: true, at_limit: true });
+    expect(res.data.subscribers).toEqual({ licensed: null, used: 0 });
+    expect(res.data.plan).toBe("enterprise");
     expect(res.data.contact.url).toMatch(/^https:\/\//);
     expect(res.data).toHaveProperty("grace_ends_at");
     expect(res.data.pending_rejections).toBe(0);
   });
 
   it("no limit reports licensed:null and never over", async () => {
-    limits.maxUsers = 0;
+    entitlement.maxUsers = null;
     const res = await jsonRequest(app, "GET", "/admin/license", undefined, owner.apiKey);
     expect(res.data.seats.licensed).toBeNull();
     expect(res.data.seats.over_limit).toBe(false);

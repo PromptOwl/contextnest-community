@@ -9,6 +9,7 @@ import { isLicenseAdminUserId } from "../auth/license.js";
 import { isServerAdminUserId } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { ValidationError, ForbiddenError } from "../shared/errors.js";
+import { assertCanGrant } from "../auth/seats.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
 import { rm } from "fs/promises";
 import type { Nest } from "../shared/types.js";
@@ -390,8 +391,11 @@ export async function assertCanCreateNest(userId: string): Promise<void> {
     config.AUTH_MODE === "open" ||
     config.NEST_CREATION === "everyone" ||
     (await isServerAdminUserId(userId))
-  )
+  ) {
+    // A nest owner bills as a user (pricing §3.3). The anon commons doesn't.
+    if (userId !== ANON_USER_ID) await assertCanGrant([{ userId, next: "user" }]);
     return;
+  }
   throw new ForbiddenError(
     "Only a server admin can create nests on this server. Ask your admin to share a nest with you.",
   );

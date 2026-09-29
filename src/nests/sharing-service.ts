@@ -18,6 +18,7 @@ import { ValidationError, ConflictError, ForbiddenError } from "../shared/errors
 import { isEmailish } from "../config.js";
 import { permissionLevel, type NestPermission } from "../shared/access.js";
 import type { NestCollaborator } from "../shared/types.js";
+import { assertCanGrant, permissionClass } from "../auth/seats.js";
 
 const VALID_PERMISSIONS = ["read", "write", "admin"] as const;
 
@@ -61,6 +62,14 @@ export async function addCollaborator(params: {
   }
 
   const db = getDb();
+
+  // Plan limit, also before any placeholder user exists.
+  const existing =
+    params.userId ??
+    ((params.email
+      ? await db.get("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", [params.email])
+      : undefined) as { id: string } | undefined)?.id;
+  await assertCanGrant([{ userId: existing, next: permissionClass(params.permission) }]);
 
   // Resolve the target user, creating a placeholder for an unregistered email
   // (they claim it by registering with the same address — see auth claim flow).

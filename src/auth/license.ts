@@ -54,11 +54,6 @@ export interface LicenseInfo {
   contact?: LicenseContact;
 }
 
-/** Seat limit from the license; 0 / missing = unlimited (null). */
-export function licensedSeats(lic: LicenseInfo | null | undefined): number | null {
-  const n = lic?.limits?.maxUsers;
-  return typeof n === "number" && n > 0 ? n : null;
-}
 
 let currentLicense: LicenseInfo | null = null;
 
@@ -108,7 +103,7 @@ export function entitlementOf(lic: LicenseInfo | null | undefined): Entitlement 
   const maxUsers = capOr(l.maxUsers, d.maxUsers);
   return {
     plan,
-    maxUsers: maxUsers === 0 ? null : maxUsers, // 0 = unlimited, as licensedSeats
+    maxUsers: maxUsers === 0 ? null : maxUsers, // 0 = unlimited (older contract)
     maxAccountOwners: capOr(l.maxAccountOwners, d.maxAccountOwners),
     maxSubscribers: capOr(l.maxSubscribers, d.maxSubscribers),
     byok: typeof l.byok === "boolean" ? l.byok : d.byok,
@@ -463,7 +458,7 @@ function withMeta(info: LicenseInfo): LicenseInfo {
  *  regardless of TELEMETRY_ENABLED — it is part of license validation, not
  *  analytics, and carries no content. */
 async function serverReport(): Promise<{
-  stats?: { users: number; nests: number };
+  stats?: { users: number; subscribers: number; nests: number };
   server: { version: string; public_url?: string };
 }> {
   const server: { version: string; public_url?: string } = {
@@ -472,13 +467,14 @@ async function serverReport(): Promise<{
   if (config.PUBLIC_BASE_URL) server.public_url = config.PUBLIC_BASE_URL;
   try {
     const db = getDb();
-    const users =
-      ((await db.get("SELECT COUNT(*) as c FROM users")) as { c: number })?.c ||
-      0;
+    // Billed users/subscribers (seats.ts), not every account: that's what
+    // the plan caps. Imported lazily — seats.ts imports this module.
+    const { countBilled } = await import("./seats.js");
+    const { users, subscribers } = await countBilled();
     const nests =
       ((await db.get("SELECT COUNT(*) as c FROM nests")) as { c: number })?.c ||
       0;
-    return { stats: { users: Number(users), nests: Number(nests) }, server };
+    return { stats: { users, subscribers, nests: Number(nests) }, server };
   } catch {
     return { server };
   }

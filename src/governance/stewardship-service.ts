@@ -15,6 +15,7 @@ import { resolveNestAccess, resolveNestPermission } from "../shared/access.js";
 import { resolveTeamRolesForUser } from "./teams-service.js";
 import { nestAllowsSelfApprove } from "../nests/service.js";
 import { config, isEmailish } from "../config.js";
+import { assertCanGrant, stewardClass } from "../auth/seats.js";
 import {
   type EffectiveRole,
   collabPermToRole,
@@ -147,6 +148,13 @@ export async function updateSteward(id: string, update: StewardUpdate): Promise<
         `"${current.user_email}" is already a steward of ${scopeLabel} with the "${dup.role}" role.`,
       );
     }
+  }
+
+  if (role !== current.role) {
+    const u = (await db.get("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", [
+      current.user_email,
+    ])) as { id: string } | undefined;
+    await assertCanGrant([{ userId: u?.id, next: stewardClass(role) }]);
   }
 
   await db.run(
@@ -348,6 +356,7 @@ export async function createStewardRecord(params: {
       "SELECT id FROM users WHERE email = ?",
       [email],
     ) as { id: string } | undefined;
+    await assertCanGrant([{ userId: userRow?.id, next: stewardClass(user.role ?? "reviewer") }]);
 
     // Mint an invited placeholder for an unregistered email — mirrors the
     // collaborator/grant/MCP provisioning paths. This gives the steward a real

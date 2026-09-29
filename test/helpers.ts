@@ -74,6 +74,9 @@ export async function createTestApp(
     /** Fields merged over the mocked license on every call — mutate it to
      *  flip the server to lapsed/suspended mid-suite. */
     licenseOverrides?: Record<string, unknown>;
+    /** Pricing entitlement (see license.getEntitlement). Read on every call.
+     *  Defaults to unlimited so plan limits never touch unrelated tests. */
+    entitlement?: Partial<import("../src/auth/license.js").Entitlement>;
   } = {},
 ) {
   process.env.AUTH_MODE = authMode;
@@ -96,6 +99,14 @@ export async function createTestApp(
         suspendedReason: null,
         ownerEmail: opts.ownerEmail ?? null,
         ...(opts.licenseOverrides ?? {}),
+      }),
+      getEntitlement: () => ({
+        plan: "enterprise",
+        maxUsers: null,
+        maxAccountOwners: null,
+        maxSubscribers: null,
+        byok: true,
+        ...(opts.entitlement ?? {}),
       }),
       // isLicenseAdminEmail reads the module-internal currentLicense, which
       // is never populated in tests. Override it so the ownerEmail opt drives
