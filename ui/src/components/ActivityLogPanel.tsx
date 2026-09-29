@@ -177,6 +177,11 @@ export function ActivityLogPanel({
             );
           })}
         </ul>
+        {!loading && items.some((i) => i.type === "read" || i.type === "retrieved" || i.type === "exported") && (
+          <p className="py-2 text-xs text-muted-foreground" data-testid="activity-log-sampled-note">
+            Reads and pulls are sampled: repeat access by the same person within 10 minutes is shown once.
+          </p>
+        )}
         {loading && (
           <div className="flex justify-center py-4">
             <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />

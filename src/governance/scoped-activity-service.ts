@@ -297,7 +297,9 @@ export async function getScopedActivity(params: {
           [nestId, scope.nodeId],
         )) as { t: string | null } | undefined)?.t
       : null;
-    const sinceIso = since ? toIso(since) : null;
+    // Whole seconds: node_versions stamps are second-resolution, so an export
+    // in the same second as the first version still counts as "after".
+    const sinceMs = since ? Math.floor(Date.parse(toIso(since)) / 1000) * 1000 : NaN;
     const a = actorSql(actor, ["COALESCE(e.user_email, u.email)"]);
     const actions = (["read", "retrieved", "exported"] as const)
       .filter((t) => wanted.has(t))
@@ -313,7 +315,7 @@ export async function getScopedActivity(params: {
         [nestId, ...actions, ...s.args, ...a.args, window],
       )) as any[];
       for (const r of rows) {
-        if (sinceIso && r.node_id == null && toIso(r.ts) < sinceIso.slice(0, 19)) continue;
+        if (r.node_id == null && Number.isFinite(sinceMs) && Date.parse(toIso(r.ts)) < sinceMs) continue;
         const client = deserializeClient(r.client_json);
         push({
           id: `a:${r.id}`,
@@ -327,8 +329,12 @@ export async function getScopedActivity(params: {
           ...(r.detail ? { detail: r.detail } : {}),
         });
       }
-    } catch {
-      /* a database without migration 047 has no access rows to show */
+    } catch (err) {
+      // A database without migration 047 simply has no access rows; anything
+      // else is a real fault worth seeing in the logs, not swallowing.
+      if (!/no such table|does not exist/i.test(String((err as Error)?.message))) {
+        console.warn("[activity-log] access query failed:", err);
+      }
     }
   }
 
