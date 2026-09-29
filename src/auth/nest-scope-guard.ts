@@ -108,8 +108,12 @@ async function bearerKeyScope(
       WHERE k.key_hash = ?`,
     [hashApiKey(key)],
   )) as { nest_id: string | null; is_service: number | null } | undefined;
+  // A service identity's key is ALWAYS a headless access key — even if its
+  // nest scope were somehow lost, it must fail closed (empty scope matches no
+  // nest), never fall back to acting as an ordinary user-level key.
+  if (row?.is_service) return { scope: row.nest_id ?? "", headless: true };
   if (!row?.nest_id) return null;
-  return { scope: row.nest_id, headless: !!row.is_service };
+  return { scope: row.nest_id, headless: false };
 }
 
 export const nestScopedKeyGuard = createMiddleware<AuthEnv>(async (c, next) => {
