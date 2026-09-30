@@ -35,6 +35,7 @@ Specific damage:
 
 - Moving governance *enforcement* (eligibility gate, scope resolution, approvals) out of Community. Signatures are spec-public; enforcement stays commercial (Plumbing-Down-Policy-Stays).
 - Merging repos or changing the license map.
+- Putting Hootie's `POST /nests/:id/chat` in the catalog. It is the UI's assistant — retrieval-as-caller plus a model call — not an operation an agent needs: an MCP client or `ctx` user *is* the assistant and already has `context_*` / `ctx query`. Deliberately REST/UI-only.
 
 ## 3. Target Architecture
 

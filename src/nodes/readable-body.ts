@@ -13,6 +13,7 @@ import { bodyOnly } from "./service.js";
 import { isPublicReader } from "../shared/access.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { getApprovedVersion } from "../governance/version-service.js";
+import { reconstructApproved } from "../governance/approved-body.js";
 
 export async function resolveReadableBody(
   nestId: string,
@@ -25,7 +26,7 @@ export async function resolveReadableBody(
   if (approved == null) return "";
   try {
     const { versions } = await engineCache.get(nestId);
-    const raw = await versions.reconstructVersion(nodeId, approved);
+    const { raw } = await reconstructApproved(versions, nestId, nodeId, approved);
     return bodyOnly(nodeId, raw);
   } catch {
     return "";
@@ -51,7 +52,7 @@ export async function resolveExportBody(
   if (approved == null) return null;
   try {
     const { versions } = await engineCache.get(nestId);
-    const raw = await versions.reconstructVersion(nodeId, approved);
+    const { raw } = await reconstructApproved(versions, nestId, nodeId, approved);
     return bodyOnly(nodeId, raw);
   } catch {
     return null;

@@ -60,6 +60,12 @@ export interface AuthContextValue {
    *  existing nodes of the type stay readable. */
   typeArtifactEnabled: boolean;
   typeTableEnabled: boolean;
+  /** Public feature flag from /health — Hootie in the nest (default ON). Off →
+   *  the launcher is hidden exactly when POST /nests/:id/chat would 404. */
+  hootieEnabled: boolean;
+  /** Whether the server holds an Anthropic key (presence only, from /health).
+   *  Hootie stays visible without one — it explains what's missing instead. */
+  runnerKeyConfigured: boolean;
   /** From /health — this server hosts several organizations (the
    *  PromptOwl-hosted deployment). The nest visibility picker confirms before
    *  'Organization' and words its tiers by it. Default false. */
@@ -97,6 +103,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [typeArtifactEnabled, setTypeArtifactEnabled] = useState(true);
   const [sharedDeployment, setSharedDeployment] = useState(false);
   const [typeTableEnabled, setTypeTableEnabled] = useState(true);
+  const [hootieEnabled, setHootieEnabled] = useState(true);
+  const [runnerKeyConfigured, setRunnerKeyConfigured] = useState(false);
   const [subagentRunsEnabled, setSubagentRunsEnabled] = useState(false);
   // Defaults mirror config.ts; overwritten by /health so operator overrides
   // flow through to the picker.
@@ -128,6 +136,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
       setTypeArtifactEnabled(h.type_artifact_enabled !== false);
       setTypeTableEnabled(h.type_table_enabled !== false);
+      setHootieEnabled(h.hootie_enabled !== false);
+      setRunnerKeyConfigured(!!h.runner_key_configured);
       setSharedDeployment(!!h.shared_deployment);
       setSubagentRunsEnabled(!!h.subagent_runs_enabled);
       if (typeof h.subagent_max_depth === "number") setSubagentMaxDepth(h.subagent_max_depth);
@@ -169,6 +179,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
         setTypeArtifactEnabled(h.type_artifact_enabled !== false);
         setTypeTableEnabled(h.type_table_enabled !== false);
+        setHootieEnabled(h.hootie_enabled !== false);
+        setRunnerKeyConfigured(!!h.runner_key_configured);
         setSharedDeployment(!!h.shared_deployment);
         setSubagentRunsEnabled(!!h.subagent_runs_enabled);
         // Product analytics, if the operator configured a PostHog project.
@@ -339,6 +351,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
         promptowlTeamsEnabled,
         typeArtifactEnabled,
         typeTableEnabled,
+        hootieEnabled,
+        runnerKeyConfigured,
         sharedDeployment,
         subagentRunsEnabled,
         subagentMaxDepth,

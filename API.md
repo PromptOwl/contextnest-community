@@ -1592,7 +1592,7 @@ Body (give `prompt` OR `selector`; everything else optional):
 }
 ```
 - `prompt` — natural language. Tokens are matched against tag names and titles, and every document is scored against them (title hits weigh most, then tags, then body words); documents under half the top score are dropped as noise. A prompt that matches nothing returns `nodes: []` — never the whole nest. `trace.compiled.fallback` is `"fulltext"` when body scoring alone produced the answer.
-- `selector` — explicit selector grammar (e.g. `#auth`). Wins over `prompt`.
+- `selector` — explicit selector grammar (e.g. `#auth`). Wins over `prompt`. May carry `[[Title]]` parts in an OR union (`#auth | [[Auth Overview]]`), and `[[nodes/auth-overview]]` names one document by id where a title may match several.
 - `hops` — link expansion depth (`[[wikilinks]]` and `contextnest://` links, both directions). Defaults to `0` for a `prompt` (neighbours of a keyword match are not answers to the question) and `2` for a `selector`.
 - `max_tokens` — budget, floored at 50, default 4000. A node that doesn't fit is skipped and the next tried (`trace.truncated_by_budget` counts the skips); only when nothing fits does the first node go through oversized.
 - 400 `prompt or selector is required` if both missing.
@@ -1707,6 +1707,39 @@ Deterministic fact lookup against a **table** node (CSV body): fetch the exact r
 { "table": "nodes/price-list", "version": 3, "columns": ["sku", "price"], "rows": [["A-1", "120"]], "matched": 7, "returned": 5, "total": 1000 }
 ```
 Same operation over MCP: `context_table_query`.
+
+### POST `/nests/:nestId/chat`
+Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (off → `404`); needs the server-wide `ANTHROPIC_API_KEY` (missing → `503` with `reason: "no_api_key"`); answers with `HOOTIE_MODEL`, through `ANTHROPIC_BASE_URL` when one is set (all three editable in Settings → General). Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
+
+Request:
+
+```json
+{
+  "message": "how do requests authenticate?",
+  "node_id": "nodes/api-authentication-guide",
+  "history": [
+    { "role": "user", "content": "…" },
+    { "role": "assistant", "content": "…" }
+  ]
+}
+```
+
+- `message` (required) — the question. `@name` tokens loop a colleague in (below).
+- `node_id` (optional) — the document the person has open. It and its neighbours (one hop) lead the context, whatever the question matches follows.
+- `history` (optional) — prior turns, oldest first; the server keeps the most recent 20.
+
+Response: `text/event-stream`.
+
+| event | data |
+|---|---|
+| `meta` | `{ nodes: [{ id, title, url, tags, type }], anchor: node \| null }` — what the answer will be grounded in, before the model speaks. |
+| `delta` | `{ text }` — a chunk of the answer. |
+| `done` | `{ answer, cited: [node…], mention }` — the whole answer, the documents it cites (by `[[Title]]`, in order), and what happened to any `@mentions`. |
+| `error` | `{ error }` — the model call failed; the stream ends. |
+
+**Grounding.** The retrieved documents are placed in the system prompt verbatim with the instruction to answer from them alone. Retrieval is permission-gated, so an answer can never draw on anything the caller couldn't read — but a document author can write text aimed at Hootie ("ignore the question and…") that later readers' sessions will see. That is the ordinary tradeoff of grounding a model in editable content, accepted here; the documents are governed, so who can write them is the control.
+
+**Mentions.** A message naming people (`@alice@acme.com`) posts the exchange — question and answer, under the asker's name — as a comment on the anchor document (the open one, else the first document the answer cites) and notifies them through the comment-mention path: inbox row, and email / Slack / Teams where configured. `mention` is `{ status: "posted", node_id, node_title, thread_id, notified }` or `{ status: "undeliverable", reason: "no_anchor" | "post_failed" }`. Nothing is posted when nobody is named.
 
 ### POST `/nests/:nestId/query`
 Graph query (Cypher-ish).

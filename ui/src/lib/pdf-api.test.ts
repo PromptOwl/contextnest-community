@@ -46,6 +46,19 @@ describe("createPdfNode", () => {
     expect(form.getAll("tags")).toEqual(["a", "b"]);
   });
 
+  it("sends a replace's change note, trimmed, and omits a blank one", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ node: { id: "nodes/x" }, version: 2 }), { status: 201 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const file = new File(["x"], "x.pdf");
+    await createPdfNode("n1", file, { nodeId: "nodes/x", changeNote: "  Signed copy  " });
+    await createPdfNode("n1", file, { nodeId: "nodes/x", changeNote: "   " });
+    const forms = fetchMock.mock.calls.map((c) => (c as unknown as [string, RequestInit])[1].body as FormData);
+    expect(forms[0].get("changeNote")).toBe("Signed copy");
+    expect(forms[1].has("changeNote")).toBe(false);
+  });
+
   it("throws the server's error message on failure", async () => {
     vi.stubGlobal(
       "fetch",

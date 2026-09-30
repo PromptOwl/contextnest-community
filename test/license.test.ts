@@ -422,13 +422,17 @@ describe("installLicenseKey — durable persistence (Docker)", () => {
     expect(result.valid).toBe(true);
     expect(result.persisted).toBe(true);
     // The key is durably stored in server_settings (survives restart + reaches
-    // every instance) rather than an ephemeral .env file.
+    // every instance) rather than an ephemeral .env file — and encrypted
+    // there, so the row is not the key (see shared/secret-box).
     const { getDb } = await import("../src/db/client.js");
     const row = (await getDb().get(
       "SELECT value FROM server_settings WHERE key = ?",
       ["PROMPTOWL_KEY"],
     )) as { value: string | null } | undefined;
-    expect(row?.value).toBe("pk_persist_1");
+    expect(row?.value).toBeTruthy();
+    expect(row!.value).not.toBe("pk_persist_1");
+    const { decryptSecret } = await import("../src/shared/secret-box.js");
+    expect(await decryptSecret(row!.value!)).toBe("pk_persist_1");
   });
 
   it("surfaces a persistence failure instead of silently keeping the key in memory", async () => {

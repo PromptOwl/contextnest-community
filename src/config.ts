@@ -557,6 +557,34 @@ export const config = {
     return process.env.TYPE_TABLE_ENABLED !== "false";
   },
   /**
+   * Hootie in the nest: the floating assistant on every page of the UI and
+   * its POST /nests/:id/chat route (default ON). Superadmin-editable at
+   * runtime via /admin/settings (hootie_enabled). Off → the route 404s and
+   * the launcher is hidden. Answering additionally needs the server-wide
+   * ANTHROPIC_API_KEY; without one the route answers 503, not 404 — the
+   * feature is on, it just isn't configured yet.
+   */
+  get HOOTIE_ENABLED(): boolean {
+    return process.env.HOOTIE_ENABLED !== "false";
+  },
+  /** Model Hootie answers with. Superadmin-editable at runtime via
+   *  /admin/settings (hootie_model). A gateway-side name (`ollama/…`,
+   *  `gpt-…`) is fine when ANTHROPIC_BASE_URL points at one. */
+  get HOOTIE_MODEL(): string {
+    return process.env.HOOTIE_MODEL || "claude-opus-5";
+  },
+  /**
+   * Where the Anthropic-shaped model calls go. Empty = Anthropic directly.
+   * Set to a LiteLLM (or PromptOwl) gateway to route Hootie AND agent runs
+   * through it — one setting: the runner honours the same variable via the
+   * run bundle's env floor. Superadmin-editable (anthropic_base_url).
+   * Never a per-user vendor key: that is the shadow-AI hole the gateway
+   * exists to close.
+   */
+  get ANTHROPIC_BASE_URL(): string {
+    return (process.env.ANTHROPIC_BASE_URL || "").trim().replace(/\/$/, "");
+  },
+  /**
    * Sub-agent runs: lets a run spawn nested runs (an external runner calling
    * back into POST /run for a child agent). Gated SEPARATELY from the base
    * plane because recursion is the risky surface — unbounded fan-out,

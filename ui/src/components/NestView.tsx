@@ -46,6 +46,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { NestPageHeader } from "./NestPageHeader";
+import { UploadingOverlay } from "./UploadingOverlay";
 import {
   deriveNestCaps,
   isNestArchived,
@@ -53,6 +54,7 @@ import {
 import { foldersCoveredBy } from "../lib/reader";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
+import { FolderDeleteDialog, type FolderDeleteTarget } from "./nest/FolderDeleteDialog";
 // Each tab is its own chunk, loaded when first opened.
 const ExternalEditsTab = lazyChunk(() => import("./nest/ExternalEditsTab").then((m) => ({ default: m.ExternalEditsTab })));
 const StewardsTab = lazyChunk(() => import("./nest/StewardsTab").then((m) => ({ default: m.StewardsTab })));
@@ -77,10 +79,6 @@ import {
   Tabs, TabsList, TabsTrigger, TabsContent,
 } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { CountSkeleton } from "@/components/ui/count-skeleton";
 import {
@@ -1049,9 +1047,12 @@ export function NestView({
   // artifact (commentable in the ArtifactViewer's Annotate pane). Title comes
   // from the filename. A single dropped file opens straight into its editor.
   const [dragOver, setDragOver] = useState(false);
-  const [importing, setImporting] = useState(false);
+  // What is being uploaded (file name or "N files"), or null when idle.
+  const [importing, setImporting] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [importMenuOpen, setImportMenuOpen] = useState(false);
+  // Folder picked for deletion from the Overview index.
+  const [overviewDeleteFolder, setOverviewDeleteFolder] = useState<FolderDeleteTarget | null>(null);
   // Phone width: Share folds into the ⋮ menu so the header actions keep one row.
   const isPhone = useMediaQuery("(max-width: 639px)");
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
@@ -1072,7 +1073,7 @@ export function NestView({
         toast.error("Drop .md, .html or .pdf files to add them to this vault.");
         return;
       }
-      setImporting(true);
+      setImporting(files.length === 1 ? files[0].name : `${files.length} files`);
       const createdIds: string[] = [];
       try {
         for (const file of files) {
@@ -1111,7 +1112,7 @@ export function NestView({
           if (createdIds.length === 1) onOpenDocument(createdIds[0]);
         }
       } finally {
-        setImporting(false);
+        setImporting(null);
       }
     },
     [nestId, fetchData, onOpenDocument],
@@ -1194,13 +1195,7 @@ export function NestView({
           </div>
         </div>
       )}
-      {importing && (
-        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-background/60">
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" /> Importing…
-          </div>
-        </div>
-      )}
+      {importing && <UploadingOverlay title="Uploading…" detail={importing} />}
       {/* Header — the row shared by every nest-scoped page. Only the actions
           passed as children differ from Board/Graph/Definitions/Workflows. */}
       <NestPageHeader
@@ -1624,30 +1619,15 @@ export function NestView({
             </Button>
             {/* Import and New Document act on the content area too, so they
                 sit with New Folder rather than in the nest header. */}
-              {/* Controlled so the Overview's empty state can open this same
-                  menu rather than keep a second copy of its items. */}
-              <DropdownMenu modal={false} open={importMenuOpen} onOpenChange={setImportMenuOpen}>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" size="sm" data-testid="nest-import-files">
-                    <Upload className="h-3.5 w-3.5 mr-1.5" />
-                    Import
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onSelect={() => importInputRef.current?.click()}>
-                    Files (.md / .html / .pdf)
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onSelect={() => pdfInputRef.current?.click()}
-                    data-testid="nest-upload-pdf"
-                  >
-                    Upload PDF (as a document)
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => importDirRef.current?.click()}>
-                    Whole vault (folder, keeps structure)
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <Button
+                variant="outline"
+                size="sm"
+                data-testid="nest-import-files"
+                onClick={() => setImportMenuOpen(true)}
+              >
+                <Upload className="h-3.5 w-3.5 mr-1.5" />
+                Import
+              </Button>
               <Button
                 size="sm"
                 // Default into the folder the Documents tab is scoped to, so a
@@ -1814,8 +1794,25 @@ export function NestView({
             onImport={canEditDocs && !isReadOnly ? () => setImportMenuOpen(true) : undefined}
             // Same gate as the header's Add with AI button.
             onAddWithAI={!isReadOnly ? () => setShowGenerate(true) : undefined}
+            // Same gate as the Documents tree's folder trash icon.
+            onDeleteFolder={!isReadOnly && (canManage || canEditDocs) ? setOverviewDeleteFolder : undefined}
           />
           </Suspense>
+          {overviewDeleteFolder && (
+            <FolderDeleteDialog
+              nestId={nestId}
+              folder={overviewDeleteFolder}
+              canManage={canManage}
+              onClose={() => setOverviewDeleteFolder(null)}
+              onDone={() => {
+                // Don't leave Documents filtered to a folder that's gone.
+                const gone = overviewDeleteFolder.path;
+                if (canManage && folderFilter && (folderFilter === gone || folderFilter.startsWith(gone + "/")))
+                  setFolderFilter(null);
+                fetchData();
+              }}
+            />
+          )}
         </TabsContent>
 
         <TabsContent value="documents" className="space-y-4">
@@ -1992,6 +1989,10 @@ export function NestView({
           nestId={nestId}
           nestName={nestName}
           openMode={authMode === "open"}
+          onOpenConnect={() => {
+            setShowGenerate(false);
+            setShowConnect(true);
+          }}
         />
       )}
 
@@ -2064,6 +2065,38 @@ export function NestView({
           }}
         />
       )}
+
+      {/* Import choices in a centred dialog, like Add with AI — opened by the
+          header's Import button and the Overview's "Import files" action. */}
+      <Dialog open={importMenuOpen} onOpenChange={setImportMenuOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Import into this nest</DialogTitle>
+            <DialogDescription>Pick what to bring in.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            {[
+              { ref: importInputRef, label: "Files", detail: ".md, .html or .pdf — one or many", testId: undefined },
+              { ref: pdfInputRef, label: "Upload PDF", detail: "Becomes a PDF document with its text extracted", testId: "nest-upload-pdf" },
+              { ref: importDirRef, label: "Whole vault", detail: "A folder, keeping its structure", testId: undefined },
+            ].map((o) => (
+              <button
+                key={o.label}
+                type="button"
+                data-testid={o.testId}
+                className="rounded-md border p-3 text-left hover:bg-muted"
+                onClick={() => {
+                  setImportMenuOpen(false);
+                  o.ref.current?.click();
+                }}
+              >
+                <div className="text-sm font-medium">{o.label}</div>
+                <div className="text-xs text-muted-foreground">{o.detail}</div>
+              </button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={showNewFolder} onOpenChange={setShowNewFolder}>
         <DialogContent className="max-w-md">

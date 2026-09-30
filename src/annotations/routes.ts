@@ -20,9 +20,10 @@ import { requestBaseUrl } from "../shared/base-url.js";
  * Routes for hosted-artifact annotations + sandboxed serving.
  *
  * Mounted at /nests/:nestId/nodes (BEFORE the greedy nodeRoutes catch-all).
- * Writes are gated to `write` permission by the per-nest middleware in app.ts;
- * here we additionally enforce node read-access so you can't annotate a node
- * you can't see.
+ * Annotating is a READ-tier collaboration action: the per-nest middleware in
+ * app.ts (isAnnotationAction) deliberately admits these POSTs at read so a
+ * read-only reviewer can comment. Each handler therefore enforces node
+ * read-access itself, so you can't annotate a node you can't see.
  */
 export const annotationRoutes = new Hono<AuthEnv>();
 

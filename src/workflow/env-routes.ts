@@ -4,16 +4,23 @@
  * full values. Values leave the server exactly once per run, inside the run
  * bundle (which already requires write permission to obtain).
  *
- * Honest scope: values are NOT encrypted at rest — they sit in the same
- * SQLite/Postgres the nest content sits in, same trust domain. This is a
- * convenience store for self-hosted deployments, not a vault.
+ * Values are encrypted at rest (see shared/secret-box), so a row read in
+ * isolation — a log, an export, one table's replica — is not the credential.
+ * It is still a convenience store, not a vault: with the default key (kept in
+ * this database) a full dump opens them, and anyone who can ask for a run
+ * bundle gets the values.
  */
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { getDb } from "../db/client.js";
+import { config } from "../config.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { requireWorkflowPlane } from "./edge-type-routes.js";
+import {
+  encryptSecret,
+  tryDecryptSecret,
+} from "../shared/secret-box.js";
 
 const KEY_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
 
@@ -39,12 +46,18 @@ envRoutes.get("/", requireWorkflowPlane, async (c) => {
   )) as EnvRow[];
   return c.json({
     count: rows.length,
-    env: rows.map((r) => ({
-      key: r.key,
-      value_masked: mask(r.value),
-      updated_by: r.updated_by,
-      updated_at: r.updated_at,
-    })),
+    env: await Promise.all(
+      rows.map(async (r) => ({
+        key: r.key,
+        // A value this server can't open still has a name worth listing, so
+        // the admin can see what to re-enter.
+        value_masked: mask(
+          (await tryDecryptSecret(r.value, `${r.key} on nest ${nestId}`)) ?? "",
+        ),
+        updated_by: r.updated_by,
+        updated_at: r.updated_at,
+      })),
+    ),
   });
 });
 
@@ -64,11 +77,12 @@ envRoutes.put("/", requireWorkflowPlane, async (c) => {
   const now = new Date().toISOString();
   const by = await resolveCallerEmail(c.get("userId"));
   const db = getDb();
+  const sealed = await encryptSecret(body.value);
   await db.run(
     `INSERT INTO nest_env (nest_id, key, value, updated_by, updated_at)
      VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(nest_id, key) DO UPDATE SET value = ?, updated_by = ?, updated_at = ?`,
-    [nestId, key, body.value, by, now, body.value, by, now],
+    [nestId, key, sealed, by, now, sealed, by, now],
   );
   return c.json({ key, value_masked: mask(body.value) }, 201);
 });
@@ -88,8 +102,9 @@ envRoutes.delete("/:key", requireWorkflowPlane, async (c) => {
 });
 
 /** Full values — for the run bundle only, never a route response. The
- *  server-wide ANTHROPIC_API_KEY (super-admin Settings) is the floor; nest
- *  env rows override it. */
+ *  server-wide ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL (super-admin
+ *  Settings) are the floor; nest env rows override them. The gateway URL
+ *  rides along so the same setting routes agent runs and Hootie alike. */
 export async function envValues(nestId: string): Promise<Record<string, string>> {
   const rows = (await getDb().all(
     "SELECT key, value FROM nest_env WHERE nest_id = ?",
@@ -97,5 +112,19 @@ export async function envValues(nestId: string): Promise<Record<string, string>>
   )) as Array<{ key: string; value: string }>;
   const base: Record<string, string> = {};
   if (process.env.ANTHROPIC_API_KEY) base.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-  return { ...base, ...Object.fromEntries(rows.map((r) => [r.key, r.value])) };
+  if (config.ANTHROPIC_BASE_URL) base.ANTHROPIC_BASE_URL = config.ANTHROPIC_BASE_URL;
+  // An unopenable row is left out rather than passed to the runner as
+  // ciphertext, which would fail further away with a stranger error.
+  const stored = (
+    await Promise.all(
+      rows.map(
+        async (r) =>
+          [
+            r.key,
+            await tryDecryptSecret(r.value, `${r.key} on nest ${nestId}`),
+          ] as const,
+      ),
+    )
+  ).filter((e): e is readonly [string, string] => e[1] !== null);
+  return { ...base, ...Object.fromEntries(stored) };
 }
