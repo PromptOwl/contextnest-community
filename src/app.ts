@@ -40,10 +40,11 @@ import { queryRoutes } from "./nodes/query-routes.js";
 import { hootieRoutes } from "./hootie/routes.js";
 import { verifyModelKey } from "./hootie/model.js";
 import {
+  HOOTIE_BRAND_FIELDS,
+  changedHootieBrandFields,
   effectiveHootieBrand,
   hootieBrandingAvailable,
-  storedHootieBrand,
-  touchesHootieBrand,
+  storedHootieSettings,
   validateHootieBrandFields,
 } from "./hootie/brand.js";
 import { mcpRoutes } from "./mcp/routes.js";
@@ -689,15 +690,7 @@ export function createApp(): Hono<AuthEnv> {
     // the licence doesn't allow them, so a lapsed licence shows what would
     // come back on renewal; `hootie_branding_available` says whether they
     // are in effect and whether edits are accepted.
-    ...(() => {
-      const b = storedHootieBrand();
-      return {
-        hootie_name: process.env.HOOTIE_NAME ? b.name : "",
-        hootie_logo_url: b.logo_url ?? "",
-        hootie_accent_color: b.accent_color ?? "",
-        hootie_greeting: b.greeting ?? "",
-      };
-    })(),
+    ...storedHootieSettings(),
     hootie_branding_available: hootieBrandingAvailable(),
     anthropic_base_url: config.ANTHROPIC_BASE_URL,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
@@ -792,19 +785,24 @@ export function createApp(): Hono<AuthEnv> {
     };
     const pending: Array<{ name: string; value: string | null }> = [];
 
-    // Custom assistant identity is an enterprise entitlement. Refuse the
-    // whole request — nothing written, not even its other fields — so a
-    // non-enterprise server can never hold a half-applied edit.
-    if (touchesHootieBrand(body) && !hootieBrandingAvailable()) {
-      return c.json(
-        {
-          error:
-            "Custom assistant name and branding are an Enterprise feature. Upgrade the licence to change them.",
-          code: "enterprise_required",
-          settings: currentServerSettings(),
-        },
-        403,
-      );
+    // Custom assistant identity is an enterprise entitlement. A request that
+    // would CHANGE it is refused whole — nothing written, not even its other
+    // fields — so a non-enterprise server never holds a half-applied edit.
+    // Branding fields that only echo the stored values are dropped, so a
+    // client that sends a whole form can still save unrelated settings.
+    if (!hootieBrandingAvailable()) {
+      if (changedHootieBrandFields(body).length > 0) {
+        return c.json(
+          {
+            error:
+              "Custom assistant name and branding are an Enterprise feature. Upgrade the licence to change them.",
+            code: "enterprise_required",
+            settings: currentServerSettings(),
+          },
+          403,
+        );
+      }
+      for (const k of Object.keys(HOOTIE_BRAND_FIELDS)) delete body[k];
     }
 
     if ("promptowl_sign_in_gate" in body) {

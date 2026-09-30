@@ -80,9 +80,37 @@ export function hootieBrandingAvailable(): boolean {
   return isEnterpriseLicense();
 }
 
-/** True if the request body touches any branding field. */
-export function touchesHootieBrand(body: Record<string, unknown>): boolean {
-  return Object.keys(HOOTIE_BRAND_FIELDS).some((k) => k in body);
+/** The stored identity as the settings form shows it: each field's valid
+ *  stored value, or "" when unset (or invalid, e.g. a hand-edited env var). */
+export function storedHootieSettings(
+  env: NodeJS.ProcessEnv = process.env,
+): Record<HootieBrandField, string> {
+  const b = storedHootieBrand(env);
+  const name = oneLine(env.HOOTIE_NAME ?? "");
+  return {
+    hootie_name: name && name.length <= HOOTIE_NAME_MAX ? name : "",
+    hootie_logo_url: b.logo_url ?? "",
+    hootie_accent_color: b.accent_color ?? "",
+    hootie_greeting: b.greeting ?? "",
+  };
+}
+
+/** The value a branding field would be stored as, for comparison. */
+function normalisedInput(field: HootieBrandField, raw: unknown): string {
+  const v = raw === null || raw === undefined ? "" : String(raw);
+  if (field === "hootie_accent_color") return v.trim() ? normalizeHex(v.trim()) ?? `invalid:${v}` : "";
+  if (field === "hootie_logo_url") return v.trim();
+  return oneLine(v);
+}
+
+/** The branding fields in the body whose value differs from what is stored.
+ *  Echoing the current values back (a client that sends a whole form) is not
+ *  a change, so it never trips the enterprise gate. */
+export function changedHootieBrandFields(body: Record<string, unknown>): HootieBrandField[] {
+  const stored = storedHootieSettings();
+  return (Object.keys(HOOTIE_BRAND_FIELDS) as HootieBrandField[]).filter(
+    (k) => k in body && normalisedInput(k, body[k]) !== stored[k],
+  );
 }
 
 /**

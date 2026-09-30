@@ -91,6 +91,30 @@ describe("Hootie branding — enterprise only", () => {
     expect((await health(app)).hootie_enabled).toBe(false);
   });
 
+  it("non-enterprise: echoing the stored branding values back is a no-op, so an unrelated save still works", async () => {
+    const { app, admin } = await adminApp("community");
+    const current = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      {
+        hootie_model: "claude-sonnet-5",
+        hootie_name: current.data.hootie_name,
+        hootie_logo_url: current.data.hootie_logo_url,
+        hootie_accent_color: current.data.hootie_accent_color,
+        hootie_greeting: current.data.hootie_greeting,
+      },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.settings.hootie_model).toBe("claude-sonnet-5");
+    // A real change is still refused.
+    const change = await jsonRequest(app, "PATCH", "/admin/settings", { hootie_name: "Ava" }, admin.apiKey);
+    expect(change.status).toBe(403);
+    delete process.env.HOOTIE_MODEL;
+  });
+
   it("non-enterprise: branding set out-of-band (deploy env) still shows the default identity", async () => {
     const { app } = await adminApp("community");
     process.env.HOOTIE_NAME = "Ava";
@@ -137,7 +161,13 @@ describe("Hootie branding — enterprise only", () => {
     );
     expect(process.env.HOOTIE_NAME).toBeUndefined();
 
-    for (const url of ["javascript:alert(1)", "data:image/png;base64,AAAA", "https://"]) {
+    for (const url of [
+      "javascript:alert(1)",
+      "data:image/png;base64,AAAA",
+      "https://",
+      "https://user:pass@cdn.acme.com/ava.png",
+      "https://cdn.acme.com/ava.svg",
+    ]) {
       const r = await jsonRequest(app, "PATCH", "/admin/settings", { hootie_logo_url: url }, admin.apiKey);
       expect(r.status).toBe(400);
     }

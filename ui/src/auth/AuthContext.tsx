@@ -189,7 +189,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setTypeArtifactEnabled(h.type_artifact_enabled !== false);
         setTypeTableEnabled(h.type_table_enabled !== false);
         setHootieEnabled(h.hootie_enabled === true);
-      setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
+        setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
         setRunnerKeyConfigured(!!h.runner_key_configured);
         setSharedDeployment(!!h.shared_deployment);
         setSubagentRunsEnabled(!!h.subagent_runs_enabled);
