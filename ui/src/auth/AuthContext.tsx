@@ -21,6 +21,7 @@ import {
   type PropsWithChildren,
 } from "react";
 import * as api from "../lib/api";
+import { DEFAULT_HOOTIE_BRAND, type HootieBrand } from "../lib/api";
 import { initAnalytics } from "../lib/analytics";
 
 type AuthMode = "open" | "key" | null;
@@ -60,9 +61,13 @@ export interface AuthContextValue {
    *  existing nodes of the type stay readable. */
   typeArtifactEnabled: boolean;
   typeTableEnabled: boolean;
-  /** Public feature flag from /health — Hootie in the nest (default ON). Off →
-   *  the launcher is hidden exactly when POST /nests/:id/chat would 404. */
+  /** Public feature flag from /health — Hootie in the nest (default OFF;
+   *  admins opt in). Off → the launcher is hidden exactly when
+   *  POST /nests/:id/chat would 404. */
   hootieEnabled: boolean;
+  /** The assistant's name/logo/colour/greeting from /health — the admin's
+   *  custom identity on an enterprise licence, the default Hootie otherwise. */
+  hootieBrand: HootieBrand;
   /** Whether the server holds an Anthropic key (presence only, from /health).
    *  Hootie stays visible without one — it explains what's missing instead. */
   runnerKeyConfigured: boolean;
@@ -103,7 +108,10 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [typeArtifactEnabled, setTypeArtifactEnabled] = useState(true);
   const [sharedDeployment, setSharedDeployment] = useState(false);
   const [typeTableEnabled, setTypeTableEnabled] = useState(true);
-  const [hootieEnabled, setHootieEnabled] = useState(true);
+  // Default OFF (mirrors config.ts: only an explicit "true" enables), so the
+  // launcher never flashes on a server that has it off while /health loads.
+  const [hootieEnabled, setHootieEnabled] = useState(false);
+  const [hootieBrand, setHootieBrand] = useState<HootieBrand>(DEFAULT_HOOTIE_BRAND);
   const [runnerKeyConfigured, setRunnerKeyConfigured] = useState(false);
   const [subagentRunsEnabled, setSubagentRunsEnabled] = useState(false);
   // Defaults mirror config.ts; overwritten by /health so operator overrides
@@ -136,7 +144,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
       setTypeArtifactEnabled(h.type_artifact_enabled !== false);
       setTypeTableEnabled(h.type_table_enabled !== false);
-      setHootieEnabled(h.hootie_enabled !== false);
+      setHootieEnabled(h.hootie_enabled === true);
+      setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
       setRunnerKeyConfigured(!!h.runner_key_configured);
       setSharedDeployment(!!h.shared_deployment);
       setSubagentRunsEnabled(!!h.subagent_runs_enabled);
@@ -179,7 +188,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
         setTypeArtifactEnabled(h.type_artifact_enabled !== false);
         setTypeTableEnabled(h.type_table_enabled !== false);
-        setHootieEnabled(h.hootie_enabled !== false);
+        setHootieEnabled(h.hootie_enabled === true);
+      setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
         setRunnerKeyConfigured(!!h.runner_key_configured);
         setSharedDeployment(!!h.shared_deployment);
         setSubagentRunsEnabled(!!h.subagent_runs_enabled);
@@ -352,6 +362,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         typeArtifactEnabled,
         typeTableEnabled,
         hootieEnabled,
+        hootieBrand,
         runnerKeyConfigured,
         sharedDeployment,
         subagentRunsEnabled,

@@ -557,15 +557,17 @@ export const config = {
     return process.env.TYPE_TABLE_ENABLED !== "false";
   },
   /**
-   * Hootie in the nest: the floating assistant on every page of the UI and
-   * its POST /nests/:id/chat route (default ON). Superadmin-editable at
-   * runtime via /admin/settings (hootie_enabled). Off → the route 404s and
-   * the launcher is hidden. Answering additionally needs the server-wide
-   * ANTHROPIC_API_KEY; without one the route answers 503, not 404 — the
-   * feature is on, it just isn't configured yet.
+   * Hootie in the nest: the assistant side panel on every page of the UI and
+   * its POST /nests/:id/chat route. Default OFF (since 1.28, CU-wdqcq03ewc):
+   * an admin opts in from Settings → General (hootie_enabled) or the deploy
+   * sets HOOTIE_ENABLED=true. Off → the route 404s and the launcher is
+   * hidden. Answering additionally needs the server-wide ANTHROPIC_API_KEY;
+   * without one the route answers 503, not 404 — the feature is on, it just
+   * isn't configured yet. Its name/logo/colour/greeting are enterprise-only
+   * (src/hootie/brand.ts).
    */
   get HOOTIE_ENABLED(): boolean {
-    return process.env.HOOTIE_ENABLED !== "false";
+    return process.env.HOOTIE_ENABLED === "true";
   },
   /** Model Hootie answers with. Superadmin-editable at runtime via
    *  /admin/settings (hootie_model). A gateway-side name (`ollama/…`,

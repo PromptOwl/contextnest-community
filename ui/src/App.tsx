@@ -43,6 +43,7 @@ const ActivityTracePage = lazyNamed(() => import("./components/ActivityTracePage
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 import { BetaBadge } from "@/components/ui/beta-badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -1120,8 +1121,13 @@ export default function App() {
 
   return (
     <div
-      className={withSidebar ? "flex min-h-screen items-stretch bg-background" : "min-h-screen bg-background"}
-      style={readerBrandVars}
+      className={cn(
+        withSidebar ? "flex min-h-screen items-stretch bg-background" : "min-h-screen bg-background",
+        "transition-[padding] duration-200",
+      )}
+      // --hootie-inset: the open Hootie panel's width on wide screens, so the
+      // page sits beside it instead of under it (HootiePanel sets it).
+      style={{ ...readerBrandVars, paddingRight: "var(--hootie-inset, 0px)" }}
     >
       {/* The sidebar is a full-height column beside the whole shell — header
           included — with the brand at its top, so header and rail read as one

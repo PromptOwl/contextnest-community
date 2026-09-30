@@ -219,9 +219,14 @@ export async function getHealth() {
     subagent_max_depth?: number;
     subagent_max_children?: number;
     runner_key_configured?: boolean;
-    /** Hootie in the nest (default ON). Off → the launcher is hidden and
-     *  POST /nests/:id/chat 404s. */
+    /** Hootie in the nest (default OFF — admins opt in). Off → the launcher
+     *  is hidden and POST /nests/:id/chat 404s. */
     hootie_enabled?: boolean;
+    /** The assistant identity to show: the admin's custom one on an
+     *  enterprise licence, the default Hootie otherwise (server-enforced). */
+    hootie_brand?: HootieBrand;
+    /** Whether custom assistant identity is allowed (enterprise licence). */
+    hootie_branding_available?: boolean;
     /** PostHog project key, or null when analytics is unconfigured or usage
      *  telemetry is switched off. The browser needs it to send events. */
     posthog_key?: string | null;
@@ -238,6 +243,21 @@ export type SignInGate = "open" | "admin-only" | "disabled";
 export type ManualSignIn = "open" | "invite-only" | "disabled";
 
 /** Server-wide settings editable from the admin Settings page. */
+/** The assistant's identity as every surface renders it (from /health). */
+export interface HootieBrand {
+  name: string;
+  logo_url: string | null;
+  accent_color: string | null;
+  greeting: string | null;
+}
+
+export const DEFAULT_HOOTIE_BRAND: HootieBrand = {
+  name: "Hootie",
+  logo_url: null,
+  accent_color: null,
+  greeting: null,
+};
+
 export interface AdminSettings {
   promptowl_sign_in_gate: SignInGate;
   manual_sign_in: ManualSignIn;
@@ -256,8 +276,15 @@ export interface AdminSettings {
    *  the type only — existing nodes still read/render/version. */
   type_artifact_enabled: boolean;
   type_table_enabled: boolean;
-  /** Hootie in the nest (default ON). */
+  /** Hootie in the nest (default OFF — admins opt in). */
   hootie_enabled: boolean;
+  /** Custom assistant identity (enterprise). "" = default. Returned even
+   *  when not in effect; `hootie_branding_available` says whether it is. */
+  hootie_name: string;
+  hootie_logo_url: string;
+  hootie_accent_color: string;
+  hootie_greeting: string;
+  hootie_branding_available: boolean;
   /** Model Hootie answers with (default claude-opus-5; a gateway-side name
    *  such as `ollama/…` when routed through a gateway). */
   hootie_model: string;
