@@ -79,7 +79,8 @@ export function effectiveHootieBrand(): HootieBrand {
   return hootieBrandingAvailable() ? storedHootieBrand() : { ...DEFAULT_HOOTIE_BRAND };
 }
 
-/** Whether this server may customise the identity (the enterprise gate). */
+/** Whether this server may customise the identity: the licence carries
+ *  the `hootie_branding` feature (Enterprise default, grantable per licence). */
 export function hootieBrandingAvailable(): boolean {
   return hasEntitlement(HOOTIE_BRANDING_FEATURE);
 }

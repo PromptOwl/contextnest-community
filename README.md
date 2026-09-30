@@ -163,7 +163,7 @@ For Enterprise pricing and features, contact **hoot@promptowl.ai** or visit <htt
 **Next release (unreleased)**
 
 - **Hootie is a side panel now, and off by default.** It opens from a slim tab on the right edge and slides in beside the page: on wide screens it pushes the page over instead of covering it, and you can drag its left edge to resize it (the width is remembered). Existing servers that never switched it on explicitly will find it **off** after upgrading; turn it on under Settings → General, or set `HOOTIE_ENABLED=true`.
-- **Custom assistant name and branding (Enterprise).** Admins can rename Hootie and give it a logo, accent colour and greeting under Settings → General. The name also goes into the assistant's instructions and the comments it posts. Without an Enterprise licence everyone sees Hootie, and the server refuses the settings.
+- **Custom assistant name and branding (Enterprise).** Admins can rename Hootie and give it a logo, accent colour and greeting under Settings → General. The name also goes into the assistant's instructions and the comments it posts. Without the branding feature on the licence (included with Enterprise) everyone sees Hootie, and the server refuses the settings.
 - **Licence features.** Enterprise capabilities are unlocked by named features on your licence, set by PromptOwl, rather than by the tier alone. Custom assistant branding (`hootie_branding`) comes with Enterprise and can also be granted to, or removed from, a single licence. The server picks up a change on its next licence check (about a minute).
 
 Full release notes live in [CHANGELOG.md](./CHANGELOG.md).

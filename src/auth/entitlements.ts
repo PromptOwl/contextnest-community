@@ -14,7 +14,7 @@
  * live, so a licence that lapses, is suspended or loses a feature switches
  * it off on the next request without touching stored data.
  */
-import { getCurrentLicense } from "./license.js";
+import { getCurrentLicense, sanitizeFeatures } from "./license.js";
 
 /** Features each tier gets when PromptOwl sends no explicit list. */
 const TIER_DEFAULT_FEATURES: Record<string, readonly string[]> = {
@@ -25,10 +25,8 @@ const TIER_DEFAULT_FEATURES: Record<string, readonly string[]> = {
 export function licenseFeatures(): string[] {
   const lic = getCurrentLicense();
   if (!lic?.valid || lic.suspended) return [];
-  const list = (lic as { features?: unknown }).features;
-  if (Array.isArray(list)) {
-    return Array.from(new Set(list.filter((f): f is string => typeof f === "string"))).sort();
-  }
+  const list = sanitizeFeatures(lic.features);
+  if (list) return list;
   return [...(TIER_DEFAULT_FEATURES[String(lic.tier || "").toLowerCase()] ?? [])].sort();
 }
 
@@ -39,8 +37,9 @@ export function hasEntitlement(feature: string): boolean {
 
 /**
  * True when a valid, unsuspended licence of the enterprise tier is
- * installed. Kept for callers that genuinely mean the tier (display);
- * gate features with hasEntitlement() instead.
+ * installed.
+ * @deprecated Gate features with hasEntitlement(); no caller in src uses
+ * this any more. Kept only so external imports don't break.
  */
 export function isEnterpriseLicense(): boolean {
   const lic = getCurrentLicense();

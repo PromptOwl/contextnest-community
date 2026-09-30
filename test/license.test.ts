@@ -94,6 +94,28 @@ describe("validateLicense", () => {
     expect(cached.features).toEqual(["hootie_branding"]);
   });
 
+  it("an empty features list (revoked) survives the cache as [], never as null (tier defaults)", async () => {
+    process.env.PROMPTOWL_KEY = "pk_test_revoked";
+    const fetchMock = mockFetch({ body: { valid: true, tier: "enterprise", org: "Acme", features: [] } });
+    const { validateLicense } = await loadLicense();
+    expect((await validateLicense()).features).toEqual([]);
+    const cached = await validateLicense();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(cached.features).toEqual([]);
+  });
+
+  it("a revalidation writes changed features through to the cache", async () => {
+    process.env.PROMPTOWL_KEY = "pk_test_change";
+    mockFetch({ body: { valid: true, tier: "community", org: "Acme", features: ["hootie_branding"] } });
+    const license = await loadLicense();
+    await license.validateLicense();
+    mockFetch({ body: { valid: true, tier: "community", org: "Acme", features: [] } });
+    await license.validateLicense({ forceFresh: true });
+    const { getDb } = await import("../src/db/client.js");
+    const row = (await getDb().get("SELECT features_json FROM license_cache WHERE key = ?", ["pk_test_change"])) as { features_json: string | null };
+    expect(row.features_json).toBe("[]");
+  });
+
   it("an older PromptOwl answer with no features reports features: null (tier defaults apply)", async () => {
     process.env.PROMPTOWL_KEY = "pk_test_nofeat";
     mockFetch({ body: { valid: true, tier: "enterprise", org: "Acme" } });

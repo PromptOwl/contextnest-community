@@ -272,16 +272,33 @@ type CachedLicenseRow = {
   features_json?: string | null;
 };
 
-/** PromptOwl's `features` → a clean string list, or null when not sent. */
-function parseFeatures(raw: unknown): string[] | null {
+/** Longest feature key accepted from PromptOwl; longer entries are dropped. */
+const MAX_FEATURE_KEY = 64;
+
+/**
+ * PromptOwl's `features` → a clean, deduped, sorted string list, or null
+ * when it sent none. The one sanitiser for licence features (entitlements.ts
+ * uses it too). null and [] mean different things and must stay distinct:
+ * null = an older PromptOwl, tier defaults apply; [] = no features (e.g.
+ * revoked). A row cached before migration 048 reads as null, so during an
+ * outage right after upgrading, tier defaults apply until the next
+ * successful check — a deliberate fail-open for a window of one poll.
+ */
+export function sanitizeFeatures(raw: unknown): string[] | null {
   if (!Array.isArray(raw)) return null;
-  return Array.from(new Set(raw.filter((f): f is string => typeof f === "string" && f.length <= 64))).sort();
+  const keep = raw.filter(
+    (f): f is string => typeof f === "string" && f.length > 0 && f.length <= MAX_FEATURE_KEY,
+  );
+  if (keep.length !== raw.length) {
+    console.warn(`[license] ignored ${raw.length - keep.length} malformed licence feature entr${raw.length - keep.length === 1 ? "y" : "ies"}`);
+  }
+  return Array.from(new Set(keep)).sort();
 }
 
 function cachedFeatures(json: string | null | undefined): string[] | null {
   if (!json) return null;
   try {
-    return parseFeatures(JSON.parse(json));
+    return sanitizeFeatures(JSON.parse(json));
   } catch {
     return null;
   }
@@ -386,7 +403,7 @@ async function _validateLicenseImpl(
       owner_email?: string | null;
       features?: unknown;
     };
-    const features = parseFeatures(data.features);
+    const features = sanitizeFeatures(data.features);
 
     // ── Kill switch: two-strike confirmation ──
     if (data.suspended === true) {
