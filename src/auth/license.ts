@@ -15,6 +15,10 @@ export interface LicenseInfo {
   suspended: boolean;
   suspendedReason: string | null;
   ownerEmail: string | null;
+  /** Named features PromptOwl says this licence unlocks (see
+   *  entitlements.ts). null/absent = an older PromptOwl that sends none —
+   *  tier defaults apply. */
+  features?: string[] | null;
 }
 
 let currentLicense: LicenseInfo | null = null;
@@ -265,7 +269,23 @@ type CachedLicenseRow = {
   limits_json: string;
   validated_at: string;
   owner_email: string | null;
+  features_json?: string | null;
 };
+
+/** PromptOwl's `features` → a clean string list, or null when not sent. */
+function parseFeatures(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  return Array.from(new Set(raw.filter((f): f is string => typeof f === "string" && f.length <= 64))).sort();
+}
+
+function cachedFeatures(json: string | null | undefined): string[] | null {
+  if (!json) return null;
+  try {
+    return parseFeatures(JSON.parse(json));
+  } catch {
+    return null;
+  }
+}
 
 function fromCache(cached: CachedLicenseRow): LicenseInfo {
   return {
@@ -276,6 +296,7 @@ function fromCache(cached: CachedLicenseRow): LicenseInfo {
     suspended: suspensionConfirmed,
     suspendedReason: suspensionReason,
     ownerEmail: cached.owner_email || null,
+    features: cachedFeatures(cached.features_json),
   };
 }
 
@@ -363,7 +384,9 @@ async function _validateLicenseImpl(
       suspended?: boolean;
       suspended_reason?: string;
       owner_email?: string | null;
+      features?: unknown;
     };
+    const features = parseFeatures(data.features);
 
     // ── Kill switch: two-strike confirmation ──
     if (data.suspended === true) {
@@ -472,10 +495,10 @@ async function _validateLicenseImpl(
       await db.run(
         insertOrReplace(
           db,
-          `INSERT INTO license_cache (key, tier, org, limits_json, owner_email, validated_at)
-           VALUES (?, ?, ?, ?, ?, ${nowExpr(db)})`,
+          `INSERT INTO license_cache (key, tier, org, limits_json, owner_email, features_json, validated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ${nowExpr(db)})`,
           ["key"],
-          `tier = excluded.tier, org = excluded.org, limits_json = excluded.limits_json, owner_email = excluded.owner_email, validated_at = ${nowExpr(db)}`,
+          `tier = excluded.tier, org = excluded.org, limits_json = excluded.limits_json, owner_email = excluded.owner_email, features_json = excluded.features_json, validated_at = ${nowExpr(db)}`,
         ),
         [
           key,
@@ -483,6 +506,7 @@ async function _validateLicenseImpl(
           data.org || null,
           limitsJson,
           data.owner_email || null,
+          features ? JSON.stringify(features) : null,
         ],
       );
     }
@@ -495,6 +519,7 @@ async function _validateLicenseImpl(
       suspended: suspensionConfirmed,
       suspendedReason: suspensionReason,
       ownerEmail: data.owner_email || null,
+      features,
     };
   } catch (err: any) {
     if (cached) {

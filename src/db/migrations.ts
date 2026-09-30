@@ -1570,6 +1570,21 @@ export function runMigrations(db: Database.Database): void {
     }
     recordMigration("044_client_attribution");
   }
+
+  // 048: license_cache.features_json — the named licence features PromptOwl
+  // returns (CU-wdqcq03f2z), cached with the rest of the licence so an
+  // outage keeps the same entitlements. NULL = PromptOwl sent none (tier
+  // defaults apply). Numbered 048: 045 (MCP OAuth), 046 (#342) and 047 (#345)
+  // are taken on in-flight branches, and ids match by string.
+  if (!hasMigration("048_license_cache_features")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(license_cache)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (cols.length && !cols.includes("features_json")) {
+      db.exec("ALTER TABLE license_cache ADD COLUMN features_json TEXT");
+    }
+    recordMigration("048_license_cache_features");
+  }
 }
 
 /**

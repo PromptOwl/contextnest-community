@@ -77,6 +77,7 @@ const HISTORICAL_MIGRATIONS = [
   "042_community_sites",
   "043_node_suggestion_details",
   "044_client_attribution",
+  "048_license_cache_features",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -185,6 +186,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       owner_email TEXT,
       validated_at TEXT NOT NULL DEFAULT ${NOW}
     );
+    ALTER TABLE license_cache ADD COLUMN IF NOT EXISTS features_json TEXT;
 
     CREATE TABLE IF NOT EXISTS telemetry_events (
       id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

@@ -12,7 +12,7 @@
  *     whatever is stored — a lapsed licence reverts every surface (UI, the
  *     system prompt, mention comments) without deleting the admin's values.
  */
-import { isEnterpriseLicense } from "../auth/entitlements.js";
+import { hasEntitlement } from "../auth/entitlements.js";
 import { isHttpsImageUrl, normalizeHex } from "../shared/branding.js";
 
 export const DEFAULT_HOOTIE_NAME = "Hootie";
@@ -69,15 +69,19 @@ export function storedHootieBrand(env: NodeJS.ProcessEnv = process.env): HootieB
   };
 }
 
-/** What every surface shows: the stored identity on an enterprise licence,
- *  the default Hootie otherwise. */
+/** The licence feature that unlocks a custom identity (enterprise default;
+ *  PromptOwl can grant or revoke it per licence). */
+export const HOOTIE_BRANDING_FEATURE = "hootie_branding";
+
+/** What every surface shows: the stored identity when the licence carries
+ *  the branding feature, the default Hootie otherwise. */
 export function effectiveHootieBrand(): HootieBrand {
-  return isEnterpriseLicense() ? storedHootieBrand() : { ...DEFAULT_HOOTIE_BRAND };
+  return hootieBrandingAvailable() ? storedHootieBrand() : { ...DEFAULT_HOOTIE_BRAND };
 }
 
 /** Whether this server may customise the identity (the enterprise gate). */
 export function hootieBrandingAvailable(): boolean {
-  return isEnterpriseLicense();
+  return hasEntitlement(HOOTIE_BRANDING_FEATURE);
 }
 
 /** The stored identity as the settings form shows it: each field's valid

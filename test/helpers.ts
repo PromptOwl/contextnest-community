@@ -65,7 +65,7 @@ export function setupTestEnv() {
  */
 export async function createTestApp(
   authMode: "open" | "key" = "open",
-  opts: { superAdmins?: string[]; ownerEmail?: string; tier?: string } = {},
+  opts: { superAdmins?: string[]; ownerEmail?: string; tier?: string; features?: string[] } = {},
 ) {
   process.env.AUTH_MODE = authMode;
   vi.resetModules();
@@ -86,6 +86,7 @@ export async function createTestApp(
         suspended: false,
         suspendedReason: null,
         ownerEmail: opts.ownerEmail ?? null,
+        ...(opts.features ? { features: opts.features } : {}),
       }),
       // isLicenseAdminEmail reads the module-internal currentLicense, which
       // is never populated in tests. Override it so the ownerEmail opt drives
