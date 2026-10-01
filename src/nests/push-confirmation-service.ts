@@ -420,7 +420,8 @@ export async function confirmPendingPush(
     [result.published, id],
   );
 
-  if (opts.alwaysAllow) {
+  // No key id (cookie-session push) would whitelist every key of the user.
+  if (opts.alwaysAllow && row.submitter_key_id) {
     await addToPushAllowlist({
       nestId,
       userId: row.submitter_user_id,

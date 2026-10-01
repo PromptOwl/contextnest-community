@@ -141,6 +141,19 @@ pushRoutes.post("/pending-pushes/:pid/confirm", async (c) => {
     );
   }
 
+  // A reviewer's own agent key must not clear its own hold either.
+  const callerKeyId = c.get("apiKeyId");
+  if (callerKeyId && callerKeyId === row.submitter_key_id) {
+    return c.json(
+      {
+        error:
+          "The API key that pushed this write cannot confirm it — " +
+          "confirm with a different credential or in the web UI.",
+      },
+      403,
+    );
+  }
+
   const body = await c.req
     .json<{ always_allow?: boolean }>()
     .catch(() => ({}) as { always_allow?: boolean });

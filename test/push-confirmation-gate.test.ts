@@ -22,6 +22,7 @@ let app: any;
 let root: { apiKey: string; userId: string; email: string }; // superadmin
 let owner: { apiKey: string; userId: string; email: string };
 let outsider: { apiKey: string; userId: string; email: string };
+let reviewerKey: string; // a second key of `owner`, to confirm what owner.apiKey pushed
 
 /** Mint a second API key for an already-registered user (same user, new key_id). */
 async function mintKey(apiKey: string, label: string): Promise<string> {
@@ -117,6 +118,7 @@ beforeAll(async () => {
   root = await registerUser(app, "root@acme.com", "Root");
   owner = await registerUser(app, "owner@acme.com", "Owner");
   outsider = await registerUser(app, "outsider@acme.com", "Outsider");
+  reviewerKey = await mintKey(owner.apiKey, "reviewer");
 });
 
 afterAll(() => env.cleanup());
@@ -232,7 +234,7 @@ describe("gate ON — push is held pending, applies only on confirm", () => {
       "POST",
       `/nests/${nestId}/pending-pushes/${pendingId}/confirm`,
       {},
-      owner.apiKey,
+      reviewerKey,
     );
     expect(status).toBe(200);
     expect(data.status).toBe("applied");
@@ -257,7 +259,7 @@ describe("gate ON — push is held pending, applies only on confirm", () => {
       "POST",
       `/nests/${nestId}/pending-pushes/${pendingId}/confirm`,
       {},
-      owner.apiKey,
+      reviewerKey,
     );
     expect(status).toBe(409);
   });
@@ -332,7 +334,7 @@ describe("the gate covers every agent create surface, not just bulk publish", ()
         "POST",
         `/nests/${nestId}/pending-pushes/${p.id}/confirm`,
         {},
-        owner.apiKey,
+        reviewerKey,
       );
       expect(res.status).toBe(200);
     }
@@ -364,6 +366,30 @@ describe("the gate covers every agent create surface, not just bulk publish", ()
     });
     expect(res.status).toBe(201);
     expect(await nodeIds(owner, nestId)).toContain("nodes/hand-written");
+  });
+});
+
+describe("a reviewer's own key cannot confirm its own push", () => {
+  it("403 when the pushing key confirms; stays pending; a different key can confirm", async () => {
+    const nestId = await makeNest("gate-reviewer-key");
+    await setGate(nestId, true);
+    const held = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publish`,
+      { documents: [{ title: "Own Key", content: "x" }] },
+      owner.apiKey,
+    );
+    expect(held.status).toBe(202);
+    const url = `/nests/${nestId}/pending-pushes/${held.data.pending_id}/confirm`;
+
+    const self = await jsonRequest(app, "POST", url, { always_allow: true }, owner.apiKey);
+    expect(self.status).toBe(403);
+    expect(await nodeIds(owner, nestId)).not.toContain("nodes/own-key");
+
+    const other = await jsonRequest(app, "POST", url, {}, reviewerKey);
+    expect(other.status).toBe(200);
+    expect(await nodeIds(owner, nestId)).toContain("nodes/own-key");
   });
 });
 
@@ -450,7 +476,7 @@ describe("always-allow whitelists the exact API key", () => {
       "POST",
       `/nests/${nestId}/pending-pushes/${first.data.pending_id}/confirm`,
       { always_allow: true },
-      owner.apiKey,
+      reviewerKey,
     );
     expect(confirm.status).toBe(200);
 
@@ -556,7 +582,7 @@ describe("expiry", () => {
       "POST",
       `/nests/${nestId}/pending-pushes/${pending.pending_id}/confirm`,
       {},
-      owner.apiKey,
+      reviewerKey,
     );
     expect(confirm.status).toBe(409);
     expect(await nodeIds(owner, nestId)).not.toContain("nodes/doc-a");
