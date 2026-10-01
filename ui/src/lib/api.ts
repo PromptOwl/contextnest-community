@@ -902,6 +902,47 @@ export async function setNestVisibility(
   );
 }
 
+// Headless publishing (CU-wdqcq0314u) — owner / nest admin only. A headless
+// nest is API-only: buyers get read-only access keys that work with ctx/MCP,
+// and can never open or browse the nest.
+export interface HeadlessKey {
+  id: string;
+  label: string;
+  key_prefix: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export async function getNestHeadless(nestId: string) {
+  return request<{
+    enabled: boolean;
+    keys: HeadlessKey[];
+    /** Who keeps their seat — headless doesn't remove existing access. */
+    shared_with?: { collaborators: number; teams: number; grants: number };
+  }>(`/nests/${nestId}/headless`);
+}
+
+export async function setNestHeadless(nestId: string, enabled: boolean) {
+  return request<{ enabled: boolean }>(`/nests/${nestId}/headless`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+/** The token comes back ONCE — show it, then it is gone. */
+export async function mintNestHeadlessKey(nestId: string, label: string) {
+  return request<{ key: HeadlessKey; api_key: string }>(`/nests/${nestId}/headless/keys`, {
+    method: "POST",
+    body: JSON.stringify({ label }),
+  });
+}
+
+export async function revokeNestHeadlessKey(nestId: string, keyId: string) {
+  return request<{ revoked: true }>(`/nests/${nestId}/headless/keys/${keyId}`, {
+    method: "DELETE",
+  });
+}
+
 // Configure Public Docs Reader Mode (superadmin-only). Either field may be sent
 // on its own; home_node: null clears the designated landing node.
 export async function setNestReaderMode(

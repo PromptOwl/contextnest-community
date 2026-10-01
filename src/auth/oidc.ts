@@ -434,9 +434,13 @@ oidcRoutes.get("/callback", async (c) => {
   try {
     const db = getDb();
     let user = (await db.get(
-      "SELECT id, email, name FROM users WHERE LOWER(email) = ?",
+      "SELECT id, email, name, is_service FROM users WHERE LOWER(email) = ?",
       [email],
-    )) as { id: string; email: string; name: string | null } | undefined;
+    )) as { id: string; email: string; name: string | null; is_service?: number | null } | undefined;
+    // An access key's identity (CU-wdqcq0314u) is not an account anyone signs
+    // in as. Its .invalid address can't come from a real IdP; this makes the
+    // refusal explicit rather than relying on that (createSession refuses too).
+    if (user?.is_service) return bounce("not_invited");
 
     if (!user) {
       if (!config.OIDC_AUTO_PROVISION) return bounce("not_invited");

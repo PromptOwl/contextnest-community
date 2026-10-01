@@ -1,7 +1,0 @@
----
-"@promptowl/contextnest-community": minor
----
-
-Hootie in the nest: a floating assistant on every page of the UI. It answers from what the person asking can read in the nest (the `/context` retrieval, run as the caller), streams the answer, cites the documents it used as chips that open them, follows the document you have open, and lets you `@tag` a colleague — which posts the exchange as a comment on that document and notifies them like any comment mention. `/` switches the nest. New `POST /nests/:id/chat` route (read tier, per-user rate limit), `HOOTIE_ENABLED` toggle in Settings → General (default on), answers with the server-wide Anthropic API key and says so when there isn't one. Model and model gateway URL (LiteLLM / PromptOwl) are superadmin settings too; the gateway URL also flows into agent runs, so one setting routes every model call.
-
-The Anthropic API key is checked against the provider when an admin saves it, so a key that does not work is refused at the box that sets it rather than surfacing later as a failed answer. When a model call does fail, the panel says what actually went wrong — out of credit, a rejected key, a rate limit, an overloaded model — instead of one generic line. Only the asker's own @mentions notify anyone: a name written by the model, echoed out of a retrieved document, reaches the comment but nobody's inbox. Without an API key the launcher is shown to admins only, who can act on it. The panel opens as a chat window in the corner rather than a full-height slide-over, so the page stays visible behind it.
