@@ -1,0 +1,53 @@
+# Option B: Cloud Build trigger (no GitHub credentials, no WIF).
+#
+# Proposed cloudbuild.yaml for a Cloud Build trigger on the `development` branch.
+# Setup (once, in the GCP console or with gcloud):
+#   1. Cloud Build -> Triggers -> Create trigger
+#        - Source: PromptOwl/contextnest-community (connect via the Cloud Build GitHub app)
+#        - Event: Push to branch, regex ^development$
+#        - Config: Cloud Build configuration file, path docs/ci/cloudbuild-dev.yaml
+#   2. Grant the trigger's service account (default: <PROJECT_NUMBER>@cloudbuild.gserviceaccount.com,
+#      or a dedicated one you pick on the trigger):
+#        - roles/artifactregistry.writer
+#        - roles/run.admin
+#        - roles/iam.serviceAccountUser (on the Cloud Run runtime service account)
+#
+# Like the GitHub Actions option, this only swaps the image. `gcloud run deploy --image`
+# keeps the service's existing env vars, secrets, volumes, Cloud SQL and VPC settings,
+# so edit those on the Cloud Run service itself.
+
+substitutions:
+  _REGION: us-central1
+  _SERVICE: community-nest-dev
+  _REPO: cloud-run-source-deploy
+  _IMAGE: community-nest-dev
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --platform=linux/amd64
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:dev-$SHORT_SHA
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:latest
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: [push, --all-tags, "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}"]
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:dev-$SHORT_SHA
+      - --region=${_REGION}
+      - --project=$PROJECT_ID
+
+options:
+  logging: CLOUD_LOGGING_ONLY
