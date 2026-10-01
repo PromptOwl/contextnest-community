@@ -194,6 +194,36 @@ export async function setAllowSelfApprove(
 }
 
 /**
+ * Whether an agent write (MCP context_create, POST /nodes, POST /publish) to
+ * this nest must be confirmed in the web UI before it applies — the Push
+ * Confirmation Gate. Superadmin-set
+ * only; default off = today's immediate-apply behaviour. Mirrors
+ * nestAllowsSelfApprove above.
+ */
+export async function nestRequiresPushConfirmation(
+  nestId: string,
+): Promise<boolean> {
+  const db = getDb();
+  const row = (await db.get(
+    "SELECT require_push_confirmation FROM nests WHERE id = ?",
+    [nestId],
+  )) as { require_push_confirmation: number } | undefined;
+  return !!row?.require_push_confirmation;
+}
+
+/** Toggle the Push Confirmation Gate for a nest (superadmin-only). */
+export async function setRequirePushConfirmation(
+  nestId: string,
+  require: boolean,
+): Promise<void> {
+  const db = getDb();
+  await db.run(
+    "UPDATE nests SET require_push_confirmation = ? WHERE id = ?",
+    [require ? 1 : 0, nestId],
+  );
+}
+
+/**
  * Whether a governed nest reviews ONLY its prime documents. Off (the default)
  * keeps the original posture: every write lands as a draft unless the actor
  * holds a self-approve bypass. On, everything self-publishes except documents

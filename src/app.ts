@@ -39,6 +39,7 @@ import { resolveNodeGrant } from "./governance/grants-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
+import { pushRoutes } from "./nests/push-routes.js";
 import { hootieRoutes } from "./hootie/routes.js";
 import { verifyModelKey } from "./hootie/model.js";
 import {
@@ -2177,12 +2178,24 @@ export function createApp(): Hono<AuthEnv> {
         path.includes("/can-access") ||
         path.includes("/can-approve") ||
         path.includes("/can-edit") ||
+        // Push Confirmation Gate — the per-key allowlist is a governance
+        // surface, licensed like /review-queue (even on GET). /pending-pushes
+        // is deliberately NOT here: see isPushRelease below.
+        path.includes("/push-allowlist") ||
         isCommentPath ||
         isActivityPath ||
         isFeedPath ||
         isDeletionQueuePath ||
         isAgentActivityPath;
-      const needsLicense = c.req.method !== "GET" || isGovernance;
+      // Releasing a held push is exempt from the license gate — listing,
+      // reading, confirming and rejecting alike. POST /publish is unlicensed,
+      // so on a gated nest a lapsed license would hold every push at 202 and
+      // then 503 the only routes that can let them through: the nest stops
+      // accepting writes with no in-product way back. The gate itself is what
+      // the license buys; draining what it already holds must never be.
+      const isPushRelease = path.includes("/pending-pushes");
+      const needsLicense =
+        !isPushRelease && (c.req.method !== "GET" || isGovernance);
       if (needsLicense) {
         const lic = getCurrentLicense();
         if (!lic?.valid) {
@@ -2338,10 +2351,13 @@ export function createApp(): Hono<AuthEnv> {
       path.includes("/submit-review") ||
       path.includes("/cancel-review") ||
       /\/review-queue\/bulk$/.test(path) ||
-      // Undoing an agent's change is a reviewer's call (the handler checks
-      // owner/admin/reviewer on the document), so a read-tier reviewer must
-      // reach it. Exact segments — never a node path.
       (parts.length === 3 && parts[1] === "agent-activity" && parts[2] === "undo");
+    // Confirm/reject a held push (Push Confirmation Gate) is admitted at
+    // read-tier so a read-only reviewer steward can decide it; the handler's
+    // own canConfirmPush is the real gate (submitter OR reviewer/owner/admin).
+    // (reject already matches isStewardActionPath's /reject; confirm needs this.)
+    const isPushDecisionPath =
+      /\/pending-pushes\/[^/]+\/(confirm|reject)$/.test(path);
     // Hosted-artifact annotations are a read-tier collaboration action:
     // anyone who can SEE the artifact (notably read-only reviewers — the people
     // most likely to annotate) may open a thread, reply, resolve or reopen.
@@ -2459,6 +2475,7 @@ export function createApp(): Hono<AuthEnv> {
     } else if (
       c.req.method !== "GET" &&
       !isStewardActionPath &&
+      !isPushDecisionPath &&
       !isCommentAction &&
       !isDeletionRequestAction &&
       !isNestLifecycleAction &&
@@ -2695,6 +2712,10 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/nodes", annotationRoutes);
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
   nestsApp.route("/:nestId/nodes", nodeRoutes);
+  // Push Confirmation Gate — MUST precede queryRoutes so this /publish (the
+  // gated one) wins under the LinearRouter (first registered match wins).
+  // Also owns /pending-pushes* and /push-allowlist.
+  nestsApp.route("/:nestId", pushRoutes);
   nestsApp.route("/:nestId", queryRoutes);
   // Hootie chat — read-tier like /context (it IS /context plus a model call).
   nestsApp.route("/:nestId", hootieRoutes);

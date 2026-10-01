@@ -27,6 +27,7 @@ import { isStewardshipEnabled } from "../nests/service.js";
 import { VaultBusyError, isVaultLockTimeout } from "../shared/errors.js";
 import { engineApi, opContext } from "../nodes/engine.js";
 import { addCollaborator } from "../nests/sharing-service.js";
+import { holdWriteIfGated } from "../nests/push-confirmation-service.js";
 import { queryTableNode } from "../tables/query.js";
 import {
   addComment,
@@ -132,6 +133,7 @@ function toolError(
     | "VERSION_NOT_FOUND"
     | "VALIDATION_FAILED"
     | "VAULT_BUSY"
+    | "PENDING_CONFIRMATION"
     | "INTERNAL",
 ): ToolResult {
   return { text, isError: true, data: { code, message: text } };
@@ -215,6 +217,10 @@ export interface McpToolContext {
   /** Request origin, so review actions taken via MCP produce notification
    *  emails with a working "Open document" link (no PUBLIC_BASE_URL needed). */
   baseUrl?: string;
+  /** The API key this call arrived on — what the agent-write gate holds and
+   *  what "always allow" whitelists. Null for a cookie-authenticated call. */
+  apiKeyId?: string | null;
+  apiKeyLabel?: string | null;
   /**
    * Caller attribution for this call (spec §9.4) — what the TRANSPORT could
    * derive, already merged with whatever the tool call itself sent (caller
@@ -1652,6 +1658,39 @@ async function runTool(
             "DOCUMENT_ALREADY_EXISTS",
           );
         }
+        // Agent-write gate: on a gated nest a non-whitelisted credential does
+        // not write, it queues. MCP is an agent surface whatever it
+        // authenticated with, so unlike the REST create this holds a cookie
+        // call too.
+        const held = await holdWriteIfGated({
+          nestId,
+          userId,
+          keyId: ctx.apiKeyId ?? null,
+          keyLabel: ctx.apiKeyLabel ?? null,
+          userEmail,
+          payload: {
+            documents: [
+              {
+                title: args.title,
+                content: args.content,
+                type: args.type,
+                tags: args.tags,
+                scope: args.scope,
+                folder: args.folder,
+              },
+            ],
+          },
+        });
+        if (held) {
+          // An error, not a success with a caveat: nothing was created, and an
+          // agent that reads this as "done" will go on to update or link a
+          // document that does not exist yet.
+          return toolError(
+            `This nest holds agent writes for review. "${args.title}" is queued as ${held.id} and will be created only when a reviewer confirms it in ${held.nest_name} — it does not exist yet, so do not reference it. Nothing else is needed from you.`,
+            "PENDING_CONFIRMATION",
+          );
+        }
+
         const { node, version } = await createNode(
           nestId,
           {

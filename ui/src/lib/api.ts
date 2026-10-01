@@ -673,6 +673,8 @@ export interface NestSettings {
   prime_only_review: boolean;
   /** Tags that mark a document prime (normalized, no leading `#`). */
   prime_tags: string[];
+  /** Push Confirmation Gate — superadmin-only to SET; readable by anyone. */
+  require_push_confirmation: boolean;
   /** The person who creates a document becomes its reviewer; v1 publishes. */
   creator_is_reviewer: boolean;
 }
@@ -688,12 +690,110 @@ export async function updateNestSettings(
     allow_self_approve?: boolean;
     prime_only_review?: boolean;
     prime_tags?: string[];
+    /** Superadmin-only — a per-field 403 is returned to anyone else. */
+    require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
   },
 ) {
   return request<NestSettings>(`/nests/${nestId}/settings`, {
     method: "PATCH",
     body: JSON.stringify(data),
+  });
+}
+
+// ─── Push Confirmation Gate ────────────────────────────────────────────────
+
+export type PendingPushStatus = "pending" | "applied" | "rejected" | "expired";
+
+/** One staged document in a held push, as the modal renders it. */
+export interface PushManifestEntry {
+  /** null when the title has no ASCII slug: the id is generated on apply. */
+  id: string | null;
+  title: string;
+  type: string;
+  tags: string[];
+}
+
+export interface PendingPush {
+  id: string;
+  status: PendingPushStatus;
+  nest_name: string;
+  doc_count: number;
+  manifest: PushManifestEntry[];
+  submitter_label: string | null;
+  submitter_email: string | null;
+  submitter_user_id: string;
+  created_at: string;
+  expires_at: string;
+  decided_by?: string;
+  decided_at?: string;
+  applied_node_count?: number;
+}
+
+export interface PushAllowlistEntry {
+  user_id: string;
+  key_id: string | null;
+  /** Resolved for display; null if the user or key has since been deleted. */
+  user_email: string | null;
+  key_label: string | null;
+  created_by_user_id: string;
+  created_at: string;
+}
+
+/** Reviewer view of held pushes (owner/admin/reviewer only). */
+export async function getPendingPushes(
+  nestId: string,
+  status?: PendingPushStatus,
+) {
+  const qs = status ? `?status=${status}` : "";
+  return request<{ pending_pushes: PendingPush[]; count: number }>(
+    `/nests/${nestId}/pending-pushes${qs}`,
+  );
+}
+
+/** Single held push — readable by the submitter OR a reviewer. */
+export async function getPendingPush(nestId: string, pendingId: string) {
+  return request<PendingPush>(
+    `/nests/${nestId}/pending-pushes/${pendingId}`,
+  );
+}
+
+/** Confirm a held push; alwaysAllow whitelists the submitter's exact key. */
+export async function confirmPush(
+  nestId: string,
+  pendingId: string,
+  alwaysAllow = false,
+) {
+  return request<PendingPush>(
+    `/nests/${nestId}/pending-pushes/${pendingId}/confirm`,
+    {
+      method: "POST",
+      body: JSON.stringify({ always_allow: alwaysAllow }),
+    },
+  );
+}
+
+export async function rejectPush(nestId: string, pendingId: string) {
+  return request<PendingPush>(
+    `/nests/${nestId}/pending-pushes/${pendingId}/reject`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+}
+
+export async function getPushAllowlist(nestId: string) {
+  return request<{ allowlist: PushAllowlistEntry[]; count: number }>(
+    `/nests/${nestId}/push-allowlist`,
+  );
+}
+
+export async function removeFromAllowlist(
+  nestId: string,
+  userId: string,
+  keyId: string | null = null,
+) {
+  return request<{ removed: boolean }>(`/nests/${nestId}/push-allowlist`, {
+    method: "DELETE",
+    body: JSON.stringify({ user_id: userId, key_id: keyId }),
   });
 }
 
@@ -1578,7 +1678,25 @@ export interface FeedCommentItem {
   isReply: boolean;
 }
 
-export type FeedItem = FeedChangeItem | FeedCommentItem;
+/** A held agent write awaiting confirmation (Push Confirmation Gate). */
+export interface FeedPendingPushItem {
+  type: "pending_push";
+  id: string;
+  nestId: string;
+  nestName: string;
+  docCount: number;
+  manifest: PushManifestEntry[];
+  submitterLabel: string | null;
+  submitterEmail: string | null;
+  createdAt: string;
+  expiresAt: string;
+  canConfirm: boolean;
+}
+
+export type FeedItem =
+  | FeedChangeItem
+  | FeedCommentItem
+  | FeedPendingPushItem;
 
 /** Activity feed: pending changes + annotation activity, newest first. */
 export async function getNestFeed(
@@ -1595,7 +1713,7 @@ export async function getNestFeed(
   return request<{
     items: FeedItem[];
     total: number;
-    counts: { changes: number; comments: number };
+    counts: { changes: number; comments: number; pending_pushes: number };
     filter: FeedFilter;
     limit: number;
     offset: number;

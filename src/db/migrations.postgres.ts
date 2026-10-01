@@ -73,6 +73,7 @@ const HISTORICAL_MIGRATIONS = [
   "037_publish",
   "038_nest_archive",
   "039_nest_pins",
+  "040_push_confirmation",
   "041_nest_visibility_org",
   "042_community_sites",
   "043_node_suggestion_details",
@@ -117,6 +118,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       creator_is_reviewer INTEGER NOT NULL DEFAULT 0,
       shared_teams TEXT NOT NULL DEFAULT '[]',
       index_synced_at TEXT,
+      require_push_confirmation INTEGER NOT NULL DEFAULT 0,
       reader_mode INTEGER NOT NULL DEFAULT 0,
       reader_home_node TEXT,
       -- Per-nest reader branding JSON (CU-wdqcq02ptm); NULL = unbranded.
@@ -127,6 +129,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       UNIQUE(user_id, slug)
     );
     CREATE INDEX IF NOT EXISTS idx_nests_user ON nests(user_id);
+    -- Push Confirmation Gate (migration 040): declared inline above; explicit
+    -- ALTER for databases created before it shipped.
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS require_push_confirmation INTEGER NOT NULL DEFAULT 0;
 
     CREATE TABLE IF NOT EXISTS api_keys (
       id TEXT PRIMARY KEY,
@@ -763,6 +768,41 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       PRIMARY KEY (user_id, nest_id)
     );
     CREATE INDEX IF NOT EXISTS idx_nest_pins_user ON nest_pins(user_id);
+
+    -- Push Confirmation Gate (migration 040). pending_pushes holds a gated agent
+    -- push in full (payload_blob) until a reviewer confirms; push_allowlist is
+    -- PER-API-KEY (key_id '' = any of that user's keys), never keyed on nest
+    -- alone. SQLite parity in migrations.ts 040_push_confirmation.
+    CREATE TABLE IF NOT EXISTS pending_pushes (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      submitter_user_id TEXT NOT NULL,
+      submitter_key_id TEXT,
+      submitter_label TEXT,
+      submitter_email TEXT,
+      doc_count INTEGER NOT NULL DEFAULT 0,
+      manifest_json TEXT NOT NULL DEFAULT '[]',
+      payload_blob TEXT NOT NULL,
+      context_md TEXT,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending', 'applied', 'rejected', 'expired')),
+      created_at TEXT NOT NULL,
+      decided_at TEXT,
+      decided_by_user_id TEXT,
+      applied_node_count INTEGER,
+      expires_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_pushes_nest_status
+      ON pending_pushes(nest_id, status, created_at);
+
+    CREATE TABLE IF NOT EXISTS push_allowlist (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      key_id TEXT NOT NULL DEFAULT '',
+      created_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (nest_id, user_id, key_id)
+    );
 
     -- community_sites (migration 042): official community site connections
     -- trusted for SSO auto-login — extends the single OFFICIAL_COMMUNITY_SSO_

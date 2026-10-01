@@ -33,6 +33,8 @@ function createMcpServerForNest(
   userId: string,
   userEmail: string,
   baseUrl: string,
+  apiKeyId: string | null,
+  apiKeyLabel: string | null,
   c: Context<AuthEnv>,
   headless = false,
 ): McpServer {
@@ -98,6 +100,8 @@ function createMcpServerForNest(
         userId,
         userEmail,
         baseUrl,
+        apiKeyId,
+        apiKeyLabel,
         client,
       });
       return toCallToolResult(out);
@@ -118,6 +122,8 @@ mcpRoutes.all("/", async (c) => {
     userId,
     caller.email,
     requestBaseUrl(c.req.url),
+    c.get("apiKeyId") ?? null,
+    c.get("apiKeyLabel") ?? null,
     c,
     caller.headless,
   );

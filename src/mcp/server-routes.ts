@@ -331,6 +331,8 @@ async function handleServerToolCall(
   userEmail: string,
   nestScope: string | null,
   baseUrl: string,
+  apiKeyId: string | null,
+  apiKeyLabel: string | null,
   client?: ClientMetadata,
   headless = false,
 ): Promise<ToolResult> {
@@ -507,6 +509,8 @@ async function handleServerToolCall(
     userId,
     userEmail,
     baseUrl,
+    apiKeyId,
+    apiKeyLabel,
     client,
   });
 }
@@ -516,6 +520,8 @@ function createServerMcp(
   userEmail: string,
   nestScope: string | null,
   baseUrl: string,
+  apiKeyId: string | null,
+  apiKeyLabel: string | null,
   c: Context<AuthEnv>,
   headless = false,
 ): McpServer {
@@ -553,6 +559,8 @@ function createServerMcp(
         userEmail,
         nestScope,
         baseUrl,
+        apiKeyId,
+        apiKeyLabel,
         attributeRequest(c, undefined, connectionClient(server)),
         headless,
       );
@@ -574,6 +582,8 @@ serverMcpRoutes.all("/", async (c) => {
     userEmail,
     c.get("nestScope"),
     requestBaseUrl(c.req.url),
+    c.get("apiKeyId") ?? null,
+    c.get("apiKeyLabel") ?? null,
     c,
     await isServiceUser(userId),
   );

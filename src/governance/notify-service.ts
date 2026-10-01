@@ -14,6 +14,7 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { describeNode } from "./title-resolver.js";
 import { permissionLabel } from "./roles.js";
+import { notifyNestEvent } from "../notify/notify.js";
 
 export interface Watcher {
   id: string;
@@ -117,6 +118,72 @@ export async function notifyReviewRequested(params: {
     return created;
   } catch (err) {
     console.error("[notify] review fan-out failed", nestId, nodeId, err);
+    return 0;
+  }
+}
+
+/**
+ * Fan a HELD AGENT WRITE (Push Confirmation Gate) out to the people who can confirm
+ * it: the nest owner and every active reviewer steward. Best-effort by
+ * contract — a notify failure must never fail the hold.
+ */
+export async function notifyPendingPush(params: {
+  nestId: string;
+  pendingId: string;
+  submitterEmail: string;
+  submitterLabel: string;
+  docCount: number;
+}): Promise<number> {
+  const { nestId, pendingId, submitterEmail, submitterLabel, docCount } = params;
+  const db = getDb();
+  try {
+    const nest = (await db.get(
+      `SELECT n.name AS name, u.email AS owner_email
+         FROM nests n JOIN users u ON u.id = n.user_id
+        WHERE n.id = ?`,
+      [nestId],
+    )) as { name?: string; owner_email?: string } | undefined;
+
+    const reviewers = (await db.all(
+      `SELECT DISTINCT LOWER(user_email) AS email
+         FROM stewards
+        WHERE nest_id = ? AND role = 'reviewer' AND is_active = 1`,
+      [nestId],
+    )) as Array<{ email: string }>;
+
+    const recipients = new Set<string>(reviewers.map((r) => r.email));
+    if (nest?.owner_email) recipients.add(nest.owner_email.toLowerCase());
+    // The submitter already knows what it wrote.
+    recipients.delete(submitterEmail.toLowerCase());
+
+    const now = new Date().toISOString();
+    const nestName = nest?.name ?? nestId;
+    let created = 0;
+    for (const email of recipients) {
+      await db.run(
+        `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
+         VALUES (?, ?, ?, 'pending_push', ?, ?, ?)`,
+        [
+          uuid(),
+          nestId,
+          email,
+          pendingId,
+          `${submitterLabel} wrote ${docCount} document(s) to "${nestName}" — awaiting your confirmation`,
+          now,
+        ],
+      );
+      created++;
+    }
+
+    // Slack/Teams/email connector line (best-effort, debounced).
+    await notifyNestEvent(
+      nestId,
+      `📥 Agent write held for confirmation on "${nestName}": ${docCount} document(s) from ${submitterLabel} (${submitterEmail}).`,
+    );
+
+    return created;
+  } catch (err) {
+    console.error("[notify] pending-push fan-out failed", nestId, err);
     return 0;
   }
 }

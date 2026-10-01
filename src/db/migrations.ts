@@ -219,6 +219,16 @@ export function runMigrations(db: Database.Database): void {
     db.exec("ALTER TABLE nests ADD COLUMN index_synced_at TEXT");
   }
 
+  // Push Confirmation Gate (superadmin). When on, an agent write (POST
+  // /nests/:id/publish) is HELD as a pending_pushes row instead of applying —
+  // it lands only after a reviewer confirms in the web UI. Default 0 keeps
+  // today's immediate-apply behaviour. Superadmin-set only (isServerAdminUserId
+  // gates the settings field); mirrors allow_self_approve above.
+  if (!nestCols.includes("require_push_confirmation")) {
+    db.exec(
+      "ALTER TABLE nests ADD COLUMN require_push_confirmation INTEGER NOT NULL DEFAULT 0",
+    );
+  }
   // Public Docs Reader Mode — a superadmin-enabled, read-only public docs view.
   // `reader_mode` off by default; `reader_home_node` names the designated
   // landing/hub node (nullable — resolved by convention when unset).
@@ -1481,6 +1491,50 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("039_nest_pins");
   }
 
+  // 040: Push Confirmation Gate. Held pushes + the per-key allowlist.
+  //
+  // pending_pushes carries the FULL staged push (payload_blob) so a confirm
+  // applies it byte-for-byte later — the submitter is long gone by then.
+  // push_allowlist is PER-API-KEY (never keyed on nest alone): key_id ''
+  // means "any of that user's keys". A confirm with always_allow whitelists
+  // the exact (nest_id, submitter_user_id, submitter_key_id) that pushed.
+  if (!hasMigration("040_push_confirmation")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS pending_pushes (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          submitter_user_id TEXT NOT NULL,
+          submitter_key_id TEXT,
+          submitter_label TEXT,
+          submitter_email TEXT,
+          doc_count INTEGER NOT NULL DEFAULT 0,
+          manifest_json TEXT NOT NULL DEFAULT '[]',
+          payload_blob TEXT NOT NULL,
+          context_md TEXT,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending', 'applied', 'rejected', 'expired')),
+          created_at TEXT NOT NULL,
+          decided_at TEXT,
+          decided_by_user_id TEXT,
+          applied_node_count INTEGER,
+          expires_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pending_pushes_nest_status
+          ON pending_pushes(nest_id, status, created_at);
+
+        CREATE TABLE IF NOT EXISTS push_allowlist (
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          user_id TEXT NOT NULL,
+          key_id TEXT NOT NULL DEFAULT '',
+          created_by_user_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (nest_id, user_id, key_id)
+        );
+      `);
+    })();
+    recordMigration("040_push_confirmation");
+  }
   // 041: widen nests.visibility to accept 'org'. 040 is skipped on purpose —
   // 040_push_confirmation is in flight on another branch, and ids are matched
   // by string, so the gap costs nothing and reusing 040 would collide.
