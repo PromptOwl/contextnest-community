@@ -279,6 +279,29 @@ describe("POST /nests/:id/nodes/pdf — governed upload", () => {
     }
   });
 
+  it("a PDF far over the cap gets the same friendly message, not the raw body-limit one", async () => {
+    const prev = process.env.PDF_MAX_MB;
+    process.env.PDF_MAX_MB = "1";
+    try {
+      // Declared 30 MB: past every gate, including app.ts's global body cap.
+      const res = await app.request(`/nests/${nestId}/nodes/pdf`, {
+        method: "POST",
+        headers: {
+          ...authed(editor.apiKey),
+          "Content-Type": "multipart/form-data; boundary=x",
+          "Content-Length": String(30 * 1024 * 1024),
+        },
+        body: "--x--",
+      });
+      expect(res.status).toBe(413);
+      const { error } = await res.json();
+      expect(error).toBe("PDF too large (30.0 MB, max 1 MB)");
+    } finally {
+      if (prev === undefined) delete process.env.PDF_MAX_MB;
+      else process.env.PDF_MAX_MB = prev;
+    }
+  });
+
   it("an oversize upload streamed WITHOUT Content-Length is cut off at the cap, not buffered whole", async () => {
     const prev = process.env.PDF_MAX_MB;
     process.env.PDF_MAX_MB = "1";

@@ -8,6 +8,7 @@ import { parseDocument } from "@promptowl/contextnest-engine";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import * as versions from "../governance/version-service.js";
+import { reconstructApproved } from "../governance/approved-body.js";
 import { loadStewardsConfig } from "../governance/stewards-parser.js";
 import {
   canReadNode,
@@ -58,12 +59,14 @@ import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
+import { recordNodeAccess, type AccessAction } from "../governance/access-log.js";
 import {
   mergeClient,
   parseClientMetadata,
   type ClientMetadata,
 } from "../shared/client-metadata.js";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
+import { HEADLESS_READER_TOOLS, headlessToolRefusal, isServiceUser } from "../auth/headless.js";
 
 /** Upper bound on caller-set traversal depth — real graphs terminate long
  *  before this; the cap just fences a misbehaving client from a runaway query. */
@@ -134,6 +137,12 @@ function toolError(
     | "INTERNAL",
 ): ToolResult {
   return { text, isError: true, data: { code, message: text } };
+}
+
+/** What a headless access key gets for a tool it may not call (CU-wdqcq0314u)
+ *  — the same shape on both MCP surfaces. */
+export function headlessToolError(toolName: string): ToolResult {
+  return toolError(headlessToolRefusal(toolName), "UNAUTHORIZED_ACTION");
 }
 
 /**
@@ -860,11 +869,43 @@ async function resolveLlmBody(
     : await versions.getApprovedVersion(ctx.nestId, node.id);
   if (approved == null) return null;
   try {
-    return await ctx.versionManager.reconstructVersion(node.id, approved);
+    return (await reconstructApproved(ctx.versionManager, ctx.nestId, node.id, approved)).raw;
   } catch (err) {
     console.error("reconstructVersion failed", node.id, approved, err);
     return null;
   }
+}
+
+/** Read tools whose `data` names the documents they handed over, and what
+ *  that counts as in the admin activity log. context_resolve and
+ *  context_export return prose only, so they record from inside their cases. */
+const ACCESS_BY_TOOL: Record<string, AccessAction> = {
+  context_get: "read",
+  context_query: "retrieve",
+  context_search: "retrieve",
+};
+
+function recordToolAccess(toolName: string, result: ToolResult, ctx: McpToolContext): void {
+  const action = ACCESS_BY_TOOL[toolName];
+  if (!action || typeof result === "string" || result.isError || !ctx.nestId) return;
+  const data = result.data as { id?: unknown; documents?: Array<{ id?: unknown }> } | undefined;
+  const ids = [
+    ...(typeof data?.id === "string" ? [data.id] : []),
+    ...(Array.isArray(data?.documents)
+      ? data.documents.map((d) => d?.id).filter((id): id is string => typeof id === "string")
+      : []),
+  ];
+  if (!ids.length) return;
+  recordNodeAccess({
+    nestId: ctx.nestId,
+    nodeIds: ids,
+    action,
+    surface: "mcp",
+    userId: ctx.userId,
+    userEmail: ctx.userEmail,
+    client: ctx.client,
+    detail: toolName,
+  });
 }
 
 /**
@@ -901,6 +942,21 @@ export async function handleToolCall(
     return toolError((err as Error).message, "VALIDATION_FAILED");
   }
   const attributed: McpToolContext = { ...ctx, client };
+  // Headless access keys (CU-wdqcq0314u) read and nothing else. Checked here,
+  // the one seam both MCP surfaces share, so no tool — including one added
+  // later — is reachable with an access key unless it is on the read list.
+  if (!HEADLESS_READER_TOOLS.has(toolName) && (await isServiceUser(ctx.userId))) {
+    void logTraceEvent({
+      kind: "mcp",
+      tool: toolName,
+      nestId: ctx.nestId,
+      userId: ctx.userId,
+      userEmail: ctx.userEmail,
+      status: 403,
+      durationMs: Date.now() - started,
+    });
+    return headlessToolError(toolName);
+  }
   // An agent that sends a whole file (frontmatter + body) as `content` used to
   // get a second, dead frontmatter block stored inside the body. Refuse and say
   // where those fields go instead.
@@ -915,7 +971,9 @@ export async function handleToolCall(
     );
   }
   try {
-    return await runTool(toolName, args, attributed);
+    const result = await runTool(toolName, args, attributed);
+    recordToolAccess(toolName, result, attributed);
+    return result;
   } catch (err) {
     // Vault write-lock timeout: map to a typed, retryable tool error HERE —
     // one seam covering both MCP surfaces — before the SDK flattens the throw
@@ -1324,13 +1382,25 @@ async function runTool(
       );
       let total = 0;
       const resolved: string[] = [];
+      const handed: string[] = [];
       for (const { node: n, body } of resolvedBodies) {
         if (body === null) continue; // not visible / no approved version yet
         const entry = `## ${n.frontmatter.title}\n\n${body}`;
         if (total + entry.length > approxChars) break;
         resolved.push(entry);
+        handed.push(n.id);
         total += entry.length;
       }
+      recordNodeAccess({
+        nestId,
+        nodeIds: handed,
+        action: "retrieve",
+        surface: "mcp",
+        userId: ctx.userId,
+        userEmail,
+        client: ctx.client,
+        detail: "context_resolve",
+      });
       return resolved.join("\n\n---\n\n") || "No nodes resolved.";
     }
 
@@ -1367,6 +1437,21 @@ async function runTool(
         }
         parts.push(entry);
         total += entry.length;
+      }
+      if (parts.length) {
+        // Whole nest unless the token budget cut it short — then the documents
+        // that actually left.
+        const sent = resolved.filter((r) => r.body !== null).slice(0, parts.length);
+        recordNodeAccess({
+          nestId,
+          ...(budgetHit ? { nodeIds: sent.map((r) => r.node.id) } : { wholeNest: true }),
+          action: "export",
+          surface: "mcp",
+          userId: ctx.userId,
+          userEmail,
+          client: ctx.client,
+          detail: `context_export (${parts.length} documents)`,
+        });
       }
       if (!parts.length) {
         return budgetHit
@@ -1693,7 +1778,7 @@ async function runTool(
           "UNAUTHORIZED_ACTION",
         );
       }
-      await deleteNode(nestId, node.id, userEmail);
+      await deleteNode(nestId, node.id, userEmail, { client: ctx.client });
       return {
         text: `Deleted node: **${node.frontmatter.title}** (${node.id})`,
         data: {

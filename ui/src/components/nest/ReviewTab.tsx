@@ -14,6 +14,7 @@ import { keys, reads } from "../../lib/queries";
 import { BULK_REVIEW_LIMIT } from "../../lib/constants";
 import { FEED_PAGE, useFeedComments } from "./feed-query";
 import { ReviewQueue, ReasonDialog, type ReviewRequest } from "../governance";
+import { AgentActivityPanel } from "./AgentActivityPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -58,7 +59,7 @@ export function ReviewTab({
   onWithdrawSubmission,
 }: Props) {
   const qc = useQueryClient();
-  const [feedFilter, setFeedFilter] = useState<"all" | "changes" | "comments">("all");
+  const [feedFilter, setFeedFilter] = useState<"all" | "changes" | "comments" | "agents">("all");
   // First page from the cache; later pages accumulate here. A write that
   // drops keys.feed re-reads page one and resets the rest.
   const firstPage = useFeedComments(nestId, enabled);
@@ -115,10 +116,11 @@ export function ReviewTab({
     onRefresh();
   };
 
-  return (
-    <>
-      {/* Feed filter chips — All shows changes + comments interleaved;
-          Changes is the legacy queue; Comments is discussion only. */}
+  // Feed filter chips — All shows changes + comments interleaved; Changes is
+  // the legacy queue; Comments is discussion only; Agent activity is what
+  // agents changed, with undo (CU-wdqcq0314v — the server lists only
+  // documents the caller could undo).
+  const chips = (
       <div className="flex items-center gap-1.5" data-testid="feed-filter-chips">
         {(
           [
@@ -126,6 +128,7 @@ export function ReviewTab({
             { key: "changes", label: `Changes (${reviewableQueue.length})` },
             // Authoritative server count — the loaded array is paged.
             { key: "comments", label: `Comments (${feedCommentsTotal})` },
+            { key: "agents", label: "Agent activity" },
           ] as const
         ).map((chip) => (
           <button
@@ -142,6 +145,20 @@ export function ReviewTab({
           </button>
         ))}
       </div>
+  );
+
+  if (feedFilter === "agents") {
+    return (
+      <>
+        {chips}
+        <AgentActivityPanel nestId={nestId} onOpenDocument={(id) => onOpenDocument(id)} />
+      </>
+    );
+  }
+
+  return (
+    <>
+      {chips}
       {/* The caller's own submissions, kept out of the actionable queue
           by separation-of-duties. Shown read-only so "submit for review"
           visibly lands somewhere. */}

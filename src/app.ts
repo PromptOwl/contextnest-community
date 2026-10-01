@@ -6,6 +6,8 @@ import { mergeFrameAncestors } from "./shared/artifact-sandbox.js";
 import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
+import { headlessRoutes } from "./nests/headless-routes.js";
+import { countPeople } from "./auth/headless.js";
 import { brandingRoutes } from "./nests/branding-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
 import { publishRoutes } from "./nests/publish-routes.js";
@@ -40,6 +42,14 @@ import { queryRoutes } from "./nodes/query-routes.js";
 import { pushRoutes } from "./nests/push-routes.js";
 import { hootieRoutes } from "./hootie/routes.js";
 import { verifyModelKey } from "./hootie/model.js";
+import {
+  HOOTIE_BRAND_FIELDS,
+  changedHootieBrandFields,
+  effectiveHootieBrand,
+  hootieBrandingAvailable,
+  storedHootieSettings,
+  validateHootieBrandFields,
+} from "./hootie/brand.js";
 import { mcpRoutes } from "./mcp/routes.js";
 import { edgeTypeRoutes } from "./workflow/edge-type-routes.js";
 import { edgeRoutes } from "./workflow/edge-routes.js";
@@ -64,8 +74,16 @@ import {
   pdfNodeRoutes,
   PDF_UPLOAD_PATH,
   pdfMaxRequestBytes,
+  pdfTooLargeMessage,
 } from "./nodes/pdf-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
+import { flushAccessLog } from "./governance/access-log.js";
+import {
+  ACTIVITY_TYPES,
+  getScopedActivity,
+  normalizeFolder,
+  type ActivityType,
+} from "./governance/scoped-activity-service.js";
 import {
   isSuperAdmin,
   isConfigSuperAdmin,
@@ -318,8 +336,9 @@ const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
       return c.json({ error: "Invalid service ticket" }, 401);
     }
     const db = getDb();
+    // Access-key identities (CU-wdqcq0314u) are never a ticket's user.
     const user = (await db.get(
-      "SELECT id FROM users WHERE LOWER(email) = LOWER(?)",
+      "SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND COALESCE(is_service, 0) = 0",
       [sub],
     )) as { id: string } | undefined;
     if (!user) {
@@ -421,16 +440,20 @@ export function createApp(): Hono<AuthEnv> {
     if (lenStr) {
       const len = parseInt(lenStr, 10);
       const isPost = c.req.method === "POST";
+      const isPdf = isPost && PDF_UPLOAD_PATH.test(c.req.path);
       const cap =
         isPost && ASSET_UPLOAD_PATH.test(c.req.path)
           ? Math.max(config.MAX_BODY_BYTES, ASSET_MAX_REQUEST_BYTES)
-          : isPost && PDF_UPLOAD_PATH.test(c.req.path)
+          : isPdf
             ? Math.max(config.MAX_BODY_BYTES, pdfMaxRequestBytes())
             : config.MAX_BODY_BYTES;
       if (Number.isFinite(len) && len > cap) {
         return c.json(
           {
-            error: `Request body too large (${len} bytes, max ${cap})`,
+            // A PDF gets the same message as the route's own gates.
+            error: isPdf
+              ? pdfTooLargeMessage(len)
+              : `Request body too large (${len} bytes, max ${cap})`,
           },
           413,
         );
@@ -518,11 +541,18 @@ export function createApp(): Hono<AuthEnv> {
       // API would refuse it — existing nodes of the type stay readable.
       type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
       type_table_enabled: config.TYPE_TABLE_ENABLED,
-      // Hootie in the nest (default ON). Off → POST /nests/:id/chat 404s and
-      // the UI hides the launcher. Whether it can actually answer is
-      // runner_key_configured above — the UI shows the launcher whenever the
-      // feature is on and explains the missing key, rather than hiding it.
+      // Hootie in the nest (default OFF — admins opt in). Off → POST
+      // /nests/:id/chat 404s and the UI hides the launcher. Whether it can
+      // actually answer is runner_key_configured above — the UI shows the
+      // launcher whenever the feature is on and explains the missing key,
+      // rather than hiding it.
       hootie_enabled: config.HOOTIE_ENABLED,
+      // The identity every surface shows: the admin's custom name/logo/
+      // colour/greeting on an enterprise licence, the default Hootie
+      // otherwise (enforced here, not in the client). Public: the launcher
+      // renders before sign-in, and none of it is secret.
+      hootie_brand: effectiveHootieBrand(),
+      hootie_branding_available: hootieBrandingAvailable(),
       // This server hosts several organizations (PromptOwl-hosted) rather than
       // one. The visibility picker words 'Organization' and 'Public' by it and
       // confirms before 'org'; the server enforces the same in
@@ -667,6 +697,12 @@ export function createApp(): Hono<AuthEnv> {
     type_table_enabled: config.TYPE_TABLE_ENABLED,
     hootie_enabled: config.HOOTIE_ENABLED,
     hootie_model: config.HOOTIE_MODEL,
+    // Custom identity (enterprise). The stored values are returned even when
+    // the licence doesn't allow them, so a lapsed licence shows what would
+    // come back on renewal; `hootie_branding_available` says whether they
+    // are in effect and whether edits are accepted.
+    ...storedHootieSettings(),
+    hootie_branding_available: hootieBrandingAvailable(),
     anthropic_base_url: config.ANTHROPIC_BASE_URL,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
@@ -760,6 +796,26 @@ export function createApp(): Hono<AuthEnv> {
     };
     const pending: Array<{ name: string; value: string | null }> = [];
 
+    // Custom assistant identity is an enterprise entitlement. A request that
+    // would CHANGE it is refused whole — nothing written, not even its other
+    // fields — so a non-enterprise server never holds a half-applied edit.
+    // Branding fields that only echo the stored values are dropped, so a
+    // client that sends a whole form can still save unrelated settings.
+    if (!hootieBrandingAvailable()) {
+      if (changedHootieBrandFields(body).length > 0) {
+        return c.json(
+          {
+            error:
+              "Custom assistant name and branding are an Enterprise feature. Upgrade the licence to change them.",
+            code: "enterprise_required",
+            settings: currentServerSettings(),
+          },
+          403,
+        );
+      }
+      for (const k of Object.keys(HOOTIE_BRAND_FIELDS)) delete body[k];
+    }
+
     if ("promptowl_sign_in_gate" in body) {
       const v = String(body.promptowl_sign_in_gate ?? "").trim().toLowerCase();
       if (!["open", "admin-only", "disabled"].includes(v))
@@ -838,10 +894,12 @@ export function createApp(): Hono<AuthEnv> {
         value: body.type_table_enabled ? null : "false",
       });
     }
+    // Default OFF (CU-wdqcq03ewc). Both states are written explicitly so a
+    // UI choice beats a deploy env of either value (db/settings.ts precedence).
     if ("hootie_enabled" in body) {
       pending.push({
         name: "HOOTIE_ENABLED",
-        value: body.hootie_enabled ? null : "false",
+        value: body.hootie_enabled ? "true" : "false",
       });
     }
     if ("hootie_model" in body) {
@@ -851,6 +909,8 @@ export function createApp(): Hono<AuthEnv> {
         addError("hootie_model", "Model must be a single identifier with no spaces.");
       else pending.push({ name: "HOOTIE_MODEL", value: v === "claude-opus-5" ? null : v });
     }
+    // Name, logo, accent colour, greeting (enterprise — gated above).
+    pending.push(...validateHootieBrandFields(body, addError));
     // Empty clears the row (direct Anthropic). Otherwise an http(s) origin
     // (+ optional path) with no trailing slash, so the SDK joins /v1/messages
     // onto it cleanly.
@@ -1859,14 +1919,11 @@ export function createApp(): Hono<AuthEnv> {
       }
     }
 
-    const usersRow = (await db.get(
-      "SELECT COUNT(*) as c FROM users",
-    )) as { c: number };
-
     return c.json({
       nests: visibleNests.length,
       documents,
-      users: usersRow.c,
+      // People only — access-key identities (CU-wdqcq0314u) aren't users.
+      users: await countPeople(),
     });
   });
 
@@ -2103,6 +2160,12 @@ export function createApp(): Hono<AuthEnv> {
       // "deletion-requests" can't drag plain node reads behind the gate.
       const isDeletionQueuePath =
         parts.length === 2 && parts[1] === "deletion-requests";
+      // The agent-activity stream and its undo (CU-wdqcq0314v) are governance
+      // views over version history. Exact segments, so a node slugged
+      // "agent-activity" stays an ordinary node read.
+      const isAgentActivityPath =
+        parts[1] === "agent-activity" &&
+        (parts.length === 2 || (parts.length === 3 && parts[2] === "undo"));
       const isGovernance =
         path.includes("/stewards") ||
         path.includes("/review-queue") ||
@@ -2122,7 +2185,8 @@ export function createApp(): Hono<AuthEnv> {
         isCommentPath ||
         isActivityPath ||
         isFeedPath ||
-        isDeletionQueuePath;
+        isDeletionQueuePath ||
+        isAgentActivityPath;
       // Releasing a held push is exempt from the license gate — listing,
       // reading, confirming and rejecting alike. POST /publish is unlicensed,
       // so on a gated nest a lapsed license would hold every push at 202 and
@@ -2286,7 +2350,8 @@ export function createApp(): Hono<AuthEnv> {
       path.includes("/reject") ||
       path.includes("/submit-review") ||
       path.includes("/cancel-review") ||
-      /\/review-queue\/bulk$/.test(path);
+      /\/review-queue\/bulk$/.test(path) ||
+      (parts.length === 3 && parts[1] === "agent-activity" && parts[2] === "undo");
     // Confirm/reject a held push (Push Confirmation Gate) is admitted at
     // read-tier so a read-only reviewer steward can decide it; the handler's
     // own canConfirmPush is the real gate (submitter OR reviewer/owner/admin).
@@ -2374,7 +2439,10 @@ export function createApp(): Hono<AuthEnv> {
     if (
       resource === "visibility" ||
       resource === "reader-mode" ||
-      resource === "branding"
+      resource === "branding" ||
+      // headless (CU-wdqcq0314u): publishing API-only and minting access keys
+      // decide who can read the nest — the same owner/admin tier as visibility.
+      resource === "headless"
     ) {
       // reader-mode: the nest owner/admin collaborator AND the server admin
       // may configure it — this "admin" tier already covers both
@@ -2570,6 +2638,55 @@ export function createApp(): Hono<AuthEnv> {
     return c.json({ count: events.length, total, limit, offset, events });
   });
 
+  // GET /nests/:nestId/activity-log?node=<id> | ?folder=<path> — the admin
+  // activity log for one document, one folder, or (neither) the whole nest:
+  // who changed, reviewed, commented on, deleted, read, retrieved or exported
+  // it (CU-wdqcq03aw2). Same guard as /trace above — owner, nest admin, or
+  // server admin; everyone else 403. Registered before the sub-routers so it
+  // matches first under the LinearRouter.
+  nestsApp.get("/:nestId/activity-log", async (c) => {
+    const nestId = c.req.param("nestId")!;
+    if (!(await canManageStewards(nestId, c.get("userId")))) {
+      return c.json(
+        { error: "Only the nest owner, a nest admin, or the server admin can view activity." },
+        403,
+      );
+    }
+    const node = c.req.query("node");
+    const folder = c.req.query("folder");
+    if (node && folder !== undefined) {
+      throw new ValidationError("Pass node or folder, not both.");
+    }
+    const scope = node
+      ? { nodeId: assertSafeNodeId(node) }
+      : folder !== undefined
+        ? { folder: normalizeFolder(folder) }
+        : {};
+    if (scope.folder !== undefined) {
+      if (scope.folder === "") delete (scope as { folder?: string }).folder; // the nest root
+      else for (const seg of scope.folder.split("/")) {
+        if (!seg || seg === "." || seg === "..") throw new ValidationError("invalid folder");
+      }
+    }
+    const typesRaw = c.req.query("type");
+    const types = typesRaw
+      ? typesRaw.split(",").map((t) => t.trim()).filter(Boolean)
+      : undefined;
+    if (types?.some((t) => !(ACTIVITY_TYPES as readonly string[]).includes(t))) {
+      throw new ValidationError(`type must be one of: ${ACTIVITY_TYPES.join(", ")}`);
+    }
+    await flushAccessLog();
+    const page = await getScopedActivity({
+      nestId,
+      scope,
+      types: types as ActivityType[] | undefined,
+      actor: c.req.query("actor") || undefined,
+      limit: Number(c.req.query("limit") ?? 50),
+      offset: Number(c.req.query("offset") ?? 0),
+    });
+    return c.json(page);
+  });
+
   // Nest list/CRUD
   nestsApp.route("/", nestRoutes);
 
@@ -2603,6 +2720,7 @@ export function createApp(): Hono<AuthEnv> {
   // Hootie chat — read-tier like /context (it IS /context plus a model call).
   nestsApp.route("/:nestId", hootieRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
+  nestsApp.route("/:nestId", headlessRoutes);
   nestsApp.route("/:nestId", brandingRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);
   // "publications" (not "/publish") — POST /:nestId/publish is already taken by

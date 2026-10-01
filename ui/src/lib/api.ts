@@ -219,9 +219,14 @@ export async function getHealth() {
     subagent_max_depth?: number;
     subagent_max_children?: number;
     runner_key_configured?: boolean;
-    /** Hootie in the nest (default ON). Off → the launcher is hidden and
-     *  POST /nests/:id/chat 404s. */
+    /** Hootie in the nest (default OFF — admins opt in). Off → the launcher
+     *  is hidden and POST /nests/:id/chat 404s. */
     hootie_enabled?: boolean;
+    /** The assistant identity to show: the admin's custom one on an
+     *  enterprise licence, the default Hootie otherwise (server-enforced). */
+    hootie_brand?: HootieBrand;
+    /** Whether custom assistant identity is allowed (enterprise licence). */
+    hootie_branding_available?: boolean;
     /** PostHog project key, or null when analytics is unconfigured or usage
      *  telemetry is switched off. The browser needs it to send events. */
     posthog_key?: string | null;
@@ -238,6 +243,21 @@ export type SignInGate = "open" | "admin-only" | "disabled";
 export type ManualSignIn = "open" | "invite-only" | "disabled";
 
 /** Server-wide settings editable from the admin Settings page. */
+/** The assistant's identity as every surface renders it (from /health). */
+export interface HootieBrand {
+  name: string;
+  logo_url: string | null;
+  accent_color: string | null;
+  greeting: string | null;
+}
+
+export const DEFAULT_HOOTIE_BRAND: HootieBrand = {
+  name: "Hootie",
+  logo_url: null,
+  accent_color: null,
+  greeting: null,
+};
+
 export interface AdminSettings {
   promptowl_sign_in_gate: SignInGate;
   manual_sign_in: ManualSignIn;
@@ -256,8 +276,15 @@ export interface AdminSettings {
    *  the type only — existing nodes still read/render/version. */
   type_artifact_enabled: boolean;
   type_table_enabled: boolean;
-  /** Hootie in the nest (default ON). */
+  /** Hootie in the nest (default OFF — admins opt in). */
   hootie_enabled: boolean;
+  /** Custom assistant identity (enterprise). "" = default. Returned even
+   *  when not in effect; `hootie_branding_available` says whether it is. */
+  hootie_name: string;
+  hootie_logo_url: string;
+  hootie_accent_color: string;
+  hootie_greeting: string;
+  hootie_branding_available: boolean;
   /** Model Hootie answers with (default claude-opus-5; a gateway-side name
    *  such as `ollama/…` when routed through a gateway). */
   hootie_model: string;
@@ -1002,6 +1029,47 @@ export async function setNestVisibility(
   );
 }
 
+// Headless publishing (CU-wdqcq0314u) — owner / nest admin only. A headless
+// nest is API-only: buyers get read-only access keys that work with ctx/MCP,
+// and can never open or browse the nest.
+export interface HeadlessKey {
+  id: string;
+  label: string;
+  key_prefix: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export async function getNestHeadless(nestId: string) {
+  return request<{
+    enabled: boolean;
+    keys: HeadlessKey[];
+    /** Who keeps their seat — headless doesn't remove existing access. */
+    shared_with?: { collaborators: number; teams: number; grants: number };
+  }>(`/nests/${nestId}/headless`);
+}
+
+export async function setNestHeadless(nestId: string, enabled: boolean) {
+  return request<{ enabled: boolean }>(`/nests/${nestId}/headless`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+/** The token comes back ONCE — show it, then it is gone. */
+export async function mintNestHeadlessKey(nestId: string, label: string) {
+  return request<{ key: HeadlessKey; api_key: string }>(`/nests/${nestId}/headless/keys`, {
+    method: "POST",
+    body: JSON.stringify({ label }),
+  });
+}
+
+export async function revokeNestHeadlessKey(nestId: string, keyId: string) {
+  return request<{ revoked: true }>(`/nests/${nestId}/headless/keys/${keyId}`, {
+    method: "DELETE",
+  });
+}
+
 // Configure Public Docs Reader Mode (superadmin-only). Either field may be sent
 // on its own; home_node: null clears the designated landing node.
 export async function setNestReaderMode(
@@ -1230,13 +1298,14 @@ export interface PdfMeta {
 export async function createPdfNode(
   nestId: string,
   file: File,
-  opts: { title?: string; folder?: string; tags?: string[]; nodeId?: string } = {},
+  opts: { title?: string; folder?: string; tags?: string[]; nodeId?: string; changeNote?: string } = {},
 ) {
   const form = new FormData();
   form.append("file", file);
   if (opts.title) form.append("title", opts.title);
   if (opts.folder) form.append("folder", opts.folder);
   if (opts.nodeId) form.append("nodeId", opts.nodeId);
+  if (opts.changeNote?.trim()) form.append("changeNote", opts.changeNote.trim());
   for (const t of opts.tags ?? []) form.append("tags", t);
   const res = await fetch(`/nests/${nestId}/nodes/pdf`, {
     method: "POST",
@@ -1649,6 +1718,112 @@ export async function getNestFeed(
     limit: number;
     offset: number;
   }>(`/nests/${nestId}/feed?${params.toString()}`);
+}
+
+// ─── Agent activity (CU-wdqcq0314v) ──────────────────────────────────────
+
+export type AgentActivityKind = "create" | "update" | "restore" | "delete";
+export type AgentUndoEffect = "restore" | "discard" | "delete";
+
+export interface AgentActivityItem {
+  id: string;
+  kind: AgentActivityKind;
+  nodeId: string;
+  title?: string;
+  version?: number;
+  status?: string;
+  actor: string;
+  agent?: string;
+  changeNote?: string;
+  at: string;
+  undo: { available: boolean; effect?: AgentUndoEffect; restoreTo?: number; reason?: string };
+}
+
+/** What agents did to this nest, newest first, each with an undo verdict. */
+export async function getAgentActivity(
+  nestId: string,
+  opts: { scope?: "agents" | "all"; agent?: string; limit?: number; offset?: number } = {},
+) {
+  const params = new URLSearchParams({
+    scope: opts.scope ?? "agents",
+    limit: String(opts.limit ?? 50),
+    offset: String(opts.offset ?? 0),
+  });
+  if (opts.agent) params.set("agent", opts.agent);
+  return request<{ items: AgentActivityItem[]; limit: number; offset: number; hasMore: boolean }>(
+    `/nests/${nestId}/agent-activity?${params.toString()}`,
+  );
+}
+
+/** Undo one change: restore the previous version, discard a draft, or delete
+ *  a document the agent created. 409 carries why it can't be undone. */
+export async function undoAgentChange(nestId: string, nodeId: string, version: number) {
+  return request<{
+    ok: true;
+    effect: AgentUndoEffect;
+    version: number | null;
+    status?: string;
+    restoredVersion?: number;
+  }>(`/nests/${nestId}/agent-activity/undo`, {
+    method: "POST",
+    body: JSON.stringify({ nodeId, version }),
+  });
+}
+
+// ─── Admin activity log (CU-wdqcq03aw2) ──────────────────────────────────
+
+export type ActivityLogType =
+  | "created"
+  | "edited"
+  | "restored"
+  | "review_requested"
+  | "approved"
+  | "rejected"
+  | "review_cancelled"
+  | "commented"
+  | "comment_resolved"
+  | "deleted"
+  | "read"
+  | "retrieved"
+  | "exported";
+
+export interface ActivityLogItem {
+  id: string;
+  type: ActivityLogType;
+  /** null for a whole-nest event (a full export). */
+  nodeId: string | null;
+  title?: string;
+  actor: string;
+  agent?: string;
+  at: string;
+  version?: number;
+  detail?: string;
+  surface?: "api" | "mcp";
+}
+
+export type ActivityLogScope =
+  | { kind: "node"; nodeId: string }
+  | { kind: "folder"; folder: string }
+  | { kind: "nest" };
+
+/** Admin-only: who changed, reviewed, read, retrieved or exported a document,
+ *  a folder, or the nest. 403 for anyone but the owner / a nest admin. */
+export async function getActivityLog(
+  nestId: string,
+  scope: ActivityLogScope,
+  opts: { types?: ActivityLogType[]; actor?: string; limit?: number; offset?: number } = {},
+) {
+  const params = new URLSearchParams({
+    limit: String(opts.limit ?? 50),
+    offset: String(opts.offset ?? 0),
+  });
+  if (scope.kind === "node") params.set("node", scope.nodeId);
+  if (scope.kind === "folder") params.set("folder", scope.folder);
+  if (opts.types?.length) params.set("type", opts.types.join(","));
+  if (opts.actor) params.set("actor", opts.actor);
+  return request<{ items: ActivityLogItem[]; limit: number; offset: number; hasMore: boolean }>(
+    `/nests/${encodeURIComponent(nestId)}/activity-log?${params.toString()}`,
+  );
 }
 
 export async function submitForReview(

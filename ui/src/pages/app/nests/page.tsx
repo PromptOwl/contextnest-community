@@ -22,10 +22,12 @@ import {
   visibleUnsynced,
   nestInScope,
   DEFAULT_NEST_SCOPE,
+  restoredNestScope,
   type NestScope,
 } from "../../../lib/dashboard-scope";
 import { canRequestNestRemoval } from "../../../lib/nest-caps";
 import { filterAndSortArchivedNests } from "../../../lib/archived-nests";
+import { pendingInviteNestIds } from "../../../lib/pending-invites";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
@@ -63,7 +65,6 @@ import { ImportFolderModal } from "../../../components/ImportFolderModal";
  *  not mount 50 cards on load. */
 const NEST_PAGE_SIZE = 24;
 const NEST_SCOPE_KEY = "cn:dashboard:nestScope";
-const NEST_SCOPES: NestScope[] = ["all", "mine", "owned", "shared", "org", "public", "synced", "unsynced"];
 
 // relTime / formatServerDate live in lib/dates: SQL-default timestamps arrive
 // as UTC with no zone, which new Date() would read as local time.
@@ -81,7 +82,15 @@ export default function NestsPage() {
     isLoading: loading,
     refetch: refetchNests,
   } = useNests();
-  const allNests = nestsData?.nests ?? [];
+  const nestsWithPending = nestsData?.nests ?? [];
+  // Nests shared with the caller whose invite is still unread live only in the
+  // Pending invites card — every grid, count and empty state below leaves them
+  // out until the invite is accepted.
+  const { data: unreadData } = useQuery(reads.unreadNotifications());
+  const allNests = useMemo(() => {
+    const pending = pendingInviteNestIds(unreadData?.notifications);
+    return nestsWithPending.filter((n: any) => !pending.has(n.id));
+  }, [nestsWithPending, unreadData]);
   // Nest creation is admins-only unless the server opens it (NEST_CREATION) —
   // non-admins never see a create/import CTA they can't use.
   const { data: health } = useQuery(reads.health());
@@ -117,13 +126,11 @@ export default function NestsPage() {
   // just bounds how many cards are mounted at once.
   const [nestQuery, setNestQuery] = useState("");
   const [nestSort, setNestSort] = useState<"activity" | "name">("activity");
-  // Scope opens on "My nests" and is remembered per browser: on a shared
-  // server the discovered org/public nests are other people's, so they are a
-  // choice, not the first screen (CU-wdqcq02mek).
+  // Scope opens on "My nests"; a narrow scope is remembered per browser, but
+  // All / Organization / Public never become the first screen (CU-wdqcq02qzc).
   const [nestScope, setNestScopeState] = useState<NestScope>(() => {
     try {
-      const saved = localStorage.getItem(NEST_SCOPE_KEY);
-      if (saved && NEST_SCOPES.includes(saved as NestScope)) return saved as NestScope;
+      return restoredNestScope(localStorage.getItem(NEST_SCOPE_KEY));
     } catch {
       /* storage blocked — fall through to the default */
     }
@@ -445,7 +452,7 @@ export default function NestsPage() {
           />
 
           <PendingInvites
-            nests={allNests}
+            nests={nestsWithPending}
             onOpen={(n) =>
               onSelectNest(n.id, n.name, n.is_owner ?? false, n.user_id === ANON_USER_ID)
             }
@@ -1573,7 +1580,8 @@ function PendingInvites({
   const [busy, setBusy] = useState<string | null>(null);
   const invites = (data?.notifications ?? []).filter((n) => n.kind === "nest_invite");
   // One row per nest, even if it was shared more than once.
-  const pending = nests.filter((nest) => invites.some((i) => i.nest_id === nest.id));
+  const pendingIds = pendingInviteNestIds(data?.notifications);
+  const pending = nests.filter((nest) => pendingIds.has(nest.id));
   if (pending.length === 0) return null;
 
   const settle = (nestId: string) =>

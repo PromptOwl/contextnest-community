@@ -43,7 +43,7 @@ export async function flushTelemetry(): Promise<void> {
 
   // Gather server stats
   const userCount =
-    ((await db.get("SELECT COUNT(*) as c FROM users")) as { c: number })?.c ||
+    ((await db.get("SELECT COUNT(*) as c FROM users WHERE COALESCE(is_service, 0) = 0")) as { c: number })?.c ||
     0;
   const nestCount =
     ((await db.get("SELECT COUNT(*) as c FROM nests")) as { c: number })?.c ||

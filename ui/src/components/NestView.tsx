@@ -17,7 +17,7 @@ import {
   Clock, CheckCircle2, Loader2, Link2, Settings as SettingsIcon,
   Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
   FileStack, FolderPlus, X,
-  Activity, BookOpen, Archive, Eye, Palette,
+  Activity, BookOpen, Archive, Eye, Palette, History,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { prettyFolderPath } from "./FolderTree";
@@ -47,6 +47,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { NestPageHeader } from "./NestPageHeader";
+import { UploadingOverlay } from "./UploadingOverlay";
 import {
   deriveNestCaps,
   isNestArchived,
@@ -54,6 +55,7 @@ import {
 import { foldersCoveredBy } from "../lib/reader";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
+import { FolderDeleteDialog, type FolderDeleteTarget } from "./nest/FolderDeleteDialog";
 // Each tab is its own chunk, loaded when first opened.
 const ExternalEditsTab = lazyChunk(() => import("./nest/ExternalEditsTab").then((m) => ({ default: m.ExternalEditsTab })));
 const StewardsTab = lazyChunk(() => import("./nest/StewardsTab").then((m) => ({ default: m.StewardsTab })));
@@ -78,10 +80,6 @@ import {
   Tabs, TabsList, TabsTrigger, TabsContent,
 } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { CountSkeleton } from "@/components/ui/count-skeleton";
 import {
@@ -91,6 +89,7 @@ import {
   type Steward, type StewardRole, type ReviewRequest,
 } from "./governance";
 import { useAuth } from "../auth/AuthContext";
+import { ActivityLogPanel } from "./ActivityLogPanel";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { toast } from "sonner";
 
@@ -350,6 +349,8 @@ export function NestView({
   const [initialLoad, setInitialLoad] = useState(true);
   const [reviewNode, setReviewNode] = useState<any | null>(null);
   const [showAssignSteward, setShowAssignSteward] = useState(false);
+  // Admin activity log for the whole nest (CU-wdqcq03aw2).
+  const [showNestActivity, setShowNestActivity] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
   const [showNewFolder, setShowNewFolder] = useState(false);
@@ -405,7 +406,7 @@ export function NestView({
   // lists live on Documents — Overview would hide the scope entirely.
   const [activeTab, setActiveTabState] = useState(
     initialTab ??
-      (initialFolder || initialTags?.length ? "documents" : "overview"),
+    (initialFolder || initialTags?.length ? "documents" : "overview"),
   );
   // Wrapper so every tab change — the tab strip, and the Overview folder
   // clicks that jump to Documents — mirrors into ?tab= via App.
@@ -546,36 +547,36 @@ export function NestView({
         grantOnly
           ? empty({ requests: [], total: 0 })
           : qc.fetchQuery(reads.reviewQueue(nestId)).catch((e) => {
-              console.error("[NestView] getReviewQueue failed", nestId, e);
-              toast.error(e?.message || "Failed to load review queue");
-              return { requests: [], total: 0 };
-            }),
+            console.error("[NestView] getReviewQueue failed", nestId, e);
+            toast.error(e?.message || "Failed to load review queue");
+            return { requests: [], total: 0 };
+          }),
         // Pending AND declined in one call: pending drives the admin queue,
         // declined is how the person who asked learns the verdict.
         grantOnly
           ? empty({ requests: [] as api.DeletionRequest[], total: 0 })
           : qc.fetchQuery(reads.deletionRequests(nestId, "all")).catch((e) => {
-              console.error("[NestView] getDeletionRequests failed", nestId, e);
-              return { requests: [] as api.DeletionRequest[], total: 0 };
-            }),
+            console.error("[NestView] getDeletionRequests failed", nestId, e);
+            return { requests: [] as api.DeletionRequest[], total: 0 };
+          }),
         grantOnly
           ? empty({
+            stewardship_enabled: false,
+            allow_self_approve: false,
+            prime_only_review: false,
+            prime_tags: [] as string[],
+            creator_is_reviewer: false,
+          })
+          : qc.fetchQuery(reads.settings(nestId)).catch((e) => {
+            console.error("[NestView] getNestSettings failed", nestId, e);
+            return {
               stewardship_enabled: false,
               allow_self_approve: false,
               prime_only_review: false,
               prime_tags: [] as string[],
               creator_is_reviewer: false,
-            })
-          : qc.fetchQuery(reads.settings(nestId)).catch((e) => {
-              console.error("[NestView] getNestSettings failed", nestId, e);
-              return {
-                stewardship_enabled: false,
-                allow_self_approve: false,
-                prime_only_review: false,
-                prime_tags: [] as string[],
-                creator_is_reviewer: false,
-              };
-            }),
+            };
+          }),
       ]);
     setReviewQueue(queueData.requests);
     setDeletionRequests(deletionData.requests);
@@ -1073,9 +1074,12 @@ export function NestView({
   // artifact (commentable in the ArtifactViewer's Annotate pane). Title comes
   // from the filename. A single dropped file opens straight into its editor.
   const [dragOver, setDragOver] = useState(false);
-  const [importing, setImporting] = useState(false);
+  // What is being uploaded (file name or "N files"), or null when idle.
+  const [importing, setImporting] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [importMenuOpen, setImportMenuOpen] = useState(false);
+  // Folder picked for deletion from the Overview index.
+  const [overviewDeleteFolder, setOverviewDeleteFolder] = useState<FolderDeleteTarget | null>(null);
   // Phone width: Share folds into the ⋮ menu so the header actions keep one row.
   const isPhone = useMediaQuery("(max-width: 639px)");
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
@@ -1096,7 +1100,7 @@ export function NestView({
         toast.error("Drop .md, .html or .pdf files to add them to this vault.");
         return;
       }
-      setImporting(true);
+      setImporting(files.length === 1 ? files[0].name : `${files.length} files`);
       const createdIds: string[] = [];
       try {
         for (const file of files) {
@@ -1135,7 +1139,7 @@ export function NestView({
           if (createdIds.length === 1) onOpenDocument(createdIds[0]);
         }
       } finally {
-        setImporting(false);
+        setImporting(null);
       }
     },
     [nestId, fetchData, onOpenDocument],
@@ -1163,22 +1167,22 @@ export function NestView({
             </Button>
           </div>
         )}
-      <ReaderView
+        <ReaderView
           key={previewReader ? "preview" : "reader"}
-        nestId={nestId}
-        nestName={editableName}
-        nodes={nodes}
-        tocGroups={tocGroups}
-        knownFolders={knownFolders}
-        readerHomeNode={readerHomeNode}
-        initialDoc={initialDoc}
-        onDocChange={onReaderDocChange}
-        onExpandFolder={fetchLevel}
-        loadingFolders={loadingFolders}
-        loadedFolders={loadedFolderPaths}
+          nestId={nestId}
+          nestName={editableName}
+          nodes={nodes}
+          tocGroups={tocGroups}
+          knownFolders={knownFolders}
+          readerHomeNode={readerHomeNode}
+          initialDoc={initialDoc}
+          onDocChange={onReaderDocChange}
+          onExpandFolder={fetchLevel}
+          loadingFolders={loadingFolders}
+          loadedFolders={loadedFolderPaths}
           approvedOnly={previewReader}
           branding={branding}
-      />
+        />
       </div>
     );
   }
@@ -1218,13 +1222,7 @@ export function NestView({
           </div>
         </div>
       )}
-      {importing && (
-        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-background/60">
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" /> Importing…
-          </div>
-        </div>
-      )}
+      {importing && <UploadingOverlay title="Uploading…" detail={importing} />}
 
       {/* Held-write banner — surfaces agent writes waiting on confirmation
           (Push Confirmation Gate). Each card opens the confirm modal. */}
@@ -1258,6 +1256,7 @@ export function NestView({
           </div>
         </div>
       )}
+
       {/* Header — the row shared by every nest-scoped page. Only the actions
           passed as children differ from Board/Graph/Definitions/Workflows. */}
       <NestPageHeader
@@ -1269,52 +1268,52 @@ export function NestView({
             // on a phone instead of truncating it to one letter.
             <div className="min-w-[11rem] flex-1 sm:min-w-0">
               <div className="flex items-center gap-1">
-              <input
-                value={editableName}
-                onChange={(e) => {
-                  setEditableName(e.target.value);
-                  setRenameError(null);
-                  scheduleRename();
-                }}
-                onBlur={flushRename}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    flushRename();
-                    (e.target as HTMLInputElement).blur();
-                  }
-                  if (e.key === "Escape") {
-                    skipNextFlush.arm();
-                    setEditableName(lastSavedName.current);
+                <input
+                  value={editableName}
+                  onChange={(e) => {
+                    setEditableName(e.target.value);
                     setRenameError(null);
-                    (e.target as HTMLInputElement).blur();
-                  }
-                }}
-                aria-label="Nest name"
-                title="Click to rename — saved automatically"
-                className="w-full min-w-0 truncate text-xl font-semibold bg-transparent outline-none border-b border-transparent hover:border-border focus:border-primary px-1 -ml-1 rounded-sm"
-              />
-              {/* Same rename the overflow menu used to offer (name + description
+                    scheduleRename();
+                  }}
+                  onBlur={flushRename}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      flushRename();
+                      (e.target as HTMLInputElement).blur();
+                    }
+                    if (e.key === "Escape") {
+                      skipNextFlush.arm();
+                      setEditableName(lastSavedName.current);
+                      setRenameError(null);
+                      (e.target as HTMLInputElement).blur();
+                    }
+                  }}
+                  aria-label="Nest name"
+                  title="Click to rename — saved automatically"
+                  className="w-full min-w-0 truncate text-xl font-semibold bg-transparent outline-none border-b border-transparent hover:border-border focus:border-primary px-1 -ml-1 rounded-sm"
+                />
+                {/* Same rename the overflow menu used to offer (name + description
                   dialog), beside the name so it is discoverable; the input itself
                   still edits inline. !loading: the description only lands with
                   fetchData, so opening earlier would prefill it empty. */}
-              {!loading && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    // Flush a pending inline rename first so the dialog primes
-                    // from the latest text instead of racing the debounce.
-                    flushRename();
-                    setShowRename(true);
-                  }}
-                  className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-                  title="Rename nest"
-                  aria-label="Rename nest"
-                  data-testid="nest-rename"
-                >
-                  <Pencil className="h-4 w-4" />
-                </button>
-              )}
+                {!loading && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      // Flush a pending inline rename first so the dialog primes
+                      // from the latest text instead of racing the debounce.
+                      flushRename();
+                      setShowRename(true);
+                    }}
+                    className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    title="Rename nest"
+                    aria-label="Rename nest"
+                    data-testid="nest-rename"
+                  >
+                    <Pencil className="h-4 w-4" />
+                  </button>
+                )}
               </div>
               {renameError && (
                 <p
@@ -1330,149 +1329,149 @@ export function NestView({
         }
         badges={
           <>
-          {/* Visibility — an inline toggle for owner/admin (so the public/
+            {/* Visibility — an inline toggle for owner/admin (so the public/
               private switch isn't buried in the Share dialog), a read-only
               badge for everyone else. Gated on !initialLoad (not `loading`,
               which flips on every background refetch too — see its
               definition above) so the header never flashes the "private"
               default before the real value lands from fetchData. */}
-          {!initialLoad && (canManage ? (
-            // Two-state on purpose: a header shortcut for the common flip,
-            // private <-> public. An org nest routes to the full three-tier
-            // control on the Collaborators tab instead (see
-            // handleVisibilityToggle), since it can move either direction.
-            // Choosing among all three tiers lives in NestVisibilityControl
-            // (Collaborators tab / Share dialog), which is also where each
-            // tier is explained.
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleVisibilityToggle}
-              disabled={visibilitySaving}
-              className={`shrink-0 h-7 gap-1.5 ${visibility === "public"
-                ? "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
-                : ""
-                }`}
-              title={
-                visibility === "public"
-                  ? "Public — anyone with the URL can read. Click to make private."
-                  : visibility === "org"
-                    ? `Organization — ${visibilityTierHint("org", { sharedDeployment }).toLowerCase()}. Click to manage sharing (Collaborators tab).`
-                    : "Private. Click to make public (anyone with the URL can read)."
-              }
-            >
-              {visibilitySaving ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : visibility === "public" ? (
-                <Globe className="h-3.5 w-3.5" />
-              ) : visibility === "org" ? (
-                <Building2 className="h-3.5 w-3.5" />
-              ) : (
-                <Lock className="h-3.5 w-3.5" />
-              )}
-              {visibility === "public"
-                ? "Public"
-                : visibility === "org"
-                  ? "Organization"
-                  : "Private"}
-            </Button>
-          ) : (
-            visibility !== "private" && (
-              <Badge
+            {!initialLoad && (canManage ? (
+              // Two-state on purpose: a header shortcut for the common flip,
+              // private <-> public. An org nest routes to the full three-tier
+              // control on the Collaborators tab instead (see
+              // handleVisibilityToggle), since it can move either direction.
+              // Choosing among all three tiers lives in NestVisibilityControl
+              // (Collaborators tab / Share dialog), which is also where each
+              // tier is explained.
+              <Button
                 variant="outline"
-                // Green for public, blue for org — same pairing the dashboard
-                // card badge uses, so the two tiers never read as one colour.
+                size="sm"
+                onClick={handleVisibilityToggle}
+                disabled={visibilitySaving}
+                className={`shrink-0 h-7 gap-1.5 ${visibility === "public"
+                  ? "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
+                  : ""
+                  }`}
+                title={
+                  visibility === "public"
+                    ? "Public — anyone with the URL can read. Click to make private."
+                    : visibility === "org"
+                      ? `Organization — ${visibilityTierHint("org", { sharedDeployment }).toLowerCase()}. Click to manage sharing (Collaborators tab).`
+                      : "Private. Click to make public (anyone with the URL can read)."
+                }
+              >
+                {visibilitySaving ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : visibility === "public" ? (
+                  <Globe className="h-3.5 w-3.5" />
+                ) : visibility === "org" ? (
+                  <Building2 className="h-3.5 w-3.5" />
+                ) : (
+                  <Lock className="h-3.5 w-3.5" />
+                )}
+                {visibility === "public"
+                  ? "Public"
+                  : visibility === "org"
+                    ? "Organization"
+                    : "Private"}
+              </Button>
+            ) : (
+              visibility !== "private" && (
+                <Badge
+                  variant="outline"
+                  // Green for public, blue for org — same pairing the dashboard
+                  // card badge uses, so the two tiers never read as one colour.
                   className={`shrink-0 gap-1 ${visibility === "public"
                     ? "border-green-200 bg-green-50 text-green-700"
                     : "border-blue-200 bg-blue-50 text-blue-700"
-                }`}
-                title={
-                  visibility === "public"
-                    ? "Anyone with the URL can read this nest"
-                    : "Everyone signed in to this deployment can read this nest"
-                }
-              >
-                {visibility === "public" ? (
-                  <Globe className="h-3 w-3" />
-                ) : (
-                  <Building2 className="h-3 w-3" />
-                )}
-                {visibility === "public" ? "Public" : "Organization"}
-              </Badge>
-            )
-          ))}
-          {/* Public Docs Reader Mode config — server admin, or this nest's own
+                    }`}
+                  title={
+                    visibility === "public"
+                      ? "Anyone with the URL can read this nest"
+                      : "Everyone signed in to this deployment can read this nest"
+                  }
+                >
+                  {visibility === "public" ? (
+                    <Globe className="h-3 w-3" />
+                  ) : (
+                    <Building2 className="h-3 w-3" />
+                  )}
+                  {visibility === "public" ? "Public" : "Organization"}
+                </Badge>
+              )
+            ))}
+            {/* Public Docs Reader Mode config — server admin, or this nest's own
               owner/admin (see canManageReaderMode). A menu rather than a
               toggle: the landing document is part of the same setting, and
               changing it must not mean switching reader mode off and on
               again. Also gated on !initialLoad — same flash-of-default-state
               reason as the visibility badge above. */}
             {canManageReaderMode && !nestArchived && !initialLoad && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setReaderDialogOpen(true)}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setReaderDialogOpen(true)}
                 className={`shrink-0 h-7 gap-1.5 ${readerModeEnabled
                   ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
                   : ""
-              }`}
-              title="Public Docs Reader Mode — the clean, read-only docs view public readers get."
-            >
-              {readerModeSaving ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <BookOpen className="h-3.5 w-3.5" />
-              )}
-              {readerModeEnabled ? "Reader: On" : "Reader: Off"}
-            </Button>
-          )}
-          {isImported && (
-            <Badge
-              variant="outline"
-              className="shrink-0 gap-1 border-blue-200 bg-blue-50 text-blue-700"
-              title="Imported from a folder — its files were copied into the workspace"
-            >
-              <FolderInput className="h-3 w-3" />
-              Imported
-            </Badge>
-          )}
-          {/* Same flag a doc/folder row gets — the requester's only sign their
+                  }`}
+                title="Public Docs Reader Mode — the clean, read-only docs view public readers get."
+              >
+                {readerModeSaving ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <BookOpen className="h-3.5 w-3.5" />
+                )}
+                {readerModeEnabled ? "Reader: On" : "Reader: Off"}
+              </Button>
+            )}
+            {isImported && (
+              <Badge
+                variant="outline"
+                className="shrink-0 gap-1 border-blue-200 bg-blue-50 text-blue-700"
+                title="Imported from a folder — its files were copied into the workspace"
+              >
+                <FolderInput className="h-3 w-3" />
+                Imported
+              </Badge>
+            )}
+            {/* Same flag a doc/folder row gets — the requester's only sign their
               request is still waiting on an admin. An ARCHIVE ask is reversible,
               so it says so and drops the red: telling every viewer the nest is
               up for permanent deletion would be plainly wrong. */}
-          {nestFlag && (() => {
-            const isOwn = nestFlag.requestedBy.toLowerCase() === currentEmail;
-            const isArchiveAsk = nestFlag.targetType === "nest_archive";
-            const verb = isArchiveAsk ? "archived" : "deleted";
-            return (
-              <Badge
-                variant="outline"
+            {nestFlag && (() => {
+              const isOwn = nestFlag.requestedBy.toLowerCase() === currentEmail;
+              const isArchiveAsk = nestFlag.targetType === "nest_archive";
+              const verb = isArchiveAsk ? "archived" : "deleted";
+              return (
+                <Badge
+                  variant="outline"
                   className={`shrink-0 gap-1 ${isArchiveAsk
                     ? "border-amber-200 bg-amber-50 text-amber-700"
                     : "border-red-200 bg-red-50 text-red-700"
-                } ${isOwn ? "cursor-pointer hover:opacity-80" : ""}`}
-                title={
-                  isOwn
-                    ? `Click to withdraw your ${isArchiveAsk ? "archive" : "deletion"} request`
-                    : `${nestFlag.requestedBy} asked for this nest to be ${verb}: "${nestFlag.reason}". A nest owner or admin decides.`
-                }
-                data-testid="nest-deletion-flag"
-                onClick={isOwn ? () => handleWithdrawDeletion(nestFlag) : undefined}
-              >
-                {isArchiveAsk ? (
-                  <Archive className="h-3 w-3" />
-                ) : (
-                  <Trash2 className="h-3 w-3" />
-                )}
-                {isArchiveAsk ? "Archive requested" : "Deletion requested"}
-                {isOwn && <X className="h-3 w-3 ml-0.5" />}
-              </Badge>
-            );
-          })()}
+                    } ${isOwn ? "cursor-pointer hover:opacity-80" : ""}`}
+                  title={
+                    isOwn
+                      ? `Click to withdraw your ${isArchiveAsk ? "archive" : "deletion"} request`
+                      : `${nestFlag.requestedBy} asked for this nest to be ${verb}: "${nestFlag.reason}". A nest owner or admin decides.`
+                  }
+                  data-testid="nest-deletion-flag"
+                  onClick={isOwn ? () => handleWithdrawDeletion(nestFlag) : undefined}
+                >
+                  {isArchiveAsk ? (
+                    <Archive className="h-3 w-3" />
+                  ) : (
+                    <Trash2 className="h-3 w-3" />
+                  )}
+                  {isArchiveAsk ? "Archive requested" : "Deletion requested"}
+                  {isOwn && <X className="h-3 w-3 ml-0.5" />}
+                </Badge>
+              );
+            })()}
           </>
         }
       >
-          {/* Connect (external clients) and Add-with-AI (seed content) are
+        {/* Connect (external clients) and Add-with-AI (seed content) are
               distinct first-class actions — Connect wires tools, Add-with-AI
               generates context into the nest. */}
         {!nestArchived && (
@@ -1481,132 +1480,154 @@ export function NestView({
             Connect
           </Button>
         )}
-          {!isReadOnly && (
-            <Button variant="outline" size="sm" onClick={() => setShowGenerate(true)}>
-              <Sparkles className="h-3.5 w-3.5 mr-1.5" />
-              Add with AI
-            </Button>
-          )}
-          {canManage && !isPhone && (
-            // Inside the nest, Share IS the Collaborators tab — one surface
-            // for visibility, people and teams (CU-wdqcpzzzy6). On a phone it
-            // is the ⋮ menu's first item instead.
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setActiveTab("collaborators")}
-            >
-              <Users className="h-3.5 w-3.5 mr-1.5" />
-              Share
-            </Button>
-          )}
-          {!isReadOnly && canEditDocs && (
-            <>
-              {/* Visible import affordance — same path as drag-and-drop.
+        {!isReadOnly && (
+          <Button variant="outline" size="sm" onClick={() => setShowGenerate(true)}>
+            <Sparkles className="h-3.5 w-3.5 mr-1.5" />
+            Add with AI
+          </Button>
+        )}
+        {canManage && !isPhone && (
+          // Inside the nest, Share IS the Collaborators tab — one surface
+          // for visibility, people and teams (CU-wdqcpzzzy6). On a phone it
+          // is the ⋮ menu's first item instead.
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setActiveTab("collaborators")}
+          >
+            <Users className="h-3.5 w-3.5 mr-1.5" />
+            Share
+          </Button>
+        )}
+        {!isReadOnly && canEditDocs && (
+          <>
+            {/* Visible import affordance — same path as drag-and-drop.
                   Two inputs: loose files, or a whole vault folder (nested
                   paths preserved via webkitRelativePath). */}
-              <input
-                ref={importInputRef}
-                type="file"
-                multiple
-                accept=".md,.markdown,.txt,.html,.htm,.pdf"
-                className="hidden"
-                onChange={(e) => {
-                  if (e.target.files?.length) void importFiles(e.target.files);
-                  e.target.value = "";
-                }}
-              />
-              <input
-                ref={pdfInputRef}
-                type="file"
-                multiple
-                accept="application/pdf,.pdf"
-                className="hidden"
-                onChange={(e) => {
-                  if (e.target.files?.length) void importFiles(e.target.files);
-                  e.target.value = "";
-                }}
-              />
-              <input
-                ref={importDirRef}
-                type="file"
-                className="hidden"
-                // @ts-expect-error — non-standard but universal in practice
-                webkitdirectory=""
-                onChange={(e) => {
-                  if (e.target.files?.length) void importFiles(e.target.files);
-                  e.target.value = "";
-                }}
-              />
-            </>
-          )}
-          {/* Secondary actions collapsed into an overflow menu at the end.
+            <input
+              ref={importInputRef}
+              type="file"
+              multiple
+              accept=".md,.markdown,.txt,.html,.htm,.pdf"
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files?.length) void importFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+            <input
+              ref={pdfInputRef}
+              type="file"
+              multiple
+              accept="application/pdf,.pdf"
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files?.length) void importFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+            <input
+              ref={importDirRef}
+              type="file"
+              className="hidden"
+              // @ts-expect-error — non-standard but universal in practice
+              webkitdirectory=""
+              onChange={(e) => {
+                if (e.target.files?.length) void importFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+          </>
+        )}
+        {/* Secondary actions collapsed into an overflow menu at the end.
               Connect: view-only export/data-egress. Share: owner/admin only
               (server requires admin on /collaborators + /visibility). Delete:
               destructive, write+admin gated. */}
-          {(() => {
-            const actions: OverflowAction[] = [];
-            if (canManage && isPhone)
-              actions.push({
-                label: "Share",
-                icon: Users,
-                onSelect: () => setActiveTab("collaborators"),
-              });
-            if (!isReadOnly && canManageGovernance)
-              actions.push({
-                label: "Nest settings",
-                icon: SettingsIcon,
-                onSelect: () => setShowSettings(true),
-              });
-            // Gate on canManageGovernance (owner/admin on THIS nest), not the
-            // server-admin flag — otherwise a license admin who is only an
-            // editor collaborator here sees "Assign Steward" in the menu while
-            // the Steward tab (also canManageGovernance-gated) stays hidden.
-            if (!isReadOnly && stewardshipEnabled && canManageGovernance)
-              actions.push({
-                label: "Assign Steward",
-                icon: Shield,
-                onSelect: () => setShowAssignSteward(true),
-              });
-            // Nest-scoped activity trace — a read-only audit view, so not
+        {(() => {
+          const actions: OverflowAction[] = [];
+          if (canManage && isPhone)
+            actions.push({
+              label: "Share",
+              icon: Users,
+              onSelect: () => setActiveTab("collaborators"),
+            });
+          if (!isReadOnly && canManageGovernance)
+            actions.push({
+              label: "Nest settings",
+              icon: SettingsIcon,
+              onSelect: () => setShowSettings(true),
+            });
+          // Gate on canManageGovernance (owner/admin on THIS nest), not the
+          // server-admin flag — otherwise a license admin who is only an
+          // editor collaborator here sees "Assign Steward" in the menu while
+          // the Steward tab (also canManageGovernance-gated) stays hidden.
+          if (!isReadOnly && stewardshipEnabled && canManageGovernance)
+            actions.push({
+              label: "Assign Steward",
+              icon: Shield,
+              onSelect: () => setShowAssignSteward(true),
+            });
+          // Nest-scoped activity trace — a read-only audit view, so not
           // gated on isReadOnly (a viewer may see it); withheld on an archived
           // nest with the rest of its management. Same owner/nest-admin rule
           // as the server's GET /nests/:id/trace (canManageStewards).
           if (canManageGovernance && onOpenTrace && !nestArchived)
-              actions.push({
-                label: "Activity trace",
-                icon: Activity,
-                onSelect: onOpenTrace,
-              });
-            // One Delete entry, like a document's: the owner deletes the nest
-            // outright, an editor raises a request an owner/admin actions.
-            // Hidden below owner once a nest flag is already pending, and
-            // withheld from viewers and reviewer-only stewards — neither may
-            // ask for a nest to be destroyed (canRequestDeletion). Also
-            // withheld outright when read-only (e.g. an archived nest) —
-            // canDeleteNest/canEditDocs don't fold in isArchived themselves.
-            if (
-              !isReadOnly &&
-              (canDeleteNest || canEditDocs) &&
-              (canDeleteNest || !nestFlagPending)
-            )
-              actions.push({
-                label: "Delete",
-                icon: Trash2,
-                destructive: canDeleteNest,
-                separatorBefore: true,
-                onSelect: () =>
-                  canDeleteNest ? setShowDelete(true) : setNestFlagOpen(true),
-              });
-            return (
-              <OverflowMenu
-                actions={actions}
-                variant="outline"
-                className="h-8 w-8"
-              />
-            );
-          })()}
+            actions.push({
+              label: "Activity trace",
+              icon: Activity,
+              onSelect: onOpenTrace,
+            });
+          // Who changed, read, pulled or exported what in this nest — the
+          // document-level log, nest-wide. Same owner/nest-admin rule as
+          // GET /activity-log; read-only, so shown on an archived nest too.
+          if (canManageGovernance)
+            actions.push({
+              label: "Activity",
+              icon: History,
+              testId: "nest-activity-log",
+              onSelect: () => setShowNestActivity(true),
+            });
+          // One Delete entry, like a document's: the owner deletes the nest
+          // outright, an editor raises a request an owner/admin actions.
+          // Hidden below owner once a nest flag is already pending, and
+          // withheld from viewers and reviewer-only stewards — neither may
+          // ask for a nest to be destroyed (canRequestDeletion). Also
+          // withheld outright when read-only (e.g. an archived nest) —
+          // canDeleteNest/canEditDocs don't fold in isArchived themselves.
+          if (
+            !isReadOnly &&
+            (canDeleteNest || canEditDocs) &&
+            (canDeleteNest || !nestFlagPending)
+          )
+            actions.push({
+              label: "Delete",
+              icon: Trash2,
+              destructive: canDeleteNest,
+              separatorBefore: true,
+              onSelect: () =>
+                canDeleteNest ? setShowDelete(true) : setNestFlagOpen(true),
+            });
+          return (
+            <OverflowMenu
+              actions={actions}
+              variant="outline"
+              className="h-8 w-8"
+            />
+          );
+        })()}
       </NestPageHeader>
+      {showNestActivity && (
+        <ActivityLogPanel
+          nestId={nestId}
+          scope={{ kind: "nest" }}
+          label={editableName || nestName}
+          onClose={() => setShowNestActivity(false)}
+          onOpenNode={(id) => {
+            setShowNestActivity(false);
+            onOpenDocument(id);
+          }}
+        />
+      )}
 
       {/* Tabbed layout — Documents / Review Queue / Stewards.
           When stewardship is off the latter two tabs are hidden because
@@ -1667,44 +1688,29 @@ export function NestView({
           </TabsList>
           {!isReadOnly && canEditDocs && (
             <div className="ml-auto flex shrink-0 items-center gap-2 pb-2 max-sm:order-first max-sm:w-full max-sm:justify-end">
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-muted-foreground"
-              onClick={() => setShowNewFolder(true)}
-              title="Create a folder (nest with parent/child)"
-              aria-label="New Folder"
-            >
-              <FolderPlus className="h-4 w-4 sm:mr-1.5" />
-              {/* Icon-only on a phone so the three actions fit one row. */}
-              <span className="max-sm:hidden">New Folder</span>
-            </Button>
-            {/* Import and New Document act on the content area too, so they
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-muted-foreground"
+                onClick={() => setShowNewFolder(true)}
+                title="Create a folder (nest with parent/child)"
+                aria-label="New Folder"
+              >
+                <FolderPlus className="h-4 w-4 sm:mr-1.5" />
+                {/* Icon-only on a phone so the three actions fit one row. */}
+                <span className="max-sm:hidden">New Folder</span>
+              </Button>
+              {/* Import and New Document act on the content area too, so they
                 sit with New Folder rather than in the nest header. */}
-              {/* Controlled so the Overview's empty state can open this same
-                  menu rather than keep a second copy of its items. */}
-              <DropdownMenu modal={false} open={importMenuOpen} onOpenChange={setImportMenuOpen}>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" size="sm" data-testid="nest-import-files">
-                    <Upload className="h-3.5 w-3.5 mr-1.5" />
-                    Import
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onSelect={() => importInputRef.current?.click()}>
-                    Files (.md / .html / .pdf)
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onSelect={() => pdfInputRef.current?.click()}
-                    data-testid="nest-upload-pdf"
-                  >
-                    Upload PDF (as a document)
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => importDirRef.current?.click()}>
-                    Whole vault (folder, keeps structure)
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <Button
+                variant="outline"
+                size="sm"
+                data-testid="nest-import-files"
+                onClick={() => setImportMenuOpen(true)}
+              >
+                <Upload className="h-3.5 w-3.5 mr-1.5" />
+                Import
+              </Button>
               <Button
                 size="sm"
                 // Default into the folder the Documents tab is scoped to, so a
@@ -1726,272 +1732,289 @@ export function NestView({
           )}
         </div>
 
-      {/* Stats Cards — only governance-related stats when stewardship is on.
+        {/* Stats Cards — only governance-related stats when stewardship is on.
           In ungoverned mode every doc is auto-approved so the pending/review
           columns are always zero and just add noise. Not on Overview: it
           carries the same numbers as its own summary line (CU-wdqcq02qb1). */}
-      {activeTab !== "overview" && (
-      <div
-        className={`grid grid-cols-1 gap-4 mb-4 ${stewardshipEnabled
-          ? "md:grid-cols-4"
-          : "md:grid-cols-1 max-w-sm"
-          }`}
-      >
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription>Total Documents</CardDescription>
-            {/* initialLoad, not `loading`: a background refetch keeps the real
+        {activeTab !== "overview" && (
+          <div
+            className={`grid grid-cols-1 gap-4 mb-4 ${stewardshipEnabled
+              ? "md:grid-cols-4"
+              : "md:grid-cols-1 max-w-sm"
+              }`}
+          >
+            <Card>
+              <CardHeader className="pb-2">
+                <CardDescription>Total Documents</CardDescription>
+                {/* initialLoad, not `loading`: a background refetch keeps the real
                 numbers on screen, and only a cold load — where every stat is
                 still 0 — shows the placeholder. */}
-            <CardTitle className="text-3xl">
-              {initialLoad ? <CountSkeleton className="h-8 w-12" /> : stats.total}
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <FileText className="h-4 w-4" />
-              {/* An empty nest has nothing to be approved or AI-ready, so the
+                <CardTitle className="text-3xl">
+                  {initialLoad ? <CountSkeleton className="h-8 w-12" /> : stats.total}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <FileText className="h-4 w-4" />
+                  {/* An empty nest has nothing to be approved or AI-ready, so the
                   readiness line would be a promise about content that isn't
                   there — say what's true instead (CU-wdqcq00x8y). */}
-              <span>
-                {/* Gated on the same cold-load flag as the count above: every
+                  <span>
+                    {/* Gated on the same cold-load flag as the count above: every
                     stat is 0 until the first read lands, and claiming an empty
                     nest before then is wrong on a slow connection. */}
-                {initialLoad
-                  ? "Loading…"
-                  : stats.total === 0
-                    ? "No documents yet"
-                    : stewardshipEnabled
-                      ? "In your context"
-                      : "Auto-approved, AI-ready"}
-              </span>
-            </div>
-          </CardContent>
-        </Card>
-        {stewardshipEnabled && (
-          <>
-            <Card>
-              <CardHeader className="pb-2">
-                <CardDescription>Pending Approvals</CardDescription>
-                <CardTitle className="text-3xl text-amber-600">
-                  {initialLoad ? (
-                    <CountSkeleton className="h-8 w-12" />
-                  ) : (
-                    stats.pending
-                  )}
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Clock className="h-4 w-4" />
-                  <span>Awaiting approval</span>
-                </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className="pb-2">
-                <CardDescription>AI Ready</CardDescription>
-                <CardTitle className="text-3xl text-green-600">
-                  {initialLoad ? (
-                    <CountSkeleton className="h-8 w-12" />
-                  ) : (
-                    stats.approved
-                  )}
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <CheckCircle2 className="h-4 w-4" />
-                  <span>
                     {initialLoad
                       ? "Loading…"
                       : stats.total === 0
-                        ? "Nothing to evaluate yet"
-                        : "Approved for AI"}
+                        ? "No documents yet"
+                        : stewardshipEnabled
+                          ? "In your context"
+                          : "Auto-approved, AI-ready"}
                   </span>
                 </div>
               </CardContent>
             </Card>
-            <Card>
-              <CardHeader className="pb-2">
-                <CardDescription>Your Review Queue</CardDescription>
-                <CardTitle className="text-3xl text-blue-600">
-                  {initialLoad ? (
-                    <CountSkeleton className="h-8 w-12" />
-                  ) : (
-                    stats.reviewable
-                  )}
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Shield className="h-4 w-4" />
-                  <span>
-                    Need your review
-                    {stats.reviewQueue > stats.reviewable && (
-                      <span className="ml-1 text-xs">
-                        ({stats.reviewQueue} pending total,
-                        {" "}
-                        {stats.reviewQueue - stats.reviewable} outside your scope)
+            {stewardshipEnabled && (
+              <>
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardDescription>Pending Approvals</CardDescription>
+                    <CardTitle className="text-3xl text-amber-600">
+                      {initialLoad ? (
+                        <CountSkeleton className="h-8 w-12" />
+                      ) : (
+                        stats.pending
+                      )}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <Clock className="h-4 w-4" />
+                      <span>Awaiting approval</span>
+                    </div>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardDescription>AI Ready</CardDescription>
+                    <CardTitle className="text-3xl text-green-600">
+                      {initialLoad ? (
+                        <CountSkeleton className="h-8 w-12" />
+                      ) : (
+                        stats.approved
+                      )}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <CheckCircle2 className="h-4 w-4" />
+                      <span>
+                        {initialLoad
+                          ? "Loading…"
+                          : stats.total === 0
+                            ? "Nothing to evaluate yet"
+                            : "Approved for AI"}
                       </span>
-                    )}
-                  </span>
-                </div>
-              </CardContent>
-            </Card>
-          </>
+                    </div>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardDescription>Your Review Queue</CardDescription>
+                    <CardTitle className="text-3xl text-blue-600">
+                      {initialLoad ? (
+                        <CountSkeleton className="h-8 w-12" />
+                      ) : (
+                        stats.reviewable
+                      )}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <Shield className="h-4 w-4" />
+                      <span>
+                        Need your review
+                        {stats.reviewQueue > stats.reviewable && (
+                          <span className="ml-1 text-xs">
+                            ({stats.reviewQueue} pending total,
+                            {" "}
+                            {stats.reviewQueue - stats.reviewable} outside your scope)
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  </CardContent>
+                </Card>
+              </>
+            )}
+          </div>
         )}
-      </div>
-      )}
 
         {/* Overview — the nest's index/landing: stat tiles, recently-edited
             rows, and a grouped table-of-contents grid so opening a nest
             presents an index rather than just the flat node list. */}
         <TabsContent value="overview" className="space-y-4">
           <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
-          <OverviewTab
+            <OverviewTab
               initialLoad={initialLoad || !censusSettled}
-            stats={stats}
-            recentlyEdited={recentlyEdited}
-            recentlyEditedCount={recentlyEditedCount}
-            folderCount={folderCount}
-            tocGroups={tocGroups}
-            knownFolders={knownFolders}
-            isReadOnly={isReadOnly}
-            canEditDocs={canEditDocs}
-            onOpenDocument={onOpenDocument}
-            onOpenFolder={openFolderInDocuments}
-            nestName={editableName}
-            loadedFolders={loadedFolderPaths}
-            loadingFolders={loadingFolders}
-            onExpandFolder={fetchLevel}
-            description={nestDescription}
-            governance={stewardshipEnabled ? stats : undefined}
-            onOpenReview={showReviewTab && !isReadOnly ? () => setActiveTab("review") : undefined}
-            onImport={canEditDocs && !isReadOnly ? () => setImportMenuOpen(true) : undefined}
-            // Same gate as the header's Add with AI button.
-            onAddWithAI={!isReadOnly ? () => setShowGenerate(true) : undefined}
-          />
+              stats={stats}
+              recentlyEdited={recentlyEdited}
+              recentlyEditedCount={recentlyEditedCount}
+              folderCount={folderCount}
+              tocGroups={tocGroups}
+              knownFolders={knownFolders}
+              isReadOnly={isReadOnly}
+              canEditDocs={canEditDocs}
+              onOpenDocument={onOpenDocument}
+              onOpenFolder={openFolderInDocuments}
+              nestName={editableName}
+              loadedFolders={loadedFolderPaths}
+              loadingFolders={loadingFolders}
+              onExpandFolder={fetchLevel}
+              description={nestDescription}
+              governance={stewardshipEnabled ? stats : undefined}
+              onOpenReview={showReviewTab && !isReadOnly ? () => setActiveTab("review") : undefined}
+              onImport={canEditDocs && !isReadOnly ? () => setImportMenuOpen(true) : undefined}
+              // Same gate as the header's Add with AI button.
+              onAddWithAI={!isReadOnly ? () => setShowGenerate(true) : undefined}
+              // Same gate as the Documents tree's folder trash icon.
+              onDeleteFolder={!isReadOnly && (canManage || canEditDocs) ? setOverviewDeleteFolder : undefined}
+            />
           </Suspense>
+          {overviewDeleteFolder && (
+            <FolderDeleteDialog
+              nestId={nestId}
+              folder={overviewDeleteFolder}
+              canManage={canManage}
+              onClose={() => setOverviewDeleteFolder(null)}
+              onDone={() => {
+                // Don't leave Documents filtered to a folder that's gone.
+                const gone = overviewDeleteFolder.path;
+                if (canManage && folderFilter && (folderFilter === gone || folderFilter.startsWith(gone + "/")))
+                  setFolderFilter(null);
+                fetchData();
+              }}
+            />
+          )}
         </TabsContent>
 
         <TabsContent value="documents" className="space-y-4">
           <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
-          <DocumentsTab
-            nestId={nestId}
-            initialSearch={initialSearch}
-            initialTags={initialTags}
-            initialLoad={initialLoad}
-            loading={loading}
-            nodes={nodes}
-            census={census}
-            knownFolders={knownFolders}
-            folderFilter={folderFilter}
-            setFolderFilter={setFolderFilter}
-            expandedFolders={expandedFolders}
-            loadingFolders={loadingFolders}
-            toggleFolderExpanded={toggleFolderExpanded}
-            expandFolder={expandFolder}
-            caps={caps}
-            isAdmin={isAdmin}
-            isOwner={isOwner}
-            roles={roles}
-            permission={permission}
-            currentEmail={currentEmail}
-            myStewards={myStewards}
-            stewardshipEnabled={stewardshipEnabled}
-            allowSelfApprove={allowSelfApprove}
-            primeTags={primeTags}
-            visibility={visibility}
-            hasRoleOnNode={hasRoleOnNode}
-            canReviewNode={canReviewNode}
-            reviewQueue={reviewQueue}
-            reviewableQueue={reviewableQueue}
-            deletionRequests={deletionRequests}
-            stats={stats}
-            onOpenDocument={onOpenDocument}
-            onReview={setReviewNode}
-            onRefresh={fetchData}
-            onWithdrawDeletion={(r) => void handleWithdrawDeletion(r)}
-            importInputRef={importInputRef}
-          />
+            <DocumentsTab
+              nestId={nestId}
+              initialSearch={initialSearch}
+              initialTags={initialTags}
+              initialLoad={initialLoad}
+              loading={loading}
+              nodes={nodes}
+              census={census}
+              knownFolders={knownFolders}
+              folderFilter={folderFilter}
+              setFolderFilter={setFolderFilter}
+              expandedFolders={expandedFolders}
+              loadingFolders={loadingFolders}
+              toggleFolderExpanded={toggleFolderExpanded}
+              expandFolder={expandFolder}
+              caps={caps}
+              isAdmin={isAdmin}
+              isOwner={isOwner}
+              roles={roles}
+              permission={permission}
+              currentEmail={currentEmail}
+              myStewards={myStewards}
+              stewardshipEnabled={stewardshipEnabled}
+              allowSelfApprove={allowSelfApprove}
+              primeTags={primeTags}
+              visibility={visibility}
+              hasRoleOnNode={hasRoleOnNode}
+              canReviewNode={canReviewNode}
+              reviewQueue={reviewQueue}
+              reviewableQueue={reviewableQueue}
+              deletionRequests={deletionRequests}
+              stats={stats}
+              onOpenDocument={onOpenDocument}
+              onReview={setReviewNode}
+              onRefresh={fetchData}
+              onWithdrawDeletion={(r) => void handleWithdrawDeletion(r)}
+              importInputRef={importInputRef}
+            />
           </Suspense>
         </TabsContent>
 
         {showReviewTab && (
           <TabsContent value="review" className="space-y-4">
-          <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
-            <ReviewTab
-              key={nestId}
-              nestId={nestId}
-              enabled={!grantOnly}
-              reviewQueue={reviewQueue}
-              reviewableQueue={reviewableQueue}
-              myPendingSubmissions={myPendingSubmissions}
-              pendingDeletions={pendingDeletions}
-              canManage={canManage}
-              loading={loading}
-              onRefresh={fetchData}
-              onOpenDocument={onOpenDocument}
-              onSelectRequest={(req) => {
-                const node = nodes.find((n) => n.id === req.nodeId);
-                if (node) {
-                  setReviewNode(node);
-                  return;
-                }
-                // Not in the loaded levels. Under lazy loading that usually
-                // just means its folder was never expanded, so open the
-                // document itself rather than calling it missing.
-                onOpenDocument(req.nodeId);
-              }}
-              onResolveDeletion={(request, action) => setResolveTarget({ request, action })}
-              onWithdrawSubmission={(id) => void withdrawSubmission(id)}
-            />
-          </Suspense>
+            <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+              <ReviewTab
+                key={nestId}
+                nestId={nestId}
+                enabled={!grantOnly}
+                reviewQueue={reviewQueue}
+                reviewableQueue={reviewableQueue}
+                myPendingSubmissions={myPendingSubmissions}
+                pendingDeletions={pendingDeletions}
+                canManage={canManage}
+                loading={loading}
+                onRefresh={fetchData}
+                onOpenDocument={onOpenDocument}
+                onSelectRequest={(req) => {
+                  const node = nodes.find((n) => n.id === req.nodeId);
+                  if (node) {
+                    setReviewNode(node);
+                    return;
+                  }
+                  // Not in the loaded levels. Under lazy loading that usually
+                  // just means its folder was never expanded, so open the
+                  // document itself rather than calling it missing.
+                  onOpenDocument(req.nodeId);
+                }}
+                onResolveDeletion={(request, action) => setResolveTarget({ request, action })}
+                onWithdrawSubmission={(id) => void withdrawSubmission(id)}
+              />
+            </Suspense>
           </TabsContent>
         )}
 
         <TabsContent value="external-edits" className="space-y-4">
           <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
-          <ExternalEditsTab
-            nestId={nestId}
-            enabled={!grantOnly}
-            onOpenDocument={onOpenDocument}
-            titleOf={(id) => nodes.find((n) => n.id === id)?.title}
-          />
+            <ExternalEditsTab
+              nestId={nestId}
+              enabled={!grantOnly}
+              onOpenDocument={onOpenDocument}
+              titleOf={(id) => nodes.find((n) => n.id === id)?.title}
+            />
           </Suspense>
         </TabsContent>
 
         {stewardshipEnabled && canManageGovernance && (
           <TabsContent value="stewards" className="space-y-4">
-          <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
-            <StewardsTab
-              nestId={nestId}
+            <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+              <StewardsTab
+                nestId={nestId}
                 canManage={canManageGovernance && !caps.isReadOnly}
-              currentUserEmail={currentEmail}
-              onAssign={() => setShowAssignSteward(true)}
-              onRemove={setRemoveStewardId}
-              onEditRole={setEditingSteward}
-            />
-          </Suspense>
+                currentUserEmail={currentEmail}
+                onAssign={() => setShowAssignSteward(true)}
+                onRemove={setRemoveStewardId}
+                onEditRole={setEditingSteward}
+              />
+            </Suspense>
           </TabsContent>
         )}
 
         {(canManage || collabCanWrite) && (
           <TabsContent value="collaborators" className="space-y-4">
-          <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
-            <CollaboratorsTab
-              nestId={nestId}
-              nestName={nestName}
-              canManage={canManage}
-              canManageGovernance={canManageGovernance}
-              stewardshipEnabled={stewardshipEnabled}
-              currentUserEmail={currentEmail}
-              callerPermission={permission ?? undefined}
-              onOpenSettings={() => setShowSettings(true)}
-              onChanged={fetchData}
-            />
-          </Suspense>
+            <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+              <CollaboratorsTab
+                nestId={nestId}
+                nestName={nestName}
+                canManage={canManage}
+                canManageGovernance={canManageGovernance}
+                stewardshipEnabled={stewardshipEnabled}
+                currentUserEmail={currentEmail}
+                callerPermission={permission ?? undefined}
+                onOpenSettings={() => setShowSettings(true)}
+                onChanged={fetchData}
+              />
+            </Suspense>
           </TabsContent>
         )}
       </Tabs>
@@ -2049,6 +2072,10 @@ export function NestView({
           nestId={nestId}
           nestName={nestName}
           openMode={authMode === "open"}
+          onOpenConnect={() => {
+            setShowGenerate(false);
+            setShowConnect(true);
+          }}
         />
       )}
 
@@ -2138,6 +2165,38 @@ export function NestView({
           }}
         />
       )}
+
+      {/* Import choices in a centred dialog, like Add with AI — opened by the
+          header's Import button and the Overview's "Import files" action. */}
+      <Dialog open={importMenuOpen} onOpenChange={setImportMenuOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Import into this nest</DialogTitle>
+            <DialogDescription>Pick what to bring in.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            {[
+              { ref: importInputRef, label: "Files", detail: ".md, .html or .pdf — one or many", testId: undefined },
+              { ref: pdfInputRef, label: "Upload PDF", detail: "Becomes a PDF document with its text extracted", testId: "nest-upload-pdf" },
+              { ref: importDirRef, label: "Whole vault", detail: "A folder, keeping its structure", testId: undefined },
+            ].map((o) => (
+              <button
+                key={o.label}
+                type="button"
+                data-testid={o.testId}
+                className="rounded-md border p-3 text-left hover:bg-muted"
+                onClick={() => {
+                  setImportMenuOpen(false);
+                  o.ref.current?.click();
+                }}
+              >
+                <div className="text-sm font-medium">{o.label}</div>
+                <div className="text-xs text-muted-foreground">{o.detail}</div>
+              </button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={showNewFolder} onOpenChange={setShowNewFolder}>
         <DialogContent className="max-w-md">

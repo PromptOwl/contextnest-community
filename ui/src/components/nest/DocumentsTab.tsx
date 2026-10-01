@@ -17,6 +17,7 @@ import { documentFacets } from "../../lib/document-facets";
 import { activityTimestamp } from "../../lib/node-sort";
 import { linkHealth } from "../../lib/link-health";
 import { findBacklinks, inboundLinkWarning } from "../../lib/backlinks";
+import { FolderDeleteDialog } from "./FolderDeleteDialog";
 import { nodeTypeSupportsMove } from "../../lib/document-actions";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
@@ -28,9 +29,10 @@ import {
   CheckCircle2, Send, Loader2,
   Pencil, Trash2, FolderInput,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
-  FolderOpen, ChevronRight, Share2, FolderPlus,
+  FolderOpen, ChevronRight, Share2, FolderPlus, Activity,
 } from "lucide-react";
 import { FolderTree, prettyFolder, prettyFolderPath, type KnownFolder } from "../FolderTree";
+import { ActivityLogPanel } from "../ActivityLogPanel";
 import { AuthorshipChips } from "../AuthorshipChips";
 import {
   LifecycleStatusBadge, SubmitForReviewModal, ReasonDialog, VersionHistoryModal,
@@ -186,6 +188,11 @@ export function DocumentsTab({
   // Folder being shared with one person (a grant, not a collaborator).
   const [shareFolder, setShareFolder] = useState<
     { path: string; label: string } | null
+  >(null);
+  // Admin activity log open for a document or a folder (owner/admin only —
+  // the same people GET /activity-log lets in).
+  const [activityFor, setActivityFor] = useState<
+    { scope: api.ActivityLogScope; label: string } | null
   >(null);
 
   // Latest flag per node (the list arrives newest-first, so the first wins).
@@ -398,24 +405,6 @@ export function DocumentsTab({
   const handleRequestDeletion = async (reason: string) => {
     await api.requestNodeDeletion(nestId, deletionTarget!.id, reason);
     toast.success("Deletion requested — a nest admin will review it");
-    fetchData();
-  };
-
-  // Folder: admins delete it outright (every doc under it), everyone else
-  // raises a request. One handler — the dialog it came from set the mode.
-  const handleFolderDeletion = async (reason: string) => {
-    const folder = folderTarget!;
-    if (canManage) {
-      const { deleted } = await api.deleteFolder(nestId, folder.path);
-      toast.success(
-        deleted === 0
-          ? `Deleted ${folder.label}`
-          : `Deleted ${folder.label} — ${deleted} document${deleted === 1 ? "" : "s"}`,
-      );
-    } else {
-      await api.requestTargetDeletion(nestId, "folder", folder.path, reason);
-      toast.success("Deletion requested — a nest admin will review it");
-    }
     fetchData();
   };
 
@@ -728,6 +717,18 @@ export function DocumentsTab({
 
   return (
     <>
+          {activityFor && (
+            <ActivityLogPanel
+              nestId={nestId}
+              scope={activityFor.scope}
+              label={activityFor.label}
+              onClose={() => setActivityFor(null)}
+              onOpenNode={(id) => {
+                setActivityFor(null);
+                onOpenDocument(id);
+              }}
+            />
+          )}
           <Card>
             <CardHeader>
               <div className="flex flex-col gap-3">
@@ -895,6 +896,22 @@ export function DocumentsTab({
                       title={`New document in this folder`}
                     >
                       <Plus className="h-3.5 w-3.5 mr-1" /> New here
+                    </Button>
+                  )}
+                  {/* An empty folder (census total, not just filtered out) can
+                      go right from here — same gate as the tree's trash icon. */}
+                  {knownFolders.find((f) => f.path === folderFilter)?.total === 0 &&
+                    (canManage || (canEditDocs && !folderFlagPending(folderFilter))) && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive"
+                      onClick={() =>
+                        setFolderTarget({ path: folderFilter, label: prettyFolderPath(folderFilter), total: 0 })
+                      }
+                      data-testid="delete-filtered-folder"
+                    >
+                      <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete folder
                     </Button>
                   )}
                 </div>
@@ -1210,6 +1227,20 @@ export function DocumentsTab({
                             <History className="h-3.5 w-3.5 mr-2" />
                             History
                           </DropdownMenuItem>
+                          {canManage && (
+                            <DropdownMenuItem
+                              data-testid={`doc-activity-${node.id}`}
+                              onSelect={() =>
+                                setActivityFor({
+                                  scope: { kind: "node", nodeId: node.id },
+                                  label: node.title || node.id,
+                                })
+                              }
+                            >
+                              <Activity className="h-3.5 w-3.5 mr-2" />
+                              Activity
+                            </DropdownMenuItem>
+                          )}
                           {canManage && (
                             <DropdownMenuItem onSelect={() => setPublishNode(node)}>
                               <Share2 className="h-3.5 w-3.5 mr-2" />
@@ -1655,6 +1686,26 @@ export function DocumentsTab({
                                 <Share2 className="h-3.5 w-3.5" />
                               </button>
                             )}
+                            {/* Admin activity log for everything under this
+                                folder — owner/admin only, like /activity-log. */}
+                            {canManage && (
+                              <button
+                                type="button"
+                                className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 focus-visible:opacity-100 hover:text-primary hover:bg-primary/10"
+                                title={`Activity in ${prettyFolderPath(node.path)}`}
+                                aria-label={`Activity in ${prettyFolderPath(node.path)}`}
+                                data-testid={`folder-activity-${node.path}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setActivityFor({
+                                    scope: { kind: "folder", folder: node.path },
+                                    label: `${prettyFolderPath(node.path)}/`,
+                                  });
+                                }}
+                              >
+                                <Activity className="h-3.5 w-3.5" />
+                              </button>
+                            )}
                             {/* Same split as a document: admins/owners delete
                                 the folder (and everything under it), editors
                                 raise a request. Hidden while one is already
@@ -1972,29 +2023,18 @@ export function DocumentsTab({
       )}
 
       {folderTarget && (
-        <ReasonDialog
-          open
-          onOpenChange={(o) => !o && setFolderTarget(null)}
-          title={
-            canManage
-              ? `Delete "${folderTarget.label}"?`
-              : `Request deletion of "${folderTarget.label}"`
-          }
-          description={
-            folderTarget.total === 0
-              ? canManage
-                ? "This folder is empty — deleting it just removes it from the tree."
-                : "A nest admin reviews this. The folder is empty, so nothing else is removed."
-              : canManage
-              ? `This deletes all ${folderTarget.total} document${folderTarget.total === 1 ? "" : "s"} in this folder and its subfolders, with their history, comments and annotations. It cannot be undone.`
-              : `A nest admin reviews this. Honouring it deletes all ${folderTarget.total} document${folderTarget.total === 1 ? "" : "s"} in this folder. Nothing is removed yet.`
-          }
-          // Admins confirm; a request must say why.
-          label={canManage ? undefined : "Why should it be deleted?"}
-          placeholder="e.g. superseded by the new API docs"
-          confirmLabel={canManage ? "Delete folder" : "Request deletion"}
-          destructive={canManage}
-          onConfirm={handleFolderDeletion}
+        <FolderDeleteDialog
+          nestId={nestId}
+          folder={folderTarget}
+          canManage={canManage}
+          onClose={() => setFolderTarget(null)}
+          onDone={() => {
+            // A deleted folder (or its parent) can't stay the active filter.
+            const gone = folderTarget.path;
+            if (canManage && folderFilter && (folderFilter === gone || folderFilter.startsWith(gone + "/")))
+              setFolderFilter(null);
+            fetchData();
+          }}
         />
       )}
 

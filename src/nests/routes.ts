@@ -589,6 +589,23 @@ nestRoutes.get("/:nestId", async (c) => {
   const grant_only = roles.length === 0 && isGrantOnly(access);
 
   const nest = await getNest(nestId);
+  // A headless access key (CU-wdqcq0314u) sees the nest's public face only —
+  // not its owner, team shares, settings or publishing state.
+  if (access.isHeadlessReader && nest) {
+    return c.json({
+      nest: {
+        id: nest.id,
+        name: nest.name,
+        slug: nest.slug,
+        description: nest.description ?? null,
+        created_at: nest.created_at,
+      },
+      permission,
+      roles: [],
+      myStewards: [],
+      grant_only: false,
+    });
+  }
   return c.json({
     nest: withParsedBranding(nest),
     permission,

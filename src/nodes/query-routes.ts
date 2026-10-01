@@ -42,6 +42,7 @@ import {
 import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
+import { recordNodeAccess } from "../governance/access-log.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
 
@@ -298,6 +299,16 @@ queryRoutes.post("/query", async (c) => {
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
   const accessible = await filterAccessible(nestId, userId, userEmail, result.documents);
+  recordNodeAccess({
+    nestId,
+    nodeIds: accessible.map((n) => n.id),
+    action: "retrieve",
+    surface: "api",
+    userId,
+    userEmail,
+    client: c.get("clientMetadata"),
+    detail: "query",
+  });
 
   return c.json({
     query: body.query,
@@ -328,6 +339,16 @@ queryRoutes.get("/search", async (c) => {
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
   const accessible = await filterAccessible(nestId, userId, userEmail, matches);
+  recordNodeAccess({
+    nestId,
+    nodeIds: accessible.map((n) => n.id),
+    action: "retrieve",
+    surface: "api",
+    userId,
+    userEmail,
+    client: c.get("clientMetadata"),
+    detail: "search",
+  });
 
   return c.json({
     query: q,
@@ -465,6 +486,17 @@ queryRoutes.get("/export", async (c) => {
     const draftsParam = c.req.query("includeDrafts");
     const includeDrafts = draftsParam === "1" || draftsParam === "true";
     const zip = await exportNestBundle(nestId, includeDrafts);
+    const bundleUser = c.get("userId");
+    recordNodeAccess({
+      nestId,
+      wholeNest: true,
+      action: "export",
+      surface: "api",
+      userId: bundleUser,
+      userEmail: await resolveCallerEmail(bundleUser),
+      client: c.get("clientMetadata"),
+      detail: includeDrafts ? "bundle export (incl. drafts)" : "bundle export",
+    });
     const filename = `nest-${nestId}.zip`;
     return c.body(zip, 200, {
       "Content-Type": "application/zip",
@@ -536,6 +568,19 @@ queryRoutes.get("/export", async (c) => {
     count: included.length,
     selector,
     truncated_by_budget: fields.length - included.length,
+  });
+  // Admin activity log: an unfiltered export is one nest-wide row; a selector
+  // or budgeted export records the documents that actually left.
+  const whole = !selector && included.length === fields.length;
+  recordNodeAccess({
+    nestId,
+    ...(whole ? { wholeNest: true } : { nodeIds: included.map((f) => f.id) }),
+    action: "export",
+    surface: "api",
+    userId,
+    userEmail,
+    client: c.get("clientMetadata"),
+    detail: `markdown export (${included.length} documents${selector ? ", selector" : ""})`,
   });
 
   return c.body(nodesToMarkdown(included), 200, {

@@ -20,6 +20,7 @@ import { randomBytes } from "crypto";
 import type { Context } from "hono";
 import { getDb } from "../db/client.js";
 import { nowExpr } from "../db/sql.js";
+import { ForbiddenError } from "../shared/errors.js";
 
 export const SESSION_COOKIE = "cnst_session";
 const SESSION_TTL_DAYS = 30;
@@ -43,6 +44,15 @@ function expiryIso(ttlSeconds: number = SESSION_TTL_SECS): string {
  */
 export async function createSession(userId: string, userAgent?: string): Promise<string> {
   const db = getDb();
+  // An access key's service identity (CU-wdqcq0314u) never gets a browser
+  // session — headless means no UI. Refused HERE, the one point every sign-in
+  // flow routes through, so no present or future flow can open one.
+  const svc = (await db.get("SELECT is_service FROM users WHERE id = ?", [userId])) as
+    | { is_service: number | null }
+    | undefined;
+  if (svc?.is_service) {
+    throw new ForbiddenError("This account is an access key for a published nest and can't sign in.");
+  }
   const id = newSessionId();
   await db.run(
     `INSERT INTO sessions (id, user_id, expires_at, user_agent)

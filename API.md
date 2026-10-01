@@ -26,6 +26,21 @@ A key minted with `nest_id` reaches **that one nest and nothing else**. It is de
 
 Everything else is **403 `nest_scoped_key`** — notably `/auth/keys*` (a nest key can't mint, rotate, list or revoke keys, so it can't trade itself for a whole-account key), `POST /nests`, every other nest (`/nests/<other>/…` answers 403 "API key not authorized for this nest"; its MCP transport answers with a JSON-RPC error envelope), `/admin/*`, `/auth/teammates`, `/auth/invite`, `/auth/users/*`, `/auth/admin/*`, `/auth/profile`, `/auth/password`, `/teams*`, `/people*` and `/me/*` — even when the key's owner is a server admin. A session cookie sent alongside the key wins, as everywhere else. User-level keys (no `nest_id`) and sessions are unaffected.
 
+### Headless access keys (API-only nests)
+
+A nest **published headless** is handed out as read-only **access keys** — one per buyer or integration, labeled and revocable (see [`/nests/:nestId/headless`](#headless-publishing-api-only-nests-owner--admin) below). An access key is not a person's key: it belongs to its own service identity, which has no password, can never open a browser session, and never appears in people search, the teammates list or user counts. It reads **approved content only** (like an `org`/`public` reader) and only while the nest is published.
+
+| An access key **can** | |
+|---|---|
+| MCP (`/nests/<its nest>/mcp` or `/mcp`): `context_list`, `context_get`, `context_query`, `context_search`, `context_resolve`, `context_overview`, `context_table_query`, `context_verify` (+ `nest_index` on `/mcp`) | What `ctx` issues against a remote nest. `tools/list` offers only these. |
+| `GET /nests/<its nest>`, `…/nodes`, `…/nodes/<id>`, `…/search`, `…/context` | Approved content only. `GET /nests/<its nest>` returns the nest's public face only (id, name, slug, description, created) — not its owner, team shares or settings. |
+| `POST /nests/<its nest>/context`, `…/query`, `…/table-query` | Retrieval queries. |
+| `GET /nests`, `GET /index`, public routes | Show only its nest. |
+
+Everything else is **403** `{ "code": "headless_reader" }` — the folder tree and the glossary (neither is approval-gated), every write, comments and annotations, version history, activity, reviews, stewards and collaborators, `GET …/export`, `context_export` and bundle export, hosted-artifact and PDF downloads, chat, workflow runs, pins, `/stats`, `/search`, and every account/admin route. MCP tools outside the list answer with a tool error. The allowlist is deny-by-default: a route or tool added later is closed to access keys until it is added on purpose.
+
+> Headless is a **commercial boundary, not a cryptographic seal**: `ctx` needs document bodies, so a key holder can read every *approved* document one call at a time. It cannot browse, export, see drafts or history, or write.
+
 All bodies are JSON unless noted. All errors return `{ "error": "msg" }` with appropriate HTTP status.
 
 ## Caller attribution (`client`)
@@ -440,6 +455,23 @@ Reviewer-only. `GET` → `{ allowlist: [{ user_id, key_id, user_email, key_label
   }
   ```
   Going back to `private` needs no acknowledgement. `GET /health` reports `shared_deployment` so a client can word its own confirmation the same way.
+
+### Headless publishing (API-only nests) (owner / admin)
+Publish a **private** nest API-only and mint read-only access keys for it (what a key can reach is [above](#headless-access-keys-api-only-nests)).
+
+| Route | Body | Result |
+|---|---|---|
+| `GET /nests/:nestId/headless` | — | `{ "enabled": false, "keys": [{ "id", "label", "key_prefix", "created_at", "last_used_at" }] }` — never the token |
+| `PUT /nests/:nestId/headless` | `{ "enabled": true }` | `{ "enabled": true }`. `409` unless the nest is `private`. Turning it off **pauses** every key (they answer 404 until it is turned back on). |
+| `POST /nests/:nestId/headless/keys` | `{ "label": "Acme Corp" }` | `201 { "key": {…}, "api_key": "cnst_…" }` — the token is returned **once**. `400` without a label (max 80 chars), `409` while headless is off. |
+| `DELETE /nests/:nestId/headless/keys/:keyId` | — | `{ "revoked": true }` — the key and its identity are gone for good. `404` for an unknown key. |
+
+Headless governs **people without a seat**: the owner, collaborators, team shares, stewards and document/folder grantees keep the access they already have (someone has to maintain the nest). The same goes for per-document publications (`/p/<slug>` links), which the owner creates deliberately one document at a time. Reader mode is display-only and grants no access, so a headless (private) nest is never readable in the public reader. `GET /nests/:nestId/headless` returns `shared_with` (collaborator + team-share + grant counts) so a client can say so before publishing. While a nest is headless, `PATCH /nests/:nestId/visibility` to `org` or `public` answers `409`. Deleting the nest deletes its access keys. Connect a key with ctx:
+```bash
+export NEST_KEY=cnst_…
+ctx vault add my-nest --url https://<server>/nests/<nestId>/mcp --bearer-env NEST_KEY
+ctx search "your question" --vault my-nest
+```
 
 ### PATCH `/nests/:nestId/reader-mode` (server-admin / superadmin only)
 Configure **Public Docs Reader Mode** — a clean, read-only public docs view of the nest. Superadmin-gated via `isServerAdminUserId` (license admin OR `access.yaml` super_admins ∪ the DB-granted set; the same gate as `/nests/unsynced` and `/admin/*`). A plain nest-owner/admin who is not a superadmin gets `403`.
@@ -1205,6 +1237,96 @@ Raising a request notifies the nest owner + owner/admin collaborators: a `/me/wo
 ### POST `/nests/:nestId/deletion-requests/:id/decline`
 Body: `{ "note": "still referenced by onboarding" }` (required). Write permission. Keeps the node and the row, recording who declined and why. `404` once the request is no longer pending.
 
+### GET `/nests/:nestId/agent-activity`
+Query: `?scope=agents|all&agent=<name>&limit=50&offset=0` (scope defaults to `agents`, limit caps at 200, offset caps at 10 000)
+
+What **agents did to this nest**, newest first: every write whose recorded `client` names an agent (§9.4 attribution — the MCP `initialize` handshake's client name, the API key's label, or a caller-sent `client.agent`), plus deletions. `scope=all` includes changes with no agent (a person in the web UI); `agent=` narrows to one agent. Built from `node_versions` and the `node_deletions` tombstones — no separate log. System auto-publish rows are left out. License-gated like `/feed`.
+
+Owners, admins and reviewers only: items are limited to documents the caller could undo. Deletions show only to nest-wide owners/admins/reviewers. An editor or viewer gets `items: []`.
+
+Each item carries an `undo` verdict: `available`, `effect` (`restore` | `discard` | `delete`), `restoreTo` for a restore, or a `reason` when it can't be undone. Reasons include: a newer change exists on the document, the change is awaiting review, or the entry is a deletion.
+
+```json
+{
+  "items": [
+    {
+      "id": "nodes/pricing@v2",
+      "kind": "update",
+      "nodeId": "nodes/pricing",
+      "title": "Pricing",
+      "version": 2,
+      "status": "published",
+      "actor": "owner@x.com",
+      "agent": "hootie",
+      "client": { "agent": "hootie" },
+      "at": "2026-09-28T01:00:00.000Z",
+      "undo": { "available": true, "effect": "restore", "restoreTo": 1 }
+    },
+    {
+      "id": "nodes/old@deleted",
+      "kind": "delete",
+      "nodeId": "nodes/old",
+      "actor": "owner@x.com",
+      "agent": "hootie",
+      "at": "2026-09-27T22:00:00.000Z",
+      "undo": { "available": false, "reason": "Deletions can't be undone here — deleting a document purges its history." }
+    }
+  ],
+  "limit": 50,
+  "offset": 0,
+  "hasMore": false,
+  "scope": "agents"
+}
+```
+
+`kind` is `create` (the document's first version), `update`, `restore` (a revert or an earlier undo), or `delete`.
+
+### POST `/nests/:nestId/agent-activity/undo`
+Body: `{ "nodeId": "nodes/pricing", "version": 2 }`. Owners, admins and reviewers on that document (a read-tier reviewer is admitted, like `/approve`). Undo never rewrites history. It re-checks at call time and takes the normal write path:
+
+- **published change** → restores the previous sealed version as a new version (same path as `POST …/revert`; change note `Undo of v2 by hootie — restored version 1`). In a governed nest the restore follows the usual review rules, so it may land as a draft awaiting approval.
+- **draft** → discards it (`POST …/discard` semantics: back to the last published version, or the document is removed if it was never published).
+- **the document's first version** (a create) → deletes the document.
+
+Returns `{ ok, nodeId, undone, effect, version, status?, restoredVersion? }`. Errors:
+- `409` with the reason when the document changed since (it names who changed it), the change is under review ("reject it from the review queue instead"), or the version isn't in the document's history
+- `403` for editors/viewers
+- `404` for a missing document
+- `400` for a malformed body
+
+### GET `/nests/:nestId/activity-log`
+Query: `?node=<nodeId>` **or** `?folder=<path>` (neither = the whole nest), `&type=<t>[,<t>…]`, `&actor=<email>`, `&limit=50` (max 200), `&offset=0`.
+
+The **admin activity log** for one document, one folder, or the nest: who changed, reviewed, commented on, deleted, read, retrieved or exported it, newest first. Owner, nest admin, or server admin only (the same rule as `/trace`); everyone else gets `403`. `400` for `node` and `folder` together, a traversal id or folder, or an unknown `type`.
+
+It merges what the server records: versions (`created`, `edited`, `restored`, with the agent from the write's `client`), reviews (`review_requested`, `approved`, `rejected`, `review_cancelled`), comments (`commented`, `comment_resolved`), deletions (`deleted`), and document access, which leaves no version (`read`, `retrieved`, `exported`).
+
+Access is recorded when a document is opened (`GET …/nodes/:id`, MCP `context_get`), returned by a search, query or context call (`/search`, `/query`, `/context` incl. Hootie, MCP `context_query` / `context_search` / `context_resolve`), or exported. A whole-nest export is one row with `nodeId: null` and appears in the nest's and folders' logs, and in the log of every document that existed at the time (not documents created afterwards). `detail` names how a document was accessed (`search`, `context`, `context_get`, `markdown export (12 documents)`); **what the caller searched for or asked is never stored**. Access rows are **sampled, not exhaustive**: throttled to one per person, document, action, surface and agent per 10 minutes, capped at 50 documents per retrieval, and pruned on the activity-trace retention window (`TRACE_RETENTION_DAYS`). The throttle is per server process, so a multi-instance deployment records up to one row per instance per window. Deleting a document purges its version and access history (the `deleted` tombstone stays).
+
+```json
+{
+  "items": [
+    {
+      "id": "a:42",
+      "type": "read",
+      "nodeId": "nodes/sales/pricing",
+      "title": "Pricing",
+      "actor": "alice@acme.com",
+      "agent": "claude-code",
+      "client": { "agent": "claude-code" },
+      "at": "2026-09-29T12:00:00.000Z",
+      "surface": "mcp",
+      "detail": "context_get"
+    }
+  ],
+  "limit": 50,
+  "offset": 0,
+  "hasMore": false
+}
+```
+
+The collaborator-facing `GET …/activity` and `GET …/nodes/:id/activity` feeds are unchanged and never include access rows.
+
 ### GET `/nests/:nestId/feed`
 Query: `?filter=all|changes|comments&limit=50&offset=0` (filter defaults to `all`, limit caps at 200, offset caps at 10 000)
 
@@ -1786,7 +1908,7 @@ Deterministic fact lookup against a **table** node (CSV body): fetch the exact r
 Same operation over MCP: `context_table_query`.
 
 ### POST `/nests/:nestId/chat`
-Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (off → `404`); needs the server-wide `ANTHROPIC_API_KEY` (missing → `503` with `reason: "no_api_key"`); answers with `HOOTIE_MODEL`, through `ANTHROPIC_BASE_URL` when one is set (all three editable in Settings → General). Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
+Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (**off by default** — off → `404`); needs the server-wide `ANTHROPIC_API_KEY` (missing → `503` with `reason: "no_api_key"`); answers with `HOOTIE_MODEL`, through `ANTHROPIC_BASE_URL` when one is set (all three editable in Settings → General). Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
 
 Request:
 
@@ -2199,6 +2321,11 @@ enforced on both sides, not by trusting the issuer.
 
 ### GET `/health` (no auth)
 `{ "status": "ok" | "suspended", "version": "<server version>", … }`. Needs no key (like `/llms.txt` and public `/p/:slug` pages) — use it for liveness probes. `suspended` means the license was revoked and writes are refused until a valid key is installed.
+
+Hootie fields: `hootie_enabled` (default `false`), `hootie_brand` — `{ name, logo_url, accent_color, greeting }`, the identity every surface should show (the admin's custom one on an Enterprise licence, otherwise `{ name: "Hootie", logo_url: null, accent_color: null, greeting: null }`, decided server-side) — and `hootie_branding_available` (whether custom identity is allowed).
+
+### Hootie identity — `/admin/settings` fields (Enterprise)
+`hootie_name` (one line, ≤40 chars), `hootie_logo_url` (`https://` image: `.png`/`.jpg`/`.gif`/`.webp`), `hootie_accent_color` (hex, normalised to `#rrggbb`), `hootie_greeting` (one line, ≤200 chars). `""` resets a field to the default. GET returns the stored values plus `hootie_branding_available`. A PATCH that would **change** any of these without an Enterprise licence is refused as a whole — `403 { code: "enterprise_required" }`, nothing written, including the request's other fields. Sending back the stored values unchanged is allowed (they are ignored). Invalid values → `400` with `fieldErrors` keyed by field. `hootie_enabled` is written explicitly (`true`/`false`), so a UI choice beats the deploy env.
 
 ### Superadmins — GET/POST `/admin/super-admins`, DELETE `/admin/super-admins/:email` (server-admin only)
 Grant and revoke **superadmins** (server-wide admins) from the API/UI instead of only via `access.yaml`. The effective superadmin set is the union of three sources, surfaced per row as `source`:

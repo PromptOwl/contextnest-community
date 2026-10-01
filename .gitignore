@@ -5,3 +5,7 @@ coverage/
 .env
 ui/node_modules/
 .claude/
+# Playwright e2e
+tests/.env/
+tests/test-results/
+tests/src/cookies_storage/

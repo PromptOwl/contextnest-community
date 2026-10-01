@@ -78,6 +78,9 @@ const HISTORICAL_MIGRATIONS = [
   "042_community_sites",
   "043_node_suggestion_details",
   "044_client_attribution",
+  "045_headless_publish",
+  "046_deletion_client_attribution",
+  "047_node_access_events",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -623,8 +626,10 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       node_id TEXT NOT NULL,
       deleted_by TEXT,
       deleted_at TEXT NOT NULL,
+      client_json TEXT,            -- caller attribution (migration 046)
       PRIMARY KEY (nest_id, node_id)
     );
+    ALTER TABLE node_deletions ADD COLUMN IF NOT EXISTS client_json TEXT;
     CREATE INDEX IF NOT EXISTS idx_node_deletions_time
       ON node_deletions(nest_id, deleted_at);
 
@@ -650,6 +655,25 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- (nest_id, id) composite (migration 026): the per-nest trace view
     -- (GET /nests/:id/trace) filters by nest_id and pages newest-first by id.
     CREATE INDEX IF NOT EXISTS idx_api_events_nest_ts ON api_events(nest_id, id);
+
+    -- document access events (migration 047): reads, retrievals and exports,
+    -- which seal no version. node_id NULL = whole-nest export. Throttled and
+    -- pruned in governance/access-log.ts.
+    CREATE TABLE IF NOT EXISTS node_access_events (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      ts TEXT NOT NULL,
+      nest_id TEXT NOT NULL,
+      node_id TEXT,
+      action TEXT NOT NULL CHECK(action IN ('read', 'retrieve', 'export')),
+      surface TEXT NOT NULL CHECK(surface IN ('api', 'mcp')),
+      user_id TEXT,
+      user_email TEXT,
+      client_json TEXT,
+      detail TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_node_access_node ON node_access_events(nest_id, node_id, id);
+    CREATE INDEX IF NOT EXISTS idx_node_access_nest ON node_access_events(nest_id, id);
+    CREATE INDEX IF NOT EXISTS idx_node_access_ts ON node_access_events(ts);
 
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,
@@ -866,6 +890,21 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
   await db.exec(`
     CREATE INDEX IF NOT EXISTS idx_node_suggestions_nest_detected
       ON node_suggestions(nest_id, detected_at DESC);
+  `);
+
+  // Migration 045 parity: headless publishing (CU-wdqcq0314u).
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS headless INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS is_service INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE IF NOT EXISTS headless_readers (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      key_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE INDEX IF NOT EXISTS idx_headless_readers_nest ON headless_readers(nest_id);
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

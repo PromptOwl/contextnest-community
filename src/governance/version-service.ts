@@ -248,6 +248,38 @@ export async function setApprovedVersion(
   await db.run(sql, [nestId, nodeId, version, approvedBy]);
 }
 
+/** approved_by for a pin the server moved itself — never a reviewer's name. */
+export const APPROVED_HEAL_AUTHOR = "system:approved-heal";
+
+/**
+ * Move an unrebuildable approval from `from` to `to` and note it on `to`'s
+ * history row. Compare-and-swap on the old pin, so concurrent reads record the
+ * move once; true when this call made it. (CU-wdqcq02vet)
+ */
+export async function moveApprovedVersion(
+  nestId: string,
+  nodeId: string,
+  from: number,
+  to: number,
+): Promise<boolean> {
+  const db = getDb();
+  const moved = await db.run(
+    `UPDATE approved_versions
+        SET approved_version = ?, approved_by = ?, approved_at = ${nowExpr(db)}
+      WHERE nest_id = ? AND node_id = ? AND approved_version = ?`,
+    [to, APPROVED_HEAL_AUTHOR, nestId, nodeId, from],
+  );
+  if (moved.changes === 0) return false;
+  const note = `Approved version moved from v${from} to v${to} — v${from} could not be rebuilt`;
+  await db.run(
+    `UPDATE node_versions
+        SET change_note = CASE WHEN change_note IS NULL OR change_note = '' THEN ? ELSE change_note || ' · ' || ? END
+      WHERE nest_id = ? AND node_id = ? AND version = ?`,
+    [note, note, nestId, nodeId, to],
+  );
+  return true;
+}
+
 /**
  * The newest version this node has SEALED — the approved pin, else the newest
  * published/approved row. Drafts never seal (they no longer reach the engine's

@@ -1,6 +1,6 @@
+import { recordNodeAccess } from "../governance/access-log.js";
 import { Hono } from "hono";
-import { parseDocument, readPdfBinary } from "@promptowl/contextnest-engine";
-import type { NestStorage } from "@promptowl/contextnest-engine";
+import { parseDocument } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
@@ -13,6 +13,7 @@ import { attributeRequest } from "../shared/client-metadata.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { getDb } from "../db/client.js";
 import * as versions from "../governance/version-service.js";
+import { reconstructApproved } from "../governance/approved-body.js";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import {
@@ -49,6 +50,7 @@ import {
   moveNode,
   deleteNode,
   discardDraft,
+  restoreVersion,
   listNodesForCaller,
   nestCensus,
   getNodeForCaller,
@@ -297,7 +299,6 @@ nodeRoutes.post("/:nodeId{.+}/discard", async (c) => {
 nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const { storage, versions: versionManager } = await engineCache.get(nestId);
 
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
@@ -316,40 +317,9 @@ nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
     throw new ValidationError("targetVersion (a positive integer) is required");
   }
 
-  let raw: string;
-  try {
-    raw = await versionManager.reconstructVersion(nodeId, targetVersion);
-  } catch {
-    throw new NotFoundError(
-      `Version ${targetVersion} not found for ${nodeId}`,
-    );
-  }
-  // A pdf node's body can't be written back as text — it is whatever its PDF
-  // extracts to. Restoring a pdf version re-imports that version's binary
-  // (resolved from the archive and hash-verified by the engine), which brings
-  // its text back with it.
-  let restoredPdf: Buffer | null = null;
-  if (pdfMetaOf(nodeId, raw)) {
-    try {
-      restoredPdf = await readPdfBinary(storage as unknown as NestStorage, nodeId, {
-        version: targetVersion,
-      });
-    } catch (err) {
-      console.error("[pdf] revert could not read the version's binary", nestId, nodeId, targetVersion, err);
-      throw new NotFoundError(`The PDF of version ${targetVersion} is not available to restore.`);
-    }
-  }
-  const content = bodyOnly(nodeId, raw);
-  const { node, version } = await updateNode(
-    nestId,
-    nodeId,
-    {
-      ...(restoredPdf ? { pdf: { bytes: new Uint8Array(restoredPdf) } } : { content }),
-      changeNote: `Restored from version ${targetVersion}`,
-      client: attributeRequest(c, body.client),
-    },
-    userEmail,
-  );
+  const { node, version } = await restoreVersion(nestId, nodeId, targetVersion, userEmail, {
+    client: attributeRequest(c, body.client),
+  });
   await trackEvent("node.revert", { nestId, nodeId, targetVersion });
   return c.json({ ok: true, version, node: toNodeResponse(node) });
 });
@@ -469,6 +439,17 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     }
   }
   const response = toNodeResponse(node);
+  // The read got past every gate — record it for the admin activity log
+  // (fire-and-forget, throttled; never slows or fails the read).
+  recordNodeAccess({
+    nestId,
+    nodeIds: [node.id],
+    action: "read",
+    surface: "api",
+    userId,
+    userEmail,
+    client: c.get("clientMetadata"),
+  });
   const publicReader = await isPublicReader(nestId, userId);
 
   // Author + collaborators (same additive fields as the list response).
@@ -500,16 +481,18 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   // mirrors the listing's flag; it narrows what is served, never widens it.
   const approvedOnly = c.req.query("approved_only") === "1" || c.req.query("approved_only") === "true";
   if (publicReader || approvedOnly) {
-    const approved = await versions.getApprovedVersion(nestId, nodeId);
+    let approved = await versions.getApprovedVersion(nestId, nodeId);
     if (approved != null) {
       // Kept for the raw path: frontmatter=1 must serve the APPROVED
       // snapshot's stored frontmatter, never the live working copy's.
       let approvedRaw = "";
       try {
-        approvedRaw = await versionManager.reconstructVersion(
+        ({ raw: approvedRaw, version: approved } = await reconstructApproved(
+          versionManager,
+          nestId,
           nodeId,
           approved,
-        );
+        ));
         response.content = bodyOnly(nodeId, approvedRaw);
         // A pdf node's `pdf:` block must describe the same version as the
         // body — the approved one, whose binary is what /pdf serves here —
@@ -651,7 +634,9 @@ nodeRoutes.delete("/:nodeId{.+}", async (c) => {
   const nodeId = c.req.param("nodeId")!;
   // The purge (storage docs, derived annotations node, governance rows,
   // tombstone) lives in the service so MCP's context_delete runs the same one.
-  await deleteNode(nestId, nodeId, await getUserEmail(c));
+  await deleteNode(nestId, nodeId, await getUserEmail(c), {
+    client: attributeRequest(c, undefined),
+  });
   return c.json({ deleted: true });
 });
 
