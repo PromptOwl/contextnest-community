@@ -60,10 +60,12 @@ import {
   normalizeSearchLimit,
   toCallToolResult,
   TOOL_DEFINITIONS,
+  headlessToolError,
   type ToolResult,
 } from "./tools.js";
 import { isDerivedAnnotationsNode } from "../nodes/service.js";
 import type { Nest } from "../shared/types.js";
+import { HEADLESS_READER_SERVER_TOOLS, isServiceUser } from "../auth/headless.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
 // suspend/license middleware (unlike the per-nest access guard), so the
@@ -330,7 +332,14 @@ async function handleServerToolCall(
   nestScope: string | null,
   baseUrl: string,
   client?: ClientMetadata,
+  headless = false,
 ): Promise<ToolResult> {
+  // Headless access keys (CU-wdqcq0314u): nest_create and every other
+  // server-only tool are refused here; per-nest tools are re-checked in
+  // handleToolCall.
+  if (headless && !HEADLESS_READER_SERVER_TOOLS.has(toolName)) {
+    return headlessToolError(toolName);
+  }
   if (toolName === "nest_index") {
     const nests = await buildNestIndex(userId, nestScope);
     // `data` is what `ctx vault list` reads to list each nest as `<alias>/<nest>`.
@@ -508,13 +517,17 @@ function createServerMcp(
   nestScope: string | null,
   baseUrl: string,
   c: Context<AuthEnv>,
+  headless = false,
 ): McpServer {
   const server = new McpServer(
     { name: "contextnest-server", version: "1.0.0" },
     { capabilities: { tools: {} } },
   );
 
-  for (const tool of SERVER_TOOL_DEFINITIONS) {
+  const toolDefs = headless
+    ? SERVER_TOOL_DEFINITIONS.filter((t) => HEADLESS_READER_SERVER_TOOLS.has(t.name))
+    : SERVER_TOOL_DEFINITIONS;
+  for (const tool of toolDefs) {
     const props = (tool.inputSchema as any).properties || {};
     const required = (tool.inputSchema as any).required || [];
     const shape: Record<string, z.ZodTypeAny> = {};
@@ -541,6 +554,7 @@ function createServerMcp(
         nestScope,
         baseUrl,
         attributeRequest(c, undefined, connectionClient(server)),
+        headless,
       );
       return toCallToolResult(out);
     });
@@ -561,6 +575,7 @@ serverMcpRoutes.all("/", async (c) => {
     c.get("nestScope"),
     requestBaseUrl(c.req.url),
     c,
+    await isServiceUser(userId),
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({

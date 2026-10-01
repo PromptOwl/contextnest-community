@@ -64,6 +64,7 @@ import {
   type ClientMetadata,
 } from "../shared/client-metadata.js";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
+import { HEADLESS_READER_TOOLS, headlessToolRefusal, isServiceUser } from "../auth/headless.js";
 
 /** Upper bound on caller-set traversal depth — real graphs terminate long
  *  before this; the cap just fences a misbehaving client from a runaway query. */
@@ -133,6 +134,12 @@ function toolError(
     | "INTERNAL",
 ): ToolResult {
   return { text, isError: true, data: { code, message: text } };
+}
+
+/** What a headless access key gets for a tool it may not call (CU-wdqcq0314u)
+ *  — the same shape on both MCP surfaces. */
+export function headlessToolError(toolName: string): ToolResult {
+  return toolError(headlessToolRefusal(toolName), "UNAUTHORIZED_ACTION");
 }
 
 /**
@@ -896,6 +903,21 @@ export async function handleToolCall(
     return toolError((err as Error).message, "VALIDATION_FAILED");
   }
   const attributed: McpToolContext = { ...ctx, client };
+  // Headless access keys (CU-wdqcq0314u) read and nothing else. Checked here,
+  // the one seam both MCP surfaces share, so no tool — including one added
+  // later — is reachable with an access key unless it is on the read list.
+  if (!HEADLESS_READER_TOOLS.has(toolName) && (await isServiceUser(ctx.userId))) {
+    void logTraceEvent({
+      kind: "mcp",
+      tool: toolName,
+      nestId: ctx.nestId,
+      userId: ctx.userId,
+      userEmail: ctx.userEmail,
+      status: 403,
+      durationMs: Date.now() - started,
+    });
+    return headlessToolError(toolName);
+  }
   // An agent that sends a whole file (frontmatter + body) as `content` used to
   // get a second, dead frontmatter block stored inside the body. Refuse and say
   // where those fields go instead.

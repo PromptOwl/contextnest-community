@@ -3,6 +3,7 @@ import { getDb } from "../db/client.js";
 import { hashApiKey, parseBearerToken } from "./keys.js";
 import { getSessionIdFromRequest, resolveSession } from "./sessions.js";
 
+import { HEADLESS_READER_CODE, headlessReaderVerdict } from "./headless.js";
 import type { AuthEnv } from "./middleware.js";
 
 /**
@@ -93,21 +94,47 @@ export function nestKeyVerdict(
   return { allowed: false, reason: "outside_nest" };
 }
 
-/** Look up the nest a bearer key is scoped to. null = no key, unknown key, or a
- *  user-level key — in every one of those cases the guard has nothing to say. */
-async function bearerKeyScope(authorization: string | undefined): Promise<string | null> {
+/** Look up the nest a bearer key is scoped to, and whether it is a headless
+ *  access key. null = no key, unknown key, or a user-level key — in every one
+ *  of those cases the guard has nothing to say. */
+async function bearerKeyScope(
+  authorization: string | undefined,
+): Promise<{ scope: string; headless: boolean } | null> {
   const key = parseBearerToken(authorization);
   if (!key) return null;
   const row = (await getDb().get(
-    "SELECT nest_id FROM api_keys WHERE key_hash = ?",
+    `SELECT k.nest_id, u.is_service
+       FROM api_keys k LEFT JOIN users u ON u.id = k.user_id
+      WHERE k.key_hash = ?`,
     [hashApiKey(key)],
-  )) as { nest_id: string | null } | undefined;
-  return row?.nest_id ?? null;
+  )) as { nest_id: string | null; is_service: number | null } | undefined;
+  // A service identity's key is ALWAYS a headless access key — even if its
+  // nest scope were somehow lost, it must fail closed (empty scope matches no
+  // nest), never fall back to acting as an ordinary user-level key.
+  if (row?.is_service) return { scope: row.nest_id ?? "", headless: true };
+  if (!row?.nest_id) return null;
+  return { scope: row.nest_id, headless: false };
 }
 
 export const nestScopedKeyGuard = createMiddleware<AuthEnv>(async (c, next) => {
-  const scope = await bearerKeyScope(c.req.header("Authorization"));
-  if (!scope) return next();
+  const found = await bearerKeyScope(c.req.header("Authorization"));
+  if (!found) return next();
+  const { scope } = found;
+
+  // A headless access key (CU-wdqcq0314u) gets the narrower read-only
+  // allowlist, and no session escape hatch: its identity can't sign in, so a
+  // cookie riding along belongs to someone else and must not widen the key.
+  if (found.headless) {
+    if (headlessReaderVerdict(c.req.method, c.req.path, scope)) return next();
+    return c.json(
+      {
+        error:
+          "This is a read-only access key for a published nest. It can list, get, query and search that nest's documents (over MCP or the read API) — nothing else.",
+        code: HEADLESS_READER_CODE,
+      },
+      403,
+    );
+  }
 
   const verdict = nestKeyVerdict(c.req.method, c.req.path, scope);
   if (verdict.allowed) return next();

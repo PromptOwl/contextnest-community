@@ -6,6 +6,8 @@ import { mergeFrameAncestors } from "./shared/artifact-sandbox.js";
 import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
+import { headlessRoutes } from "./nests/headless-routes.js";
+import { countPeople } from "./auth/headless.js";
 import { brandingRoutes } from "./nests/branding-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
 import { publishRoutes } from "./nests/publish-routes.js";
@@ -318,8 +320,9 @@ const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
       return c.json({ error: "Invalid service ticket" }, 401);
     }
     const db = getDb();
+    // Access-key identities (CU-wdqcq0314u) are never a ticket's user.
     const user = (await db.get(
-      "SELECT id FROM users WHERE LOWER(email) = LOWER(?)",
+      "SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND COALESCE(is_service, 0) = 0",
       [sub],
     )) as { id: string } | undefined;
     if (!user) {
@@ -1863,14 +1866,11 @@ export function createApp(): Hono<AuthEnv> {
       }
     }
 
-    const usersRow = (await db.get(
-      "SELECT COUNT(*) as c FROM users",
-    )) as { c: number };
-
     return c.json({
       nests: visibleNests.length,
       documents,
-      users: usersRow.c,
+      // People only — access-key identities (CU-wdqcq0314u) aren't users.
+      users: await countPeople(),
     });
   });
 
@@ -2360,7 +2360,10 @@ export function createApp(): Hono<AuthEnv> {
     if (
       resource === "visibility" ||
       resource === "reader-mode" ||
-      resource === "branding"
+      resource === "branding" ||
+      // headless (CU-wdqcq0314u): publishing API-only and minting access keys
+      // decide who can read the nest — the same owner/admin tier as visibility.
+      resource === "headless"
     ) {
       // reader-mode: the nest owner/admin collaborator AND the server admin
       // may configure it — this "admin" tier already covers both
@@ -2584,6 +2587,7 @@ export function createApp(): Hono<AuthEnv> {
   // Hootie chat — read-tier like /context (it IS /context plus a model call).
   nestsApp.route("/:nestId", hootieRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
+  nestsApp.route("/:nestId", headlessRoutes);
   nestsApp.route("/:nestId", brandingRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);
   // "publications" (not "/publish") — POST /:nestId/publish is already taken by

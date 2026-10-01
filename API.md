@@ -26,6 +26,21 @@ A key minted with `nest_id` reaches **that one nest and nothing else**. It is de
 
 Everything else is **403 `nest_scoped_key`** — notably `/auth/keys*` (a nest key can't mint, rotate, list or revoke keys, so it can't trade itself for a whole-account key), `POST /nests`, every other nest (`/nests/<other>/…` answers 403 "API key not authorized for this nest"; its MCP transport answers with a JSON-RPC error envelope), `/admin/*`, `/auth/teammates`, `/auth/invite`, `/auth/users/*`, `/auth/admin/*`, `/auth/profile`, `/auth/password`, `/teams*`, `/people*` and `/me/*` — even when the key's owner is a server admin. A session cookie sent alongside the key wins, as everywhere else. User-level keys (no `nest_id`) and sessions are unaffected.
 
+### Headless access keys (API-only nests)
+
+A nest **published headless** is handed out as read-only **access keys** — one per buyer or integration, labeled and revocable (see [`/nests/:nestId/headless`](#headless-publishing-api-only-nests-owner--admin) below). An access key is not a person's key: it belongs to its own service identity, which has no password, can never open a browser session, and never appears in people search, the teammates list or user counts. It reads **approved content only** (like an `org`/`public` reader) and only while the nest is published.
+
+| An access key **can** | |
+|---|---|
+| MCP (`/nests/<its nest>/mcp` or `/mcp`): `context_list`, `context_get`, `context_query`, `context_search`, `context_resolve`, `context_overview`, `context_table_query`, `context_verify` (+ `nest_index` on `/mcp`) | What `ctx` issues against a remote nest. `tools/list` offers only these. |
+| `GET /nests/<its nest>`, `…/nodes`, `…/nodes/<id>`, `…/search`, `…/context` | Approved content only. `GET /nests/<its nest>` returns the nest's public face only (id, name, slug, description, created) — not its owner, team shares or settings. |
+| `POST /nests/<its nest>/context`, `…/query`, `…/table-query` | Retrieval queries. |
+| `GET /nests`, `GET /index`, public routes | Show only its nest. |
+
+Everything else is **403** `{ "code": "headless_reader" }` — the folder tree and the glossary (neither is approval-gated), every write, comments and annotations, version history, activity, reviews, stewards and collaborators, `GET …/export`, `context_export` and bundle export, hosted-artifact and PDF downloads, chat, workflow runs, pins, `/stats`, `/search`, and every account/admin route. MCP tools outside the list answer with a tool error. The allowlist is deny-by-default: a route or tool added later is closed to access keys until it is added on purpose.
+
+> Headless is a **commercial boundary, not a cryptographic seal**: `ctx` needs document bodies, so a key holder can read every *approved* document one call at a time. It cannot browse, export, see drafts or history, or write.
+
 All bodies are JSON unless noted. All errors return `{ "error": "msg" }` with appropriate HTTP status.
 
 ## Caller attribution (`client`)
@@ -365,6 +380,23 @@ Turning stewardship **off** wipes stewards and pending reviews and is owner-only
   }
   ```
   Going back to `private` needs no acknowledgement. `GET /health` reports `shared_deployment` so a client can word its own confirmation the same way.
+
+### Headless publishing (API-only nests) (owner / admin)
+Publish a **private** nest API-only and mint read-only access keys for it (what a key can reach is [above](#headless-access-keys-api-only-nests)).
+
+| Route | Body | Result |
+|---|---|---|
+| `GET /nests/:nestId/headless` | — | `{ "enabled": false, "keys": [{ "id", "label", "key_prefix", "created_at", "last_used_at" }] }` — never the token |
+| `PUT /nests/:nestId/headless` | `{ "enabled": true }` | `{ "enabled": true }`. `409` unless the nest is `private`. Turning it off **pauses** every key (they answer 404 until it is turned back on). |
+| `POST /nests/:nestId/headless/keys` | `{ "label": "Acme Corp" }` | `201 { "key": {…}, "api_key": "cnst_…" }` — the token is returned **once**. `400` without a label (max 80 chars), `409` while headless is off. |
+| `DELETE /nests/:nestId/headless/keys/:keyId` | — | `{ "revoked": true }` — the key and its identity are gone for good. `404` for an unknown key. |
+
+Headless governs **people without a seat**: the owner, collaborators, team shares, stewards and document/folder grantees keep the access they already have (someone has to maintain the nest). The same goes for per-document publications (`/p/<slug>` links), which the owner creates deliberately one document at a time. Reader mode is display-only and grants no access, so a headless (private) nest is never readable in the public reader. `GET /nests/:nestId/headless` returns `shared_with` (collaborator + team-share + grant counts) so a client can say so before publishing. While a nest is headless, `PATCH /nests/:nestId/visibility` to `org` or `public` answers `409`. Deleting the nest deletes its access keys. Connect a key with ctx:
+```bash
+export NEST_KEY=cnst_…
+ctx vault add my-nest --url https://<server>/nests/<nestId>/mcp --bearer-env NEST_KEY
+ctx search "your question" --vault my-nest
+```
 
 ### PATCH `/nests/:nestId/reader-mode` (server-admin / superadmin only)
 Configure **Public Docs Reader Mode** — a clean, read-only public docs view of the nest. Superadmin-gated via `isServerAdminUserId` (license admin OR `access.yaml` super_admins ∪ the DB-granted set; the same gate as `/nests/unsynced` and `/admin/*`). A plain nest-owner/admin who is not a superadmin gets `403`.

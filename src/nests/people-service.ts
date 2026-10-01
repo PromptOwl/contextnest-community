@@ -121,7 +121,8 @@ export async function withDirectory(roster: NestPerson[]): Promise<NestPerson[]>
   // ponytail: capped like /people/suggest; past the cap a typed email still
   // resolves via findDirectoryPerson. Server-side ?q= if a picker needs more.
   const rows = (await getDb().all(
-    "SELECT id, email, name FROM users WHERE id != ? ORDER BY email LIMIT ?",
+    // Access-key identities (CU-wdqcq0314u) are not people — never offered.
+    "SELECT id, email, name FROM users WHERE id != ? AND COALESCE(is_service, 0) = 0 ORDER BY email LIMIT ?",
     [ANON_USER_ID, SUGGEST_FETCH],
   )) as Array<{ id: string; email: string; name: string | null }>;
   const extra: NestPerson[] = [];
@@ -146,7 +147,7 @@ export async function findDirectoryPerson(name: string): Promise<NestPerson | un
   if (!n) return undefined;
   const rows = (await getDb().all(
     `SELECT id, email, name FROM users
-      WHERE id != ?
+      WHERE id != ? AND COALESCE(is_service, 0) = 0
         AND (LOWER(email) = ? OR LOWER(email) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(name, '')) = ?)`,
     [ANON_USER_ID, n, `${escapeLike(n)}@%`, n],
   )) as Array<{ id: string; email: string; name: string | null }>;
@@ -247,7 +248,7 @@ export async function suggestPeopleForUser(
       return (await db.all(
         `SELECT u.id AS user_id, u.email AS email, u.name AS name, 'directory' AS source
            FROM users u
-          WHERE u.id != ? AND u.id != ?${filter.sql}
+          WHERE u.id != ? AND u.id != ? AND COALESCE(u.is_service, 0) = 0${filter.sql}
           ORDER BY u.email
           LIMIT ?`,
         [callerUserId, ANON_USER_ID, ...filter.args, SUGGEST_FETCH],
