@@ -1160,6 +1160,63 @@ Raising a request notifies the nest owner + owner/admin collaborators: a `/me/wo
 ### POST `/nests/:nestId/deletion-requests/:id/decline`
 Body: `{ "note": "still referenced by onboarding" }` (required). Write permission. Keeps the node and the row, recording who declined and why. `404` once the request is no longer pending.
 
+### GET `/nests/:nestId/agent-activity`
+Query: `?scope=agents|all&agent=<name>&limit=50&offset=0` (scope defaults to `agents`, limit caps at 200, offset caps at 10 000)
+
+What **agents did to this nest**, newest first: every write whose recorded `client` names an agent (§9.4 attribution — the MCP `initialize` handshake's client name, the API key's label, or a caller-sent `client.agent`), plus deletions. `scope=all` includes changes with no agent (a person in the web UI); `agent=` narrows to one agent. Built from `node_versions` and the `node_deletions` tombstones — no separate log. System auto-publish rows are left out. License-gated like `/feed`.
+
+Owners, admins and reviewers only: items are limited to documents the caller could undo. Deletions show only to nest-wide owners/admins/reviewers. An editor or viewer gets `items: []`.
+
+Each item carries an `undo` verdict: `available`, `effect` (`restore` | `discard` | `delete`), `restoreTo` for a restore, or a `reason` when it can't be undone. Reasons include: a newer change exists on the document, the change is awaiting review, or the entry is a deletion.
+
+```json
+{
+  "items": [
+    {
+      "id": "nodes/pricing@v2",
+      "kind": "update",
+      "nodeId": "nodes/pricing",
+      "title": "Pricing",
+      "version": 2,
+      "status": "published",
+      "actor": "owner@x.com",
+      "agent": "hootie",
+      "client": { "agent": "hootie" },
+      "at": "2026-09-28T01:00:00.000Z",
+      "undo": { "available": true, "effect": "restore", "restoreTo": 1 }
+    },
+    {
+      "id": "nodes/old@deleted",
+      "kind": "delete",
+      "nodeId": "nodes/old",
+      "actor": "owner@x.com",
+      "agent": "hootie",
+      "at": "2026-09-27T22:00:00.000Z",
+      "undo": { "available": false, "reason": "Deletions can't be undone here — deleting a document purges its history." }
+    }
+  ],
+  "limit": 50,
+  "offset": 0,
+  "hasMore": false,
+  "scope": "agents"
+}
+```
+
+`kind` is `create` (the document's first version), `update`, `restore` (a revert or an earlier undo), or `delete`.
+
+### POST `/nests/:nestId/agent-activity/undo`
+Body: `{ "nodeId": "nodes/pricing", "version": 2 }`. Owners, admins and reviewers on that document (a read-tier reviewer is admitted, like `/approve`). Undo never rewrites history. It re-checks at call time and takes the normal write path:
+
+- **published change** → restores the previous sealed version as a new version (same path as `POST …/revert`; change note `Undo of v2 by hootie — restored version 1`). In a governed nest the restore follows the usual review rules, so it may land as a draft awaiting approval.
+- **draft** → discards it (`POST …/discard` semantics: back to the last published version, or the document is removed if it was never published).
+- **the document's first version** (a create) → deletes the document.
+
+Returns `{ ok, nodeId, undone, effect, version, status?, restoredVersion? }`. Errors:
+- `409` with the reason when the document changed since (it names who changed it), the change is under review ("reject it from the review queue instead"), or the version isn't in the document's history
+- `403` for editors/viewers
+- `404` for a missing document
+- `400` for a malformed body
+
 ### GET `/nests/:nestId/feed`
 Query: `?filter=all|changes|comments&limit=50&offset=0` (filter defaults to `all`, limit caps at 200, offset caps at 10 000)
 

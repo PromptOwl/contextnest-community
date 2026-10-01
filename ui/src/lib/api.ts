@@ -1575,6 +1575,56 @@ export async function getNestFeed(
   }>(`/nests/${nestId}/feed?${params.toString()}`);
 }
 
+// ─── Agent activity (CU-wdqcq0314v) ──────────────────────────────────────
+
+export type AgentActivityKind = "create" | "update" | "restore" | "delete";
+export type AgentUndoEffect = "restore" | "discard" | "delete";
+
+export interface AgentActivityItem {
+  id: string;
+  kind: AgentActivityKind;
+  nodeId: string;
+  title?: string;
+  version?: number;
+  status?: string;
+  actor: string;
+  agent?: string;
+  changeNote?: string;
+  at: string;
+  undo: { available: boolean; effect?: AgentUndoEffect; restoreTo?: number; reason?: string };
+}
+
+/** What agents did to this nest, newest first, each with an undo verdict. */
+export async function getAgentActivity(
+  nestId: string,
+  opts: { scope?: "agents" | "all"; agent?: string; limit?: number; offset?: number } = {},
+) {
+  const params = new URLSearchParams({
+    scope: opts.scope ?? "agents",
+    limit: String(opts.limit ?? 50),
+    offset: String(opts.offset ?? 0),
+  });
+  if (opts.agent) params.set("agent", opts.agent);
+  return request<{ items: AgentActivityItem[]; limit: number; offset: number; hasMore: boolean }>(
+    `/nests/${nestId}/agent-activity?${params.toString()}`,
+  );
+}
+
+/** Undo one change: restore the previous version, discard a draft, or delete
+ *  a document the agent created. 409 carries why it can't be undone. */
+export async function undoAgentChange(nestId: string, nodeId: string, version: number) {
+  return request<{
+    ok: true;
+    effect: AgentUndoEffect;
+    version: number | null;
+    status?: string;
+    restoredVersion?: number;
+  }>(`/nests/${nestId}/agent-activity/undo`, {
+    method: "POST",
+    body: JSON.stringify({ nodeId, version }),
+  });
+}
+
 export async function submitForReview(
   nestId: string,
   nodeId: string,
