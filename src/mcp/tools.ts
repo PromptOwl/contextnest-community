@@ -58,6 +58,7 @@ import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
+import { recordNodeAccess, type AccessAction } from "../governance/access-log.js";
 import {
   mergeClient,
   parseClientMetadata,
@@ -869,6 +870,38 @@ async function resolveLlmBody(
   }
 }
 
+/** Read tools whose `data` names the documents they handed over, and what
+ *  that counts as in the admin activity log. context_resolve and
+ *  context_export return prose only, so they record from inside their cases. */
+const ACCESS_BY_TOOL: Record<string, AccessAction> = {
+  context_get: "read",
+  context_query: "retrieve",
+  context_search: "retrieve",
+};
+
+function recordToolAccess(toolName: string, result: ToolResult, ctx: McpToolContext): void {
+  const action = ACCESS_BY_TOOL[toolName];
+  if (!action || typeof result === "string" || result.isError || !ctx.nestId) return;
+  const data = result.data as { id?: unknown; documents?: Array<{ id?: unknown }> } | undefined;
+  const ids = [
+    ...(typeof data?.id === "string" ? [data.id] : []),
+    ...(Array.isArray(data?.documents)
+      ? data.documents.map((d) => d?.id).filter((id): id is string => typeof id === "string")
+      : []),
+  ];
+  if (!ids.length) return;
+  recordNodeAccess({
+    nestId: ctx.nestId,
+    nodeIds: ids,
+    action,
+    surface: "mcp",
+    userId: ctx.userId,
+    userEmail: ctx.userEmail,
+    client: ctx.client,
+    detail: toolName,
+  });
+}
+
 /**
  * Public entry for every MCP tool call. Logging lives HERE (not in the route
  * wrapper) so it covers per-nest AND server-level MCP, and so a tool that
@@ -932,7 +965,9 @@ export async function handleToolCall(
     );
   }
   try {
-    return await runTool(toolName, args, attributed);
+    const result = await runTool(toolName, args, attributed);
+    recordToolAccess(toolName, result, attributed);
+    return result;
   } catch (err) {
     // Vault write-lock timeout: map to a typed, retryable tool error HERE —
     // one seam covering both MCP surfaces — before the SDK flattens the throw
@@ -1341,13 +1376,25 @@ async function runTool(
       );
       let total = 0;
       const resolved: string[] = [];
+      const handed: string[] = [];
       for (const { node: n, body } of resolvedBodies) {
         if (body === null) continue; // not visible / no approved version yet
         const entry = `## ${n.frontmatter.title}\n\n${body}`;
         if (total + entry.length > approxChars) break;
         resolved.push(entry);
+        handed.push(n.id);
         total += entry.length;
       }
+      recordNodeAccess({
+        nestId,
+        nodeIds: handed,
+        action: "retrieve",
+        surface: "mcp",
+        userId: ctx.userId,
+        userEmail,
+        client: ctx.client,
+        detail: "context_resolve",
+      });
       return resolved.join("\n\n---\n\n") || "No nodes resolved.";
     }
 
@@ -1384,6 +1431,21 @@ async function runTool(
         }
         parts.push(entry);
         total += entry.length;
+      }
+      if (parts.length) {
+        // Whole nest unless the token budget cut it short — then the documents
+        // that actually left.
+        const sent = resolved.filter((r) => r.body !== null).slice(0, parts.length);
+        recordNodeAccess({
+          nestId,
+          ...(budgetHit ? { nodeIds: sent.map((r) => r.node.id) } : { wholeNest: true }),
+          action: "export",
+          surface: "mcp",
+          userId: ctx.userId,
+          userEmail,
+          client: ctx.client,
+          detail: `context_export (${parts.length} documents)`,
+        });
       }
       if (!parts.length) {
         return budgetHit

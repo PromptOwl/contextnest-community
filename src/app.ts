@@ -68,6 +68,13 @@ import {
   pdfTooLargeMessage,
 } from "./nodes/pdf-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
+import { flushAccessLog } from "./governance/access-log.js";
+import {
+  ACTIVITY_TYPES,
+  getScopedActivity,
+  normalizeFolder,
+  type ActivityType,
+} from "./governance/scoped-activity-service.js";
 import {
   isSuperAdmin,
   isConfigSuperAdmin,
@@ -2567,6 +2574,55 @@ export function createApp(): Hono<AuthEnv> {
       user: c.req.query("user") || undefined,
     });
     return c.json({ count: events.length, total, limit, offset, events });
+  });
+
+  // GET /nests/:nestId/activity-log?node=<id> | ?folder=<path> — the admin
+  // activity log for one document, one folder, or (neither) the whole nest:
+  // who changed, reviewed, commented on, deleted, read, retrieved or exported
+  // it (CU-wdqcq03aw2). Same guard as /trace above — owner, nest admin, or
+  // server admin; everyone else 403. Registered before the sub-routers so it
+  // matches first under the LinearRouter.
+  nestsApp.get("/:nestId/activity-log", async (c) => {
+    const nestId = c.req.param("nestId")!;
+    if (!(await canManageStewards(nestId, c.get("userId")))) {
+      return c.json(
+        { error: "Only the nest owner, a nest admin, or the server admin can view activity." },
+        403,
+      );
+    }
+    const node = c.req.query("node");
+    const folder = c.req.query("folder");
+    if (node && folder !== undefined) {
+      throw new ValidationError("Pass node or folder, not both.");
+    }
+    const scope = node
+      ? { nodeId: assertSafeNodeId(node) }
+      : folder !== undefined
+        ? { folder: normalizeFolder(folder) }
+        : {};
+    if (scope.folder !== undefined) {
+      if (scope.folder === "") delete (scope as { folder?: string }).folder; // the nest root
+      else for (const seg of scope.folder.split("/")) {
+        if (!seg || seg === "." || seg === "..") throw new ValidationError("invalid folder");
+      }
+    }
+    const typesRaw = c.req.query("type");
+    const types = typesRaw
+      ? typesRaw.split(",").map((t) => t.trim()).filter(Boolean)
+      : undefined;
+    if (types?.some((t) => !(ACTIVITY_TYPES as readonly string[]).includes(t))) {
+      throw new ValidationError(`type must be one of: ${ACTIVITY_TYPES.join(", ")}`);
+    }
+    await flushAccessLog();
+    const page = await getScopedActivity({
+      nestId,
+      scope,
+      types: types as ActivityType[] | undefined,
+      actor: c.req.query("actor") || undefined,
+      limit: Number(c.req.query("limit") ?? 50),
+      offset: Number(c.req.query("offset") ?? 0),
+    });
+    return c.json(page);
   });
 
   // Nest list/CRUD

@@ -1586,6 +1586,37 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("046_deletion_client_attribution");
   }
 
+  // 047: document access events (CU-wdqcq03aw2). Reads, retrievals and exports
+  //   leave no version behind, and the activity trace (api_events) records a
+  //   call but not which documents it returned — so "who pulled this doc" had
+  //   no answer. One row per (actor, document, action), throttled at write time
+  //   and pruned on the trace's retention window (access-log.ts). node_id is
+  //   NULL for a whole-nest export. (045 is taken on other branches.)
+  if (!hasMigration("047_node_access_events")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS node_access_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts TEXT NOT NULL,
+          nest_id TEXT NOT NULL,
+          node_id TEXT,
+          action TEXT NOT NULL CHECK(action IN ('read', 'retrieve', 'export')),
+          surface TEXT NOT NULL CHECK(surface IN ('api', 'mcp')),
+          user_id TEXT,
+          user_email TEXT,
+          client_json TEXT,
+          detail TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_node_access_node
+          ON node_access_events(nest_id, node_id, id);
+        CREATE INDEX IF NOT EXISTS idx_node_access_nest
+          ON node_access_events(nest_id, id);
+        CREATE INDEX IF NOT EXISTS idx_node_access_ts ON node_access_events(ts);
+      `);
+    })();
+    recordMigration("047_node_access_events");
+  }
+
   // 045: headless publishing (CU-wdqcq0314u). `nests.headless` is the owner's
   // "API-only" switch; `users.is_service` marks the identity behind an access
   // key (no password, never listed as a person); `headless_readers` ties each

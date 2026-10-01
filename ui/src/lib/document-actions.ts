@@ -21,6 +21,7 @@ export function nodeTypeSupportsMove(type: string | undefined): boolean {
 
 export type DocumentActionKey =
   | "history"
+  | "activity"
   | "copy-link"
   | "move"
   | "share-doc"
@@ -63,6 +64,11 @@ export interface DocumentActionsInput {
    * point; the artifact viewer carries its own History button. Default true.
    */
   includeVersionHistory?: boolean;
+  /**
+   * Owner / nest admin: may open the admin activity log (who changed, read,
+   * pulled…). The server 403s everyone else. Default false.
+   */
+  canSeeActivity?: boolean;
 }
 
 export function documentActions(input: DocumentActionsInput): DocumentActionSpec[] {
@@ -78,11 +84,17 @@ export function documentActions(input: DocumentActionsInput): DocumentActionSpec
     deletionRequested,
     isOwnDeletionRequest,
     includeVersionHistory = true,
+    canSeeActivity = false,
   } = input;
   const actions: DocumentActionSpec[] = [];
 
   if (!isNew && includeVersionHistory)
     actions.push({ key: "history", label: "Version history", testId: "document-editor-history" });
+
+  // Admin audit log for this document (CU-wdqcq03aw2) — next to History, its
+  // nearest neighbour; owner/nest-admin only, like GET /activity-log.
+  if (!isNew && canSeeActivity)
+    actions.push({ key: "activity", label: "Activity", testId: "document-editor-activity" });
 
   if (!isNew)
     actions.push({

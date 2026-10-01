@@ -17,7 +17,7 @@ import {
   Clock, CheckCircle2, Loader2, Link2, Settings as SettingsIcon,
   Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
   FileStack, FolderPlus, X,
-  Activity, BookOpen, Archive, Eye, Palette,
+  Activity, BookOpen, Archive, Eye, Palette, History,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { prettyFolderPath } from "./FolderTree";
@@ -88,6 +88,7 @@ import {
   type Steward, type StewardRole, type ReviewRequest,
 } from "./governance";
 import { useAuth } from "../auth/AuthContext";
+import { ActivityLogPanel } from "./ActivityLogPanel";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { toast } from "sonner";
 
@@ -325,6 +326,8 @@ export function NestView({
   const [initialLoad, setInitialLoad] = useState(true);
   const [reviewNode, setReviewNode] = useState<any | null>(null);
   const [showAssignSteward, setShowAssignSteward] = useState(false);
+  // Admin activity log for the whole nest (CU-wdqcq03aw2).
+  const [showNestActivity, setShowNestActivity] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
   const [showNewFolder, setShowNewFolder] = useState(false);
@@ -1516,6 +1519,16 @@ export function NestView({
                 icon: Activity,
                 onSelect: onOpenTrace,
               });
+            // Who changed, read, pulled or exported what in this nest — the
+            // document-level log, nest-wide. Same owner/nest-admin rule as
+            // GET /activity-log; read-only, so shown on an archived nest too.
+            if (canManageGovernance)
+              actions.push({
+                label: "Activity",
+                icon: History,
+                testId: "nest-activity-log",
+                onSelect: () => setShowNestActivity(true),
+              });
             // One Delete entry, like a document's: the owner deletes the nest
             // outright, an editor raises a request an owner/admin actions.
             // Hidden below owner once a nest flag is already pending, and
@@ -1545,6 +1558,18 @@ export function NestView({
             );
           })()}
       </NestPageHeader>
+      {showNestActivity && (
+        <ActivityLogPanel
+          nestId={nestId}
+          scope={{ kind: "nest" }}
+          label={editableName || nestName}
+          onClose={() => setShowNestActivity(false)}
+          onOpenNode={(id) => {
+            setShowNestActivity(false);
+            onOpenDocument(id);
+          }}
+        />
+      )}
 
       {/* Tabbed layout — Documents / Review Queue / Stewards.
           When stewardship is off the latter two tabs are hidden because

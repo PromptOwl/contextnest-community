@@ -1217,6 +1217,39 @@ Returns `{ ok, nodeId, undone, effect, version, status?, restoredVersion? }`. Er
 - `404` for a missing document
 - `400` for a malformed body
 
+### GET `/nests/:nestId/activity-log`
+Query: `?node=<nodeId>` **or** `?folder=<path>` (neither = the whole nest), `&type=<t>[,<t>…]`, `&actor=<email>`, `&limit=50` (max 200), `&offset=0`.
+
+The **admin activity log** for one document, one folder, or the nest: who changed, reviewed, commented on, deleted, read, retrieved or exported it, newest first. Owner, nest admin, or server admin only (the same rule as `/trace`); everyone else gets `403`. `400` for `node` and `folder` together, a traversal id or folder, or an unknown `type`.
+
+It merges what the server records: versions (`created`, `edited`, `restored`, with the agent from the write's `client`), reviews (`review_requested`, `approved`, `rejected`, `review_cancelled`), comments (`commented`, `comment_resolved`), deletions (`deleted`), and document access, which leaves no version (`read`, `retrieved`, `exported`).
+
+Access is recorded when a document is opened (`GET …/nodes/:id`, MCP `context_get`), returned by a search, query or context call (`/search`, `/query`, `/context` incl. Hootie, MCP `context_query` / `context_search` / `context_resolve`), or exported. A whole-nest export is one row with `nodeId: null` and appears in the nest's and folders' logs, and in the log of every document that existed at the time (not documents created afterwards). `detail` names how a document was accessed (`search`, `context`, `context_get`, `markdown export (12 documents)`); **what the caller searched for or asked is never stored**. Access rows are **sampled, not exhaustive**: throttled to one per person, document, action, surface and agent per 10 minutes, capped at 50 documents per retrieval, and pruned on the activity-trace retention window (`TRACE_RETENTION_DAYS`). The throttle is per server process, so a multi-instance deployment records up to one row per instance per window. Deleting a document purges its version and access history (the `deleted` tombstone stays).
+
+```json
+{
+  "items": [
+    {
+      "id": "a:42",
+      "type": "read",
+      "nodeId": "nodes/sales/pricing",
+      "title": "Pricing",
+      "actor": "alice@acme.com",
+      "agent": "claude-code",
+      "client": { "agent": "claude-code" },
+      "at": "2026-09-29T12:00:00.000Z",
+      "surface": "mcp",
+      "detail": "context_get"
+    }
+  ],
+  "limit": 50,
+  "offset": 0,
+  "hasMore": false
+}
+```
+
+The collaborator-facing `GET …/activity` and `GET …/nodes/:id/activity` feeds are unchanged and never include access rows.
+
 ### GET `/nests/:nestId/feed`
 Query: `?filter=all|changes|comments&limit=50&offset=0` (filter defaults to `all`, limit caps at 200, offset caps at 10 000)
 

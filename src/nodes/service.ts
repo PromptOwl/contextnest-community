@@ -2481,6 +2481,11 @@ export const NODE_KEYED_TABLES = [
   ["publish", "node_id"],
   ["edges", "from_node"],
   ["edges", "to_node"],
+  // Who read / pulled the document (CU-wdqcq03aw2). Moves carry it along;
+  // a delete purges it with the rest of the document's history, so a later
+  // document at the same id never inherits someone else's reads. The
+  // deletion tombstone and whole-nest export rows (node_id NULL) survive.
+  ["node_access_events", "node_id"],
 ] as const;
 
 /** Drop every row keyed to a node id. Caller supplies the transaction. */
