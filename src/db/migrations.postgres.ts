@@ -77,6 +77,7 @@ const HISTORICAL_MIGRATIONS = [
   "042_community_sites",
   "043_node_suggestion_details",
   "044_client_attribution",
+  "045_headless_publish",
   "046_deletion_client_attribution",
 ];
 
@@ -830,6 +831,21 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
   await db.exec(`
     CREATE INDEX IF NOT EXISTS idx_node_suggestions_nest_detected
       ON node_suggestions(nest_id, detected_at DESC);
+  `);
+
+  // Migration 045 parity: headless publishing (CU-wdqcq0314u).
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS headless INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS is_service INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE IF NOT EXISTS headless_readers (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      key_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE INDEX IF NOT EXISTS idx_headless_readers_nest ON headless_readers(nest_id);
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

@@ -6,6 +6,7 @@
 import { toast } from "sonner";
 import { CollaboratorManager } from "../CollaboratorManager";
 import { NestVisibilityControl } from "../NestVisibilityControl";
+import { HeadlessAccessPanel } from "../HeadlessAccessPanel";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 interface Props {
@@ -81,6 +82,11 @@ export function CollaboratorsTab({
             onChanged={onChanged}
             onError={(msg) => msg && toast.error(msg)}
           />
+        )}
+        {/* API-only access keys (CU-wdqcq0314u) — another answer to "who can
+            read this nest", so it sits with visibility. */}
+        {canManage && (
+          <HeadlessAccessPanel nestId={nestId} onError={(msg) => msg && toast.error(msg)} />
         )}
         <CollaboratorManager
           nestId={nestId}

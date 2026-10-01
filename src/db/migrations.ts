@@ -1585,6 +1585,39 @@ export function runMigrations(db: Database.Database): void {
     }
     recordMigration("046_deletion_client_attribution");
   }
+
+  // 045: headless publishing (CU-wdqcq0314u). `nests.headless` is the owner's
+  // "API-only" switch; `users.is_service` marks the identity behind an access
+  // key (no password, never listed as a person); `headless_readers` ties each
+  // such identity to the one nest its key reads.
+  if (!hasMigration("045_headless_publish")) {
+    db.transaction(() => {
+      const nestCols = (
+        db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!nestCols.includes("headless")) {
+        db.exec("ALTER TABLE nests ADD COLUMN headless INTEGER NOT NULL DEFAULT 0");
+      }
+      const userCols = (
+        db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!userCols.includes("is_service")) {
+        db.exec("ALTER TABLE users ADD COLUMN is_service INTEGER NOT NULL DEFAULT 0");
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS headless_readers (
+          user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          key_id TEXT NOT NULL,
+          label TEXT NOT NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_headless_readers_nest ON headless_readers(nest_id);
+      `);
+    })();
+    recordMigration("045_headless_publish");
+  }
 }
 
 /**
