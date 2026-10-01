@@ -1,5 +1,31 @@
 # @promptowl/contextnest-community
 
+## 1.27.0
+
+### Minor Changes
+
+- 5e1f545: Hootie in the nest: a floating assistant on every page of the UI. It answers from what the person asking can read in the nest (the `/context` retrieval, run as the caller), streams the answer, cites the documents it used as chips that open them, follows the document you have open, and lets you `@tag` a colleague — which posts the exchange as a comment on that document and notifies them like any comment mention. `/` switches the nest. New `POST /nests/:id/chat` route (read tier, per-user rate limit), `HOOTIE_ENABLED` toggle in Settings → General (default on), answers with the server-wide Anthropic API key and says so when there isn't one. Model and model gateway URL (LiteLLM / PromptOwl) are superadmin settings too; the gateway URL also flows into agent runs, so one setting routes every model call.
+
+  The Anthropic API key is checked against the provider when an admin saves it, so a key that does not work is refused at the box that sets it rather than surfacing later as a failed answer. When a model call does fail, the panel says what actually went wrong — out of credit, a rejected key, a rate limit, an overloaded model — instead of one generic line. Only the asker's own @mentions notify anyone: a name written by the model, echoed out of a retrieved document, reaches the comment but nobody's inbox. Without an API key the launcher is shown to admins only, who can act on it. The panel opens as a chat window in the corner rather than a full-height slide-over, so the page stays visible behind it.
+
+- cf0a89a: Stored credentials are now encrypted at rest. The secret server settings (Anthropic API key, OIDC client secret, MCP signing secret, SMTP URL, Slack and Teams webhook URLs, the SES secret access key, the license key) and every value in a nest's Tool environment are stored AES-256-GCM encrypted instead of in the clear, so a row read in isolation — a log line, an export, one table's replica — is not the credential. Non-secret settings stay readable. The master key is generated on first use and kept in the database, so it survives redeploys and is shared by every instance with nothing to configure; set SECRETS_KEY in the deploy environment to supply your own and keep the key out of the database it protects. Values written before this are read back as plaintext and re-encrypted on their next save — nothing to migrate — and a value that cannot be decrypted is logged by name and treated as unset rather than failing the boot. Known exception: the license validation cache is still keyed by the license key.
+
+### Patch Changes
+
+- df4a8c4: In the Add with AI modal, Connect in the API key note is now a link that opens the nest's Connect dialog, where the key is minted.
+- ab94585: Documents whose approved version can no longer be rebuilt (history damaged by an older import) no longer show up empty to readers. On the read that hits one, the approval moves to the newest published version that still rebuilds, credited to the server (system:approved-heal) rather than the original reviewer, and that version's history entry notes the move (Approved version moved from v3 to v4 — v3 could not be rebuilt). No version is created, the saved history is not rewritten, and a draft or pending version is never promoted. This covers the public reader, the document list, exports and MCP reads. If no newer published version rebuilds, nothing changes.
+- e6025f5: The Nests dashboard opens on My nests again after you last used All, Organization or Public, so other organizations' nests are never the first screen. Narrow scopes (Owned, Shared, Synced, Unsynced) are still remembered.
+- 5c47b52: A nest's description now shows on its Overview even before it has any documents, above the Add the first page actions, the same as on a nest with pages.
+- a795fab: Add a Delete folder action in two more places. The nest Overview's folder rows now show a delete icon next to New document and Open in Documents, and the Documents tab's folder filter line shows Delete folder when the filtered folder holds no documents. Both open the same confirmation (or deletion request, for editors) the Documents tree already uses.
+- 392861f: Import in a nest opens a centred dialog listing Files, Upload PDF and Whole vault, the same way New Document and Add with AI open, instead of a dropdown anchored to the header button. The Overview's Import files action opens the same dialog.
+- 90949c6: Replace PDF now asks for an optional change note before you pick the file, and records it on the new version. Left blank, the version history keeps the default Replaced the PDF.
+- a12c13f: Replacing a PDF shows the same centred upload card as an import, naming the file being uploaded, instead of only a spinner on the Replace PDF button.
+- ab13414: Every oversized PDF upload now gets the same message, for example PDF too large (30.0 MB, max 25 MB), in the admin-configured MB. A file far over the limit used to hit the server's generic body cap and show a raw Request body too large error with byte counts.
+- 5035c43: Uploading files into a nest shows a large, centred progress card naming the file (or file count) being uploaded, instead of a small muted spinner that was easy to miss during a slow PDF upload.
+- 29a9eb8: A nest shared with you no longer appears in your Nests grid as viewable or editable while its invite is still pending. It shows only under Pending invites until you accept it.
+- 3d99297: When a Server settings save is rejected, the offending field is marked in place with a red border and the server's reason underneath (for example an invalid Public base URL), not only in the banner at the top. The mark clears on the next edit.
+- 72ab1b7: The Suggest everyone on this server and This server hosts several organizations toggles in Server settings now describe their behaviour as a short summary followed by separate Off, On and In either state points, instead of one dense paragraph each.
+
 ## 1.26.0
 
 ### Minor Changes

@@ -52,6 +52,10 @@ export interface LicenseInfo {
   reason?: string | null;
   graceEndsAt?: string | null;
   contact?: LicenseContact;
+  /** Named features PromptOwl says this licence unlocks (see
+   *  entitlements.ts). null/absent = an older PromptOwl that sends none —
+   *  tier defaults apply. */
+  features?: string[] | null;
 }
 
 
@@ -486,8 +490,41 @@ type CachedLicenseRow = {
   limits_json: string;
   validated_at: string;
   owner_email: string | null;
+  features_json?: string | null;
   gateway_json?: string | null;
 };
+
+/** Longest feature key accepted from PromptOwl; longer entries are dropped. */
+const MAX_FEATURE_KEY = 64;
+
+/**
+ * PromptOwl's `features` → a clean, deduped, sorted string list, or null
+ * when it sent none. The one sanitiser for licence features (entitlements.ts
+ * uses it too). null and [] mean different things and must stay distinct:
+ * null = an older PromptOwl, tier defaults apply; [] = no features (e.g.
+ * revoked). A row cached before migration 048 reads as null, so during an
+ * outage right after upgrading, tier defaults apply until the next
+ * successful check — a deliberate fail-open for a window of one poll.
+ */
+export function sanitizeFeatures(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const keep = raw.filter(
+    (f): f is string => typeof f === "string" && f.length > 0 && f.length <= MAX_FEATURE_KEY,
+  );
+  if (keep.length !== raw.length) {
+    console.warn(`[license] ignored ${raw.length - keep.length} malformed licence feature entr${raw.length - keep.length === 1 ? "y" : "ies"}`);
+  }
+  return Array.from(new Set(keep)).sort();
+}
+
+function cachedFeatures(json: string | null | undefined): string[] | null {
+  if (!json) return null;
+  try {
+    return sanitizeFeatures(JSON.parse(json));
+  } catch {
+    return null;
+  }
+}
 
 async function fromCache(cached: CachedLicenseRow): Promise<LicenseInfo> {
   if (cached.owner_email) lastOwnerEmail = cached.owner_email;
@@ -500,6 +537,7 @@ async function fromCache(cached: CachedLicenseRow): Promise<LicenseInfo> {
     suspended: suspensionConfirmed,
     suspendedReason: suspensionReason,
     ownerEmail: cached.owner_email || null,
+    features: cachedFeatures(cached.features_json),
   });
 }
 
@@ -590,9 +628,11 @@ async function _validateLicenseImpl(
       suspended?: boolean;
       suspended_reason?: string;
       owner_email?: string | null;
+      features?: unknown;
       // v2 (optional): reason, trial, expires_at, seats, contact
       [k: string]: unknown;
     };
+    const features = sanitizeFeatures(data.features);
     lastMeta = parseMeta(data, report.stats?.users ?? null);
     lastCheckedAt = new Date().toISOString();
     if (data.owner_email) lastOwnerEmail = data.owner_email;
@@ -709,10 +749,10 @@ async function _validateLicenseImpl(
       await db.run(
         insertOrReplace(
           db,
-          `INSERT INTO license_cache (key, tier, org, limits_json, owner_email, gateway_json, validated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ${nowExpr(db)})`,
+          `INSERT INTO license_cache (key, tier, org, limits_json, owner_email, features_json, gateway_json, validated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ${nowExpr(db)})`,
           ["key"],
-          `tier = excluded.tier, org = excluded.org, limits_json = excluded.limits_json, owner_email = excluded.owner_email, gateway_json = excluded.gateway_json, validated_at = ${nowExpr(db)}`,
+          `tier = excluded.tier, org = excluded.org, limits_json = excluded.limits_json, owner_email = excluded.owner_email, features_json = excluded.features_json, gateway_json = excluded.gateway_json, validated_at = ${nowExpr(db)}`,
         ),
         [
           key,
@@ -720,6 +760,7 @@ async function _validateLicenseImpl(
           data.org || null,
           limitsJson,
           data.owner_email || null,
+          features ? JSON.stringify(features) : null,
           gatewayJson,
         ],
       );
@@ -733,6 +774,7 @@ async function _validateLicenseImpl(
       suspended: suspensionConfirmed,
       suspendedReason: suspensionReason,
       ownerEmail: data.owner_email || null,
+      features,
     });
   } catch (err: any) {
     if (cached) {

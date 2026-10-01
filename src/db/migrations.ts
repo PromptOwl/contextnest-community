@@ -1571,16 +1571,31 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("044_client_attribution");
   }
 
-  // 046: license_cache.gateway_json — the license's LiteLLM key, encrypted.
-  //   046 because 045 is taken by two in-flight branches (ids match by string).
-  if (!hasMigration("046_license_cache_gateway")) {
+  // 048: license_cache.features_json — the named licence features PromptOwl
+  // returns (CU-wdqcq03f2z), cached with the rest of the licence so an
+  // outage keeps the same entitlements. NULL = PromptOwl sent none (tier
+  // defaults apply). Numbered 048: 045 (MCP OAuth), 046 (#342) and 047 (#345)
+  // are taken on in-flight branches, and ids match by string.
+  if (!hasMigration("048_license_cache_features")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(license_cache)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (cols.length && !cols.includes("features_json")) {
+      db.exec("ALTER TABLE license_cache ADD COLUMN features_json TEXT");
+    }
+    recordMigration("048_license_cache_features");
+  }
+
+  // 049: license_cache.gateway_json — the license's LiteLLM key, encrypted.
+  //   049: 045-048 are taken (ids match by string).
+  if (!hasMigration("049_license_cache_gateway")) {
     const cols = (
       db.prepare("PRAGMA table_info(license_cache)").all() as Array<{ name: string }>
     ).map((c) => c.name);
     if (!cols.includes("gateway_json")) {
       db.exec("ALTER TABLE license_cache ADD COLUMN gateway_json TEXT");
     }
-    recordMigration("046_license_cache_gateway");
+    recordMigration("049_license_cache_gateway");
   }
 }
 

@@ -68,6 +68,9 @@ export async function createTestApp(
   opts: {
     superAdmins?: string[];
     ownerEmail?: string;
+    tier?: string;
+    /** Named licence features (entitlements.ts). */
+    features?: string[];
     /** License limits the mocked license reports. Read on every call, so a
      *  test can mutate maxUsers after seeding users (seat-limit tests). */
     licenseLimits?: { maxUsers: number; maxNests: number };
@@ -92,12 +95,13 @@ export async function createTestApp(
       ...actual,
       getCurrentLicense: () => ({
         valid: true,
-        tier: "test",
+        tier: opts.tier ?? "test",
         org: "Test Org",
         limits: opts.licenseLimits ?? null,
         suspended: false,
         suspendedReason: null,
         ownerEmail: opts.ownerEmail ?? null,
+        ...(opts.features ? { features: opts.features } : {}),
         ...(opts.licenseOverrides ?? {}),
       }),
       getEntitlement: () => ({
