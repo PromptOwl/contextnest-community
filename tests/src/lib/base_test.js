@@ -27,6 +27,9 @@ import LoginPage from '../page_factory/auth/login_page.js';
 import AppShellPage from '../page_factory/app/app_shell_page.js';
 import NestsPage from '../page_factory/app/nests_page.js';
 
+// REST helper used to arrange dashboard preconditions (nests, pins, sharing)
+import DashboardApi from './dashboard_api.js';
+
 /**
  * Global fixtures available to all tests
  * These don't require authentication
@@ -184,6 +187,15 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
       // Nests dashboard
       get nestsPage() {
         return new NestsPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper bound to this role's authenticated session — used to
+       * arrange test data (nests, archive state, pins, sharing) without
+       * driving the UI for setup.
+       */
+      get dashboardApi() {
+        return new DashboardApi(this.page);
       },
 
       /**

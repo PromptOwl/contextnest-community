@@ -58,7 +58,16 @@ const testRun = [
     enabled: true,
     independent: true, // Self-contained auth tests
   },
-  // ── Add new suites here (nests, governance, documents, …) ─────────────────
+  {
+    // Community Dashboard (CN-DASH-001 … CN-DASH-062). Serial on purpose: the
+    // cases share one account, so a parallel run would have them filtering,
+    // counting and deleting each other's nests.
+    file: 'dashboard/community_dashboard.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nests; depends only on the orphan sweep
+  },
+  // ── Add new suites here (governance, documents, …) ────────────────────────
   // ── Teardown (always runs last, even on failure) ───────────────────────────
   {
     file: 'global-cleanup/global_cleanup.spec.js',
@@ -141,7 +150,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth'];
+const standaloneNames = ['auth', 'dashboard'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -263,6 +272,17 @@ export default defineConfig({
             name: 'auth',
             dependencies: ['setup-auth'],
             testMatch: 'tests/features/auth/**/*.spec.js',
+            fullyParallel: false,
+            use: {
+              ...devices['Desktop Chrome'],
+              screenshot: 'only-on-failure',
+              trace: 'retain-on-failure',
+            },
+          },
+          {
+            name: 'dashboard',
+            dependencies: ['setup-auth'],
+            testMatch: 'tests/features/dashboard/**/*.spec.js',
             fullyParallel: false,
             use: {
               ...devices['Desktop Chrome'],
