@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil } from "lucide-react";
+import { Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PageTitle } from "@/components/ui/page-title";
 import { Input } from "@/components/ui/input";
@@ -88,6 +88,10 @@ const TABS: {
       "anthropic_base_url",
       "hootie_enabled",
       "hootie_model",
+      "hootie_name",
+      "hootie_logo_url",
+      "hootie_accent_color",
+      "hootie_greeting",
       "nest_creation",
       "people_suggest_all_users",
       "shared_deployment",
@@ -799,10 +803,11 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               <CardHeader>
                 <CardTitle className="text-base">Hootie</CardTitle>
                 <CardDescription>
-                  The assistant in the corner of every page. It answers from
-                  what the person asking can read in the nest, cites the
-                  documents it used, and lets them @tag a colleague — which
-                  posts the exchange as a comment and notifies them. Uses the
+                  The assistant in a side panel on every page, opened from a
+                  tab on the right edge. It answers from what the person asking
+                  can read in the nest, cites the documents it used, and lets
+                  them @tag a colleague — which posts the exchange as a comment
+                  and notifies them. Off until you turn it on. Uses the
                   Anthropic API key above; without one the panel says so.
                 </CardDescription>
               </CardHeader>
@@ -814,8 +819,14 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   <Switch
                     checked={draft.hootie_enabled}
                     onCheckedChange={(v) => set({ hootie_enabled: v })}
+                    data-testid="settings-hootie-enabled"
                   />
                 </div>
+                <HootieBrandingFields
+                  draft={draft}
+                  fieldErrors={fieldErrors}
+                  set={set}
+                />
                 <div className="space-y-1.5">
                   <Label htmlFor="hootie-model">Model</Label>
                   <TextField
@@ -2111,5 +2122,95 @@ export default function SettingsRoute() {
       settings={serverSettings}
       onUpdate={updateServerSettings}
     />
+  );
+}
+
+/**
+ * The assistant's name, logo, accent colour and greeting — an Enterprise
+ * feature. Without the entitlement the fields are shown locked (the server
+ * refuses them anyway and every surface shows the default Hootie).
+ */
+function HootieBrandingFields({
+  draft,
+  fieldErrors,
+  set,
+}: {
+  draft: AdminSettings;
+  fieldErrors: Record<string, string>;
+  set: (patch: Partial<AdminSettings>) => void;
+}) {
+  const available = !!draft.hootie_branding_available;
+  const hex = /^#[0-9a-fA-F]{6}$/.test(draft.hootie_accent_color ?? "")
+    ? draft.hootie_accent_color
+    : null;
+  return (
+    <div className="space-y-3 rounded-md border p-3" data-testid="settings-hootie-branding">
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-medium">Name and branding</span>
+        <Badge variant="secondary" className="gap-1">
+          {!available && <Lock className="h-3 w-3" />}
+          Enterprise
+        </Badge>
+      </div>
+      {!available && (
+        <p className="text-xs text-muted-foreground" data-testid="settings-hootie-branding-locked">
+          Rename the assistant and give it your logo, colour and greeting with
+          an Enterprise licence. Until then everyone sees Hootie.
+        </p>
+      )}
+      <fieldset disabled={!available} className="grid gap-3 disabled:opacity-60 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label htmlFor="hootie-name">Name</Label>
+          <TextField
+            id="hootie-name"
+            error={fieldErrors.hootie_name}
+            value={draft.hootie_name ?? ""}
+            placeholder="Hootie"
+            onChange={(v) => set({ hootie_name: v })}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="hootie-accent">Accent colour</Label>
+          <div className="flex items-center gap-2">
+            <span
+              aria-hidden
+              className="h-8 w-8 shrink-0 rounded-md border"
+              style={hex ? { backgroundColor: hex } : undefined}
+            />
+            <TextField
+              id="hootie-accent"
+              error={fieldErrors.hootie_accent_color}
+              value={draft.hootie_accent_color ?? ""}
+              placeholder="#0a7cff — empty uses the theme colour"
+              onChange={(v) => set({ hootie_accent_color: v })}
+            />
+          </div>
+        </div>
+        <div className="space-y-1.5 sm:col-span-2">
+          <Label htmlFor="hootie-logo">Logo URL</Label>
+          <TextField
+            id="hootie-logo"
+            error={fieldErrors.hootie_logo_url}
+            value={draft.hootie_logo_url ?? ""}
+            placeholder="https://cdn.example.com/assistant.png"
+            onChange={(v) => set({ hootie_logo_url: v })}
+          />
+          <p className="text-xs text-muted-foreground">
+            An https link to a .png, .jpg, .gif or .webp image. Shown on the
+            edge tab, the panel header and next to each answer.
+          </p>
+        </div>
+        <div className="space-y-1.5 sm:col-span-2">
+          <Label htmlFor="hootie-greeting">Greeting</Label>
+          <TextField
+            id="hootie-greeting"
+            error={fieldErrors.hootie_greeting}
+            value={draft.hootie_greeting ?? ""}
+            placeholder={`Hi, I'm ${draft.hootie_name?.trim() || "Hootie"}`}
+            onChange={(v) => set({ hootie_greeting: v })}
+          />
+        </div>
+      </fieldset>
+    </div>
   );
 }

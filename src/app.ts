@@ -41,6 +41,14 @@ import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { hootieRoutes } from "./hootie/routes.js";
 import { verifyModelKey } from "./hootie/model.js";
+import {
+  HOOTIE_BRAND_FIELDS,
+  changedHootieBrandFields,
+  effectiveHootieBrand,
+  hootieBrandingAvailable,
+  storedHootieSettings,
+  validateHootieBrandFields,
+} from "./hootie/brand.js";
 import { mcpRoutes } from "./mcp/routes.js";
 import { edgeTypeRoutes } from "./workflow/edge-type-routes.js";
 import { edgeRoutes } from "./workflow/edge-routes.js";
@@ -532,11 +540,18 @@ export function createApp(): Hono<AuthEnv> {
       // API would refuse it — existing nodes of the type stay readable.
       type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
       type_table_enabled: config.TYPE_TABLE_ENABLED,
-      // Hootie in the nest (default ON). Off → POST /nests/:id/chat 404s and
-      // the UI hides the launcher. Whether it can actually answer is
-      // runner_key_configured above — the UI shows the launcher whenever the
-      // feature is on and explains the missing key, rather than hiding it.
+      // Hootie in the nest (default OFF — admins opt in). Off → POST
+      // /nests/:id/chat 404s and the UI hides the launcher. Whether it can
+      // actually answer is runner_key_configured above — the UI shows the
+      // launcher whenever the feature is on and explains the missing key,
+      // rather than hiding it.
       hootie_enabled: config.HOOTIE_ENABLED,
+      // The identity every surface shows: the admin's custom name/logo/
+      // colour/greeting on an enterprise licence, the default Hootie
+      // otherwise (enforced here, not in the client). Public: the launcher
+      // renders before sign-in, and none of it is secret.
+      hootie_brand: effectiveHootieBrand(),
+      hootie_branding_available: hootieBrandingAvailable(),
       // This server hosts several organizations (PromptOwl-hosted) rather than
       // one. The visibility picker words 'Organization' and 'Public' by it and
       // confirms before 'org'; the server enforces the same in
@@ -681,6 +696,12 @@ export function createApp(): Hono<AuthEnv> {
     type_table_enabled: config.TYPE_TABLE_ENABLED,
     hootie_enabled: config.HOOTIE_ENABLED,
     hootie_model: config.HOOTIE_MODEL,
+    // Custom identity (enterprise). The stored values are returned even when
+    // the licence doesn't allow them, so a lapsed licence shows what would
+    // come back on renewal; `hootie_branding_available` says whether they
+    // are in effect and whether edits are accepted.
+    ...storedHootieSettings(),
+    hootie_branding_available: hootieBrandingAvailable(),
     anthropic_base_url: config.ANTHROPIC_BASE_URL,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
@@ -774,6 +795,26 @@ export function createApp(): Hono<AuthEnv> {
     };
     const pending: Array<{ name: string; value: string | null }> = [];
 
+    // Custom assistant identity is an enterprise entitlement. A request that
+    // would CHANGE it is refused whole — nothing written, not even its other
+    // fields — so a non-enterprise server never holds a half-applied edit.
+    // Branding fields that only echo the stored values are dropped, so a
+    // client that sends a whole form can still save unrelated settings.
+    if (!hootieBrandingAvailable()) {
+      if (changedHootieBrandFields(body).length > 0) {
+        return c.json(
+          {
+            error:
+              "Custom assistant name and branding are an Enterprise feature. Upgrade the licence to change them.",
+            code: "enterprise_required",
+            settings: currentServerSettings(),
+          },
+          403,
+        );
+      }
+      for (const k of Object.keys(HOOTIE_BRAND_FIELDS)) delete body[k];
+    }
+
     if ("promptowl_sign_in_gate" in body) {
       const v = String(body.promptowl_sign_in_gate ?? "").trim().toLowerCase();
       if (!["open", "admin-only", "disabled"].includes(v))
@@ -852,10 +893,12 @@ export function createApp(): Hono<AuthEnv> {
         value: body.type_table_enabled ? null : "false",
       });
     }
+    // Default OFF (CU-wdqcq03ewc). Both states are written explicitly so a
+    // UI choice beats a deploy env of either value (db/settings.ts precedence).
     if ("hootie_enabled" in body) {
       pending.push({
         name: "HOOTIE_ENABLED",
-        value: body.hootie_enabled ? null : "false",
+        value: body.hootie_enabled ? "true" : "false",
       });
     }
     if ("hootie_model" in body) {
@@ -865,6 +908,8 @@ export function createApp(): Hono<AuthEnv> {
         addError("hootie_model", "Model must be a single identifier with no spaces.");
       else pending.push({ name: "HOOTIE_MODEL", value: v === "claude-opus-5" ? null : v });
     }
+    // Name, logo, accent colour, greeting (enterprise — gated above).
+    pending.push(...validateHootieBrandFields(body, addError));
     // Empty clears the row (direct Anthropic). Otherwise an http(s) origin
     // (+ optional path) with no trailing slash, so the SDK joins /v1/messages
     // onto it cleanly.
