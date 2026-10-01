@@ -802,7 +802,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       created_by_user_id TEXT NOT NULL,
       created_at TEXT NOT NULL,
       PRIMARY KEY (nest_id, user_id, key_id)
-    
+    );
+
     -- community_sites (migration 042): official community site connections
     -- trusted for SSO auto-login — extends the single OFFICIAL_COMMUNITY_SSO_
     -- SECRET/PUBLIC_BASE_URL env-var pair to a DB-backed list, each row with

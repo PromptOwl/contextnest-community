@@ -394,6 +394,39 @@ export function NestSettingsModal({
           </div>
           )}
 
+          {/* Creator reviews — only meaningful once stewardship is on. */}
+          {canManageStewardship && enabled && (
+          <div className="rounded-lg border p-4 space-y-3">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label className="flex items-center gap-2 text-sm font-medium">
+                  <UserPen className="h-4 w-4" />
+                  Creators review their own documents
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Default off. When enabled, whoever creates a document becomes
+                  its <strong>reviewer</strong> and the first version publishes
+                  right away. Changes by anyone else go to the creator for
+                  approval; the creator&rsquo;s own later edits go to the
+                  nest&rsquo;s other reviewers. Applies to documents created
+                  from now on — existing documents keep their stewards.
+                </p>
+              </div>
+              <Switch checked={creatorReviews} onCheckedChange={setCreatorReviews} />
+            </div>
+
+            <div className="flex items-start gap-2 text-xs text-muted-foreground pt-2 border-t">
+              <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+              <div>
+                <strong className="text-foreground">Prime wins.</strong> A
+                prime document still starts as a draft — its creator is made
+                its reviewer, but someone else has to approve the first
+                version.
+              </div>
+            </div>
+          </div>
+          )}
+
           {/* Push Confirmation Gate — SERVER superadmin only. Rendered for
               everyone who can manage the nest so the posture is visible, but
               the switch is enabled only for a superadmin; others see it

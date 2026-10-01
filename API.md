@@ -333,7 +333,7 @@ Pins are per `(user, nest)` in the `nest_pins` table and cascade with the nest. 
   "allow_self_approve": false,
   "prime_only_review": false,
   "prime_tags": ["prime-document"],
-  "require_push_confirmation": false
+  "require_push_confirmation": false,
   "creator_is_reviewer": false
 }
 ```
