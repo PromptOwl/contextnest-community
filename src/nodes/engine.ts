@@ -270,6 +270,11 @@ type HistoryMap = Awaited<ReturnType<NestStorage["findAllHistories"]>>;
  * is past its cached history (a write from another process) is re-read too. So
  * the version and chain hash a checkpoint pairs up always come from the same
  * state. Callers that pass `onUnreadable` (the integrity check) always crawl.
+ *
+ * Limit: the cross-process check compares versions only. Another process that
+ * rewrites a history WITHOUT a version bump (a quarantine, a repair re-anchor)
+ * stays unseen here until `invalidateDiscovery` runs. Normal writes bump the
+ * version. Temporary: PromptOwl/ContextNest#146 moves this into the engine.
  */
 function withHistoryCache<S extends NestStorage>(
   storage: S,
@@ -289,6 +294,7 @@ function withHistoryCache<S extends NestStorage>(
       if (generation === startedAt) cached = new Map(crawled);
       return crawled;
     }
+    // Cheap: `storage` is already wrapped by withDiscoveryCache.
     const docs = await storage.discoverDocuments({ includeRetired: true });
     const live = new Set(docs.map((d) => d.id));
     for (const d of docs) {
@@ -312,6 +318,8 @@ function withHistoryCache<S extends NestStorage>(
     );
     // Deleted or moved documents leave the set.
     for (const id of map.keys()) if (!live.has(id)) map.delete(id);
+    // A new Map, but the history objects are shared with the cache. The
+    // engine's checkpoint code only reads them; a caller must not mutate them.
     return new Map(map);
   };
 
