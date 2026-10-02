@@ -2,6 +2,12 @@
 # when a PR is merged into `development`. Mirrors dev-cloud-run/deploy-dev.ps1
 # step-for-step: build + push image (always), then `gcloud run deploy`.
 #
+# Feature flags: FEATURE_WORKFLOW_PLANE is ON for dev only (runs, schedules,
+# typed edges; the 60s schedule tick starts at boot). Runs are executed by the
+# external contextnest-runner `poll` worker (PromptOwl/contextnest-runner).
+# FEATURE_SUBAGENT_RUNS stays off. To turn the plane off again, delete the line
+# and redeploy (a changed deploy env overrides any stored Settings toggle).
+#
 # This is the DEV pipeline only. A separate main/prod workflow will reuse the
 # PROD_* secret names; dev secrets are DEV_* so the two never collide.
 #
@@ -112,6 +118,7 @@ jobs:
           PROMPTOWL_BYPASS_SECRET: '$(esc "$PROMPTOWL_BYPASS_SECRET")'
           PUBLIC_BASE_URL: 'https://community-nest-dev-619135602958.us-central1.run.app/'
           OFFICIAL_COMMUNITY_SSO_SECRET: '$(esc "$OFFICIAL_COMMUNITY_SSO_SECRET")'
+          FEATURE_WORKFLOW_PLANE: 'true'
           EOF
 
       # --- deploy (ps1: gcloud run deploy, identical flags) --------------------
