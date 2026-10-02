@@ -31,6 +31,8 @@ import { resolveNodeGrant } from "./grants-service.js";
 import { dispatchEvent, hasAnyConnector } from "../notify/dispatch.js";
 import { isEmailConfigured, sendEmailToRecipient } from "../notify/email.js";
 import { tryConsume } from "../shared/rate-limit.js";
+import { listWatchers } from "./notify-service.js";
+import { resolveStewardsForNode } from "./stewardship-service.js";
 
 /**
  * Can this person open this document at all?
@@ -370,16 +372,28 @@ export async function notifyCommentMentions(params: {
   actorEmail: string;
   baseUrl?: string;
 }): Promise<number> {
+  return (await fanOutCommentMentions(params)).length;
+}
+
+/** notifyCommentMentions' body, returning WHO was notified so notifyComment
+ *  can keep the watcher/reviewer fan-out from pinging them a second time. */
+async function fanOutCommentMentions(params: {
+  nestId: string;
+  nodeId: string;
+  body: string;
+  actorEmail: string;
+  baseUrl?: string;
+}): Promise<Recipient[]> {
   const { nestId, nodeId, body, actorEmail, baseUrl } = params;
   try {
     const names = extractMentions(body || "");
     const recipients = await resolveRecipients({ nestId, nodeId, names, actorEmail });
-    if (recipients.length === 0) return 0;
+    if (recipients.length === 0) return [];
 
     const ctx = await buildDocContext(nestId, nodeId, baseUrl);
     const excerpt = excerptOf(body);
     const message = `${actorEmail} mentioned you in a comment on "${ctx.label}"`;
-    const created = await insertInboxRows({ nestId, nodeId, recipients, message });
+    await insertInboxRows({ nestId, nodeId, recipients, message });
     await deliverMentionMessages({
       nestId,
       nodeId,
@@ -393,9 +407,145 @@ export async function notifyCommentMentions(params: {
       excerpt,
       ctx,
     });
-    return created;
+    return recipients;
   } catch (err) {
     console.error("[notify] comment mention fan-out failed", nestId, nodeId, err);
+    return [];
+  }
+}
+
+/**
+ * Upper bound on watcher + reviewer recipients one comment can reach. Both
+ * lists are admin-curated, so this is a backstop, not a policy: it bounds the
+ * inbox rows and emails a single read-tier write can cause.
+ */
+export const MAX_COMMENT_FOLLOWERS = 50;
+
+/**
+ * Everything a new comment notifies: the people named in it (mentions, as
+ * before) AND the people who follow the document — its watchers and its
+ * reviewer stewards (document, tag and nest scope).
+ *
+ * Followers get a plain "X commented on Doc" row (kind `comment`) and, with
+ * SMTP configured, an email carrying the excerpt. Never the comment's author,
+ * never someone the comment already reached as a mention (one comment, one
+ * notification each), never anyone who can't open the document, never an
+ * address with no account.
+ *
+ * No team-channel post: a comment is read-tier and frequent, and the channel
+ * rule above (no comment prose to a channel whose audience isn't derived from
+ * who can read the document) applies to followers too. Outbound email draws
+ * on the same per-actor budget mentions do.
+ *
+ * Best-effort like every fan-out: never throws, never fails the comment.
+ */
+export async function notifyComment(params: {
+  nestId: string;
+  nodeId: string;
+  body: string;
+  /** Who wrote the comment. */
+  actorEmail: string;
+  baseUrl?: string;
+}): Promise<{ mentioned: number; followers: number }> {
+  const mentioned = await fanOutCommentMentions(params);
+  const followers = await notifyCommentFollowers({
+    ...params,
+    exclude: mentioned.map((r) => r.email),
+  });
+  return { mentioned: mentioned.length, followers };
+}
+
+async function notifyCommentFollowers(params: {
+  nestId: string;
+  nodeId: string;
+  body: string;
+  actorEmail: string;
+  baseUrl?: string;
+  exclude: string[];
+}): Promise<number> {
+  const { nestId, nodeId, body, actorEmail, baseUrl } = params;
+  try {
+    const skip = new Set(
+      [actorEmail, ...params.exclude].map((e) => e.toLowerCase()),
+    );
+    const [watchers, stewards] = await Promise.all([
+      listWatchers(nestId, nodeId),
+      resolveStewardsForNode(nestId, nodeId),
+    ]);
+    const emails: string[] = [];
+    for (const e of [
+      ...watchers.map((w) => w.user_email),
+      ...stewards
+        .filter((s) => s.steward.role === "reviewer")
+        .map((s) => s.steward.userEmail),
+    ]) {
+      const key = e.toLowerCase();
+      if (skip.has(key)) continue;
+      skip.add(key);
+      emails.push(key);
+      if (emails.length >= MAX_COMMENT_FOLLOWERS) break;
+    }
+    if (emails.length === 0) return 0;
+
+    // Account lookup in one read: a watcher or steward invited by email who
+    // never signed up has no inbox to read.
+    const users = (await getDb().all(
+      `SELECT id, LOWER(email) AS email FROM users
+        WHERE LOWER(email) IN (${emails.map(() => "?").join(",")})`,
+      emails,
+    )) as Array<{ id: string; email: string }>;
+    const byEmail = new Map(users.map((u) => [u.email, u.id]));
+    const candidates: Recipient[] = emails
+      .filter((e) => byEmail.has(e))
+      .map((e) => ({ email: e, userId: byEmail.get(e)! }));
+
+    // A watcher row outlives the access that justified it; check access now.
+    const checked = await Promise.all(
+      candidates.map(async (r) => ({
+        r,
+        allowed: await canOpenNode(nestId, nodeId, r.userId, r.email),
+      })),
+    );
+    const recipients = checked.filter((c) => c.allowed).map((c) => c.r);
+    if (recipients.length === 0) return 0;
+
+    const ctx = await buildDocContext(nestId, nodeId, baseUrl);
+    const db = getDb();
+    const now = new Date().toISOString();
+    for (const r of recipients) {
+      // subject_id is the node id, as for a mention: listNotifications links
+      // a 'comment' row straight to the document.
+      await db.run(
+        `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
+         VALUES (?, ?, ?, 'comment', ?, ?, ?)`,
+        [uuid(), nestId, r.email, nodeId, `${actorEmail} commented on "${ctx.label}"`, now],
+      );
+    }
+
+    let throttled = 0;
+    const excerpt = excerptOf(body);
+    for (const r of isEmailConfigured() ? recipients : []) {
+      if (!canDeliver("email", nestId, actorEmail)) {
+        throttled++;
+        continue;
+      }
+      void sendEmailToRecipient(r.email, {
+        status: "comment",
+        docTitle: ctx.docTitle,
+        path: ctx.path,
+        link: ctx.link,
+        actor: actorEmail,
+        note: excerpt || null,
+      });
+    }
+    if (throttled > 0) {
+      console.warn(
+        `[notify] comment delivery budget exhausted for ${actorEmail} in ${nestId} — ${throttled} email(s) skipped; inbox rows unaffected`,
+      );
+    }
+    return recipients.length;
+  } catch (err) {
+    console.error("[notify] comment follower fan-out failed", nestId, nodeId, err);
     return 0;
   }
 }

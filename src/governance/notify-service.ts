@@ -309,7 +309,7 @@ export async function listNotifications(
               rr.node_id,
               CASE WHEN dr.target_type = 'document' THEN dr.node_id END,
               -- A mention names the document directly; there's no request row.
-              CASE WHEN n.kind = 'mention' THEN n.subject_id END
+              CASE WHEN n.kind IN ('mention', 'comment') THEN n.subject_id END
             ) AS node_id,
             -- Name resolved here so the inbox never fetches the nest list for it.
             COALESCE(ns.name, n.nest_id) AS nest_name

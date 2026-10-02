@@ -133,6 +133,10 @@ Each review records the rung it reached (`escalationLevel`, `escalatedAt` on `GE
 
 The check runs every minute on its own loop, independent of the workflow plane. It ignores nests with the SLA off, ungoverned nests, and archived nests. Changing or clearing the SLA never un-notifies anyone; it only governs the next escalation.
 
+## Comment notifications
+
+A new comment notifies the document's **watchers** and its **reviewer stewards** (document, tag and nest scope) with a `comment` inbox row and, when SMTP is set up, an email with the excerpt — on top of the `mention` rows for anyone the comment names. The author is never notified, someone the comment mentions hears once (as the mention), and nobody who can't open the document hears about it.
+
 ## Who sees what
 
 Governance gates two things: who can **approve**, and who can **read**.

@@ -55,7 +55,8 @@ export interface EmailEventDetails {
     | "deletion_declined"
     | "deletion_deleted"
     | "deletion_archived"
-    | "review_overdue";
+    | "review_overdue"
+    | "comment";
   /** Document title (or nest name for a share event). */
   docTitle: string;
   /** Location: "Nest name" or "Nest name / Subfolder". */
@@ -125,6 +126,8 @@ const STATUS_META: Record<
     label: "Review overdue",
     color: "#b45309",
   },
+  // A comment on a document the recipient watches or reviews.
+  comment: { subjectWord: "has a new comment", label: "Comment", color: "#7c3aed" },
 };
 
 /** First-letter capitalize for tidy detail values (role/scope). */
@@ -331,6 +334,16 @@ const TEMPLATES: Record<EmailEventDetails["status"], EmailTemplate> = {
     lineH: (x) =>
       `A review requested for ${x.doc}${x.vH}${x.byH} has passed the nest's review SLA and was escalated to you${x.noteH}.`,
     rows: governanceRows,
+  },
+  // Addressed to someone who watches or reviews the document. `note` carries
+  // the comment excerpt, like a mention does.
+  comment: {
+    heading: (x) => `${x.d.actor || "Someone"} commented on ${x.title}`,
+    detailsHeader: "Document details",
+    linkLabel: "Open document",
+    lineT: (x) => `New comment on ${x.title}${x.byT}${x.noteT}.`,
+    lineH: (x) => `New comment on ${x.doc}${x.byH}${x.noteH}.`,
+    rows: (x) => [plainRow("Nest", x.d.path)],
   },
   steward: {
     heading: (x) => `You're now a steward of ${x.title}`,

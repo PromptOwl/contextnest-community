@@ -38,7 +38,7 @@ import {
   canRequestDeletion,
 } from "./access-guard.js";
 import { handleAnnotationReply } from "../annotations/routes.js";
-import { notifyCommentMentions } from "./mention-notify.js";
+import { notifyComment } from "./mention-notify.js";
 
 // ═════════════════════════════════════════════════════════════════════════
 // Nest-level routes (mounted at /:nestId)
@@ -860,11 +860,12 @@ governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
     );
   }
   // Tagging someone in a comment reaches them: inbox row + configured
-  // channels. Outside the try above, whose catch turns anything thrown into a
+  // channels; the document's watchers and reviewer stewards get a "new
+  // comment" row too (never the author). Outside the try above, whose catch turns anything thrown into a
   // 400 — the fan-out swallows its own failures, and a notification problem is
   // not a bad request. Awaited like the document-save fan-out: a local insert
   // is cheaper than returning before it lands.
-  await notifyCommentMentions({
+  await notifyComment({
     nestId,
     nodeId,
     body: comment.body,

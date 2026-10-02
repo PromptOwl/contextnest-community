@@ -1391,7 +1391,7 @@ The UI deep-links a comment item to its document with the thread focused via
 
 ### Notification rows (`GET /me/work` → `notifications`, `GET /me/notifications`)
 
-Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review requests, verdicts and SLA escalations, document deletion flags, mentions); nest-level rows have `node_id: null`.
+Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review requests, verdicts and SLA escalations, document deletion flags, mentions, comments); nest-level rows have `node_id: null`.
 
 Unread `nest_invite` rows are what the Nests page shows as **Pending invites**. Accept marks them read (`POST /me/notifications/read`) and opens the nest.
 
@@ -1603,6 +1603,19 @@ agent working through a review posts a comment per finding, which is exactly
 what `context_comment` is for, and throttling the write would break it. The same applies to the
 annotation thread endpoints (§ Hosted artifacts), which are what the UI's
 comments panel posts.
+
+**Followers hear about every comment.** Besides the people it names, a new
+comment (or reply) notifies the document's **watchers**
+(`POST /nests/:nestId/nodes/:nodeId/watchers`) and its **reviewer stewards** at
+document, tag and nest scope: a `comment` row in `GET /me/notifications`
+linking the document, plus an email carrying the excerpt when SMTP is set up.
+Never the comment's author, never twice for someone the same comment mentions
+(they get the `mention`), never an address with no account or a person who
+can't open the document; at most 50 followers per comment
+(`MAX_COMMENT_FOLLOWERS`). Emails draw on the same per-actor budget as mention
+emails. There is no channel post for a plain comment — the connector audience
+isn't derived from who can read the document. This applies to the REST,
+annotation-thread and MCP `context_comment` write paths.
 
 ### POST `/nests/:nestId/nodes/:nodeId/comments/:commentId/resolve`
 Mark a comment resolved. Records `resolvedBy` + `resolvedAt`. Returns `{ comment }`.

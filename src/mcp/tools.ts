@@ -36,7 +36,7 @@ import {
   setThreadStatus,
   syncAnnotationsNode,
 } from "../annotations/service.js";
-import { notifyCommentMentions } from "../governance/mention-notify.js";
+import { notifyComment } from "../governance/mention-notify.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
@@ -1599,7 +1599,7 @@ async function runTool(
       // be allowed to READ (the approval gate applies to context_comments, not
       // here), so the reply should tell them what THEY did and nothing about
       // what is already in the thread.
-      await notifyCommentMentions({
+      await notifyComment({
         nestId,
         nodeId: node.id,
         body,
