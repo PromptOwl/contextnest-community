@@ -334,7 +334,8 @@ Pins are per `(user, nest)` in the `nest_pins` table and cascade with the nest. 
   "prime_only_review": false,
   "prime_tags": ["prime-document"],
   "require_push_confirmation": false,
-  "creator_is_reviewer": false
+  "creator_is_reviewer": false,
+  "review_sla_hours": null
 }
 ```
 
@@ -350,6 +351,7 @@ Every field is optional; only the ones present are changed.
 - `prime_tags` — tags that mark a document prime. Accepts an array or a comma-separated string; stored and returned normalized (no leading `#`, lowercased, deduped). See `STEWARDSHIP.md → Prime documents`.
 - `require_push_confirmation` — the **Push Confirmation Gate** (see below). **Superadmin-only to SET**: a PATCH carrying this field from anyone who is not a server superadmin is refused with a per-field `403` (`{ "error": ..., "field": "require_push_confirmation" }`) and no other field in the same body is applied. Readable by anyone who can read the nest. Off by default.
 - `creator_is_reviewer` — in a governed nest, whoever creates a document becomes its document-scope `reviewer` and v1 publishes immediately; later changes go through review as usual (the creator approves teammates' changes, another reviewer approves the creator's). Prime documents still draft. Future creates only. Off by default. See `STEWARDSHIP.md → Creators review their own documents`.
+- `review_sla_hours` — review SLA in whole hours (`1`–`8760`), or `null` (or `0`) for off, the default. When set, a review left pending that long escalates **one rung**: from the document's own reviewers (who heard at submit) to its **tag**-scope reviewers, then **nest**-scope reviewers, then the **nest owner** — each rung getting the same window before the next. Escalating notifies the new rung (a `review_escalated` inbox row linking the document, a `review_escalated` connector event, and an email when SMTP is configured); it never changes who may approve, and the submitter is never a recipient. Any other value → `400`, with nothing in the body applied. Inert while off and in ungoverned or archived nests. See `STEWARDSHIP.md → Review SLA escalation`.
 
 Turning stewardship **off** wipes stewards and pending reviews and is owner-only; the other fields are non-destructive and never change the state of anything already published.
 
@@ -1182,7 +1184,10 @@ Duplicate ids collapse. Up to **50** ids per call; an empty or oversized
 selection is refused up front (`400`) rather than silently truncated.
 
 ### GET `/nests/:nestId/nodes/:nodeId/reviews`
-Full review history for a node.
+Full review history for a node. Each review carries `escalationLevel` — the
+last review-SLA rung it was escalated to (`0` none, `1` tag reviewers, `2` nest
+reviewers, `3` nest owner) — and `escalatedAt` once it has escalated. A
+resubmission is a new review and starts back at `0`.
 
 ### POST `/nests/:nestId/nodes/:nodeId/request-deletion`
 Body: `{ "reason": "superseded by the new runbook" }` (required).
@@ -1386,7 +1391,7 @@ The UI deep-links a comment item to its document with the thread focused via
 
 ### Notification rows (`GET /me/work` → `notifications`, `GET /me/notifications`)
 
-Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review verdicts, document deletion flags, mentions); nest-level rows have `node_id: null`.
+Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review requests, verdicts and SLA escalations, document deletion flags, mentions); nest-level rows have `node_id: null`.
 
 Unread `nest_invite` rows are what the Nests page shows as **Pending invites**. Accept marks them read (`POST /me/notifications/read`) and opens the nest.
 
@@ -2229,7 +2234,7 @@ Values ride to the runner inside the run bundle. `ANTHROPIC_API_KEY` here overri
 Not behind the workflow-plane flag: connectors fire on review events too.
 
 - `GET /nests/:nestId/connectors` (read).
-- `POST /nests/:nestId/connectors` (write) — Body: `{ channel, url, events }`. `channel` = `slack` | `teams` | `webhook`; `url` is a literal `https://…` or `env:KEY` to pull it from the env store; `events` is a non-empty array of `review_requested`, `review_approved`, `review_rejected`, `run_failed`, `mention`, or `["*"]`.
+- `POST /nests/:nestId/connectors` (write) — Body: `{ channel, url, events }`. `channel` = `slack` | `teams` | `webhook`; `url` is a literal `https://…` or `env:KEY` to pull it from the env store; `events` is a non-empty array of `review_requested`, `review_approved`, `review_rejected`, `run_failed`, `mention`, `review_escalated` (a review passed its nest's review SLA and moved up a rung), or `["*"]`.
 - `PATCH /nests/:nestId/connectors/:id` (write) — `{ enabled?, events?, url? }`.
 - `DELETE /nests/:nestId/connectors/:id` (write).
 

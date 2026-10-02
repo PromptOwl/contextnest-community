@@ -114,6 +114,25 @@ Only **future** creates are affected. Turning it on doesn't steward anyone on ex
 
 Like prime, this only applies to **governed** nests. With stewardship off there is nothing to review, so the flag is inert until you turn stewardship on.
 
+## Review SLA escalation (`review_sla_hours`)
+
+A per-nest setting (**off** by default; nest Settings → "Review SLA (hours)", or `PATCH /nests/:id/settings` with `review_sla_hours`) for reviews nobody picks up. When it's set, a review that has been pending that long is **escalated one rung** up the same ladder steward resolution already uses:
+
+| Rung | Who hears | When |
+|---|---|---|
+| 0 | Document-scope reviewers | At submit, as always |
+| 1 | Tag-scope reviewers | SLA after submit |
+| 2 | Nest-scope reviewers | SLA after rung 1 |
+| 3 | The nest owner | SLA after rung 2 |
+
+Each rung gets a full SLA window before the next. A rung with nobody new on it — no tag reviewers for this document, or only people a lower rung already reached — is skipped in the same step, so an escalation always reaches someone if anyone is left. After the owner it stops.
+
+Escalating **notifies**; it grants nothing. The new rung gets a `review_escalated` row in their inbox linking the document, an email when SMTP is configured, and the nest's connectors get a `review_escalated` event (per-nest connectors subscribe to it like any other event; the server-wide Slack/Teams webhooks receive it directly). Who may approve is unchanged — the same approve gate, the same separation of duties — and the submitter is never an escalation recipient, since they can't approve their own submission.
+
+Each review records the rung it reached (`escalationLevel`, `escalatedAt` on `GET /nests/:id/nodes/:nodeId/reviews`). The rung is claimed in the database before anyone is notified, so no rung hears twice — not on the next tick, not after a restart, not when two server instances tick at once. Resubmitting after a rejection is a new review and starts at rung 0; editing a pending submission keeps the same review and its rung.
+
+The check runs every minute on its own loop, independent of the workflow plane. It ignores nests with the SLA off, ungoverned nests, and archived nests. Changing or clearing the SLA never un-notifies anyone; it only governs the next escalation.
+
 ## Who sees what
 
 Governance gates two things: who can **approve**, and who can **read**.

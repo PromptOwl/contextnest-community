@@ -44,6 +44,7 @@ const EVENT_EMOJI: Record<string, string> = {
   review_requested: ":memo:",
   review_approved: ":white_check_mark:",
   review_rejected: ":x:",
+  review_escalated: ":alarm_clock:",
   run_failed: ":rotating_light:",
   deletion_requested: ":wastebasket:",
   deletion_deleted: ":wastebasket:",

@@ -54,7 +54,8 @@ export interface EmailEventDetails {
     | "deletion_requested"
     | "deletion_declined"
     | "deletion_deleted"
-    | "deletion_archived";
+    | "deletion_archived"
+    | "review_overdue";
   /** Document title (or nest name for a share event). */
   docTitle: string;
   /** Location: "Nest name" or "Nest name / Subfolder". */
@@ -116,6 +117,13 @@ const STATUS_META: Record<
     subjectWord: "archived",
     label: "Archived",
     color: "#0891b2",
+  },
+  // Review SLA escalation: a pending review outlived the nest's SLA and has
+  // reached the next rung of reviewers. Amber like pending_review, but darker.
+  review_overdue: {
+    subjectWord: "overdue for review",
+    label: "Review overdue",
+    color: "#b45309",
   },
 };
 
@@ -312,6 +320,16 @@ const TEMPLATES: Record<EmailEventDetails["status"], EmailTemplate> = {
       `${x.title} has been archived${x.byT}${x.noteT} — your request was accepted. Nothing was deleted: every document and version is intact, and an owner can restore it.`,
     lineH: (x) =>
       `${x.doc} has been archived${x.byH}${x.noteH} — your request was accepted. Nothing was deleted: every document and version is intact, and an owner can restore it.`,
+    rows: governanceRows,
+  },
+  review_overdue: {
+    heading: (x) => `${x.title} is ${x.meta.subjectWord}`,
+    detailsHeader: "Document details",
+    linkLabel: "Review it",
+    lineT: (x) =>
+      `A review requested for ${x.title}${x.vT}${x.byT} has passed the nest's review SLA and was escalated to you${x.noteT}.`,
+    lineH: (x) =>
+      `A review requested for ${x.doc}${x.vH}${x.byH} has passed the nest's review SLA and was escalated to you${x.noteH}.`,
     rows: governanceRows,
   },
   steward: {

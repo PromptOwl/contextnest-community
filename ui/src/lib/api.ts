@@ -679,6 +679,8 @@ export interface NestSettings {
   require_push_confirmation: boolean;
   /** The person who creates a document becomes its reviewer; v1 publishes. */
   creator_is_reviewer: boolean;
+  /** Review SLA in hours; null = off. Overdue reviews escalate one rung. */
+  review_sla_hours?: number | null;
 }
 
 export async function getNestSettings(nestId: string) {
@@ -695,6 +697,7 @@ export async function updateNestSettings(
     /** Superadmin-only — a per-field 403 is returned to anyone else. */
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
+    review_sla_hours?: number | null;
   },
 ) {
   return request<NestSettings>(`/nests/${nestId}/settings`, {

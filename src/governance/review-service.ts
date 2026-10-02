@@ -1306,5 +1306,7 @@ function rowToReviewRequest(row: any): ReviewRequest {
     resolvedAt: row.resolved_at || undefined,
     resolutionNote: row.resolution_note || undefined,
     priority: row.priority,
+    escalationLevel: Number(row.escalation_level ?? 0),
+    escalatedAt: row.escalated_at || undefined,
   };
 }

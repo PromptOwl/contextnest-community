@@ -1703,6 +1703,37 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("045_headless_publish");
   }
+
+  // 050: review SLA escalation. `nests.review_sla_hours` is the per-nest SLA
+  //   (NULL = off, the default — the escalation tick never looks at the nest).
+  //   `review_requests.escalation_level` is the last rung a pending review was
+  //   escalated to (0 = none yet; 1 tag reviewers, 2 nest reviewers, 3 nest
+  //   owner) and `escalated_at` when that happened. Persisted on the request
+  //   row so a restart never re-notifies a rung, and a resubmission (a new
+  //   row) starts the ladder over. Plain ADD COLUMNs — no CHECK changes, so no
+  //   table rebuild. (048/049 are taken on other branches.)
+  if (!hasMigration("050_review_sla_escalation")) {
+    db.transaction(() => {
+      const nestCols = (
+        db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!nestCols.includes("review_sla_hours")) {
+        db.exec("ALTER TABLE nests ADD COLUMN review_sla_hours INTEGER");
+      }
+      const reviewCols = (
+        db.prepare("PRAGMA table_info(review_requests)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!reviewCols.includes("escalation_level")) {
+        db.exec(
+          "ALTER TABLE review_requests ADD COLUMN escalation_level INTEGER NOT NULL DEFAULT 0",
+        );
+      }
+      if (!reviewCols.includes("escalated_at")) {
+        db.exec("ALTER TABLE review_requests ADD COLUMN escalated_at TEXT");
+      }
+    })();
+    recordMigration("050_review_sla_escalation");
+  }
 }
 
 /**

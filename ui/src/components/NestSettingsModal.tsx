@@ -25,6 +25,7 @@ import {
   UserPen,
   Star,
   ShieldCheck,
+  Clock,
 } from "lucide-react";
 import * as api from "../lib/api";
 
@@ -40,6 +41,8 @@ interface NestSettingsModalProps {
   /** True only for a server superadmin — gates the push-confirmation switch. */
   isServerAdmin: boolean;
   creatorIsReviewer: boolean;
+  /** Review SLA in hours; null = off. */
+  reviewSlaHours: number | null;
   /** False hides the stewardship section. Server still enforces. */
   canManageStewardship: boolean;
   onClose: () => void;
@@ -50,6 +53,7 @@ interface NestSettingsModalProps {
     primeTags: string[];
     requirePushConfirmation: boolean;
     creatorIsReviewer: boolean;
+    reviewSlaHours: number | null;
   }) => void;
 }
 
@@ -63,6 +67,7 @@ export function NestSettingsModal({
   requirePushConfirmation,
   isServerAdmin,
   creatorIsReviewer,
+  reviewSlaHours,
   canManageStewardship,
   onClose,
   onChanged,
@@ -73,6 +78,11 @@ export function NestSettingsModal({
   const [pushConfirm, setPushConfirm] = useState(requirePushConfirmation);
   const [primeTagText, setPrimeTagText] = useState(primeTags.join(", "));
   const [creatorReviews, setCreatorReviews] = useState(creatorIsReviewer);
+  // Text, not a number: an empty box means "off", and the field must allow
+  // the transient empty state while someone retypes it.
+  const [slaText, setSlaText] = useState(
+    reviewSlaHours ? String(reviewSlaHours) : "",
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Acknowledgement required only when the caller is turning stewardship
@@ -156,13 +166,24 @@ export function NestSettingsModal({
     const pushConfirmChanged =
       isServerAdmin && pushConfirm !== requirePushConfirmation;
     const creatorReviewsChanged = creatorReviews !== creatorIsReviewer;
+    const slaTrimmed = slaText.trim();
+    const nextSla = slaTrimmed === "" || slaTrimmed === "0" ? null : Number(slaTrimmed);
+    if (
+      nextSla !== null &&
+      (!Number.isInteger(nextSla) || nextSla < 1 || nextSla > 8760)
+    ) {
+      setError("Review SLA must be a whole number of hours (1–8760), or empty for off.");
+      return;
+    }
+    const slaChanged = nextSla !== (reviewSlaHours ?? null);
     if (
       !stewardshipChanged &&
       !selfApproveChanged &&
       !primeOnlyChanged &&
       !primeTagsChanged &&
       !pushConfirmChanged &&
-      !creatorReviewsChanged
+      !creatorReviewsChanged &&
+      !slaChanged
     ) {
       onClose();
       return;
@@ -177,6 +198,7 @@ export function NestSettingsModal({
         ...(primeTagsChanged ? { prime_tags: nextPrimeTags } : {}),
         ...(pushConfirmChanged ? { require_push_confirmation: pushConfirm } : {}),
         ...(creatorReviewsChanged ? { creator_is_reviewer: creatorReviews } : {}),
+        ...(slaChanged ? { review_sla_hours: nextSla } : {}),
       });
       // Trust the server's response, not our optimistic local state, in
       // case the permission check rejected silently or the DB rejected.
@@ -185,7 +207,8 @@ export function NestSettingsModal({
         result.allow_self_approve !== selfApprove ||
         result.prime_only_review !== primeOnly ||
         (pushConfirmChanged && result.require_push_confirmation !== pushConfirm) ||
-        result.creator_is_reviewer !== creatorReviews
+        result.creator_is_reviewer !== creatorReviews ||
+        (slaChanged && (result.review_sla_hours ?? null) !== nextSla)
       ) {
         setError(
           "Server did not accept the change. You may not have permission to change these settings.",
@@ -202,6 +225,7 @@ export function NestSettingsModal({
         primeTags: result.prime_tags,
         requirePushConfirmation: result.require_push_confirmation,
         creatorIsReviewer: result.creator_is_reviewer,
+        reviewSlaHours: result.review_sla_hours ?? null,
       });
     } catch (err: any) {
       setError(err.message);
@@ -424,6 +448,35 @@ export function NestSettingsModal({
                 version.
               </div>
             </div>
+          </div>
+          )}
+
+          {/* Review SLA — only meaningful once stewardship is on. */}
+          {canManageStewardship && enabled && (
+          <div className="rounded-lg border p-4 space-y-3">
+            <div className="space-y-1">
+              <Label className="flex items-center gap-2 text-sm font-medium">
+                <Clock className="h-4 w-4" />
+                Review SLA (hours)
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                Default off. When set, a review left pending this long is
+                escalated one rung — to the document&rsquo;s tag reviewers,
+                then the nest&rsquo;s reviewers, then the nest owner — and
+                each rung gets the same window before the next. Escalation
+                only notifies; it never changes who can approve.
+              </p>
+            </div>
+            <Input
+              type="number"
+              min={1}
+              max={8760}
+              step={1}
+              value={slaText}
+              onChange={(e) => setSlaText(e.target.value)}
+              placeholder="Off"
+              className="w-32"
+            />
           </div>
           )}
 
