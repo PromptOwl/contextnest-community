@@ -187,6 +187,9 @@ interface DocumentEditorProps {
   isOwner?: boolean;
   onBack: () => void;
   onSaved?: (savedNodeId: string) => void;
+  /** After an approve or reject: leave for the queue the doc came from.
+   *  Absent = stay and reload the document. */
+  onReviewed?: () => void;
   /** Open another document; `currentTitle` feeds breadcrumb push. */
   onNavigateDocument?: (
     nestId: string,
@@ -227,6 +230,7 @@ export function DocumentEditor({
   isOwner = false,
   onBack,
   onSaved,
+  onReviewed,
   onNavigateDocument,
   onTagClick,
   onOpenNest,
@@ -1564,12 +1568,18 @@ export function DocumentEditor({
   const handleApprove = async (note?: string) => {
     if (isNew) return;
     await api.approveNode(nestId, nodeId, note);
-    await loadNode();
+    if (onReviewed) {
+      toast.success("Approved");
+      onReviewed();
+    } else await loadNode();
   };
   const handleReject = async (note: string) => {
     if (isNew) return;
     await api.rejectNode(nestId, nodeId, note);
-    await loadNode();
+    if (onReviewed) {
+      toast.success("Rejected");
+      onReviewed();
+    } else await loadNode();
   };
   // Cancel your own pending review from the document itself — back to Draft,
   // rather than Delete being the only exit (CU-wdqcq007pe).

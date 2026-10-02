@@ -48,6 +48,7 @@ export interface EmailEventDetails {
     | "rejected"
     | "pending_review"
     | "shared"
+    | "doc_shared"
     | "invited"
     | "steward"
     | "deletion_requested"
@@ -90,6 +91,7 @@ const STATUS_META: Record<
     color: "#d97706",
   },
   shared: { subjectWord: "shared with you", label: "Shared", color: "#2563eb" },
+  doc_shared: { subjectWord: "shared with you", label: "Shared", color: "#2563eb" },
   invited: { subjectWord: "invited you", label: "Invitation", color: "#2563eb" },
   steward: { subjectWord: "steward", label: "Steward", color: "#7c3aed" },
   deletion_requested: {
@@ -229,6 +231,21 @@ const TEMPLATES: Record<EmailEventDetails["status"], EmailTemplate> = {
       `You've been given ${shareRole(x.d.permission)} access to ${x.title}${x.d.by ? ` by ${x.d.by}` : ""}. Open it below to start collaborating.`,
     lineH: (x) =>
       `You've been given <strong>${escapeHtml(shareRole(x.d.permission))}</strong> access to ${x.doc}${x.d.by ? ` by ${escapeHtml(x.d.by)}` : ""}. Open it below to start collaborating.`,
+    rows: (x) => [
+      plainRow("Nest", x.d.path),
+      ...(x.d.permission ? [plainRow("Role", shareRole(x.d.permission))] : []),
+    ],
+  },
+  // One document or folder shared with someone outside the nest. A nest-wide
+  // share uses `shared` above, so the person gets one email, never one per doc.
+  doc_shared: {
+    heading: (x) => `${x.title} was shared with you`,
+    detailsHeader: "Details",
+    linkLabel: "Open",
+    lineT: (x) =>
+      `You've been given ${shareRole(x.d.permission)} access to ${x.title}${x.d.by ? ` by ${x.d.by}` : ""}.`,
+    lineH: (x) =>
+      `You've been given <strong>${escapeHtml(shareRole(x.d.permission))}</strong> access to ${x.doc}${x.d.by ? ` by ${escapeHtml(x.d.by)}` : ""}.`,
     rows: (x) => [
       plainRow("Nest", x.d.path),
       ...(x.d.permission ? [plainRow("Role", shareRole(x.d.permission))] : []),
