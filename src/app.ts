@@ -91,6 +91,7 @@ import {
   loadGrantedSuperAdmins,
 } from "./governance/access-service.js";
 import { communitySiteRoutes } from "./auth/community-sites-routes.js";
+import { ssoCandidates } from "./auth/community-sites.js";
 import {
   llmsTxtRoutes,
   nestIndexRoutes,
@@ -529,6 +530,13 @@ export function createApp(): Hono<AuthEnv> {
       // (login.microsoftonline.com → Microsoft, accounts.google.com → Google).
       oidc_enabled: oidcReady,
       ...(oidcReady && { oidc_issuer: config.OIDC_ISSUER }),
+      // "Sign in with Google" via PromptOwl: the button sends the browser to
+      // PromptOwl's community-sso route, which signs the user in (Google
+      // creates the PromptOwl account) and returns a ticket to GET /auth/sso.
+      // Live only when this server can verify that ticket.
+      ...(ssoCandidates().length > 0 && {
+        promptowl_google_url: `${config.PROMPTOWL_API_URL.replace(/\/$/, "")}/api/auth/community-sso?provider=google`,
+      }),
       // Public feature flags the SPA needs before auth to decide what to
       // render. Mirrors the server-side route gate so UI and API agree:
       // flag off → the plane's routes 404 AND its UI stays hidden.

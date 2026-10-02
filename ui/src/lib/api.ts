@@ -207,6 +207,8 @@ export async function getHealth() {
     oidc_enabled?: boolean;
     /** Present when oidc_enabled — lets the login page label the button by IdP. */
     oidc_issuer?: string;
+    /** Present when PromptOwl SSO tickets are accepted — the Google button target. */
+    promptowl_google_url?: string;
     workflow_plane_enabled?: boolean;
     /** Import teams from PromptOwl (default OFF). Off → the panel is hidden. */
     promptowl_teams_enabled?: boolean;
