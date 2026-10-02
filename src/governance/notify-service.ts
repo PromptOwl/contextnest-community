@@ -354,6 +354,21 @@ export async function markNotificationsRead(
  * what those rows were inserted with — not the resolved kind, so a stale
  * "requested" row is cleared for every recipient regardless of who acted.
  */
+/**
+ * A review that is approved, rejected or withdrawn is no longer an ask: clear
+ * every "please review this" row it produced — the original request and any
+ * SLA escalation — for every recipient, whoever resolved it. Best-effort: a
+ * failure here must never fail the resolution.
+ */
+export async function markReviewNotificationsRead(reviewId: string): Promise<void> {
+  try {
+    await markNotificationsReadBySubject(reviewId, "review_requested");
+    await markNotificationsReadBySubject(reviewId, "review_escalated");
+  } catch (err) {
+    console.error("[notify] clearing review rows failed", reviewId, err);
+  }
+}
+
 export async function markNotificationsReadBySubject(
   subjectId: string,
   kind: string,

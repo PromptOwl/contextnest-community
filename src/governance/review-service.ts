@@ -13,6 +13,7 @@ import {
   notifyReviewRequested,
   notifyReviewResolved,
   markNotificationsReadBySubject,
+  markReviewNotificationsRead,
 } from "./notify-service.js";
 import { dispatchEvent } from "../notify/dispatch.js";
 import { notifyNestEvent } from "../notify/notify.js";
@@ -317,6 +318,8 @@ export async function approve(params: {
      WHERE id = ?`,
       [params.approvedBy, params.note || null, params.override ? 1 : 0, pending.id],
     );
+    // The request (and any SLA escalation of it) is answered.
+    await markReviewNotificationsRead(pending.id);
 
     void dispatchEvent({
       kind: "review_approved",
@@ -491,6 +494,7 @@ export async function reject(params: {
      WHERE id = ?`,
       [params.rejectedBy, params.note, pending.id],
     );
+    await markReviewNotificationsRead(pending.id);
 
     await db.run(
       "UPDATE node_versions SET status = 'rejected' WHERE nest_id = ? AND node_id = ? AND version = ?",
@@ -591,6 +595,7 @@ export async function cancelReview(params: {
      WHERE id = ?`,
       [params.cancelledBy, pending.id],
     );
+    await markReviewNotificationsRead(pending.id);
 
     await db.run(
       "UPDATE node_versions SET status = 'draft' WHERE nest_id = ? AND node_id = ? AND version = ?",

@@ -127,11 +127,13 @@ A per-nest setting (**off** by default; nest Settings → "Review SLA (hours)", 
 
 Each rung gets a full SLA window before the next. A rung with nobody new on it — no tag reviewers for this document, or only people a lower rung already reached — is skipped in the same step, so an escalation always reaches someone if anyone is left. After the owner it stops.
 
-Escalating **notifies**; it grants nothing. The new rung gets a `review_escalated` row in their inbox linking the document, an email when SMTP is configured, and the nest's connectors get a `review_escalated` event (per-nest connectors subscribe to it like any other event; the server-wide Slack/Teams webhooks receive it directly). Who may approve is unchanged — the same approve gate, the same separation of duties — and the submitter is never an escalation recipient, since they can't approve their own submission.
+Escalating **notifies**; it grants nothing. The new rung gets a `review_escalated` row in their inbox linking the document, an email when SMTP is configured, and it goes to Slack/Teams the same way a review request does: the server-wide Slack/Teams webhooks (super-admin Settings) post it by default, folded into the same debounced digest as review requests, and a per-nest connector posts it when subscribed to `review_escalated` or `"*"`. A connector subscribed only to `review_requested` does not receive escalations — add `review_escalated` to its events. The team-inbox email (`NOTIFY_EMAIL_TO`) is skipped for escalations; the escalated reviewers are emailed directly. Who may approve is unchanged — the same approve gate, the same separation of duties — and the submitter is never an escalation recipient, since they can't approve their own submission.
 
 Each review records the rung it reached (`escalationLevel`, `escalatedAt` on `GET /nests/:id/nodes/:nodeId/reviews`). The rung is claimed in the database before anyone is notified, so no rung hears twice — not on the next tick, not after a restart, not when two server instances tick at once. Resubmitting after a rejection is a new review and starts at rung 0; editing a pending submission keeps the same review and its rung.
 
 The check runs every minute on its own loop, independent of the workflow plane. It ignores nests with the SLA off, ungoverned nests, and archived nests. Changing or clearing the SLA never un-notifies anyone; it only governs the next escalation.
+
+When a review is approved, rejected or withdrawn, its `review_requested` and `review_escalated` inbox rows are marked read for every recipient, whoever resolved it — an answered request no longer sits in anyone's queue looking open. The rows stay in the inbox history; the submitter's verdict row is unaffected.
 
 ## Comment notifications
 
