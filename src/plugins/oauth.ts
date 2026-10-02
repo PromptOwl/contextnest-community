@@ -32,7 +32,12 @@ const STATE_TTL_MS = 10 * 60_000;
 interface ProviderConfig { authorizationUrl: string; tokenUrl: string; clientId: string; clientSecret: string; extraAuthParams: Record<string, string> }
 
 const KNOWN: Record<string, (tenant: string) => { authorizationUrl: string; tokenUrl: string; extraAuthParams: Record<string, string> }> = {
-  google: () => ({ authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth", tokenUrl: "https://oauth2.googleapis.com/token", extraAuthParams: { access_type: "offline", prompt: "consent", include_granted_scopes: "true" } }),
+  // include_granted_scopes is deliberately ABSENT: with incremental
+  // authorization Google folds every product's grant into one, and its revoke
+  // endpoint kills the whole grant — disconnecting Drive would silently
+  // disconnect Gmail on the same account. Each plugin keeps its own grant so
+  // disconnecting one severs only its own scopes.
+  google: () => ({ authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth", tokenUrl: "https://oauth2.googleapis.com/token", extraAuthParams: { access_type: "offline", prompt: "consent" } }),
   microsoft: (tenant) => ({ authorizationUrl: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize`, tokenUrl: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`, extraAuthParams: { response_mode: "query", prompt: "select_account" } }),
 };
 
