@@ -36,6 +36,7 @@ import { getDb } from "../db/client.js";
 import { resolveStewardsForNode } from "./stewardship-service.js";
 import { buildDocContext } from "./title-resolver.js";
 import { dispatchEvent } from "../notify/dispatch.js";
+import { notifyNestEvent } from "../notify/notify.js";
 import { sendEmailToRecipient } from "../notify/email.js";
 
 /** The last rung: the nest owner. Nothing escalates past it. */
@@ -154,12 +155,24 @@ async function notifyEscalation(
       ],
     );
   }
+  const line = `Review on *${ctx.label}* (v${r.version}) has waited ${waited} — escalated to ${ESCALATION_RUNG_LABELS[level]}: ${recipients.join(", ")}`;
+  // Same two channel paths a review request takes: per-nest connector rows
+  // that subscribe to review_escalated (or "*") via dispatchEvent, and the
+  // server-wide Slack/Teams webhooks via the debounced digest — which is the
+  // default every nest gets with no connector rows at all. review_escalated is
+  // a digest kind, so dispatchEvent skips the server-wide hooks and the
+  // channel sees it once.
   void dispatchEvent({
     kind: "review_escalated",
     nestId: r.nest_id,
     subjectId: r.node_id,
     actor: r.requested_by,
-    message: `Review on *${ctx.label}* (v${r.version}) has waited ${waited} — escalated to ${ESCALATION_RUNG_LABELS[level]}: ${recipients.join(", ")}`,
+    message: line,
+  });
+  // skipEmail: the escalated reviewers are emailed directly below, and the
+  // "escalated to you" email is not for the shared team inbox.
+  void notifyNestEvent(r.nest_id, `:alarm_clock: ${line}`, undefined, {
+    skipEmail: true,
   });
   void sendEmailToRecipient(recipients, {
     status: "review_overdue",

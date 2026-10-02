@@ -20,10 +20,19 @@ import {
   resetAuthRateLimit,
 } from "./helpers.js";
 
-const { dispatchEvent, sendEmailToRecipient } = vi.hoisted(() => ({
+const { dispatchEvent, sendEmailToRecipient, notifyNestEvent } = vi.hoisted(() => ({
   dispatchEvent: vi.fn(async () => {}),
   sendEmailToRecipient: vi.fn(async () => {}),
+  notifyNestEvent: vi.fn(async () => {}),
 }));
+// The server-wide Slack/Teams digest — the channel path review requests take.
+// End-to-end delivery is covered in review-sla-channels.test.ts.
+vi.mock("../src/notify/notify.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/notify/notify.js")>(
+    "../src/notify/notify.js",
+  );
+  return { ...actual, notifyNestEvent };
+});
 vi.mock("../src/notify/dispatch.js", async () => {
   const actual = await vi.importActual<typeof import("../src/notify/dispatch.js")>(
     "../src/notify/dispatch.js",
@@ -231,6 +240,7 @@ describe("escalation ladder", () => {
     t0 = Date.now();
     dispatchEvent.mockClear();
     sendEmailToRecipient.mockClear();
+    notifyNestEvent.mockClear();
   });
 
   it("does nothing before the SLA has elapsed", async () => {
@@ -256,6 +266,14 @@ describe("escalation ladder", () => {
     expect(escalatedEvents()[0].message).toContain(tara.email);
     expect(overdueEmails()).toHaveLength(1);
     expect(overdueEmails()[0][0]).toEqual([tara.email]);
+    // …and the server-wide channel digest, without the team-inbox email.
+    const digest = notifyNestEvent.mock.calls.filter((c) =>
+      String(c[1]).includes("escalated"),
+    );
+    expect(digest).toHaveLength(1);
+    expect(digest[0][0]).toBe(nestId);
+    expect(String(digest[0][1])).toContain(tara.email);
+    expect(digest[0][3]).toEqual({ skipEmail: true });
 
     const [review] = await reviewsOf("nodes/budget");
     expect(review.escalationLevel).toBe(1);

@@ -32,6 +32,7 @@ const EMOJI: Record<string, string> = {
   ":x:": "❌",
   ":rotating_light:": "🚨",
   ":key:": "🔑", // collaborator added (sharing-service)
+  ":alarm_clock:": "⏰", // review SLA escalation (review-sla)
 };
 
 /** Slack *bold* span: whole word(s) between single asterisks, delimited by
