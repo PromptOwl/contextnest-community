@@ -254,6 +254,90 @@ function withDiscoveryCache<S extends NestStorage>(
   return { storage, invalidate, desync: () => void desync() };
 }
 
+type HistoryMap = Awaited<ReturnType<NestStorage["findAllHistories"]>>;
+
+/**
+ * Memoize `findAllHistories` on one storage instance.
+ *
+ * Every publish (an approval, a save that publishes) seals a checkpoint, and the
+ * engine's checkpoint reads EVERY document's history.yaml to do it. On a Cloud
+ * Storage mount that is a walk of the whole vault plus one round trip per
+ * document — under the vault lock — which is what made a single approval take
+ * close to a minute on a large nest.
+ *
+ * The cache stays exact for what a checkpoint needs: a history this process
+ * writes is re-read on the next call, and any document whose discovered version
+ * is past its cached history (a write from another process) is re-read too. So
+ * the version and chain hash a checkpoint pairs up always come from the same
+ * state. Callers that pass `onUnreadable` (the integrity check) always crawl.
+ */
+function withHistoryCache<S extends NestStorage>(
+  storage: S,
+): { storage: S; invalidate: () => void } {
+  const rawFind = storage.findAllHistories.bind(storage);
+  const readHistory = storage.readHistory.bind(storage);
+  let cached: HistoryMap | null = null;
+  let generation = 0;
+  const dirty = new Set<string>();
+
+  storage.findAllHistories = async (onUnreadable) => {
+    if (onUnreadable || !cached) {
+      const startedAt = generation;
+      // Writes that land during the crawl re-mark their ids after this clear.
+      dirty.clear();
+      const crawled = await rawFind(onUnreadable);
+      if (generation === startedAt) cached = new Map(crawled);
+      return crawled;
+    }
+    const docs = await storage.discoverDocuments({ includeRetired: true });
+    const live = new Set(docs.map((d) => d.id));
+    for (const d of docs) {
+      const last = cached.get(d.id)?.versions.at(-1)?.version ?? 0;
+      if (last < (Number(d.frontmatter.version) || 0)) dirty.add(d.id);
+    }
+    const reread = [...dirty];
+    dirty.clear();
+    const map = cached;
+    await Promise.all(
+      reread.map(async (id) => {
+        try {
+          const h = await readHistory(id);
+          if (h) map.set(id, h);
+          else map.delete(id);
+        } catch {
+          // Unreadable: skip it, as the engine's own crawl does.
+          map.delete(id);
+        }
+      }),
+    );
+    // Deleted or moved documents leave the set.
+    for (const id of map.keys()) if (!live.has(id)) map.delete(id);
+    return new Map(map);
+  };
+
+  for (const name of [
+    "writeHistory",
+    "appendVersionEntry",
+    "quarantineHistory",
+    "deleteDocument",
+  ] as const) {
+    const write = (storage[name] as (...a: any[]) => Promise<any>).bind(storage);
+    (storage as any)[name] = async (...args: unknown[]) => {
+      try {
+        return await write(...args);
+      } finally {
+        dirty.add(String(args[0]));
+      }
+    };
+  }
+
+  const invalidate = () => {
+    generation++;
+    cached = null;
+  };
+  return { storage, invalidate };
+}
+
 interface NestEngine {
   storage: NestStorage;
   query: GraphQueryEngine;
@@ -295,13 +379,18 @@ class NestEngineCache {
           ? new FlatNestStorage(nestPath)
           : new NestStorage(nestPath),
       );
+      const histories = withHistoryCache(storage);
       const query = new GraphQueryEngine(storage as any);
       const versions = new VersionManager(storage);
       engine = {
         storage,
         query,
         versions,
-        invalidateDiscovery: desync,
+        // "Disk may have moved under us" covers history files as well.
+        invalidateDiscovery: () => {
+          histories.invalidate();
+          desync();
+        },
         dropDiscoveryCache: invalidate,
       };
       this.cache.set(nestId, engine);
