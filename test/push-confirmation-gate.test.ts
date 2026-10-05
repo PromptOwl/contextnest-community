@@ -230,6 +230,25 @@ describe("gate ON — push is held pending, applies only on confirm", () => {
     expect(data.manifest[0].content).toBe("# Doc A\n\nbody");
   });
 
+  it("content stays on the right row when the payload has rows that won't be written", async () => {
+    const held = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publish`,
+      { documents: [{ title: "No Body", content: "" }, { title: "Doc B", content: "b body" }] },
+      owner.apiKey,
+    );
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/pending-pushes/${held.data.pending_id}`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(data.manifest).toHaveLength(1);
+    expect(data.manifest[0]).toMatchObject({ title: "Doc B", content: "b body" });
+  });
+
   it("confirm → applied, docs present, decided_by stamped", async () => {
     const { status, data } = await jsonRequest(
       app,

@@ -27,6 +27,7 @@ import {
   applyPublish,
   buildManifest,
   countPublishDocs,
+  publishableDocs,
   type PublishPayload,
   type PushManifestEntry,
 } from "../nodes/publish-apply.js";
@@ -369,11 +370,10 @@ export async function getPendingPush(
   if (!row) return null;
   const view = toView(row, await nestName(nestId));
   // The single view carries what would be written, so a reviewer can read it
-  // before confirming. manifest_json was built from these same rows, in order.
+  // before confirming. manifest_json was built from publishableDocs too, in order.
   let docs: Array<{ content?: string }> = [];
   try {
-    const payload = JSON.parse(row.payload_blob) as PublishPayload;
-    docs = (payload.documents || []).filter((d) => d.title && d.content);
+    docs = publishableDocs(JSON.parse(row.payload_blob) as PublishPayload);
   } catch {
     docs = [];
   }

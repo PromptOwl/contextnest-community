@@ -84,10 +84,15 @@ export function validatePublishPayload(body: PublishPayload): void {
   }
 }
 
+/** The docs that will actually be written (title + content present). The
+ *  manifest and the held-push content view both index into this list. */
+export function publishableDocs(body: PublishPayload): PublishDoc[] {
+  return (body.documents || []).filter((d) => d.title && d.content);
+}
+
 /** Build the confirm-modal manifest for a payload (title·type·tags per doc). */
 export function buildManifest(body: PublishPayload): PushManifestEntry[] {
-  return (body.documents || [])
-    .filter((d) => d.title && d.content)
+  return publishableDocs(body)
     .map((d) => ({
       id: derivedNodeId(d.title),
       title: d.title,
@@ -98,7 +103,7 @@ export function buildManifest(body: PublishPayload): PushManifestEntry[] {
 
 /** Count the docs that will actually be written (title + content present). */
 export function countPublishDocs(body: PublishPayload): number {
-  return (body.documents || []).filter((d) => d.title && d.content).length;
+  return publishableDocs(body).length;
 }
 
 /**
