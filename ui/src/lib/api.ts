@@ -87,6 +87,11 @@ async function request<T = any>(
     const err = new Error(data.error || `Request failed: ${res.status}`) as ApiError;
     err.status = res.status;
     err.body = data;
+    // A role grant past the pricing plan: the dialog shows the message; the
+    // license banner offers admins the way to change plans (one listener).
+    if (res.status === 402 && data.code === "plan_limit" && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("license:plan-limit", { detail: data }));
+    }
     throw err;
   }
   // Every successful mutation invalidates the cached reads its result affects.
@@ -227,6 +232,8 @@ export async function getHealth() {
     hootie_brand?: HootieBrand;
     /** Whether custom assistant identity is allowed (enterprise licence). */
     hootie_branding_available?: boolean;
+    /** Own model key / gateway allowed (licence feature byok, Enterprise). */
+    byok_available?: boolean;
     /** PostHog project key, or null when analytics is unconfigured or usage
      *  telemetry is switched off. The browser needs it to send events. */
     posthog_key?: string | null;
@@ -285,7 +292,9 @@ export interface AdminSettings {
   hootie_accent_color: string;
   hootie_greeting: string;
   hootie_branding_available: boolean;
-  /** Model Hootie answers with (default claude-opus-5; a gateway-side name
+  /** Own key + gateway fields are in effect and editable only with byok. */
+  byok_available?: boolean;
+  /** Model Hootie answers with (default claude-sonnet-5; a gateway-side name
    *  such as `ollama/…` when routed through a gateway). */
   hootie_model: string;
   /** Model gateway (LiteLLM / PromptOwl) for Hootie AND agent runs;
@@ -421,6 +430,13 @@ export interface AdminLicense extends LicenseTerms {
   };
   pending_rejections: number;
   last_checked_at: string | null;
+  /** free | trial | self_hosted | enterprise. */
+  plan?: string;
+  /** Editors in use and the cap (null = unlimited, 0 = needs a paid plan). */
+  subscribers?: { licensed: number | null; used: number };
+  max_account_owners?: number | null;
+  /** PromptOwl's page for this key: plan and Upgrade. */
+  manage_url?: string | null;
 }
 
 export async function getAdminLicense() {

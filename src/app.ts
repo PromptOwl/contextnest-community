@@ -584,6 +584,8 @@ export function createApp(): Hono<AuthEnv> {
       // renders before sign-in, and none of it is secret.
       hootie_brand: effectiveHootieBrand(),
       hootie_branding_available: hootieBrandingAvailable(),
+      // Own model key / gateway allowed (licence feature byok, Enterprise).
+      byok_available: hasEntitlement("byok"),
       // This server hosts several organizations (PromptOwl-hosted) rather than
       // one. The visibility picker words 'Organization' and 'Public' by it and
       // confirms before 'org'; the server enforces the same in
@@ -690,6 +692,10 @@ export function createApp(): Hono<AuthEnv> {
       // yet (3 drop the license) — the "we're checking your license" banner.
       pending_rejections: getPendingRejections(),
       last_checked_at: getLastLicenseCheck(),
+      // PromptOwl's page for this key (plan, Upgrade); ?key= is the last 4 only.
+      manage_url: config.PROMPTOWL_KEY
+        ? `${config.PROMPTOWL_API_URL.replace(/\/$/, "")}/community-license?key=${config.PROMPTOWL_KEY.slice(-4)}`
+        : null,
     });
   });
 
@@ -789,6 +795,8 @@ export function createApp(): Hono<AuthEnv> {
     // are in effect and whether edits are accepted.
     ...storedHootieSettings(),
     hootie_branding_available: hootieBrandingAvailable(),
+    // Own key + gateway fields are in effect and editable only with byok.
+    byok_available: hasEntitlement("byok"),
     anthropic_base_url: config.ANTHROPIC_BASE_URL,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,

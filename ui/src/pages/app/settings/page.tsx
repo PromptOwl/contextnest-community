@@ -761,6 +761,27 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 </CardDescription>
               </CardHeader>
               <CardContent>
+                {settings?.byok_available === false ? (
+                  // Pricing spec §9.3: own key only with the byok licence feature.
+                  <div className="text-sm text-muted-foreground space-y-2" data-testid="settings-models-by-promptowl">
+                    <p>
+                      Models on this server are supplied by PromptOwl and use
+                      your plan's credits. Using your own model key or gateway
+                      is an Enterprise feature.
+                    </p>
+                    {settings.anthropic_api_key_masked && draft.anthropic_api_key !== null && (
+                      <button
+                        type="button"
+                        className="text-xs text-destructive hover:underline"
+                        onClick={() => set({ anthropic_api_key: null })}
+                      >
+                        A stored key ({settings.anthropic_api_key_masked}) is ignored on this plan — clear it
+                      </button>
+                    )}
+                    {draft.anthropic_api_key === null && <p className="text-xs">Will be cleared when you save.</p>}
+                  </div>
+                ) : (
+                <>
                 <div className="text-xs text-muted-foreground mb-2">
                   {draft.anthropic_api_key === null
                     ? "Will be cleared when you save."
@@ -798,6 +819,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     Keep current key
                   </button>
                 )}
+                </>
+                )}
               </CardContent>
             </Card>
 
@@ -813,8 +836,9 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   tab on the right edge. It answers from what the person asking
                   can read in the nest, cites the documents it used, and lets
                   them @tag a colleague — which posts the exchange as a comment
-                  and notifies them. Off until you turn it on. Uses the
-                  Anthropic API key above; without one the panel says so.
+                  and notifies them. Off until you turn it on. Runs on the
+                  model key above, or on PromptOwl models with your plan's
+                  credits; without either the panel says so.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -839,7 +863,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     error={fieldErrors.hootie_model}
                     id="hootie-model"
                     value={draft.hootie_model ?? ""}
-                    placeholder="claude-opus-5"
+                    placeholder="claude-sonnet-5"
                     onChange={(v) => set({ hootie_model: v })}
                   />
                   <p className="text-xs text-muted-foreground">
@@ -848,6 +872,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     <code>gpt-5</code>, …).
                   </p>
                 </div>
+                {settings?.byok_available !== false && (
                 <div className="space-y-1.5">
                   <Label htmlFor="anthropic-base-url">Model gateway URL</Label>
                   <TextField
@@ -863,6 +888,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     fronts. Empty means Anthropic directly.
                   </p>
                 </div>
+                )}
               </CardContent>
             </Card>
 

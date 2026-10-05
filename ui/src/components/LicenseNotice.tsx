@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { CalendarClock, ExternalLink, Info, KeyRound, Mail, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { toast } from "sonner";
 import { getAdminLicense, type AdminLicense, type LicenseStatus } from "../lib/api";
 import {
   adminLicenseNotice,
@@ -140,6 +141,20 @@ export function LicenseBanner({
   // making its owner an admin — for anyone while the workspace is read-only.
   const { lic } = useAdminLicense(isAdmin || readOnly);
   const [dismissed, setDismissed] = useState(readDismissal);
+
+  // A role grant hit the plan's limit (lib/api dispatches it). The dialog
+  // already shows why; an admin also gets the way to change plans.
+  const manageUrl = lic?.manage_url;
+  useEffect(() => {
+    if (!manageUrl) return;
+    const onLimit = () =>
+      toast("Your plan's limit was reached", {
+        description: "Change your plan with PromptOwl to add more people.",
+        action: { label: "Manage plan", onClick: () => window.open(manageUrl, "_blank", "noopener") },
+      });
+    window.addEventListener("license:plan-limit", onLimit);
+    return () => window.removeEventListener("license:plan-limit", onLimit);
+  }, [manageUrl]);
 
   const notice = lic ? adminLicenseNotice(lic) : readOnly ? neutralReadOnlyNotice() : null;
   if (!notice || isDismissed(notice, dismissed)) return null;

@@ -76,6 +76,19 @@ describe("seats are reported, never enforced", () => {
     expect(res.data.pending_rejections).toBe(0);
   });
 
+  it("links to PromptOwl's page for this key by its last 4 characters only", async () => {
+    const before = process.env.PROMPTOWL_KEY;
+    process.env.PROMPTOWL_KEY = "pk_0123456789abcdef";
+    try {
+      const res = await jsonRequest(app, "GET", "/admin/license", undefined, owner.apiKey);
+      expect(res.data.manage_url).toMatch(/\/community-license\?key=cdef$/);
+      expect(res.data.manage_url).not.toContain("0123456789");
+    } finally {
+      if (before === undefined) delete process.env.PROMPTOWL_KEY;
+      else process.env.PROMPTOWL_KEY = before;
+    }
+  });
+
   it("no limit reports licensed:null and never over", async () => {
     entitlement.maxUsers = null;
     const res = await jsonRequest(app, "GET", "/admin/license", undefined, owner.apiKey);

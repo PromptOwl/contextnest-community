@@ -86,6 +86,20 @@ describe("the run bundle and Hootie use the same credential", () => {
   });
 });
 
+describe("the UI is told whether own keys are allowed", () => {
+  it("/health and /admin/settings carry byok_available", async () => {
+    for (const features of [[], ["byok"]]) {
+      const { app, owner } = await boot({ features, gateway: GATEWAY });
+      const health = await jsonRequest(app, "GET", "/health");
+      const settings = await jsonRequest(app, "GET", "/admin/settings", undefined, owner.apiKey);
+      expect(health.data.byok_available).toBe(features.length > 0);
+      expect(settings.data.byok_available).toBe(features.length > 0);
+      env?.cleanup();
+      env = null;
+    }
+  });
+});
+
 describe("own keys can't be stored without byok", () => {
   it("Settings refuses setting a key or gateway (403 byok_required) but allows clearing", async () => {
     const { app, owner } = await boot({ gateway: GATEWAY });

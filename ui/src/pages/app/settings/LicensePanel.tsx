@@ -24,6 +24,21 @@ function tierLabel(tier: string, trial: boolean | undefined): string {
   return trial ? `${name} (trial)` : name;
 }
 
+/** Pricing plan names (spec v21 §1); the tier label is the fallback for an older PromptOwl. */
+const PLAN_LABELS: Record<string, string> = {
+  free: "Free",
+  trial: "Trial",
+  self_hosted: "Self-Hosted",
+  enterprise: "Enterprise",
+};
+
+/** "3 of 10", "3 (unlimited)", or "None on this plan" for a 0 cap. */
+function capLabel(used: number, cap: number | null | undefined): string {
+  if (cap == null) return `${used} (unlimited)`;
+  if (cap === 0 && used === 0) return "None on this plan";
+  return `${used} of ${cap}`;
+}
+
 function fmt(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -125,14 +140,21 @@ export function LicensePanel() {
         </CardHeader>
         <CardContent>
           <dl className="text-sm">
-            <Row label="Plan">{tierLabel(lic.tier, lic.trial)}</Row>
+            <Row label="Plan">
+              {lic.plan ? PLAN_LABELS[lic.plan] ?? lic.plan : tierLabel(lic.tier, lic.trial)}
+            </Row>
             {lic.org && <Row label="Licensed to">{lic.org}</Row>}
             {lic.owner_email && <Row label="License admin">{lic.owner_email}</Row>}
-            <Row label="Seats">
-              {licensed == null
-                ? `${used} in use (no seat limit)`
-                : `${used} of ${licensed} in use`}
-            </Row>
+            {/* Each person counts once, at their highest role on any nest. */}
+            <Row label="Users (owners, admins, reviewers)">{capLabel(used, licensed)}</Row>
+            {lic.subscribers && (
+              <Row label="Editors">{capLabel(lic.subscribers.used, lic.subscribers.licensed)}</Row>
+            )}
+            {lic.max_account_owners !== undefined && (
+              <Row label="Account Owners">
+                {lic.max_account_owners == null ? "Unlimited" : `Up to ${lic.max_account_owners}`}
+              </Row>
+            )}
             <Row label={lic.trial ? "Trial ends" : "License ends"}>
               {lic.expires_at
                 ? `${fmt(lic.expires_at)}${
@@ -173,7 +195,14 @@ export function LicensePanel() {
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-wrap items-center gap-3">
-          <Button asChild>
+          {lic.manage_url && (
+            <Button asChild>
+              <a href={lic.manage_url} target="_blank" rel="noreferrer">
+                Manage plan <ExternalLink className="h-4 w-4 ml-1.5" />
+              </a>
+            </Button>
+          )}
+          <Button asChild variant={lic.manage_url ? "outline" : "default"}>
             <a href={contact.url} target="_blank" rel="noreferrer">
               Talk to PromptOwl <ExternalLink className="h-4 w-4 ml-1.5" />
             </a>
