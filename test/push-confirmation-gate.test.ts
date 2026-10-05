@@ -226,6 +226,27 @@ describe("gate ON — push is held pending, applies only on confirm", () => {
     expect(data.doc_count).toBe(1);
     // Attribution: who pushed.
     expect((data.submitter_email || data.submitter_label || "").length).toBeGreaterThan(0);
+    // The reviewer can read what would be written before deciding.
+    expect(data.manifest[0].content).toBe("# Doc A\n\nbody");
+  });
+
+  it("content stays on the right row when the payload has rows that won't be written", async () => {
+    const held = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publish`,
+      { documents: [{ title: "No Body", content: "" }, { title: "Doc B", content: "b body" }] },
+      owner.apiKey,
+    );
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/pending-pushes/${held.data.pending_id}`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(data.manifest).toHaveLength(1);
+    expect(data.manifest[0]).toMatchObject({ title: "Doc B", content: "b body" });
   });
 
   it("confirm → applied, docs present, decided_by stamped", async () => {
@@ -512,6 +533,61 @@ describe("always-allow whitelists the exact API key", () => {
     );
     expect(third.status).toBe(202);
     expect(await nodeIds(callerB, nestId)).not.toContain("nodes/third");
+  });
+
+  it("a keyless push (PromptOwl ticket / session) is whitelisted on its own — API keys still gate", async () => {
+    const nestId = await makeNest("allowlist-keyless");
+    await setGate(nestId, true);
+    const login = await app.request("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: owner.email, password: "testpass" }),
+    });
+    const cookie = login.headers.get("set-cookie") || "";
+    const keylessPublish = (title: string) =>
+      app.request(`/nests/${nestId}/publish`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ documents: [{ title, content: "x" }] }),
+      });
+
+    const first = await keylessPublish("Keyless One");
+    expect(first.status).toBe(202);
+    const { pending_id } = await first.json();
+    const confirm = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/pending-pushes/${pending_id}/confirm`,
+      { always_allow: true },
+      reviewerKey,
+    );
+    expect(confirm.status).toBe(200);
+
+    expect([200, 201]).toContain((await keylessPublish("Keyless Two")).status);
+    expect(await nodeIds(owner, nestId)).toContain("nodes/keyless-two");
+
+    const keyed = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publish`,
+      { documents: [{ title: "Keyed", content: "x" }] },
+      owner.apiKey,
+    );
+    expect(keyed.status).toBe(202);
+
+    // The keyless entry is listed and revocable like any other.
+    const al = await jsonRequest(app, "GET", `/nests/${nestId}/push-allowlist`, undefined, owner.apiKey);
+    const entry = al.data.allowlist.find((a: any) => a.key_id === "keyless");
+    expect(entry.key_label).toBe("PromptOwl / signed-in session");
+    const del = await jsonRequest(
+      app,
+      "DELETE",
+      `/nests/${nestId}/push-allowlist`,
+      { user_id: entry.user_id, key_id: entry.key_id },
+      owner.apiKey,
+    );
+    expect(del.data.removed).toBe(true);
+    expect((await keylessPublish("Keyless Three")).status).toBe(202);
   });
 });
 

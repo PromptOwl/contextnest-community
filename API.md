@@ -412,7 +412,7 @@ The poll endpoint. **Readable by the submitter (same key/user that pushed) OR a 
 
 Confirm rights: a **reviewer/owner/admin of the nest — never the submitter**. A submitter that could confirm its own push would clear the gate with one extra call using the very key being held (and `always_allow` would whitelist it permanently); `403` otherwise.
 
-Applies the stored payload through the same apply path an immediate push uses, attributed to the **submitter**, and returns the updated record. Confirming a push that is no longer pending (already applied/rejected/expired) → `409`. `always_allow: true` whitelists the submitter's exact API key for future pushes to this nest — revoke it from nest settings or `DELETE /push-allowlist`.
+Applies the stored payload through the same apply path an immediate push uses, attributed to the **submitter**, and returns the updated record. Confirming a push that is no longer pending (already applied/rejected/expired) → `409`. `always_allow: true` whitelists the credential that pushed for future pushes to this nest: the submitter's exact API key, or for a keyless push (PromptOwl service ticket, signed-in session) all of that user's keyless pushes, but never their API keys. Revoke it from nest settings or `DELETE /push-allowlist`.
 
 If applying throws (a busy vault, an unusable payload), the record goes back to `pending` rather than being stranded as applied-with-nothing-written; retry the confirm.
 
@@ -422,7 +422,7 @@ A reviewer/owner/admin, **or the submitter withdrawing its own push** — reject
 
 ### GET / DELETE `/nests/:nestId/push-allowlist`
 
-Reviewer-only. `GET` → `{ allowlist: [{ user_id, key_id, user_email, key_label, created_by_user_id, created_at }], count }` (`key_id: null` = all of that user's keys; `user_email`/`key_label` are resolved for display and null if the user or key is gone). `DELETE { user_id, key_id? }` removes one entry → `{ removed }`.
+Reviewer-only. `GET` → `{ allowlist: [{ user_id, key_id, user_email, key_label, created_by_user_id, created_at }], count }` (`key_id: null` = all of that user's keys; `key_id: "keyless"` = their keyless pushes, labelled "PromptOwl / signed-in session"; `user_email`/`key_label` are resolved for display and null if the user or key is gone). `DELETE { user_id, key_id? }` removes one entry → `{ removed }`.
 
 `/push-allowlist` is governance-licensed (`503` without a valid license). The `/pending-pushes` routes are **not**: `POST /publish` is unlicensed, so a lapsed license on a gated nest would otherwise hold every push at `202` with nothing able to confirm it, and the nest would stop accepting writes with no way back.
 
