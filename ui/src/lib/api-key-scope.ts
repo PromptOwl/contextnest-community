@@ -1,3 +1,5 @@
+import { parseServerDate } from "./dates";
+
 /**
  * What an API key can reach, in words — and the request that mints one.
  *
@@ -75,9 +77,10 @@ export function filterSortKeys<
     if (opts.scope !== "any" && reach.kind !== opts.scope) return false;
     return !q || [k.label ?? "", k.key_prefix, reach.label].some((s) => s.toLowerCase().includes(q));
   });
-  // ISO strings compare chronologically; a never-used key sorts last.
+  // Timestamps come as ISO or SQL-style, so compare parsed; never-used sorts last.
+  const ms = (v: string | null) => parseServerDate(v)?.getTime() ?? 0;
   if (opts.sort === "name") out.sort((a, b) => (a.label ?? "").localeCompare(b.label ?? ""));
-  else if (opts.sort === "last_used") out.sort((a, b) => (b.last_used_at ?? "").localeCompare(a.last_used_at ?? ""));
-  else out.sort((a, b) => b.created_at.localeCompare(a.created_at));
+  else if (opts.sort === "last_used") out.sort((a, b) => ms(b.last_used_at) - ms(a.last_used_at));
+  else out.sort((a, b) => ms(b.created_at) - ms(a.created_at));
   return out;
 }

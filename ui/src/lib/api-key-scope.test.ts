@@ -66,8 +66,8 @@ describe("nestOnlyKeyLabel", () => {
 describe("filterSortKeys", () => {
   const keys = [
     { id: "a", label: "Laptop CLI", key_prefix: "cnst_aaa", nest_id: null, created_at: "2026-01-01T00:00:00Z", last_used_at: null },
-    { id: "b", label: "Zed agent", key_prefix: "cnst_bbb", nest_id: "n1", created_at: "2026-03-01T00:00:00Z", last_used_at: "2026-05-01T00:00:00Z" },
-    { id: "c", label: "Claude Desktop", key_prefix: "cnst_ccc", nest_id: null, created_at: "2026-03-05T00:00:00Z", last_used_at: "2026-04-01T00:00:00Z" },
+    { id: "b", label: "Zed agent", key_prefix: "cnst_bbb", nest_id: "n1", created_at: "2026-03-01T06:00:00Z", last_used_at: "2026-05-01T00:00:00Z" },
+    { id: "c", label: "Claude Desktop", key_prefix: "cnst_ccc", nest_id: null, created_at: "2026-03-01 12:00:00", last_used_at: "2026-04-01T00:00:00Z" }, // SQL-style stamp, same day as b,
   ];
   const ids = (opts: Parameters<typeof filterSortKeys>[2]) => filterSortKeys(keys, nests, opts).map((k) => k.id);
 
