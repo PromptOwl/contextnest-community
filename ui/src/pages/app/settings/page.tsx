@@ -41,7 +41,8 @@ import {
 } from "../../../lib/api";
 import { reads } from "../../../lib/queries";
 import { copyTextWithToast } from "../../../lib/clipboard";
-import { getAdminSettings, updateAdminSettings } from "../../../lib/api";
+import { getAdminModels, getAdminSettings, updateAdminSettings } from "../../../lib/api";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from "../../../auth/AuthContext";
 import { AgentConnectPanel } from "./AgentConnectPanel";
 import { LicensePanel } from "./LicensePanel";
@@ -197,6 +198,65 @@ const noAutofill = (type: string) =>
   }) as const;
 
 /** Controlled text input bound straight to the draft (no per-field Save). */
+/** Hootie's model: one of the models this server's key can reach (PromptOwl's
+ *  team models on the gateway, the provider's on an own key). If the list
+ *  can't be loaded, a name can still be typed. */
+function HootieModelField({
+  value,
+  error,
+  onChange,
+}: {
+  value: string;
+  error?: string;
+  onChange: (v: string) => void;
+}) {
+  const [models, setModels] = useState<string[] | null>(null);
+  useEffect(() => {
+    getAdminModels()
+      .then((r) => setModels(r.models))
+      .catch(() => setModels([]));
+  }, []);
+  // Keep the saved model selectable even if the key no longer lists it.
+  const options = models && value && !models.includes(value) ? [value, ...models] : (models ?? []);
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor="hootie-model">Model</Label>
+      {models === null ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground h-9">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading models…
+        </div>
+      ) : models.length > 0 ? (
+        <Select value={value || undefined} onValueChange={onChange}>
+          <SelectTrigger id="hootie-model" data-testid="settings-hootie-model" aria-invalid={!!error}>
+            <SelectValue placeholder="Pick a model" />
+          </SelectTrigger>
+          <SelectContent>
+            {options.map((m) => (
+              <SelectItem key={m} value={m}>
+                {m}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : (
+        <TextField
+          error={error}
+          id="hootie-model"
+          value={value}
+          placeholder="claude-sonnet-5"
+          onChange={onChange}
+        />
+      )}
+      {error && models && models.length > 0 && <p className="text-xs text-destructive">{error}</p>}
+      <p className="text-xs text-muted-foreground">
+        {models && models.length > 0
+          ? `The model Hootie answers with — ${models.length} available on this server.`
+          : "The model Hootie answers with. The list of available models couldn't be loaded, so type its name (through a gateway, the gateway's name for it)."}
+      </p>
+    </div>
+  );
+}
+
 function TextField({
   id,
   value,
@@ -857,21 +917,11 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   fieldErrors={fieldErrors}
                   set={set}
                 />
-                <div className="space-y-1.5">
-                  <Label htmlFor="hootie-model">Model</Label>
-                  <TextField
-                    error={fieldErrors.hootie_model}
-                    id="hootie-model"
-                    value={draft.hootie_model ?? ""}
-                    placeholder="claude-sonnet-5"
-                    onChange={(v) => set({ hootie_model: v })}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    The model Hootie answers with. Through a gateway this is the
-                    gateway's name for it (<code>ollama/llama3.2</code>,{" "}
-                    <code>gpt-5</code>, …).
-                  </p>
-                </div>
+                <HootieModelField
+                  value={draft.hootie_model ?? ""}
+                  error={fieldErrors.hootie_model}
+                  onChange={(v) => set({ hootie_model: v })}
+                />
                 {settings?.byok_available !== false && (
                 <div className="space-y-1.5">
                   <Label htmlFor="anthropic-base-url">Model gateway URL</Label>

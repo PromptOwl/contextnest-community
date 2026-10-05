@@ -121,20 +121,29 @@ async function* answer(
  * every reader of the nest, not just the admin, and an upstream message can
  * change or say more than we want to repeat.
  */
-export function describeModelError(err: unknown): string {
+/** `model` / `gateway`: the call actually made (it may be the PromptOwl gateway). */
+export function describeModelError(
+  err: unknown,
+  call: { model?: string; gateway?: boolean } = {},
+): string {
+  const model = call.model ?? config.HOOTIE_MODEL;
   const e = err as { status?: number; error?: { error?: { message?: string } } };
   const detail = (e?.error?.error?.message || "").toLowerCase();
   // Behind a gateway the rejection is the gateway's, not Anthropic's.
-  const provider = config.ANTHROPIC_BASE_URL ? "The model gateway" : "Anthropic";
+  const provider = (call.gateway ?? !!config.ANTHROPIC_BASE_URL) ? "The model gateway" : "Anthropic";
   if (detail.includes("credit balance") || detail.includes("billing")) {
     return "Hootie's Anthropic account is out of credit. A server admin needs to add credit in the Anthropic console (Plans & Billing).";
+  }
+  // LiteLLM answers 400 for a model name it doesn't serve.
+  if (detail.includes("no healthy deployments") || detail.includes("invalid model name")) {
+    return `No model named "${model}" is available on this key. A server admin can pick one under Settings → General.`;
   }
   switch (e?.status) {
     case 401:
     case 403:
       return `${provider} rejected this server's API key. A server admin can replace it under Settings → General.`;
     case 404:
-      return `No model named "${config.HOOTIE_MODEL}" is available on this key. A server admin can change it under Settings → General.`;
+      return `No model named "${model}" is available on this key. A server admin can pick one under Settings → General.`;
     case 413:
       return "That question plus the documents behind it are too large for one request. Try asking something narrower.";
     case 429:

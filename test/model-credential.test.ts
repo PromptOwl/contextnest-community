@@ -3,10 +3,14 @@
  * nest's own key only with the `byok` licence feature (Enterprise); otherwise
  * the PromptOwl gateway from the licence check, metered in credits.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers";
 
-const GATEWAY = { baseUrl: "https://llm.promptowl.ai", key: "sk-litellm-licence" };
+const GATEWAY = {
+  baseUrl: "https://llm.promptowl.ai",
+  key: "sk-litellm-licence",
+  defaultModel: "default-claude/claude-sonnet-5",
+};
 const OWNER = "owner@acme.com";
 
 let env: ReturnType<typeof setupTestEnv> | null = null;
@@ -31,17 +35,19 @@ describe("resolveModelCredential", () => {
   it("without byok, the server's own key is ignored and PromptOwl's gateway is used", async () => {
     const { resolveModelCredential } = await boot({ gateway: GATEWAY });
     process.env.ANTHROPIC_API_KEY = "sk-ant-own";
-    expect(resolveModelCredential()).toEqual({ apiKey: GATEWAY.key, baseUrl: GATEWAY.baseUrl, source: "promptowl" });
+    expect(resolveModelCredential()).toEqual({
+      apiKey: GATEWAY.key, baseUrl: GATEWAY.baseUrl, source: "promptowl", defaultModel: GATEWAY.defaultModel,
+    });
     expect(resolveModelCredential({ ANTHROPIC_API_KEY: "sk-ant-nest" })?.source).toBe("promptowl");
   });
 
   it("with byok, a nest key beats the server key, and the server key beats the gateway", async () => {
     const { resolveModelCredential } = await boot({ features: ["byok"], gateway: GATEWAY });
     process.env.ANTHROPIC_API_KEY = "sk-ant-own";
-    expect(resolveModelCredential()).toEqual({ apiKey: "sk-ant-own", baseUrl: null, source: "own" });
+    expect(resolveModelCredential()).toEqual({ apiKey: "sk-ant-own", baseUrl: null, source: "own", defaultModel: null });
     expect(
       resolveModelCredential({ ANTHROPIC_API_KEY: "sk-ant-nest", ANTHROPIC_BASE_URL: "http://gw:4000" }),
-    ).toEqual({ apiKey: "sk-ant-nest", baseUrl: "http://gw:4000", source: "own" });
+    ).toEqual({ apiKey: "sk-ant-nest", baseUrl: "http://gw:4000", source: "own", defaultModel: null });
   });
 
   it("with byok but no own key yet, PromptOwl's gateway still answers", async () => {
@@ -83,6 +89,102 @@ describe("the run bundle and Hootie use the same credential", () => {
     expect(res.data.reason).toBe("no_api_key");
     expect(res.data.error).toMatch(/PromptOwl models/);
     delete process.env.HOOTIE_ENABLED;
+  });
+});
+
+describe("which model Hootie asks for", () => {
+  it("the admin's pick, else the gateway's team default, else Anthropic's id", async () => {
+    const { hootieModel } = await import("../src/shared/model-credential.js");
+    const own = { apiKey: "k", baseUrl: null, source: "own" as const, defaultModel: null };
+    const gw = { ...own, source: "promptowl" as const, defaultModel: "default-claude/claude-sonnet-5" };
+    const before = process.env.HOOTIE_MODEL;
+    try {
+      delete process.env.HOOTIE_MODEL;
+      expect(hootieModel(gw)).toBe("claude-sonnet-5") // shown and stored without the prefix;
+      expect(hootieModel(own)).toBe("claude-sonnet-5");
+      expect(hootieModel(null)).toBe("claude-sonnet-5");
+      process.env.HOOTIE_MODEL = "gpt-5.5";
+      expect(hootieModel(gw)).toBe("gpt-5.5");
+    } finally {
+      if (before === undefined) delete process.env.HOOTIE_MODEL;
+      else process.env.HOOTIE_MODEL = before;
+    }
+  });
+});
+
+describe("the PromptOwl prefix goes on at call time", () => {
+  afterEach(() => vi.restoreAllMocks());
+  const gw = {
+    apiKey: "sk-gw-prefix", baseUrl: "https://llm.promptowl.ai", source: "promptowl" as const,
+    defaultModel: "default-claude/claude-sonnet-5",
+  };
+
+  it("a plain name becomes the team's full name; full names and own keys go as given", async () => {
+    const { resolveGatewayModel } = await import("../src/shared/model-credential.js");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ data: [{ id: "default-claude/claude-sonnet-5" }, { id: "default-openai/gpt-5.5" }] })),
+    );
+    expect(await resolveGatewayModel(gw, "claude-sonnet-5")).toBe("default-claude/claude-sonnet-5");
+    expect(await resolveGatewayModel(gw, "gpt-5.5")).toBe("default-openai/gpt-5.5");
+    expect(await resolveGatewayModel(gw, "default-openai/gpt-5.5")).toBe("default-openai/gpt-5.5");
+    expect(await resolveGatewayModel(gw, "not-in-catalog")).toBe("not-in-catalog");
+    const own = { ...gw, source: "own" as const, defaultModel: null };
+    expect(await resolveGatewayModel(own, "claude-sonnet-5")).toBe("claude-sonnet-5");
+  });
+
+  it("a gateway that can't list still sends the name", async () => {
+    const { resolveGatewayModel } = await import("../src/shared/model-credential.js");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("down", { status: 503 }));
+    expect(await resolveGatewayModel({ ...gw, apiKey: "sk-gw-down" }, "gpt-5.5")).toBe("gpt-5.5");
+  });
+});
+
+describe("/admin/models — the Hootie model picker", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("lists what the gateway key can reach, with the model in use; admins only", async () => {
+    const { app, owner } = await boot({ gateway: GATEWAY });
+    const realFetch = globalThis.fetch;
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url: any, init?: any) => {
+      if (String(url) !== "https://llm.promptowl.ai/v1/models") return realFetch(url, init);
+      expect(init.headers.authorization).toBe(`Bearer ${GATEWAY.key}`);
+      return new Response(JSON.stringify({ data: [{ id: "default-openai/gpt-5.5" }, { id: "default-claude/claude-sonnet-5" }] }));
+    });
+    const res = await jsonRequest(app, "GET", "/admin/models", undefined, owner.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data).toEqual({
+      models: ["claude-sonnet-5", "gpt-5.5"],
+      current: "claude-sonnet-5",
+      source: "promptowl",
+    });
+    expect(spy).toHaveBeenCalled();
+
+    const member = await registerUser(app, "member@acme.com");
+    expect((await jsonRequest(app, "GET", "/admin/models", undefined, member.apiKey)).status).toBe(403);
+  });
+
+  it("Settings reports the model in use, so the picker preselects it", async () => {
+    const before = process.env.HOOTIE_MODEL;
+    delete process.env.HOOTIE_MODEL;
+    try {
+      const { app, owner } = await boot({ gateway: GATEWAY });
+      const res = await jsonRequest(app, "GET", "/admin/settings", undefined, owner.apiKey);
+      expect(res.data.hootie_model).toBe("claude-sonnet-5");
+    } finally {
+      if (before !== undefined) process.env.HOOTIE_MODEL = before;
+    }
+  });
+
+  it("a gateway that can't list still answers, so a name can be typed", async () => {
+    const { app, owner } = await boot({ gateway: GATEWAY });
+    const realFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: any, init?: any) =>
+      String(url).startsWith("https://llm.promptowl.ai") ? new Response("nope", { status: 503 }) : realFetch(url, init),
+    );
+    const res = await jsonRequest(app, "GET", "/admin/models", undefined, owner.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data.models).toEqual([]);
+    expect(res.data.current).toBe("claude-sonnet-5");
   });
 });
 

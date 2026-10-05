@@ -443,6 +443,13 @@ export async function getAdminLicense() {
   return request<AdminLicense>("/admin/license");
 }
 
+/** Models this server's credential can reach (admin), and the one Hootie uses now. */
+export async function getAdminModels() {
+  return request<{ models: string[]; current: string; source: "own" | "promptowl" | null; error?: string }>(
+    "/admin/models",
+  );
+}
+
 export async function installLicense(key: string) {
   return request<{
     valid: boolean;

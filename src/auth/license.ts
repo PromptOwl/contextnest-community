@@ -121,6 +121,8 @@ export function getEntitlement(): Entitlement {
 export interface ModelGateway {
   baseUrl: string;
   key: string;
+  /** PromptOwl's default team model name (e.g. "default-claude/claude-sonnet-5"). */
+  defaultModel: string | null;
 }
 
 let currentGateway: ModelGateway | null = null;
@@ -133,12 +135,15 @@ function parseGateway(raw: unknown): ModelGateway | null {
   const g = (raw && typeof raw === "object" ? raw : {}) as {
     baseUrl?: unknown;
     key?: unknown;
+    defaultModel?: unknown;
   };
+  const defaultModel =
+    typeof g.defaultModel === "string" && /^[\w./:@-]{1,128}$/.test(g.defaultModel) ? g.defaultModel : null;
   return typeof g.baseUrl === "string" &&
     /^https?:\/\/[^\s"'<>]+$/i.test(g.baseUrl) &&
     typeof g.key === "string" &&
     g.key.length > 0
-    ? { baseUrl: g.baseUrl.replace(/\/+$/, ""), key: g.key }
+    ? { baseUrl: g.baseUrl.replace(/\/+$/, ""), key: g.key, defaultModel }
     : null;
 }
 

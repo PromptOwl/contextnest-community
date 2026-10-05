@@ -657,12 +657,20 @@ describe("pricing entitlement", () => {
         valid: true,
         tier: "team",
         limits: { plan: "self_hosted", maxUsers: 30 },
-        gateway: { baseUrl: "https://llm.promptowl.ai/", key: "sk-litellm-secret" },
+        gateway: {
+          baseUrl: "https://llm.promptowl.ai/",
+          key: "sk-litellm-secret",
+          defaultModel: "default-claude/claude-sonnet-5",
+        },
       },
     });
     const license = await loadLicense();
     await license.validateLicense();
-    expect(license.getModelGateway()).toEqual({ baseUrl: "https://llm.promptowl.ai", key: "sk-litellm-secret" });
+    expect(license.getModelGateway()).toEqual({
+      baseUrl: "https://llm.promptowl.ai",
+      key: "sk-litellm-secret",
+      defaultModel: "default-claude/claude-sonnet-5",
+    });
     expect(license.getEntitlement().plan).toBe("self_hosted");
 
     const { getDb } = await import("../src/db/client.js");
@@ -678,6 +686,7 @@ describe("pricing entitlement", () => {
     await again.validateLicense();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(again.getModelGateway()?.key).toBe("sk-litellm-secret");
+    expect(again.getModelGateway()?.defaultModel).toBe("default-claude/claude-sonnet-5");
   });
 
   it("drops the gateway when it is malformed or the license stops being valid", async () => {
@@ -687,9 +696,13 @@ describe("pricing entitlement", () => {
     await license.validateLicense();
     expect(license.getModelGateway()).toBeNull();
 
-    mockFetch({ body: { valid: true, tier: "team", gateway: { baseUrl: "https://llm.promptowl.ai", key: "k2" } } });
+    mockFetch({
+      body: { valid: true, tier: "team", gateway: { baseUrl: "https://llm.promptowl.ai", key: "k2", defaultModel: "bad name; rm" } },
+    });
     await license.validateLicense({ forceFresh: true });
     expect(license.getModelGateway()?.key).toBe("k2");
+    // A malformed model name is dropped; the gateway itself is kept.
+    expect(license.getModelGateway()?.defaultModel).toBeNull();
 
     mockFetch({ body: { valid: false, reason: "deactivated" } });
     await license.validateLicense({ forceFresh: true, strict: true });

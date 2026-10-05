@@ -133,7 +133,12 @@ import {
 } from "./auth/license.js";
 import { countBilled, assertCanGrant, assertCanAddAccountOwner } from "./auth/seats.js";
 import { hasEntitlement } from "./auth/entitlements.js";
-import { resolveModelCredential } from "./shared/model-credential.js";
+import {
+  resolveModelCredential,
+  hootieModel,
+  listCredentialModels,
+  bareModelName,
+} from "./shared/model-credential.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "./auth/license-copy.js";
 import { SERVICE_VERSION } from "./shared/version.js";
 import { persistSetting } from "./db/settings.js";
@@ -788,7 +793,8 @@ export function createApp(): Hono<AuthEnv> {
     type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
     type_table_enabled: config.TYPE_TABLE_ENABLED,
     hootie_enabled: config.HOOTIE_ENABLED,
-    hootie_model: config.HOOTIE_MODEL,
+    // The model in use: the admin's pick, else the gateway's default (see hootieModel).
+    hootie_model: hootieModel(resolveModelCredential()),
     // Custom identity (enterprise). The stored values are returned even when
     // the licence doesn't allow them, so a lapsed licence shows what would
     // come back on renewal; `hootie_branding_available` says whether they
@@ -849,6 +855,27 @@ export function createApp(): Hono<AuthEnv> {
     if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
     return c.json(currentServerSettings());
+  });
+
+  // Models the current credential can reach — the Hootie model picker. On the
+  // PromptOwl gateway that is PromptOwl's team catalog (team model names); on
+  // an own key (byok), whatever that key's provider/gateway lists.
+  app.use("/admin/models", flexAuthMiddleware);
+  app.get("/admin/models", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const credential = resolveModelCredential();
+    const current = hootieModel(credential);
+    if (!credential) return c.json({ models: [], current, source: null });
+    try {
+      const ids = await listCredentialModels(credential);
+      // People pick plain names; PromptOwl's instance prefix is added per call.
+      const names = credential.source === "promptowl" ? ids.map(bareModelName) : ids;
+      return c.json({ models: [...new Set(names)].sort(), current, source: credential.source });
+    } catch (err) {
+      console.warn("[admin/models] could not list models:", err instanceof Error ? err.message : err);
+      return c.json({ models: [], current, source: credential.source, error: "Could not list models right now." });
+    }
   });
 
   // Send a test notification to the saved Slack/Teams webhook so the admin can

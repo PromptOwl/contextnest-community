@@ -26,7 +26,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AuthEnv } from "../auth/middleware.js";
 import { config } from "../config.js";
-import { resolveModelCredential } from "../shared/model-credential.js";
+import { resolveModelCredential, hootieModel, resolveGatewayModel } from "../shared/model-credential.js";
 import { hasEntitlement } from "../auth/entitlements.js";
 import {
   resolveContext,
@@ -99,6 +99,8 @@ hootieRoutes.post("/chat", async (c) => {
       503,
     );
   }
+  // Stored as a plain name; on PromptOwl's gateway the team prefix goes on here.
+  const callModel = await resolveGatewayModel(credential, hootieModel(credential));
 
   let body: ChatBody;
   try {
@@ -241,7 +243,7 @@ hootieRoutes.post("/chat", async (c) => {
     try {
       for await (const chunk of streamAnswer({
         apiKey: credential.apiKey,
-        model: config.HOOTIE_MODEL,
+        model: callModel,
         baseUrl: credential.baseUrl,
         system,
         turns,
@@ -256,7 +258,9 @@ hootieRoutes.post("/chat", async (c) => {
       // to report, and nobody to report it to.
       if (cancel.signal.aborted) return;
       const text =
-        err instanceof ModelRefusedError ? err.message : describeModelError(err);
+        err instanceof ModelRefusedError
+          ? err.message
+          : describeModelError(err, { model: hootieModel(credential), gateway: !!credential.baseUrl });
       console.error("[hootie] model call failed", nestId, err);
       await stream.writeSSE({ event: "error", data: JSON.stringify({ error: text }) });
       return;
