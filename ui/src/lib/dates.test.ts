@@ -65,6 +65,8 @@ describe("untilTime", () => {
 
   it("reads a past instant as expired, missing input as empty", () => {
     expect(untilTime(isoIn(-60_000))).toBe("expired");
+    // Still live in its last minute.
+    expect(untilTime(isoIn(20_000))).toBe("in 1m");
     expect(untilTime(null)).toBe("");
   });
 });

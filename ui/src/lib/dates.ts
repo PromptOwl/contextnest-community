@@ -28,8 +28,9 @@ export function formatServerDate(raw: string | null | undefined): string {
 export function untilTime(raw: string | null | undefined): string {
   const then = parseServerDate(raw)?.getTime();
   if (then == null) return "";
-  const mins = Math.floor((then - Date.now()) / 60_000);
-  if (mins <= 0) return "expired";
+  const left = then - Date.now();
+  if (left <= 0) return "expired";
+  const mins = Math.max(1, Math.floor(left / 60_000));
   if (mins < 60) return `in ${mins}m`;
   const hrs = Math.floor(mins / 60);
   return hrs < 24 ? `in ${hrs}h` : `in ${Math.floor(hrs / 24)}d`;
