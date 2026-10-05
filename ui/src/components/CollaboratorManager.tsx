@@ -142,10 +142,8 @@ export function CollaboratorManager({
   const loadCollaborators = async () => {
     setLoading(true);
     try {
-      const { collaborators } = await qc.fetchQuery(
-        reads.collaborators(nestId),
-      );
-      setCollaborators(collaborators as Collaborator[]);
+      const res = await qc.fetchQuery(reads.collaborators(nestId));
+      setCollaborators((res?.collaborators ?? []) as Collaborator[]);
     } catch (err: any) {
       setError(err?.message || "Failed to load collaborators");
     } finally {
@@ -159,8 +157,8 @@ export function CollaboratorManager({
         qc.fetchQuery(reads.nestTeams(nestId)),
         qc.fetchQuery(reads.teamList()).catch(() => ({ teams: [] as Team[] })),
       ]);
-      setSharedTeams(nestTeams.teams);
-      setMyTeams(owned.teams);
+      setSharedTeams(nestTeams?.teams ?? []);
+      setMyTeams(owned?.teams ?? []);
     } catch (err: any) {
       setError(err?.message || "Failed to load teams");
     }

@@ -86,7 +86,8 @@ governanceRoutes.get("/stewards", async (c) => {
     }
     enriched.push({ ...s, ...merged });
   }
-  return c.json({ stewards: enriched });
+  const ownerEmail = await stewardship.getNestOwnerEmail(nestId);
+  return c.json({ stewards: enriched, ownerEmail });
 });
 
 // POST /nests/:nestId/stewards
