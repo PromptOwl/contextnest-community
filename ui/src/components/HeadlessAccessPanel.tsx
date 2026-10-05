@@ -19,6 +19,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import * as api from "../lib/api";
 import { useNestMeta } from "../lib/queries";
+import { copyTextWithToast } from "../lib/clipboard";
 import {
   MAX_KEY_LABEL,
   connectSnippet,
@@ -162,7 +163,7 @@ export function HeadlessAccessPanel({ nestId, onError }: Props) {
             <Button
               size="sm"
               variant="outline"
-              onClick={() => void navigator.clipboard?.writeText(snippet)}
+              onClick={() => void copyTextWithToast(snippet, "Key copied to clipboard")}
             >
               <Copy className="mr-1 h-3 w-3" /> Copy
             </Button>
