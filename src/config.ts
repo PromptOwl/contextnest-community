@@ -489,6 +489,10 @@ export const config = {
     }
     return raw;
   },
+  /** Display name for this community (Server settings → Basic). Unset = null. */
+  get COMMUNITY_NAME(): string | null {
+    return process.env.COMMUNITY_NAME?.trim() || null;
+  },
   /**
    * Workflow plane ("turing" track): typed edges, edge-type registry, runs.
    * OFF by default — an optional feature an admin turns on (env or Settings).

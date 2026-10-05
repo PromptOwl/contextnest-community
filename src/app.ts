@@ -693,6 +693,7 @@ export function createApp(): Hono<AuthEnv> {
   const currentServerSettings = () => ({
     promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
     manual_sign_in: config.MANUAL_SIGN_IN,
+    community_name: config.COMMUNITY_NAME,
     logo_url: config.LOGO_URL,
     telemetry_enabled: config.TELEMETRY_ENABLED,
     posthog_key: config.POSTHOG_KEY,
@@ -839,6 +840,12 @@ export function createApp(): Hono<AuthEnv> {
     if ("logo_url" in body) {
       const v = String(body.logo_url ?? "").trim();
       pending.push({ name: "LOGO_URL", value: v || null });
+    }
+    if ("community_name" in body) {
+      const v = String(body.community_name ?? "").trim();
+      if (v.length > 100 || /[\r\n]/.test(v))
+        addError("community_name", "Community name must be one line, 100 characters or fewer.");
+      else pending.push({ name: "COMMUNITY_NAME", value: v || null });
     }
     // Validated, not just trimmed. This value is spliced into the copy-paste
     // snippets the Connecting-agents panel renders — a `bash` block for the
