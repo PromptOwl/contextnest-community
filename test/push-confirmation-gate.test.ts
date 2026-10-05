@@ -555,6 +555,20 @@ describe("always-allow whitelists the exact API key", () => {
       owner.apiKey,
     );
     expect(keyed.status).toBe(202);
+
+    // The keyless entry is listed and revocable like any other.
+    const al = await jsonRequest(app, "GET", `/nests/${nestId}/push-allowlist`, undefined, owner.apiKey);
+    const entry = al.data.allowlist.find((a: any) => a.key_id === "keyless");
+    expect(entry.key_label).toBe("PromptOwl / signed-in session");
+    const del = await jsonRequest(
+      app,
+      "DELETE",
+      `/nests/${nestId}/push-allowlist`,
+      { user_id: entry.user_id, key_id: entry.key_id },
+      owner.apiKey,
+    );
+    expect(del.data.removed).toBe(true);
+    expect((await keylessPublish("Keyless Three")).status).toBe(202);
   });
 });
 

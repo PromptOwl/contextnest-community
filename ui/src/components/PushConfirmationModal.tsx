@@ -255,7 +255,9 @@ export function PushConfirmationModal({
                       Always allow automated writes from {label} to this nest
                     </span>
                     <span className="block text-xs text-muted-foreground">
-                      Whitelists this exact API key. Future writes on it apply
+                      Whitelists the credential that sent this: its API key, or,
+                      for a PromptOwl / signed-in session write, all of this
+                      user&rsquo;s keyless writes. Future writes on it apply
                       immediately without holding for confirmation.
                     </span>
                   </span>

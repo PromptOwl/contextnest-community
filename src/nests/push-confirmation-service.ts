@@ -36,7 +36,8 @@ export type PendingPushStatus = "pending" | "applied" | "rejected" | "expired";
 /** '' key_id means "any of that user's keys" — see migration 040. */
 const ALL_KEYS = "";
 /** key_id for keyless agent writes (PromptOwl service ticket, signed-in MCP):
- *  whitelists those alone, never the user's API keys. */
+ *  whitelists those alone, never the user's API keys. Real key ids are UUIDs,
+ *  so this can't collide with one. */
 const KEYLESS = "keyless";
 
 export interface PendingPushRow {
