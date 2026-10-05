@@ -263,6 +263,7 @@ export const DEFAULT_HOOTIE_BRAND: HootieBrand = {
 export interface AdminSettings {
   promptowl_sign_in_gate: SignInGate;
   manual_sign_in: ManualSignIn;
+  community_name: string | null;
   logo_url: string | null;
   telemetry_enabled: boolean;
   /** PostHog project key ("" = analytics off) and ingestion host. */

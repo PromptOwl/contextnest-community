@@ -438,7 +438,7 @@ Reviewer-only. `GET` → `{ allowlist: [{ user_id, key_id, user_email, key_label
   | `public` | anyone, including anonymous callers |
   `org` and `public` readers see **approved content only** — drafts and pending versions stay with collaborators and stewards.
   Under `AUTH_MODE=open` every caller resolves to the anonymous user, so there is no "other authenticated user" for `org` to admit: on an open-mode deployment `org` behaves as `private`. Use it on a deployment with real logins.
-- **Outside-org publish guardrail.** Setting `visibility: "public"` **requires** `acknowledge_public: true`. `org` does not on a single-organization server — it stays inside the deployment, so it crosses no organizational boundary. On a **shared deployment** (`SHARED_DEPLOYMENT=true` / Settings → General → *This server hosts several organizations* — the PromptOwl-hosted service) the deployment *is* several organizations, so `org` requires the same `acknowledge_public: true` and the `warning` names that boundary. Without the acknowledgement the request is rejected `409`:
+- **Outside-org publish guardrail.** Setting `visibility: "public"` **requires** `acknowledge_public: true`. `org` does not on a single-organization server — it stays inside the deployment, so it crosses no organizational boundary. On a **shared deployment** (`SHARED_DEPLOYMENT=true` / Settings → Features → *This server hosts several organizations* — the PromptOwl-hosted service) the deployment *is* several organizations, so `org` requires the same `acknowledge_public: true` and the `warning` names that boundary. Without the acknowledgement the request is rejected `409`:
   ```json
   {
     "error": "Publishing this nest requires acknowledgement.",
@@ -644,7 +644,7 @@ Read-tier, because commenting is read-tier and a read-only reviewer is the perso
 ```
 Server-wide, not nest-scoped: the people the caller **already works with** — anyone on a nest they own or collaborate on (its owner, collaborators, active stewards) and anyone on a team they own or belong to. `source` ∈ `nest` / `team` / `directory`. For a server admin the directory is every user; `GET /auth/teammates` remains the admin-only full roster.
 
-Scope is deliberately narrow by default, because a single server may hold several unrelated organisations: `PEOPLE_SUGGEST_ALL_USERS` (off by default, Settings → General → People directory) widens it to every registered account, which is right for a single-company deployment and wrong for a shared one. A server admin always sees every account.
+Scope is deliberately narrow by default, because a single server may hold several unrelated organisations: `PEOPLE_SUGGEST_ALL_USERS` (off by default, Settings → Features → People directory) widens it to every registered account, which is right for a single-company deployment and wrong for a shared one. A server admin always sees every account.
 
 `q` filters on name or address (substring, case-insensitive); `limit` caps the list (default and max 20). Suggestions are a convenience for the add-a-person pickers — an address that appears nowhere here is still valid to submit (that is how you invite someone with no account yet), and the add itself re-checks permission and the escalation cap.
 
@@ -1908,7 +1908,7 @@ Deterministic fact lookup against a **table** node (CSV body): fetch the exact r
 Same operation over MCP: `context_table_query`.
 
 ### POST `/nests/:nestId/chat`
-Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (**off by default** — off → `404`); needs the server-wide `ANTHROPIC_API_KEY` (missing → `503` with `reason: "no_api_key"`); answers with `HOOTIE_MODEL`, through `ANTHROPIC_BASE_URL` when one is set (all three editable in Settings → General). Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
+Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (**off by default** — off → `404`); needs the server-wide `ANTHROPIC_API_KEY` (missing → `503` with `reason: "no_api_key"`); answers with `HOOTIE_MODEL`, through `ANTHROPIC_BASE_URL` when one is set (all three editable in Settings → Hootie). Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
 
 Request:
 
@@ -2379,7 +2379,7 @@ Active sites are loaded into an in-memory cache at startup and refreshed after e
 ### GET `/admin/trace` (server-admin only)
 Operator activity trail — one newest-first row per API request and per MCP tool call, so the server admin has a single place to audit what every client and agent did. Server-admin only: the license admin, or a `super_admin` in `access.yaml` (open mode: always allowed). Everyone else gets `403`. Cross-tenant data; not scoped to a nest.
 
-Rows are best-effort fire-and-forget writes to the `api_events` table (a broken trace table never fails a real request) on a rolling retention window of **`TRACE_RETENTION_DAYS`** days (default **14**; `0` = keep forever — see `CONFIGURATION.md`; also editable from Settings → Advanced). API rows come from a global request-logging middleware; MCP rows are logged inside `handleToolCall`, so both per-nest and server-level tool calls — including ones that throw — are captured.
+Rows are best-effort fire-and-forget writes to the `api_events` table (a broken trace table never fails a real request) on a rolling retention window of **`TRACE_RETENTION_DAYS`** days (default **14**; `0` = keep forever — see `CONFIGURATION.md`; also editable from Settings → Basic). API rows come from a global request-logging middleware; MCP rows are logged inside `handleToolCall`, so both per-nest and server-level tool calls — including ones that throw — are captured.
 
 Query params (all optional):
 - `kind` — `api` or `mcp`. Omit for both.
