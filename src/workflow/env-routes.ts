@@ -13,8 +13,9 @@
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { getDb } from "../db/client.js";
-import { config } from "../config.js";
-import { ValidationError, NotFoundError } from "../shared/errors.js";
+import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
+import { OWN_KEY_ENV, resolveModelCredential } from "../shared/model-credential.js";
+import { hasEntitlement } from "../auth/entitlements.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { requireWorkflowPlane } from "./edge-type-routes.js";
 import {
@@ -74,6 +75,11 @@ envRoutes.put("/", requireWorkflowPlane, async (c) => {
   if (typeof body.value !== "string" || !body.value) {
     throw new ValidationError("value is required");
   }
+  if ((OWN_KEY_ENV as readonly string[]).includes(key) && !hasEntitlement("byok")) {
+    throw new ForbiddenError(
+      "Models on this server are supplied by PromptOwl. Using your own model key is an Enterprise feature.",
+    );
+  }
   const now = new Date().toISOString();
   const by = await resolveCallerEmail(c.get("userId"));
   const db = getDb();
@@ -102,17 +108,13 @@ envRoutes.delete("/:key", requireWorkflowPlane, async (c) => {
 });
 
 /** Full values — for the run bundle only, never a route response. The
- *  server-wide ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL (super-admin
- *  Settings) are the floor; nest env rows override them. The gateway URL
- *  rides along so the same setting routes agent runs and Hootie alike. */
+ *  model credential is the one Hootie uses (resolveModelCredential): the
+ *  nest's or server's own key with byok, else PromptOwl's gateway. */
 export async function envValues(nestId: string): Promise<Record<string, string>> {
   const rows = (await getDb().all(
     "SELECT key, value FROM nest_env WHERE nest_id = ?",
     [nestId],
-  )) as Array<{ key: string; value: string }>;
-  const base: Record<string, string> = {};
-  if (process.env.ANTHROPIC_API_KEY) base.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-  if (config.ANTHROPIC_BASE_URL) base.ANTHROPIC_BASE_URL = config.ANTHROPIC_BASE_URL;
+  )) as Array<{ key: string; value: string }>
   // An unopenable row is left out rather than passed to the runner as
   // ciphertext, which would fail further away with a stranger error.
   const stored = (
@@ -126,5 +128,12 @@ export async function envValues(nestId: string): Promise<Record<string, string>>
       ),
     )
   ).filter((e): e is readonly [string, string] => e[1] !== null);
-  return { ...base, ...Object.fromEntries(stored) };
+  const env: Record<string, string> = Object.fromEntries(stored);
+  const credential = resolveModelCredential(env);
+  for (const k of OWN_KEY_ENV) delete env[k];
+  if (credential) {
+    env.ANTHROPIC_API_KEY = credential.apiKey;
+    if (credential.baseUrl) env.ANTHROPIC_BASE_URL = credential.baseUrl;
+  }
+  return env;
 }

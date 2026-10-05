@@ -18,14 +18,16 @@
  * Nothing is posted when nobody is named.
  *
  * Read-tier (see isReadQuery in app.ts): if you can read the nest you can
- * ask about it. The feature gate is HOOTIE_ENABLED; the credential is the
- * server-wide ANTHROPIC_API_KEY. Off → 404 (the route doesn't exist);
- * no key → 503 with a reason the UI can explain.
+ * ask about it. The feature gate is HOOTIE_ENABLED; the credential comes from
+ * resolveModelCredential (own key with the byok feature, else PromptOwl's
+ * gateway). Off → 404 (the route doesn't exist); none → 503 with a reason.
  */
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AuthEnv } from "../auth/middleware.js";
 import { config } from "../config.js";
+import { resolveModelCredential } from "../shared/model-credential.js";
+import { hasEntitlement } from "../auth/entitlements.js";
 import {
   resolveContext,
   type ContextNodeSummary,
@@ -85,12 +87,13 @@ type MentionOutcome =
 
 hootieRoutes.post("/chat", async (c) => {
   if (!config.HOOTIE_ENABLED) return c.json({ error: "Not found" }, 404);
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
+  const credential = resolveModelCredential();
+  if (!credential) {
     return c.json(
       {
-        error:
-          "Hootie needs an Anthropic API key. A server admin can add one under Settings → General.",
+        error: hasEntitlement("byok")
+          ? "Hootie needs an Anthropic API key. A server admin can add one under Settings → General."
+          : "Hootie runs on PromptOwl models, which arrive with this server's next licence check. If it persists, ask your administrator.",
         reason: "no_api_key",
       },
       503,
@@ -237,9 +240,9 @@ hootieRoutes.post("/chat", async (c) => {
     let answer = "";
     try {
       for await (const chunk of streamAnswer({
-        apiKey,
+        apiKey: credential.apiKey,
         model: config.HOOTIE_MODEL,
-        baseUrl: config.ANTHROPIC_BASE_URL || null,
+        baseUrl: credential.baseUrl,
         system,
         turns,
         signal: cancel.signal,

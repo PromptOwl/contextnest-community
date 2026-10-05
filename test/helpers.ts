@@ -80,6 +80,8 @@ export async function createTestApp(
     /** Pricing entitlement (see license.getEntitlement). Read on every call.
      *  Defaults to unlimited so plan limits never touch unrelated tests. */
     entitlement?: Partial<import("../src/auth/license.js").Entitlement>;
+    /** The PromptOwl model gateway the licence check hands out (default none). */
+    gateway?: { baseUrl: string; key: string } | null;
   } = {},
 ) {
   process.env.AUTH_MODE = authMode;
@@ -104,6 +106,7 @@ export async function createTestApp(
         ...(opts.features ? { features: opts.features } : {}),
         ...(opts.licenseOverrides ?? {}),
       }),
+      getModelGateway: () => opts.gateway ?? null,
       getEntitlement: () => ({
         plan: "enterprise",
         maxUsers: null,

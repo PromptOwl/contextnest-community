@@ -132,6 +132,8 @@ import {
   type LicenseInfo,
 } from "./auth/license.js";
 import { countBilled, assertCanGrant, assertCanAddAccountOwner } from "./auth/seats.js";
+import { hasEntitlement } from "./auth/entitlements.js";
+import { resolveModelCredential } from "./shared/model-credential.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "./auth/license-copy.js";
 import { SERVICE_VERSION } from "./shared/version.js";
 import { persistSetting } from "./db/settings.js";
@@ -534,8 +536,8 @@ export function createApp(): Hono<AuthEnv> {
       auth_mode: config.AUTH_MODE,
       logo_url: config.LOGO_URL,
       // Presence only, never the value: lets the UI stop prompting for a
-      // runner key once the server-wide one exists.
-      runner_key_configured: !!process.env.ANTHROPIC_API_KEY,
+      // runner key once runs have a credential (own key or PromptOwl's).
+      runner_key_configured: !!resolveModelCredential(),
       // Presence only: the publish dialog hides the email/invite gates when
       // this server cannot send mail, because their only way in is a mailed link.
       email_configured: isEmailConfigured(),
@@ -900,6 +902,25 @@ export function createApp(): Hono<AuthEnv> {
       for (const k of Object.keys(HOOTIE_BRAND_FIELDS)) delete body[k];
     }
 
+    // Own model key / gateway: Enterprise only (pricing spec §9.3, licence
+    // feature byok). Setting one is refused whole; clearing is always allowed.
+    if (
+      !hasEntitlement("byok") &&
+      (["anthropic_api_key", "anthropic_base_url"] as const).some(
+        (f) => f in body && String(body[f] ?? "").trim() !== "",
+      )
+    ) {
+      return c.json(
+        {
+          error:
+            "Models on this server are supplied by PromptOwl. Using your own model key or gateway is an Enterprise feature.",
+          code: "byok_required",
+          settings: currentServerSettings(),
+        },
+        403,
+      );
+    }
+
     if ("promptowl_sign_in_gate" in body) {
       const v = String(body.promptowl_sign_in_gate ?? "").trim().toLowerCase();
       if (!["open", "admin-only", "disabled"].includes(v))
@@ -988,10 +1009,10 @@ export function createApp(): Hono<AuthEnv> {
     }
     if ("hootie_model" in body) {
       const v = String(body.hootie_model ?? "").trim();
-      if (!v) addError("hootie_model", "Model is required — e.g. claude-opus-5.");
+      if (!v) addError("hootie_model", "Model is required — e.g. claude-sonnet-5.");
       else if (v.length > 200 || /\s/.test(v))
         addError("hootie_model", "Model must be a single identifier with no spaces.");
-      else pending.push({ name: "HOOTIE_MODEL", value: v === "claude-opus-5" ? null : v });
+      else pending.push({ name: "HOOTIE_MODEL", value: v === "claude-sonnet-5" ? null : v });
     }
     // Name, logo, accent colour, greeting (enterprise — gated above).
     pending.push(...validateHootieBrandFields(body, addError));
