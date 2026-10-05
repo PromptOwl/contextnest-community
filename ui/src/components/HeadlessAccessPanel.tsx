@@ -13,6 +13,16 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { Copy, KeyRound, Loader2, Trash2 } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -45,6 +55,8 @@ export function HeadlessAccessPanel({ nestId, onError }: Props) {
   const [label, setLabel] = useState("");
   // The token of the key just minted — shown once, cleared on dismiss.
   const [fresh, setFresh] = useState<{ label: string; apiKey: string } | null>(null);
+  // Key awaiting revoke confirmation; null closes the dialog.
+  const [revokeTarget, setRevokeTarget] = useState<api.HeadlessKey | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -94,7 +106,7 @@ export function HeadlessAccessPanel({ nestId, onError }: Props) {
   }
 
   async function revoke(key: api.HeadlessKey) {
-    if (!window.confirm(`Revoke "${key.label}"? Anything using this key stops working immediately.`)) return;
+    setRevokeTarget(null);
     setBusy(true);
     try {
       await api.revokeNestHeadlessKey(nestId, key.id);
@@ -189,7 +201,7 @@ export function HeadlessAccessPanel({ nestId, onError }: Props) {
                 size="sm"
                 variant="ghost"
                 aria-label={`Revoke ${k.label}`}
-                onClick={() => void revoke(k)}
+                onClick={() => setRevokeTarget(k)}
                 disabled={busy}
               >
                 <Trash2 className="h-4 w-4" />
@@ -198,6 +210,27 @@ export function HeadlessAccessPanel({ nestId, onError }: Props) {
           ))}
         </ul>
       )}
+
+      <AlertDialog open={revokeTarget !== null} onOpenChange={(open) => !open && setRevokeTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Revoke key?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Revoke &ldquo;{revokeTarget?.label}&rdquo;? Anything using this key stops working immediately.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => revokeTarget && void revoke(revokeTarget)}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              data-testid="revoke-key-confirm"
+            >
+              Revoke key
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
