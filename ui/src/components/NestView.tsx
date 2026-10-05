@@ -31,6 +31,7 @@ import { groupNodesByFolder } from "@/lib/nest-overview";
 import { useMediaQuery } from "@/lib/use-media-query";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { PushConfirmationModal } from "./PushConfirmationModal";
+import { untilTime } from "../lib/dates";
 import { ReaderView } from "./ReaderView";
 import { ReaderBrandingDialog } from "./ReaderBrandingDialog";
 import { isBranded, type NestBranding } from "../lib/branding";
@@ -1249,7 +1250,7 @@ export function NestView({
                   {p.submitter_label || p.submitter_email || "an API key"}
                 </span>
                 <span className="text-xs text-muted-foreground shrink-0">
-                  Review →
+                  Expires {untilTime(p.expires_at)} · Review →
                 </span>
               </button>
             ))}

@@ -29,6 +29,7 @@ import {
   X,
 } from "lucide-react";
 import * as api from "../lib/api";
+import { formatServerDate, untilTime } from "../lib/dates";
 
 interface PushConfirmationModalProps {
   nestId: string;
@@ -155,6 +156,13 @@ export function PushConfirmationModal({
                 <span className="text-muted-foreground">
                   {new Date(pending.created_at).toLocaleString()}
                 </span>
+                {!decided && (
+                  <div className="text-xs text-amber-700 dark:text-amber-500">
+                    Expires {untilTime(pending.expires_at)} ·{" "}
+                    {formatServerDate(pending.expires_at)} — not confirmed by then, it is
+                    dropped and never applied.
+                  </div>
+                )}
               </div>
 
               {/* Manifest. */}

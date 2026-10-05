@@ -24,6 +24,17 @@ export function formatServerDate(raw: string | null | undefined): string {
   return parseServerDate(raw)?.toLocaleString() ?? "";
 }
 
+/** Forward countdown: "in 5m" / "in 3h" / "in 7d", or "expired" once past. */
+export function untilTime(raw: string | null | undefined): string {
+  const then = parseServerDate(raw)?.getTime();
+  if (then == null) return "";
+  const mins = Math.floor((then - Date.now()) / 60_000);
+  if (mins <= 0) return "expired";
+  if (mins < 60) return `in ${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  return hrs < 24 ? `in ${hrs}h` : `in ${Math.floor(hrs / 24)}d`;
+}
+
 /** "just now" / "5m ago" / "3h ago" / "7d ago". */
 export function relTime(raw: string | null | undefined): string {
   const then = parseServerDate(raw)?.getTime();
