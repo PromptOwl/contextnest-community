@@ -1,3 +1,5 @@
+import { parseServerDate } from "./dates";
+
 /**
  * What an API key can reach, in words — and the request that mints one.
  *
@@ -55,4 +57,30 @@ export function nestOnlyKeyLabel(
     const candidate = `${base}${suffix}`;
     if (!used.has(candidate.toLowerCase())) return candidate;
   }
+}
+
+export type KeyScopeFilter = "any" | "all" | "nest";
+export type KeySort = "newest" | "name" | "last_used";
+
+/** The API keys page's list controls: text search over name, prefix and
+ *  scope label, a scope filter, then a sort. Never mutates `keys`. */
+export function filterSortKeys<
+  K extends { label: string | null; key_prefix: string; nest_id: string | null; created_at: string; last_used_at: string | null },
+>(
+  keys: ReadonlyArray<K>,
+  nests: ReadonlyArray<{ id: string; name?: string | null }> | undefined,
+  opts: { query: string; scope: KeyScopeFilter; sort: KeySort },
+): K[] {
+  const q = opts.query.trim().toLowerCase();
+  const out = keys.filter((k) => {
+    const reach = keyScope(k, nests);
+    if (opts.scope !== "any" && reach.kind !== opts.scope) return false;
+    return !q || [k.label ?? "", k.key_prefix, reach.label].some((s) => s.toLowerCase().includes(q));
+  });
+  // Timestamps come as ISO or SQL-style, so compare parsed; never-used sorts last.
+  const ms = (v: string | null) => parseServerDate(v)?.getTime() ?? 0;
+  if (opts.sort === "name") out.sort((a, b) => (a.label ?? "").localeCompare(b.label ?? ""));
+  else if (opts.sort === "last_used") out.sort((a, b) => ms(b.last_used_at) - ms(a.last_used_at));
+  else out.sort((a, b) => ms(b.created_at) - ms(a.created_at));
+  return out;
 }

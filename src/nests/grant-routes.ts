@@ -17,6 +17,7 @@ import {
 import { resolveTeamRolesForUser } from "../governance/teams-service.js";
 import { resolveNestAccess } from "../shared/access.js";
 import { config } from "../config.js";
+import { requestBaseUrl } from "../shared/base-url.js";
 import {
   canEditWith,
   collabPermToRole,
@@ -177,6 +178,7 @@ grantRoutes.post("/", async (c) => {
     userId,
     role,
     grantedBy: await resolveCallerEmail(c.get("userId")),
+    baseUrl: requestBaseUrl(c.req.url),
   });
   return c.json({ grant }, 201);
 });

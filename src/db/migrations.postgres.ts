@@ -73,10 +73,14 @@ const HISTORICAL_MIGRATIONS = [
   "037_publish",
   "038_nest_archive",
   "039_nest_pins",
+  "040_push_confirmation",
   "041_nest_visibility_org",
   "042_community_sites",
   "043_node_suggestion_details",
   "044_client_attribution",
+  "045_headless_publish",
+  "046_deletion_client_attribution",
+  "047_node_access_events",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -114,6 +118,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       creator_is_reviewer INTEGER NOT NULL DEFAULT 0,
       shared_teams TEXT NOT NULL DEFAULT '[]',
       index_synced_at TEXT,
+      require_push_confirmation INTEGER NOT NULL DEFAULT 0,
       reader_mode INTEGER NOT NULL DEFAULT 0,
       reader_home_node TEXT,
       -- Per-nest reader branding JSON (CU-wdqcq02ptm); NULL = unbranded.
@@ -124,6 +129,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       UNIQUE(user_id, slug)
     );
     CREATE INDEX IF NOT EXISTS idx_nests_user ON nests(user_id);
+    -- Push Confirmation Gate (migration 040): declared inline above; explicit
+    -- ALTER for databases created before it shipped.
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS require_push_confirmation INTEGER NOT NULL DEFAULT 0;
 
     CREATE TABLE IF NOT EXISTS api_keys (
       id TEXT PRIMARY KEY,
@@ -618,8 +626,10 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       node_id TEXT NOT NULL,
       deleted_by TEXT,
       deleted_at TEXT NOT NULL,
+      client_json TEXT,            -- caller attribution (migration 046)
       PRIMARY KEY (nest_id, node_id)
     );
+    ALTER TABLE node_deletions ADD COLUMN IF NOT EXISTS client_json TEXT;
     CREATE INDEX IF NOT EXISTS idx_node_deletions_time
       ON node_deletions(nest_id, deleted_at);
 
@@ -645,6 +655,25 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- (nest_id, id) composite (migration 026): the per-nest trace view
     -- (GET /nests/:id/trace) filters by nest_id and pages newest-first by id.
     CREATE INDEX IF NOT EXISTS idx_api_events_nest_ts ON api_events(nest_id, id);
+
+    -- document access events (migration 047): reads, retrievals and exports,
+    -- which seal no version. node_id NULL = whole-nest export. Throttled and
+    -- pruned in governance/access-log.ts.
+    CREATE TABLE IF NOT EXISTS node_access_events (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      ts TEXT NOT NULL,
+      nest_id TEXT NOT NULL,
+      node_id TEXT,
+      action TEXT NOT NULL CHECK(action IN ('read', 'retrieve', 'export')),
+      surface TEXT NOT NULL CHECK(surface IN ('api', 'mcp')),
+      user_id TEXT,
+      user_email TEXT,
+      client_json TEXT,
+      detail TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_node_access_node ON node_access_events(nest_id, node_id, id);
+    CREATE INDEX IF NOT EXISTS idx_node_access_nest ON node_access_events(nest_id, id);
+    CREATE INDEX IF NOT EXISTS idx_node_access_ts ON node_access_events(ts);
 
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,
@@ -740,6 +769,41 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
     CREATE INDEX IF NOT EXISTS idx_nest_pins_user ON nest_pins(user_id);
 
+    -- Push Confirmation Gate (migration 040). pending_pushes holds a gated agent
+    -- push in full (payload_blob) until a reviewer confirms; push_allowlist is
+    -- PER-API-KEY (key_id '' = any of that user's keys), never keyed on nest
+    -- alone. SQLite parity in migrations.ts 040_push_confirmation.
+    CREATE TABLE IF NOT EXISTS pending_pushes (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      submitter_user_id TEXT NOT NULL,
+      submitter_key_id TEXT,
+      submitter_label TEXT,
+      submitter_email TEXT,
+      doc_count INTEGER NOT NULL DEFAULT 0,
+      manifest_json TEXT NOT NULL DEFAULT '[]',
+      payload_blob TEXT NOT NULL,
+      context_md TEXT,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending', 'applied', 'rejected', 'expired')),
+      created_at TEXT NOT NULL,
+      decided_at TEXT,
+      decided_by_user_id TEXT,
+      applied_node_count INTEGER,
+      expires_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_pushes_nest_status
+      ON pending_pushes(nest_id, status, created_at);
+
+    CREATE TABLE IF NOT EXISTS push_allowlist (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      key_id TEXT NOT NULL DEFAULT '',
+      created_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (nest_id, user_id, key_id)
+    );
+
     -- community_sites (migration 042): official community site connections
     -- trusted for SSO auto-login — extends the single OFFICIAL_COMMUNITY_SSO_
     -- SECRET/PUBLIC_BASE_URL env-var pair to a DB-backed list, each row with
@@ -827,6 +891,21 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
   await db.exec(`
     CREATE INDEX IF NOT EXISTS idx_node_suggestions_nest_detected
       ON node_suggestions(nest_id, detected_at DESC);
+  `);
+
+  // Migration 045 parity: headless publishing (CU-wdqcq0314u).
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS headless INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS is_service INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE IF NOT EXISTS headless_readers (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      key_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE INDEX IF NOT EXISTS idx_headless_readers_nest ON headless_readers(nest_id);
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

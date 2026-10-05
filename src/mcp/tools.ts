@@ -27,6 +27,7 @@ import { isStewardshipEnabled } from "../nests/service.js";
 import { VaultBusyError, isVaultLockTimeout } from "../shared/errors.js";
 import { engineApi, opContext } from "../nodes/engine.js";
 import { addCollaborator } from "../nests/sharing-service.js";
+import { holdWriteIfGated } from "../nests/push-confirmation-service.js";
 import { queryTableNode } from "../tables/query.js";
 import {
   addComment,
@@ -58,12 +59,14 @@ import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
+import { recordNodeAccess, type AccessAction } from "../governance/access-log.js";
 import {
   mergeClient,
   parseClientMetadata,
   type ClientMetadata,
 } from "../shared/client-metadata.js";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
+import { HEADLESS_READER_TOOLS, headlessToolRefusal, isServiceUser } from "../auth/headless.js";
 
 /** Upper bound on caller-set traversal depth — real graphs terminate long
  *  before this; the cap just fences a misbehaving client from a runaway query. */
@@ -130,9 +133,16 @@ function toolError(
     | "VERSION_NOT_FOUND"
     | "VALIDATION_FAILED"
     | "VAULT_BUSY"
+    | "PENDING_CONFIRMATION"
     | "INTERNAL",
 ): ToolResult {
   return { text, isError: true, data: { code, message: text } };
+}
+
+/** What a headless access key gets for a tool it may not call (CU-wdqcq0314u)
+ *  — the same shape on both MCP surfaces. */
+export function headlessToolError(toolName: string): ToolResult {
+  return toolError(headlessToolRefusal(toolName), "UNAUTHORIZED_ACTION");
 }
 
 /**
@@ -207,6 +217,10 @@ export interface McpToolContext {
   /** Request origin, so review actions taken via MCP produce notification
    *  emails with a working "Open document" link (no PUBLIC_BASE_URL needed). */
   baseUrl?: string;
+  /** The API key this call arrived on — what the agent-write gate holds and
+   *  what "always allow" whitelists. Null for a cookie-authenticated call. */
+  apiKeyId?: string | null;
+  apiKeyLabel?: string | null;
   /**
    * Caller attribution for this call (spec §9.4) — what the TRANSPORT could
    * derive, already merged with whatever the tool call itself sent (caller
@@ -862,6 +876,38 @@ async function resolveLlmBody(
   }
 }
 
+/** Read tools whose `data` names the documents they handed over, and what
+ *  that counts as in the admin activity log. context_resolve and
+ *  context_export return prose only, so they record from inside their cases. */
+const ACCESS_BY_TOOL: Record<string, AccessAction> = {
+  context_get: "read",
+  context_query: "retrieve",
+  context_search: "retrieve",
+};
+
+function recordToolAccess(toolName: string, result: ToolResult, ctx: McpToolContext): void {
+  const action = ACCESS_BY_TOOL[toolName];
+  if (!action || typeof result === "string" || result.isError || !ctx.nestId) return;
+  const data = result.data as { id?: unknown; documents?: Array<{ id?: unknown }> } | undefined;
+  const ids = [
+    ...(typeof data?.id === "string" ? [data.id] : []),
+    ...(Array.isArray(data?.documents)
+      ? data.documents.map((d) => d?.id).filter((id): id is string => typeof id === "string")
+      : []),
+  ];
+  if (!ids.length) return;
+  recordNodeAccess({
+    nestId: ctx.nestId,
+    nodeIds: ids,
+    action,
+    surface: "mcp",
+    userId: ctx.userId,
+    userEmail: ctx.userEmail,
+    client: ctx.client,
+    detail: toolName,
+  });
+}
+
 /**
  * Public entry for every MCP tool call. Logging lives HERE (not in the route
  * wrapper) so it covers per-nest AND server-level MCP, and so a tool that
@@ -896,6 +942,21 @@ export async function handleToolCall(
     return toolError((err as Error).message, "VALIDATION_FAILED");
   }
   const attributed: McpToolContext = { ...ctx, client };
+  // Headless access keys (CU-wdqcq0314u) read and nothing else. Checked here,
+  // the one seam both MCP surfaces share, so no tool — including one added
+  // later — is reachable with an access key unless it is on the read list.
+  if (!HEADLESS_READER_TOOLS.has(toolName) && (await isServiceUser(ctx.userId))) {
+    void logTraceEvent({
+      kind: "mcp",
+      tool: toolName,
+      nestId: ctx.nestId,
+      userId: ctx.userId,
+      userEmail: ctx.userEmail,
+      status: 403,
+      durationMs: Date.now() - started,
+    });
+    return headlessToolError(toolName);
+  }
   // An agent that sends a whole file (frontmatter + body) as `content` used to
   // get a second, dead frontmatter block stored inside the body. Refuse and say
   // where those fields go instead.
@@ -910,7 +971,9 @@ export async function handleToolCall(
     );
   }
   try {
-    return await runTool(toolName, args, attributed);
+    const result = await runTool(toolName, args, attributed);
+    recordToolAccess(toolName, result, attributed);
+    return result;
   } catch (err) {
     // Vault write-lock timeout: map to a typed, retryable tool error HERE —
     // one seam covering both MCP surfaces — before the SDK flattens the throw
@@ -1319,13 +1382,25 @@ async function runTool(
       );
       let total = 0;
       const resolved: string[] = [];
+      const handed: string[] = [];
       for (const { node: n, body } of resolvedBodies) {
         if (body === null) continue; // not visible / no approved version yet
         const entry = `## ${n.frontmatter.title}\n\n${body}`;
         if (total + entry.length > approxChars) break;
         resolved.push(entry);
+        handed.push(n.id);
         total += entry.length;
       }
+      recordNodeAccess({
+        nestId,
+        nodeIds: handed,
+        action: "retrieve",
+        surface: "mcp",
+        userId: ctx.userId,
+        userEmail,
+        client: ctx.client,
+        detail: "context_resolve",
+      });
       return resolved.join("\n\n---\n\n") || "No nodes resolved.";
     }
 
@@ -1362,6 +1437,21 @@ async function runTool(
         }
         parts.push(entry);
         total += entry.length;
+      }
+      if (parts.length) {
+        // Whole nest unless the token budget cut it short — then the documents
+        // that actually left.
+        const sent = resolved.filter((r) => r.body !== null).slice(0, parts.length);
+        recordNodeAccess({
+          nestId,
+          ...(budgetHit ? { nodeIds: sent.map((r) => r.node.id) } : { wholeNest: true }),
+          action: "export",
+          surface: "mcp",
+          userId: ctx.userId,
+          userEmail,
+          client: ctx.client,
+          detail: `context_export (${parts.length} documents)`,
+        });
       }
       if (!parts.length) {
         return budgetHit
@@ -1568,6 +1658,39 @@ async function runTool(
             "DOCUMENT_ALREADY_EXISTS",
           );
         }
+        // Agent-write gate: on a gated nest a non-whitelisted credential does
+        // not write, it queues. MCP is an agent surface whatever it
+        // authenticated with, so unlike the REST create this holds a cookie
+        // call too.
+        const held = await holdWriteIfGated({
+          nestId,
+          userId,
+          keyId: ctx.apiKeyId ?? null,
+          keyLabel: ctx.apiKeyLabel ?? null,
+          userEmail,
+          payload: {
+            documents: [
+              {
+                title: args.title,
+                content: args.content,
+                type: args.type,
+                tags: args.tags,
+                scope: args.scope,
+                folder: args.folder,
+              },
+            ],
+          },
+        });
+        if (held) {
+          // An error, not a success with a caveat: nothing was created, and an
+          // agent that reads this as "done" will go on to update or link a
+          // document that does not exist yet.
+          return toolError(
+            `This nest holds agent writes for review. "${args.title}" is queued as ${held.id} and will be created only when a reviewer confirms it in ${held.nest_name} — it does not exist yet, so do not reference it. Nothing else is needed from you.`,
+            "PENDING_CONFIRMATION",
+          );
+        }
+
         const { node, version } = await createNode(
           nestId,
           {
@@ -1655,7 +1778,7 @@ async function runTool(
           "UNAUTHORIZED_ACTION",
         );
       }
-      await deleteNode(nestId, node.id, userEmail);
+      await deleteNode(nestId, node.id, userEmail, { client: ctx.client });
       return {
         text: `Deleted node: **${node.frontmatter.title}** (${node.id})`,
         data: {

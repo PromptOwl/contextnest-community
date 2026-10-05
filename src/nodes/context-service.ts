@@ -21,6 +21,7 @@ import { compilePrompt, scorePrompt, tokenizePrompt } from "./prompt-compiler.js
 import { resolveNodeUrl } from "../governance/title-resolver.js";
 import { resolveReadableBody } from "./readable-body.js";
 import { extractContextTargets, extractWikiTargets } from "./graph-service.js";
+import { recordNodeAccess } from "../governance/access-log.js";
 
 export interface ContextRequest {
   prompt?: string;
@@ -350,6 +351,17 @@ export async function resolveContext(params: {
     included: included.length,
     permission_filtered: permissionFiltered,
     token_count: tokenCount,
+  });
+  // Admin activity log: the documents this call handed over (REST /context and
+  // Hootie's chat both come through here).
+  recordNodeAccess({
+    nestId,
+    nodeIds: included.map((n) => n.id),
+    action: "retrieve",
+    surface: "api",
+    userId,
+    userEmail,
+    detail: "context",
   });
 
   return {

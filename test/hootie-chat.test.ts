@@ -171,7 +171,7 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
   beforeAll(async () => {
     setupTestEnv();
     process.env.ANTHROPIC_API_KEY = "sk-ant-test";
-    delete process.env.HOOTIE_ENABLED;
+    process.env.HOOTIE_ENABLED = "true"; // off by default since CU-wdqcq03ewc
     app = await createTestApp("key");
     owner = await registerUser(app, "owner@acme.com", "Owner");
     await resetAuthRateLimit();
@@ -854,7 +854,7 @@ describe("POST /nests/:id/chat — gates", () => {
   it("503s with a reason when the server has no Anthropic key, and never calls out", async () => {
     setupTestEnv();
     delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.HOOTIE_ENABLED;
+    process.env.HOOTIE_ENABLED = "true"; // off by default since CU-wdqcq03ewc
     lastModelCall = null;
     const app = await createTestApp("open");
     const { data } = await jsonRequest(app, "POST", "/nests", { name: "Keyless" });
@@ -879,7 +879,7 @@ describe("POST /nests/:id/chat — gates", () => {
   it("caps how many questions one person can ask in a window — a looping client hits 429", async () => {
     setupTestEnv();
     process.env.ANTHROPIC_API_KEY = "sk-ant-test";
-    delete process.env.HOOTIE_ENABLED;
+    process.env.HOOTIE_ENABLED = "true"; // off by default since CU-wdqcq03ewc
     const app = await createTestApp("key");
     const user = await registerUser(app, "busy@acme.com");
     const { data } = await jsonRequest(app, "POST", "/nests", { name: "Busy" }, user.apiKey);
@@ -894,12 +894,12 @@ describe("POST /nests/:id/chat — gates", () => {
     expect(json.error).toMatch(/too many/i);
   });
 
-  it("/health reports hootie_enabled true by default", async () => {
+  it("/health reports hootie_enabled FALSE by default — admins opt in (CU-wdqcq03ewc)", async () => {
     setupTestEnv();
     delete process.env.HOOTIE_ENABLED;
     const app = await createTestApp("open");
     const health = await (await app.request("/health")).json();
-    expect(health.hootie_enabled).toBe(true);
+    expect(health.hootie_enabled).toBe(false);
   });
 });
 
@@ -918,7 +918,7 @@ describe("/admin/settings — hootie_enabled toggle", () => {
 
     const before = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
     expect(before.status).toBe(200);
-    expect(before.data.hootie_enabled).toBe(true);
+    expect(before.data.hootie_enabled).toBe(false);
 
     const off = await jsonRequest(
       app,
@@ -958,6 +958,7 @@ describe("/admin/settings — Hootie model + gateway", () => {
     process.env.ANTHROPIC_API_KEY = "sk-ant-test";
     delete process.env.ANTHROPIC_BASE_URL;
     delete process.env.HOOTIE_MODEL;
+    process.env.HOOTIE_ENABLED = "true"; // off by default since CU-wdqcq03ewc
     const app = await createTestApp("key", { ownerEmail: OWNER });
     const admin = await registerUser(app, OWNER);
     const nest = (await jsonRequest(app, "POST", "/nests", { name: "Gateway" }, admin.apiKey)).data.nest.id;
@@ -1018,5 +1019,38 @@ describe("/admin/settings — Hootie model + gateway", () => {
     await chat(app, nest, { message: "and back" }, admin.apiKey);
     expect(lastModelCall!.baseUrl).toBeNull();
     expect((await envValues(nest)).ANTHROPIC_BASE_URL).toBeUndefined();
+  });
+});
+
+describe("POST /nests/:id/chat — the assistant's name (CU-wdqcq03ewc)", () => {
+  afterAll(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.HOOTIE_ENABLED;
+    delete process.env.HOOTIE_NAME;
+  });
+
+  async function systemPromptFor(tier: string): Promise<string> {
+    setupTestEnv();
+    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
+    process.env.HOOTIE_ENABLED = "true";
+    process.env.HOOTIE_NAME = "Ava";
+    lastModelCall = null;
+    scriptedAnswer = "ok";
+    const app = await createTestApp("open", { tier });
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Named" });
+    const { status } = await chatRaw(app, data.nest.id, { message: "hi" });
+    expect(status).toBe(200);
+    return lastModelCall!.system;
+  }
+
+  it("uses the enterprise brand name in the system prompt", async () => {
+    const system = await systemPromptFor("enterprise");
+    expect(system).toMatch(/You are Ava,/);
+    expect(system).not.toMatch(/You are Hootie/);
+  });
+
+  it("stays Hootie without an enterprise licence, whatever is configured", async () => {
+    const system = await systemPromptFor("community");
+    expect(system).toMatch(/You are Hootie,/);
   });
 });

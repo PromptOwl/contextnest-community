@@ -65,7 +65,7 @@ export function setupTestEnv() {
  */
 export async function createTestApp(
   authMode: "open" | "key" = "open",
-  opts: { superAdmins?: string[]; ownerEmail?: string } = {},
+  opts: { superAdmins?: string[]; ownerEmail?: string; tier?: string } = {},
 ) {
   process.env.AUTH_MODE = authMode;
   vi.resetModules();
@@ -80,7 +80,7 @@ export async function createTestApp(
       ...actual,
       getCurrentLicense: () => ({
         valid: true,
-        tier: "test",
+        tier: opts.tier ?? "test",
         org: "Test Org",
         limits: null,
         suspended: false,

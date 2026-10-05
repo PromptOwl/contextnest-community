@@ -44,6 +44,7 @@ import {
   type ModelTurn,
   ModelRefusedError,
 } from "./model.js";
+import { effectiveHootieBrand } from "./brand.js";
 
 export const hootieRoutes = new Hono<AuthEnv>();
 
@@ -351,7 +352,9 @@ function buildSystemPrompt(params: {
       ? blocks.join("\n\n---\n\n").replace(/<\/documents>/gi, "</ documents>")
       : "(nothing in the nest matched this question)";
   return [
-    `You are Hootie, the assistant inside the ContextNest nest "${nestName}". You are talking with ${userEmail}.`,
+    // The admin's assistant name on an enterprise licence (one line, ≤40
+    // chars, validated in brand.ts), Hootie otherwise.
+    `You are ${effectiveHootieBrand().name}, the assistant inside the ContextNest nest "${nestName}". You are talking with ${userEmail}.`,
     "",
     "Answer from the documents below and nothing else. They are the governed context this person is allowed to read; do not invent facts that are not in them.",
     "When you use a document, cite it by its exact title as a wiki link, like [[Title]] — this is how the reader opens it. Cite every document you drew on, and only those.",
@@ -416,10 +419,11 @@ async function deliverMentions(params: {
 }): Promise<MentionOutcome> {
   const { nestId, userEmail, baseUrl, message, answer, anchor } = params;
   if (!anchor) return { status: "undeliverable", reason: "no_anchor" };
+  const name = effectiveHootieBrand().name;
   const body = [
-    `**Asked Hootie:** ${message}`,
+    `**Asked ${name}:** ${message}`,
     "",
-    "**Hootie answered:**",
+    `**${name} answered:**`,
     answer.trim(),
   ].join("\n");
   // Only the comment itself decides "posted": once createThread returns, a

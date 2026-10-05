@@ -1,7 +1,7 @@
 /**
  * NestSettingsModal — per-nest admin settings (stewardship toggle, etc.)
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -24,6 +24,7 @@ import {
   UserCheck,
   UserPen,
   Star,
+  ShieldCheck,
 } from "lucide-react";
 import * as api from "../lib/api";
 
@@ -34,6 +35,10 @@ interface NestSettingsModalProps {
   allowSelfApprove: boolean;
   primeOnlyReview: boolean;
   primeTags: string[];
+  /** Push Confirmation Gate (superadmin-set). */
+  requirePushConfirmation: boolean;
+  /** True only for a server superadmin — gates the push-confirmation switch. */
+  isServerAdmin: boolean;
   creatorIsReviewer: boolean;
   /** False hides the stewardship section. Server still enforces. */
   canManageStewardship: boolean;
@@ -43,6 +48,7 @@ interface NestSettingsModalProps {
     allowSelfApprove: boolean;
     primeOnlyReview: boolean;
     primeTags: string[];
+    requirePushConfirmation: boolean;
     creatorIsReviewer: boolean;
   }) => void;
 }
@@ -54,6 +60,8 @@ export function NestSettingsModal({
   allowSelfApprove,
   primeOnlyReview,
   primeTags,
+  requirePushConfirmation,
+  isServerAdmin,
   creatorIsReviewer,
   canManageStewardship,
   onClose,
@@ -62,6 +70,7 @@ export function NestSettingsModal({
   const [enabled, setEnabled] = useState(stewardshipEnabled);
   const [selfApprove, setSelfApprove] = useState(allowSelfApprove);
   const [primeOnly, setPrimeOnly] = useState(primeOnlyReview);
+  const [pushConfirm, setPushConfirm] = useState(requirePushConfirmation);
   const [primeTagText, setPrimeTagText] = useState(primeTags.join(", "));
   const [creatorReviews, setCreatorReviews] = useState(creatorIsReviewer);
   const [loading, setLoading] = useState(false);
@@ -70,6 +79,55 @@ export function NestSettingsModal({
   // OFF (was on, now off). Toggling on, or no change, doesn't need it.
   const [disableAcknowledged, setDisableAcknowledged] = useState(false);
   const turningStewardshipOff = stewardshipEnabled && !enabled;
+
+  // Push allowlist — loaded once when the section is visible. Reviewer-only on
+  // the server; a 403 for a plain editor just leaves the list empty.
+  const [allowlist, setAllowlist] = useState<api.PushAllowlistEntry[]>([]);
+  const [allowlistLoading, setAllowlistLoading] = useState(false);
+  const [allowlistError, setAllowlistError] = useState<string | null>(null);
+  const [revoking, setRevoking] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!canManageStewardship) return;
+    let cancelled = false;
+    setAllowlistLoading(true);
+    api
+      .getPushAllowlist(nestId)
+      .then((res) => {
+        if (!cancelled) setAllowlist(res.allowlist);
+      })
+      .catch(() => {
+        // Not a reviewer, or the governance license lapsed — show nothing
+        // rather than an error the caller can do anything about.
+        if (!cancelled) setAllowlist([]);
+      })
+      .finally(() => {
+        if (!cancelled) setAllowlistLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [nestId, canManageStewardship]);
+
+  async function handleRevoke(entry: api.PushAllowlistEntry) {
+    const rowKey = `${entry.user_id}:${entry.key_id ?? "*"}`;
+    setRevoking(rowKey);
+    setAllowlistError(null);
+    try {
+      await api.removeFromAllowlist(nestId, entry.user_id, entry.key_id);
+      setAllowlist((prev) =>
+        prev.filter(
+          (a) => `${a.user_id}:${a.key_id ?? "*"}` !== rowKey,
+        ),
+      );
+    } catch (err) {
+      setAllowlistError(
+        err instanceof Error ? err.message : "Could not revoke this key",
+      );
+    } finally {
+      setRevoking(null);
+    }
+  }
 
   // The owner/admin bypass is unreachable while prime-only review is on: the
   // gate self-publishes every non-prime doc before it ever consults
@@ -93,12 +151,17 @@ export function NestSettingsModal({
     const primeOnlyChanged = primeOnly !== primeOnlyReview;
     const primeTagsChanged =
       nextPrimeTags.join(",") !== primeTags.join(",");
+    // Only a superadmin may change this; never send it otherwise (a per-field
+    // 403 would otherwise reject the whole PATCH for a non-superadmin).
+    const pushConfirmChanged =
+      isServerAdmin && pushConfirm !== requirePushConfirmation;
     const creatorReviewsChanged = creatorReviews !== creatorIsReviewer;
     if (
       !stewardshipChanged &&
       !selfApproveChanged &&
       !primeOnlyChanged &&
       !primeTagsChanged &&
+      !pushConfirmChanged &&
       !creatorReviewsChanged
     ) {
       onClose();
@@ -112,9 +175,8 @@ export function NestSettingsModal({
         ...(selfApproveChanged ? { allow_self_approve: selfApprove } : {}),
         ...(primeOnlyChanged ? { prime_only_review: primeOnly } : {}),
         ...(primeTagsChanged ? { prime_tags: nextPrimeTags } : {}),
-        ...(creatorReviewsChanged
-          ? { creator_is_reviewer: creatorReviews }
-          : {}),
+        ...(pushConfirmChanged ? { require_push_confirmation: pushConfirm } : {}),
+        ...(creatorReviewsChanged ? { creator_is_reviewer: creatorReviews } : {}),
       });
       // Trust the server's response, not our optimistic local state, in
       // case the permission check rejected silently or the DB rejected.
@@ -122,6 +184,7 @@ export function NestSettingsModal({
         result.stewardship_enabled !== enabled ||
         result.allow_self_approve !== selfApprove ||
         result.prime_only_review !== primeOnly ||
+        (pushConfirmChanged && result.require_push_confirmation !== pushConfirm) ||
         result.creator_is_reviewer !== creatorReviews
       ) {
         setError(
@@ -137,6 +200,7 @@ export function NestSettingsModal({
         allowSelfApprove: result.allow_self_approve,
         primeOnlyReview: result.prime_only_review,
         primeTags: result.prime_tags,
+        requirePushConfirmation: result.require_push_confirmation,
         creatorIsReviewer: result.creator_is_reviewer,
       });
     } catch (err: any) {
@@ -359,6 +423,108 @@ export function NestSettingsModal({
                 its reviewer, but someone else has to approve the first
                 version.
               </div>
+            </div>
+          </div>
+          )}
+
+          {/* Push Confirmation Gate — SERVER superadmin only. Rendered for
+              everyone who can manage the nest so the posture is visible, but
+              the switch is enabled only for a superadmin; others see it
+              read-only with a tooltip. The server enforces a per-field 403. */}
+          {canManageStewardship && (
+          <div className="rounded-lg border p-4 space-y-3">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label className="flex items-center gap-2 text-sm font-medium">
+                  <ShieldCheck className="h-4 w-4" />
+                  Require confirmation for agent writes
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Default off. When on, a document created by an agent or
+                  script — through an MCP tool, the API, or a bulk push — is
+                  held pending review instead of applying, and lands only after
+                  a reviewer confirms it here. Your own work in this app is
+                  never held. Whitelisted keys (via &ldquo;Always allow&rdquo;
+                  when confirming) skip the gate.{" "}
+                  <strong>Superadmin only.</strong>
+                </p>
+              </div>
+              <span
+                title={
+                  isServerAdmin
+                    ? undefined
+                    : "Only a server superadmin can change this."
+                }
+              >
+                <Switch
+                  checked={pushConfirm}
+                  onCheckedChange={setPushConfirm}
+                  disabled={!isServerAdmin}
+                />
+              </span>
+            </div>
+            {!isServerAdmin && (
+              <div className="flex items-start gap-2 text-xs text-muted-foreground pt-2 border-t">
+                <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                <div>
+                  This is a server-wide governance control. Ask a superadmin to
+                  change it.
+                </div>
+              </div>
+            )}
+
+            {/* Whitelisted keys. "Always allow" is otherwise a one-way door:
+                the only way back is here. Shown whenever entries exist, even
+                with the gate off — a whitelist that outlives the gate being
+                turned off and on again is exactly what needs auditing. */}
+            <div className="pt-3 border-t space-y-2">
+              <div className="text-xs font-medium">
+                Keys that skip the gate
+                {allowlist.length > 0 ? ` (${allowlist.length})` : ""}
+              </div>
+              {allowlistError && (
+                <p className="text-xs text-destructive">{allowlistError}</p>
+              )}
+              {allowlistLoading ? (
+                <p className="text-xs text-muted-foreground">Loading…</p>
+              ) : allowlist.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  None. A reviewer adds one with &ldquo;Always allow&rdquo; when
+                  confirming a held push.
+                </p>
+              ) : (
+                <div className="rounded-md border divide-y">
+                  {allowlist.map((a) => (
+                    <div
+                      key={`${a.user_id}:${a.key_id ?? "*"}`}
+                      className="p-2 flex items-center justify-between gap-3"
+                    >
+                      <div className="min-w-0 text-xs">
+                        <div className="truncate font-medium">
+                          {a.user_email || a.user_id}
+                        </div>
+                        <div className="truncate text-muted-foreground">
+                          {a.key_id
+                            ? `key: ${a.key_label || a.key_id}`
+                            : "all of this user's keys"}
+                          {" · "}
+                          {new Date(a.created_at).toLocaleDateString()}
+                        </div>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={revoking === `${a.user_id}:${a.key_id ?? "*"}`}
+                        onClick={() => handleRevoke(a)}
+                      >
+                        {revoking === `${a.user_id}:${a.key_id ?? "*"}`
+                          ? "Revoking…"
+                          : "Revoke"}
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
           )}
