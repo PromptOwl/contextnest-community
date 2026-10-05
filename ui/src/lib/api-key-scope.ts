@@ -56,3 +56,28 @@ export function nestOnlyKeyLabel(
     if (!used.has(candidate.toLowerCase())) return candidate;
   }
 }
+
+export type KeyScopeFilter = "any" | "all" | "nest";
+export type KeySort = "newest" | "name" | "last_used";
+
+/** The API keys page's list controls: text search over name, prefix and
+ *  scope label, a scope filter, then a sort. Never mutates `keys`. */
+export function filterSortKeys<
+  K extends { label: string | null; key_prefix: string; nest_id: string | null; created_at: string; last_used_at: string | null },
+>(
+  keys: ReadonlyArray<K>,
+  nests: ReadonlyArray<{ id: string; name?: string | null }> | undefined,
+  opts: { query: string; scope: KeyScopeFilter; sort: KeySort },
+): K[] {
+  const q = opts.query.trim().toLowerCase();
+  const out = keys.filter((k) => {
+    const reach = keyScope(k, nests);
+    if (opts.scope !== "any" && reach.kind !== opts.scope) return false;
+    return !q || [k.label ?? "", k.key_prefix, reach.label].some((s) => s.toLowerCase().includes(q));
+  });
+  // ISO strings compare chronologically; a never-used key sorts last.
+  if (opts.sort === "name") out.sort((a, b) => (a.label ?? "").localeCompare(b.label ?? ""));
+  else if (opts.sort === "last_used") out.sort((a, b) => (b.last_used_at ?? "").localeCompare(a.last_used_at ?? ""));
+  else out.sort((a, b) => b.created_at.localeCompare(a.created_at));
+  return out;
+}
