@@ -1250,7 +1250,10 @@ export function NestView({
                   {p.submitter_label || p.submitter_email || "an API key"}
                 </span>
                 <span className="text-xs text-muted-foreground shrink-0">
-                  Expires {untilTime(p.expires_at)} · Review →
+                  {untilTime(p.expires_at) === "expired"
+                    ? "Expired"
+                    : `Expires ${untilTime(p.expires_at)}`}{" "}
+                  · Review →
                 </span>
               </button>
             ))}

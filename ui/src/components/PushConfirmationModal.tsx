@@ -163,9 +163,9 @@ export function PushConfirmationModal({
                 </span>
                 {!decided && (
                   <div className="text-xs text-amber-700 dark:text-amber-500">
-                    Expires {untilTime(pending.expires_at)} ·{" "}
-                    {formatServerDate(pending.expires_at)} — not confirmed by then, it is
-                    dropped and never applied.
+                    {untilTime(pending.expires_at) === "expired"
+                      ? `Expired ${formatServerDate(pending.expires_at)} — it can no longer be confirmed.`
+                      : `Expires ${untilTime(pending.expires_at)} · ${formatServerDate(pending.expires_at)} — not confirmed by then, it is dropped and never applied.`}
                   </div>
                 )}
               </div>
