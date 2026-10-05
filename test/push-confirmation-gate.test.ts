@@ -226,6 +226,8 @@ describe("gate ON — push is held pending, applies only on confirm", () => {
     expect(data.doc_count).toBe(1);
     // Attribution: who pushed.
     expect((data.submitter_email || data.submitter_label || "").length).toBeGreaterThan(0);
+    // The reviewer can read what would be written before deciding.
+    expect(data.manifest[0].content).toBe("# Doc A\n\nbody");
   });
 
   it("confirm → applied, docs present, decided_by stamped", async () => {

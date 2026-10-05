@@ -59,6 +59,8 @@ export interface PushManifestEntry {
   title: string;
   type: string;
   tags: string[];
+  /** Single-push GET only: the document body, for the reviewer to read. */
+  content?: string;
 }
 
 /**

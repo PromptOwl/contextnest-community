@@ -73,6 +73,8 @@ export interface PendingPushView {
   decided_by?: string;
   decided_at?: string;
   applied_node_count?: number;
+  /** Single-push GET only: the context.md the push would write. */
+  context_md?: string | null;
 }
 
 async function nestName(nestId: string): Promise<string> {
@@ -364,7 +366,21 @@ export async function getPendingPush(
 ): Promise<PendingPushView | null> {
   const row = await getPendingPushRow(nestId, id);
   if (!row) return null;
-  return toView(row, await nestName(nestId));
+  const view = toView(row, await nestName(nestId));
+  // The single view carries what would be written, so a reviewer can read it
+  // before confirming. manifest_json was built from these same rows, in order.
+  let docs: Array<{ content?: string }> = [];
+  try {
+    const payload = JSON.parse(row.payload_blob) as PublishPayload;
+    docs = (payload.documents || []).filter((d) => d.title && d.content);
+  } catch {
+    docs = [];
+  }
+  return {
+    ...view,
+    manifest: view.manifest.map((m, i) => ({ ...m, content: docs[i]?.content })),
+    context_md: row.context_md,
+  };
 }
 
 /**

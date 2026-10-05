@@ -714,6 +714,8 @@ export interface PushManifestEntry {
   title: string;
   type: string;
   tags: string[];
+  /** Single-push GET only: the document body. */
+  content?: string;
 }
 
 export interface PendingPush {
@@ -730,6 +732,8 @@ export interface PendingPush {
   decided_by?: string;
   decided_at?: string;
   applied_node_count?: number;
+  /** Single-push GET only: the context.md the push would write. */
+  context_md?: string | null;
 }
 
 export interface PushAllowlistEntry {
