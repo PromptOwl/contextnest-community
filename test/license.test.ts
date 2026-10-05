@@ -628,7 +628,7 @@ describe("pricing entitlement", () => {
 
   it("runs as Free with no license, or when PromptOwl names no plan", async () => {
     const { entitlementOf } = await loadLicense();
-    const free = { plan: "free", maxUsers: 10, maxAccountOwners: 1, maxSubscribers: 0, byok: false };
+    const free = { plan: "free", maxUsers: 10, maxAccountOwners: 1, maxSubscribers: 0 };
     expect(entitlementOf(null)).toEqual(free);
     expect(entitlementOf(lic({ plan: "enterprise" }, false))).toEqual(free);
     // An older PromptOwl's maxUsers 0 (= unlimited) must not lift the Free cap.
@@ -638,11 +638,11 @@ describe("pricing entitlement", () => {
   it("takes PromptOwl's caps over the plan defaults; null = unlimited", async () => {
     const { entitlementOf } = await loadLicense();
     expect(entitlementOf(lic({ plan: "enterprise" }))).toEqual({
-      plan: "enterprise", maxUsers: null, maxAccountOwners: null, maxSubscribers: null, byok: true,
+      plan: "enterprise", maxUsers: null, maxAccountOwners: null, maxSubscribers: null,
     });
     expect(
       entitlementOf(lic({ plan: "self_hosted", maxUsers: 45, maxSubscribers: 12, maxAccountOwners: null })),
-    ).toEqual({ plan: "self_hosted", maxUsers: 45, maxAccountOwners: null, maxSubscribers: 12, byok: false });
+    ).toEqual({ plan: "self_hosted", maxUsers: 45, maxAccountOwners: null, maxSubscribers: 12 });
     // Malformed fields fall back to the plan's default; an unknown plan is Free.
     expect(entitlementOf(lic({ plan: "free", maxUsers: "lots", maxSubscribers: -1 }))).toMatchObject({
       maxUsers: 10, maxSubscribers: 0,

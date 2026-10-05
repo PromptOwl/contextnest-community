@@ -18,7 +18,6 @@ const entitlement: Record<string, any> = {
   maxUsers: 3,
   maxAccountOwners: 1,
   maxSubscribers: 0,
-  byok: false,
 };
 
 const newNest = (u: U, name: string) => jsonRequest(app, "POST", "/nests", { name }, u.apiKey);

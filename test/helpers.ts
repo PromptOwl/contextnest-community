@@ -109,7 +109,6 @@ export async function createTestApp(
         maxUsers: null,
         maxAccountOwners: null,
         maxSubscribers: null,
-        byok: true,
         ...(opts.entitlement ?? {}),
       }),
       // isLicenseAdminEmail reads the module-internal currentLicense, which

@@ -37,7 +37,6 @@ export interface LicenseInfo {
     plan?: LicensePlan;
     maxAccountOwners?: number | null;
     maxSubscribers?: number | null;
-    byok?: boolean;
   } | null;
   suspended: boolean;
   suspendedReason: string | null;
@@ -78,15 +77,13 @@ export interface Entitlement {
   maxAccountOwners: number | null;
   /** Editors. Free has none: adding one is a paid action. */
   maxSubscribers: number | null;
-  /** Own provider keys (Enterprise only); otherwise models run on credits. */
-  byok: boolean;
 }
 
 const PLAN_DEFAULTS: Record<LicensePlan, Omit<Entitlement, "plan">> = {
-  free: { maxUsers: 10, maxAccountOwners: 1, maxSubscribers: 0, byok: false },
-  trial: { maxUsers: 30, maxAccountOwners: null, maxSubscribers: null, byok: false },
-  self_hosted: { maxUsers: 30, maxAccountOwners: null, maxSubscribers: null, byok: false },
-  enterprise: { maxUsers: null, maxAccountOwners: null, maxSubscribers: null, byok: true },
+  free: { maxUsers: 10, maxAccountOwners: 1, maxSubscribers: 0 },
+  trial: { maxUsers: 30, maxAccountOwners: null, maxSubscribers: null },
+  self_hosted: { maxUsers: 30, maxAccountOwners: null, maxSubscribers: null },
+  enterprise: { maxUsers: null, maxAccountOwners: null, maxSubscribers: null },
 };
 
 /** A cap from PromptOwl: null = unlimited, a whole number = the cap, anything
@@ -110,7 +107,6 @@ export function entitlementOf(lic: LicenseInfo | null | undefined): Entitlement 
     maxUsers: maxUsers === 0 ? null : maxUsers, // 0 = unlimited (older contract)
     maxAccountOwners: capOr(l.maxAccountOwners, d.maxAccountOwners),
     maxSubscribers: capOr(l.maxSubscribers, d.maxSubscribers),
-    byok: typeof l.byok === "boolean" ? l.byok : d.byok,
   };
 }
 

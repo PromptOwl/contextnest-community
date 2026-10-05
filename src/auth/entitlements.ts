@@ -18,7 +18,8 @@ import { getCurrentLicense, sanitizeFeatures } from "./license.js";
 
 /** Features each tier gets when PromptOwl sends no explicit list. */
 const TIER_DEFAULT_FEATURES: Record<string, readonly string[]> = {
-  enterprise: ["hootie_branding"],
+  // byok: own provider keys / LiteLLM gateway (pricing spec §2: Enterprise only).
+  enterprise: ["byok", "hootie_branding"],
 };
 
 /** The features the installed licence unlocks right now (sorted). */

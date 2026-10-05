@@ -48,6 +48,9 @@ describe("hasEntitlement", () => {
     expect((await withLicense(valid({ tier: "enterprise" }))).hasEntitlement("hootie_branding")).toBe(true);
     expect((await withLicense(valid({ tier: "enterprise", features: null }))).hasEntitlement("hootie_branding")).toBe(true);
     expect((await withLicense(valid({ tier: "community" }))).hasEntitlement("hootie_branding")).toBe(false);
+    // Own model keys are Enterprise only (pricing spec §2).
+    expect((await withLicense(valid({ tier: "enterprise" }))).hasEntitlement("byok")).toBe(true);
+    expect((await withLicense(valid({ tier: "community" }))).hasEntitlement("byok")).toBe(false);
   });
 
   it("an invalid, suspended or missing licence unlocks nothing", async () => {
