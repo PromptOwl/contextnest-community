@@ -1495,7 +1495,7 @@ export async function listTags(nestId: string): Promise<string[]> {
 // ─── Governance ─────────────────────────────────────────────────────────
 
 export async function listStewards(nestId: string) {
-  return request<{ stewards: any[] }>(`/nests/${nestId}/stewards`);
+  return request<{ stewards: any[]; ownerEmail: string | null }>(`/nests/${nestId}/stewards`);
 }
 
 export async function syncStewards(nestId: string) {
