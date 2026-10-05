@@ -516,6 +516,23 @@ export function DocumentEditor({
   // The body wrapper, whichever control is inside it (rich editor, raw
   // markdown, source, artifact HTML) — Enter from the title lands here.
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  // Editing controls (toolbar, Type, Prime) show only while the user works in
+  // the page; a pointerdown outside it puts them away. Portaled menus/dialogs
+  // opened from the page count as inside, or opening one would hide the toolbar.
+  const pageRef = useRef<HTMLDivElement | null>(null);
+  const [pageActive, setPageActive] = useState(isNew);
+  useEffect(() => setPageActive(isNew), [nodeId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!pageActive) return;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Element | null;
+      if (!t || pageRef.current?.contains(t)) return;
+      if (t.closest("[data-radix-popper-content-wrapper], [role='dialog'], [role='alertdialog'], [data-sonner-toaster]")) return;
+      setPageActive(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    return () => document.removeEventListener("pointerdown", onDown);
+  }, [pageActive]);
   const [anchoredThreads, setAnchoredThreads] = useState<api.AnnotationThread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   // The comments rail starts closed — an empty panel beside every document
@@ -2382,7 +2399,12 @@ export function DocumentEditor({
             window bottom on a short document too (mt-auto), and sticks there
             while a long one scrolls under it. 7rem = app header + top bar. */}
         <div className="flex min-w-0 flex-1 flex-col min-h-[calc(100vh-7rem)]">
-          <div className="w-full px-5 py-6 sm:px-10 sm:py-8">
+          <div
+            ref={pageRef}
+            onFocusCapture={() => setPageActive(true)}
+            onPointerDownCapture={() => setPageActive(true)}
+            className="w-full px-5 py-6 sm:px-10 sm:py-8"
+          >
 
             {error && (
               <Alert variant="destructive" className="mb-4">
@@ -2799,7 +2821,7 @@ export function DocumentEditor({
 
                 {/* Prime — governed nests only, and only for the roles allowed to
               set it. Everyone else just sees the badge next to the title. */}
-                {stewardshipEnabled && canFlagPrime && (
+                {stewardshipEnabled && canFlagPrime && pageActive && (
                   <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
                     <div className="space-y-0.5">
                       <span className="flex items-center gap-1.5 text-sm font-medium">
@@ -2878,7 +2900,7 @@ export function DocumentEditor({
               picking another type opens the re-type confirmation (through the
               leave guard — the server re-types the SAVED body). Schedule shows
               for any agent/skill node. */}
-                {canEditContent && (isNew || isRunnable || canTurnIntoHere) && (
+                {canEditContent && pageActive && (isNew || isRunnable || canTurnIntoHere) && (
                   <div className="flex flex-col sm:flex-row gap-4 w-full">
                     {(isNew || canTurnIntoHere) && (
                       <div className="flex-1 min-w-0">
@@ -3433,6 +3455,7 @@ export function DocumentEditor({
                           // scroll a long document to its last line on arrival.
                           autofocus={false}
                           variant="page"
+                          toolbarHidden={!pageActive}
                           toolbarEnd={
                             <>
                               {/* Rich ↔ raw markdown at the editor's own right end, where the
