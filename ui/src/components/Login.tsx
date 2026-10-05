@@ -47,11 +47,17 @@ export function Login() {
     enabled: false,
     issuer: "",
   });
+  // Google via PromptOwl — the server sends the URL only when it accepts
+  // PromptOwl SSO tickets. A first-time Google user gets a PromptOwl account
+  // there and a ContextNest account here (GET /auth/sso provisions it).
+  const [googleUrl, setGoogleUrl] = useState("");
   const adminMode =
     typeof window !== "undefined" &&
     new URLSearchParams(window.location.search).has("admin");
   const showPromptOwl =
     promptowlGate === "open" || (promptowlGate === "admin-only" && adminMode);
+  // Same gate as the PromptOwl button: this path signs in through PromptOwl.
+  const showGoogle = !!googleUrl && showPromptOwl && !deviceUrl;
   const showManual = manualMode !== "disabled";
   const allowSelfRegister = manualMode === "open";
 
@@ -76,6 +82,7 @@ export function Login() {
         setPromptowlGate(h.promptowl_sign_in_gate ?? "open");
         setManualMode(h.manual_sign_in ?? "open");
         setOidc({ enabled: !!h.oidc_enabled, issuer: h.oidc_issuer ?? "" });
+        setGoogleUrl(h.promptowl_google_url ?? "");
       })
       .catch(() => {});
     return () => {
@@ -237,10 +244,21 @@ export function Login() {
           </button>
         )}
 
+        {showGoogle && (
+          <a
+            href={googleUrl}
+            data-testid="login-google-button"
+            className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg border border-border bg-card hover:bg-secondary text-sm font-medium transition-colors"
+          >
+            Sign in with Google
+          </a>
+        )}
+
         {/* OIDC SSO — a plain link: GET /auth/oidc/login 302s to the IdP and
             the callback lands back on "/" with a session cookie (or
             ?sso_error=<code>, which App.tsx surfaces as a toast). */}
-        {oidc.enabled && !deviceUrl && (
+        {/* An OIDC issuer of Google would duplicate the button above. */}
+        {oidc.enabled && !deviceUrl && !(showGoogle && ssoLabel === "Sign in with Google") && (
           <a
             href="/auth/oidc/login"
             className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg border border-border bg-card hover:bg-secondary text-sm font-medium transition-colors"
@@ -285,7 +303,7 @@ export function Login() {
             credential entry mid-poll — or when manual sign-in is disabled. */}
         {!deviceUrl && showManual && (
           <>
-            {(showPromptOwl || oidc.enabled) && (
+            {(showPromptOwl || showGoogle || oidc.enabled) && (
               <div className="relative">
                 <div className="absolute inset-0 flex items-center">
                   <div className="w-full border-t border-border" />
@@ -382,7 +400,7 @@ export function Login() {
         {/* Nothing to show: manual off, PromptOwl hidden for this visitor,
             and no SSO. The admin-only ?admin=1 link below still lets the
             admin in. */}
-        {!deviceUrl && !showManual && !showPromptOwl && !oidc.enabled && (
+        {!deviceUrl && !showManual && !showPromptOwl && !showGoogle && !oidc.enabled && (
           <p className="text-sm text-center text-muted-foreground">
             Sign-in is restricted on this server. Contact your admin for access.
           </p>

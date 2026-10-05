@@ -126,3 +126,19 @@ describe("nodeTypeSupportsMove — shared by this menu and the documents-list ro
     expect(nodeTypeSupportsMove(undefined)).toBe(true);
   });
 });
+
+describe("documentActions — admin Activity log (CU-wdqcq03aw2)", () => {
+  it("offers Activity to owners and nest admins, right after Version history", () => {
+    const k = keys({ ...owner, canSeeActivity: true });
+    expect(k.slice(0, 2)).toEqual(["history", "activity"]);
+    expect(documentActions({ ...owner, canSeeActivity: true }).find((a) => a.key === "activity")).toEqual(
+      expect.objectContaining({ label: "Activity", testId: "document-editor-activity" }),
+    );
+  });
+
+  it("never offers it to anyone else, or on an unsaved document", () => {
+    expect(keys({ ...owner, canSeeActivity: false })).not.toContain("activity");
+    expect(keys(owner)).not.toContain("activity");
+    expect(keys({ ...owner, isNew: true, canSeeActivity: true })).not.toContain("activity");
+  });
+});

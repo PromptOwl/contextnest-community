@@ -1,5 +1,125 @@
 # @promptowl/contextnest-community
 
+## 1.28.0
+
+### Minor Changes
+
+- b303dd3: Agent activity with undo. The Review tab has a new Agent activity view listing every change an agent made to the nest: creates, edits, restores and deletions. Each row shows which agent made the change, under which account, and when. The view can be filtered to one agent or widened to everyone's changes. Each change can be undone in one click. Undo writes the previous version back as a new version, discards an unreviewed draft, or removes a document the agent created. It is refused when the document changed since, when the change is awaiting review, or for deletions, and the reason is shown next to the button. Owners, admins and reviewers only. New endpoints: `GET /nests/:id/agent-activity` and `POST /nests/:id/agent-activity/undo`. Deletions now record which agent made them (migration 046).
+- 943056b: Publish a nest API-only (headless). An owner or nest admin can turn on API-only access for a private nest (Collaborators tab, or `PUT /nests/:id/headless`) and create one read-only access key per buyer or integration, each labeled and revocable. A key works with `ctx` and any MCP client to list, get, query and search the nest's approved documents, and nothing else: no browsing, no sign-in, no drafts or version history, no comments, no export, no writes. Everything else answers 403 `headless_reader`. Each key is its own service identity, never shown as a person in people search, the teammates list or user counts. Turning API-only access off pauses every key, and deleting a key revokes it. While a nest is headless it stays private.
+- 10df909: Hootie in the nest is now a side panel instead of a chat bubble, off by default, and Enterprise licences can rename and brand it.
+
+  This reverses the 1.27.0 choice of a corner chat window over a full-height slide-over. The assistant opens from a slim tab on the right edge and slides in beside the page. On screens 1280px and wider it pushes the page over rather than covering it; on narrower screens it overlays. Drag its left edge (or use the arrow keys on the handle) to resize it between 340px and 720px; the width is remembered per browser, and a double-click resets it. Closing it keeps the conversation, as before.
+
+  **Behaviour change:** `HOOTIE_ENABLED` now defaults to off. A server that had Hootie on only because it was the default will find it off after upgrading. Turn it on under Settings → General or with `HOOTIE_ENABLED=true`. A server that set `HOOTIE_ENABLED=true` in its deploy environment, or turned it off in Settings, keeps that choice. Both states are now written explicitly from Settings, so a UI choice beats the deploy env either way. The startup banner prints whether Hootie is on.
+
+  **Custom identity (Enterprise):** admins set the assistant's name, logo (an https image link), accent colour (hex) and greeting under Settings → General, or with `HOOTIE_NAME`, `HOOTIE_LOGO_URL`, `HOOTIE_ACCENT_COLOR` and `HOOTIE_GREETING`. The identity shows on the edge tab, the panel header, next to each answer and in the greeting, and the name also goes into the assistant's system prompt and the comments it posts for @mentions. `/health` reports the identity to show as `hootie_brand`, decided on the server. Without an Enterprise licence (tier `enterprise`, valid and not suspended), `/admin/settings` refuses a request that would change any branding field with `403 enterprise_required` and writes nothing from it (sending back the stored values unchanged is allowed), and every surface shows the default Hootie. A licence that lapses reverts to Hootie on the next request without deleting the stored values.
+
+- fdeb253: Push Confirmation Gate — hold agent writes for review on a gated nest.
+
+  A superadmin can require confirmation for agent writes to a nest
+  (`require_push_confirmation`, superadmin-only to set via
+  `PATCH /nests/:id/settings` — a per-field `403` for anyone else). On a gated
+  nest, a document created by an agent or script is **held** as a pending record
+  (`202 pending_confirmation` with a `poll_url`/`confirm_url`) instead of
+  applying; it lands only after a reviewer confirms it in the web UI, through the
+  exact same apply path an immediate write uses — same engine create, same version
+  rows, same skip-don't-overwrite semantics, attributed to the submitter. With the
+  gate off, behaviour is unchanged.
+
+  The gate covers the three ways an agent CREATES a document: the MCP
+  `context_create` tool (always, whatever credential it arrived on — it answers a
+  `PENDING_CONFIRMATION` tool error, since nothing was created), `POST
+/nests/:id/nodes` on an API key, and the bulk `POST /nests/:id/publish`. A
+  person working in the web UI (session cookie) is never held, and edits to
+  existing documents keep going through stewardship review, which is built for
+  them.
+
+  - New `pending_pushes` table (carries the full staged payload so a confirm
+    applies it byte-for-byte) and a **per-API-key** `push_allowlist`
+    (`key_id` `''`/null = all of that user's keys; never keyed on nest alone).
+    Idempotent SQLite + Postgres migrations (`040_push_confirmation`).
+  - New endpoints under `/nests/:id`: `GET pending-pushes`,
+    `GET pending-pushes/:pid` (readable by the **submitter or a reviewer** — the
+    CLI polls with the pushing key), `POST …/:pid/confirm { always_allow? }`,
+    `POST …/:pid/reject`, `GET/DELETE push-allowlist`. **Confirming is
+    reviewer/owner/admin only — never the submitter**, or the gate would be one
+    extra call away from being cleared by the key it is holding; a submitter may
+    reject (withdraw) its own write. Confirm/reject on a no-longer-pending record
+    → `409`, and a confirm whose apply throws returns the record to `pending`
+    instead of stranding it as applied-with-nothing-written. Doc/folder grantees
+    are denied `/publish`.
+  - The allowlist is governance-licensed (`503` without a license); the
+    `/pending-pushes` routes deliberately are **not** — the write endpoints are
+    unlicensed, so licensing the release path would let a lapsed license hold
+    every write with nothing able to confirm it, and the nest would stop
+    accepting writes with no in-product way back.
+  - Held payloads are bounded by `MAX_PENDING_PUSH_BYTES` (default 5 MB) and
+    expire after `PENDING_PUSH_TTL_MS` (default 7 days), reported lazily as
+    `expired`.
+  - Web UI: a loud confirm modal (which nest — name + id verbatim, how many
+    documents + a title·type·tags manifest with new-vs-update badges, who wrote
+    them, and an "Always allow automated writes" checkbox that whitelists that
+    exact key), a held-write banner + count badge in the nest view, and — in nest
+    settings — the superadmin-gated `require_push_confirmation` switch plus the
+    list of whitelisted keys with a Revoke action, so "Always allow" is not a
+    one-way door. Reviewers are notified when a write is held.
+  - The nest feed API also emits a `pending_push` item carrying the manifest and
+    a per-caller `canConfirm`, for clients that want held writes inline with the
+    rest of the activity. The nest view surfaces them through the banner instead,
+    so nothing renders that item yet.
+  - A held write's manifest entry carries the id the title will publish to, or
+    `null` when the title has no ASCII slug and the id can only be generated at
+    apply time. It is a preview for the new-vs-update badge, not a promise: an id
+    that is occupied by the time a reviewer confirms is skipped, never
+    overwritten.
+
+  Shares one wire contract with the paired `ctx push` change in
+  `PromptOwl/ContextNest` (the CLI polls the gate and prints the confirm URL) —
+  the CLI pushes through `POST /nests/:id/publish`, one of the gated surfaces.
+
+- Sign in with Google through PromptOwl. When this server accepts PromptOwl SSO tickets, the login page shows a Sign in with Google button that signs in through PromptOwl's community SSO (a first-time Google user gets a PromptOwl account there and a ContextNest account here). `GET /health` reports the URL as `promptowl_google_url`. The button follows the same gate as Sign in with PromptOwl, and an OIDC provider whose issuer is Google no longer shows a second Google button.
+
+  Sharing a document or folder with someone outside the nest now emails them, naming the document or folder, the nest, the permission and who shared it, with a link to open it. Role changes on an existing share and shares to nest members send nothing. A failed email is logged and never fails the share.
+
+  A document opened from the review queue now returns to the queue on Back, approve or reject, so a reviewer goes straight to the next item. Document histories are cached per document and invalidated when the document changes, including writes from another server instance, so reopening a document's history no longer rebuilds it each time.
+
+  Engine dependency bumped to `@promptowl/contextnest-engine` ^2.9.1.
+
+- b6d91b0: Activity log for a document, a folder, or the nest, for admins. Owners and nest admins get an Activity entry in a document's ⋯ menu (document page and card view), on a folder's row, and in the nest's ⋯ menu. It opens a log of who created, edited, restored, reviewed, commented on, deleted, read, pulled into a search or answer, or exported that document or anything under the folder, newest first, with the agent and whether it came through the web/API or MCP. The log can be filtered to changes, reviews, comments, or reads & pulls, and to one person. Reads, retrievals and exports are now recorded per document (migration 047) — how a document was pulled, never what was searched for or asked, throttled to one row per person, document and action per 10 minutes and pruned on the activity-trace retention window. New endpoint: `GET /nests/:id/activity-log`.
+- 1b10bf2: Server settings are regrouped into tabs: **Basic** (community name, public base URL, logo, sign-in methods, product analytics, upload size, trace retention), **Features** (every on/off switch — workflow plane, sub-agents, PromptOwl teams import, content types, usage telemetry, single sign-on, agent SSO, nest creation, people directory) and **Hootie** (the chatbot with its model key). Single sign-on and agent SSO are switched on in Features; their configuration moves to a **Single sign-on** tab that appears only while one of them is on. New `community_name` setting (`COMMUNITY_NAME`), editable under Basic.
+
+### Patch Changes
+
+- ec72345: Copying a new API key in a nest's API-only access panel now confirms with a "Key copied to clipboard" toast, and falls back to the legacy copy path (with an error toast) when the clipboard API is unavailable.
+- 6a5c3a4: Revoking an API key in a nest's API-only access panel now asks for confirmation in the app's own dialog instead of the browser's native confirm popup.
+- aa26f0e: The API keys page now has list controls: a search box matching a key's name, prefix or nest, a filter for all-nests keys versus one-nest keys, and a sort by newest first, name, or most recently used.
+- 172f0b1: An editable document now opens as a clean reading page. The formatting toolbar, the Type control and the Prime box appear once you click or tab into the page, and go away when you click outside it. Menus and dialogs opened from the page keep them visible. New documents still show the controls from the start.
+- 99c846e: Fix the "Unsaved changes" dialog appearing right after saving a document.
+
+  Saving navigates back to the nest, and that navigation is checked by the
+  unsaved-edits guard. The save had already cleared the dirty flag, but React had
+  not re-rendered yet, so the guard still saw the document as dirty and opened
+  the leave dialog — asking the user to save the edits it had just written, with
+  the save button reading "Saved" behind it.
+
+  A save is the answer to that question, so every save path now runs its
+  follow-on navigation past the guard. Discard and "Save & leave" already did;
+  the plain Save button was the one path that did not.
+
+- 99c846e: Fix nest activity-feed totals on Postgres.
+
+  `COUNT(*)` comes back from Postgres as a bigint, which `pg` hands to the app as
+  a string, so the feed's totals concatenated instead of adding: a nest with 12
+  pending changes and 3 held writes reported 123 items. SQLite was unaffected
+  (it returns a number), so this only ever showed on a Postgres-backed server.
+
+  Each count is coerced with `Number()` before the arithmetic. The per-type
+  `counts` object was already correct — only the summed `total` was wrong.
+
+- c02f9a2: Held pushes now show when they expire. The pending list in a nest shows a countdown on each entry (for example "Expires in 6d"), and the review dialog shows the exact expiry time and explains that a push not confirmed by then is dropped.
+- 32bd441: Reviewers can now read a held push before confirming it. In the review dialog, clicking a document shows its full content, a staged context.md can be expanded, and a summary counts how many documents are new and how many are updates. `GET /nests/:id/pending-pushes/:pid` now returns each manifest row's `content` and the push's `context_md`. The list endpoint is unchanged.
+- 2f836fb: Fix "Always allow" doing nothing for pushes from PromptOwl. PromptOwl writes to a nest over MCP with a signed service ticket rather than an API key, so the held push carried no key to whitelist and every later push was held again. Confirming such a push with "Always allow" now whitelists that user's keyless agent writes (PromptOwl and signed-in MCP) on that nest, shown in the nest settings as "PromptOwl / signed-in session". The user's API keys are not affected and still need their own approval.
+
 ## 1.27.0
 
 ### Minor Changes

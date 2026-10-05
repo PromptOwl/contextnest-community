@@ -170,6 +170,7 @@ async function main() {
   License:   ${license.valid ? `${license.tier}${license.org ? ` (${license.org})` : ""}` : "unlicensed (register at promptowl.ai)"}
   Auth:      ${authDesc}
   Telemetry: ${config.TELEMETRY_ENABLED ? "on" : "off"}
+  Hootie:    ${config.HOOTIE_ENABLED ? "on" : "off (default since 1.28 — enable in Settings → General or set HOOTIE_ENABLED=true)"}
   ────────────────────────────────────
 
   To switch auth modes, set the AUTH_MODE env var:

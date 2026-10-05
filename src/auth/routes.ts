@@ -1349,6 +1349,9 @@ authRoutes.get("/teammates", async (c) => {
           ) activity) as last_active
        FROM users u
        WHERE u.id != ?
+         -- Access-key identities (CU-wdqcq0314u) are managed on their nest,
+         -- not here: they are not teammates.
+         AND COALESCE(u.is_service, 0) = 0
        ORDER BY u.created_at DESC`,
     [ANON_USER_ID],
   ) as Array<{

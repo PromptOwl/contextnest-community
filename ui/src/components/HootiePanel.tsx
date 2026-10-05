@@ -1,7 +1,9 @@
 /**
- * Hootie in the nest — the floating assistant on every page.
+ * Hootie in the nest — the assistant side panel on every page.
  *
- * A launcher in the corner opens a chat window over it that knows where you are: the
+ * A slim tab on the right edge opens a slide-over panel beside the page (it
+ * pushes the page over on wide screens, overlays it on narrow ones, and can be
+ * resized from its left edge). The panel knows where you are: the
  * document you have open, or the nest, and asks about that. Answers stream in
  * and cite documents as chips that open them. The composer keeps real
  * Hootie's conventions — `@` loops a colleague in, `/` switches the nest.
@@ -20,7 +22,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { X, ArrowUp, Loader2, KeyRound, Database, RotateCcw, AlertCircle, FileText } from "lucide-react";
+import {
+  ArrowUp,
+  Loader2,
+  KeyRound,
+  Database,
+  RotateCcw,
+  AlertCircle,
+  FileText,
+  PanelRightClose,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "../auth/AuthContext";
@@ -34,6 +45,15 @@ import {
 import { MentionTextarea } from "./MentionTextarea";
 import type { MentionMember } from "./MarkdownEditor/picker-match";
 import hootieIcon from "../assets/hootie.svg";
+import {
+  HOOTIE_PANEL_DEFAULT,
+  clampPanelWidth,
+  hootieAccentStyle,
+  hootieGreeting,
+  pushesContent,
+  readPanelWidth,
+  savePanelWidth,
+} from "@/lib/hootie-panel";
 
 /** Where the page is; the panel derives its scope from it. */
 export interface HootieScope {
@@ -74,8 +94,57 @@ export interface HootiePanelProps {
 const MAX_TURNS_SENT = 20;
 
 export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelProps) {
-  const { hootieEnabled, runnerKeyConfigured, isAdmin } = useAuth();
+  const { hootieEnabled, hootieBrand, runnerKeyConfigured, isAdmin } = useAuth();
+  const name = hootieBrand.name;
+  const logo = hootieBrand.logo_url || hootieIcon;
+  const accent = hootieAccentStyle(hootieBrand.accent_color);
   const [open, setOpen] = useState(false);
+  const [width, setWidth] = useState<number>(() => readPanelWidth());
+  const [viewport, setViewport] = useState<number>(() =>
+    typeof window === "undefined" ? 1440 : window.innerWidth,
+  );
+  useEffect(() => {
+    const onResize = () => setViewport(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  const push = open && pushesContent(viewport);
+  // On wide screens the open panel sits beside the page instead of over it:
+  // the app shell pads its right side by --hootie-inset (App.tsx).
+  useEffect(() => {
+    const root = document.documentElement;
+    if (push) root.style.setProperty("--hootie-inset", `${width}px`);
+    else root.style.removeProperty("--hootie-inset");
+    return () => {
+      root.style.removeProperty("--hootie-inset");
+    };
+  }, [push, width]);
+
+  // Drag the left edge to resize; the width is remembered per browser.
+  const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    const move = (ev: PointerEvent) =>
+      setWidth(clampPanelWidth(window.innerWidth - ev.clientX, window.innerWidth));
+    const up = (ev: PointerEvent) => {
+      el.releasePointerCapture(ev.pointerId);
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      setWidth((w) => {
+        savePanelWidth(w);
+        return w;
+      });
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+  };
+  const nudgeWidth = (delta: number) =>
+    setWidth((w) => {
+      const next = clampPanelWidth(w + delta, window.innerWidth);
+      savePanelWidth(next);
+      return next;
+    });
   // A nest picked with `/` overrides the page until the page moves to a
   // different nest — then the page wins again, so following the person
   // around the app is the default and the override is the exception.
@@ -225,7 +294,7 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
         setMessages((prev) => prev.filter((m) => m.id !== answerId && m.id !== userId));
       } else {
         patch({
-          content: e?.message || "Hootie couldn't answer that.",
+          content: e?.message || `${name} couldn't answer that.`,
           failed: true,
           pending: false,
         });
@@ -234,7 +303,7 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
       if (abortRef.current === ctrl) abortRef.current = null;
       setBusy(false);
     }
-  }, [draft, busy, scope, override, page, messages]);
+  }, [draft, busy, scope, override, page, messages, name]);
 
   if (!hootieEnabled) return null;
   // On without a key answers nothing. An admin still gets the launcher —
@@ -250,41 +319,82 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
 
   return (
     <>
-      {/* Launcher */}
+      {/* Launcher: a slim tab on the right edge, out of the way of the page. */}
       {!open && (
         <button
           type="button"
           onClick={() => setOpen(true)}
-          aria-label="Ask Hootie"
+          aria-label={`Open ${name}`}
+          title={`Ask ${name}`}
           data-testid="hootie-launcher"
-          className="group fixed bottom-5 right-5 z-40 flex h-14 items-center gap-2 rounded-full bg-primary pl-2 pr-2 text-primary-foreground shadow-lg ring-4 ring-primary/15 transition-all hover:pr-5 hover:shadow-xl focus:outline-none focus-visible:ring-primary/40"
+          style={accent ?? undefined}
+          className={cn(
+            "fixed right-0 top-1/2 z-40 flex -translate-y-1/2 flex-col items-center gap-2 rounded-l-xl py-3 pl-1.5 pr-1 shadow-lg transition-all hover:pl-2.5 focus:outline-none focus-visible:ring-4 focus-visible:ring-primary/30",
+            !accent && "bg-primary text-primary-foreground",
+          )}
         >
-          <span className="flex h-10 w-10 items-center justify-center rounded-full bg-background">
-            <img src={hootieIcon} alt="" className="h-7 w-7" />
+          <span className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-background">
+            <img src={logo} alt="" referrerPolicy="no-referrer" className="h-6 w-6 object-contain" />
           </span>
-          {/* Label slides out on hover/focus; the owl alone is the resting state. */}
-          <span className="max-w-0 overflow-hidden whitespace-nowrap text-sm font-medium transition-all duration-200 group-hover:max-w-[8rem] group-focus-visible:max-w-[8rem]">
-            Ask Hootie
+          <span className="max-h-40 overflow-hidden text-xs font-medium [writing-mode:vertical-rl]">
+            {name}
           </span>
         </button>
       )}
 
-      {/* Panel */}
+      {/* Panel: slides in from the right edge; resizable from its left edge. */}
       {open && (
         <aside
-          role="dialog"
-          aria-label="Hootie"
+          role="complementary"
+          aria-label={name}
           data-testid="hootie-panel"
-          className="fixed bottom-5 right-5 z-40 flex h-[min(680px,calc(100vh-2.5rem))] w-[min(420px,calc(100vw-2.5rem))] flex-col overflow-hidden rounded-2xl border bg-background shadow-2xl ring-1 ring-black/5 animate-in fade-in slide-in-from-bottom-4 zoom-in-95 duration-200"
+          data-pushes={push ? "true" : "false"}
+          style={{ width: pushesContent(viewport) ? width : undefined }}
+          className={cn(
+            "fixed inset-y-0 right-0 z-40 flex max-w-full flex-col border-l bg-background shadow-2xl animate-in slide-in-from-right duration-200",
+            !pushesContent(viewport) && "w-full sm:w-[420px]",
+          )}
         >
-          <header className="flex items-center gap-3 bg-primary px-4 py-3 text-primary-foreground">
-            <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-background">
-              <img src={hootieIcon} alt="" className="h-6 w-6" />
-              <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-emerald-400 ring-2 ring-primary" />
+          {pushesContent(viewport) && (
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label={`Resize ${name}`}
+              aria-valuenow={width}
+              tabIndex={0}
+              data-testid="hootie-resize"
+              onPointerDown={startResize}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowLeft") {
+                  e.preventDefault();
+                  nudgeWidth(24);
+                } else if (e.key === "ArrowRight") {
+                  e.preventDefault();
+                  nudgeWidth(-24);
+                }
+              }}
+              onDoubleClick={() => {
+                setWidth(HOOTIE_PANEL_DEFAULT);
+                savePanelWidth(HOOTIE_PANEL_DEFAULT);
+              }}
+              className="absolute inset-y-0 -left-1 z-10 w-2 cursor-col-resize hover:bg-primary/20 focus:bg-primary/30 focus:outline-none"
+            />
+          )}
+          <header
+            style={accent ?? undefined}
+            className={cn(
+              "flex items-center gap-3 px-4 py-3",
+              !accent && "bg-primary text-primary-foreground",
+            )}
+          >
+            <span className="relative flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-background">
+              <img src={logo} alt="" referrerPolicy="no-referrer" className="h-6 w-6 object-contain" />
             </span>
             <div className="min-w-0 flex-1">
-              <div className="text-sm font-semibold leading-tight">Hootie</div>
-              <div className="truncate text-xs text-primary-foreground/75" title={scopeLabel}>
+              <div className="truncate text-sm font-semibold leading-tight" data-testid="hootie-name">
+                {name}
+              </div>
+              <div className="truncate text-xs opacity-75" title={scopeLabel}>
                 {scopeLabel}
               </div>
             </div>
@@ -297,7 +407,7 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
                 }}
                 aria-label="New conversation"
                 title="New conversation"
-                className="rounded-md p-1.5 text-primary-foreground/75 hover:bg-primary-foreground/10 hover:text-primary-foreground"
+                className="rounded-md p-1.5 opacity-75 hover:bg-black/10 hover:opacity-100"
               >
                 <RotateCcw className="h-4 w-4" />
               </button>
@@ -305,22 +415,27 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
             <button
               type="button"
               onClick={() => setOpen(false)}
-              aria-label="Close Hootie"
-              className="rounded-md p-1.5 text-primary-foreground/75 hover:bg-primary-foreground/10 hover:text-primary-foreground"
+              aria-label={`Close ${name}`}
+              title="Close panel (Esc)"
+              data-testid="hootie-close"
+              className="rounded-md p-1.5 opacity-75 hover:bg-black/10 hover:opacity-100"
             >
-              <X className="h-4 w-4" />
+              <PanelRightClose className="h-4 w-4" />
             </button>
           </header>
 
           {!runnerKeyConfigured ? (
-            <NoKeyNotice isAdmin={isAdmin} onOpenSettings={onOpenSettings} />
+            <NoKeyNotice name={name} isAdmin={isAdmin} onOpenSettings={onOpenSettings} />
           ) : !scope ? (
-            <PickNest nests={nests} onPick={pickNest} />
+            <PickNest name={name} nests={nests} onPick={pickNest} />
           ) : (
             <>
               <div ref={listRef} className="flex-1 overflow-y-auto bg-muted/30 px-4 py-4">
                 {messages.length === 0 && (
                   <Welcome
+                    name={name}
+                    logo={logo}
+                    greeting={hootieGreeting(hootieBrand)}
                     onDocument={!override && !!page?.nodeId}
                     subject={
                       !override && page?.nodeId
@@ -340,10 +455,11 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
                       ) : (
                         <div className="flex items-start gap-2">
                           <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border bg-background shadow-sm">
-                            <img src={hootieIcon} alt="" className="h-[18px] w-[18px]" />
+                            <img src={logo} alt="" referrerPolicy="no-referrer" className="h-[18px] w-[18px] object-contain" />
                           </span>
                           <div className="min-w-0 flex-1">
                             <AnswerBubble
+                              name={name}
                               message={m}
                               nestId={scope.nestId}
                               onOpenNode={onOpenNode}
@@ -396,7 +512,7 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
                     onValueChange={setDraft}
                     members={members}
                     rows={2}
-                    placeholder="Ask Hootie anything…"
+                    placeholder={`Ask ${name} anything…`}
                     data-testid="hootie-input"
                     className="block w-full resize-none rounded-xl border-0 bg-transparent px-3.5 py-2.5 pr-12 text-sm placeholder:text-muted-foreground/70 focus:outline-none"
                     onKeyDown={(e) => {
@@ -457,9 +573,11 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
 }
 
 function NoKeyNotice({
+  name,
   isAdmin,
   onOpenSettings,
 }: {
+  name: string;
   isAdmin: boolean;
   onOpenSettings?: () => void;
 }) {
@@ -468,10 +586,10 @@ function NoKeyNotice({
       <span className="flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/10 ring-8 ring-amber-500/5">
         <KeyRound className="h-6 w-6 text-amber-600 dark:text-amber-400" />
       </span>
-      <p className="text-base font-semibold">Hootie needs an API key</p>
+      <p className="text-base font-semibold">{name} needs an API key</p>
       <p className="text-muted-foreground">
         {isAdmin
-          ? "Add an Anthropic API key under Settings → General and Hootie can answer from your nests."
+          ? `Add an Anthropic API key under Settings → General and ${name} can answer from your nests.`
           : "Ask your server admin to add an Anthropic API key under Settings → General."}
       </p>
       {isAdmin && onOpenSettings && (
@@ -484,16 +602,18 @@ function NoKeyNotice({
 }
 
 function PickNest({
+  name,
   nests,
   onPick,
 }: {
+  name: string;
   nests: NestOption[];
   onPick: (n: NestOption) => void;
 }) {
   return (
     <div className="flex-1 overflow-y-auto px-4 py-4 text-sm">
       <p className="mb-3 text-muted-foreground">
-        Hootie answers about one nest at a time. Which one?
+        {name} answers about one nest at a time. Which one?
       </p>
       {nests.length === 0 ? (
         <p className="text-xs text-muted-foreground">No nests yet.</p>
@@ -519,10 +639,16 @@ function PickNest({
 
 /** Empty-conversation greeting with a few starter questions for the scope. */
 function Welcome({
+  name,
+  logo,
+  greeting,
   onDocument,
   subject,
   onAsk,
 }: {
+  name: string;
+  logo: string;
+  greeting: string;
   onDocument: boolean;
   subject: string;
   onAsk: (question: string) => void;
@@ -533,9 +659,11 @@ function Welcome({
   return (
     <div className="flex flex-col items-center px-2 pt-6 text-center">
       <span className="flex h-16 w-16 items-center justify-center rounded-full bg-primary/10 ring-8 ring-primary/5">
-        <img src={hootieIcon} alt="" className="h-10 w-10" />
+        <img src={logo} alt="" referrerPolicy="no-referrer" className="h-10 w-10 object-contain" />
       </span>
-      <h2 className="mt-4 text-base font-semibold">Hi, I'm Hootie</h2>
+      <h2 className="mt-4 text-base font-semibold" data-testid="hootie-greeting" aria-label={`${greeting} (${name})`}>
+        {greeting}
+      </h2>
       <p className="mt-1 text-sm text-muted-foreground">
         Ask me anything about <span className="font-medium text-foreground">{subject}</span>.
       </p>
@@ -566,10 +694,12 @@ function Welcome({
  * nothing reads as clickable that isn't.
  */
 function AnswerBubble({
+  name,
   message,
   nestId,
   onOpenNode,
 }: {
+  name: string;
   message: Message;
   nestId: string;
   onOpenNode: (nestId: string, nodeId: string) => void;
@@ -602,7 +732,7 @@ function AnswerBubble({
     <div>
       <div className="rounded-2xl rounded-tl-md border bg-background px-3.5 py-2.5 text-sm shadow-sm">
         {message.pending && !message.content ? (
-          <span className="inline-flex items-center gap-2 text-muted-foreground" aria-label="Hootie is thinking">
+          <span className="inline-flex items-center gap-2 text-muted-foreground" aria-label={`${name} is thinking`}>
             <span className="flex gap-1">
               {[0, 150, 300].map((d) => (
                 <span
@@ -662,16 +792,20 @@ function AnswerBubble({
           ))}
         </div>
       )}
-      {message.mention && <MentionOutcome outcome={message.mention} nestId={nestId} onOpenNode={onOpenNode} />}
+      {message.mention && (
+        <MentionOutcome name={name} outcome={message.mention} nestId={nestId} onOpenNode={onOpenNode} />
+      )}
     </div>
   );
 }
 
 function MentionOutcome({
+  name,
   outcome,
   nestId,
   onOpenNode,
 }: {
+  name: string;
   outcome: HootieMention;
   nestId: string;
   onOpenNode: (nestId: string, nodeId: string) => void;
@@ -696,7 +830,7 @@ function MentionOutcome({
   return (
     <p className="mt-1.5 text-[11px] text-amber-700 dark:text-amber-400" data-testid="hootie-mention-undeliverable">
       {outcome.reason === "no_anchor"
-        ? "Couldn't tag anyone: there's no document to attach this to. Open one, or ask something Hootie can cite."
+        ? `Couldn't tag anyone: there's no document to attach this to. Open one, or ask something ${name} can cite.`
         : "Couldn't post the comment — the mention wasn't delivered."}
     </p>
   );

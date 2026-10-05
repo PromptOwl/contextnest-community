@@ -29,9 +29,10 @@ import {
   CheckCircle2, Send, Loader2,
   Pencil, Trash2, FolderInput,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
-  FolderOpen, ChevronRight, Share2, FolderPlus,
+  FolderOpen, ChevronRight, Share2, FolderPlus, Activity,
 } from "lucide-react";
 import { FolderTree, prettyFolder, prettyFolderPath, type KnownFolder } from "../FolderTree";
+import { ActivityLogPanel } from "../ActivityLogPanel";
 import { AuthorshipChips } from "../AuthorshipChips";
 import {
   LifecycleStatusBadge, SubmitForReviewModal, ReasonDialog, VersionHistoryModal,
@@ -187,6 +188,11 @@ export function DocumentsTab({
   // Folder being shared with one person (a grant, not a collaborator).
   const [shareFolder, setShareFolder] = useState<
     { path: string; label: string } | null
+  >(null);
+  // Admin activity log open for a document or a folder (owner/admin only —
+  // the same people GET /activity-log lets in).
+  const [activityFor, setActivityFor] = useState<
+    { scope: api.ActivityLogScope; label: string } | null
   >(null);
 
   // Latest flag per node (the list arrives newest-first, so the first wins).
@@ -711,6 +717,18 @@ export function DocumentsTab({
 
   return (
     <>
+          {activityFor && (
+            <ActivityLogPanel
+              nestId={nestId}
+              scope={activityFor.scope}
+              label={activityFor.label}
+              onClose={() => setActivityFor(null)}
+              onOpenNode={(id) => {
+                setActivityFor(null);
+                onOpenDocument(id);
+              }}
+            />
+          )}
           <Card>
             <CardHeader>
               <div className="flex flex-col gap-3">
@@ -1210,6 +1228,20 @@ export function DocumentsTab({
                             History
                           </DropdownMenuItem>
                           {canManage && (
+                            <DropdownMenuItem
+                              data-testid={`doc-activity-${node.id}`}
+                              onSelect={() =>
+                                setActivityFor({
+                                  scope: { kind: "node", nodeId: node.id },
+                                  label: node.title || node.id,
+                                })
+                              }
+                            >
+                              <Activity className="h-3.5 w-3.5 mr-2" />
+                              Activity
+                            </DropdownMenuItem>
+                          )}
+                          {canManage && (
                             <DropdownMenuItem onSelect={() => setPublishNode(node)}>
                               <Share2 className="h-3.5 w-3.5 mr-2" />
                               Publish
@@ -1652,6 +1684,26 @@ export function DocumentsTab({
                                 }}
                               >
                                 <Share2 className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                            {/* Admin activity log for everything under this
+                                folder — owner/admin only, like /activity-log. */}
+                            {canManage && (
+                              <button
+                                type="button"
+                                className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 focus-visible:opacity-100 hover:text-primary hover:bg-primary/10"
+                                title={`Activity in ${prettyFolderPath(node.path)}`}
+                                aria-label={`Activity in ${prettyFolderPath(node.path)}`}
+                                data-testid={`folder-activity-${node.path}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setActivityFor({
+                                    scope: { kind: "folder", folder: node.path },
+                                    label: `${prettyFolderPath(node.path)}/`,
+                                  });
+                                }}
+                              >
+                                <Activity className="h-3.5 w-3.5" />
                               </button>
                             )}
                             {/* Same split as a document: admins/owners delete

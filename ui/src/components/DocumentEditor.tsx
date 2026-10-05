@@ -80,10 +80,13 @@ import {
   Globe,
   Building2,
   Lock,
+  Activity,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { documentActions } from "../lib/document-actions";
+import { canSeeActivityLog } from "../lib/activity-log";
+import { ActivityLogPanel } from "./ActivityLogPanel";
 import { toast } from "sonner";
 import {
   MarkdownEditor,
@@ -184,6 +187,9 @@ interface DocumentEditorProps {
   isOwner?: boolean;
   onBack: () => void;
   onSaved?: (savedNodeId: string) => void;
+  /** After an approve or reject: leave for the queue the doc came from.
+   *  Absent = stay and reload the document. */
+  onReviewed?: () => void;
   /** Open another document; `currentTitle` feeds breadcrumb push. */
   onNavigateDocument?: (
     nestId: string,
@@ -224,6 +230,7 @@ export function DocumentEditor({
   isOwner = false,
   onBack,
   onSaved,
+  onReviewed,
   onNavigateDocument,
   onTagClick,
   onOpenNest,
@@ -252,6 +259,8 @@ export function DocumentEditor({
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
   const [showPublish, setShowPublish] = useState(false);
+  // Admin activity log for this document (CU-wdqcq03aw2).
+  const [showActivity, setShowActivity] = useState(false);
   // Share THIS document with one person (a grant), as opposed to the whole
   // nest above. Same owner/admin gate the /grants routes enforce.
   const [showShareDoc, setShowShareDoc] = useState(false);
@@ -507,6 +516,23 @@ export function DocumentEditor({
   // The body wrapper, whichever control is inside it (rich editor, raw
   // markdown, source, artifact HTML) — Enter from the title lands here.
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  // Editing controls (toolbar, Type, Prime) show only while the user works in
+  // the page; a pointerdown outside it puts them away. Portaled menus/dialogs
+  // opened from the page count as inside, or opening one would hide the toolbar.
+  const pageRef = useRef<HTMLDivElement | null>(null);
+  const [pageActive, setPageActive] = useState(isNew);
+  useEffect(() => setPageActive(isNew), [nodeId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!pageActive) return;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Element | null;
+      if (!t || pageRef.current?.contains(t)) return;
+      if (t.closest("[data-radix-popper-content-wrapper], [role='dialog'], [role='alertdialog'], [data-sonner-toaster]")) return;
+      setPageActive(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    return () => document.removeEventListener("pointerdown", onDown);
+  }, [pageActive]);
   const [anchoredThreads, setAnchoredThreads] = useState<api.AnnotationThread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   // The comments rail starts closed — an empty panel beside every document
@@ -1559,12 +1585,18 @@ export function DocumentEditor({
   const handleApprove = async (note?: string) => {
     if (isNew) return;
     await api.approveNode(nestId, nodeId, note);
-    await loadNode();
+    if (onReviewed) {
+      toast.success("Approved");
+      onReviewed();
+    } else await loadNode();
   };
   const handleReject = async (note: string) => {
     if (isNew) return;
     await api.rejectNode(nestId, nodeId, note);
-    await loadNode();
+    if (onReviewed) {
+      toast.success("Rejected");
+      onReviewed();
+    } else await loadNode();
   };
   // Cancel your own pending review from the document itself — back to Draft,
   // rather than Delete being the only exit (CU-wdqcq007pe).
@@ -1725,6 +1757,9 @@ export function DocumentEditor({
       deletionRequested,
       isOwnDeletionRequest,
       includeVersionHistory: opts.includeVersionHistory,
+      // Owner / nest admin (or server admin) — the people GET /activity-log
+      // lets in; the server refuses everyone else regardless.
+      canSeeActivity: isAdmin || canSeeActivityLog(permission),
     }).map((a) => {
       const base = {
         label: a.label,
@@ -1735,6 +1770,8 @@ export function DocumentEditor({
       switch (a.key) {
         case "history":
           return { ...base, icon: History, onSelect: openVersions };
+        case "activity":
+          return { ...base, icon: Activity, onSelect: () => setShowActivity(true) };
         case "copy-link":
           return {
             ...base,
@@ -1953,6 +1990,14 @@ export function DocumentEditor({
           nodeId={nodeId}
           nodeTitle={title || nodeId}
           onClose={() => setShowPublish(false)}
+        />
+      )}
+      {showActivity && (
+        <ActivityLogPanel
+          nestId={nestId}
+          scope={{ kind: "node", nodeId }}
+          label={title || nodeId}
+          onClose={() => setShowActivity(false)}
         />
       )}
     </>
@@ -2354,7 +2399,12 @@ export function DocumentEditor({
             window bottom on a short document too (mt-auto), and sticks there
             while a long one scrolls under it. 7rem = app header + top bar. */}
         <div className="flex min-w-0 flex-1 flex-col min-h-[calc(100vh-7rem)]">
-          <div className="w-full px-5 py-6 sm:px-10 sm:py-8">
+          <div
+            ref={pageRef}
+            onFocusCapture={() => setPageActive(true)}
+            onPointerDownCapture={() => setPageActive(true)}
+            className="w-full px-5 py-6 sm:px-10 sm:py-8"
+          >
 
             {error && (
               <Alert variant="destructive" className="mb-4">
@@ -2771,7 +2821,7 @@ export function DocumentEditor({
 
                 {/* Prime — governed nests only, and only for the roles allowed to
               set it. Everyone else just sees the badge next to the title. */}
-                {stewardshipEnabled && canFlagPrime && (
+                {stewardshipEnabled && canFlagPrime && pageActive && (
                   <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
                     <div className="space-y-0.5">
                       <span className="flex items-center gap-1.5 text-sm font-medium">
@@ -2850,7 +2900,7 @@ export function DocumentEditor({
               picking another type opens the re-type confirmation (through the
               leave guard — the server re-types the SAVED body). Schedule shows
               for any agent/skill node. */}
-                {canEditContent && (isNew || isRunnable || canTurnIntoHere) && (
+                {canEditContent && pageActive && (isNew || isRunnable || canTurnIntoHere) && (
                   <div className="flex flex-col sm:flex-row gap-4 w-full">
                     {(isNew || canTurnIntoHere) && (
                       <div className="flex-1 min-w-0">
@@ -3405,6 +3455,7 @@ export function DocumentEditor({
                           // scroll a long document to its last line on arrival.
                           autofocus={false}
                           variant="page"
+                          toolbarHidden={!pageActive}
                           toolbarEnd={
                             <>
                               {/* Rich ↔ raw markdown at the editor's own right end, where the

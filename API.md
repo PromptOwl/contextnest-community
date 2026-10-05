@@ -26,6 +26,21 @@ A key minted with `nest_id` reaches **that one nest and nothing else**. It is de
 
 Everything else is **403 `nest_scoped_key`** — notably `/auth/keys*` (a nest key can't mint, rotate, list or revoke keys, so it can't trade itself for a whole-account key), `POST /nests`, every other nest (`/nests/<other>/…` answers 403 "API key not authorized for this nest"; its MCP transport answers with a JSON-RPC error envelope), `/admin/*`, `/auth/teammates`, `/auth/invite`, `/auth/users/*`, `/auth/admin/*`, `/auth/profile`, `/auth/password`, `/teams*`, `/people*` and `/me/*` — even when the key's owner is a server admin. A session cookie sent alongside the key wins, as everywhere else. User-level keys (no `nest_id`) and sessions are unaffected.
 
+### Headless access keys (API-only nests)
+
+A nest **published headless** is handed out as read-only **access keys** — one per buyer or integration, labeled and revocable (see [`/nests/:nestId/headless`](#headless-publishing-api-only-nests-owner--admin) below). An access key is not a person's key: it belongs to its own service identity, which has no password, can never open a browser session, and never appears in people search, the teammates list or user counts. It reads **approved content only** (like an `org`/`public` reader) and only while the nest is published.
+
+| An access key **can** | |
+|---|---|
+| MCP (`/nests/<its nest>/mcp` or `/mcp`): `context_list`, `context_get`, `context_query`, `context_search`, `context_resolve`, `context_overview`, `context_table_query`, `context_verify` (+ `nest_index` on `/mcp`) | What `ctx` issues against a remote nest. `tools/list` offers only these. |
+| `GET /nests/<its nest>`, `…/nodes`, `…/nodes/<id>`, `…/search`, `…/context` | Approved content only. `GET /nests/<its nest>` returns the nest's public face only (id, name, slug, description, created) — not its owner, team shares or settings. |
+| `POST /nests/<its nest>/context`, `…/query`, `…/table-query` | Retrieval queries. |
+| `GET /nests`, `GET /index`, public routes | Show only its nest. |
+
+Everything else is **403** `{ "code": "headless_reader" }` — the folder tree and the glossary (neither is approval-gated), every write, comments and annotations, version history, activity, reviews, stewards and collaborators, `GET …/export`, `context_export` and bundle export, hosted-artifact and PDF downloads, chat, workflow runs, pins, `/stats`, `/search`, and every account/admin route. MCP tools outside the list answer with a tool error. The allowlist is deny-by-default: a route or tool added later is closed to access keys until it is added on purpose.
+
+> Headless is a **commercial boundary, not a cryptographic seal**: `ctx` needs document bodies, so a key holder can read every *approved* document one call at a time. It cannot browse, export, see drafts or history, or write.
+
 All bodies are JSON unless noted. All errors return `{ "error": "msg" }` with appropriate HTTP status.
 
 ## Caller attribution (`client`)
@@ -318,6 +333,7 @@ Pins are per `(user, nest)` in the `nest_pins` table and cascade with the nest. 
   "allow_self_approve": false,
   "prime_only_review": false,
   "prime_tags": ["prime-document"],
+  "require_push_confirmation": false,
   "creator_is_reviewer": false
 }
 ```
@@ -332,9 +348,83 @@ Every field is optional; only the ones present are changed.
 - `allow_self_approve` — owner/admin writes publish immediately instead of drafting.
 - `prime_only_review` — in a governed nest, only **prime** documents need approval; everything else self-publishes. Off by default.
 - `prime_tags` — tags that mark a document prime. Accepts an array or a comma-separated string; stored and returned normalized (no leading `#`, lowercased, deduped). See `STEWARDSHIP.md → Prime documents`.
+- `require_push_confirmation` — the **Push Confirmation Gate** (see below). **Superadmin-only to SET**: a PATCH carrying this field from anyone who is not a server superadmin is refused with a per-field `403` (`{ "error": ..., "field": "require_push_confirmation" }`) and no other field in the same body is applied. Readable by anyone who can read the nest. Off by default.
 - `creator_is_reviewer` — in a governed nest, whoever creates a document becomes its document-scope `reviewer` and v1 publishes immediately; later changes go through review as usual (the creator approves teammates' changes, another reviewer approves the creator's). Prime documents still draft. Future creates only. Off by default. See `STEWARDSHIP.md → Creators review their own documents`.
 
 Turning stewardship **off** wipes stewards and pending reviews and is owner-only; the other fields are non-destructive and never change the state of anything already published.
+
+## Push Confirmation Gate
+
+When a nest has `require_push_confirmation` on, a document written by an agent or script — through the MCP `context_create` tool, `POST /nests/:id/nodes` with an API key, or a bulk `POST /nests/:id/publish` — is **held** as a pending record instead of applying. It lands only after a reviewer confirms it in the web UI. Superadmin-set; default off (immediate-apply, as before).
+
+**What the gate covers.**
+
+| Surface | Gated? |
+|---|---|
+| MCP `context_create` | Yes — always; MCP is an agent surface whatever it authenticated with. Returns a `PENDING_CONFIRMATION` tool error, because nothing was created. |
+| `POST /nests/:id/nodes` with `Authorization: Bearer cnst_…` | Yes → `202`. |
+| `POST /nests/:id/nodes` from a session cookie (a person in the web UI) | **No** — the gate holds writes nobody watched being made; the person creating a document is the one who would confirm it. |
+| `POST /nests/:id/publish` (bulk) | Yes — on any credential → `202`. |
+| Edits to existing documents (`context_update`, `PATCH /nodes/:id`) | **No** — use stewardship review, which is built for changes to documents that already exist. |
+| `context_delete`, `context_move` | **No.** |
+
+So the gate is a checkpoint on documents an agent *creates*, not a general write lock on the nest. Pair it with stewardship if every change needs review.
+
+### POST `/nests/:nestId/publish`
+
+The bulk write endpoint. Body: `{ documents?: [{ title, content, type?, tags?, scope? }], context_md? }`.
+
+- **Ungated nest, or a whitelisted key** → applies immediately: `201 { published, context_md_updated, node_ids, skipped, failed }` (unchanged — see §8b for the full contract).
+- **Gated nest, non-whitelisted credential** → held: `202` (identical body from `POST /nests/:id/nodes` when that is held)
+  ```json
+  {
+    "status": "pending_confirmation",
+    "pending_id": "…",
+    "confirm_url": "/nests/:id/pending-pushes/:pid/confirm",
+    "poll_url": "/nests/:id/pending-pushes/:pid",
+    "message": "…",
+    "expires_at": "<ISO-8601>"
+  }
+  ```
+
+Requires `write`. Doc/folder grantees cannot reach it. The held payload is bounded by `MAX_PENDING_PUSH_BYTES` and expires after `PENDING_PUSH_TTL_MS` (see `CONFIGURATION.md`).
+
+### GET `/nests/:nestId/pending-pushes?status=pending|applied|rejected|expired`
+
+Reviewer view (owner/admin/reviewer only) of held pushes → `{ pending_pushes: [...], count }`.
+
+### GET `/nests/:nestId/pending-pushes/:pid`
+
+The poll endpoint. **Readable by the submitter (same key/user that pushed) OR a reviewer** — the CLI polls with the pushing key.
+```json
+{
+  "id": "…", "status": "pending|applied|rejected|expired",
+  "nest_name": "…", "doc_count": 3, "manifest": [{ "id", "title", "type", "tags" }],
+  "submitter_label": "…", "submitter_email": "…", "submitter_user_id": "…",
+  "created_at": "…", "expires_at": "…",
+  "decided_by": "…", "decided_at": "…", "applied_node_count": 3
+}
+```
+
+`manifest[].id` is the id each title will publish to — `null` when the title carries no ASCII slug, because the id is generated at apply time. It is a preview for the confirm screen's new-vs-update badge, not a promise: an id occupied by then is skipped, not overwritten.
+
+### POST `/nests/:nestId/pending-pushes/:pid/confirm`  `{ always_allow?: boolean }`
+
+Confirm rights: a **reviewer/owner/admin of the nest — never the submitter**. A submitter that could confirm its own push would clear the gate with one extra call using the very key being held (and `always_allow` would whitelist it permanently); `403` otherwise.
+
+Applies the stored payload through the same apply path an immediate push uses, attributed to the **submitter**, and returns the updated record. Confirming a push that is no longer pending (already applied/rejected/expired) → `409`. `always_allow: true` whitelists the credential that pushed for future pushes to this nest: the submitter's exact API key, or for a keyless push (PromptOwl service ticket, signed-in session) all of that user's keyless pushes, but never their API keys. Revoke it from nest settings or `DELETE /push-allowlist`.
+
+If applying throws (a busy vault, an unusable payload), the record goes back to `pending` rather than being stranded as applied-with-nothing-written; retry the confirm.
+
+### POST `/nests/:nestId/pending-pushes/:pid/reject`
+
+A reviewer/owner/admin, **or the submitter withdrawing its own push** — rejecting never writes. Marks the push `rejected`. `409` if not pending.
+
+### GET / DELETE `/nests/:nestId/push-allowlist`
+
+Reviewer-only. `GET` → `{ allowlist: [{ user_id, key_id, user_email, key_label, created_by_user_id, created_at }], count }` (`key_id: null` = all of that user's keys; `key_id: "keyless"` = their keyless pushes, labelled "PromptOwl / signed-in session"; `user_email`/`key_label` are resolved for display and null if the user or key is gone). `DELETE { user_id, key_id? }` removes one entry → `{ removed }`.
+
+`/push-allowlist` is governance-licensed (`503` without a valid license). The `/pending-pushes` routes are **not**: `POST /publish` is unlicensed, so a lapsed license on a gated nest would otherwise hold every push at `202` with nothing able to confirm it, and the nest would stop accepting writes with no way back.
 
 ### PATCH `/nests/:nestId/visibility` (admin)
 ```json
@@ -348,7 +438,7 @@ Turning stewardship **off** wipes stewards and pending reviews and is owner-only
   | `public` | anyone, including anonymous callers |
   `org` and `public` readers see **approved content only** — drafts and pending versions stay with collaborators and stewards.
   Under `AUTH_MODE=open` every caller resolves to the anonymous user, so there is no "other authenticated user" for `org` to admit: on an open-mode deployment `org` behaves as `private`. Use it on a deployment with real logins.
-- **Outside-org publish guardrail.** Setting `visibility: "public"` **requires** `acknowledge_public: true`. `org` does not on a single-organization server — it stays inside the deployment, so it crosses no organizational boundary. On a **shared deployment** (`SHARED_DEPLOYMENT=true` / Settings → General → *This server hosts several organizations* — the PromptOwl-hosted service) the deployment *is* several organizations, so `org` requires the same `acknowledge_public: true` and the `warning` names that boundary. Without the acknowledgement the request is rejected `409`:
+- **Outside-org publish guardrail.** Setting `visibility: "public"` **requires** `acknowledge_public: true`. `org` does not on a single-organization server — it stays inside the deployment, so it crosses no organizational boundary. On a **shared deployment** (`SHARED_DEPLOYMENT=true` / Settings → Features → *This server hosts several organizations* — the PromptOwl-hosted service) the deployment *is* several organizations, so `org` requires the same `acknowledge_public: true` and the `warning` names that boundary. Without the acknowledgement the request is rejected `409`:
   ```json
   {
     "error": "Publishing this nest requires acknowledgement.",
@@ -365,6 +455,23 @@ Turning stewardship **off** wipes stewards and pending reviews and is owner-only
   }
   ```
   Going back to `private` needs no acknowledgement. `GET /health` reports `shared_deployment` so a client can word its own confirmation the same way.
+
+### Headless publishing (API-only nests) (owner / admin)
+Publish a **private** nest API-only and mint read-only access keys for it (what a key can reach is [above](#headless-access-keys-api-only-nests)).
+
+| Route | Body | Result |
+|---|---|---|
+| `GET /nests/:nestId/headless` | — | `{ "enabled": false, "keys": [{ "id", "label", "key_prefix", "created_at", "last_used_at" }] }` — never the token |
+| `PUT /nests/:nestId/headless` | `{ "enabled": true }` | `{ "enabled": true }`. `409` unless the nest is `private`. Turning it off **pauses** every key (they answer 404 until it is turned back on). |
+| `POST /nests/:nestId/headless/keys` | `{ "label": "Acme Corp" }` | `201 { "key": {…}, "api_key": "cnst_…" }` — the token is returned **once**. `400` without a label (max 80 chars), `409` while headless is off. |
+| `DELETE /nests/:nestId/headless/keys/:keyId` | — | `{ "revoked": true }` — the key and its identity are gone for good. `404` for an unknown key. |
+
+Headless governs **people without a seat**: the owner, collaborators, team shares, stewards and document/folder grantees keep the access they already have (someone has to maintain the nest). The same goes for per-document publications (`/p/<slug>` links), which the owner creates deliberately one document at a time. Reader mode is display-only and grants no access, so a headless (private) nest is never readable in the public reader. `GET /nests/:nestId/headless` returns `shared_with` (collaborator + team-share + grant counts) so a client can say so before publishing. While a nest is headless, `PATCH /nests/:nestId/visibility` to `org` or `public` answers `409`. Deleting the nest deletes its access keys. Connect a key with ctx:
+```bash
+export NEST_KEY=cnst_…
+ctx vault add my-nest --url https://<server>/nests/<nestId>/mcp --bearer-env NEST_KEY
+ctx search "your question" --vault my-nest
+```
 
 ### PATCH `/nests/:nestId/reader-mode` (server-admin / superadmin only)
 Configure **Public Docs Reader Mode** — a clean, read-only public docs view of the nest. Superadmin-gated via `isServerAdminUserId` (license admin OR `access.yaml` super_admins ∪ the DB-granted set; the same gate as `/nests/unsynced` and `/admin/*`). A plain nest-owner/admin who is not a superadmin gets `403`.
@@ -537,7 +644,7 @@ Read-tier, because commenting is read-tier and a read-only reviewer is the perso
 ```
 Server-wide, not nest-scoped: the people the caller **already works with** — anyone on a nest they own or collaborate on (its owner, collaborators, active stewards) and anyone on a team they own or belong to. `source` ∈ `nest` / `team` / `directory`. For a server admin the directory is every user; `GET /auth/teammates` remains the admin-only full roster.
 
-Scope is deliberately narrow by default, because a single server may hold several unrelated organisations: `PEOPLE_SUGGEST_ALL_USERS` (off by default, Settings → General → People directory) widens it to every registered account, which is right for a single-company deployment and wrong for a shared one. A server admin always sees every account.
+Scope is deliberately narrow by default, because a single server may hold several unrelated organisations: `PEOPLE_SUGGEST_ALL_USERS` (off by default, Settings → Features → People directory) widens it to every registered account, which is right for a single-company deployment and wrong for a shared one. A server admin always sees every account.
 
 `q` filters on name or address (substring, case-insensitive); `limit` caps the list (default and max 20). Suggestions are a convenience for the add-a-person pickers — an address that appears nowhere here is still valid to submit (that is how you invite someone with no account yet), and the add itself re-checks permission and the escalation cap.
 
@@ -776,6 +883,8 @@ Optional query params, applied before the per-node enrichment:
 - Auto-syncs tag index for steward resolution.
 
 Response (201): `{ "node": { ... }, "stewards": [...] }`.
+
+**`202` on a gated nest.** If the nest has `require_push_confirmation` on and this call arrived on a **non-whitelisted API key**, nothing is created: the document is held and the response is the `202 pending_confirmation` body documented under [Push Confirmation Gate](#push-confirmation-gate). A session-cookie caller (a person in the web UI) is never held. Poll `poll_url` for the outcome; the document exists only once `status` reads `applied`.
 
 ### GET `/nests/:nestId/nodes/:nodeId`
 Full node content. 403 if no steward access (when stewardship on).
@@ -1127,6 +1236,96 @@ Raising a request notifies the nest owner + owner/admin collaborators: a `/me/wo
 
 ### POST `/nests/:nestId/deletion-requests/:id/decline`
 Body: `{ "note": "still referenced by onboarding" }` (required). Write permission. Keeps the node and the row, recording who declined and why. `404` once the request is no longer pending.
+
+### GET `/nests/:nestId/agent-activity`
+Query: `?scope=agents|all&agent=<name>&limit=50&offset=0` (scope defaults to `agents`, limit caps at 200, offset caps at 10 000)
+
+What **agents did to this nest**, newest first: every write whose recorded `client` names an agent (§9.4 attribution — the MCP `initialize` handshake's client name, the API key's label, or a caller-sent `client.agent`), plus deletions. `scope=all` includes changes with no agent (a person in the web UI); `agent=` narrows to one agent. Built from `node_versions` and the `node_deletions` tombstones — no separate log. System auto-publish rows are left out. License-gated like `/feed`.
+
+Owners, admins and reviewers only: items are limited to documents the caller could undo. Deletions show only to nest-wide owners/admins/reviewers. An editor or viewer gets `items: []`.
+
+Each item carries an `undo` verdict: `available`, `effect` (`restore` | `discard` | `delete`), `restoreTo` for a restore, or a `reason` when it can't be undone. Reasons include: a newer change exists on the document, the change is awaiting review, or the entry is a deletion.
+
+```json
+{
+  "items": [
+    {
+      "id": "nodes/pricing@v2",
+      "kind": "update",
+      "nodeId": "nodes/pricing",
+      "title": "Pricing",
+      "version": 2,
+      "status": "published",
+      "actor": "owner@x.com",
+      "agent": "hootie",
+      "client": { "agent": "hootie" },
+      "at": "2026-09-28T01:00:00.000Z",
+      "undo": { "available": true, "effect": "restore", "restoreTo": 1 }
+    },
+    {
+      "id": "nodes/old@deleted",
+      "kind": "delete",
+      "nodeId": "nodes/old",
+      "actor": "owner@x.com",
+      "agent": "hootie",
+      "at": "2026-09-27T22:00:00.000Z",
+      "undo": { "available": false, "reason": "Deletions can't be undone here — deleting a document purges its history." }
+    }
+  ],
+  "limit": 50,
+  "offset": 0,
+  "hasMore": false,
+  "scope": "agents"
+}
+```
+
+`kind` is `create` (the document's first version), `update`, `restore` (a revert or an earlier undo), or `delete`.
+
+### POST `/nests/:nestId/agent-activity/undo`
+Body: `{ "nodeId": "nodes/pricing", "version": 2 }`. Owners, admins and reviewers on that document (a read-tier reviewer is admitted, like `/approve`). Undo never rewrites history. It re-checks at call time and takes the normal write path:
+
+- **published change** → restores the previous sealed version as a new version (same path as `POST …/revert`; change note `Undo of v2 by hootie — restored version 1`). In a governed nest the restore follows the usual review rules, so it may land as a draft awaiting approval.
+- **draft** → discards it (`POST …/discard` semantics: back to the last published version, or the document is removed if it was never published).
+- **the document's first version** (a create) → deletes the document.
+
+Returns `{ ok, nodeId, undone, effect, version, status?, restoredVersion? }`. Errors:
+- `409` with the reason when the document changed since (it names who changed it), the change is under review ("reject it from the review queue instead"), or the version isn't in the document's history
+- `403` for editors/viewers
+- `404` for a missing document
+- `400` for a malformed body
+
+### GET `/nests/:nestId/activity-log`
+Query: `?node=<nodeId>` **or** `?folder=<path>` (neither = the whole nest), `&type=<t>[,<t>…]`, `&actor=<email>`, `&limit=50` (max 200), `&offset=0`.
+
+The **admin activity log** for one document, one folder, or the nest: who changed, reviewed, commented on, deleted, read, retrieved or exported it, newest first. Owner, nest admin, or server admin only (the same rule as `/trace`); everyone else gets `403`. `400` for `node` and `folder` together, a traversal id or folder, or an unknown `type`.
+
+It merges what the server records: versions (`created`, `edited`, `restored`, with the agent from the write's `client`), reviews (`review_requested`, `approved`, `rejected`, `review_cancelled`), comments (`commented`, `comment_resolved`), deletions (`deleted`), and document access, which leaves no version (`read`, `retrieved`, `exported`).
+
+Access is recorded when a document is opened (`GET …/nodes/:id`, MCP `context_get`), returned by a search, query or context call (`/search`, `/query`, `/context` incl. Hootie, MCP `context_query` / `context_search` / `context_resolve`), or exported. A whole-nest export is one row with `nodeId: null` and appears in the nest's and folders' logs, and in the log of every document that existed at the time (not documents created afterwards). `detail` names how a document was accessed (`search`, `context`, `context_get`, `markdown export (12 documents)`); **what the caller searched for or asked is never stored**. Access rows are **sampled, not exhaustive**: throttled to one per person, document, action, surface and agent per 10 minutes, capped at 50 documents per retrieval, and pruned on the activity-trace retention window (`TRACE_RETENTION_DAYS`). The throttle is per server process, so a multi-instance deployment records up to one row per instance per window. Deleting a document purges its version and access history (the `deleted` tombstone stays).
+
+```json
+{
+  "items": [
+    {
+      "id": "a:42",
+      "type": "read",
+      "nodeId": "nodes/sales/pricing",
+      "title": "Pricing",
+      "actor": "alice@acme.com",
+      "agent": "claude-code",
+      "client": { "agent": "claude-code" },
+      "at": "2026-09-29T12:00:00.000Z",
+      "surface": "mcp",
+      "detail": "context_get"
+    }
+  ],
+  "limit": 50,
+  "offset": 0,
+  "hasMore": false
+}
+```
+
+The collaborator-facing `GET …/activity` and `GET …/nodes/:id/activity` feeds are unchanged and never include access rows.
 
 ### GET `/nests/:nestId/feed`
 Query: `?filter=all|changes|comments&limit=50&offset=0` (filter defaults to `all`, limit caps at 200, offset caps at 10 000)
@@ -1709,7 +1908,7 @@ Deterministic fact lookup against a **table** node (CSV body): fetch the exact r
 Same operation over MCP: `context_table_query`.
 
 ### POST `/nests/:nestId/chat`
-Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (off → `404`); needs the server-wide `ANTHROPIC_API_KEY` (missing → `503` with `reason: "no_api_key"`); answers with `HOOTIE_MODEL`, through `ANTHROPIC_BASE_URL` when one is set (all three editable in Settings → General). Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
+Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (**off by default** — off → `404`); needs the server-wide `ANTHROPIC_API_KEY` (missing → `503` with `reason: "no_api_key"`); answers with `HOOTIE_MODEL`, through `ANTHROPIC_BASE_URL` when one is set (all three editable in Settings → Hootie). Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
 
 Request:
 
@@ -2123,6 +2322,11 @@ enforced on both sides, not by trusting the issuer.
 ### GET `/health` (no auth)
 `{ "status": "ok" | "suspended", "version": "<server version>", … }`. Needs no key (like `/llms.txt` and public `/p/:slug` pages) — use it for liveness probes. `suspended` means the license was revoked and writes are refused until a valid key is installed.
 
+Hootie fields: `hootie_enabled` (default `false`), `hootie_brand` — `{ name, logo_url, accent_color, greeting }`, the identity every surface should show (the admin's custom one on an Enterprise licence, otherwise `{ name: "Hootie", logo_url: null, accent_color: null, greeting: null }`, decided server-side) — and `hootie_branding_available` (whether custom identity is allowed).
+
+### Hootie identity — `/admin/settings` fields (Enterprise)
+`hootie_name` (one line, ≤40 chars), `hootie_logo_url` (`https://` image: `.png`/`.jpg`/`.gif`/`.webp`), `hootie_accent_color` (hex, normalised to `#rrggbb`), `hootie_greeting` (one line, ≤200 chars). `""` resets a field to the default. GET returns the stored values plus `hootie_branding_available`. A PATCH that would **change** any of these without an Enterprise licence is refused as a whole — `403 { code: "enterprise_required" }`, nothing written, including the request's other fields. Sending back the stored values unchanged is allowed (they are ignored). Invalid values → `400` with `fieldErrors` keyed by field. `hootie_enabled` is written explicitly (`true`/`false`), so a UI choice beats the deploy env.
+
 ### Superadmins — GET/POST `/admin/super-admins`, DELETE `/admin/super-admins/:email` (server-admin only)
 Grant and revoke **superadmins** (server-wide admins) from the API/UI instead of only via `access.yaml`. The effective superadmin set is the union of three sources, surfaced per row as `source`:
 
@@ -2175,7 +2379,7 @@ Active sites are loaded into an in-memory cache at startup and refreshed after e
 ### GET `/admin/trace` (server-admin only)
 Operator activity trail — one newest-first row per API request and per MCP tool call, so the server admin has a single place to audit what every client and agent did. Server-admin only: the license admin, or a `super_admin` in `access.yaml` (open mode: always allowed). Everyone else gets `403`. Cross-tenant data; not scoped to a nest.
 
-Rows are best-effort fire-and-forget writes to the `api_events` table (a broken trace table never fails a real request) on a rolling retention window of **`TRACE_RETENTION_DAYS`** days (default **14**; `0` = keep forever — see `CONFIGURATION.md`; also editable from Settings → Advanced). API rows come from a global request-logging middleware; MCP rows are logged inside `handleToolCall`, so both per-nest and server-level tool calls — including ones that throw — are captured.
+Rows are best-effort fire-and-forget writes to the `api_events` table (a broken trace table never fails a real request) on a rolling retention window of **`TRACE_RETENTION_DAYS`** days (default **14**; `0` = keep forever — see `CONFIGURATION.md`; also editable from Settings → Basic). API rows come from a global request-logging middleware; MCP rows are logged inside `handleToolCall`, so both per-nest and server-level tool calls — including ones that throw — are captured.
 
 Query params (all optional):
 - `kind` — `api` or `mcp`. Omit for both.

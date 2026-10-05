@@ -31,7 +31,7 @@ import {
   VaultBusyError,
   isVaultLockTimeout,
 } from "../shared/errors.js";
-import type { ClientMetadata } from "../shared/client-metadata.js";
+import { serializeClient, type ClientMetadata } from "../shared/client-metadata.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
@@ -174,6 +174,17 @@ const slugify = (s: string) =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
+
+/**
+ * The id `createNode` will derive for a title at the nest root, or null when
+ * the title slugifies to nothing (createNode generates an id at write time,
+ * so it cannot be known in advance). Preview-only — the confirm modal uses it
+ * to label a staged document New vs Update.
+ */
+export function derivedNodeId(title: string): string | null {
+  const slug = slugify(title).slice(0, 100).replace(/-+$/, "");
+  return slug ? `nodes/${slug}` : null;
+}
 
 /**
  * The id for a title that carries no ASCII at all: document-1, document-2, …,
@@ -1385,6 +1396,25 @@ export interface WriteOptions {
    * authored.
    */
   creatorReviews?: boolean;
+  /**
+   * The version the caller last saw as this node's head. Checked INSIDE the
+   * write lock, so a change that landed between the caller's look and this
+   * write is refused (409) instead of overwritten. The agent-activity undo
+   * uses it: its "nothing changed since" check has to hold at write time.
+   */
+  expectHead?: number;
+}
+
+/** Refuse the write if the node's head moved past what the caller saw.
+ *  Call inside the node's write lock. */
+async function assertHead(nestId: string, nodeId: string, expectHead: number | undefined): Promise<void> {
+  if (expectHead === undefined) return;
+  const current = await versions.getCurrentVersion(nestId, nodeId);
+  if (current !== expectHead) {
+    throw new ConflictError(
+      `This document changed while you were looking at it (now v${current}, you saw v${expectHead}). Reload and try again.`,
+    );
+  }
 }
 
 export interface NodeMutationResult {
@@ -2055,6 +2085,7 @@ export async function updateNode(
 ): Promise<NodeMutationResult> {
   return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
     try {
+      await assertHead(nestId, nodeId, opts.expectHead);
       const { storage, versions: versionManager } = await engineCache.get(
         nestId
       );
@@ -2461,6 +2492,11 @@ export const NODE_KEYED_TABLES = [
   ["publish", "node_id"],
   ["edges", "from_node"],
   ["edges", "to_node"],
+  // Who read / pulled the document (CU-wdqcq03aw2). Moves carry it along;
+  // a delete purges it with the rest of the document's history, so a later
+  // document at the same id never inherits someone else's reads. The
+  // deletion tombstone and whole-nest export rows (node_id NULL) survive.
+  ["node_access_events", "node_id"],
 ] as const;
 
 /** Drop every row keyed to a node id. Caller supplies the transaction. */
@@ -2708,8 +2744,10 @@ export async function discardDraft(
   nestId: string,
   nodeId: string,
   userEmail: string,
+  opts: Pick<WriteOptions, "expectHead"> = {},
 ): Promise<{ deleted: boolean; version: number | null; warning?: string }> {
   return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
+    await assertHead(nestId, nodeId, opts.expectHead);
     await assertNotReviewLocked(nestId, nodeId, userEmail, "discarding");
 
     const sealed = await versions.getSealedVersion(nestId, nodeId);
@@ -2777,10 +2815,89 @@ export async function discardDraft(
   });
 }
 
+/**
+ * Restore an old version by writing its reconstructed content as a NEW version
+ * through updateNode — history is append-only, nothing is lost, and the write
+ * takes the same governance path any edit does (review lock, draft vs publish).
+ * Shared by POST …/revert and the agent-activity undo.
+ *
+ * A pdf node's body can't be written back as text — it is whatever its PDF
+ * extracts to. Restoring a pdf version re-imports that version's binary
+ * (resolved from the archive and hash-verified by the engine), which brings
+ * its text back with it.
+ */
+export async function restoreVersion(
+  nestId: string,
+  nodeId: string,
+  targetVersion: number,
+  userEmail: string,
+  opts: { client?: ClientMetadata; changeNote?: string; expectHead?: number } = {},
+): Promise<NodeMutationResult> {
+  const { storage, versions: versionManager } = await engineCache.get(nestId);
+  let raw: string;
+  try {
+    raw = await versionManager.reconstructVersion(nodeId, targetVersion);
+  } catch {
+    throw new NotFoundError(`Version ${targetVersion} not found for ${nodeId}`);
+  }
+  let pdfMeta: unknown;
+  try {
+    pdfMeta = parseDocument(`${nodeId}.md`, raw, nodeId).frontmatter.pdf;
+  } catch {
+    pdfMeta = undefined;
+  }
+  let restoredPdf: Buffer | null = null;
+  if (pdfMeta) {
+    try {
+      restoredPdf = await readPdfBinary(storage as unknown as NestStorage, nodeId, {
+        version: targetVersion,
+      });
+    } catch (err) {
+      console.error("[pdf] restore could not read the version's binary", nestId, nodeId, targetVersion, err);
+      throw new NotFoundError(`The PDF of version ${targetVersion} is not available to restore.`);
+    }
+  }
+  return updateNode(
+    nestId,
+    nodeId,
+    {
+      ...(restoredPdf ? { pdf: { bytes: new Uint8Array(restoredPdf) } } : { content: bodyOnly(nodeId, raw) }),
+      changeNote: opts.changeNote ?? `Restored from version ${targetVersion}`,
+      client: opts.client,
+    },
+    userEmail,
+    { expectHead: opts.expectHead },
+  );
+}
+
+/**
+ * deleteNode, refused if the node's head moved past `expectHead`. deleteNode
+ * takes no lock of its own (discardDraft calls it from inside one), so this
+ * holds the node's write lock across the check and the delete — a delete
+ * purges history, so it must never land on a change the caller didn't see.
+ */
+export async function deleteNodeIfUnchanged(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+  expectHead: number,
+  opts: { client?: ClientMetadata } = {},
+): Promise<void> {
+  return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
+    await assertHead(nestId, nodeId, expectHead);
+    await deleteNode(nestId, nodeId, userEmail, opts);
+  });
+}
+
 export async function deleteNode(
   nestId: string,
   nodeId: string,
   userEmail: string,
+  opts: {
+    /** Caller attribution (§9.4) for the tombstone — the one record a delete
+     *  leaves, so it is where "which agent deleted this" has to live. */
+    client?: ClientMetadata;
+  } = {},
 ): Promise<void> {
   const { storage } = await engineCache.get(nestId);
 
@@ -2831,11 +2948,12 @@ export async function deleteNode(
     // GET /changes can tell external mirrors a doc was removed. Upsert:
     // delete → recreate → delete again just refreshes the timestamp.
     await tx.run(
-      `INSERT INTO node_deletions (nest_id, node_id, deleted_by, deleted_at)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO node_deletions (nest_id, node_id, deleted_by, deleted_at, client_json)
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(nest_id, node_id) DO UPDATE
-         SET deleted_by = excluded.deleted_by, deleted_at = excluded.deleted_at`,
-      [nestId, nodeId, userEmail, new Date().toISOString()],
+         SET deleted_by = excluded.deleted_by, deleted_at = excluded.deleted_at,
+             client_json = excluded.client_json`,
+      [nestId, nodeId, userEmail, new Date().toISOString(), serializeClient(opts.client)],
     );
   });
 

@@ -31,6 +31,8 @@ import {
   setPrimeOnlyReview,
   nestPrimeTags,
   setPrimeTags,
+  nestRequiresPushConfirmation,
+  setRequirePushConfirmation,
 } from "./service.js";
 import {
   registerImportedDocuments,
@@ -587,6 +589,23 @@ nestRoutes.get("/:nestId", async (c) => {
   const grant_only = roles.length === 0 && isGrantOnly(access);
 
   const nest = await getNest(nestId);
+  // A headless access key (CU-wdqcq0314u) sees the nest's public face only —
+  // not its owner, team shares, settings or publishing state.
+  if (access.isHeadlessReader && nest) {
+    return c.json({
+      nest: {
+        id: nest.id,
+        name: nest.name,
+        slug: nest.slug,
+        description: nest.description ?? null,
+        created_at: nest.created_at,
+      },
+      permission,
+      roles: [],
+      myStewards: [],
+      grant_only: false,
+    });
+  }
   return c.json({
     nest: withParsedBranding(nest),
     permission,
@@ -721,6 +740,9 @@ nestRoutes.get("/:nestId/settings", async (c) => {
     allow_self_approve: await nestAllowsSelfApprove(nestId),
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
+    // Push Confirmation Gate — superadmin-only to SET (see PATCH), readable by
+    // anyone who can read the nest so the CLI/UI knows the posture.
+    require_push_confirmation: await nestRequiresPushConfirmation(nestId),
     creator_is_reviewer: await nestCreatorIsReviewer(nestId),
   });
 });
@@ -751,8 +773,27 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     allow_self_approve?: boolean;
     prime_only_review?: boolean;
     prime_tags?: string[] | string;
+    require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
   }>();
+
+  // Push Confirmation Gate is a SERVER-admin (superadmin) control, not a
+  // per-nest owner setting — the whole point is that a nest admin cannot turn
+  // their own push gate off. Reject the field with a per-field 403 for anyone
+  // who isn't a superadmin, WITHOUT touching the other settings in the body.
+  if (typeof body.require_push_confirmation === "boolean") {
+    if (!(await isServerAdminUserId(userId))) {
+      return c.json(
+        {
+          error:
+            "Only a server superadmin can change require_push_confirmation for a nest.",
+          field: "require_push_confirmation",
+        },
+        403,
+      );
+    }
+    await setRequirePushConfirmation(nestId, body.require_push_confirmation);
+  }
   let wiped: {
     stewards: number;
     pendingReviews: number;
@@ -807,6 +848,7 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     allow_self_approve: await nestAllowsSelfApprove(nestId),
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
+    require_push_confirmation: await nestRequiresPushConfirmation(nestId),
     creator_is_reviewer: await nestCreatorIsReviewer(nestId),
     wiped,
   });

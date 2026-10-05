@@ -43,6 +43,7 @@ const ActivityTracePage = lazyNamed(() => import("./components/ActivityTracePage
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 import { BetaBadge } from "@/components/ui/beta-badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -123,6 +124,9 @@ type View =
       /** Open with this comment thread focused (activity-feed deep link;
        *  also arrives via the ?thread= URL param). */
       initialThreadId?: string;
+      /** The review queue this doc was opened from. Back, approve and reject
+       *  return there, so a reviewer goes straight to the next item. */
+      returnTo?: View;
     }
   | { page: "docs" }
   | {
@@ -255,6 +259,9 @@ export default function App() {
     (next: View) => navigateGuarded(() => setViewNow(next)),
     [],
   );
+  // The view a queue page sits on, for a document opened from it to return to.
+  const viewRef = useRef(view);
+  viewRef.current = view;
   // The node key last written to history (see `nodeKey` below) — null both
   // before the URL-sync effect has run at all and whenever the current view
   // isn't looking at a node, so in either case the next node it lands on
@@ -819,7 +826,15 @@ export default function App() {
       openNest: (id, name, isOwner, isAnonOwned, isArchived) =>
         setView({ page: "nest", nestId: id, nestName: name, isOwner, isAnonOwned, isArchived }),
       openReview: (nestId, nestName, nodeId) =>
-        setView({ page: "document", nestId, nestName, nodeId, isOwner: true, isAnonOwned: true }),
+        setView({
+          page: "document",
+          nestId,
+          nestName,
+          nodeId,
+          isOwner: true,
+          isAnonOwned: true,
+          returnTo: viewRef.current,
+        }),
       manageKeys: () => setView({ page: "dashboard", tab: "api-keys" }),
     }),
     [setView],
@@ -1120,8 +1135,13 @@ export default function App() {
 
   return (
     <div
-      className={withSidebar ? "flex min-h-screen items-stretch bg-background" : "min-h-screen bg-background"}
-      style={readerBrandVars}
+      className={cn(
+        withSidebar ? "flex min-h-screen items-stretch bg-background" : "min-h-screen bg-background",
+        "transition-[padding] duration-200",
+      )}
+      // --hootie-inset: the open Hootie panel's width on wide screens, so the
+      // page sits beside it instead of under it (HootiePanel sets it).
+      style={{ ...readerBrandVars, paddingRight: "var(--hootie-inset, 0px)" }}
     >
       {/* The sidebar is a full-height column beside the whole shell — header
           included — with the brand at its top, so header and rail read as one
@@ -1551,6 +1571,7 @@ export default function App() {
                 isAnonOwned: view.isAnonOwned,
                 initialFolder: opts?.folder,
                 initialThreadId: opts?.thread,
+                returnTo: view.tab === "review" ? view : undefined,
               })
             }
             onOpenTrace={() =>
@@ -1637,6 +1658,10 @@ export default function App() {
                   openDocument({ ...prev, breadcrumb: stack.slice(0, -1) });
                   return;
                 }
+                if (doc.returnTo) {
+                  setView(doc.returnTo);
+                  return;
+                }
                 // Documents tab, not the nest's default Overview — every
                 // caller of this is a "back to documents" affordance.
                 openNest({ tab: "documents" });
@@ -1648,6 +1673,7 @@ export default function App() {
                 if (!entry) return;
                 openDocument({ ...entry, breadcrumb: stack.slice(0, index) });
               }}
+              onReviewed={doc.returnTo ? () => setView(doc.returnTo!) : undefined}
               onSaved={() => {
                 // A fresh "new" doc has nowhere to stay open on, so land back
                 // on the nest; saving an EXISTING document must leave the
