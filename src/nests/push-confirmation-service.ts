@@ -35,6 +35,9 @@ export type PendingPushStatus = "pending" | "applied" | "rejected" | "expired";
 
 /** '' key_id means "any of that user's keys" — see migration 040. */
 const ALL_KEYS = "";
+/** key_id for keyless agent writes (PromptOwl service ticket, signed-in MCP):
+ *  whitelists those alone, never the user's API keys. */
+const KEYLESS = "keyless";
 
 export interface PendingPushRow {
   id: string;
@@ -120,7 +123,7 @@ export async function isPushAllowlisted(
       WHERE nest_id = ? AND user_id = ?
         AND (key_id = ? OR key_id = ?)
       LIMIT 1`,
-    [nestId, userId, ALL_KEYS, keyId ?? ALL_KEYS],
+    [nestId, userId, ALL_KEYS, keyId ?? KEYLESS],
   )) as { 1: number } | undefined;
   return !!row;
 }
@@ -170,7 +173,11 @@ export async function listPushAllowlist(nestId: string): Promise<
     created_at: string;
   }>;
   // Surface the '' sentinel as null ("all keys") at the API boundary.
-  return rows.map((r) => ({ ...r, key_id: r.key_id === ALL_KEYS ? null : r.key_id }));
+  return rows.map((r) => ({
+    ...r,
+    key_id: r.key_id === ALL_KEYS ? null : r.key_id,
+    key_label: r.key_id === KEYLESS ? "PromptOwl / signed-in session" : r.key_label,
+  }));
 }
 
 export async function removeFromPushAllowlist(params: {
@@ -420,12 +427,12 @@ export async function confirmPendingPush(
     [result.published, id],
   );
 
-  // No key id (cookie-session push) would whitelist every key of the user.
-  if (opts.alwaysAllow && row.submitter_key_id) {
+  // A keyless push whitelists KEYLESS, never '' — that covers every key of the user.
+  if (opts.alwaysAllow) {
     await addToPushAllowlist({
       nestId,
       userId: row.submitter_user_id,
-      keyId: row.submitter_key_id,
+      keyId: row.submitter_key_id ?? KEYLESS,
       createdBy: deciderUserId,
     });
   }

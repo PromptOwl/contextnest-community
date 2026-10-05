@@ -513,6 +513,47 @@ describe("always-allow whitelists the exact API key", () => {
     expect(third.status).toBe(202);
     expect(await nodeIds(callerB, nestId)).not.toContain("nodes/third");
   });
+
+  it("a keyless push (PromptOwl ticket / session) is whitelisted on its own — API keys still gate", async () => {
+    const nestId = await makeNest("allowlist-keyless");
+    await setGate(nestId, true);
+    const login = await app.request("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: owner.email, password: "testpass" }),
+    });
+    const cookie = login.headers.get("set-cookie") || "";
+    const keylessPublish = (title: string) =>
+      app.request(`/nests/${nestId}/publish`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ documents: [{ title, content: "x" }] }),
+      });
+
+    const first = await keylessPublish("Keyless One");
+    expect(first.status).toBe(202);
+    const { pending_id } = await first.json();
+    const confirm = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/pending-pushes/${pending_id}/confirm`,
+      { always_allow: true },
+      reviewerKey,
+    );
+    expect(confirm.status).toBe(200);
+
+    expect([200, 201]).toContain((await keylessPublish("Keyless Two")).status);
+    expect(await nodeIds(owner, nestId)).toContain("nodes/keyless-two");
+
+    const keyed = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publish`,
+      { documents: [{ title: "Keyed", content: "x" }] },
+      owner.apiKey,
+    );
+    expect(keyed.status).toBe(202);
+  });
 });
 
 describe("submitter-or-steward read scope", () => {
