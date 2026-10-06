@@ -2469,7 +2469,7 @@ The server validates its key with PromptOwl (`POST {PROMPTOWL_API_URL}/api/licen
 
 - **Seats are reported, never enforced.** Over the licensed seats, new people still join. The admin sees a private notice, and PromptOwl follows up.
 - **Expiry has a 14-day grace period on PromptOwl's side.** While `reason` is `expired_grace` the server works normally until `grace_ends_at`.
-- **A lapse makes the server read-only, with no lock-out.** When PromptOwl rejects the key 3 checks in a row (about 3 min) or a suspension is confirmed (the two-strike 1h window), writes return 503 as above. Reads keep working. Sessions and the installed key are kept, so a renewal or reactivation restores the server on the next check with nothing to reinstall.
+- **A lapse makes the server read-only, with no lock-out.** When PromptOwl rejects the key 3 checks in a row (about 3 min) or a suspension is confirmed (two suspended answers within an hour — the next 60s check, so about a minute), writes return 503 as above. Reads keep working. Sessions and the installed key are kept, so a renewal or reactivation restores the server on the next check with nothing to reinstall.
 
 ### GET `/license/status` (public)
 `{ valid, tier, org, owner_email, suspended, suspended_reason, limits, setup_required }`. `setup_required` is true only for a server that has never been licensed; the UI shows the activation screen then. A lapsed license is not a setup case. Carries no lapse reason, dates, head-count or contact.

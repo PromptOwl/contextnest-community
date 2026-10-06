@@ -2213,9 +2213,55 @@ export function createApp(): Hono<AuthEnv> {
       : flexAuthMiddleware(c, next);
   });
 
+  // Why a write is refused on a read-only server — suspended by PromptOwl, or
+  // no valid license — worded for who asked: admins get the reason and who to
+  // talk to, everyone else one neutral line. null = writes are allowed.
+  const readOnlyDenial = async (
+    userId: string,
+  ): Promise<{ error: string; extra: Record<string, unknown> } | null> => {
+    const admin = () => canSeeLicenseDetail(userId);
+    if (isSuspended()) {
+      if (!(await admin())) return { error: NEUTRAL_READ_ONLY, extra: { read_only: true } };
+      const lic = getCurrentLicense();
+      return {
+        error: "Server suspended by PromptOwl",
+        extra: {
+          reason: getSuspensionReason(),
+          contact: (lic?.contact ?? DEFAULT_LICENSE_CONTACT).email,
+          contact_url: (lic?.contact ?? DEFAULT_LICENSE_CONTACT).url,
+        },
+      };
+    }
+    const lic = getCurrentLicense();
+    if (lic?.valid) return null;
+    if (!(await admin())) return { error: NEUTRAL_READ_ONLY, extra: { read_only: true } };
+    // licenseTerms carries the machine reason code; expose it as
+    // license_reason so it doesn't clobber the human-readable reason.
+    const { reason: licenseReason, ...terms } = licenseTerms(lic);
+    return {
+      error: "License required",
+      extra: {
+        ...terms,
+        license_reason: licenseReason,
+        reason:
+          lic?.reason === "expired"
+            ? "This server's PromptOwl license has ended, so it is read-only until it is renewed. Nothing has been deleted."
+            : "This server has no valid PromptOwl license installed. Ask the server admin to install one via the setup screen or POST /license/install.",
+        setup_url: "/setup",
+      },
+    };
+  };
+
   // Access control for nest-scoped routes
   nestsApp.use("*", async (c, next) => {
     const parts = nestPathParts(c.req.path);
+    // Nest-level writes (create, rename, delete: /nests, /nests/:id) and the
+    // unsynced-folder actions skip the per-nest checks below, but a read-only
+    // server must refuse them too.
+    if ((parts.length < 2 || parts[0] === "unsynced") && c.req.method !== "GET") {
+      const denial = await readOnlyDenial(c.get("userId"));
+      if (denial) return c.json({ error: denial.error, ...denial.extra }, 503);
+    }
     if (parts.length < 2) return next();
 
     // "unsynced" is a server-admin namespace under /nests, not a nest id.
@@ -2294,15 +2340,8 @@ export function createApp(): Hono<AuthEnv> {
     // Kill switch: if suspended, block writes but allow reads
     // Only admins hear why; everyone else gets the neutral read-only line.
     if (isSuspended() && c.req.method !== "GET") {
-      if (!(await canSeeLicenseDetail(userId))) {
-        return deny(503, NEUTRAL_READ_ONLY, { read_only: true });
-      }
-      const lic = getCurrentLicense();
-      return deny(503, "Server suspended by PromptOwl", {
-        reason: getSuspensionReason(),
-        contact: (lic?.contact ?? DEFAULT_LICENSE_CONTACT).email,
-        contact_url: (lic?.contact ?? DEFAULT_LICENSE_CONTACT).url,
-      });
+      const denial = await readOnlyDenial(userId);
+      if (denial) return deny(503, denial.error, denial.extra);
     }
 
     // License gate: block writes until a valid PromptOwl key is
@@ -2371,25 +2410,9 @@ export function createApp(): Hono<AuthEnv> {
       const isPushRelease = path.includes("/pending-pushes");
       const needsLicense =
         !isPushRelease && (c.req.method !== "GET" || isGovernance);
-      if (needsLicense) {
-        const lic = getCurrentLicense();
-        if (!lic?.valid) {
-          if (!(await canSeeLicenseDetail(userId))) {
-            return deny(503, NEUTRAL_READ_ONLY, { read_only: true });
-          }
-          // licenseTerms carries the machine reason code; expose it as
-          // license_reason so it doesn't clobber the human-readable reason.
-          const { reason: licenseReason, ...terms } = licenseTerms(lic);
-          return deny(503, "License required", {
-            ...terms,
-            license_reason: licenseReason,
-            reason:
-              lic?.reason === "expired"
-                ? "This server's PromptOwl license has ended, so it is read-only until it is renewed. Nothing has been deleted."
-                : "This server has no valid PromptOwl license installed. Ask the server admin to install one via the setup screen or POST /license/install.",
-            setup_url: "/setup",
-          });
-        }
+      if (needsLicense && !getCurrentLicense()?.valid) {
+        const denial = await readOnlyDenial(userId);
+        if (denial) return deny(503, denial.error, denial.extra);
       }
     }
 

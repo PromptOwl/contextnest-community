@@ -216,7 +216,7 @@ describe("kill switch (isSuspended / two-strike confirmation)", () => {
     vi.restoreAllMocks();
   });
 
-  it("first suspension flag does NOT confirm — confirmation requires the 1h window", async () => {
+  it("first suspension flag does NOT confirm — one stray answer can't suspend", async () => {
     process.env.PROMPTOWL_KEY = "pk_susp_1";
     mockFetch({
       body: { valid: true, tier: "team", suspended: true, suspended_reason: "abuse" },
@@ -224,11 +224,11 @@ describe("kill switch (isSuspended / two-strike confirmation)", () => {
     const { validateLicense, isSuspended, getSuspensionReason } =
       await loadLicense();
     await validateLicense();
-    expect(isSuspended()).toBe(false); // still in confirmation window
+    expect(isSuspended()).toBe(false); // needs a second answer
     expect(getSuspensionReason()).toBe("abuse"); // reason captured early
   });
 
-  it("a second strike after the confirm window confirms suspension", async () => {
+  it("a second strike inside the hour confirms suspension (spec §9.4: two checks in one hour)", async () => {
     process.env.PROMPTOWL_KEY = "pk_susp_2";
     mockFetch({
       body: { valid: true, tier: "team", suspended: true, suspended_reason: "tos" },
@@ -248,11 +248,26 @@ describe("kill switch (isSuspended / two-strike confirmation)", () => {
       ["pk_susp_2"],
     );
 
-    // Jump past the 1h confirmation window
-    vi.spyOn(Date, "now").mockReturnValue(realNow + 61 * 60 * 1000);
+    // The next poll, a minute later, confirms
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 60 * 1000);
     await license.validateLicense();
     expect(license.isSuspended()).toBe(true);
     expect(license.getSuspensionReason()).toBe("tos");
+  });
+
+  it("a second strike more than an hour after the first starts a new window instead", async () => {
+    process.env.PROMPTOWL_KEY = "pk_susp_2b";
+    mockFetch({ body: { valid: true, tier: "team", suspended: true, suspended_reason: "tos" } });
+    const license = await loadLicense();
+    const realNow = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(realNow);
+    await license.validateLicense({ forceFresh: true });
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 61 * 60 * 1000);
+    await license.validateLicense({ forceFresh: true });
+    expect(license.isSuspended()).toBe(false); // too far apart: strike 1 again
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 62 * 60 * 1000);
+    await license.validateLicense({ forceFresh: true });
+    expect(license.isSuspended()).toBe(true);
   });
 
   it("clears a pending suspension when PromptOwl reverses the flag", async () => {
@@ -311,7 +326,7 @@ describe("suspension (valid:false + suspended:true) keeps the two-strike window"
     expect(first.tier).toBe("team");
     expect(license.isSuspended()).toBe(false);
 
-    vi.spyOn(Date, "now").mockReturnValue(realNow + 61 * 60 * 1000);
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 60 * 1000); // the next poll
     const second = await license.validateLicense({ forceFresh: true });
     expect(second.valid).toBe(true); // license kept; writes blocked via isSuspended()
     expect(license.isSuspended()).toBe(true);

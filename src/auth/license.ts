@@ -640,9 +640,15 @@ async function _validateLicenseImpl(
     else if (cached?.owner_email) lastOwnerEmail = cached.owner_email;
 
     // ── Kill switch: two-strike confirmation ──
+    // Spec §9.4: two suspended answers inside one hour suspend the server —
+    // with the 60s poll that is about a minute, and one stray answer can't.
     if (data.suspended === true) {
-      if (!suspensionFirstSeen) {
-        // First strike — start the confirmation window
+      if (
+        !suspensionConfirmed &&
+        (!suspensionFirstSeen ||
+          Date.now() - suspensionFirstSeen > SUSPENSION_CONFIRM_WINDOW_MS)
+      ) {
+        // First strike (or the last one is over an hour old) — start the window
         suspensionFirstSeen = Date.now();
         suspensionReason = data.suspended_reason || "Suspended by PromptOwl";
         console.warn(
@@ -652,26 +658,21 @@ async function _validateLicenseImpl(
           `  Reason: ${suspensionReason}`,
         );
         console.warn(
-          `  This will be confirmed in ~1 hour. If this is an error,`,
+          `  It is confirmed on the next check (about a minute). If this is an error,`,
         );
         console.warn(
           `  contact support@promptowl.ai to reverse it.\n`,
         );
-      } else if (
-        Date.now() - suspensionFirstSeen >= SUSPENSION_CONFIRM_WINDOW_MS
-      ) {
-        // Second strike after the window — confirm suspension
+      } else {
+        // Second strike inside the window — confirm suspension (logged once)
+        const announce = !suspensionConfirmed;
         suspensionConfirmed = true;
         suspensionReason = data.suspended_reason || "Suspended by PromptOwl";
-        console.error(
-          `\n  SERVER SUSPENDED: ${suspensionReason}`,
-        );
-        console.error(
-          `  Write operations are disabled. Reads still work.`,
-        );
-        console.error(
-          `  Contact support@promptowl.ai to resolve.\n`,
-        );
+        if (announce) {
+          console.error(`\n  SERVER SUSPENDED: ${suspensionReason}`);
+          console.error(`  Write operations are disabled. Reads still work.`);
+          console.error(`  Contact support@promptowl.ai to resolve.\n`);
+        }
       }
       // During the confirmation window, server runs normally
 

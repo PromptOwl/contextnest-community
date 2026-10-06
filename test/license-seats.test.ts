@@ -137,6 +137,23 @@ describe("who hears what", () => {
       expect(JSON.stringify(w.data)).not.toMatch(/licen|expir|suspend|payment|trial/i);
     });
 
+    it("nest-level writes (create, rename, delete) are refused too; reads still work", async () => {
+      const create = await jsonRequest(app, "POST", "/nests", { name: "Blocked" }, member.apiKey);
+      expect(create.status).toBe(503);
+      expect(create.data.error).toBe(NEUTRAL);
+      const rename = await jsonRequest(app, "PATCH", `/nests/${nestId}`, { name: "Renamed" }, member.apiKey);
+      expect(rename.status).toBe(503);
+      const del = await jsonRequest(app, "DELETE", `/nests/${nestId}`, undefined, member.apiKey);
+      expect(del.status).toBe(503);
+      // The license owner hears why.
+      const asOwner = await jsonRequest(app, "POST", "/nests", { name: "Blocked" }, owner.apiKey);
+      expect(asOwner.status).toBe(503);
+      expect(asOwner.data.error).toBe("License required");
+      // Reading is untouched.
+      expect((await jsonRequest(app, "GET", "/nests", undefined, member.apiKey)).status).toBe(200);
+      expect((await jsonRequest(app, "GET", `/nests/${nestId}`, undefined, member.apiKey)).status).toBe(200);
+    });
+
     it("the license owner gets the specifics and who to talk to", async () => {
       const w = await jsonRequest(
         app,
