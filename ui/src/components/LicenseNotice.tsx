@@ -131,10 +131,13 @@ export function LicenseBanner({
   isAdmin,
   status,
   onInstallKey,
+  className = "mb-4",
 }: {
   isAdmin: boolean;
   status: LicenseStatus | null;
   onInstallKey?: () => void;
+  /** Spacing around the card; the shell passes its own where <main> has no padding. */
+  className?: string;
 }) {
   const readOnly = !!status && (!status.valid || status.suspended);
   // Probe the admin endpoint for admins, and — since a lapsed license stops
@@ -160,7 +163,7 @@ export function LicenseBanner({
   if (!notice || isDismissed(notice, dismissed)) return null;
   return (
     <LicenseNoticeCard
-      className="mb-4"
+      className={className}
       notice={notice}
       onInstallKey={lic ? onInstallKey : undefined}
       onDismiss={

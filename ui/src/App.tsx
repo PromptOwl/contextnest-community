@@ -1520,6 +1520,9 @@ export default function App() {
           isAdmin={isAdmin}
           status={licenseStatus}
           onInstallKey={() => setInstallingKey(true)}
+          // With the sidebar <main> has no padding of its own (pages add it),
+          // so the card needs its own gap from the header and the edges.
+          className={withSidebar ? "mx-4 mt-4 md:mx-6" : "mb-4"}
         />
         {/* A ?nest link that didn't resolve. Falling through to the dashboard
             made a stale bookmark look like it had simply opened the app, with
