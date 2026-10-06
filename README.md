@@ -70,7 +70,8 @@ The key is read at boot. The server validates against PromptOwl on startup; if v
 ### 3. How licensing behaves at runtime
 
 - **Unlicensed / setup mode** — reads work; every non-GET (write) request returns `503` until a valid key is installed.
-- **Live revocation** — a long-poll watcher tracks license state against PromptOwl. If your key is revoked, the server blocks writes within seconds (no restart required) and returns to setup mode.
+- **Live license checks** — the server re-checks its key with PromptOwl every minute. If the key is rejected or suspended, the server goes read-only within minutes: reads keep working, nobody is signed out, and writing comes back on its own once the key is valid again.
+- **Plans, seats and models** — the key's plan (Free, Self-Hosted, Enterprise) sets how many users, editors and server admins you can have, and how AI models are paid for. See [LICENSING.md](./LICENSING.md).
 - **Admin identity follows the license** — the admin user is whichever PromptOwl account owns the installed key, resolved live per request. Transferring the license to another account immediately promotes the new owner and demotes the old one.
 
 For redistribution, hosted-service, OEM, or regulated-industry licensing, contact **hoot@promptowl.ai**.
@@ -174,6 +175,7 @@ Full release notes live in [CHANGELOG.md](./CHANGELOG.md).
 - [Single sign-on admin guide](./CONFIGURATION.md#single-sign-on-oidc) — connect Microsoft Entra ID, Google, Okta, Keycloak or any OIDC provider; what happens to existing accounts, API keys and agents; every `sso_error` code with its fix
 - [API.md](./API.md) — complete REST reference with request and response bodies
 - [STEWARDSHIP.md](./STEWARDSHIP.md) — the governance model: modes, stewards, scopes, prime documents, teams, super-admins
+- [LICENSING.md](./LICENSING.md) — plans, seats, limits, model credits and BYOK, and how the license check behaves
 - `<server>/llms.txt` — the agent manual the running server publishes; rendered as **Docs** in the app
 - **How it works** inside the app — a page-by-page tour
 
