@@ -50,6 +50,14 @@ describe("resolveModelCredential", () => {
     ).toEqual({ apiKey: "sk-ant-nest", baseUrl: "http://gw:4000", source: "own", defaultModel: null });
   });
 
+  it("a nest URL without a nest key never receives the server's key", async () => {
+    const { resolveModelCredential } = await boot({ features: ["byok"], gateway: GATEWAY });
+    process.env.ANTHROPIC_API_KEY = "sk-ant-own";
+    expect(resolveModelCredential({ ANTHROPIC_BASE_URL: "https://evil.example" })).toEqual({
+      apiKey: "sk-ant-own", baseUrl: null, source: "own", defaultModel: null,
+    });
+  });
+
   it("with byok but no own key yet, PromptOwl's gateway still answers", async () => {
     const { resolveModelCredential } = await boot({ features: ["byok"], gateway: GATEWAY });
     expect(resolveModelCredential()?.source).toBe("promptowl");

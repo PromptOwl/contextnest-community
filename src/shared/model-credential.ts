@@ -21,17 +21,19 @@ export const DIRECT_DEFAULT_MODEL = "claude-sonnet-5";
 /**
  * Pricing spec §6.1/§9.3: the server's own key only with the `byok` licence
  * feature (Enterprise); otherwise PromptOwl's gateway, metered in credits.
- * A nest's own key beats the server's. null = nothing to call with.
+ * A nest's own key beats the server's. Key and URL come as a pair from one
+ * source, so a nest URL never receives the server's key. null = nothing to call with.
  * ponytail: Anthropic only; another provider = its env names + gateway route here.
  */
 export function resolveModelCredential(
   nestEnv: Record<string, string> = {},
 ): ModelCredential | null {
   if (hasEntitlement("byok")) {
-    const apiKey = nestEnv.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
-    if (apiKey) {
-      const baseUrl = nestEnv.ANTHROPIC_BASE_URL || config.ANTHROPIC_BASE_URL || null;
-      return { apiKey, baseUrl, source: "own", defaultModel: null };
+    if (nestEnv.ANTHROPIC_API_KEY) {
+      return { apiKey: nestEnv.ANTHROPIC_API_KEY, baseUrl: nestEnv.ANTHROPIC_BASE_URL || null, source: "own", defaultModel: null };
+    }
+    if (process.env.ANTHROPIC_API_KEY) {
+      return { apiKey: process.env.ANTHROPIC_API_KEY, baseUrl: config.ANTHROPIC_BASE_URL || null, source: "own", defaultModel: null };
     }
   }
   const gateway = getModelGateway();

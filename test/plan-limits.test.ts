@@ -106,6 +106,14 @@ describe("plan limits at role grant", () => {
     expect(res.data.error).toMatch(/Upgrade the plan from Settings → License/);
   });
 
+  it("a new superadmin is a billed user, so the user cap applies even with unlimited Account Owners", async () => {
+    entitlement.maxAccountOwners = null; // users still 3 of 3; carol is a viewer
+    const res = await jsonRequest(app, "POST", "/admin/super-admins", { email: "carol@co.com" }, owner.apiKey);
+    expect(res.status).toBe(402);
+    expect(res.data).toMatchObject({ code: "plan_limit", limit: "users", max: 3 });
+    entitlement.maxAccountOwners = 1;
+  });
+
   it("over the cap nothing is taken away, and demotions still work", async () => {
     entitlement.maxUsers = 1; // server now holds 3 users on a 1-user plan
     const people = await jsonRequest(app, "GET", `/nests/${nestId}/collaborators`, undefined, alice.apiKey);
@@ -137,5 +145,23 @@ describe("plan limits at role grant", () => {
       [nestId, alice.userId],
     );
     expect(await countBilled()).toEqual(before);
+  });
+
+  it("a creator's own reviewer row on their document is free; a reviewer someone assigns is billed", async () => {
+    const { getDb } = await import("../src/db/client.js");
+    const { countBilled } = await import("../src/auth/seats.js");
+    const db = getDb();
+    await db.run("INSERT INTO users (id, email, name, password_hash) VALUES ('h1', 'heidi@co.com', 'Heidi', 'x')");
+    const before = await countBilled();
+    const steward = (id: string, doc: string, by: string) =>
+      db.run(
+        `INSERT INTO stewards (id, nest_id, scope, node_pattern, user_email, user_id, role, assigned_by)
+         VALUES (?, ?, 'document', ?, 'heidi@co.com', 'h1', 'reviewer', ?)`,
+        [id, nestId, doc, by],
+      );
+    await steward("s-own", "doc-own", "heidi@co.com");
+    expect(await countBilled()).toEqual(before);
+    await steward("s-given", "doc-given", "alice@co.com");
+    expect((await countBilled()).users).toBe(before.users + 1);
   });
 });

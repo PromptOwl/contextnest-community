@@ -2475,7 +2475,7 @@ The server validates its key with PromptOwl (`POST {PROMPTOWL_API_URL}/api/licen
 `{ valid, tier, org, owner_email, suspended, suspended_reason, limits, setup_required }`. `setup_required` is true only for a server that has never been licensed; the UI shows the activation screen then. A lapsed license is not a setup case. Carries no lapse reason, dates, head-count or contact.
 
 ### GET `/admin/license` (server admin, or the key's owner)
-`{ valid, tier, org, owner_email, suspended, suspended_reason, trial, expires_at, days_left, reason, grace_ends_at, contact: { url, email }, seats: { licensed, used, over_limit, at_limit }, pending_rejections, last_checked_at }`. `seats.licensed` is null when there is no seat limit. `pending_rejections` counts rejections not yet acted on (3 make the server read-only). Drives Settings → License and the admin license banner.
+`{ plan, valid, tier, org, owner_email, suspended, suspended_reason, trial, expires_at, days_left, reason, grace_ends_at, contact: { url, email }, seats: { licensed, used, over_limit, at_limit }, subscribers: { licensed, used }, max_account_owners, pending_rejections, last_checked_at, manage_url }`. `plan` is `free`, `trial`, `self_hosted` or `enterprise`. `seats` counts billed users (nest owners, admins, reviewers, server admins) and `subscribers` counts editors; each person counts once, at their highest role. A `licensed` or `max_account_owners` of null means no limit. `manage_url` is PromptOwl's page for this key (`?key=` carries its last 4 characters only), or null without a key. `pending_rejections` counts rejections not yet acted on (3 make the server read-only). Drives Settings → License and the admin license banner.
 
 ### POST `/license/install`
 `{ key }`. Public while the server has never been licensed. Once it has a license owner, only a server admin or that owner may replace the key (401/403 otherwise). A rejected key returns 400 with an operator-facing `error` plus the same term fields.
@@ -2490,6 +2490,7 @@ The server validates its key with PromptOwl (`POST {PROMPTOWL_API_URL}/api/licen
 | 401 | Auth required |
 | 403 | Permission denied (`Insufficient permissions`, governance steward mismatch) |
 | 404 | Nest / node / steward not found, or caller has no permission |
+| 402 | Plan limit: a role grant would pass the plan's cap. `{ "error", "code": "plan_limit", "limit": "users" \| "subscribers" \| "account_owners", "max" }`. Only raises are checked; demotions and viewers always go through. `error` tells a server admin to upgrade and anyone else to ask their admin |
 | 409 | Conflict (e.g., key already exists, version conflict) |
 | 429 | Rate limit |
 | 503 | License missing |

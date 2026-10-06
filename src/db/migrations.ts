@@ -1720,7 +1720,8 @@ export function runMigrations(db: Database.Database): void {
   }
 
   // 049: license_cache.gateway_json — the license's LiteLLM key, encrypted.
-  //   049: 045-048 are taken (ids match by string).
+  //   Was 046; renumbered after other branches merged 045-048, so numbers
+  //   stay unique and in order.
   if (!hasMigration("049_license_cache_gateway")) {
     const cols = (
       db.prepare("PRAGMA table_info(license_cache)").all() as Array<{ name: string }>

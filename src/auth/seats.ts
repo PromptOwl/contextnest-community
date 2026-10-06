@@ -120,6 +120,8 @@ export async function countBilled(): Promise<{ users: number; subscribers: numbe
  * raise is checked, so an over-limit server can still demote people and add
  * viewers; nothing already granted is ever taken away. `userId` null = a
  * person who has no account yet (e.g. a steward invited by email).
+ * ponytail: best-effort — count and write aren't atomic, so two grants at the
+ * last seat can both pass; serialise check+write if the cap must be exact.
  */
 export async function assertCanGrant(
   changes: Array<{ userId: string | null | undefined; next: BillingClass }>,
@@ -184,10 +186,20 @@ export function planLimitMessage(
     : `${full} Ask your server admin to add seats.`;
 }
 
-/** Refuse a new server admin (Account Owner) past the plan's cap — Free has one. */
+/**
+ * Refuse a new server admin (Account Owner) past the plan's cap — Free has one.
+ * A server admin is also a billed user, so the user cap applies too.
+ */
 export async function assertCanAddAccountOwner(email: string): Promise<void> {
   const max = getEntitlement().maxAccountOwners;
-  if (max == null) return;
+  if (max != null) await assertAccountOwnerSlot(email, max);
+  const user = (await getDb().get("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", [email])) as
+    | { id: string }
+    | undefined;
+  await assertCanGrant([{ userId: user?.id ?? null, next: "user" }]);
+}
+
+async function assertAccountOwnerSlot(email: string, max: number): Promise<void> {
   const owners = new Set<string>();
   const licenseOwner = getCurrentLicense()?.ownerEmail;
   if (licenseOwner) owners.add(licenseOwner.toLowerCase());
