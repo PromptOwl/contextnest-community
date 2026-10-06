@@ -24,7 +24,6 @@ import { resolveStewardsForNode, canUserApprove } from "./stewardship-service.js
 import * as versions from "./version-service.js";
 import {
   buildTitleMap,
-  describeNode,
   titleForNode,
   buildDocContext,
   nestName,
@@ -283,7 +282,7 @@ export async function approve(params: {
   // approval could otherwise interleave — resolving the review against a stale
   // version and orphaning the freshly-drafted edit. The version to approve is
   // read INSIDE the lock so it reflects the author's latest committed edit.
-  return withNodeWriteLock(nodeWriteKey(params.nestId, params.nodeId), async () => {
+  const { pending, version } = await withNodeWriteLock(nodeWriteKey(params.nestId, params.nodeId), async () => {
     const db = getDb();
     const version = await versions.getCurrentVersion(params.nestId, params.nodeId);
 
@@ -317,24 +316,6 @@ export async function approve(params: {
      WHERE id = ?`,
       [params.approvedBy, params.note || null, params.override ? 1 : 0, pending.id],
     );
-
-    void dispatchEvent({
-      kind: "review_approved",
-      nestId: params.nestId,
-      subjectId: params.nodeId,
-      actor: params.approvedBy,
-      message: `*${await describeNode(params.nestId, params.nodeId)}* v${version} approved by ${params.approvedBy}`,
-    });
-
-    // Verdict fan-out: submitter + watchers hear the approval. Best-effort.
-    await notifyReviewResolved({
-      nestId: params.nestId,
-      nodeId: params.nodeId,
-      status: "approved",
-      resolvedBy: params.approvedBy,
-      requestedBy: pending.requested_by,
-      reviewId: pending.id,
-    });
 
     // Update version status. We write 'published' (not 'approved') so the DB
     // mirrors the engine's terminal status — history.yaml/frontmatter record
@@ -416,38 +397,61 @@ export async function approve(params: {
       );
     }
 
-    const approveCtx = await buildDocContext(params.nestId, params.nodeId, params.baseUrl);
-    void notifyNestEvent(
-      params.nestId,
-      `:white_check_mark: *${approveCtx.label}* v${version} approved by ${params.approvedBy}`,
-      {
-        status: "approved",
-        docTitle: approveCtx.docTitle,
-        path: approveCtx.path,
-        link: approveCtx.link,
-        actor: params.approvedBy,
-        version: version,
-      },
-      // The verdict emails the submitter directly (below), not the shared
-      // NOTIFY_EMAIL_TO team inbox — skip the team-channel email; Slack/Teams fire.
-      { skipEmail: true },
-    );
-
-    // Email the submitter their verdict, unless they approved it themselves.
-    if (pending.requested_by?.toLowerCase() !== params.approvedBy.toLowerCase()) {
-      void sendEmailToRecipient(pending.requested_by, {
-        status: "approved",
-        docTitle: approveCtx.docTitle,
-        path: approveCtx.path,
-        link: approveCtx.link,
-        actor: params.approvedBy,
-        version: version,
-        note: params.note || null,
-      });
-    }
-
-    return (await getReviewRequest(pending.id))!;
+    return { pending, version };
   });
+
+  // Notifications run OUTSIDE the lock, as in submitForReview: the approval is
+  // committed, and the author's next save shouldn't wait on the fan-out.
+  const approveCtx = await buildDocContext(params.nestId, params.nodeId, params.baseUrl);
+  void dispatchEvent({
+    kind: "review_approved",
+    nestId: params.nestId,
+    subjectId: params.nodeId,
+    actor: params.approvedBy,
+    message: `*${approveCtx.label}* v${version} approved by ${params.approvedBy}`,
+  });
+
+  // Verdict fan-out: submitter + watchers hear the approval. Best-effort.
+  await notifyReviewResolved({
+    nestId: params.nestId,
+    nodeId: params.nodeId,
+    status: "approved",
+    resolvedBy: params.approvedBy,
+    requestedBy: pending.requested_by,
+    reviewId: pending.id,
+    label: approveCtx.label,
+  });
+
+  void notifyNestEvent(
+    params.nestId,
+    `:white_check_mark: *${approveCtx.label}* v${version} approved by ${params.approvedBy}`,
+    {
+      status: "approved",
+      docTitle: approveCtx.docTitle,
+      path: approveCtx.path,
+      link: approveCtx.link,
+      actor: params.approvedBy,
+      version: version,
+    },
+    // The verdict emails the submitter directly (below), not the shared
+    // NOTIFY_EMAIL_TO team inbox — skip the team-channel email; Slack/Teams fire.
+    { skipEmail: true },
+  );
+
+  // Email the submitter their verdict, unless they approved it themselves.
+  if (pending.requested_by?.toLowerCase() !== params.approvedBy.toLowerCase()) {
+    void sendEmailToRecipient(pending.requested_by, {
+      status: "approved",
+      docTitle: approveCtx.docTitle,
+      path: approveCtx.path,
+      link: approveCtx.link,
+      actor: params.approvedBy,
+      version: version,
+      note: params.note || null,
+    });
+  }
+
+  return (await getReviewRequest(pending.id))!;
 }
 
 // ─── Reject ─────────────────────────────────────────────────────────────
@@ -463,7 +467,7 @@ export async function reject(params: {
 }): Promise<ReviewRequest> {
   // Same lock as approve: serialize against a concurrent author edit so the
   // rejected version reflects the author's latest committed edit.
-  return withNodeWriteLock(nodeWriteKey(params.nestId, params.nodeId), async () => {
+  const { pending, version } = await withNodeWriteLock(nodeWriteKey(params.nestId, params.nodeId), async () => {
     const db = getDb();
     const version = await versions.getCurrentVersion(params.nestId, params.nodeId);
 
@@ -497,55 +501,59 @@ export async function reject(params: {
       [params.nestId, params.nodeId, version],
     );
 
-    const rejectCtx = await buildDocContext(params.nestId, params.nodeId, params.baseUrl);
-    void dispatchEvent({
-      kind: "review_rejected",
-      nestId: params.nestId,
-      subjectId: params.nodeId,
-      actor: params.rejectedBy,
-      message: `*${rejectCtx.label}* v${version} rejected by ${params.rejectedBy}${params.note ? ` — "${params.note}"` : ""}`,
-    });
-    void notifyNestEvent(
-      params.nestId,
-      `:x: *${rejectCtx.label}* v${version} rejected by ${params.rejectedBy} — "${params.note}"`,
-      {
-        status: "rejected",
-        docTitle: rejectCtx.docTitle,
-        path: rejectCtx.path,
-        link: rejectCtx.link,
-        actor: params.rejectedBy,
-        version: version,
-        note: params.note || null,
-      },
-      // Verdict emails the submitter directly (below), not the team inbox.
-      { skipEmail: true },
-    );
-
-    // Email the submitter their verdict, unless they rejected it themselves.
-    if (pending.requested_by?.toLowerCase() !== params.rejectedBy.toLowerCase()) {
-      void sendEmailToRecipient(pending.requested_by, {
-        status: "rejected",
-        docTitle: rejectCtx.docTitle,
-        path: rejectCtx.path,
-        link: rejectCtx.link,
-        actor: params.rejectedBy,
-        version: version,
-        note: params.note || null,
-      });
-    }
-
-    // Verdict fan-out: submitter + watchers hear the rejection. Best-effort.
-    await notifyReviewResolved({
-      nestId: params.nestId,
-      nodeId: params.nodeId,
-      status: "rejected",
-      resolvedBy: params.rejectedBy,
-      requestedBy: pending.requested_by,
-      reviewId: pending.id,
-    });
-
-    return (await getReviewRequest(pending.id))!;
+    return { pending, version };
   });
+
+  // Notifications run outside the lock, same as approve.
+  const rejectCtx = await buildDocContext(params.nestId, params.nodeId, params.baseUrl);
+  void dispatchEvent({
+    kind: "review_rejected",
+    nestId: params.nestId,
+    subjectId: params.nodeId,
+    actor: params.rejectedBy,
+    message: `*${rejectCtx.label}* v${version} rejected by ${params.rejectedBy}${params.note ? ` — "${params.note}"` : ""}`,
+  });
+  void notifyNestEvent(
+    params.nestId,
+    `:x: *${rejectCtx.label}* v${version} rejected by ${params.rejectedBy} — "${params.note}"`,
+    {
+      status: "rejected",
+      docTitle: rejectCtx.docTitle,
+      path: rejectCtx.path,
+      link: rejectCtx.link,
+      actor: params.rejectedBy,
+      version: version,
+      note: params.note || null,
+    },
+    // Verdict emails the submitter directly (below), not the team inbox.
+    { skipEmail: true },
+  );
+
+  // Email the submitter their verdict, unless they rejected it themselves.
+  if (pending.requested_by?.toLowerCase() !== params.rejectedBy.toLowerCase()) {
+    void sendEmailToRecipient(pending.requested_by, {
+      status: "rejected",
+      docTitle: rejectCtx.docTitle,
+      path: rejectCtx.path,
+      link: rejectCtx.link,
+      actor: params.rejectedBy,
+      version: version,
+      note: params.note || null,
+    });
+  }
+
+  // Verdict fan-out: submitter + watchers hear the rejection. Best-effort.
+  await notifyReviewResolved({
+    nestId: params.nestId,
+    nodeId: params.nodeId,
+    status: "rejected",
+    resolvedBy: params.rejectedBy,
+    requestedBy: pending.requested_by,
+    reviewId: pending.id,
+    label: rejectCtx.label,
+  });
+
+  return (await getReviewRequest(pending.id))!;
 }
 
 // ─── Cancel ─────────────────────────────────────────────────────────────

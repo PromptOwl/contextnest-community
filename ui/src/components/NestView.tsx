@@ -869,6 +869,8 @@ export function NestView({
     try {
       await api.approveNode(nestId, reviewNode.id, note);
       toast.success("Approved");
+      // Drop the row now; fetchData below reconciles in the background.
+      setReviewQueue((q) => q.filter((r) => r.nodeId !== reviewNode.id));
       setReviewNode(null);
       fetchData();
     } catch (err: any) {
@@ -882,6 +884,7 @@ export function NestView({
     try {
       await api.rejectNode(nestId, reviewNode.id, note);
       toast.success("Rejected");
+      setReviewQueue((q) => q.filter((r) => r.nodeId !== reviewNode.id));
       setReviewNode(null);
       fetchData();
     } catch (err: any) {
