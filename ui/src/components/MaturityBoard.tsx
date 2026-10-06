@@ -29,6 +29,7 @@ import {
   Lock,
   ChevronDown,
   Filter,
+  CheckCircle2,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -58,8 +59,13 @@ import {
   newCardPlacement,
   planMove,
   resolveConfig,
+  buildLanes,
+  laneFields,
+  laneKeyOf,
+  isFieldDimension,
   type BoardNode,
   type MovePlan,
+  type SwimlaneKind,
   type BoardSettings,
   type ColumnLayout,
   type DimensionKind,
@@ -72,6 +78,7 @@ import {
   moveNeedsReview,
   subItemsByParent,
   timestampsTooltip,
+  PRIORITY_LABELS,
   type Priority,
 } from "../lib/board-tasks";
 import { timeAgo } from "./nest/node-display";
@@ -81,6 +88,7 @@ import {
   Avatar,
   DueChip,
   GovernedMoveDialog,
+  PriorityIcon,
   PriorityMenu,
   SubItemChip,
 } from "./board/CardParts";
@@ -102,8 +110,9 @@ function loadConfig(nestId: string): BoardSettings {
     const raw = localStorage.getItem(CONFIG_PREFIX + nestId);
     if (raw) {
       const p = JSON.parse(raw);
-      const dimension: DimensionKind =
-        p.dimension === "status" || p.dimension === "tag" ? p.dimension : "folder";
+      const dimension: DimensionKind = DIMENSION_KINDS.includes(p.dimension)
+        ? p.dimension
+        : "folder";
       const tagNamespace =
         typeof p.tagNamespace === "string" ? p.tagNamespace : "";
       const strings = (v: unknown): string[] | undefined =>
@@ -145,11 +154,15 @@ function loadConfig(nestId: string): BoardSettings {
   return { dimension: "folder", tagNamespace: "", layouts: {} };
 }
 
+const DIMENSION_KINDS: readonly string[] = ["folder", "status", "tag", "assignee", "priority"];
+const SWIMLANE_KINDS: readonly string[] = ["assignee", "priority", "parent"];
+
 /** A saved board's config → the settings this component works on. Same
  *  normalisation as loadConfig, so a hand-edited blob can't break the page. */
 function settingsFromBoard(cfg: Record<string, any>): BoardSettings {
-  const dimension: DimensionKind =
-    cfg?.dimension === "status" || cfg?.dimension === "tag" ? cfg.dimension : "folder";
+  const dimension: DimensionKind = DIMENSION_KINDS.includes(cfg?.dimension)
+    ? cfg.dimension
+    : "folder";
   const strings = (v: unknown): string[] | undefined =>
     Array.isArray(v) ? v.filter((k) => typeof k === "string") : undefined;
   const layouts: Record<string, ColumnLayout> = {};
@@ -170,6 +183,9 @@ function settingsFromBoard(cfg: Record<string, any>): BoardSettings {
     tasksOnly: cfg?.tasksOnly === true,
     filterTags: strings(cfg?.filterTags),
     ranks,
+    swimlane: SWIMLANE_KINDS.includes(cfg?.swimlane) ? cfg.swimlane : undefined,
+    hideDoneAfterDays:
+      typeof cfg?.hideDoneAfterDays === "number" ? cfg.hideDoneAfterDays : undefined,
   };
 }
 
@@ -279,6 +295,7 @@ export function MaturityBoard({
           priority: n.priority,
           parent: n.parent,
           moved_at: n.moved_at,
+          completed_at: n.completed_at,
           created_at: n.created_at,
           updated_at: n.updated_at,
           prime: n.prime,
@@ -427,13 +444,19 @@ export function MaturityBoard({
         (n) =>
           (!config.tasksOnly || n.type === "task") &&
           matchesAssigneeFilter(n, assigneeFilter) &&
+          // Linear's "completed issues: past week/month" display option.
+          !(
+            config.hideDoneAfterDays !== undefined &&
+            n.completed_at &&
+            Date.now() - Date.parse(n.completed_at) > config.hideDoneAfterDays * 86_400_000
+          ) &&
           (config.filterTags ?? []).every((f) =>
             n.tags.some(
               (t) => t.replace(/^#/, "").toLowerCase() === f.toLowerCase(),
             ),
           ),
       ),
-    [nodes, config.tasksOnly, config.filterTags, assigneeFilter],
+    [nodes, config.tasksOnly, config.filterTags, config.hideDoneAfterDays, assigneeFilter],
   );
 
   const { columns, byColumn } = useMemo(
@@ -474,7 +497,7 @@ export function MaturityBoard({
   );
   // Where a dragged card would land: before this card id, or (null) at the
   // bottom of the column.
-  const [dropBefore, setDropBefore] = useState<{ col: string; before: string | null } | null>(null);
+  const [dropBefore, setDropBefore] = useState<{ cell: string; before: string | null } | null>(null);
 
   // The nest's people — who a card can be assigned to. Writers only: the
   // pickers are write affordances, and the roster read is gated anyway.
@@ -502,12 +525,25 @@ export function MaturityBoard({
 
   const today = localToday();
 
+  /** Fields a card can be set to from the board. */
+  type CardFields = {
+    assignee?: string | null;
+    due?: string | null;
+    priority?: Priority | string | null;
+    parent?: string | null;
+  };
+
+  // A write that would land as a draft on a governed document waits here for
+  // the person to confirm it (GovernedMoveDialog).
+  const [pending, setPending] = useState<{
+    title: string;
+    verb: "Moving" | "Changing";
+    run: () => Promise<void>;
+  } | null>(null);
+
   /** Set board fields on one card: optimistic, reverted if the server refuses. */
-  const patchFields = useCallback(
-    async (
-      id: string,
-      fields: { assignee?: string | null; due?: string | null; priority?: Priority | null },
-    ) => {
+  const applyFields = useCallback(
+    async (id: string, fields: CardFields) => {
       const prev = nodes.find((n) => n.id === id);
       if (!prev) return;
       const optimistic: BoardNode = { ...prev };
@@ -516,7 +552,7 @@ export function MaturityBoard({
       }
       setNodes((ns) => ns.map((n) => (n.id === id ? optimistic : n)));
       try {
-        const res: any = await api.updateNode(nestId, id, fields);
+        const res: any = await api.updateNode(nestId, id, fields as any);
         const r = res?.node;
         if (r) {
           setNodes((ns) =>
@@ -529,11 +565,15 @@ export function MaturityBoard({
                     assigned_at: r.assigned_at,
                     due: r.due,
                     priority: r.priority,
+                    parent: r.parent,
                     updated_at: r.updated_at ?? n.updated_at,
                   }
                 : n,
             ),
           );
+          if (r.status === "draft" && prev.status !== "draft") {
+            toast("Saved as a draft — waiting for review");
+          }
         }
         qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
       } catch (e: any) {
@@ -544,10 +584,23 @@ export function MaturityBoard({
     [nodes, nestId, qc],
   );
 
+  /** Inline field edit from a card — asks first if it would need review. */
+  const patchFields = useCallback(
+    (id: string, fields: CardFields) => {
+      const node = nodes.find((n) => n.id === id);
+      if (node && moveNeedsReview(node, governance)) {
+        setPending({ title: node.title, verb: "Changing", run: () => applyFields(id, fields) });
+        return;
+      }
+      void applyFields(id, fields);
+    },
+    [nodes, governance, applyFields],
+  );
+
   // ── "+ Add task" ──
-  const [addingIn, setAddingIn] = useState<{ col: string; parent?: string } | null>(null);
+  const [addingIn, setAddingIn] = useState<{ cell: string; col: string; lane?: string; parent?: string } | null>(null);
   const createCard = useCallback(
-    async (colKey: string, title: string, parent?: string) => {
+    async (colKey: string, title: string, parent?: string, laneKey?: string) => {
       const placement = newCardPlacement(colKey, effectiveConfig);
       if (!placement) return;
       try {
@@ -569,6 +622,10 @@ export function MaturityBoard({
                 ],
               }
             : {}),
+          // Added inside a swimlane: it belongs to that lane.
+          ...(config.swimlane && laneKey !== undefined
+            ? laneFields(config.swimlane as SwimlaneKind, laneKey)
+            : {}),
           ...(parent ? { parent } : {}),
           // Filtering by one person and adding a card hands it to them —
           // otherwise it would vanish from the filtered board on creation.
@@ -583,41 +640,50 @@ export function MaturityBoard({
         throw e;
       }
     },
-    [effectiveConfig, config.filterTags, nestId, typeTaskEnabled, assigneeFilter, qc, load],
+    [effectiveConfig, config.filterTags, config.swimlane, nestId, typeTaskEnabled, assigneeFilter, qc, load],
   );
 
-  const [pendingMove, setPendingMove] = useState<{
-    id: string;
-    title: string;
-    plan: MovePlan;
-    place?: { col: string; before: string | null };
-  } | null>(null);
-
+  /**
+   * Run a drop: a column move (plan, or null for "same column") plus any lane
+   * change (extra fields), as ONE document write where possible, then place
+   * the card in the target column's order.
+   */
   const executeMove = useCallback(
-    async (id: string, plan: MovePlan, place?: { col: string; before: string | null }) => {
+    async (
+      id: string,
+      plan: MovePlan | null,
+      place: { col: string; before: string | null } | undefined,
+      extra: CardFields = {},
+    ) => {
+      const hasExtra = Object.keys(extra).length > 0;
       setBusy(true);
       try {
-        if (plan.kind === "move-folder") {
-          await api.moveNode(nestId, id, plan.folder);
+        let rankId = id;
+        if (plan?.kind === "move-folder") {
+          const res: any = await api.moveNode(nestId, id, plan.folder);
+          rankId = res?.node?.id ?? id;
+          if (hasExtra) await api.updateNode(nestId, rankId, extra as any);
           toast.success("Moved");
-        } else if (plan.kind === "retag") {
-          // updateNode replaces the tag set, so the plan's full next set both
+        } else if (plan?.kind === "retag" || plan?.kind === "set-fields" || hasExtra) {
+          // updateNode replaces the tag set, so a retag's full next set both
           // adds the target column's tag and drops the source column's.
-          const res: any = await api.updateNode(nestId, id, { tags: plan.tags });
-          // Not "Moved" for a document: this rewrites its tags and saves a
-          // new version. A draft result means it is now waiting on review.
-          const s = res?.node?.status;
+          const body = {
+            ...(plan?.kind === "retag" ? { tags: plan.tags } : {}),
+            ...(plan?.kind === "set-fields" ? plan.fields : {}),
+            ...extra,
+          };
+          const res: any = await api.updateNode(nestId, id, body as any);
+          const st = res?.node?.status;
           const isTask = nodes.find((n) => n.id === id)?.type === "task";
           toast.success(
-            s === "draft" || s === "pending_review"
+            st === "draft" || st === "pending_review"
               ? "Saved as a draft — waiting for review"
-              : isTask
+              : isTask || plan?.kind !== "retag"
                 ? "Moved"
                 : "Retagged",
           );
         }
-        // A folder move changes the id, so there's nothing stable to rank.
-        if (place && plan.kind === "retag") await rankCard(place.col, id, place.before);
+        if (place && activeBoard) await rankCard(place.col, rankId, place.before);
         await load();
       } catch (e: any) {
         toast.error(e?.message || "Move failed");
@@ -625,16 +691,17 @@ export function MaturityBoard({
         setBusy(false);
       }
     },
-    [nestId, nodes, load, rankCard],
+    [nestId, nodes, load, rankCard, activeBoard],
   );
 
   const handleDrop = useCallback(
-    async (targetKey: string) => {
+    async (targetKey: string, laneKey?: string) => {
       const id = dragId;
       const from = dragFromCol;
+      const cell = laneKey !== undefined ? `${laneKey}\u0001${targetKey}` : targetKey;
       const place =
-        dropBefore && dropBefore.col === targetKey
-          ? dropBefore
+        dropBefore && dropBefore.cell === cell
+          ? { col: targetKey, before: dropBefore.before }
           : { col: targetKey, before: null };
       setDragId(null);
       setDragFromCol(null);
@@ -644,37 +711,51 @@ export function MaturityBoard({
       const node = nodes.find((n) => n.id === id);
       if (!node) return;
 
-      // Same column: a reorder. Rank lives on the board, so no document is
-      // touched — works on every dimension, status included.
-      if (from === targetKey) {
+      // Changing lane sets that lane's field (Linear: drag across swimlanes).
+      const lane = config.swimlane as SwimlaneKind | undefined;
+      const extra: CardFields =
+        lane && laneKey !== undefined && laneKey !== laneKeyOf(node, lane) && laneKey !== node.id
+          ? laneFields(lane, laneKey)
+          : {};
+      const laneChange = Object.keys(extra).length > 0;
+
+      // Same column, same lane: a reorder. Rank lives on the board, so no
+      // document is touched — works on every dimension, status included.
+      if (from === targetKey && !laneChange) {
         if (activeBoard) await rankCard(targetKey, id, place.before);
         return;
       }
 
-      const plan = planMove(node, targetKey, effectiveConfig, from ?? undefined);
-      if (plan.kind === "unsupported") {
-        // Silent for a pure no-op (same column); explain the real blockers.
-        if (plan.reason !== "Already in this column.") toast(plan.reason);
+      let plan: MovePlan | null = null;
+      if (from !== targetKey) {
+        plan = planMove(node, targetKey, effectiveConfig, from ?? undefined);
+        if (plan.kind === "unsupported") {
+          // Silent for a pure no-op (same column); explain the real blockers.
+          if (plan.reason !== "Already in this column.") toast(plan.reason);
+          if (!laneChange) return;
+          plan = null;
+        }
+      }
+      // A document write on a governed doc lands as a draft that waits for
+      // review — say so before doing it, not after. Tasks skip review, so
+      // they never see this. A folder move alone doesn't draft.
+      const writesDocument = laneChange || (plan !== null && plan.kind !== "move-folder");
+      if (writesDocument && moveNeedsReview(node, governance)) {
+        setPending({
+          title: node.title,
+          verb: "Moving",
+          run: () => executeMove(id, plan, place, extra),
+        });
         return;
       }
-      // A retag is an edit. On a governed document it lands as a draft that
-      // waits for review — say so before doing it, not after. Tasks skip
-      // review, so they never see this. Folder moves don't draft.
-      if (plan.kind === "retag" && moveNeedsReview(node, governance)) {
-        setPendingMove({ id, title: node.title, plan, place });
-        return;
-      }
-      await executeMove(id, plan, place);
+      await executeMove(id, plan, place, extra);
     },
-    [dragId, dragFromCol, dropBefore, nodes, effectiveConfig, governance, executeMove, activeBoard, rankCard],
+    [dragId, dragFromCol, dropBefore, nodes, config.swimlane, effectiveConfig, governance, executeMove, activeBoard, rankCard],
   );
 
-  // Folder and tag drags mutate the node (moveNode / retag). Status moves
-  // through the review workflow, so it stays non-draggable. On the tag board a
-  // card can sit in several columns; the source column (dragFromCol) tells us
-  // which tag to drop. Write access is the second, independent condition.
   // Every dimension is draggable now that a same-column drop reorders: on the
-  // status board a cross-column drop still explains itself (planMove).
+  // status board a cross-column drop still explains itself (planMove). Write
+  // access is the other, independent condition.
   const draggable = canEditDocs;
 
   // ── Board tabs: create / rename / duplicate / share / delete ──
@@ -802,6 +883,19 @@ export function MaturityBoard({
           : // Tag column keys are the bare value; "#doing" and "doing" are the
             // same column (board-dimensions strips the stored "#").
             value.trim().replace(/^#/, "");
+      if (effectiveConfig.dimension === "assignee") {
+        const email = value.trim().toLowerCase();
+        if (!people.some((p) => p.email.toLowerCase() === email)) {
+          toast("Pick someone on this nest — share the nest with them first.");
+          return;
+        }
+        updateLayout({
+          columnOrder: [...new Set([...orderedKeys, email])],
+          hiddenColumns: (effectiveConfig.hiddenColumns ?? []).filter((k) => k !== email),
+        });
+        setNewColumn("");
+        return;
+      }
       if (effectiveConfig.dimension === "folder" && !v) {
         // Slugifying to nothing is the same bound the server enforces: a name
         // with no letter or digit has no path to derive.
@@ -832,6 +926,7 @@ export function MaturityBoard({
       effectiveConfig.dimension,
       effectiveConfig.hiddenColumns,
       updateLayout,
+      people,
     ],
   );
 
@@ -846,6 +941,354 @@ export function MaturityBoard({
     }
     return [...set].sort();
   }, [nodes, effectiveConfig]);
+
+  // ── Done columns, lanes, render helpers ──
+  const doneTags = useMemo(
+    () =>
+      (((nestSettings.data as any)?.done_tags ?? ["done"]) as string[]).map((t) =>
+        t.replace(/^#/, "").toLowerCase(),
+      ),
+    [nestSettings.data],
+  );
+  const canManageNest = isOwner || isAdmin;
+  const toggleDoneColumn = useCallback(
+    async (key: string) => {
+      const k = key.toLowerCase();
+      const next = doneTags.includes(k) ? doneTags.filter((t) => t !== k) : [...doneTags, k];
+      try {
+        await api.updateNestSettings(nestId, { done_tags: next } as any);
+        await qc.invalidateQueries({ queryKey: reads.settings(nestId).queryKey });
+        toast.success(
+          doneTags.includes(k)
+            ? `“${key}” no longer completes tasks`
+            : `Tasks moved to “${key}” now count as done`,
+        );
+      } catch (e: any) {
+        toast.error(e?.message || "Couldn't update done columns");
+      }
+    },
+    [doneTags, nestId, qc],
+  );
+
+  const personLabel = useCallback(
+    (email: string) =>
+      people.find((p) => p.email.toLowerCase() === email.toLowerCase())?.name || email,
+    [people],
+  );
+  const lanes = useMemo(() => {
+    const lane = config.swimlane as SwimlaneKind | undefined;
+    if (!lane) return null;
+    const none = { assignee: "Unassigned", priority: "No priority", parent: "No parent" }[lane];
+    return buildLanes(visibleNodes, lane, (key) =>
+      key === UNCATEGORIZED
+        ? none
+        : lane === "assignee"
+          ? personLabel(key)
+          : lane === "priority"
+            ? PRIORITY_LABELS[key as Priority] ?? key
+            : (nodes.find((n) => n.id === key)?.title ?? key),
+    );
+  }, [config.swimlane, visibleNodes, nodes, personLabel]);
+  const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(new Set());
+
+  /** Drop handling for a column (no lane) or one lane's cell of it. */
+  const cellDropHandlers = (col: { key: string }, laneKey?: string) => {
+    const cell = laneKey !== undefined ? `${laneKey}\u0001${col.key}` : col.key;
+    return {
+      onDragOver: (e: React.DragEvent) => {
+        if (colDrag) {
+          e.preventDefault();
+          setColDropTarget(col.key);
+          return;
+        }
+        if (!draggable) return;
+        e.preventDefault();
+        setDropCol(cell);
+      },
+      onDragLeave: () => {
+        setDropCol((c) => (c === cell ? null : c));
+        setColDropTarget((c) => (c === col.key ? null : c));
+      },
+      onDrop: (e: React.DragEvent) => {
+        e.preventDefault();
+        if (colDrag) {
+          reorderColumns(colDrag, col.key);
+          setColDrag(null);
+          setColDropTarget(null);
+          return;
+        }
+        void handleDrop(col.key, laneKey);
+      },
+    };
+  };
+
+  const renderHeader = (col: { key: string; label: string; title: string }, count: number) => {
+    const isDone =
+      effectiveConfig.dimension === "tag" && doneTags.includes(col.key.toLowerCase());
+    return (
+      <div
+        className={`group/header flex items-center justify-between gap-1 px-3 py-2 border-b border-border sticky top-0 ${
+          col.key !== UNCATEGORIZED ? "cursor-grab active:cursor-grabbing" : ""
+        } ${colDropTarget === col.key ? "bg-primary/10" : ""}`}
+        draggable={col.key !== UNCATEGORIZED}
+        onDragStart={(e) => {
+          if (col.key === UNCATEGORIZED) return;
+          setColDrag(col.key);
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData("text/plain", `col:${col.key}`);
+        }}
+        onDragEnd={() => {
+          setColDrag(null);
+          setColDropTarget(null);
+        }}
+        title={col.title}
+      >
+        <span className="flex min-w-0 items-center gap-1.5">
+          {effectiveConfig.dimension === "assignee" && col.key !== UNCATEGORIZED && (
+            <Avatar email={col.key} size="sm" />
+          )}
+          {effectiveConfig.dimension === "priority" && (
+            <PriorityIcon priority={col.key === UNCATEGORIZED ? undefined : col.key} />
+          )}
+          {isDone && <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" />}
+          <span
+            className={`min-w-0 text-sm font-medium truncate ${
+              capitalizeColumnHeader(effectiveConfig.dimension) ? "capitalize" : ""
+            } ${col.key === UNCATEGORIZED ? "text-muted-foreground" : ""}`}
+          >
+            {effectiveConfig.dimension === "assignee" && col.key !== UNCATEGORIZED
+              ? personLabel(col.key)
+              : col.label}
+          </span>
+        </span>
+        <div className="flex items-center gap-1 shrink-0">
+          <span className="text-xs text-muted-foreground tabular-nums">{count}</span>
+          {/* Linear's "completed" status category, as a column flag. */}
+          {effectiveConfig.dimension === "tag" && col.key !== UNCATEGORIZED && canManageNest && (
+            <button
+              type="button"
+              onClick={() => void toggleDoneColumn(col.key)}
+              className={`rounded p-0.5 hover:bg-muted ${
+                isDone
+                  ? "text-emerald-600"
+                  : "text-muted-foreground/50 opacity-0 group-hover/header:opacity-100 hover:text-foreground"
+              }`}
+              title={
+                isDone
+                  ? "Done column — moving a task here completes it. Click to unmark."
+                  : "Mark as a done column — tasks moved here count as completed"
+              }
+            >
+              <CheckCircle2 className="h-3.5 w-3.5" />
+            </button>
+          )}
+          {/* Tag columns are removable outright. A folder column is only
+              removable while it is still empty — one added by mistake. */}
+          {col.key !== UNCATEGORIZED &&
+            (effectiveConfig.dimension === "tag" ||
+              (effectiveConfig.dimension === "folder" && count === 0)) && (
+              <button
+                type="button"
+                onClick={() => hideColumn(col.key)}
+                className="text-muted-foreground/50 hover:text-foreground"
+                title={
+                  effectiveConfig.dimension === "folder"
+                    ? "Remove this empty column"
+                    : "Remove this column — its cards drop off the board; their tags aren't changed"
+                }
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderAddButton = (col: { key: string }, laneKey?: string) => {
+    const cell = laneKey !== undefined ? `${laneKey}\u0001${col.key}` : col.key;
+    if (!canEditDocs || !newCardPlacement(col.key, effectiveConfig) || addingIn?.cell === cell) {
+      return null;
+    }
+    return (
+      <button
+        type="button"
+        onClick={() => setAddingIn({ cell, col: col.key, lane: laneKey })}
+        className={`flex items-center gap-1.5 px-3 text-sm text-muted-foreground hover:bg-muted/60 hover:text-foreground rounded-b-lg ${
+          laneKey !== undefined ? "py-1.5 opacity-60 hover:opacity-100" : "py-2 border-t border-border"
+        }`}
+      >
+        <Plus className="h-3.5 w-3.5" /> Add task
+      </button>
+    );
+  };
+
+  const renderCards = (col: { key: string }, cards: BoardNode[], laneKey?: string) => {
+    const cell = laneKey !== undefined ? `${laneKey}\u0001${col.key}` : col.key;
+    return (
+      <div className={`flex-1 overflow-y-auto p-2 space-y-2 ${laneKey !== undefined ? "min-h-12" : ""}`}>
+        {cards.map((n, i) => {
+          const kids = subItems.get(n.id) ?? [];
+          const completed = !!n.completed_at;
+          return (
+            <div key={n.id}>
+              {dragId && dragId !== n.id && dropBefore?.cell === cell && dropBefore.before === n.id && (
+                <div className="mb-2 h-0.5 rounded bg-primary" />
+              )}
+              <div
+                onDragOver={(e) => {
+                  if (!dragId || colDrag) return;
+                  e.preventDefault();
+                  // Top half → before this card; bottom half → before the
+                  // next one (or the end of the column).
+                  const r = e.currentTarget.getBoundingClientRect();
+                  const before =
+                    e.clientY < r.top + r.height / 2 ? n.id : (cards[i + 1]?.id ?? null);
+                  setDropBefore((p) =>
+                    p?.cell === cell && p.before === before ? p : { cell, before },
+                  );
+                }}
+                draggable={draggable}
+                onDragStart={(e) => {
+                  setDragId(n.id);
+                  setDragFromCol(col.key);
+                  e.dataTransfer.effectAllowed = "move";
+                  e.dataTransfer.setData("text/plain", n.id);
+                }}
+                onDragEnd={() => {
+                  setDragId(null);
+                  setDragFromCol(null);
+                  setDropCol(null);
+                  setDropBefore(null);
+                }}
+                onClick={() => onOpenDocument(n.id)}
+                className={`group rounded-md border border-border bg-card px-2.5 py-2 text-sm cursor-pointer hover:border-primary/60 hover:shadow-sm transition ${
+                  dragId === n.id ? "opacity-50" : ""
+                } ${busy ? "pointer-events-none" : ""}`}
+              >
+                {/* A sub-item names its parent, as ClickUp does. Redundant
+                    inside its parent's own swimlane, so hidden there. */}
+                {n.parent && !(config.swimlane === "parent" && laneKey === n.parent) && (
+                  <div
+                    className="mb-0.5 truncate pl-5 text-[10px] text-muted-foreground"
+                    title={`Sub-item of ${nodes.find((x) => x.id === n.parent)?.title ?? n.parent}`}
+                  >
+                    ↳ {nodes.find((x) => x.id === n.parent)?.title ?? n.parent}
+                  </div>
+                )}
+                <div className="flex items-start gap-1.5">
+                  {draggable && (
+                    <GripVertical className="h-3.5 w-3.5 mt-0.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
+                  )}
+                  {completed ? (
+                    <CheckCircle2
+                      className="h-3.5 w-3.5 mt-0.5 shrink-0 text-emerald-600"
+                      aria-label="Completed"
+                    />
+                  ) : (
+                    <TypeIcon type={n.type} />
+                  )}
+                  {/* min-w-0: lets an unbroken title wrap instead of widening
+                      the card past the column. */}
+                  <span
+                    className={`min-w-0 flex-1 leading-snug break-words ${completed ? "text-muted-foreground" : ""}`}
+                  >
+                    {n.title}
+                  </span>
+                </div>
+                {n.tags.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mt-1.5 pl-5">
+                    {n.tags.slice(0, 4).map((t) => (
+                      <span
+                        key={t}
+                        className="text-[10px] px-1 py-0.5 rounded bg-muted text-muted-foreground"
+                      >
+                        {t}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {/* Footer, Linear-style: priority · due · sub-items · last
+                    touched on the left, assignee on the right. */}
+                <div className="mt-1.5 flex items-center gap-1.5 pl-5 min-h-6">
+                  <PriorityMenu
+                    value={n.priority}
+                    editable={canEditDocs}
+                    onChange={(priority) => patchFields(n.id, { priority })}
+                  />
+                  {!completed && (
+                    <DueChip
+                      due={n.due}
+                      today={today}
+                      editable={canEditDocs}
+                      onChange={(due) => patchFields(n.id, { due })}
+                    />
+                  )}
+                  <SubItemChip
+                    items={kids}
+                    done={kids.filter((k) => !!k.completed_at).length}
+                    onOpen={onOpenDocument}
+                  />
+                  {(n.updated_at || n.created_at) && (
+                    <span
+                      className="text-[10px] text-muted-foreground/80 tabular-nums whitespace-pre"
+                      title={timestampsTooltip(n, (iso) => new Date(iso).toLocaleString())}
+                    >
+                      {completed && n.completed_at
+                        ? `done ${timeAgo(n.completed_at)}`
+                        : timeAgo((n.updated_at || n.created_at)!)}
+                    </span>
+                  )}
+                  <span className="ml-auto flex items-center gap-1">
+                    {canEditDocs && newCardPlacement(col.key, effectiveConfig) && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setAddingIn({ cell, col: col.key, lane: laneKey, parent: n.id });
+                        }}
+                        className="rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-muted hover:text-foreground"
+                        title="Add a sub-item"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    <AssigneeMenu
+                      assignee={n.assignee}
+                      people={people}
+                      me={me}
+                      editable={canEditDocs}
+                      onChange={(assignee) => patchFields(n.id, { assignee })}
+                    />
+                  </span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {dragId && dropBefore?.cell === cell && dropBefore.before === null && (
+          <div className="h-0.5 rounded bg-primary" />
+        )}
+        {cards.length === 0 && addingIn?.cell !== cell && laneKey === undefined && (
+          <div className="text-xs text-muted-foreground/60 text-center py-6">
+            {draggable ? "Drop here" : "Empty"}
+          </div>
+        )}
+        {addingIn?.cell === cell && (
+          <AddCardComposer
+            key={addingIn.parent ?? "top"}
+            placeholder={
+              addingIn.parent
+                ? `Sub-item of “${nodes.find((x) => x.id === addingIn.parent)?.title ?? "task"}”…`
+                : "Task title…"
+            }
+            onSubmit={(title) => createCard(col.key, title, addingIn.parent, addingIn.lane)}
+            onClose={() => setAddingIn(null)}
+          />
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="space-y-4">
@@ -866,6 +1309,22 @@ export function MaturityBoard({
             <option value="folder">Folder</option>
             <option value="status">Status</option>
             <option value="tag">Tag namespace</option>
+            <option value="assignee">Assignee</option>
+            <option value="priority">Priority</option>
+          </select>
+          {/* Swimlanes: sub-group the columns into rows (Linear/Jira). */}
+          <label className="text-sm text-muted-foreground">Lanes</label>
+          <select
+            value={config.swimlane ?? ""}
+            onChange={(e) =>
+              updateConfig({ swimlane: (e.target.value || undefined) as SwimlaneKind | undefined })
+            }
+            className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+          >
+            <option value="">None</option>
+            {config.dimension !== "assignee" && <option value="assignee">Assignee</option>}
+            {config.dimension !== "priority" && <option value="priority">Priority</option>}
+            <option value="parent">Parent</option>
           </select>
           {config.dimension === "tag" && (
             <Input
@@ -880,7 +1339,9 @@ export function MaturityBoard({
               a folder. Without this a nest whose documents all sit in Root has
               a single column and nowhere to drag them. */}
           {(config.dimension === "tag" ||
-            (effectiveConfig.dimension === "folder" && canEditDocs)) && (
+            ((effectiveConfig.dimension === "folder" ||
+              effectiveConfig.dimension === "assignee") &&
+              canEditDocs)) && (
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -892,9 +1353,19 @@ export function MaturityBoard({
                 value={newColumn}
                 onChange={(e) => setNewColumn(e.target.value)}
                 placeholder={
-                  config.dimension === "tag" ? "add column…" : "new folder…"
+                  config.dimension === "tag"
+                    ? "add column…"
+                    : config.dimension === "assignee"
+                      ? "add person…"
+                      : "new folder…"
                 }
-                list={config.dimension === "tag" ? "board-tag-values" : undefined}
+                list={
+                  config.dimension === "tag"
+                    ? "board-tag-values"
+                    : config.dimension === "assignee"
+                      ? "board-people"
+                      : undefined
+                }
                 className="h-8 w-32"
                 title={
                   config.dimension === "tag"
@@ -902,6 +1373,15 @@ export function MaturityBoard({
                     : "Add a folder column — drag a card into it to file the document there (nest with parent/child)"
                 }
               />
+              {config.dimension === "assignee" && (
+                <datalist id="board-people">
+                  {people.map((p) => (
+                    <option key={p.email} value={p.email}>
+                      {p.name ?? p.email}
+                    </option>
+                  ))}
+                </datalist>
+              )}
               {config.dimension === "tag" && (
                 <datalist id="board-tag-values">
                   {availableTagValues.map((v) => (
@@ -1078,6 +1558,24 @@ export function MaturityBoard({
               remove one.
             </li>
           </>
+        ) : isFieldDimension(config.dimension) ? (
+          <>
+            <li>
+              One column per{" "}
+              <span className="font-medium text-foreground">
+                {config.dimension === "assignee" ? "person" : "priority"}
+              </span>
+              {canEditDocs
+                ? config.dimension === "assignee"
+                  ? " — drag a card across to reassign it."
+                  : " — drag a card across to change its priority."
+                : "."}
+            </li>
+            {config.dimension === "assignee" && canEditDocs && (
+              <li>Add a column for someone who has nothing assigned yet, above.</li>
+            )}
+            <li>Drag a card up or down to rank it; pick Lanes to split rows.</li>
+          </>
         ) : !canEditDocs ? (
           <>
             <li>
@@ -1135,6 +1633,23 @@ export function MaturityBoard({
             className="h-3.5 w-3.5"
           />
           Tasks only
+        </label>
+        <label className="flex items-center gap-1.5 text-sm text-muted-foreground">
+          Completed
+          <select
+            value={config.hideDoneAfterDays ?? ""}
+            onChange={(e) =>
+              updateConfig({
+                hideDoneAfterDays: e.target.value === "" ? undefined : Number(e.target.value),
+              })
+            }
+            className="h-7 rounded-md border border-input bg-background px-1.5 text-xs"
+          >
+            <option value="">All</option>
+            <option value="7">Past week</option>
+            <option value="30">Past month</option>
+            <option value="0">Hide</option>
+          </select>
         </label>
         {/* Tag filter: cards must carry every tag listed (saved per board). */}
         <div className="flex items-center gap-1">
@@ -1247,275 +1762,107 @@ export function MaturityBoard({
             : "No documents to show."}
         </div>
       ) : (
+        lanes ? (
+          // Swimlanes: column headers once, then one row of cells per lane.
+          <div className="overflow-x-auto pb-4">
+            <div className="inline-flex min-w-full flex-col gap-2">
+              <div className="flex gap-3">
+                {columns.map((col) => (
+                  <div
+                    key={col.key}
+                    {...cellDropHandlers(col)}
+                    className="w-64 flex-shrink-0 rounded-lg border border-border bg-muted/30"
+                  >
+                    {renderHeader(col, (orderedByColumn[col.key] ?? []).length)}
+                  </div>
+                ))}
+              </div>
+              {lanes.map((lane) => {
+                const collapsed = collapsedLanes.has(lane.key);
+                return (
+                  <div key={lane.key}>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setCollapsedLanes((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(lane.key)) next.delete(lane.key);
+                          else next.add(lane.key);
+                          return next;
+                        })
+                      }
+                      className="sticky left-0 flex items-center gap-1.5 py-1.5 text-sm font-medium hover:text-foreground"
+                    >
+                      <ChevronDown
+                        className={`h-3.5 w-3.5 transition-transform ${collapsed ? "-rotate-90" : ""}`}
+                      />
+                      {config.swimlane === "assignee" && lane.key !== UNCATEGORIZED && (
+                        <Avatar email={lane.key} size="sm" />
+                      )}
+                      {config.swimlane === "priority" && <PriorityIcon priority={lane.key === UNCATEGORIZED ? undefined : lane.key} />}
+                      <span className={lane.key === UNCATEGORIZED ? "text-muted-foreground" : ""}>
+                        {lane.label}
+                      </span>
+                      <span className="text-xs text-muted-foreground tabular-nums">{lane.nodes.length}</span>
+                    </button>
+                    {!collapsed && (
+                      <div className="flex gap-3">
+                        {columns.map((col) => {
+                          const cards = (orderedByColumn[col.key] ?? []).filter(
+                            (n) => laneKeyOf(n, config.swimlane as SwimlaneKind) === lane.key,
+                          );
+                          const cell = `${lane.key}\u0001${col.key}`;
+                          return (
+                            <div
+                              key={col.key}
+                              {...cellDropHandlers(col, lane.key)}
+                              className={`flex w-64 flex-shrink-0 flex-col rounded-lg border bg-muted/20 transition-colors ${
+                                dropCol === cell ? "border-primary ring-1 ring-primary" : "border-border"
+                              }`}
+                            >
+                              {renderCards(col, cards, lane.key)}
+                              {renderAddButton(col, lane.key)}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
         <div className="flex gap-3 overflow-x-auto pb-4">
           {columns.map((col) => {
             const cards = orderedByColumn[col.key] ?? [];
-            const isDropTarget = dropCol === col.key;
             return (
               <div
                 key={col.key}
-                onDragOver={(e) => {
-                  if (colDrag) {
-                    e.preventDefault();
-                    setColDropTarget(col.key);
-                    return;
-                  }
-                  if (!draggable) return;
-                  e.preventDefault();
-                  setDropCol(col.key);
-                }}
-                onDragLeave={() => {
-                  setDropCol((c) => (c === col.key ? null : c));
-                  setColDropTarget((c) => (c === col.key ? null : c));
-                }}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  if (colDrag) {
-                    reorderColumns(colDrag, col.key);
-                    setColDrag(null);
-                    setColDropTarget(null);
-                    return;
-                  }
-                  handleDrop(col.key);
-                }}
+                {...cellDropHandlers(col)}
                 className={`flex-shrink-0 w-64 rounded-lg border bg-muted/30 flex flex-col max-h-[70vh] transition-colors ${
-                  isDropTarget
-                    ? "border-primary ring-1 ring-primary"
-                    : "border-border"
+                  dropCol === col.key ? "border-primary ring-1 ring-primary" : "border-border"
                 }`}
               >
-                <div
-                  className={`flex items-center justify-between gap-1 px-3 py-2 border-b border-border sticky top-0 ${
-                    col.key !== UNCATEGORIZED
-                      ? "cursor-grab active:cursor-grabbing"
-                      : ""
-                  } ${colDropTarget === col.key ? "bg-primary/10" : ""}`}
-                  draggable={col.key !== UNCATEGORIZED}
-                  onDragStart={(e) => {
-                    if (col.key === UNCATEGORIZED) return;
-                    setColDrag(col.key);
-                    e.dataTransfer.effectAllowed = "move";
-                    e.dataTransfer.setData("text/plain", `col:${col.key}`);
-                  }}
-                  onDragEnd={() => {
-                    setColDrag(null);
-                    setColDropTarget(null);
-                  }}
-                  title={col.title}
-                >
-                  <span
-                    className={`min-w-0 text-sm font-medium truncate ${
-                      capitalizeColumnHeader(effectiveConfig.dimension) ? "capitalize" : ""
-                    } ${col.key === UNCATEGORIZED ? "text-muted-foreground" : ""}`}
-                  >
-                    {col.label}
-                  </span>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <span className="text-xs text-muted-foreground tabular-nums">
-                      {cards.length}
-                    </span>
-                    {/* Tag columns are removable outright. A folder column is
-                        only removable while it is still empty — one added by
-                        mistake, holding no documents to lose. */}
-                    {col.key !== UNCATEGORIZED &&
-                      (effectiveConfig.dimension === "tag" ||
-                        (effectiveConfig.dimension === "folder" &&
-                          cards.length === 0)) && (
-                        <button
-                          type="button"
-                          onClick={() => hideColumn(col.key)}
-                          className="text-muted-foreground/50 hover:text-foreground"
-                          title={
-                            effectiveConfig.dimension === "folder"
-                              ? "Remove this empty column"
-                              : // No Uncategorized catch-all on the tag board:
-                                // the cards leave the board, tags untouched.
-                                "Remove this column — its cards drop off the board; their tags aren't changed"
-                          }
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-                  </div>
-                </div>
-
-                <div className="flex-1 overflow-y-auto p-2 space-y-2">
-                  {cards.map((n, i) => (
-                    <div key={n.id}>
-                    {dragId && dragId !== n.id && dropBefore?.col === col.key && dropBefore.before === n.id && (
-                      <div className="mb-2 h-0.5 rounded bg-primary" />
-                    )}
-                    <div
-                      onDragOver={(e) => {
-                        if (!dragId || colDrag) return;
-                        e.preventDefault();
-                        // Top half → before this card; bottom half → before
-                        // the next one (or the end of the column).
-                        const r = e.currentTarget.getBoundingClientRect();
-                        const before =
-                          e.clientY < r.top + r.height / 2
-                            ? n.id
-                            : (cards[i + 1]?.id ?? null);
-                        setDropBefore((p) =>
-                          p?.col === col.key && p.before === before ? p : { col: col.key, before },
-                        );
-                      }}
-                      draggable={draggable}
-                      onDragStart={(e) => {
-                        setDragId(n.id);
-                        setDragFromCol(col.key);
-                        e.dataTransfer.effectAllowed = "move";
-                        e.dataTransfer.setData("text/plain", n.id);
-                      }}
-                      onDragEnd={() => {
-                        setDragId(null);
-                        setDragFromCol(null);
-                        setDropCol(null);
-                        setDropBefore(null);
-                      }}
-                      onClick={() => onOpenDocument(n.id)}
-                      className={`group rounded-md border border-border bg-card px-2.5 py-2 text-sm cursor-pointer hover:border-primary/60 hover:shadow-sm transition ${
-                        dragId === n.id ? "opacity-50" : ""
-                      } ${busy ? "pointer-events-none" : ""}`}
-                    >
-                      {/* A sub-item names its parent, as ClickUp does —
-                          otherwise it reads as an orphan in its column. */}
-                      {n.parent && (
-                        <div
-                          className="mb-0.5 truncate pl-5 text-[10px] text-muted-foreground"
-                          title={`Sub-item of ${nodes.find((x) => x.id === n.parent)?.title ?? n.parent}`}
-                        >
-                          ↳ {nodes.find((x) => x.id === n.parent)?.title ?? n.parent}
-                        </div>
-                      )}
-                      <div className="flex items-start gap-1.5">
-                        {draggable && (
-                          <GripVertical className="h-3.5 w-3.5 mt-0.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
-                        )}
-                        <TypeIcon type={n.type} />
-                        {/* min-w-0: a flex item defaults to min-width:auto, so
-                            it refuses to shrink below its content and
-                            break-words never fires — an unbroken title like
-                            ENTERPRISE_LICENSING_IMPLEMENTATION widened the card
-                            past the column instead of wrapping. */}
-                        <span className="min-w-0 flex-1 leading-snug break-words">
-                          {n.title}
-                        </span>
-                      </div>
-                      {n.tags.length > 0 && (
-                        <div className="flex flex-wrap gap-1 mt-1.5 pl-5">
-                          {n.tags.slice(0, 4).map((t) => (
-                            <span
-                              key={t}
-                              className="text-[10px] px-1 py-0.5 rounded bg-muted text-muted-foreground"
-                            >
-                              {t}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                      {/* Footer, Linear-style: priority · due · sub-items ·
-                          last touched on the left, assignee on the right.
-                          Empty fields show their control only on hover. */}
-                      <div className="mt-1.5 flex items-center gap-1.5 pl-5 min-h-6">
-                        <PriorityMenu
-                          value={n.priority}
-                          editable={canEditDocs}
-                          onChange={(priority) => patchFields(n.id, { priority })}
-                        />
-                        <DueChip
-                          due={n.due}
-                          today={today}
-                          editable={canEditDocs}
-                          onChange={(due) => patchFields(n.id, { due })}
-                        />
-                        <SubItemChip
-                          items={subItems.get(n.id) ?? []}
-                          onOpen={onOpenDocument}
-                        />
-                        {(n.updated_at || n.created_at) && (
-                          <span
-                            className="text-[10px] text-muted-foreground/80 tabular-nums whitespace-pre"
-                            title={timestampsTooltip(n, (iso) =>
-                              new Date(iso).toLocaleString(),
-                            )}
-                          >
-                            {timeAgo((n.updated_at || n.created_at)!)}
-                          </span>
-                        )}
-                        <span className="ml-auto flex items-center gap-1">
-                          {canEditDocs && newCardPlacement(col.key, effectiveConfig) && (
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setAddingIn({ col: col.key, parent: n.id });
-                              }}
-                              className="rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-muted hover:text-foreground"
-                              title="Add a sub-item"
-                            >
-                              <Plus className="h-3.5 w-3.5" />
-                            </button>
-                          )}
-                          <AssigneeMenu
-                            assignee={n.assignee}
-                            people={people}
-                            me={me}
-                            editable={canEditDocs}
-                            onChange={(assignee) => patchFields(n.id, { assignee })}
-                          />
-                        </span>
-                      </div>
-                    </div>
-                    </div>
-                  ))}
-                  {dragId && dropBefore?.col === col.key && dropBefore.before === null && (
-                    <div className="h-0.5 rounded bg-primary" />
-                  )}
-                  {cards.length === 0 && addingIn?.col !== col.key && (
-                    <div className="text-xs text-muted-foreground/60 text-center py-6">
-                      {draggable ? "Drop here" : "Empty"}
-                    </div>
-                  )}
-                  {addingIn?.col === col.key && (
-                    <AddCardComposer
-                      key={addingIn.parent ?? "top"}
-                      placeholder={
-                        addingIn.parent
-                          ? `Sub-item of “${nodes.find((x) => x.id === addingIn.parent)?.title ?? "task"}”…`
-                          : "Task title…"
-                      }
-                      onSubmit={(title) => createCard(col.key, title, addingIn.parent)}
-                      onClose={() => setAddingIn(null)}
-                    />
-                  )}
-                </div>
-                {/* Trello's "+ Add a card", pinned under the cards. */}
-                {canEditDocs &&
-                  newCardPlacement(col.key, effectiveConfig) &&
-                  addingIn?.col !== col.key && (
-                    <button
-                      type="button"
-                      onClick={() => setAddingIn({ col: col.key })}
-                      className="flex items-center gap-1.5 px-3 py-2 text-sm text-muted-foreground hover:bg-muted/60 hover:text-foreground rounded-b-lg border-t border-border"
-                    >
-                      <Plus className="h-3.5 w-3.5" /> Add task
-                    </button>
-                  )}
+                {renderHeader(col, cards.length)}
+                {renderCards(col, cards)}
+                {renderAddButton(col)}
               </div>
             );
           })}
         </div>
+        )
       )}
 
       <GovernedMoveDialog
-        open={!!pendingMove}
-        title={pendingMove?.title ?? ""}
-        onCancel={() => setPendingMove(null)}
+        open={!!pending}
+        title={pending?.title ?? ""}
+        verb={pending?.verb ?? "Moving"}
+        onCancel={() => setPending(null)}
         onConfirm={() => {
-          const m = pendingMove;
-          setPendingMove(null);
-          if (m) void executeMove(m.id, m.plan, m.place);
+          const m = pending;
+          setPending(null);
+          if (m) void m.run();
         }}
       />
     </div>

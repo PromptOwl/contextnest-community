@@ -84,6 +84,7 @@ const HISTORICAL_MIGRATIONS = [
   "048_license_cache_features",
   "049_license_cache_gateway",
   "051_boards",
+  "052_nest_done_tags",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -929,6 +930,11 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
     CREATE INDEX IF NOT EXISTS idx_boards_nest ON boards(nest_id, position);
   `);
+
+  // Migration 052 parity: which column tags mean "completed".
+  await db.exec(
+    "ALTER TABLE nests ADD COLUMN IF NOT EXISTS done_tags TEXT NOT NULL DEFAULT 'done'",
+  );
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(

@@ -17,8 +17,15 @@ import type { NestPermission } from "../shared/access.js";
 import type { SqlParam } from "../db/adapter.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
 
+const DIMENSIONS = ["folder", "status", "tag", "assignee", "priority"] as const;
+const SWIMLANES = ["assignee", "priority", "parent"] as const;
+
 export interface BoardConfig {
-  dimension: "folder" | "status" | "tag";
+  dimension: (typeof DIMENSIONS)[number];
+  /** Sub-group the columns into horizontal lanes (Linear/Jira swimlanes). */
+  swimlane?: (typeof SWIMLANES)[number];
+  /** Hide cards completed more than N days ago (Linear's "completed issues"). */
+  hideDoneAfterDays?: number;
   tagNamespace?: string;
   layouts?: Record<string, { columnOrder?: string[]; hiddenColumns?: string[] }>;
   tasksOnly?: boolean;
@@ -79,10 +86,23 @@ export function cleanConfig(raw: unknown): BoardConfig {
   }
   const r = raw as Record<string, unknown>;
   const dimension = r.dimension ?? "folder";
-  if (dimension !== "folder" && dimension !== "status" && dimension !== "tag") {
-    throw new ValidationError("config.dimension must be folder, status or tag");
+  if (!(DIMENSIONS as readonly unknown[]).includes(dimension)) {
+    throw new ValidationError(`config.dimension must be one of ${DIMENSIONS.join(", ")}`);
   }
-  const out: BoardConfig = { dimension };
+  const out: BoardConfig = { dimension: dimension as BoardConfig["dimension"] };
+  if (r.swimlane !== undefined && r.swimlane !== null && r.swimlane !== "") {
+    if (!(SWIMLANES as readonly unknown[]).includes(r.swimlane)) {
+      throw new ValidationError(`config.swimlane must be one of ${SWIMLANES.join(", ")}`);
+    }
+    out.swimlane = r.swimlane as BoardConfig["swimlane"];
+  }
+  if (r.hideDoneAfterDays !== undefined && r.hideDoneAfterDays !== null) {
+    const d = r.hideDoneAfterDays;
+    if (typeof d !== "number" || !Number.isInteger(d) || d < 0 || d > 3650) {
+      throw new ValidationError("config.hideDoneAfterDays must be a whole number of days");
+    }
+    out.hideDoneAfterDays = d;
+  }
   if (r.tagNamespace !== undefined) {
     if (typeof r.tagNamespace !== "string") {
       throw new ValidationError("config.tagNamespace must be a string");

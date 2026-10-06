@@ -7,6 +7,7 @@ import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
 import { boardRoutes } from "./nests/board-routes.js";
+import { listAssignedTo } from "./nodes/assigned-service.js";
 import { headlessRoutes } from "./nests/headless-routes.js";
 import { countPeople } from "./auth/headless.js";
 import { brandingRoutes } from "./nests/branding-routes.js";
@@ -1979,10 +1980,13 @@ export function createApp(): Hono<AuthEnv> {
     const deletionsShown =
       items.filter((i) => i.type === "deletion").length +
       waiting.filter((i) => i.type === "deletion").length;
+    // Board cards assigned to me (open ones), across every nest I can see.
+    const assigned = await listAssignedTo(me, userId, nestName);
     return c.json({
       items,
       waiting,
       notifications,
+      assigned,
       pagination: {
         total: reviewTotal + deletionsShown,
         limit,

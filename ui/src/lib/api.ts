@@ -2783,6 +2783,18 @@ export interface WorkPagination {
   has_more: boolean;
 }
 
+/** A board card assigned to the caller (open ones only), from /me/work. */
+export interface AssignedItem {
+  nest_id: string;
+  nest_name: string;
+  node_id: string;
+  title: string;
+  type: string;
+  due: string | null;
+  priority: string | null;
+  assigned_at: string | null;
+}
+
 export async function getMyWork(opts?: { limit?: number; offset?: number }) {
   const q = new URLSearchParams();
   if (opts?.limit != null) q.set("limit", String(opts.limit));
@@ -2792,6 +2804,7 @@ export async function getMyWork(opts?: { limit?: number; offset?: number }) {
     items: WorkItem[];
     waiting: WorkItem[];
     notifications?: WatcherNotification[];
+    assigned?: AssignedItem[];
     pagination?: WorkPagination;
   }>(`/me/work${qs ? `?${qs}` : ""}`);
 }
