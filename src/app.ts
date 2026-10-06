@@ -398,6 +398,11 @@ const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
 
     c.set("userId", user.id);
     c.set("nestScope", null);
+    // Shared agent driven by someone else: label held pushes with who asked.
+    const act = typeof claims.act === "string" ? claims.act.trim() : "";
+    if (isValidTicketSub(act) && act.toLowerCase() !== sub.toLowerCase()) {
+      c.set("apiKeyLabel", `${act} via ${sub}'s agent`);
+    }
     return next();
   },
 );

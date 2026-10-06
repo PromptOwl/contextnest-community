@@ -415,6 +415,10 @@ export function NestView({
     setActiveTabState(tab);
     onTabChange?.(tab);
   };
+  // Follow tab changes made outside the tab strip (sidebar, breadcrumb, back/forward).
+  useEffect(() => {
+    if (initialTab) setActiveTabState(initialTab);
+  }, [initialTab]);
   // Expanded folders, not collapsed ones: a folder's documents are fetched on
   // first expand, so the default has to be closed.
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
