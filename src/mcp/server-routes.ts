@@ -325,6 +325,47 @@ export const SERVER_TOOL_DEFINITIONS = [
   }),
 ];
 
+/**
+ * The tools an OAuth grant may call with only `nests:read`.
+ *
+ * Deliberately an ALLOW-list of read-only tools rather than a deny-list of
+ * writes: a tool added later and forgotten about defaults to requiring
+ * `nests:write`, which fails closed. The reverse would silently hand every new
+ * write tool to read-only grants.
+ *
+ * Only OAuth callers are affected. A cnst_ key or an MCP ticket carries no
+ * scope and keeps doing whatever the user themselves can do.
+ */
+const READ_ONLY_SERVER_TOOLS = new Set([
+  "nest_index",
+  "context_query",
+  "context_search",
+  "context_list",
+  "context_overview",
+  "context_get",
+  "context_resolve",
+  "context_comments",
+]);
+
+/** Exported so a test can assert every defined tool is classified. */
+export function serverToolNeedsWrite(name: string): boolean {
+  return !READ_ONLY_SERVER_TOOLS.has(name);
+}
+
+/**
+ * Does this grant reach this tool?
+ *
+ * `nests:write` implies `nests:read` — a grant that may create documents but
+ * not read them is useless, and treating them as disjoint let a write-only
+ * grant read everything while its consent screen mentioned only writing.
+ * Both directions are checked here so neither can be forgotten again.
+ */
+export function scopeAllows(granted: string[], toolName: string): boolean {
+  const canWrite = granted.includes("nests:write");
+  const canRead = canWrite || granted.includes("nests:read");
+  return serverToolNeedsWrite(toolName) ? canWrite : canRead;
+}
+
 async function handleServerToolCall(
   toolName: string,
   args: any,
@@ -556,6 +597,17 @@ function createServerMcp(
     // Same §9.4 field the per-nest surface advertises.
     Object.assign(shape, clientToolField);
     server.tool(tool.name, tool.description, shape, async (args) => {
+      // Scope check. Present only for OAuth callers; undefined means a key or
+      // a ticket, which this must not restrict.
+      const granted = c.get("oauthScope");
+      if (granted && !scopeAllows(granted, tool.name)) {
+        const needed = serverToolNeedsWrite(tool.name)
+          ? "nests:write"
+          : "nests:read";
+        return toCallToolResult(
+          `This connection wasn't authorized for that. "${tool.name}" needs the ${needed} scope — reconnect and approve it to use this tool.`,
+        );
+      }
       // See mcp/routes.ts: resolved per call, because the handshake that
       // reports `clientInfo` completes inside the transport.
       // Its stash on the request is inert here too — see mcp/routes.ts.
