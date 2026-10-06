@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { ExternalLink, KeyRound, Loader2, Mail } from "lucide-react";
+import { ExternalLink, Info, KeyRound, Loader2, Mail } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { installLicense } from "../../../lib/api";
@@ -45,7 +46,34 @@ function fmt(iso: string | null | undefined): string {
   return isNaN(d.getTime()) ? "—" : d.toLocaleString();
 }
 
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
+/** A label with an (i) that explains how the number beside it is counted. */
+function Counted({ label, help }: { label: string; help: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {label}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label={`How ${label.toLowerCase()} are counted`}
+            className="text-muted-foreground hover:text-foreground"
+          >
+            <Info className="h-3.5 w-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-xs text-xs leading-relaxed">{help}</TooltipContent>
+      </Tooltip>
+    </span>
+  );
+}
+
+/** "6 people count as users of 5 on this plan." */
+function countLine(n: number, what: string, cap: number | null | undefined): string {
+  const who = n === 1 ? "1 person counts" : `${n} people count`;
+  return `${who} as ${what}${cap != null ? ` of ${cap} on this plan` : ""}.`;
+}
+
+function Row({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
   return (
     <div className="flex items-start justify-between gap-4 py-2 border-b last:border-b-0">
       <dt className="text-muted-foreground">{label}</dt>
@@ -139,6 +167,7 @@ export function LicensePanel() {
           </CardDescription>
         </CardHeader>
         <CardContent>
+          <TooltipProvider>
           <dl className="text-sm">
             <Row label="Plan">
               {lic.plan ? PLAN_LABELS[lic.plan] ?? lic.plan : tierLabel(lic.tier, lic.trial)}
@@ -146,9 +175,27 @@ export function LicensePanel() {
             {lic.org && <Row label="Licensed to">{lic.org}</Row>}
             {lic.owner_email && <Row label="License admin">{lic.owner_email}</Row>}
             {/* Each person counts once, at their highest role on any nest. */}
-            <Row label="Users (owners, admins, reviewers)">{capLabel(used, licensed)}</Row>
+            <Row
+              label={
+                <Counted
+                  label="Users"
+                  help={`${countLine(used, "users", licensed)} Each person counts once, at their highest role on any nest. Users are the license admin, superadmins, nest owners, and anyone who is an admin or reviewer on a nest. Invited people with no role and viewers are free and don't count. Over the limit nobody loses access; only making someone a user is blocked.`}
+                />
+              }
+            >
+              {capLabel(used, licensed)}
+            </Row>
             {lic.subscribers && (
-              <Row label="Editors">{capLabel(lic.subscribers.used, lic.subscribers.licensed)}</Row>
+              <Row
+                label={
+                  <Counted
+                    label="Editors"
+                    help={`${countLine(lic.subscribers.used, "editors", lic.subscribers.licensed)} Editors are people whose highest role is editor: they can write but not approve. Someone who is also an admin or reviewer anywhere counts as a user instead. Viewers are free.${lic.subscribers.licensed === 0 ? " On this plan, adding an editor needs an upgrade." : ""}`}
+                  />
+                }
+              >
+                {capLabel(lic.subscribers.used, lic.subscribers.licensed)}
+              </Row>
             )}
             {lic.max_account_owners !== undefined && (
               <Row label="Account Owners">
@@ -180,6 +227,7 @@ export function LicensePanel() {
             </Row>
             <Row label="Last checked with PromptOwl">{fmt(lic.last_checked_at)}</Row>
           </dl>
+          </TooltipProvider>
           <div className="pt-4">
             <ReplaceKey onDone={refresh} />
           </div>
