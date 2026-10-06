@@ -222,6 +222,7 @@ export async function getHealth() {
     type_artifact_enabled?: boolean;
     shared_deployment?: boolean;
     type_table_enabled?: boolean;
+    type_task_enabled?: boolean;
     subagent_runs_enabled?: boolean;
     subagent_max_depth?: number;
     subagent_max_children?: number;
@@ -286,6 +287,8 @@ export interface AdminSettings {
    *  the type only — existing nodes still read/render/version. */
   type_artifact_enabled: boolean;
   type_table_enabled: boolean;
+  /** The server accepts `task` nodes (its engine knows the type). */
+  type_task_enabled?: boolean;
   /** Hootie in the nest (default OFF — admins opt in). */
   hootie_enabled: boolean;
   /** Custom assistant identity (enterprise). "" = default. Returned even
@@ -1341,6 +1344,11 @@ export async function createNode(
     schedule?: string;
     /** Flag as prime (always needs approval). Owner/admin only. */
     prime?: boolean;
+    /** Board fields — any node; `null` clears (see src/nodes/task-fields.ts). */
+    assignee?: string | null;
+    due?: string | null;
+    priority?: string | null;
+    parent?: string | null;
   },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
@@ -1421,6 +1429,11 @@ export async function updateNode(
     prime?: boolean | null;
     /** Re-type the node ("Turn into…"). Same accepted set as create. */
     type?: string;
+    /** Board fields — any node; `null` clears (see src/nodes/task-fields.ts). */
+    assignee?: string | null;
+    due?: string | null;
+    priority?: string | null;
+    parent?: string | null;
   },
   baseVersion?: number,
 ) {

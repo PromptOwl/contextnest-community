@@ -22,6 +22,17 @@ export interface BoardNode {
   type: string;
   tags: string[];
   status: string;
+  /** Board fields + timestamps, from the node listing (src/nodes/task-fields.ts). */
+  assignee?: string;
+  assigned_at?: string;
+  due?: string;
+  priority?: string;
+  parent?: string;
+  moved_at?: string;
+  created_at?: string;
+  updated_at?: string;
+  /** Document-scope prime flag; undefined = inherit from tags. */
+  prime?: boolean;
 }
 
 export type DimensionKind = "folder" | "status" | "tag";
@@ -176,6 +187,8 @@ export interface BoardSettings {
   dimension: DimensionKind;
   tagNamespace?: string;
   layouts: Record<string, ColumnLayout>;
+  /** Show only `task` nodes — a project board rather than a nest map. */
+  tasksOnly?: boolean;
 }
 
 /**
@@ -452,5 +465,28 @@ export function planMove(
         reason:
           "Status changes go through the review workflow, not the board — open the doc and submit for review.",
       };
+  }
+}
+
+/**
+ * Where a card created from a column's "+ Add task" lands, so it shows up in
+ * the column it was added from: the column's tag (tag board) or folder
+ * (folder board). Null on the status board — a new node's status is decided
+ * by governance, not by which column you clicked.
+ */
+export function newCardPlacement(
+  columnKey: string,
+  config: BoardConfig,
+): { tags?: string[]; folder?: string } | null {
+  switch (config.dimension) {
+    case "folder":
+      return columnKey === UNCATEGORIZED ? {} : { folder: columnKey };
+    case "tag": {
+      if (columnKey === UNCATEGORIZED) return { tags: [] };
+      const ns = namespaceOf(config);
+      return { tags: [withHash(ns ? `${ns}:${columnKey}` : columnKey)] };
+    }
+    case "status":
+      return null;
   }
 }

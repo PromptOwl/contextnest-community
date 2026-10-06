@@ -25,11 +25,12 @@ import {
   GripVertical,
   X,
   Plus,
+  ListTodo,
 } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../lib/api";
-import { useQueryClient } from "@tanstack/react-query";
-import { reads } from "../lib/queries";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { reads, useNestSettings } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
@@ -43,13 +44,35 @@ import {
   groupByColumn,
   layoutKey,
   migrateLayout,
+  newCardPlacement,
   planMove,
   resolveConfig,
   type BoardNode,
+  type MovePlan,
   type BoardSettings,
   type ColumnLayout,
   type DimensionKind,
 } from "../lib/board-dimensions";
+import {
+  UNASSIGNED,
+  assigneesOnBoard,
+  localToday,
+  matchesAssigneeFilter,
+  moveNeedsReview,
+  subItemsByParent,
+  timestampsTooltip,
+  type Priority,
+} from "../lib/board-tasks";
+import { timeAgo } from "./nest/node-display";
+import {
+  AddCardComposer,
+  AssigneeMenu,
+  Avatar,
+  DueChip,
+  GovernedMoveDialog,
+  PriorityMenu,
+  SubItemChip,
+} from "./board/CardParts";
 
 interface Props {
   nestId: string;
@@ -95,7 +118,7 @@ function loadConfig(nestId: string): BoardSettings {
         const lk = layoutKey({ dimension, tagNamespace });
         layouts[lk] ??= migrateLayout(lk, legacy);
       }
-      return { dimension, tagNamespace, layouts };
+      return { dimension, tagNamespace, layouts, tasksOnly: p.tasksOnly === true };
     }
   } catch {
     // ignore corrupt storage — fall through to default
@@ -119,6 +142,7 @@ function TypeIcon({ type }: { type: string }) {
   if (type === "agent") return <Bot className={`${cls} text-violet-500`} />;
   if (type === "table") return <Database className={`${cls} text-emerald-500`} />;
   if (type === "pdf") return <FileType className={`${cls} text-rose-500`} />;
+  if (type === "task") return <ListTodo className={`${cls} text-indigo-500`} />;
   return <FileText className={`${cls} text-muted-foreground`} />;
 }
 
@@ -130,8 +154,10 @@ export function MaturityBoard({
   onBack,
   onOpenDocument,
 }: Props) {
-  const { isAdmin } = useAuth();
+  const { isAdmin, adminStatus, typeTaskEnabled } = useAuth();
+  const me = adminStatus?.me?.email?.toLowerCase();
   const qc = useQueryClient();
+  const nestSettings = useNestSettings(nestId);
   const [nodes, setNodes] = useState<BoardNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -192,6 +218,15 @@ export function MaturityBoard({
           type: n.type ?? "document",
           tags: Array.isArray(n.tags) ? n.tags : [],
           status: n.status ?? "",
+          assignee: n.assignee,
+          assigned_at: n.assigned_at,
+          due: n.due,
+          priority: n.priority,
+          parent: n.parent,
+          moved_at: n.moved_at,
+          created_at: n.created_at,
+          updated_at: n.updated_at,
+          prime: n.prime,
         })),
       );
     } catch (e: any) {
@@ -237,9 +272,170 @@ export function MaturityBoard({
 
   const effectiveConfig = useMemo(() => resolveConfig(config), [config]);
 
+  // Quick-filter by person (Jira/ClickUp avatar row). Session-only: a filter
+  // is a glance, not a setting.
+  const [assigneeFilter, setAssigneeFilter] = useState<Set<string>>(new Set());
+  const toggleAssignee = useCallback((key: string) => {
+    setAssigneeFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+  const boardPeople = useMemo(() => assigneesOnBoard(nodes), [nodes]);
+  const subItems = useMemo(() => subItemsByParent(nodes), [nodes]);
+
+  const visibleNodes = useMemo(
+    () =>
+      nodes.filter(
+        (n) =>
+          (!config.tasksOnly || n.type === "task") &&
+          matchesAssigneeFilter(n, assigneeFilter),
+      ),
+    [nodes, config.tasksOnly, assigneeFilter],
+  );
+
   const { columns, byColumn } = useMemo(
-    () => groupByColumn(nodes, effectiveConfig),
-    [nodes, effectiveConfig],
+    () => groupByColumn(visibleNodes, effectiveConfig),
+    [visibleNodes, effectiveConfig],
+  );
+
+  // The nest's people — who a card can be assigned to. Writers only: the
+  // pickers are write affordances, and the roster read is gated anyway.
+  const { data: roster } = useQuery({
+    ...reads.mentionable(nestId),
+    enabled: !!nestId && canEditDocs,
+  });
+  const people = useMemo(
+    () => (roster?.people ?? []).filter((p) => !!p.email),
+    [roster],
+  );
+
+  const governance = useMemo(
+    () => ({
+      stewardshipEnabled: !!nestSettings.data?.stewardship_enabled,
+      primeOnlyReview: !!(nestSettings.data as any)?.prime_only_review,
+      allowSelfApprove: !!nestSettings.data?.allow_self_approve,
+      ownerOrAdmin: isOwner || isAdmin,
+      primeTags: (((nestSettings.data as any)?.prime_tags ?? []) as string[]).map((t) =>
+        t.replace(/^#+/, "").toLowerCase(),
+      ),
+    }),
+    [nestSettings.data, isOwner, isAdmin],
+  );
+
+  const today = localToday();
+
+  /** Set board fields on one card: optimistic, reverted if the server refuses. */
+  const patchFields = useCallback(
+    async (
+      id: string,
+      fields: { assignee?: string | null; due?: string | null; priority?: Priority | null },
+    ) => {
+      const prev = nodes.find((n) => n.id === id);
+      if (!prev) return;
+      const optimistic: BoardNode = { ...prev };
+      for (const [k, v] of Object.entries(fields)) {
+        (optimistic as any)[k] = v === null ? undefined : v;
+      }
+      setNodes((ns) => ns.map((n) => (n.id === id ? optimistic : n)));
+      try {
+        const res: any = await api.updateNode(nestId, id, fields);
+        const r = res?.node;
+        if (r) {
+          setNodes((ns) =>
+            ns.map((n) =>
+              n.id === id
+                ? {
+                    ...n,
+                    status: r.status ?? n.status,
+                    assignee: r.assignee,
+                    assigned_at: r.assigned_at,
+                    due: r.due,
+                    priority: r.priority,
+                    updated_at: r.updated_at ?? n.updated_at,
+                  }
+                : n,
+            ),
+          );
+        }
+        qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
+      } catch (e: any) {
+        setNodes((ns) => ns.map((n) => (n.id === id ? prev : n)));
+        toast.error(e?.message || "Couldn't update the card");
+      }
+    },
+    [nodes, nestId, qc],
+  );
+
+  // ── "+ Add task" ──
+  const [addingIn, setAddingIn] = useState<{ col: string; parent?: string } | null>(null);
+  const createCard = useCallback(
+    async (colKey: string, title: string, parent?: string) => {
+      const placement = newCardPlacement(colKey, effectiveConfig);
+      if (!placement) return;
+      try {
+        await api.createNode(nestId, {
+          title,
+          // The create route requires a body; a task's notes start empty.
+          content: "\n",
+          type: typeTaskEnabled ? "task" : "document",
+          ...placement,
+          ...(parent ? { parent } : {}),
+          // Filtering by one person and adding a card hands it to them —
+          // otherwise it would vanish from the filtered board on creation.
+          ...(assigneeFilter.size === 1 && !assigneeFilter.has(UNASSIGNED)
+            ? { assignee: [...assigneeFilter][0] }
+            : {}),
+        });
+        qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
+        await load();
+      } catch (e: any) {
+        toast.error(e?.message || "Couldn't add the task");
+        throw e;
+      }
+    },
+    [effectiveConfig, nestId, typeTaskEnabled, assigneeFilter, qc, load],
+  );
+
+  const [pendingMove, setPendingMove] = useState<{
+    id: string;
+    title: string;
+    plan: MovePlan;
+  } | null>(null);
+
+  const executeMove = useCallback(
+    async (id: string, plan: MovePlan) => {
+      setBusy(true);
+      try {
+        if (plan.kind === "move-folder") {
+          await api.moveNode(nestId, id, plan.folder);
+          toast.success("Moved");
+        } else if (plan.kind === "retag") {
+          // updateNode replaces the tag set, so the plan's full next set both
+          // adds the target column's tag and drops the source column's.
+          const res: any = await api.updateNode(nestId, id, { tags: plan.tags });
+          // Not "Moved" for a document: this rewrites its tags and saves a
+          // new version. A draft result means it is now waiting on review.
+          const s = res?.node?.status;
+          const isTask = nodes.find((n) => n.id === id)?.type === "task";
+          toast.success(
+            s === "draft" || s === "pending_review"
+              ? "Saved as a draft — waiting for review"
+              : isTask
+                ? "Moved"
+                : "Retagged",
+          );
+        }
+        await load();
+      } catch (e: any) {
+        toast.error(e?.message || "Move failed");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [nestId, nodes, load],
   );
 
   const handleDrop = useCallback(
@@ -259,27 +455,16 @@ export function MaturityBoard({
         if (plan.reason !== "Already in this column.") toast(plan.reason);
         return;
       }
-
-      setBusy(true);
-      try {
-        if (plan.kind === "move-folder") {
-          await api.moveNode(nestId, id, plan.folder);
-          toast.success("Moved");
-        } else if (plan.kind === "retag") {
-          // updateNode replaces the tag set, so the plan's full next set both
-          // adds the target column's tag and drops the source column's.
-          await api.updateNode(nestId, id, { tags: plan.tags });
-          // Not "Moved": this rewrites the doc's tags and saves a new version.
-          toast.success("Retagged");
-        }
-        await load();
-      } catch (e: any) {
-        toast.error(e?.message || "Move failed");
-      } finally {
-        setBusy(false);
+      // A retag is an edit. On a governed document it lands as a draft that
+      // waits for review — say so before doing it, not after. Tasks skip
+      // review, so they never see this. Folder moves don't draft.
+      if (plan.kind === "retag" && moveNeedsReview(node, governance)) {
+        setPendingMove({ id, title: node.title, plan });
+        return;
       }
+      await executeMove(id, plan);
     },
-    [dragId, dragFromCol, nodes, effectiveConfig, nestId, load],
+    [dragId, dragFromCol, nodes, effectiveConfig, governance, executeMove],
   );
 
   // Folder and tag drags mutate the node (moveNode / retag). Status moves
@@ -590,6 +775,79 @@ export function MaturityBoard({
         )}
       </ul>
 
+      {/* Project-board bar: tasks-only toggle + the person quick-filter
+          (Jira/ClickUp's avatar row — click faces to show only their cards). */}
+      <div className="flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-1.5 text-sm text-muted-foreground cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={!!config.tasksOnly}
+            onChange={(e) => updateConfig({ tasksOnly: e.target.checked })}
+            className="h-3.5 w-3.5"
+          />
+          Tasks only
+        </label>
+        {(boardPeople.length > 0 || assigneeFilter.size > 0) && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-muted-foreground">Assignee</span>
+            <div className="flex items-center -space-x-1">
+              {boardPeople.map((email) => {
+                const on = assigneeFilter.has(email);
+                return (
+                  <button
+                    key={email}
+                    type="button"
+                    onClick={() => toggleAssignee(email)}
+                    title={`${on ? "Showing" : "Show only"} ${email}${email === me ? " (me)" : ""}`}
+                    className={`rounded-full transition ${
+                      on
+                        ? "ring-2 ring-primary ring-offset-1 ring-offset-background z-10"
+                        : assigneeFilter.size > 0
+                          ? "opacity-50 hover:opacity-100"
+                          : "hover:z-10 hover:-translate-y-0.5"
+                    }`}
+                  >
+                    <Avatar email={email} />
+                  </button>
+                );
+              })}
+            </div>
+            {me && (
+              <Button
+                variant={assigneeFilter.has(me) && assigneeFilter.size === 1 ? "secondary" : "ghost"}
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={() =>
+                  setAssigneeFilter((prev) =>
+                    prev.has(me) && prev.size === 1 ? new Set() : new Set([me]),
+                  )
+                }
+              >
+                Only my tasks
+              </Button>
+            )}
+            <Button
+              variant={assigneeFilter.has(UNASSIGNED) ? "secondary" : "ghost"}
+              size="sm"
+              className="h-7 px-2 text-xs"
+              onClick={() => toggleAssignee(UNASSIGNED)}
+            >
+              Unassigned
+            </Button>
+            {assigneeFilter.size > 0 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs text-muted-foreground"
+                onClick={() => setAssigneeFilter(new Set())}
+              >
+                Clear
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+
       {loading ? (
         <div className="flex items-center gap-2 text-muted-foreground py-12 justify-center">
           <Loader2 className="h-4 w-4 animate-spin" /> Loading board…
@@ -718,6 +976,16 @@ export function MaturityBoard({
                         dragId === n.id ? "opacity-50" : ""
                       } ${busy ? "pointer-events-none" : ""}`}
                     >
+                      {/* A sub-item names its parent, as ClickUp does —
+                          otherwise it reads as an orphan in its column. */}
+                      {n.parent && (
+                        <div
+                          className="mb-0.5 truncate pl-5 text-[10px] text-muted-foreground"
+                          title={`Sub-item of ${nodes.find((x) => x.id === n.parent)?.title ?? n.parent}`}
+                        >
+                          ↳ {nodes.find((x) => x.id === n.parent)?.title ?? n.parent}
+                        </div>
+                      )}
                       <div className="flex items-start gap-1.5">
                         {draggable && (
                           <GripVertical className="h-3.5 w-3.5 mt-0.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
@@ -744,19 +1012,106 @@ export function MaturityBoard({
                           ))}
                         </div>
                       )}
+                      {/* Footer, Linear-style: priority · due · sub-items ·
+                          last touched on the left, assignee on the right.
+                          Empty fields show their control only on hover. */}
+                      <div className="mt-1.5 flex items-center gap-1.5 pl-5 min-h-6">
+                        <PriorityMenu
+                          value={n.priority}
+                          editable={canEditDocs}
+                          onChange={(priority) => patchFields(n.id, { priority })}
+                        />
+                        <DueChip
+                          due={n.due}
+                          today={today}
+                          editable={canEditDocs}
+                          onChange={(due) => patchFields(n.id, { due })}
+                        />
+                        <SubItemChip
+                          items={subItems.get(n.id) ?? []}
+                          onOpen={onOpenDocument}
+                        />
+                        {(n.updated_at || n.created_at) && (
+                          <span
+                            className="text-[10px] text-muted-foreground/80 tabular-nums whitespace-pre"
+                            title={timestampsTooltip(n, (iso) =>
+                              new Date(iso).toLocaleString(),
+                            )}
+                          >
+                            {timeAgo((n.updated_at || n.created_at)!)}
+                          </span>
+                        )}
+                        <span className="ml-auto flex items-center gap-1">
+                          {canEditDocs && newCardPlacement(col.key, effectiveConfig) && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setAddingIn({ col: col.key, parent: n.id });
+                              }}
+                              className="rounded p-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-muted hover:text-foreground"
+                              title="Add a sub-item"
+                            >
+                              <Plus className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                          <AssigneeMenu
+                            assignee={n.assignee}
+                            people={people}
+                            me={me}
+                            editable={canEditDocs}
+                            onChange={(assignee) => patchFields(n.id, { assignee })}
+                          />
+                        </span>
+                      </div>
                     </div>
                   ))}
-                  {cards.length === 0 && (
+                  {cards.length === 0 && addingIn?.col !== col.key && (
                     <div className="text-xs text-muted-foreground/60 text-center py-6">
                       {draggable ? "Drop here" : "Empty"}
                     </div>
                   )}
+                  {addingIn?.col === col.key && (
+                    <AddCardComposer
+                      key={addingIn.parent ?? "top"}
+                      placeholder={
+                        addingIn.parent
+                          ? `Sub-item of “${nodes.find((x) => x.id === addingIn.parent)?.title ?? "task"}”…`
+                          : "Task title…"
+                      }
+                      onSubmit={(title) => createCard(col.key, title, addingIn.parent)}
+                      onClose={() => setAddingIn(null)}
+                    />
+                  )}
                 </div>
+                {/* Trello's "+ Add a card", pinned under the cards. */}
+                {canEditDocs &&
+                  newCardPlacement(col.key, effectiveConfig) &&
+                  addingIn?.col !== col.key && (
+                    <button
+                      type="button"
+                      onClick={() => setAddingIn({ col: col.key })}
+                      className="flex items-center gap-1.5 px-3 py-2 text-sm text-muted-foreground hover:bg-muted/60 hover:text-foreground rounded-b-lg border-t border-border"
+                    >
+                      <Plus className="h-3.5 w-3.5" /> Add task
+                    </button>
+                  )}
               </div>
             );
           })}
         </div>
       )}
+
+      <GovernedMoveDialog
+        open={!!pendingMove}
+        title={pendingMove?.title ?? ""}
+        onCancel={() => setPendingMove(null)}
+        onConfirm={() => {
+          const m = pendingMove;
+          setPendingMove(null);
+          if (m) void executeMove(m.id, m.plan);
+        }}
+      />
     </div>
   );
 }

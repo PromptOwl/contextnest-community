@@ -66,6 +66,12 @@ function tintIndexOf(email: string): number {
   return (hash >>> 0) % TINTS.length;
 }
 
+/** One person's tint on its own — for a lone avatar (a board card's assignee),
+ *  where there's no row to probe collisions against. */
+export function personTint(email: string): string {
+  return TINTS[tintIndexOf(email.toLowerCase())];
+}
+
 /**
  * Preferred colour per email, then linear-probe collisions off each other.
  *
