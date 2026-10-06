@@ -12,6 +12,7 @@ import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invalidateForPath, keys, reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
+import { saveOutcome } from "../lib/save-outcome";
 import { setNavGuard, bypassNavGuard } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { nestPath } from "../lib/nest-url";
@@ -1432,6 +1433,10 @@ export function DocumentEditor({
       const nextVersion =
         (res as any)?.version ?? (res as any)?.node?.version;
       if (typeof nextVersion === "number") setBaseVersion(nextVersion);
+      // A save can move the status (a published prime doc lands as a draft), and
+      // Submit/Discard key off it. Own-pending edits keep the open review's status.
+      const nextStatus = (res as any)?.node?.status;
+      if (outcome !== "pending" && typeof nextStatus === "string") setStatus(nextStatus);
       // The top bar's "Edited …" reads this; the save just moved it.
       setUpdatedAt((res as any)?.node?.updated_at ?? new Date().toISOString());
       savedId = nodeId;
@@ -1484,8 +1489,13 @@ export function DocumentEditor({
             ? `"${title.trim() || "Untitled"}" published — it's now live and available for use.`
             : `"${title.trim() || "Untitled"}" saved as a draft.`,
         );
-      } else if (!isNew && !noop) {
-        toast.success(`"${title.trim() || "Untitled"}" saved.`);
+      } else if (!isNew && !noop && outcome !== "pending") {
+        // Pending edits auto-save; the action bar says so instead of a toast each time.
+        toast.success(
+          outcome === "publish"
+            ? `"${title.trim() || "Untitled"}" published — it's live now.`
+            : `"${title.trim() || "Untitled"}" saved as a draft — submit it for review when ready.`,
+        );
       }
       // The document is clean now, but React has not re-rendered yet: the
       // app-level nav guard registered by the effect below still closes over
@@ -1575,8 +1585,12 @@ export function DocumentEditor({
 
   const handleSubmitForReview = async (note: string, priority: string) => {
     if (isNew) return;
+    // Submit what's on screen, not the last save.
+    const saveFirst = isDirty;
+    if (saveFirst) await persistCurrent();
     await api.submitForReview(nestId, nodeId, note, priority);
     setShowSubmitModal(false);
+    toast.success(saveFirst ? "Saved and submitted for review." : "Submitted for review.");
     // Reload → status flips to pending_review, button hides.
     await loadNode();
   };
@@ -1686,9 +1700,33 @@ export function DocumentEditor({
     if (isLocked && mode === "edit") setMode("view");
   }, [isLocked, mode]);
 
-  // Submit-for-Review only on existing drafts with stewardship enabled.
+  // What Save will do — publish, draft, or update the author's own open review.
+  const outcome = saveOutcome({
+    isNew,
+    isOwnPendingReview,
+    stewardshipEnabled,
+    prime: effectivePrime,
+    primeOnlyReview: !!nestSettings.data?.prime_only_review,
+    creatorIsReviewer: !!nestSettings.data?.creator_is_reviewer,
+    allowSelfApprove,
+    ownerOrAdmin: canFlagPrime,
+  });
+
+  // Submit saves unsaved edits first, so offer it only where that save drafts —
+  // a save that publishes would put the doc live before the submit ran.
   const canSubmitForReview =
-    !isNew && stewardshipEnabled && status === "draft" && !isReviewerOnly;
+    !isNew &&
+    stewardshipEnabled &&
+    !isReviewerOnly &&
+    (isDirty ? outcome === "draft" : status === "draft");
+
+  // Own pending submission: edits save themselves to it once typing pauses.
+  useEffect(() => {
+    if (outcome !== "pending" || mode !== "edit" || !canSave) return;
+    const t = setTimeout(() => void runSave(() => {}), 3000);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [outcome, mode, canSave, title, content, tags, schedule]);
 
   const handleDocLinkInsert = (node: { id: string; title: string }) => {
     editorRef.current?.insertWikiLink(node.id, node.title);
@@ -3632,19 +3670,45 @@ export function DocumentEditor({
                       )}
                     {showSubmit && (
                       <Button
-                        variant="outline"
+                        variant={outcome === "draft" ? "default" : "outline"}
                         size="sm"
                         className="h-8"
                         onClick={() => setShowSubmitModal(true)}
                         data-testid="document-editor-submit"
-                        title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
+                        title="Saves your changes and sends them to a steward for approval."
                       >
                         <Send className="h-4 w-4 sm:mr-1.5" />
                         <span className="hidden sm:inline">Submit for review</span>
                       </Button>
                     )}
-                    {canWrite && (
+                    {/* Own pending submission auto-saves — a status line, not a Save button. */}
+                    {canWrite && outcome === "pending" && (
+                      <span className="text-xs text-muted-foreground" data-testid="document-editor-autosave">
+                        {saving
+                          ? "Saving…"
+                          : isDirty
+                            ? "Unsaved changes"
+                            : justSaved
+                              ? "Changes saved to your pending submission"
+                              : "Edits save to your pending submission"}
+                      </span>
+                    )}
+                    {canWrite && outcome !== "pending" && (
+                      // Tooltip on a wrapper: a disabled Button takes no pointer events.
+                      <span
+                        className="inline-flex"
+                        title={
+                          !canSave
+                            ? isDirty || isNew
+                              ? "Add a title and content first."
+                              : "No unsaved changes."
+                            : outcome === "publish"
+                              ? "Saves and publishes — it goes live now."
+                              : "Saves your changes as a draft. Doesn't publish or submit for review."
+                        }
+                      >
                       <Button
+                        variant={showSubmit && outcome === "draft" ? "outline" : "default"}
                         size="sm"
                         className="h-8"
                         // Keep focus in the editor field so clicking Save doesn't
@@ -3665,11 +3729,12 @@ export function DocumentEditor({
                         {saving
                           ? "Saving…"
                           : justSaved && !isDirty
-                            ? "Saved"
-                            : isNew
-                              ? "Create"
-                              : "Save"}
+                            ? outcome === "publish" ? "Published" : "Saved"
+                            : outcome === "publish"
+                              ? "Publish"
+                              : "Save draft"}
                       </Button>
+                      </span>
                     )}
                   </>
                 );
