@@ -275,11 +275,19 @@ queryRoutes.post("/table-query", async (c) => {
   }>();
   const ref = typeof body.table === "string" ? body.table.trim() : "";
   if (!ref) throw new ValidationError("table is required — [[Title]] or node id");
+  // Gated like GET /nodes/:id: canReadNode, and a public/org reader gets the
+  // approved version's rows, never the working copy's.
+  const userId = c.get("userId");
   const result = await queryTableNode(
     nestId,
     ref,
     typeof body.query === "string" ? body.query : "",
     body.include_drafts === true,
+    {
+      userId,
+      userEmail: await resolveCallerEmail(userId),
+      approvedOnly: await isPublicReader(nestId, userId),
+    },
   );
   return c.json(result);
 });
@@ -359,20 +367,24 @@ queryRoutes.get("/search", async (c) => {
 
 // GET /nests/:nestId/overview
 queryRoutes.get("/overview", async (c) => {
-  const { storage } = await engineCache.get(c.req.param("nestId")!);
-  // Derived annotation projections stay out of the counts and — because this
-  // is where the tag facet comes from — out of tag filtering too.
-  const documents = (await storage.discoverDocuments()).filter(
-    (d) => !isDerivedAnnotationsNode(d.id),
-  );
+  // Caller-gated, like MCP context_overview: this used to list every node's
+  // title, tags and a body excerpt straight off disk, so a public reader could
+  // read a governed nest's unapproved drafts here. listNodesForCaller applies
+  // filterAccessible and serves public readers the approved body. It also
+  // keeps the derived annotation projections out, as this route always did.
+  const documents = (
+    await listNodesForCaller(c.req.param("nestId")!, c.get("userId"), {
+      withContent: true,
+    })
+  ).filter((d) => !isDerivedAnnotationsNode(d.id));
 
   const types: Record<string, number> = {};
   const tags: Record<string, number> = {};
 
   for (const node of documents) {
-    const t = node.frontmatter.type || "document";
+    const t = node.type || "document";
     types[t] = (types[t] || 0) + 1;
-    for (const tag of node.frontmatter.tags || []) {
+    for (const tag of node.tags || []) {
       tags[tag] = (tags[tag] || 0) + 1;
     }
   }
@@ -383,10 +395,10 @@ queryRoutes.get("/overview", async (c) => {
     tags,
     nodes: documents.map((n) => ({
       id: n.id,
-      title: n.frontmatter.title,
-      type: n.frontmatter.type || "document",
-      tags: n.frontmatter.tags || [],
-      snippet: (n.body || "").slice(0, 120).replace(/\n/g, " "),
+      title: n.title,
+      type: n.type || "document",
+      tags: n.tags || [],
+      snippet: (n.content || "").slice(0, 120).replace(/\n/g, " "),
     })),
   });
 });
