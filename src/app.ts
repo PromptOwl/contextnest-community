@@ -119,6 +119,7 @@ import {
   AppError,
   ValidationError,
   VaultBusyError,
+  PlanLimitError,
   isVaultLockTimeout,
 } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish } from "./config.js";
@@ -134,7 +135,23 @@ import {
   getSuspensionReason,
   getCurrentLicense,
   installLicenseKey,
+  getLastLicenseCheck,
+  getLicenseOwnerEmail,
+  getPendingRejections,
+  getEntitlement,
+  DEFAULT_LICENSE_CONTACT,
+  type LicenseInfo,
 } from "./auth/license.js";
+import { countBilled, assertCanGrant, assertCanAddAccountOwner, planLimitMessage } from "./auth/seats.js";
+import { hasEntitlement } from "./auth/entitlements.js";
+import {
+  resolveModelCredential,
+  hootieModel,
+  listCredentialModels,
+  bareModelName,
+} from "./shared/model-credential.js";
+import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "./auth/license-copy.js";
+import { SERVICE_VERSION } from "./shared/version.js";
 import { persistSetting } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
 import { publicBaseUrlError } from "./shared/public-base-url.js";
@@ -142,7 +159,7 @@ import { isOidcReady } from "./auth/oidc.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 
 // Resolve UI static files. In built mode this file lives at dist/index.js,
 // so siblings of __dirname include dist/web3. In dev (`tsx src/index.ts`)
@@ -151,16 +168,6 @@ import { existsSync, readFileSync } from "node:fs";
 // serveStatic wants a path relative to CWD.
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-// Built mode puts this file at dist/app.js, dev at src/app.ts — package.json
-// is one level up from either.
-const SERVICE_VERSION = (() => {
-  try {
-    return JSON.parse(readFileSync(join(HERE, "..", "package.json"), "utf8"))
-      .version as string;
-  } catch {
-    return "unknown";
-  }
-})();
 const UI_DIR_CANDIDATES = [
   join(HERE, "web3"),
   join(process.cwd(), "dist", "web3"),
@@ -169,6 +176,46 @@ const UI_DIR_ABS =
   UI_DIR_CANDIDATES.find((p) => existsSync(p)) || UI_DIR_CANDIDATES[0];
 const UI_DIR_REL = relative(process.cwd(), UI_DIR_ABS) || ".";
 
+/** Whole days until an ISO date (negative once past); null = no date. */
+function daysUntil(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const ms = Date.parse(iso) - Date.now();
+  return isNaN(ms) ? null : Math.ceil(ms / 86_400_000);
+}
+
+/** License-term fields shared by /license/status, /admin/license and a
+ *  rejected install: what the license is, when it ends, why PromptOwl last
+ *  refused it, and who to talk to. */
+function licenseTerms(lic: LicenseInfo | null | undefined) {
+  return {
+    trial: !!lic?.trial,
+    expires_at: lic?.expiresAt ?? null,
+    days_left: daysUntil(lic?.expiresAt),
+    reason: lic?.reason ?? null,
+    grace_ends_at: lic?.graceEndsAt ?? null,
+    contact: lic?.contact ?? DEFAULT_LICENSE_CONTACT,
+  };
+}
+
+/** Operator-facing message for a key PromptOwl refused at install time. */
+function rejectedKeyMessage(info: LicenseInfo): string {
+  const contact = info.contact ?? DEFAULT_LICENSE_CONTACT;
+  const talk = `Talk to PromptOwl (${contact.url} or ${contact.email}) to renew or get a new key.`;
+  switch (info.reason) {
+    case "expired": {
+      const when = info.expiresAt
+        ? ` on ${new Date(info.expiresAt).toDateString()}`
+        : "";
+      return `This ${info.trial ? "trial" : "license"} ended${when}, so the key wasn't saved. ${talk}`;
+    }
+    case "deactivated":
+      return `This license key has been deactivated, so it wasn't saved. ${talk}`;
+    case "suspended":
+      return `This license is suspended, so it wasn't saved. ${talk}`;
+    default:
+      return "PromptOwl rejected this license key. It wasn't saved. Verify the key is correct and active, then try again.";
+  }
+}
 // True for a browser loading this URL as a page (hard reload, typed/bookmarked
 // link), false for the app's own fetch()es and other programmatic callers.
 // Sec-Fetch-Mode is sent by every current browser on navigation; the Accept
@@ -506,8 +553,8 @@ export function createApp(): Hono<AuthEnv> {
       auth_mode: config.AUTH_MODE,
       logo_url: config.LOGO_URL,
       // Presence only, never the value: lets the UI stop prompting for a
-      // runner key once the server-wide one exists.
-      runner_key_configured: !!process.env.ANTHROPIC_API_KEY,
+      // runner key once runs have a credential (own key or PromptOwl's).
+      runner_key_configured: !!resolveModelCredential(),
       // Presence only: the publish dialog hides the email/invite gates when
       // this server cannot send mail, because their only way in is a mailed link.
       email_configured: isEmailConfigured(),
@@ -561,6 +608,8 @@ export function createApp(): Hono<AuthEnv> {
       // renders before sign-in, and none of it is secret.
       hootie_brand: effectiveHootieBrand(),
       hootie_branding_available: hootieBrandingAvailable(),
+      // Own model key / gateway allowed (licence feature byok, Enterprise).
+      byok_available: hasEntitlement("byok"),
       // This server hosts several organizations (PromptOwl-hosted) rather than
       // one. The visibility picker words 'Organization' and 'Public' by it and
       // confirms before 'org'; the server enforces the same in
@@ -615,6 +664,11 @@ export function createApp(): Hono<AuthEnv> {
   app.route("/auth", authRoutes);
 
   // ─── License setup endpoints (public — needed before unlock) ──────────
+  // Public, so it says nothing about WHY a license lapsed (trial ended,
+  // deactivated…) — that is between PromptOwl and the admin, on
+  // GET /admin/license. `setup_required` is true only for a server that has
+  // never been licensed; a workspace whose license lapsed stays usable
+  // read-only instead of dropping everyone onto the activation screen.
   app.get("/license/status", (c) => {
     const lic = getCurrentLicense();
     return c.json({
@@ -625,10 +679,64 @@ export function createApp(): Hono<AuthEnv> {
       suspended: !!lic?.suspended,
       suspended_reason: lic?.suspendedReason || null,
       limits: lic?.limits || null,
+      setup_required: !lic?.valid && !getLicenseOwnerEmail(),
     });
   });
 
+  // License detail for the people who can act on it — server admins and the
+  // key's owner (even once it lapsed): the Settings → License tab and the
+  // admin banner, including the live seat count.
+  app.use("/admin/license", flexAuthMiddleware);
+  app.get("/admin/license", async (c) => {
+    if (!(await canSeeLicenseDetail(c.get("userId"))))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const lic = getCurrentLicense();
+    const ent = getEntitlement();
+    const licensed = ent.maxUsers;
+    const billed = await countBilled();
+    const used = billed.users;
+    return c.json({
+      plan: ent.plan,
+      subscribers: { licensed: ent.maxSubscribers, used: billed.subscribers },
+      max_account_owners: ent.maxAccountOwners,
+      valid: !!lic?.valid,
+      tier: lic?.tier || "none",
+      org: lic?.org || null,
+      owner_email: lic?.ownerEmail || null,
+      suspended: !!lic?.suspended,
+      suspended_reason: lic?.suspendedReason || null,
+      ...licenseTerms(lic),
+      seats: {
+        licensed,
+        used,
+        over_limit: licensed != null && used > licensed,
+        at_limit: licensed != null && used >= licensed,
+      },
+      // Consecutive rejections PromptOwl has sent that haven't been acted on
+      // yet (3 drop the license) — the "we're checking your license" banner.
+      pending_rejections: getPendingRejections(),
+      last_checked_at: getLastLicenseCheck(),
+      // PromptOwl's page for this key (plan, Upgrade); ?key= is the last 4 only.
+      manage_url: config.PROMPTOWL_KEY
+        ? `${config.PROMPTOWL_API_URL.replace(/\/$/, "")}/community-license?key=${config.PROMPTOWL_KEY.slice(-4)}`
+        : null,
+    });
+  });
+
+  // Installing the FIRST key is public — that's how a fresh server gets set
+  // up. Once the server has a license owner, replacing the key is theirs (or
+  // a server admin's) to do: a lapsed license must not let any visitor paste
+  // their own key and become this server's admin.
+  app.use("/license/install", async (c, next) =>
+    getLicenseOwnerEmail() ? flexAuthMiddleware(c, next) : next(),
+  );
   app.post("/license/install", async (c) => {
+    if (getLicenseOwnerEmail() && !(await canSeeLicenseDetail(c.get("userId")))) {
+      return c.json(
+        { error: "Only the server admin can replace this server's license key." },
+        403,
+      );
+    }
     let body: { key?: string };
     try {
       body = await c.req.json();
@@ -648,8 +756,8 @@ export function createApp(): Hono<AuthEnv> {
         return c.json(
           {
             valid: false,
-            error:
-              "PromptOwl rejected this license key. It wasn't saved. Verify the key is correct and active, then try again.",
+            error: rejectedKeyMessage(info),
+            ...licenseTerms(info),
           },
           400,
         );
@@ -705,13 +813,16 @@ export function createApp(): Hono<AuthEnv> {
     type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
     type_table_enabled: config.TYPE_TABLE_ENABLED,
     hootie_enabled: config.HOOTIE_ENABLED,
-    hootie_model: config.HOOTIE_MODEL,
+    // The model in use: the admin's pick, else the gateway's default (see hootieModel).
+    hootie_model: hootieModel(resolveModelCredential()),
     // Custom identity (enterprise). The stored values are returned even when
     // the licence doesn't allow them, so a lapsed licence shows what would
     // come back on renewal; `hootie_branding_available` says whether they
     // are in effect and whether edits are accepted.
     ...storedHootieSettings(),
     hootie_branding_available: hootieBrandingAvailable(),
+    // Own key + gateway fields are in effect and editable only with byok.
+    byok_available: hasEntitlement("byok"),
     anthropic_base_url: config.ANTHROPIC_BASE_URL,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
@@ -764,6 +875,27 @@ export function createApp(): Hono<AuthEnv> {
     if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
     return c.json(currentServerSettings());
+  });
+
+  // Models the current credential can reach — the Hootie model picker. On the
+  // PromptOwl gateway that is PromptOwl's team catalog (team model names); on
+  // an own key (byok), whatever that key's provider/gateway lists.
+  app.use("/admin/models", flexAuthMiddleware);
+  app.get("/admin/models", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const credential = resolveModelCredential();
+    const current = hootieModel(credential);
+    if (!credential) return c.json({ models: [], current, source: null });
+    try {
+      const ids = await listCredentialModels(credential);
+      // People pick plain names; PromptOwl's instance prefix is added per call.
+      const names = credential.source === "promptowl" ? ids.map(bareModelName) : ids;
+      return c.json({ models: [...new Set(names)].sort(), current, source: credential.source });
+    } catch (err) {
+      console.warn("[admin/models] could not list models:", err instanceof Error ? err.message : err);
+      return c.json({ models: [], current, source: credential.source, error: "Could not list models right now." });
+    }
   });
 
   // Send a test notification to the saved Slack/Teams webhook so the admin can
@@ -823,6 +955,25 @@ export function createApp(): Hono<AuthEnv> {
         );
       }
       for (const k of Object.keys(HOOTIE_BRAND_FIELDS)) delete body[k];
+    }
+
+    // Own model key / gateway: Enterprise only (pricing spec §9.3, licence
+    // feature byok). Setting one is refused whole; clearing is always allowed.
+    if (
+      !hasEntitlement("byok") &&
+      (["anthropic_api_key", "anthropic_base_url"] as const).some(
+        (f) => f in body && String(body[f] ?? "").trim() !== "",
+      )
+    ) {
+      return c.json(
+        {
+          error:
+            "Models on this server are supplied by PromptOwl. Using your own model key or gateway is an Enterprise feature.",
+          code: "byok_required",
+          settings: currentServerSettings(),
+        },
+        403,
+      );
     }
 
     if ("promptowl_sign_in_gate" in body) {
@@ -919,10 +1070,10 @@ export function createApp(): Hono<AuthEnv> {
     }
     if ("hootie_model" in body) {
       const v = String(body.hootie_model ?? "").trim();
-      if (!v) addError("hootie_model", "Model is required — e.g. claude-opus-5.");
+      if (!v) addError("hootie_model", "Model is required — e.g. claude-sonnet-5.");
       else if (v.length > 200 || /\s/.test(v))
         addError("hootie_model", "Model must be a single identifier with no spaces.");
-      else pending.push({ name: "HOOTIE_MODEL", value: v === "claude-opus-5" ? null : v });
+      else pending.push({ name: "HOOTIE_MODEL", value: v === "claude-sonnet-5" ? null : v });
     }
     // Name, logo, accent colour, greeting (enterprise — gated above).
     pending.push(...validateHootieBrandFields(body, addError));
@@ -1537,6 +1688,9 @@ export function createApp(): Hono<AuthEnv> {
     if (isLicenseOwner || isSuperAdmin(email)) {
       return c.json({ error: "This user is already a superadmin." }, 409);
     }
+    // A superadmin is an Account Owner, and bills as a user (pricing §3).
+    await assertCanAddAccountOwner(email);
+    await assertCanGrant([{ userId: (user as { id: string }).id, next: "user" }]);
 
     const grantedBy = (await resolveCallerEmail(c.get("userId"))).toLowerCase();
     try {
@@ -2059,9 +2213,55 @@ export function createApp(): Hono<AuthEnv> {
       : flexAuthMiddleware(c, next);
   });
 
+  // Why a write is refused on a read-only server — suspended by PromptOwl, or
+  // no valid license — worded for who asked: admins get the reason and who to
+  // talk to, everyone else one neutral line. null = writes are allowed.
+  const readOnlyDenial = async (
+    userId: string,
+  ): Promise<{ error: string; extra: Record<string, unknown> } | null> => {
+    const admin = () => canSeeLicenseDetail(userId);
+    if (isSuspended()) {
+      if (!(await admin())) return { error: NEUTRAL_READ_ONLY, extra: { read_only: true } };
+      const lic = getCurrentLicense();
+      return {
+        error: "Server suspended by PromptOwl",
+        extra: {
+          reason: getSuspensionReason(),
+          contact: (lic?.contact ?? DEFAULT_LICENSE_CONTACT).email,
+          contact_url: (lic?.contact ?? DEFAULT_LICENSE_CONTACT).url,
+        },
+      };
+    }
+    const lic = getCurrentLicense();
+    if (lic?.valid) return null;
+    if (!(await admin())) return { error: NEUTRAL_READ_ONLY, extra: { read_only: true } };
+    // licenseTerms carries the machine reason code; expose it as
+    // license_reason so it doesn't clobber the human-readable reason.
+    const { reason: licenseReason, ...terms } = licenseTerms(lic);
+    return {
+      error: "License required",
+      extra: {
+        ...terms,
+        license_reason: licenseReason,
+        reason:
+          lic?.reason === "expired"
+            ? "This server's PromptOwl license has ended, so it is read-only until it is renewed. Nothing has been deleted."
+            : "This server has no valid PromptOwl license installed. Ask the server admin to install one via the setup screen or POST /license/install.",
+        setup_url: "/setup",
+      },
+    };
+  };
+
   // Access control for nest-scoped routes
   nestsApp.use("*", async (c, next) => {
     const parts = nestPathParts(c.req.path);
+    // Nest-level writes (create, rename, delete: /nests, /nests/:id) and the
+    // unsynced-folder actions skip the per-nest checks below, but a read-only
+    // server must refuse them too.
+    if ((parts.length < 2 || parts[0] === "unsynced") && c.req.method !== "GET") {
+      const denial = await readOnlyDenial(c.get("userId"));
+      if (denial) return c.json({ error: denial.error, ...denial.extra }, 503);
+    }
     if (parts.length < 2) return next();
 
     // "unsynced" is a server-admin namespace under /nests, not a nest id.
@@ -2138,11 +2338,10 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     // Kill switch: if suspended, block writes but allow reads
+    // Only admins hear why; everyone else gets the neutral read-only line.
     if (isSuspended() && c.req.method !== "GET") {
-      return deny(503, "Server suspended by PromptOwl", {
-        reason: getSuspensionReason(),
-        contact: "support@promptowl.ai",
-      });
+      const denial = await readOnlyDenial(userId);
+      if (denial) return deny(503, denial.error, denial.extra);
     }
 
     // License gate: block writes until a valid PromptOwl key is
@@ -2211,15 +2410,9 @@ export function createApp(): Hono<AuthEnv> {
       const isPushRelease = path.includes("/pending-pushes");
       const needsLicense =
         !isPushRelease && (c.req.method !== "GET" || isGovernance);
-      if (needsLicense) {
-        const lic = getCurrentLicense();
-        if (!lic?.valid) {
-          return deny(503, "License required", {
-            reason:
-              "This server has no valid PromptOwl license installed. Ask the server admin to install one via the setup screen or POST /license/install.",
-            setup_url: "/setup",
-          });
-        }
+      if (needsLicense && !getCurrentLicense()?.valid) {
+        const denial = await readOnlyDenial(userId);
+        if (denial) return deny(503, denial.error, denial.extra);
       }
     }
 
@@ -2806,7 +2999,7 @@ export function createApp(): Hono<AuthEnv> {
   // for predictable failure modes (constraint violations, missing rows,
   // disk/path errors). Anything truly unexpected still falls through
   // to the 500.
-  app.onError((err, c) => {
+  app.onError(async (err, c) => {
     // Vault write-lock timeout: retryable, so it carries Retry-After — the
     // one AppError with a header. Raw engine errors are converted here too,
     // for any route that throws them without passing through toSafeError.
@@ -2815,6 +3008,15 @@ export function createApp(): Hono<AuthEnv> {
       return c.json({ error: busy.message }, 503, {
         "Retry-After": String(busy.retryAfterSeconds),
       });
+    }
+    if (err instanceof PlanLimitError) {
+      // Only a server admin can change the plan; everyone else is told who to ask.
+      const userId = (c as any).get?.("userId") as string | undefined;
+      const forAdmin = !!userId && (await isServerAdminUserId(userId).catch(() => false));
+      return c.json(
+        { error: planLimitMessage(err.limit, err.max, forAdmin), code: "plan_limit", limit: err.limit, max: err.max },
+        402,
+      );
     }
     if (err instanceof AppError) {
       return c.json({ error: err.message }, err.statusCode as any);

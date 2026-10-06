@@ -18,14 +18,16 @@
  * Nothing is posted when nobody is named.
  *
  * Read-tier (see isReadQuery in app.ts): if you can read the nest you can
- * ask about it. The feature gate is HOOTIE_ENABLED; the credential is the
- * server-wide ANTHROPIC_API_KEY. Off → 404 (the route doesn't exist);
- * no key → 503 with a reason the UI can explain.
+ * ask about it. The feature gate is HOOTIE_ENABLED; the credential comes from
+ * resolveModelCredential (own key with the byok feature, else PromptOwl's
+ * gateway). Off → 404 (the route doesn't exist); none → 503 with a reason.
  */
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AuthEnv } from "../auth/middleware.js";
 import { config } from "../config.js";
+import { resolveModelCredential, hootieModel, resolveGatewayModel } from "../shared/model-credential.js";
+import { hasEntitlement } from "../auth/entitlements.js";
 import {
   resolveContext,
   type ContextNodeSummary,
@@ -85,17 +87,20 @@ type MentionOutcome =
 
 hootieRoutes.post("/chat", async (c) => {
   if (!config.HOOTIE_ENABLED) return c.json({ error: "Not found" }, 404);
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
+  const credential = resolveModelCredential();
+  if (!credential) {
     return c.json(
       {
-        error:
-          "Hootie needs an Anthropic API key. A server admin can add one under Settings → General.",
+        error: hasEntitlement("byok")
+          ? "Hootie needs an Anthropic API key. A server admin can add one under Settings → General."
+          : "Hootie runs on PromptOwl models, which arrive with this server's next licence check. If it persists, ask your administrator.",
         reason: "no_api_key",
       },
       503,
     );
   }
+  // Stored as a plain name; on PromptOwl's gateway the team prefix goes on here.
+  const callModel = await resolveGatewayModel(credential, hootieModel(credential));
 
   let body: ChatBody;
   try {
@@ -237,9 +242,9 @@ hootieRoutes.post("/chat", async (c) => {
     let answer = "";
     try {
       for await (const chunk of streamAnswer({
-        apiKey,
-        model: config.HOOTIE_MODEL,
-        baseUrl: config.ANTHROPIC_BASE_URL || null,
+        apiKey: credential.apiKey,
+        model: callModel,
+        baseUrl: credential.baseUrl,
         system,
         turns,
         signal: cancel.signal,
@@ -253,7 +258,9 @@ hootieRoutes.post("/chat", async (c) => {
       // to report, and nobody to report it to.
       if (cancel.signal.aborted) return;
       const text =
-        err instanceof ModelRefusedError ? err.message : describeModelError(err);
+        err instanceof ModelRefusedError
+          ? err.message
+          : describeModelError(err, { model: hootieModel(credential), gateway: !!credential.baseUrl });
       console.error("[hootie] model call failed", nestId, err);
       await stream.writeSSE({ event: "error", data: JSON.stringify({ error: text }) });
       return;

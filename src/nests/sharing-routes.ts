@@ -12,6 +12,7 @@ import {
 } from "../governance/stewardship-service.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { addCollaborator } from "./sharing-service.js";
+import { assertCanGrant, permissionClass } from "../auth/seats.js";
 import { listNestPeople, withDirectory } from "./people-service.js";
 import { setReaderMode } from "./service.js";
 import { isNestHeadless } from "../auth/headless.js";
@@ -93,6 +94,11 @@ sharingRoutes.patch("/collaborators/:collabId", async (c) => {
   }
 
   const db = getDb();
+  const row = (await db.get(
+    "SELECT user_id FROM nest_collaborators WHERE id = ? AND nest_id = ?",
+    [c.req.param("collabId")!, c.req.param("nestId")!],
+  )) as { user_id: string } | undefined;
+  if (row) await assertCanGrant([{ userId: row.user_id, next: permissionClass(body.permission) }]);
   // Scope to the nest in the URL — the guard authorised the caller against
   // THIS nest, so the row we touch must belong to it (a bare `id =` match
   // would let an admin of nest A mutate a collaborator row from nest B).

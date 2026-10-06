@@ -92,8 +92,10 @@ async function main() {
     console.error("[sso] failed to load community sites:", err);
   }
 
-  // Validate PromptOwl license key (non-blocking — server runs either way)
-  const license = await validateLicense();
+  // Validate PromptOwl license key (non-blocking — server runs either way).
+  // Ask PromptOwl at boot rather than trusting the 24h cache, so a restart
+  // can't hide a suspension; unreachable falls back to the cache as before.
+  const license = await validateLicense({ forceFresh: true });
 
   if (!license.valid) {
     console.warn(`

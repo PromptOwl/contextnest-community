@@ -2906,6 +2906,9 @@ function RunnerKeyCallout({ nestId }: { nestId: string }) {
       // Server-wide key (super-admin Settings) satisfies runners for every
       // nest — only prompt when NEITHER level has one.
       if (health?.runner_key_configured) return setHasKey(true);
+      // Without the byok licence feature runs use PromptOwl models, never a
+      // pasted key (the server would refuse it) — nothing to prompt for.
+      if (health?.byok_available === false) return setHasKey(true);
       if (!env) return setHasKey(null);
       setHasKey(env.some((e) => e.key === "ANTHROPIC_API_KEY"));
     });

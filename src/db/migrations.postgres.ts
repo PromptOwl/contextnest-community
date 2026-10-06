@@ -81,6 +81,8 @@ const HISTORICAL_MIGRATIONS = [
   "045_headless_publish",
   "046_deletion_client_attribution",
   "047_node_access_events",
+  "048_license_cache_features",
+  "049_license_cache_gateway",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -191,8 +193,11 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       org TEXT,
       limits_json TEXT,
       owner_email TEXT,
+      gateway_json TEXT,           -- license's LiteLLM key, encrypted (migration 049)
       validated_at TEXT NOT NULL DEFAULT ${NOW}
     );
+    ALTER TABLE license_cache ADD COLUMN IF NOT EXISTS features_json TEXT;
+    ALTER TABLE license_cache ADD COLUMN IF NOT EXISTS gateway_json TEXT;
 
     CREATE TABLE IF NOT EXISTS telemetry_events (
       id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

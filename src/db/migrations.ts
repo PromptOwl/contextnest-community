@@ -1625,6 +1625,39 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("044_client_attribution");
   }
 
+  // 045: headless publishing (CU-wdqcq0314u). `nests.headless` is the owner's
+  // "API-only" switch; `users.is_service` marks the identity behind an access
+  // key (no password, never listed as a person); `headless_readers` ties each
+  // such identity to the one nest its key reads.
+  if (!hasMigration("045_headless_publish")) {
+    db.transaction(() => {
+      const nestCols = (
+        db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!nestCols.includes("headless")) {
+        db.exec("ALTER TABLE nests ADD COLUMN headless INTEGER NOT NULL DEFAULT 0");
+      }
+      const userCols = (
+        db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!userCols.includes("is_service")) {
+        db.exec("ALTER TABLE users ADD COLUMN is_service INTEGER NOT NULL DEFAULT 0");
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS headless_readers (
+          user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          key_id TEXT NOT NULL,
+          label TEXT NOT NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_headless_readers_nest ON headless_readers(nest_id);
+      `);
+    })();
+    recordMigration("045_headless_publish");
+  }
+
   // 046: attribute deletions (CU-wdqcq0314v). A delete purges every row tied
   //   to the node, so its tombstone is the only record left — which makes it
   //   where "which agent deleted this" has to live for the agent-activity
@@ -1671,37 +1704,32 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("047_node_access_events");
   }
 
-  // 045: headless publishing (CU-wdqcq0314u). `nests.headless` is the owner's
-  // "API-only" switch; `users.is_service` marks the identity behind an access
-  // key (no password, never listed as a person); `headless_readers` ties each
-  // such identity to the one nest its key reads.
-  if (!hasMigration("045_headless_publish")) {
-    db.transaction(() => {
-      const nestCols = (
-        db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
-      ).map((c) => c.name);
-      if (!nestCols.includes("headless")) {
-        db.exec("ALTER TABLE nests ADD COLUMN headless INTEGER NOT NULL DEFAULT 0");
-      }
-      const userCols = (
-        db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>
-      ).map((c) => c.name);
-      if (!userCols.includes("is_service")) {
-        db.exec("ALTER TABLE users ADD COLUMN is_service INTEGER NOT NULL DEFAULT 0");
-      }
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS headless_readers (
-          user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-          key_id TEXT NOT NULL,
-          label TEXT NOT NULL,
-          created_by TEXT,
-          created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_headless_readers_nest ON headless_readers(nest_id);
-      `);
-    })();
-    recordMigration("045_headless_publish");
+  // 048: license_cache.features_json — the named licence features PromptOwl
+  // returns (CU-wdqcq03f2z), cached with the rest of the licence so an
+  // outage keeps the same entitlements. NULL = PromptOwl sent none (tier
+  // defaults apply). Numbered 048: 045 (MCP OAuth), 046 (#342) and 047 (#345)
+  // are taken on in-flight branches, and ids match by string.
+  if (!hasMigration("048_license_cache_features")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(license_cache)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (cols.length && !cols.includes("features_json")) {
+      db.exec("ALTER TABLE license_cache ADD COLUMN features_json TEXT");
+    }
+    recordMigration("048_license_cache_features");
+  }
+
+  // 049: license_cache.gateway_json — the license's LiteLLM key, encrypted.
+  //   Was 046; renumbered after other branches merged 045-048, so numbers
+  //   stay unique and in order.
+  if (!hasMigration("049_license_cache_gateway")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(license_cache)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("gateway_json")) {
+      db.exec("ALTER TABLE license_cache ADD COLUMN gateway_json TEXT");
+    }
+    recordMigration("049_license_cache_gateway");
   }
 }
 

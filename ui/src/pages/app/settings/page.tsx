@@ -41,9 +41,11 @@ import {
 } from "../../../lib/api";
 import { reads } from "../../../lib/queries";
 import { copyTextWithToast } from "../../../lib/clipboard";
-import { getAdminSettings, updateAdminSettings } from "../../../lib/api";
+import { getAdminModels, getAdminSettings, updateAdminSettings } from "../../../lib/api";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from "../../../auth/AuthContext";
 import { AgentConnectPanel } from "./AgentConnectPanel";
+import { LicensePanel } from "./LicensePanel";
 import { toast } from "sonner";
 
 interface SettingsPageProps {
@@ -178,6 +180,11 @@ const TABS: {
     label: "Connecting agents",
     keys: [],
   },
+  {
+    id: "license",
+    label: "License",
+    keys: [],
+  },
 ];
 
 /**
@@ -204,6 +211,65 @@ const noAutofill = (type: string) =>
   }) as const;
 
 /** Controlled text input bound straight to the draft (no per-field Save). */
+/** Hootie's model: one of the models this server's key can reach (PromptOwl's
+ *  team models on the gateway, the provider's on an own key). If the list
+ *  can't be loaded, a name can still be typed. */
+function HootieModelField({
+  value,
+  error,
+  onChange,
+}: {
+  value: string;
+  error?: string;
+  onChange: (v: string) => void;
+}) {
+  const [models, setModels] = useState<string[] | null>(null);
+  useEffect(() => {
+    getAdminModels()
+      .then((r) => setModels(r.models))
+      .catch(() => setModels([]));
+  }, []);
+  // Keep the saved model selectable even if the key no longer lists it.
+  const options = models && value && !models.includes(value) ? [value, ...models] : (models ?? []);
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor="hootie-model">Model</Label>
+      {models === null ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground h-9">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading models…
+        </div>
+      ) : models.length > 0 ? (
+        <Select value={value || undefined} onValueChange={onChange}>
+          <SelectTrigger id="hootie-model" data-testid="settings-hootie-model" aria-invalid={!!error}>
+            <SelectValue placeholder="Pick a model" />
+          </SelectTrigger>
+          <SelectContent>
+            {options.map((m) => (
+              <SelectItem key={m} value={m}>
+                {m}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : (
+        <TextField
+          error={error}
+          id="hootie-model"
+          value={value}
+          placeholder="claude-sonnet-5"
+          onChange={onChange}
+        />
+      )}
+      {error && models && models.length > 0 && <p className="text-xs text-destructive">{error}</p>}
+      <p className="text-xs text-muted-foreground">
+        {models && models.length > 0
+          ? `The model Hootie answers with — ${models.length} available on this server.`
+          : "The model Hootie answers with. The list of available models couldn't be loaded, so type its name (through a gateway, the gateway's name for it)."}
+      </p>
+    </div>
+  );
+}
+
 function TextField({
   id,
   value,
@@ -1690,6 +1756,27 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 </CardDescription>
               </CardHeader>
               <CardContent>
+                {settings?.byok_available === false ? (
+                  // Pricing spec §9.3: own key only with the byok licence feature.
+                  <div className="text-sm text-muted-foreground space-y-2" data-testid="settings-models-by-promptowl">
+                    <p>
+                      Models on this server are supplied by PromptOwl and use
+                      your plan's credits. Using your own model key or gateway
+                      is an Enterprise feature.
+                    </p>
+                    {settings.anthropic_api_key_masked && draft.anthropic_api_key !== null && (
+                      <button
+                        type="button"
+                        className="text-xs text-destructive hover:underline"
+                        onClick={() => set({ anthropic_api_key: null })}
+                      >
+                        A stored key ({settings.anthropic_api_key_masked}) is ignored on this plan — clear it
+                      </button>
+                    )}
+                    {draft.anthropic_api_key === null && <p className="text-xs">Will be cleared when you save.</p>}
+                  </div>
+                ) : (
+                <>
                 <div className="text-xs text-muted-foreground mb-2">
                   {draft.anthropic_api_key === null
                     ? "Will be cleared when you save."
@@ -1727,6 +1814,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     Keep current key
                   </button>
                 )}
+                </>
+                )}
               </CardContent>
             </Card>
 
@@ -1742,8 +1831,9 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   tab on the right edge. It answers from what the person asking
                   can read in the nest, cites the documents it used, and lets
                   them @tag a colleague — which posts the exchange as a comment
-                  and notifies them. Off until you turn it on. Uses the
-                  Anthropic API key above; without one the panel says so.
+                  and notifies them. Off until you turn it on. Runs on the
+                  model key above, or on PromptOwl models with your plan's
+                  credits; without either the panel says so.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -1762,21 +1852,12 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   fieldErrors={fieldErrors}
                   set={set}
                 />
-                <div className="space-y-1.5">
-                  <Label htmlFor="hootie-model">Model</Label>
-                  <TextField
-                    error={fieldErrors.hootie_model}
-                    id="hootie-model"
-                    value={draft.hootie_model ?? ""}
-                    placeholder="claude-opus-5"
-                    onChange={(v) => set({ hootie_model: v })}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    The model Hootie answers with. Through a gateway this is the
-                    gateway's name for it (<code>ollama/llama3.2</code>,{" "}
-                    <code>gpt-5</code>, …).
-                  </p>
-                </div>
+                <HootieModelField
+                  value={draft.hootie_model ?? ""}
+                  error={fieldErrors.hootie_model}
+                  onChange={(v) => set({ hootie_model: v })}
+                />
+                {settings?.byok_available !== false && (
                 <div className="space-y-1.5">
                   <Label htmlFor="anthropic-base-url">Model gateway URL</Label>
                   <TextField
@@ -1792,6 +1873,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     fronts. Empty means Anthropic directly.
                   </p>
                 </div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>
@@ -2048,6 +2130,10 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               publicBaseUrl={draft.public_base_url}
               openMode={authMode === "open"}
             />
+          </TabsContent>
+
+          <TabsContent value="license" className="space-y-4">
+            {activeTab === "license" && <LicensePanel />}
           </TabsContent>
         </Tabs>
       )}

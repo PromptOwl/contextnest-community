@@ -577,7 +577,7 @@ export const config = {
    *  /admin/settings (hootie_model). A gateway-side name (`ollama/…`,
    *  `gpt-…`) is fine when ANTHROPIC_BASE_URL points at one. */
   get HOOTIE_MODEL(): string {
-    return process.env.HOOTIE_MODEL || "claude-opus-5";
+    return process.env.HOOTIE_MODEL || "claude-sonnet-5"; // efficient default (pricing spec §6.6)
   },
   /**
    * Where the Anthropic-shaped model calls go. Empty = Anthropic directly.

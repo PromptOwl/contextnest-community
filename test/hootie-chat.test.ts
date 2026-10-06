@@ -172,7 +172,7 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
     setupTestEnv();
     process.env.ANTHROPIC_API_KEY = "sk-ant-test";
     process.env.HOOTIE_ENABLED = "true"; // off by default since CU-wdqcq03ewc
-    app = await createTestApp("key");
+    app = await createTestApp("key", { features: ["byok"] });
     owner = await registerUser(app, "owner@acme.com", "Owner");
     await resetAuthRateLimit();
     reader = await registerUser(app, "reader@acme.com", "Reader");
@@ -880,7 +880,7 @@ describe("POST /nests/:id/chat — gates", () => {
     setupTestEnv();
     process.env.ANTHROPIC_API_KEY = "sk-ant-test";
     process.env.HOOTIE_ENABLED = "true"; // off by default since CU-wdqcq03ewc
-    const app = await createTestApp("key");
+    const app = await createTestApp("key", { features: ["byok"] });
     const user = await registerUser(app, "busy@acme.com");
     const { data } = await jsonRequest(app, "POST", "/nests", { name: "Busy" }, user.apiKey);
     const { CHAT_BUDGET } = await import("../src/hootie/routes.js");
@@ -913,7 +913,7 @@ describe("/admin/settings — hootie_enabled toggle", () => {
   it("round-trips through PATCH and shows up on /health", async () => {
     setupTestEnv();
     delete process.env.HOOTIE_ENABLED;
-    const app = await createTestApp("key", { ownerEmail: OWNER });
+    const app = await createTestApp("key", { ownerEmail: OWNER, features: ["byok"] });
     const admin = await registerUser(app, OWNER);
 
     const before = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
@@ -959,18 +959,18 @@ describe("/admin/settings — Hootie model + gateway", () => {
     delete process.env.ANTHROPIC_BASE_URL;
     delete process.env.HOOTIE_MODEL;
     process.env.HOOTIE_ENABLED = "true"; // off by default since CU-wdqcq03ewc
-    const app = await createTestApp("key", { ownerEmail: OWNER });
+    const app = await createTestApp("key", { ownerEmail: OWNER, features: ["byok"] });
     const admin = await registerUser(app, OWNER);
     const nest = (await jsonRequest(app, "POST", "/nests", { name: "Gateway" }, admin.apiKey)).data.nest.id;
 
     const before = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
-    expect(before.data.hootie_model).toBe("claude-opus-5");
+    expect(before.data.hootie_model).toBe("claude-sonnet-5");
     expect(before.data.anthropic_base_url).toBe("");
 
     // Direct Anthropic by default.
     scriptedAnswer = "direct";
     await chat(app, nest, { message: "hi" }, admin.apiKey);
-    expect(lastModelCall!.model).toBe("claude-opus-5");
+    expect(lastModelCall!.model).toBe("claude-sonnet-5");
     expect(lastModelCall!.baseUrl).toBeNull();
 
     // A bad gateway URL is refused, field-keyed, and nothing is applied.
@@ -984,7 +984,7 @@ describe("/admin/settings — Hootie model + gateway", () => {
     expect(bad.status).toBe(400);
     expect(bad.data.fieldErrors?.anthropic_base_url).toBeTruthy();
     const still = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
-    expect(still.data.hootie_model).toBe("claude-opus-5");
+    expect(still.data.hootie_model).toBe("claude-sonnet-5");
 
     // Empty model is refused too.
     const empty = await jsonRequest(app, "PATCH", "/admin/settings", { hootie_model: "   " }, admin.apiKey);
@@ -1036,7 +1036,11 @@ describe("POST /nests/:id/chat — the assistant's name (CU-wdqcq03ewc)", () => 
     process.env.HOOTIE_NAME = "Ava";
     lastModelCall = null;
     scriptedAnswer = "ok";
-    const app = await createTestApp("open", { tier });
+    // Own key needs byok; an enterprise licence also gets branding by default.
+    const app = await createTestApp("open", {
+      tier,
+      features: tier === "enterprise" ? ["byok", "hootie_branding"] : ["byok"],
+    });
     const { data } = await jsonRequest(app, "POST", "/nests", { name: "Named" });
     const { status } = await chatRaw(app, data.nest.id, { message: "hi" });
     expect(status).toBe(200);

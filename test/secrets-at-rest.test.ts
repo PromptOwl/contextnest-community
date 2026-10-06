@@ -49,7 +49,7 @@ describe("server settings — secrets at rest", () => {
       streamAnswer: async function* () {},
       ModelRefusedError: class extends Error {},
     }));
-    const app = await createTestApp("key", { ownerEmail: OWNER });
+    const app = await createTestApp("key", { ownerEmail: OWNER, features: ["byok"] });
     const admin = await registerUser(app, OWNER);
 
     const res = await jsonRequest(

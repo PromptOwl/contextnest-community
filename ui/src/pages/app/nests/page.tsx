@@ -2,7 +2,7 @@
  * NestsPage — the dashboard's landing page (/): server info, the whole-brain
  * banner and the nest grid, with archived nests behind a switch.
  */
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as api from "../../../lib/api";
 import { useQueryClient, useQuery } from "@tanstack/react-query";
 import { reads, useNests } from "../../../lib/queries";
@@ -144,6 +144,21 @@ export default function NestsPage() {
       /* best-effort */
     }
   };
+  // Nothing in "My nests" yet but nests reachable elsewhere (shared, org,
+  // public): open on All so they're visible. Once per visit, and not
+  // remembered — someone with their own nests still opens on "My nests".
+  const scopeFallbackDone = useRef(false);
+  useEffect(() => {
+    if (scopeFallbackDone.current || loading) return;
+    scopeFallbackDone.current = true;
+    if (
+      nestScope === "mine" &&
+      allNests.length > 0 &&
+      !allNests.some((n: any) => nestInScope(n, "mine"))
+    ) {
+      setNestScopeState("all");
+    }
+  }, [loading, allNests, nestScope]);
   const [nestPageSize, setNestPageSize] = useState(NEST_PAGE_SIZE);
   const filteredNests = useMemo(() => {
     if (!scopeShowsNests(nestScope)) return [];
@@ -535,13 +550,13 @@ export default function NestsPage() {
           </Dialog>
 
           {/* Grid controls — filter/sort the cards in place, the way the
-              in-nest Documents browser does. Hidden until there are enough
-              nests for it to matter. The Archived switch on the right is
+              in-nest Documents browser does. Always shown, however many
+              nests there are. The Archived switch on the right is
               always there — it's the only way to reach archived nests, and
               the archived list brings its own filter/sort. */}
           {!loading && (
             <div className="flex flex-wrap items-center gap-2">
-              {!showArchived && allNests.length > 5 && (
+              {!showArchived && (
               <>
               <Input
                 value={nestQuery}
@@ -649,7 +664,8 @@ export default function NestsPage() {
                   These nests are read-only. They don't appear on your dashboard,
                   answer agents over MCP, or serve published links until restored.
                 </p>
-                {archivedNests.length > 5 && (
+                {/* Always shown, however many archived nests there are. */}
+                {(
                   <div className="flex flex-wrap items-center gap-2">
                     <Input
                       value={archivedQuery}

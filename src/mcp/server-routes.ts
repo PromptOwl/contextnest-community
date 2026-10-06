@@ -65,6 +65,7 @@ import {
 } from "./tools.js";
 import { isDerivedAnnotationsNode } from "../nodes/service.js";
 import type { Nest } from "../shared/types.js";
+import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "../auth/license-copy.js";
 import { HEADLESS_READER_SERVER_TOOLS, isServiceUser } from "../auth/headless.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
@@ -352,6 +353,12 @@ async function handleServerToolCall(
 
   // Kill-switch + license gate for writes — parity with per-nest write path.
   if (SERVER_WRITE_TOOLS.has(toolName)) {
+    if (
+      (isSuspended() || !getCurrentLicense()?.valid) &&
+      !(await canSeeLicenseDetail(userId))
+    ) {
+      return NEUTRAL_READ_ONLY;
+    }
     if (isSuspended()) {
       const reason = getSuspensionReason();
       return `This server is suspended by PromptOwl; writes are blocked${

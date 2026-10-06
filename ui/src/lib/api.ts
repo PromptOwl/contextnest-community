@@ -87,6 +87,11 @@ async function request<T = any>(
     const err = new Error(data.error || `Request failed: ${res.status}`) as ApiError;
     err.status = res.status;
     err.body = data;
+    // A role grant past the pricing plan: the dialog shows the message; the
+    // license banner offers admins the way to change plans (one listener).
+    if (res.status === 402 && data.code === "plan_limit" && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("license:plan-limit", { detail: data }));
+    }
     throw err;
   }
   // Every successful mutation invalidates the cached reads its result affects.
@@ -229,6 +234,8 @@ export async function getHealth() {
     hootie_brand?: HootieBrand;
     /** Whether custom assistant identity is allowed (enterprise licence). */
     hootie_branding_available?: boolean;
+    /** Own model key / gateway allowed (licence feature byok, Enterprise). */
+    byok_available?: boolean;
     /** PostHog project key, or null when analytics is unconfigured or usage
      *  telemetry is switched off. The browser needs it to send events. */
     posthog_key?: string | null;
@@ -288,7 +295,9 @@ export interface AdminSettings {
   hootie_accent_color: string;
   hootie_greeting: string;
   hootie_branding_available: boolean;
-  /** Model Hootie answers with (default claude-opus-5; a gateway-side name
+  /** Own key + gateway fields are in effect and editable only with byok. */
+  byok_available?: boolean;
+  /** Model Hootie answers with (default claude-sonnet-5; a gateway-side name
    *  such as `ollama/…` when routed through a gateway). */
   hootie_model: string;
   /** Model gateway (LiteLLM / PromptOwl) for Hootie AND agent runs;
@@ -374,6 +383,24 @@ export async function sendTestNotification(channel: "slack" | "teams") {
 
 // ─── License ───────────────────────────────────────────────────────────
 
+export interface LicenseContact {
+  url: string;
+  email: string;
+}
+
+/** Trial / expiry / refusal fields shared by the public and admin views. */
+export interface LicenseTerms {
+  trial?: boolean;
+  expires_at?: string | null;
+  /** Whole days until expires_at (negative once past); null = no end date. */
+  days_left?: number | null;
+  /** not_found | deactivated | suspended | expired — or expired_grace (past
+   *  the end date, still fully working until grace_ends_at). */
+  reason?: string | null;
+  grace_ends_at?: string | null;
+  contact?: LicenseContact;
+}
+
 export interface LicenseStatus {
   valid: boolean;
   tier: string;
@@ -382,10 +409,48 @@ export interface LicenseStatus {
   suspended: boolean;
   suspended_reason: string | null;
   limits: { maxNests: number; maxUsers: number } | null;
+  /** Never licensed: show activation. False for a lapsed license. */
+  setup_required?: boolean;
 }
 
 export async function getLicenseStatus() {
   return request<LicenseStatus>("/license/status");
+}
+
+/** Admin-only license detail (Settings → License, the admin banner). */
+export interface AdminLicense extends LicenseTerms {
+  valid: boolean;
+  tier: string;
+  org: string | null;
+  owner_email: string | null;
+  suspended: boolean;
+  suspended_reason: string | null;
+  seats: {
+    licensed: number | null;
+    used: number;
+    over_limit: boolean;
+    at_limit: boolean;
+  };
+  pending_rejections: number;
+  last_checked_at: string | null;
+  /** free | trial | self_hosted | enterprise. */
+  plan?: string;
+  /** Editors in use and the cap (null = unlimited, 0 = needs a paid plan). */
+  subscribers?: { licensed: number | null; used: number };
+  max_account_owners?: number | null;
+  /** PromptOwl's page for this key: plan and Upgrade. */
+  manage_url?: string | null;
+}
+
+export async function getAdminLicense() {
+  return request<AdminLicense>("/admin/license");
+}
+
+/** Models this server's credential can reach (admin), and the one Hootie uses now. */
+export async function getAdminModels() {
+  return request<{ models: string[]; current: string; source: "own" | "promptowl" | null; error?: string }>(
+    "/admin/models",
+  );
 }
 
 export async function installLicense(key: string) {
@@ -399,7 +464,7 @@ export async function installLicense(key: string) {
     // restart); `warning` carries the operator-facing explanation.
     persisted?: boolean;
     warning?: string;
-  }>("/license/install", {
+  } & LicenseTerms>("/license/install", {
     method: "POST",
     body: JSON.stringify({ key }),
   });

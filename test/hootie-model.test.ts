@@ -123,6 +123,11 @@ describe("streamAnswer — model compatibility", () => {
       caught = err;
     }
     expect(describeModelError(caught)).toMatch(/out of credit/i);
+    // LiteLLM's 400 for a model it doesn't serve names the model that was asked for.
+    const unknownModel = { status: 400, error: { error: { message: "litellm.BadRequestError: There are no healthy deployments for this model." } } };
+    expect(describeModelError(unknownModel, { model: "default-claude/x", gateway: true })).toMatch(
+      'No model named "default-claude/x"',
+    );
 
     alwaysFail = null;
     calls = [];

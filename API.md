@@ -1908,7 +1908,7 @@ Deterministic fact lookup against a **table** node (CSV body): fetch the exact r
 Same operation over MCP: `context_table_query`.
 
 ### POST `/nests/:nestId/chat`
-Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (**off by default** — off → `404`); needs the server-wide `ANTHROPIC_API_KEY` (missing → `503` with `reason: "no_api_key"`); answers with `HOOTIE_MODEL`, through `ANTHROPIC_BASE_URL` when one is set (all three editable in Settings → Hootie). Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
+Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (**off by default** — off → `404`); needs a model credential (missing → `503` with `reason: "no_api_key"`): the server's own `ANTHROPIC_API_KEY` (and `ANTHROPIC_BASE_URL`, if set) when the licence carries the `byok` feature (Enterprise), otherwise the PromptOwl model gateway the licence check provides, metered in PromptOwl credits. Answers with `HOOTIE_MODEL`, a plain model name (on the PromptOwl gateway the server adds the instance prefix, e.g. `default-claude/`, per call) — unset, the gateway's default model or `claude-sonnet-5` on an own key; all editable in Settings → General. `GET /admin/models` (server admin) lists the models the current credential can reach, by plain name — `{ models, current, source }` — for the Settings picker; if the list can't be fetched it answers `models: []` with an `error`, and a name can still be typed. Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
 
 Request:
 
@@ -2325,7 +2325,7 @@ enforced on both sides, not by trusting the issuer.
 Hootie fields: `hootie_enabled` (default `false`), `hootie_brand` — `{ name, logo_url, accent_color, greeting }`, the identity every surface should show (the admin's custom one on an Enterprise licence, otherwise `{ name: "Hootie", logo_url: null, accent_color: null, greeting: null }`, decided server-side) — and `hootie_branding_available` (whether custom identity is allowed).
 
 ### Hootie identity — `/admin/settings` fields (Enterprise)
-`hootie_name` (one line, ≤40 chars), `hootie_logo_url` (`https://` image: `.png`/`.jpg`/`.gif`/`.webp`), `hootie_accent_color` (hex, normalised to `#rrggbb`), `hootie_greeting` (one line, ≤200 chars). `""` resets a field to the default. GET returns the stored values plus `hootie_branding_available`. A PATCH that would **change** any of these without an Enterprise licence is refused as a whole — `403 { code: "enterprise_required" }`, nothing written, including the request's other fields. Sending back the stored values unchanged is allowed (they are ignored). Invalid values → `400` with `fieldErrors` keyed by field. `hootie_enabled` is written explicitly (`true`/`false`), so a UI choice beats the deploy env.
+`hootie_name` (one line, ≤40 chars), `hootie_logo_url` (`https://` image: `.png`/`.jpg`/`.gif`/`.webp`), `hootie_accent_color` (hex, normalised to `#rrggbb`), `hootie_greeting` (one line, ≤200 chars). `""` resets a field to the default. GET returns the stored values plus `hootie_branding_available`. "Enterprise licence" here means the licence carries the `hootie_branding` feature (PromptOwl's licence check returns the licence's `features`; an Enterprise licence has it by default, and PromptOwl can grant or revoke it per licence). A PATCH that would **change** any of these without it is refused as a whole — `403 { code: "enterprise_required" }` (the code name is kept for wire compatibility; it means the licence lacks `hootie_branding`), nothing written, including the request's other fields. Sending back the stored values unchanged is allowed (they are ignored). Invalid values → `400` with `fieldErrors` keyed by field. `hootie_enabled` is written explicitly (`true`/`false`), so a UI choice beats the deploy env.
 
 ### Superadmins — GET/POST `/admin/super-admins`, DELETE `/admin/super-admins/:email` (server-admin only)
 Grant and revoke **superadmins** (server-wide admins) from the API/UI instead of only via `access.yaml`. The effective superadmin set is the union of three sources, surfaced per row as `source`:
@@ -2459,7 +2459,26 @@ For any `/nests/:nestId/...` request, the middleware computes:
 
 Returns 403 `Insufficient permissions` if not met. Open-mode (`AUTH_MODE=open`) treats everyone as `owner`.
 
-License gate: any non-GET request OR any governance path requires a valid PromptOwl license (`/license/install`). 503 `License required` otherwise.
+License gate: any non-GET request OR any governance path requires a valid PromptOwl license (`/license/install`). Otherwise 503. **Who hears why:** a server admin (open mode, license owner, superadmin), or the key's owner after it lapsed, gets `{ "error": "License required", "reason": "...", "setup_url": "/setup", "trial", "expires_at", "days_left", "license_reason", "grace_ends_at", "contact": { "url", "email" } }` (or `"Server suspended by PromptOwl"` with `reason`, `contact`, `contact_url`). Everyone else gets only `{ "error": "This workspace is read-only right now. Your administrator has been notified.", "read_only": true }`, with no licensing vocabulary. The server-level `/mcp` write tools and run writes follow the same rule.
+
+---
+
+## License
+
+The server validates its key with PromptOwl (`POST {PROMPTOWL_API_URL}/api/license/validate`) at startup and every 60s. Each check sends the key plus `stats: { users, nests }` (the head-count the license is billed on) and `server: { version, public_url }`. It is part of validation, so it is sent even with `TELEMETRY_ENABLED=false`, and it never includes content.
+
+- **Seats are reported, never enforced.** Over the licensed seats, new people still join. The admin sees a private notice, and PromptOwl follows up.
+- **Expiry has a 14-day grace period on PromptOwl's side.** While `reason` is `expired_grace` the server works normally until `grace_ends_at`.
+- **A lapse makes the server read-only, with no lock-out.** When PromptOwl rejects the key 3 checks in a row (about 3 min) or a suspension is confirmed (two suspended answers within an hour — the next 60s check, so about a minute), writes return 503 as above. Reads keep working. Sessions and the installed key are kept, so a renewal or reactivation restores the server on the next check with nothing to reinstall.
+
+### GET `/license/status` (public)
+`{ valid, tier, org, owner_email, suspended, suspended_reason, limits, setup_required }`. `setup_required` is true only for a server that has never been licensed; the UI shows the activation screen then. A lapsed license is not a setup case. Carries no lapse reason, dates, head-count or contact.
+
+### GET `/admin/license` (server admin, or the key's owner)
+`{ plan, valid, tier, org, owner_email, suspended, suspended_reason, trial, expires_at, days_left, reason, grace_ends_at, contact: { url, email }, seats: { licensed, used, over_limit, at_limit }, subscribers: { licensed, used }, max_account_owners, pending_rejections, last_checked_at, manage_url }`. `plan` is `free`, `trial`, `self_hosted` or `enterprise`. `seats` counts billed users (nest owners, admins, reviewers, server admins) and `subscribers` counts editors; each person counts once, at their highest role. A `licensed` or `max_account_owners` of null means no limit. `manage_url` is PromptOwl's page for this key (`?key=` carries its last 4 characters only), or null without a key. `pending_rejections` counts rejections not yet acted on (3 make the server read-only). Drives Settings → License and the admin license banner.
+
+### POST `/license/install`
+`{ key }`. Public while the server has never been licensed. Once it has a license owner, only a server admin or that owner may replace the key (401/403 otherwise). A rejected key returns 400 with an operator-facing `error` plus the same term fields.
 
 ---
 
@@ -2471,6 +2490,7 @@ License gate: any non-GET request OR any governance path requires a valid Prompt
 | 401 | Auth required |
 | 403 | Permission denied (`Insufficient permissions`, governance steward mismatch) |
 | 404 | Nest / node / steward not found, or caller has no permission |
+| 402 | Plan limit: a role grant would pass the plan's cap. `{ "error", "code": "plan_limit", "limit": "users" \| "subscribers" \| "account_owners", "max" }`. Only raises are checked; demotions and viewers always go through. `error` tells a server admin to upgrade and anyone else to ask their admin |
 | 409 | Conflict (e.g., key already exists, version conflict) |
 | 429 | Rate limit |
 | 503 | License missing |

@@ -559,7 +559,7 @@ describe("/admin/settings — Anthropic key verification", () => {
       streamAnswer: async function* () {},
       ModelRefusedError: class extends Error {},
     }));
-    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL, features: ["byok"] });
     const admin = await registerUser(app, OWNER_EMAIL);
     return { app, admin };
   }
@@ -610,7 +610,7 @@ describe("/admin/settings — Anthropic key verification", () => {
       streamAnswer: async function* () {},
       ModelRefusedError: class extends Error {},
     }));
-    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL, features: ["byok"] });
     const admin = await registerUser(app, OWNER_EMAIL);
     process.env.ANTHROPIC_API_KEY = "sk-ant-old";
     const res = await jsonRequest(
