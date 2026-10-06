@@ -20,6 +20,19 @@ describe("activity log helpers (CU-wdqcq03aw2)", () => {
     );
   });
 
+  it("names the version a read or pull was served", () => {
+    expect(
+      describeActivity({ id: "4", type: "read", nodeId: "n", actor: "d@x.com", agent: "claude-code", at: "", version: 4 }),
+    ).toBe("d@x.com (via claude-code) read v4");
+    expect(
+      describeActivity({ id: "5", type: "retrieved", nodeId: "n", actor: "e@x.com", at: "", version: 2 }),
+    ).toBe("e@x.com pulled into a search / answer v2");
+    // An export carries no single version.
+    expect(
+      describeActivity({ id: "6", type: "exported", nodeId: "n", actor: "f@x.com", at: "", version: 9 }),
+    ).toBe("f@x.com exported");
+  });
+
   it("labels the surface and groups the filters", () => {
     expect(surfaceLabel("mcp")).toBe("MCP");
     expect(surfaceLabel("api")).toBe("web / API");
