@@ -12,7 +12,7 @@
  * All bucketing / drag-plan rules live in lib/board-dimensions (pure, tested);
  * this file owns React state, localStorage, and running the plan against the API.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NestPageHeader } from "./NestPageHeader";
 import {
   RefreshCw,
@@ -26,7 +26,18 @@ import {
   X,
   Plus,
   ListTodo,
+  Lock,
+  ChevronDown,
+  Filter,
 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { orderByRank, placeCard, rankKey } from "../lib/board-rank";
 import { toast } from "sonner";
 import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -118,7 +129,13 @@ function loadConfig(nestId: string): BoardSettings {
         const lk = layoutKey({ dimension, tagNamespace });
         layouts[lk] ??= migrateLayout(lk, legacy);
       }
-      return { dimension, tagNamespace, layouts, tasksOnly: p.tasksOnly === true };
+      return {
+        dimension,
+        tagNamespace,
+        layouts,
+        tasksOnly: p.tasksOnly === true,
+        filterTags: strings(p.filterTags),
+      };
     }
   } catch {
     // ignore corrupt storage — fall through to default
@@ -127,6 +144,44 @@ function loadConfig(nestId: string): BoardSettings {
   // real columns on a vault of flat (un-namespaced) tags.
   return { dimension: "folder", tagNamespace: "", layouts: {} };
 }
+
+/** A saved board's config → the settings this component works on. Same
+ *  normalisation as loadConfig, so a hand-edited blob can't break the page. */
+function settingsFromBoard(cfg: Record<string, any>): BoardSettings {
+  const dimension: DimensionKind =
+    cfg?.dimension === "status" || cfg?.dimension === "tag" ? cfg.dimension : "folder";
+  const strings = (v: unknown): string[] | undefined =>
+    Array.isArray(v) ? v.filter((k) => typeof k === "string") : undefined;
+  const layouts: Record<string, ColumnLayout> = {};
+  for (const [k, v] of Object.entries(cfg?.layouts ?? {})) {
+    if (v && typeof v === "object") {
+      layouts[k] = migrateLayout(k, {
+        columnOrder: strings((v as any).columnOrder),
+        hiddenColumns: strings((v as any).hiddenColumns),
+      });
+    }
+  }
+  const ranks: Record<string, string[]> = {};
+  for (const [k, v] of Object.entries(cfg?.ranks ?? {})) ranks[k] = strings(v) ?? [];
+  return {
+    dimension,
+    tagNamespace: typeof cfg?.tagNamespace === "string" ? cfg.tagNamespace : "",
+    layouts,
+    tasksOnly: cfg?.tasksOnly === true,
+    filterTags: strings(cfg?.filterTags),
+    ranks,
+  };
+}
+
+/** What a new board starts as: a project board, Trello's three lists. */
+const NEW_BOARD_CONFIG = {
+  dimension: "tag",
+  tagNamespace: "",
+  tasksOnly: true,
+  layouts: { "tag:": { columnOrder: ["todo", "doing", "done"] } },
+};
+
+const ACTIVE_PREFIX = "cn.board.active.";
 
 function saveConfig(nestId: string, config: BoardSettings) {
   try {
@@ -240,15 +295,95 @@ export function MaturityBoard({
     load();
   }, [load]);
 
+  // ── Saved boards ──
+  // Several named views per nest, stored on the server (shared unless
+  // private). Before any exist, the browser-saved layout is the one board;
+  // a writer's first visit turns it into the nest's first saved board.
+  const [boards, setBoards] = useState<api.SavedBoard[] | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(ACTIVE_PREFIX + nestId);
+    } catch {
+      return null;
+    }
+  });
+  const activeBoard = useMemo(
+    () => boards?.find((b) => b.id === activeId) ?? boards?.[0] ?? null,
+    [boards, activeId],
+  );
+  const seeding = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listBoards(nestId)
+      .then(({ boards }) => !cancelled && setBoards(boards))
+      .catch(() => !cancelled && setBoards([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [nestId]);
+
+  // First visit by a writer to a nest with no saved boards: save the layout
+  // they already had as "Board", so nothing they arranged is lost.
+  useEffect(() => {
+    if (!boards || boards.length > 0 || !canEditDocs || seeding.current) return;
+    seeding.current = true;
+    const local = loadConfig(nestId);
+    api
+      .createBoard(nestId, { name: "Board", config: local as any })
+      .then(({ board }) => setBoards((bs) => (bs && bs.length > 0 ? bs : [board])))
+      .catch(() => {
+        // Stay on the browser-saved board; nothing is lost.
+      });
+  }, [boards, canEditDocs, nestId]);
+
+  // Switching boards loads that board's view.
+  const loadedBoardId = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeBoard || loadedBoardId.current === activeBoard.id) return;
+    loadedBoardId.current = activeBoard.id;
+    setConfig(settingsFromBoard(activeBoard.config));
+    setAssigneeFilter(new Set());
+    try {
+      localStorage.setItem(ACTIVE_PREFIX + nestId, activeBoard.id);
+    } catch {
+      /* per-browser convenience only */
+    }
+  }, [activeBoard, nestId]);
+
+  // Layout edits save to the active board, debounced so dragging headers or
+  // typing a namespace is one write. Ranks are written separately (per
+  // column), so they're stripped here — the server keeps the stored ones.
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const persist = useCallback(
+    (next: BoardSettings) => {
+      saveConfig(nestId, next);
+      const board = activeBoard;
+      if (!board || !canEditDocs) return;
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => {
+        const { ranks: _ranks, ...config } = next;
+        api
+          .updateBoard(nestId, board.id, { config })
+          .then(({ board: saved }) =>
+            setBoards((bs) => bs?.map((b) => (b.id === saved.id ? saved : b)) ?? bs),
+          )
+          .catch((e: any) => toast.error(e?.message || "Couldn't save the board"));
+      }, 400);
+    },
+    [nestId, activeBoard, canEditDocs],
+  );
+
   const updateConfig = useCallback(
     (patch: Partial<BoardSettings>) => {
       setConfig((prev) => {
         const next = { ...prev, ...patch };
-        saveConfig(nestId, next);
+        persist(next);
         return next;
       });
     },
-    [nestId],
+    [persist],
   );
 
   /** Patch only the active dimension's column layout. */
@@ -263,11 +398,11 @@ export function MaturityBoard({
             [key]: { ...prev.layouts[key], ...patch },
           },
         };
-        saveConfig(nestId, next);
+        persist(next);
         return next;
       });
     },
-    [nestId],
+    [persist],
   );
 
   const effectiveConfig = useMemo(() => resolveConfig(config), [config]);
@@ -291,15 +426,55 @@ export function MaturityBoard({
       nodes.filter(
         (n) =>
           (!config.tasksOnly || n.type === "task") &&
-          matchesAssigneeFilter(n, assigneeFilter),
+          matchesAssigneeFilter(n, assigneeFilter) &&
+          (config.filterTags ?? []).every((f) =>
+            n.tags.some(
+              (t) => t.replace(/^#/, "").toLowerCase() === f.toLowerCase(),
+            ),
+          ),
       ),
-    [nodes, config.tasksOnly, assigneeFilter],
+    [nodes, config.tasksOnly, config.filterTags, assigneeFilter],
   );
 
   const { columns, byColumn } = useMemo(
     () => groupByColumn(visibleNodes, effectiveConfig),
     [visibleNodes, effectiveConfig],
   );
+
+  // Each column in the active board's saved order (Linear/Jira stack rank).
+  const orderedByColumn = useMemo(() => {
+    const out: Record<string, BoardNode[]> = {};
+    for (const col of columns) {
+      out[col.key] = orderByRank(
+        byColumn[col.key] ?? [],
+        config.ranks?.[rankKey(config, col.key)],
+      );
+    }
+    return out;
+  }, [columns, byColumn, config]);
+
+  /** Put a card at a position in a column and save that column's order. */
+  const rankCard = useCallback(
+    async (col: string, id: string, before: string | null) => {
+      const board = activeBoard;
+      if (!board) return;
+      const key = rankKey(config, col);
+      const current = (orderedByColumn[col] ?? []).map((n) => n.id);
+      const order = placeCard(current, id, before);
+      if (order.join("\n") === current.join("\n") && current.includes(id)) return;
+      setConfig((prev) => ({ ...prev, ranks: { ...(prev.ranks ?? {}), [key]: order } }));
+      try {
+        const { board: saved } = await api.rankBoardColumn(nestId, board.id, key, order);
+        setBoards((bs) => bs?.map((b) => (b.id === saved.id ? saved : b)) ?? bs);
+      } catch (e: any) {
+        toast.error(e?.message || "Couldn't save the order");
+      }
+    },
+    [activeBoard, config, orderedByColumn, nestId],
+  );
+  // Where a dragged card would land: before this card id, or (null) at the
+  // bottom of the column.
+  const [dropBefore, setDropBefore] = useState<{ col: string; before: string | null } | null>(null);
 
   // The nest's people — who a card can be assigned to. Writers only: the
   // pickers are write affordances, and the roster read is gated anyway.
@@ -382,6 +557,18 @@ export function MaturityBoard({
           content: "\n",
           type: typeTaskEnabled ? "task" : "document",
           ...placement,
+          // The board's tag filter too, or the new card would be filtered
+          // straight off the board it was added to.
+          ...((config.filterTags ?? []).length > 0
+            ? {
+                tags: [
+                  ...new Set([
+                    ...(placement.tags ?? []),
+                    ...(config.filterTags ?? []).map((t) => `#${t}`),
+                  ]),
+                ],
+              }
+            : {}),
           ...(parent ? { parent } : {}),
           // Filtering by one person and adding a card hands it to them —
           // otherwise it would vanish from the filtered board on creation.
@@ -396,17 +583,18 @@ export function MaturityBoard({
         throw e;
       }
     },
-    [effectiveConfig, nestId, typeTaskEnabled, assigneeFilter, qc, load],
+    [effectiveConfig, config.filterTags, nestId, typeTaskEnabled, assigneeFilter, qc, load],
   );
 
   const [pendingMove, setPendingMove] = useState<{
     id: string;
     title: string;
     plan: MovePlan;
+    place?: { col: string; before: string | null };
   } | null>(null);
 
   const executeMove = useCallback(
-    async (id: string, plan: MovePlan) => {
+    async (id: string, plan: MovePlan, place?: { col: string; before: string | null }) => {
       setBusy(true);
       try {
         if (plan.kind === "move-folder") {
@@ -428,6 +616,8 @@ export function MaturityBoard({
                 : "Retagged",
           );
         }
+        // A folder move changes the id, so there's nothing stable to rank.
+        if (place && plan.kind === "retag") await rankCard(place.col, id, place.before);
         await load();
       } catch (e: any) {
         toast.error(e?.message || "Move failed");
@@ -435,19 +625,31 @@ export function MaturityBoard({
         setBusy(false);
       }
     },
-    [nestId, nodes, load],
+    [nestId, nodes, load, rankCard],
   );
 
   const handleDrop = useCallback(
     async (targetKey: string) => {
       const id = dragId;
       const from = dragFromCol;
+      const place =
+        dropBefore && dropBefore.col === targetKey
+          ? dropBefore
+          : { col: targetKey, before: null };
       setDragId(null);
       setDragFromCol(null);
       setDropCol(null);
+      setDropBefore(null);
       if (!id) return;
       const node = nodes.find((n) => n.id === id);
       if (!node) return;
+
+      // Same column: a reorder. Rank lives on the board, so no document is
+      // touched — works on every dimension, status included.
+      if (from === targetKey) {
+        if (activeBoard) await rankCard(targetKey, id, place.before);
+        return;
+      }
 
       const plan = planMove(node, targetKey, effectiveConfig, from ?? undefined);
       if (plan.kind === "unsupported") {
@@ -459,22 +661,76 @@ export function MaturityBoard({
       // waits for review — say so before doing it, not after. Tasks skip
       // review, so they never see this. Folder moves don't draft.
       if (plan.kind === "retag" && moveNeedsReview(node, governance)) {
-        setPendingMove({ id, title: node.title, plan });
+        setPendingMove({ id, title: node.title, plan, place });
         return;
       }
-      await executeMove(id, plan);
+      await executeMove(id, plan, place);
     },
-    [dragId, dragFromCol, nodes, effectiveConfig, governance, executeMove],
+    [dragId, dragFromCol, dropBefore, nodes, effectiveConfig, governance, executeMove, activeBoard, rankCard],
   );
 
   // Folder and tag drags mutate the node (moveNode / retag). Status moves
   // through the review workflow, so it stays non-draggable. On the tag board a
   // card can sit in several columns; the source column (dragFromCol) tells us
   // which tag to drop. Write access is the second, independent condition.
-  const dimensionDraggable =
-    effectiveConfig.dimension === "folder" ||
-    effectiveConfig.dimension === "tag";
-  const draggable = dimensionDraggable && canEditDocs;
+  // Every dimension is draggable now that a same-column drop reorders: on the
+  // status board a cross-column drop still explains itself (planMove).
+  const draggable = canEditDocs;
+
+  // ── Board tabs: create / rename / duplicate / share / delete ──
+  const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null);
+  const [filterDraft, setFilterDraft] = useState("");
+  const selectBoard = useCallback((id: string) => setActiveId(id), []);
+  const upsertBoard = useCallback(
+    (saved: api.SavedBoard) =>
+      setBoards((bs) =>
+        bs?.some((b) => b.id === saved.id)
+          ? bs.map((b) => (b.id === saved.id ? saved : b))
+          : [...(bs ?? []), saved],
+      ),
+    [],
+  );
+  const newBoard = useCallback(
+    async (from?: api.SavedBoard) => {
+      try {
+        const { board } = await api.createBoard(nestId, {
+          name: from ? `${from.name} copy` : "Untitled board",
+          config: from ? from.config : NEW_BOARD_CONFIG,
+        });
+        upsertBoard(board);
+        setActiveId(board.id);
+        setRenaming({ id: board.id, value: board.name });
+      } catch (e: any) {
+        toast.error(e?.message || "Couldn't create the board");
+      }
+    },
+    [nestId, upsertBoard],
+  );
+  const saveBoardMeta = useCallback(
+    async (id: string, patch: { name?: string; private?: boolean }) => {
+      try {
+        const { board } = await api.updateBoard(nestId, id, patch);
+        upsertBoard(board);
+      } catch (e: any) {
+        toast.error(e?.message || "Couldn't update the board");
+      }
+    },
+    [nestId, upsertBoard],
+  );
+  const removeBoard = useCallback(
+    async (b: api.SavedBoard) => {
+      if (!window.confirm(`Delete the board "${b.name}"? The documents on it are not touched.`)) return;
+      try {
+        await api.deleteBoard(nestId, b.id);
+        setBoards((bs) => bs?.filter((x) => x.id !== b.id) ?? bs);
+        if (activeId === b.id) setActiveId(null);
+        loadedBoardId.current = null;
+      } catch (e: any) {
+        toast.error(e?.message || "Couldn't delete the board");
+      }
+    },
+    [nestId, activeId],
+  );
 
   // ── Column management: reorder (all dimensions) + hide/add (tag columns) ──
   const [colDrag, setColDrag] = useState<string | null>(null);
@@ -674,6 +930,99 @@ export function MaturityBoard({
         </div>
       </NestPageHeader>
 
+      {/* Saved boards as tabs — Linear's views / ClickUp's view bar. */}
+      {boards && boards.length > 0 && (
+        <div className="flex items-center gap-1 overflow-x-auto border-b border-border">
+          {boards.map((b) => {
+            const active = b.id === activeBoard?.id;
+            const mine = !!me && b.created_by_email?.toLowerCase() === me;
+            const canDelete = mine || isOwner || isAdmin;
+            if (renaming?.id === b.id) {
+              return (
+                <Input
+                  key={b.id}
+                  autoFocus
+                  value={renaming.value}
+                  onChange={(e) => setRenaming({ id: b.id, value: e.target.value })}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                    if (e.key === "Escape") setRenaming(null);
+                  }}
+                  onBlur={() => {
+                    const v = renaming.value.trim();
+                    setRenaming(null);
+                    if (v && v !== b.name) void saveBoardMeta(b.id, { name: v });
+                  }}
+                  className="h-8 w-44 mb-1"
+                />
+              );
+            }
+            return (
+              <div
+                key={b.id}
+                className={`flex items-center -mb-px border-b-2 ${
+                  active ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => selectBoard(b.id)}
+                  onDoubleClick={() => canEditDocs && setRenaming({ id: b.id, value: b.name })}
+                  className="flex items-center gap-1.5 px-2.5 py-2 text-sm font-medium whitespace-nowrap"
+                  title={
+                    b.private
+                      ? "Private — only you see this board"
+                      : `Shared with everyone on this nest${b.created_by_email ? ` · made by ${b.created_by_email}` : ""}`
+                  }
+                >
+                  {b.private && <Lock className="h-3 w-3" />}
+                  {b.name}
+                </button>
+                {active && canEditDocs && (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger className="rounded p-0.5 hover:bg-muted" title="Board options">
+                      <ChevronDown className="h-3.5 w-3.5" />
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start" className="w-52">
+                      <DropdownMenuItem onSelect={() => setRenaming({ id: b.id, value: b.name })}>
+                        Rename
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => void newBoard(b)}>Duplicate</DropdownMenuItem>
+                      {mine && (
+                        <DropdownMenuItem onSelect={() => void saveBoardMeta(b.id, { private: !b.private })}>
+                          {b.private ? "Share with the nest" : "Make private"}
+                        </DropdownMenuItem>
+                      )}
+                      {canDelete && boards.length > 1 && (
+                        <>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            onSelect={() => void removeBoard(b)}
+                            className="text-destructive focus:text-destructive"
+                          >
+                            Delete board
+                          </DropdownMenuItem>
+                        </>
+                      )}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )}
+              </div>
+            );
+          })}
+          {canEditDocs && (
+            <button
+              type="button"
+              onClick={() => void newBoard()}
+              className="ml-1 flex items-center gap-1 px-2 py-2 text-sm text-muted-foreground hover:text-foreground whitespace-nowrap"
+              title="New board"
+            >
+              <Plus className="h-3.5 w-3.5" /> New board
+            </button>
+          )}
+        </div>
+      )}
+
       <ul className="max-w-2xl list-disc space-y-1 pl-5 text-xs text-muted-foreground">
         {config.dimension === "status" ? (
           <>
@@ -787,6 +1136,41 @@ export function MaturityBoard({
           />
           Tasks only
         </label>
+        {/* Tag filter: cards must carry every tag listed (saved per board). */}
+        <div className="flex items-center gap-1">
+          <Filter className="h-3.5 w-3.5 text-muted-foreground" />
+          {(config.filterTags ?? []).map((t) => (
+            <span
+              key={t}
+              className="inline-flex items-center gap-0.5 rounded bg-primary/10 px-1.5 py-0.5 text-xs text-primary"
+            >
+              #{t}
+              <button
+                type="button"
+                title={`Remove #${t}`}
+                onClick={() =>
+                  updateConfig({ filterTags: (config.filterTags ?? []).filter((x) => x !== t) })
+                }
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          ))}
+          <Input
+            value={filterDraft}
+            onChange={(e) => setFilterDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              const v = filterDraft.trim().replace(/^#/, "");
+              if (v && !(config.filterTags ?? []).includes(v)) {
+                updateConfig({ filterTags: [...(config.filterTags ?? []), v] });
+              }
+              setFilterDraft("");
+            }}
+            placeholder="filter by tag…"
+            className="h-7 w-32 text-xs"
+          />
+        </div>
         {(boardPeople.length > 0 || assigneeFilter.size > 0) && (
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-muted-foreground">Assignee</span>
@@ -865,7 +1249,7 @@ export function MaturityBoard({
       ) : (
         <div className="flex gap-3 overflow-x-auto pb-4">
           {columns.map((col) => {
-            const cards = byColumn[col.key] ?? [];
+            const cards = orderedByColumn[col.key] ?? [];
             const isDropTarget = dropCol === col.key;
             return (
               <div
@@ -956,9 +1340,26 @@ export function MaturityBoard({
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-2 space-y-2">
-                  {cards.map((n) => (
+                  {cards.map((n, i) => (
+                    <div key={n.id}>
+                    {dragId && dragId !== n.id && dropBefore?.col === col.key && dropBefore.before === n.id && (
+                      <div className="mb-2 h-0.5 rounded bg-primary" />
+                    )}
                     <div
-                      key={n.id}
+                      onDragOver={(e) => {
+                        if (!dragId || colDrag) return;
+                        e.preventDefault();
+                        // Top half → before this card; bottom half → before
+                        // the next one (or the end of the column).
+                        const r = e.currentTarget.getBoundingClientRect();
+                        const before =
+                          e.clientY < r.top + r.height / 2
+                            ? n.id
+                            : (cards[i + 1]?.id ?? null);
+                        setDropBefore((p) =>
+                          p?.col === col.key && p.before === before ? p : { col: col.key, before },
+                        );
+                      }}
                       draggable={draggable}
                       onDragStart={(e) => {
                         setDragId(n.id);
@@ -970,6 +1371,7 @@ export function MaturityBoard({
                         setDragId(null);
                         setDragFromCol(null);
                         setDropCol(null);
+                        setDropBefore(null);
                       }}
                       onClick={() => onOpenDocument(n.id)}
                       className={`group rounded-md border border-border bg-card px-2.5 py-2 text-sm cursor-pointer hover:border-primary/60 hover:shadow-sm transition ${
@@ -1065,7 +1467,11 @@ export function MaturityBoard({
                         </span>
                       </div>
                     </div>
+                    </div>
                   ))}
+                  {dragId && dropBefore?.col === col.key && dropBefore.before === null && (
+                    <div className="h-0.5 rounded bg-primary" />
+                  )}
                   {cards.length === 0 && addingIn?.col !== col.key && (
                     <div className="text-xs text-muted-foreground/60 text-center py-6">
                       {draggable ? "Drop here" : "Empty"}
@@ -1109,7 +1515,7 @@ export function MaturityBoard({
         onConfirm={() => {
           const m = pendingMove;
           setPendingMove(null);
-          if (m) void executeMove(m.id, m.plan);
+          if (m) void executeMove(m.id, m.plan, m.place);
         }}
       />
     </div>

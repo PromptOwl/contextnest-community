@@ -3359,3 +3359,63 @@ export async function chatWithHootie(
   }
   if (buffer.trim()) dispatch(buffer);
 }
+
+// ─── Boards (saved Board views) ─────────────────────────────────────────
+
+export interface SavedBoard {
+  id: string;
+  nest_id: string;
+  name: string;
+  private: boolean;
+  position: number;
+  created_by: string;
+  created_by_email: string | null;
+  /** BoardSettings plus filterTags and per-column ranks; see board-service.ts. */
+  config: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listBoards(nestId: string) {
+  return request<{ boards: SavedBoard[] }>(`/nests/${nestId}/boards`);
+}
+
+export async function createBoard(
+  nestId: string,
+  data: { name: string; private?: boolean; config?: Record<string, any> },
+) {
+  return request<{ board: SavedBoard }>(`/nests/${nestId}/boards`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateBoard(
+  nestId: string,
+  boardId: string,
+  data: { name?: string; private?: boolean; config?: Record<string, any>; position?: number },
+) {
+  return request<{ board: SavedBoard }>(`/nests/${nestId}/boards/${boardId}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+/** Set one column's card order (merged server-side, per column). */
+export async function rankBoardColumn(
+  nestId: string,
+  boardId: string,
+  key: string,
+  order: string[],
+) {
+  return request<{ board: SavedBoard }>(`/nests/${nestId}/boards/${boardId}/rank`, {
+    method: "POST",
+    body: JSON.stringify({ key, order }),
+  });
+}
+
+export async function deleteBoard(nestId: string, boardId: string) {
+  return request<{ deleted: boolean }>(`/nests/${nestId}/boards/${boardId}`, {
+    method: "DELETE",
+  });
+}
