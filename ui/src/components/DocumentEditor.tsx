@@ -1706,19 +1706,19 @@ export function DocumentEditor({
     isOwnPendingReview,
     stewardshipEnabled,
     prime: effectivePrime,
-    primeOnlyReview: !!(nestSettings.data as any)?.prime_only_review,
-    creatorIsReviewer: !!(nestSettings.data as any)?.creator_is_reviewer,
+    primeOnlyReview: !!nestSettings.data?.prime_only_review,
+    creatorIsReviewer: !!nestSettings.data?.creator_is_reviewer,
     allowSelfApprove,
     ownerOrAdmin: canFlagPrime,
   });
 
-  // Submit-for-Review on existing drafts, or on unsaved edits that would draft
-  // anyway (Submit saves them first) — so a published prime doc goes in one step.
+  // Submit saves unsaved edits first, so offer it only where that save drafts —
+  // a save that publishes would put the doc live before the submit ran.
   const canSubmitForReview =
     !isNew &&
     stewardshipEnabled &&
     !isReviewerOnly &&
-    (status === "draft" || (outcome === "draft" && isDirty));
+    (isDirty ? outcome === "draft" : status === "draft");
 
   // Own pending submission: edits save themselves to it once typing pauses.
   useEffect(() => {
@@ -3729,7 +3729,7 @@ export function DocumentEditor({
                         {saving
                           ? "Saving…"
                           : justSaved && !isDirty
-                            ? "Saved"
+                            ? outcome === "publish" ? "Published" : "Saved"
                             : outcome === "publish"
                               ? "Publish"
                               : "Save draft"}
