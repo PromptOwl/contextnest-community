@@ -41,7 +41,7 @@ import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
 } from "../nests/unsynced-service.js";
-import { isServerAdminUserId } from "../shared/access.js";
+import { isServerAdminUserId, isPublicReader } from "../shared/access.js";
 import { config } from "../config.js";
 import {
   createNode,
@@ -1825,17 +1825,26 @@ async function runTool(
         const node = docs.find(
           (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
         );
-        const nodeId = node?.id || "";
+        // A title the caller cannot open resolves exactly like one that does
+        // not exist — otherwise its document-scoped stewards (and so the
+        // document itself) leak through the lookup.
+        const readable =
+          node !== undefined &&
+          (await canReadNode(ctx.nestId, node.id, ctx.userId, ctx.userEmail));
+        const nodeId = readable ? node.id : "";
         const resolved = await stewardship.resolveStewardsForNode(ctx.nestId, nodeId);
 
         if (resolved.length === 0) {
           return `No stewards configured for "${args.title}". Changes are auto-approved.`;
         }
 
+        // Members see who reviews their work; a public reader is an outsider
+        // and gets the roles without the people's email addresses.
+        const hideEmails = await isPublicReader(ctx.nestId, ctx.userId);
         const list = resolved
           .map(
             (r, i) =>
-              `${i + 1}. **${r.steward.userEmail}** — ${r.steward.role} (${r.source})${r.steward.role === "reviewer" ? " ✓ can approve" : ""}`,
+              `${i + 1}. **${hideEmails ? "a steward" : r.steward.userEmail}** — ${r.steward.role} (${hideEmails ? r.steward.scope : r.source})${r.steward.role === "reviewer" ? " ✓ can approve" : ""}`,
           )
           .join("\n");
         return `# Stewards for "${args.title}"\n\n${list}`;

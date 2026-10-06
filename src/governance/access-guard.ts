@@ -106,6 +106,28 @@ export async function canRequestDeletion(params: {
 }
 
 /**
+ * True when the caller can read every document in the nest — the cases where
+ * `filterAccessible` returns its input untouched, answered without listing the
+ * nest. False means "possibly narrowed", not "narrowed": callers fall back to
+ * `filterAccessible` for the exact set. Lets whole-nest views (folder tree,
+ * comment counts) stay cheap for members and narrow only for restricted
+ * callers. Keep in step with `filterAccessible` below.
+ */
+export async function readsWholeNest(
+  nestId: string,
+  userId: string,
+  userEmail: string,
+): Promise<boolean> {
+  if (await isPublicReader(nestId, userId)) return false;
+  if (!(await isStewardshipEnabled(nestId))) {
+    if ((await listUserGrants(nestId, userId)).length === 0) return true;
+    return (await resolveNestPermission(nestId, userId)) !== "none";
+  }
+  if ((await resolveNestWideRoles(nestId, userEmail)).length > 0) return true;
+  return (await stewardCoverageForUser(nestId, userEmail)).nestWide;
+}
+
+/**
  * Filter a list of node-like objects (with .id) down to those the caller
  * can read. Mirrors `canReadNode` resolution: public readers see approved
  * nodes only; collaborators bypass the gate when stewardship is off; with
