@@ -142,7 +142,7 @@ import {
   DEFAULT_LICENSE_CONTACT,
   type LicenseInfo,
 } from "./auth/license.js";
-import { countBilled, assertCanGrant, assertCanAddAccountOwner } from "./auth/seats.js";
+import { countBilled, assertCanGrant, assertCanAddAccountOwner, planLimitMessage } from "./auth/seats.js";
 import { hasEntitlement } from "./auth/entitlements.js";
 import {
   resolveModelCredential,
@@ -2976,7 +2976,7 @@ export function createApp(): Hono<AuthEnv> {
   // for predictable failure modes (constraint violations, missing rows,
   // disk/path errors). Anything truly unexpected still falls through
   // to the 500.
-  app.onError((err, c) => {
+  app.onError(async (err, c) => {
     // Vault write-lock timeout: retryable, so it carries Retry-After — the
     // one AppError with a header. Raw engine errors are converted here too,
     // for any route that throws them without passing through toSafeError.
@@ -2987,7 +2987,13 @@ export function createApp(): Hono<AuthEnv> {
       });
     }
     if (err instanceof PlanLimitError) {
-      return c.json({ error: err.message, code: "plan_limit", limit: err.limit, max: err.max }, 402);
+      // Only a server admin can change the plan; everyone else is told who to ask.
+      const userId = (c as any).get?.("userId") as string | undefined;
+      const forAdmin = !!userId && (await isServerAdminUserId(userId).catch(() => false));
+      return c.json(
+        { error: planLimitMessage(err.limit, err.max, forAdmin), code: "plan_limit", limit: err.limit, max: err.max },
+        402,
+      );
     }
     if (err instanceof AppError) {
       return c.json({ error: err.message }, err.statusCode as any);

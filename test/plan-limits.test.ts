@@ -45,6 +45,10 @@ describe("plan limits at role grant", () => {
     const res = await newNest(carol, "Carol");
     expect(res.status).toBe(402);
     expect(res.data).toMatchObject({ code: "plan_limit", limit: "users", max: 3 });
+    // carol can't change the plan, so she is told who can.
+    expect(res.data.error).toMatch(/plan includes 3 users .*all are in use/);
+    expect(res.data.error).toMatch(/Ask your server admin/);
+    expect(res.data.error).not.toMatch(/Upgrade/);
   });
 
   it("an existing user can own more nests without a new seat", async () => {
@@ -56,7 +60,7 @@ describe("plan limits at role grant", () => {
     const res = await share("dave@co.com", "write");
     expect(res.status).toBe(402);
     expect(res.data).toMatchObject({ code: "plan_limit", limit: "subscribers", max: 0 });
-    expect(res.data.error).toMatch(/Editors need a paid plan/);
+    expect(res.data.error).toMatch(/Editors aren't included in this server's plan. Ask your server admin/);
   });
 
   it("raising a viewer to admin or reviewer needs a user seat", async () => {
@@ -98,6 +102,8 @@ describe("plan limits at role grant", () => {
     const res = await jsonRequest(app, "POST", "/admin/super-admins", { email: "alice@co.com" }, owner.apiKey);
     expect(res.status).toBe(402);
     expect(res.data).toMatchObject({ code: "plan_limit", limit: "account_owners", max: 1 });
+    // The licence admin can change the plan, so they are pointed at it.
+    expect(res.data.error).toMatch(/Upgrade the plan from Settings → License/);
   });
 
   it("over the cap nothing is taken away, and demotions still work", async () => {
@@ -116,5 +122,20 @@ describe("plan limits at role grant", () => {
     Object.assign(entitlement, { plan: "enterprise", maxUsers: null, maxSubscribers: null, maxAccountOwners: null });
     expect((await newNest(carol, "Carol finally")).status).toBe(201);
     expect((await share("frank@co.com", "write")).status).toBe(201);
+  });
+
+  it("an access key (service identity) never takes a seat, whatever its role", async () => {
+    const { getDb } = await import("../src/db/client.js");
+    const { countBilled } = await import("../src/auth/seats.js");
+    const before = await countBilled();
+    const db = getDb();
+    await db.run(
+      "INSERT INTO users (id, email, name, password_hash, is_service) VALUES ('svc1', 'key-svc1@service.local', 'Key', 'x', 1)",
+    );
+    await db.run(
+      "INSERT INTO nest_collaborators (id, nest_id, user_id, permission, granted_by) VALUES ('c-svc1', ?, 'svc1', 'admin', ?)",
+      [nestId, alice.userId],
+    );
+    expect(await countBilled()).toEqual(before);
   });
 });

@@ -52,14 +52,16 @@ export async function billingClasses(): Promise<Map<string, BillingClass>> {
     db.all("SELECT shared_teams FROM nests WHERE shared_teams IS NOT NULL AND shared_teams != '[]'") as Promise<
       Array<{ shared_teams: string }>
     >,
-    db.all("SELECT id, email FROM users WHERE id != ?", [ANON_USER_ID]) as Promise<
+    // People only: access-key service identities are never billed seats.
+    db.all("SELECT id, email FROM users WHERE id != ? AND COALESCE(is_service, 0) = 0", [ANON_USER_ID]) as Promise<
       Array<{ id: string; email: string }>
     >,
   ]);
 
+  const people = new Set(users.map((u) => u.id));
   const best = new Map<string, number>();
   const bump = (id: string | null | undefined, r: number) => {
-    if (id && id !== ANON_USER_ID && r > (best.get(id) ?? -1)) best.set(id, r);
+    if (id && people.has(id) && r > (best.get(id) ?? -1)) best.set(id, r);
   };
   for (const row of rows) bump(row.user_id, Number(row.r));
 
@@ -144,11 +146,7 @@ export async function assertCanGrant(
   }
 
   if (ent.maxUsers != null && after.users > ent.maxUsers && after.users > before.users) {
-    throw new PlanLimitError(
-      "users",
-      ent.maxUsers,
-      `Your plan includes ${ent.maxUsers} users (owners, admins and reviewers). Upgrade your plan to add more.`,
-    );
+    throw new PlanLimitError("users", ent.maxUsers, planLimitMessage("users", ent.maxUsers, true));
   }
   if (
     ent.maxSubscribers != null &&
@@ -158,11 +156,32 @@ export async function assertCanGrant(
     throw new PlanLimitError(
       "subscribers",
       ent.maxSubscribers,
-      ent.maxSubscribers === 0
-        ? "Editors need a paid plan. Upgrade your plan to add editors."
-        : `Your plan includes ${ent.maxSubscribers} editors. Upgrade your plan to add more.`,
+      planLimitMessage("subscribers", ent.maxSubscribers, true),
     );
   }
+}
+
+/**
+ * Why a role change was refused, worded for who asked: a server admin can
+ * upgrade (Settings → License); anyone else can only ask that admin. The API
+ * error handler picks the audience per request.
+ */
+export function planLimitMessage(
+  limit: "users" | "subscribers" | "account_owners",
+  max: number,
+  forAdmin: boolean,
+): string {
+  const full =
+    limit === "users"
+      ? `This server's plan includes ${max} ${max === 1 ? "user" : "users"} (nest owners, admins and reviewers), and all are in use.`
+      : limit === "subscribers"
+        ? max === 0
+          ? "Editors aren't included in this server's plan."
+          : `This server's plan includes ${max} ${max === 1 ? "editor" : "editors"}, and all are in use.`
+        : `This server's plan includes ${max} account ${max === 1 ? "owner" : "owners"}.`;
+  return forAdmin
+    ? `${full} Upgrade the plan from Settings → License to add more.`
+    : `${full} Ask your server admin to add seats.`;
 }
 
 /** Refuse a new server admin (Account Owner) past the plan's cap — Free has one. */
@@ -178,10 +197,6 @@ export async function assertCanAddAccountOwner(email: string): Promise<void> {
   }
   if (owners.has(email.toLowerCase())) return;
   if (owners.size >= max) {
-    throw new PlanLimitError(
-      "account_owners",
-      max,
-      `Your plan includes ${max} account owner${max === 1 ? "" : "s"}. Upgrade your plan to add more.`,
-    );
+    throw new PlanLimitError("account_owners", max, planLimitMessage("account_owners", max, true));
   }
 }
