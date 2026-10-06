@@ -29,6 +29,8 @@ import {
   isIdUnderFolder,
   vaultFolderExists,
 } from "../nodes/service.js";
+import * as agentActivity from "./agent-activity-service.js";
+import { trackEvent } from "../telemetry/tracker.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
 import {
   canReadNode,
@@ -84,7 +86,8 @@ governanceRoutes.get("/stewards", async (c) => {
     }
     enriched.push({ ...s, ...merged });
   }
-  return c.json({ stewards: enriched });
+  const ownerEmail = await stewardship.getNestOwnerEmail(nestId);
+  return c.json({ stewards: enriched, ownerEmail });
 });
 
 // POST /nests/:nestId/stewards
@@ -561,6 +564,45 @@ governanceRoutes.get("/feed", async (c) => {
     offset,
   });
   return c.json({ ...result, filter, limit, offset });
+});
+
+// GET /nests/:nestId/agent-activity?scope=agents|all&agent=&limit=&offset=
+// What agents did to this nest — every write whose `client` names an agent,
+// plus deletions — newest first, each with an undo verdict. Owners, admins and
+// reviewers only: the list holds just the documents the caller could undo.
+governanceRoutes.get("/agent-activity", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const scope = c.req.query("scope") === "all" ? "all" : "agents";
+  const agent = c.req.query("agent")?.trim() || undefined;
+  const limit = parseLimit(c.req.query("limit"), 50, 200);
+  const offsetRaw = parseInt(c.req.query("offset") ?? "", 10);
+  const offset = Number.isNaN(offsetRaw) || offsetRaw < 0 ? 0 : Math.min(offsetRaw, 10_000);
+  const userEmail = await getUserEmail(c);
+  const page = await agentActivity.getAgentActivity({ nestId, userEmail, scope, agent, limit, offset });
+  return c.json({ ...page, scope, ...(agent ? { agent } : {}) });
+});
+
+// POST /nests/:nestId/agent-activity/undo — body { nodeId, version }.
+// Undo one change through the normal write paths (restore the previous
+// version as a new one / discard a draft / delete a created document). 409
+// with the reason when the document changed since or the change is in review.
+governanceRoutes.post("/agent-activity/undo", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const body = await c.req
+    .json<{ nodeId?: unknown; version?: unknown; client?: unknown }>()
+    .catch(() => ({}) as { nodeId?: unknown; version?: unknown; client?: unknown });
+  const nodeId = typeof body.nodeId === "string" ? assertSafeNodeId(body.nodeId) : "";
+  const version = Number(body.version);
+  const userEmail = await getUserEmail(c);
+  const result = await agentActivity.undoChange({
+    nestId,
+    nodeId,
+    version,
+    userEmail,
+    client: attributeRequest(c, body.client),
+  });
+  await trackEvent("node.undo_agent_change", { nestId, nodeId, version, effect: result.effect });
+  return c.json({ ok: true, nodeId, undone: version, ...result });
 });
 
 // GET /nests/:nestId/external-edits

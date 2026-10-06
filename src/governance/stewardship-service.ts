@@ -314,14 +314,15 @@ export async function createStewardRecord(params: {
       throw new ValidationError(`"${user.email}" is not a valid email address.`);
     }
 
+    // Owner check first: an owner adding themselves gets the owner message.
+    if (ownerEmail && email === ownerEmail) {
+      throw new ValidationError(
+        "The nest owner already holds full stewardship and approval authority over all documents. Steward roles are for delegating authority to other team members.",
+      );
+    }
     if (email === actor) {
       throw new ValidationError(
         "You already manage this nest, so you can't add yourself as a steward.",
-      );
-    }
-    if (ownerEmail && email === ownerEmail) {
-      throw new ValidationError(
-        "The nest owner already has full access and doesn't need a steward role.",
       );
     }
 
@@ -861,7 +862,7 @@ export async function canCreateInNest(nestId: string, userEmail: string): Promis
   );
 }
 
-async function getNestOwnerEmail(nestId: string): Promise<string | null> {
+export async function getNestOwnerEmail(nestId: string): Promise<string | null> {
   const db = getDb();
   const row = await db.get(
     `SELECT u.email FROM nests n

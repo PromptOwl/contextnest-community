@@ -35,6 +35,7 @@ const SETTING_ENV = [
   "PROMPTOWL_SIGN_IN_GATE",
   "MANUAL_SIGN_IN",
   "LOGO_URL",
+  "COMMUNITY_NAME",
   "PUBLIC_BASE_URL",
   "MAX_BODY_BYTES",
   "FEATURE_WORKFLOW_PLANE",
@@ -140,6 +141,25 @@ describe("/admin/settings — validation", () => {
     expect(res.status).toBe(400);
     expect(res.data.error).toMatch(/PromptOwl sign-in/i);
     expect(res.data.fieldErrors).toHaveProperty("promptowl_sign_in_gate");
+  });
+
+  it("saves a trimmed community name, clears it with an empty string, rejects multi-line", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    const patch = (community_name: string) =>
+      jsonRequest(app, "PATCH", "/admin/settings", { community_name }, admin.apiKey);
+
+    const ok = await patch("  Acme Community ");
+    expect(ok.status).toBe(200);
+    expect(ok.data.settings.community_name).toBe("Acme Community");
+    expect(await persistedSetting("COMMUNITY_NAME")).toBe("Acme Community");
+
+    const bad = await patch("Acme\nEvil");
+    expect(bad.status).toBe(400);
+    expect(bad.data.fieldErrors).toHaveProperty("community_name");
+
+    const cleared = await patch("");
+    expect(cleared.data.settings.community_name).toBeNull();
   });
 
   it("saves a PostHog key, rejects a junk key and a non-URL host", async () => {

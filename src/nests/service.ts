@@ -6,6 +6,7 @@ import { config } from "../config.js";
 import { resolveNestPath } from "../shared/paths.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
+import { revokeAllHeadlessKeys } from "../auth/headless.js";
 import { isServerAdminUserId } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { ValidationError, ForbiddenError } from "../shared/errors.js";
@@ -191,6 +192,36 @@ export async function setAllowSelfApprove(
     allow ? 1 : 0,
     nestId,
   ]);
+}
+
+/**
+ * Whether an agent write (MCP context_create, POST /nodes, POST /publish) to
+ * this nest must be confirmed in the web UI before it applies — the Push
+ * Confirmation Gate. Superadmin-set
+ * only; default off = today's immediate-apply behaviour. Mirrors
+ * nestAllowsSelfApprove above.
+ */
+export async function nestRequiresPushConfirmation(
+  nestId: string,
+): Promise<boolean> {
+  const db = getDb();
+  const row = (await db.get(
+    "SELECT require_push_confirmation FROM nests WHERE id = ?",
+    [nestId],
+  )) as { require_push_confirmation: number } | undefined;
+  return !!row?.require_push_confirmation;
+}
+
+/** Toggle the Push Confirmation Gate for a nest (superadmin-only). */
+export async function setRequirePushConfirmation(
+  nestId: string,
+  require: boolean,
+): Promise<void> {
+  const db = getDb();
+  await db.run(
+    "UPDATE nests SET require_push_confirmation = ? WHERE id = ?",
+    [require ? 1 : 0, nestId],
+  );
 }
 
 /**
@@ -704,11 +735,15 @@ export async function listSharedNests(userId: string): Promise<Nest[]> {
         AND LOWER(s.user_email) = LOWER(u.email)
        LEFT JOIN grants g
          ON g.nest_id = n.id AND g.user_id = ?
+       -- A headless access key lists the one nest it reads, while published.
+       LEFT JOIN headless_readers hr
+         ON hr.nest_id = n.id AND hr.user_id = ?
        WHERE n.user_id != ?
          AND ${LIVE_ONLY_N}
-         AND (nc.user_id IS NOT NULL OR s.id IS NOT NULL OR g.id IS NOT NULL)
+         AND (nc.user_id IS NOT NULL OR s.id IS NOT NULL OR g.id IS NOT NULL
+              OR (hr.user_id IS NOT NULL AND n.headless = 1))
        ORDER BY n.created_at DESC`,
-    [userId, userId, userId, userId],
+    [userId, userId, userId, userId, userId],
   )) as Nest[];
 
   // Fold in team-shared nests, deduped by id. Re-sort newest-first so the
@@ -891,6 +926,9 @@ export async function deleteNest(nestId: string): Promise<void> {
     } catch {
       // Table not present on legacy DBs — fine, nothing to clean.
     }
+    // Headless access keys take their service identities with them — before
+    // the api_keys sweep below, which would otherwise orphan those users.
+    await revokeAllHeadlessKeys(tx, id);
     await tx.run("DELETE FROM api_keys WHERE nest_id = ?", [id]);
     // Pins are FK-cascaded too; explicit for the same reason as the rows above,
     // and wrapped because a DB predating the pins migration has no such table.

@@ -15,6 +15,7 @@ import { addCollaborator } from "./sharing-service.js";
 import { assertCanGrant, permissionClass } from "../auth/seats.js";
 import { listNestPeople, withDirectory } from "./people-service.js";
 import { setReaderMode } from "./service.js";
+import { isNestHeadless } from "../auth/headless.js";
 import {
   isServerAdminUserId,
   resolveNestAccess,
@@ -211,10 +212,32 @@ sharingRoutes.patch("/visibility", async (c) => {
 
   const db = getDb();
   const nestId = c.req.param("nestId")!;
-  const result = await db.run("UPDATE nests SET visibility = ? WHERE id = ?", [
-    body.visibility,
-    nestId,
-  ]);
+  // A nest published headless (API-only, CU-wdqcq0314u) stays private: org or
+  // public would let people read it without a key.
+  if (body.visibility !== "private" && (await isNestHeadless(nestId))) {
+    return c.json(
+      {
+        error:
+          "This nest is published API-only (headless), so it stays private. Stop headless publishing first to make it org or public.",
+      },
+      409,
+    );
+  }
+  // Widening is conditional on the nest not being headless (CU-wdqcq0314u), so
+  // a headless toggle racing this request can't leave it both public and
+  // headless. A zero-row result is then told apart from "no such nest" below.
+  const result = await db.run(
+    body.visibility === "private"
+      ? "UPDATE nests SET visibility = ? WHERE id = ?"
+      : "UPDATE nests SET visibility = ? WHERE id = ? AND COALESCE(headless, 0) = 0",
+    [body.visibility, nestId],
+  );
+  if (result.changes === 0 && body.visibility !== "private" && (await isNestHeadless(nestId))) {
+    return c.json(
+      { error: "This nest is published API-only (headless), so it stays private." },
+      409,
+    );
+  }
   // A zero-row update means the nest id didn't resolve — report it instead of
   // echoing success, which previously let the UI flip to a state the DB never
   // took (the "made it private but it still shows public" symptom).

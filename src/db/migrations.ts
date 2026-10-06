@@ -219,6 +219,16 @@ export function runMigrations(db: Database.Database): void {
     db.exec("ALTER TABLE nests ADD COLUMN index_synced_at TEXT");
   }
 
+  // Push Confirmation Gate (superadmin). When on, an agent write (POST
+  // /nests/:id/publish) is HELD as a pending_pushes row instead of applying —
+  // it lands only after a reviewer confirms in the web UI. Default 0 keeps
+  // today's immediate-apply behaviour. Superadmin-set only (isServerAdminUserId
+  // gates the settings field); mirrors allow_self_approve above.
+  if (!nestCols.includes("require_push_confirmation")) {
+    db.exec(
+      "ALTER TABLE nests ADD COLUMN require_push_confirmation INTEGER NOT NULL DEFAULT 0",
+    );
+  }
   // Public Docs Reader Mode — a superadmin-enabled, read-only public docs view.
   // `reader_mode` off by default; `reader_home_node` names the designated
   // landing/hub node (nullable — resolved by convention when unset).
@@ -1481,6 +1491,50 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("039_nest_pins");
   }
 
+  // 040: Push Confirmation Gate. Held pushes + the per-key allowlist.
+  //
+  // pending_pushes carries the FULL staged push (payload_blob) so a confirm
+  // applies it byte-for-byte later — the submitter is long gone by then.
+  // push_allowlist is PER-API-KEY (never keyed on nest alone): key_id ''
+  // means "any of that user's keys". A confirm with always_allow whitelists
+  // the exact (nest_id, submitter_user_id, submitter_key_id) that pushed.
+  if (!hasMigration("040_push_confirmation")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS pending_pushes (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          submitter_user_id TEXT NOT NULL,
+          submitter_key_id TEXT,
+          submitter_label TEXT,
+          submitter_email TEXT,
+          doc_count INTEGER NOT NULL DEFAULT 0,
+          manifest_json TEXT NOT NULL DEFAULT '[]',
+          payload_blob TEXT NOT NULL,
+          context_md TEXT,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending', 'applied', 'rejected', 'expired')),
+          created_at TEXT NOT NULL,
+          decided_at TEXT,
+          decided_by_user_id TEXT,
+          applied_node_count INTEGER,
+          expires_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pending_pushes_nest_status
+          ON pending_pushes(nest_id, status, created_at);
+
+        CREATE TABLE IF NOT EXISTS push_allowlist (
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          user_id TEXT NOT NULL,
+          key_id TEXT NOT NULL DEFAULT '',
+          created_by_user_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (nest_id, user_id, key_id)
+        );
+      `);
+    })();
+    recordMigration("040_push_confirmation");
+  }
   // 041: widen nests.visibility to accept 'org'. 040 is skipped on purpose —
   // 040_push_confirmation is in flight on another branch, and ids are matched
   // by string, so the gap costs nothing and reusing 040 would collide.
@@ -1569,6 +1623,85 @@ export function runMigrations(db: Database.Database): void {
       }
     }
     recordMigration("044_client_attribution");
+  }
+
+  // 045: headless publishing (CU-wdqcq0314u). `nests.headless` is the owner's
+  // "API-only" switch; `users.is_service` marks the identity behind an access
+  // key (no password, never listed as a person); `headless_readers` ties each
+  // such identity to the one nest its key reads.
+  if (!hasMigration("045_headless_publish")) {
+    db.transaction(() => {
+      const nestCols = (
+        db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!nestCols.includes("headless")) {
+        db.exec("ALTER TABLE nests ADD COLUMN headless INTEGER NOT NULL DEFAULT 0");
+      }
+      const userCols = (
+        db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!userCols.includes("is_service")) {
+        db.exec("ALTER TABLE users ADD COLUMN is_service INTEGER NOT NULL DEFAULT 0");
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS headless_readers (
+          user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          key_id TEXT NOT NULL,
+          label TEXT NOT NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_headless_readers_nest ON headless_readers(nest_id);
+      `);
+    })();
+    recordMigration("045_headless_publish");
+  }
+
+  // 046: attribute deletions (CU-wdqcq0314v). A delete purges every row tied
+  //   to the node, so its tombstone is the only record left — which makes it
+  //   where "which agent deleted this" has to live for the agent-activity
+  //   stream. Same nullable, never-hashed annotation as 044. (045 is taken by
+  //   045_mcp_oauth on another branch; ids match by string.)
+  if (!hasMigration("046_deletion_client_attribution")) {
+    const cols = (
+      db.prepare(`PRAGMA table_info(node_deletions)`).all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (cols.length && !cols.includes("client_json")) {
+      db.exec(`ALTER TABLE node_deletions ADD COLUMN client_json TEXT`);
+    }
+    recordMigration("046_deletion_client_attribution");
+  }
+
+  // 047: document access events (CU-wdqcq03aw2). Reads, retrievals and exports
+  //   leave no version behind, and the activity trace (api_events) records a
+  //   call but not which documents it returned — so "who pulled this doc" had
+  //   no answer. One row per (actor, document, action), throttled at write time
+  //   and pruned on the trace's retention window (access-log.ts). node_id is
+  //   NULL for a whole-nest export. (045 is taken on other branches.)
+  if (!hasMigration("047_node_access_events")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS node_access_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts TEXT NOT NULL,
+          nest_id TEXT NOT NULL,
+          node_id TEXT,
+          action TEXT NOT NULL CHECK(action IN ('read', 'retrieve', 'export')),
+          surface TEXT NOT NULL CHECK(surface IN ('api', 'mcp')),
+          user_id TEXT,
+          user_email TEXT,
+          client_json TEXT,
+          detail TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_node_access_node
+          ON node_access_events(nest_id, node_id, id);
+        CREATE INDEX IF NOT EXISTS idx_node_access_nest
+          ON node_access_events(nest_id, id);
+        CREATE INDEX IF NOT EXISTS idx_node_access_ts ON node_access_events(ts);
+      `);
+    })();
+    recordMigration("047_node_access_events");
   }
 
   // 048: license_cache.features_json — the named licence features PromptOwl

@@ -39,7 +39,10 @@ import { reads, useApiKeys, useNests } from "../../../lib/queries";
 import {
   ALL_NESTS,
   createKeyRequest,
+  filterSortKeys,
   keyScope,
+  type KeyScopeFilter,
+  type KeySort,
 } from "../../../lib/api-key-scope";
 import { parseServerDate } from "../../../lib/dates";
 import { KeyRevealModal, RotateKeyConfirm } from "../../../components/ConnectModal";
@@ -67,6 +70,11 @@ export default function ApiKeysPage() {
 
   const [label, setLabel] = useState("");
   const [scope, setScope] = useState<string>(ALL_NESTS);
+  // List controls — search, scope filter, sort.
+  const [query, setQuery] = useState("");
+  const [scopeFilter, setScopeFilter] = useState<KeyScopeFilter>("any");
+  const [sort, setSort] = useState<KeySort>("newest");
+  const shown = filterSortKeys(keys, allNests, { query, scope: scopeFilter, sort });
   // One id at a time: which row is mid-request, so only its button spins.
   const [busy, setBusy] = useState<string | null>(null);
   const [rotateTarget, setRotateTarget] = useState<{ id: string; name: string } | null>(null);
@@ -206,6 +214,38 @@ export default function ApiKeysPage() {
         </Button>
       </form>
 
+      {keys.length > 0 && (
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search by name, prefix or nest"
+            aria-label="Search keys"
+            className="flex-1"
+          />
+          <Select value={scopeFilter} onValueChange={(v) => setScopeFilter(v as KeyScopeFilter)}>
+            <SelectTrigger className="w-full sm:w-[170px]" aria-label="Filter by scope">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="any">Any scope</SelectItem>
+              <SelectItem value="all">All-nests keys</SelectItem>
+              <SelectItem value="nest">One-nest keys</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={sort} onValueChange={(v) => setSort(v as KeySort)}>
+            <SelectTrigger className="w-full sm:w-[170px]" aria-label="Sort keys">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="newest">Newest first</SelectItem>
+              <SelectItem value="name">Name A–Z</SelectItem>
+              <SelectItem value="last_used">Recently used</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
       {isLoading ? (
         <p className="py-6 text-center text-sm text-muted-foreground">
           Loading your keys…
@@ -214,9 +254,13 @@ export default function ApiKeysPage() {
         <p className="rounded-md border border-dashed py-6 text-center text-sm text-muted-foreground">
           No keys yet. Generate one above to connect an AI client.
         </p>
+      ) : shown.length === 0 ? (
+        <p className="rounded-md border border-dashed py-6 text-center text-sm text-muted-foreground">
+          No keys match.
+        </p>
       ) : (
         <ul className="divide-y rounded-md border">
-          {keys.map((k) => {
+          {shown.map((k) => {
             const name = k.label || "Unnamed key";
             const reach = keyScope(k, allNests);
             return (

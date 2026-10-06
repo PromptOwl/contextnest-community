@@ -87,6 +87,10 @@ export interface NestAccess {
   archived: boolean;
   /** Reaches the nest ONLY because it is public (approved content only). */
   isPublicReader: boolean;
+  /** The caller is a headless access key's service identity for this nest
+   *  (CU-wdqcq0314u) — approved-content-only 'read' while the nest is
+   *  published headless, nothing when it isn't. */
+  isHeadlessReader: boolean;
 }
 
 const higher = (
@@ -160,13 +164,17 @@ async function resolveNestAccessRaw(
                LIMIT 1) AS steward_hit,
             (SELECT 1 FROM grants g
                WHERE g.nest_id = n.id AND g.user_id = ?
-               LIMIT 1) AS grant_hit
+               LIMIT 1) AS grant_hit,
+            n.headless     AS headless,
+            (SELECT 1 FROM headless_readers hr
+               WHERE hr.nest_id = n.id AND hr.user_id = ?
+               LIMIT 1) AS headless_hit
        FROM nests n
        LEFT JOIN users u ON u.id = ?
        LEFT JOIN nest_collaborators nc
          ON nc.nest_id = n.id AND nc.user_id = ?
       WHERE n.id = ?`,
-    [userId, userId, userId, nestId],
+    [userId, userId, userId, userId, nestId],
   )) as
     | {
         owner_id: string;
@@ -177,6 +185,8 @@ async function resolveNestAccessRaw(
         collab_permission: NestPermission | null;
         steward_hit: number | boolean | null;
         grant_hit: number | boolean | null;
+        headless: number | null;
+        headless_hit: number | boolean | null;
       }
     | undefined;
 
@@ -191,6 +201,7 @@ async function resolveNestAccessRaw(
     permission: "none",
     rawPermission: "none",
     isPublicReader: false,
+    isHeadlessReader: false,
     archived: false,
   };
   if (!row) return absent;
@@ -206,7 +217,21 @@ async function resolveNestAccessRaw(
     isSteward: !!row.steward_hit,
     hasGrant: !!row.grant_hit,
     archived: !!row.archived_at,
+    isHeadlessReader: false,
   };
+
+  // 0. A headless access key (CU-wdqcq0314u). Its service identity is never an
+  //    owner, collaborator, steward or team member — the reader row is its
+  //    only path in, and it reads what a visibility-only reader reads
+  //    (approved content only). Publishing switched off pauses every key.
+  if (row.headless_hit) {
+    return {
+      ...base,
+      isHeadlessReader: true,
+      permission: row.headless ? "read" : "none",
+      isPublicReader: !!row.headless,
+    };
+  }
 
   // 1. The owner.
   if (row.owner_id === userId) {
