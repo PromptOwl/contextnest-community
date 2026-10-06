@@ -13,7 +13,10 @@ import {
   resolveHostedNodeId,
 } from "./service.js";
 import { ARTIFACT_NODE_TYPE, type AnnotationAnchor } from "./types.js";
-import { notifyCommentMentions } from "../governance/mention-notify.js";
+import {
+  notifyCommentMentions,
+  notifyCommentReply,
+} from "../governance/mention-notify.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 
 /**
@@ -111,10 +114,13 @@ export async function handleAnnotationReply(
     throw new ValidationError("body is required");
   }
 
+  // addComment also reopens the thread when it was resolved.
   const thread = await addComment(nestId, nodeId, threadId, userEmail, input.body);
-  await notifyCommentMentions({
+  // @mentions in the reply, plus everyone already in the thread.
+  await notifyCommentReply({
     nestId,
     nodeId,
+    thread,
     body: input.body,
     actorEmail: userEmail,
     baseUrl: requestBaseUrl(c.req.url),

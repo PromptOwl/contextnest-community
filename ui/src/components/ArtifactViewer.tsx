@@ -40,6 +40,7 @@ import { VersionHistoryModal, type VersionHistoryData } from "./governance";
 import {
   ArrowLeft, Loader2, MessageSquare, MessageSquarePlus, ExternalLink, RefreshCw,
   Eye, Highlighter, Check, RotateCcw, Send, History, Code2, X, FileText, Users,
+  ChevronDown, ChevronRight,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -194,6 +195,8 @@ export function ArtifactViewer({
   const [posting, setPosting] = useState(false);
   const [replyFor, setReplyFor] = useState<string | null>(null);
   const [replyBody, setReplyBody] = useState("");
+  // Resolved threads fold under "Resolved (n)", closed by default.
+  const [showResolved, setShowResolved] = useState(false);
 
   const preRef = useRef<HTMLPreElement | null>(null);
   // A pinned historical version wins over the served snapshot. `iframeKey`
@@ -408,8 +411,11 @@ export function ArtifactViewer({
     if (!initialThreadId || initialThreadConsumedRef.current || loadingThreads) {
       return;
     }
-    if (!threads.some((t) => t.id === initialThreadId)) return;
+    const target = threads.find((t) => t.id === initialThreadId);
+    if (!target) return;
     initialThreadConsumedRef.current = true;
+    // A resolved target sits in the folded section — unfold it first.
+    if (target.status === "resolved") setShowResolved(true);
     requestAnimationFrame(() => {
       document
         .getElementById(`annotation-thread-${initialThreadId}`)
@@ -492,11 +498,13 @@ export function ArtifactViewer({
   }, [draft, selection, extractedText, nestId, nodeId, snapshot, loadThreads]);
 
   const submitReply = useCallback(
-    async (threadId: string) => {
+    async (threadId: string, andResolve = false) => {
       const body = replyBody.trim();
       if (!body) return;
       try {
         await api.replyAnnotation(nestId, nodeId, threadId, body);
+        // Reply & resolve: the reply lands first, then the thread closes.
+        if (andResolve) await api.resolveAnnotation(nestId, nodeId, threadId);
         setReplyBody("");
         setReplyFor(null);
         await loadThreads();
@@ -912,15 +920,27 @@ export function ArtifactViewer({
                     }}
                     onReplyChange={setReplyBody}
                     onReplySubmit={() => submitReply(t.id)}
+                    onReplyResolve={() => submitReply(t.id, true)}
                     onToggleResolved={() => toggleResolved(t)}
                   />
                 ))}
                 {resolvedThreads.length > 0 && (
-                  <div className="pt-2 text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                    Resolved
-                  </div>
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-1 pt-2 text-xs font-medium text-muted-foreground uppercase tracking-wide hover:text-foreground"
+                    aria-expanded={showResolved}
+                    onClick={() => setShowResolved((v) => !v)}
+                    data-testid="artifact-resolved-toggle"
+                  >
+                    {showResolved ? (
+                      <ChevronDown className="h-3.5 w-3.5" />
+                    ) : (
+                      <ChevronRight className="h-3.5 w-3.5" />
+                    )}
+                    Resolved ({resolvedThreads.length})
+                  </button>
                 )}
-                {resolvedThreads.map((t) => (
+                {showResolved && resolvedThreads.map((t) => (
                   <ThreadCard
                     key={t.id}
                     thread={t}
@@ -1033,6 +1053,8 @@ interface ThreadCardProps {
   onReplyOpen: () => void;
   onReplyChange: (v: string) => void;
   onReplySubmit: () => void;
+  /** Post the reply, then resolve. Omitted for resolved threads. */
+  onReplyResolve?: () => void;
   onToggleResolved: () => void;
 }
 
@@ -1043,6 +1065,7 @@ function ThreadCard({
   onReplyOpen,
   onReplyChange,
   onReplySubmit,
+  onReplyResolve,
   onToggleResolved,
 }: ThreadCardProps) {
   const resolved = thread.status === "resolved";
@@ -1109,12 +1132,22 @@ function ThreadCard({
           <textarea
             value={replyBody}
             onChange={(e) => onReplyChange(e.target.value)}
-            placeholder="Reply…"
+            placeholder={resolved ? "Reply… replying reopens this thread" : "Reply…"}
             rows={2}
             className="w-full text-sm rounded border px-2 py-1 resize-y focus:outline-none focus:ring-1 focus:ring-primary"
             autoFocus
           />
-          <div className="flex justify-end">
+          <div className="flex justify-end gap-2">
+            {!resolved && onReplyResolve && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={onReplyResolve}
+                disabled={!replyBody.trim()}
+              >
+                <Check className="h-3.5 w-3.5 mr-1.5" /> Reply &amp; resolve
+              </Button>
+            )}
             <Button size="sm" onClick={onReplySubmit} disabled={!replyBody.trim()}>
               <Send className="h-3.5 w-3.5 mr-1.5" /> Reply
             </Button>

@@ -152,6 +152,8 @@ async function insertInboxRows(params: {
   nodeId: string;
   recipients: Recipient[];
   message: string;
+  /** 'mention' (named in the text) or 'comment_reply' (a thread you're in). */
+  kind?: "mention" | "comment_reply";
 }): Promise<number> {
   const db = getDb();
   const now = new Date().toISOString();
@@ -159,8 +161,16 @@ async function insertInboxRows(params: {
   for (const r of params.recipients) {
     await db.run(
       `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
-       VALUES (?, ?, ?, 'mention', ?, ?, ?)`,
-      [uuid(), params.nestId, r.email.toLowerCase(), params.nodeId, params.message, now],
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        uuid(),
+        params.nestId,
+        r.email.toLowerCase(),
+        params.kind ?? "mention",
+        params.nodeId,
+        params.message,
+        now,
+      ],
     );
     created++;
   }
@@ -370,16 +380,28 @@ export async function notifyCommentMentions(params: {
   actorEmail: string;
   baseUrl?: string;
 }): Promise<number> {
+  return (await commentMentionFanOut(params)).length;
+}
+
+/** notifyCommentMentions' body, returning WHO was notified so a reply can
+ *  leave those people out of its participant fan-out. */
+async function commentMentionFanOut(params: {
+  nestId: string;
+  nodeId: string;
+  body: string;
+  actorEmail: string;
+  baseUrl?: string;
+}): Promise<Recipient[]> {
   const { nestId, nodeId, body, actorEmail, baseUrl } = params;
   try {
     const names = extractMentions(body || "");
     const recipients = await resolveRecipients({ nestId, nodeId, names, actorEmail });
-    if (recipients.length === 0) return 0;
+    if (recipients.length === 0) return [];
 
     const ctx = await buildDocContext(nestId, nodeId, baseUrl);
     const excerpt = excerptOf(body);
     const message = `${actorEmail} mentioned you in a comment on "${ctx.label}"`;
-    const created = await insertInboxRows({ nestId, nodeId, recipients, message });
+    await insertInboxRows({ nestId, nodeId, recipients, message });
     await deliverMentionMessages({
       nestId,
       nodeId,
@@ -393,9 +415,118 @@ export async function notifyCommentMentions(params: {
       excerpt,
       ctx,
     });
-    return created;
+    return recipients;
   } catch (err) {
     console.error("[notify] comment mention fan-out failed", nestId, nodeId, err);
-    return 0;
+    return [];
+  }
+}
+
+/**
+ * A reply on a comment thread: the @mentions in it notify exactly as
+ * notifyCommentMentions does, and everyone who already took part in the
+ * thread (its opener and every earlier replier) hears about the reply too —
+ * otherwise a question answered in a thread reaches nobody unless the
+ * replier remembered to tag the asker.
+ *
+ * A participant is skipped when they are the replier, or when this same
+ * reply already notified them through an @mention (one event, one row). The
+ * same open-the-document check and recipient cap apply as for a mention.
+ *
+ * Inbox row (kind 'comment_reply', linking the document) + a direct email
+ * when SMTP is configured, drawing on the same per-actor email budget as
+ * mentions. No team-channel post: a reply is addressed to the people in the
+ * thread, and posting every reply to the nest's channel (including the
+ * server-wide webhook) would be noise the channel never asked for.
+ */
+export async function notifyCommentReply(params: {
+  nestId: string;
+  nodeId: string;
+  /** The thread AFTER the reply was added — its opener and comment authors
+   *  are the participants. */
+  thread: { createdBy: string; comments: Array<{ author: string }> };
+  body: string;
+  /** Who wrote the reply. */
+  actorEmail: string;
+  baseUrl?: string;
+}): Promise<{ mentioned: number; participants: number }> {
+  const { nestId, nodeId, thread, body, actorEmail, baseUrl } = params;
+  const mentioned = await commentMentionFanOut({
+    nestId,
+    nodeId,
+    body,
+    actorEmail,
+    baseUrl,
+  });
+  try {
+    const skip = new Set<string>([
+      actorEmail.toLowerCase(),
+      ...mentioned.map((r) => r.email.toLowerCase()),
+    ]);
+    const emails: string[] = [];
+    for (const e of [thread.createdBy, ...thread.comments.map((c) => c.author)]) {
+      const key = (e || "").toLowerCase();
+      if (!key || skip.has(key)) continue;
+      skip.add(key);
+      emails.push(key);
+      if (emails.length >= MAX_MENTION_RECIPIENTS) break;
+    }
+    if (emails.length === 0) return { mentioned: mentioned.length, participants: 0 };
+
+    const db = getDb();
+    const candidates: Recipient[] = [];
+    for (const email of emails) {
+      // No account means no inbox (e.g. an anonymous OPEN-mode author).
+      const user = (await db.get(
+        "SELECT id, email FROM users WHERE LOWER(email) = LOWER(?)",
+        [email],
+      )) as { id: string; email: string } | undefined;
+      if (user) candidates.push({ email: user.email, userId: user.id });
+    }
+    // Someone who has since lost access to the document hears nothing about
+    // it — the same rule a mention keeps.
+    const checked = await Promise.all(
+      candidates.map(async (r) => ({
+        r,
+        allowed: await canOpenNode(nestId, nodeId, r.userId, r.email),
+      })),
+    );
+    const recipients = checked.filter((c) => c.allowed).map((c) => c.r);
+    if (recipients.length === 0) return { mentioned: mentioned.length, participants: 0 };
+
+    const ctx = await buildDocContext(nestId, nodeId, baseUrl);
+    const excerpt = excerptOf(body);
+    const message = `${actorEmail} replied to a comment thread on "${ctx.label}"`;
+    const created = await insertInboxRows({
+      nestId,
+      nodeId,
+      recipients,
+      message,
+      kind: "comment_reply",
+    });
+    let throttled = 0;
+    for (const r of isEmailConfigured() ? recipients : []) {
+      if (!canDeliver("email", nestId, actorEmail)) {
+        throttled++;
+        continue;
+      }
+      void sendEmailToRecipient(r.email, {
+        status: "comment_reply",
+        docTitle: ctx.docTitle,
+        path: ctx.path,
+        link: ctx.link,
+        actor: actorEmail,
+        note: excerpt || null,
+      });
+    }
+    if (throttled > 0) {
+      console.warn(
+        `[notify] reply delivery budget exhausted for ${actorEmail} in ${nestId} — ${throttled} email(s) skipped; inbox rows unaffected`,
+      );
+    }
+    return { mentioned: mentioned.length, participants: created };
+  } catch (err) {
+    console.error("[notify] comment reply fan-out failed", nestId, nodeId, err);
+    return { mentioned: mentioned.length, participants: 0 };
   }
 }

@@ -7,7 +7,18 @@
  * context/MCP path; plain documents keep their comments in SQLite only.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { MessageSquare, Check, RotateCcw, Loader2, Quote, X, CornerDownRight, CheckCircle2 } from "lucide-react";
+import {
+  MessageSquare,
+  Check,
+  RotateCcw,
+  Loader2,
+  Quote,
+  X,
+  CornerDownRight,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+} from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "./ui/button";
 import { Switch } from "./ui/switch";
@@ -17,6 +28,7 @@ import { reads } from "../lib/queries";
 import { MentionTextarea, CommentBody } from "./MentionTextarea";
 import type { MentionMember } from "./MarkdownEditor/picker-match";
 import { formatServerDate } from "../lib/dates";
+import { splitThreads } from "../lib/comment-threads";
 
 interface Props {
   nestId: string;
@@ -33,6 +45,8 @@ interface Props {
   onThreadsChange?: (threads: api.AnnotationThread[]) => void;
   /** Thread to visually emphasize + scroll to (set when its doc highlight is clicked). */
   activeThreadId?: string | null;
+  /** Threads whose quoted text is no longer in the document ("text changed"). */
+  outdatedThreadIds?: ReadonlySet<string>;
   /** Whether the document is in comment mode (rendered view + overlay). */
   commentMode?: boolean;
   /** Turn comment mode on/off from inside the panel. */
@@ -58,6 +72,7 @@ export function AnnotationsPanel({
   onFocusAnchor,
   onThreadsChange,
   activeThreadId,
+  outdatedThreadIds,
   commentMode,
   onSetCommentMode,
 }: Props) {
@@ -69,6 +84,8 @@ export function AnnotationsPanel({
   const [replyFor, setReplyFor] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
   const [busy, setBusy] = useState(false);
+  // Resolved threads fold under "Resolved (n)", closed by default.
+  const [showResolved, setShowResolved] = useState(false);
   const qc = useQueryClient();
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -109,7 +126,8 @@ export function AnnotationsPanel({
     if (pendingAnchor) composerRef.current?.focus();
   }, [pendingAnchor]);
 
-  // Scroll the active thread (its doc highlight was clicked) into view.
+  // Scroll the active thread (its doc highlight was clicked) into view —
+  // again once the Resolved section unfolds for it.
   useEffect(() => {
     if (activeThreadId && itemRefs.current[activeThreadId]) {
       itemRefs.current[activeThreadId]?.scrollIntoView({
@@ -117,7 +135,7 @@ export function AnnotationsPanel({
         block: "nearest",
       });
     }
-  }, [activeThreadId]);
+  }, [activeThreadId, showResolved]);
 
   const newThread = async () => {
     const body = draft.trim();
@@ -135,12 +153,15 @@ export function AnnotationsPanel({
     }
   };
 
-  const reply = async (threadId: string) => {
+  const reply = async (threadId: string, andResolve = false) => {
     const body = replyText.trim();
     if (!body) return;
     setBusy(true);
     try {
       await api.replyAnnotation(nestId, nodeId, threadId, body);
+      // Reply & resolve: the reply lands first, so it's on record even if
+      // the resolve fails.
+      if (andResolve) await api.resolveAnnotation(nestId, nodeId, threadId);
       setReplyText("");
       setReplyFor(null);
       await load();
@@ -167,12 +188,191 @@ export function AnnotationsPanel({
     }
   };
 
-  const count = threads?.length ?? 0;
   // Newest thread first in the rail (replies inside a thread stay chronological).
   // UI-only ordering — the server list + derived projection keep their own order.
-  const ordered = threads
-    ? [...threads].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    : threads;
+  const { open: openThreads, resolved: resolvedThreads } = useMemo(
+    () => splitThreads(threads ?? []),
+    [threads],
+  );
+  const total = threads?.length ?? 0;
+  // The header counts what still needs attention.
+  const count = openThreads.length;
+
+  // A deep link or doc click onto a resolved thread unfolds the section, or
+  // the rail would scroll to nothing.
+  useEffect(() => {
+    if (activeThreadId && resolvedThreads.some((t) => t.id === activeThreadId)) {
+      setShowResolved(true);
+    }
+  }, [activeThreadId, resolvedThreads]);
+
+  const renderThread = (t: api.AnnotationThread) => (
+    <li
+      key={t.id}
+      ref={(el) => {
+        itemRefs.current[t.id] = el;
+      }}
+      className={`rounded-md border p-3 transition-shadow ${
+        activeThreadId === t.id
+          ? "border-amber-400 ring-2 ring-amber-300/60"
+          : t.status === "resolved"
+            ? "border-emerald-200 bg-emerald-50/40 dark:bg-emerald-950/20"
+            : "border-border"
+      }`}
+    >
+      <div className="flex items-center gap-1.5 mb-2">
+        <span
+          className={`text-[10px] px-1.5 py-0.5 rounded ${
+            t.status === "resolved"
+              ? "bg-emerald-100 text-emerald-800"
+              : "bg-amber-100 text-amber-800"
+          }`}
+        >
+          {t.status}
+        </span>
+        {/* The quoted text is gone from the current version: say so rather
+            than leave a quote that jumps nowhere. */}
+        {outdatedThreadIds?.has(t.id) && (
+          <span
+            className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground"
+            title="The text this comment was on has changed or been removed"
+            data-testid="annotations-outdated"
+          >
+            text changed
+          </span>
+        )}
+      </div>
+
+      {/* Anchored quote — what this thread is pinned to. Click to jump. */}
+      {t.anchor?.quote && (
+        <button
+          type="button"
+          onClick={() => onFocusAnchor?.(t.anchor!)}
+          className="group mb-2 block w-full text-left rounded border-l-2 border-amber-400 bg-amber-50/50 dark:bg-amber-950/20 px-2 py-1 text-xs italic text-foreground/75 hover:bg-amber-100/70"
+          title="Jump to this text in the document"
+        >
+          <Quote className="inline h-3 w-3 mr-1 text-amber-600 align-[-1px]" />
+          {shortQuote(t.anchor.quote)}
+        </button>
+      )}
+
+      {/* First comment is the thread root; the rest are replies,
+          nested under it with a connector rail. */}
+      {t.comments.length > 0 && (
+        <div className="text-sm">
+          <div className="text-xs text-muted-foreground">
+            <span className="font-medium text-foreground">
+              {t.comments[0].author}
+            </span>{" "}
+            · {when(t.comments[0].createdAt)}
+          </div>
+          <CommentBody body={t.comments[0].body} members={members} />
+        </div>
+      )}
+      {t.comments.length > 1 && (
+        <ul className="mt-2 ml-2 space-y-2 border-l-2 border-border pl-3">
+          {t.comments.slice(1).map((c) => (
+            <li key={c.id} className="text-sm">
+              <div className="text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">{c.author}</span>{" "}
+                replied · {when(c.createdAt)}
+              </div>
+              <CommentBody body={c.body} members={members} />
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* Resolve audit line — who closed the thread and when. */}
+      {t.status === "resolved" && t.resolvedBy && (
+        <div className="mt-2 flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-400">
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+          <span>
+            Resolved by{" "}
+            <span className="font-medium">{t.resolvedBy}</span>
+            {t.resolvedAt && <> · {when(t.resolvedAt)}</>}
+          </span>
+        </div>
+      )}
+
+      {!readOnly &&
+        (replyFor === t.id ? (
+          <div className="mt-2">
+            <MentionTextarea
+              members={members}
+              value={replyText}
+              onValueChange={setReplyText}
+              placeholder={
+                t.status === "resolved"
+                  ? "Reply… replying reopens this thread"
+                  : "Reply… use @ to tag someone"
+              }
+              rows={2}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-y"
+              autoFocus
+            />
+            <div className="flex justify-end gap-2 mt-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setReplyFor(null);
+                  setReplyText("");
+                }}
+              >
+                Cancel
+              </Button>
+              {t.status === "open" && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => reply(t.id, true)}
+                  disabled={busy || !replyText.trim()}
+                  data-testid="annotations-reply-resolve"
+                >
+                  <Check className="h-3.5 w-3.5 mr-1" /> Reply &amp; resolve
+                </Button>
+              )}
+              <Button size="sm" onClick={() => reply(t.id)} disabled={busy || !replyText.trim()}>
+                Reply
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 flex items-center gap-2">
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+              onClick={() => {
+                setReplyFor(t.id);
+                setReplyText("");
+              }}
+            >
+              <CornerDownRight className="h-3 w-3" /> Reply
+            </button>
+            {t.status === "open" ? (
+              <button
+                type="button"
+                disabled={busy}
+                className="inline-flex items-center gap-1 rounded-md border border-emerald-600 bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50"
+                onClick={() => toggleStatus(t)}
+              >
+                <Check className="h-3.5 w-3.5" /> Resolve
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={busy}
+                className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+                onClick={() => toggleStatus(t)}
+              >
+                <RotateCcw className="h-3 w-3" /> Reopen
+              </button>
+            )}
+          </div>
+        ))}
+    </li>
+  );
 
   return (
     <section className="flex flex-col flex-1 min-h-0 max-h-[calc(100vh-2rem)] rounded-lg border border-border bg-card p-5" data-testid="annotations-panel">
@@ -275,152 +475,37 @@ export function AnnotationsPanel({
           <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
             <Loader2 className="h-4 w-4 animate-spin" /> Loading comments…
           </div>
-        ) : count === 0 ? (
+        ) : total === 0 ? (
           <p className="text-sm text-muted-foreground py-2">No comments yet.</p>
         ) : (
-          <ul className="space-y-3">
-            {ordered!.map((t) => (
-              <li
-                key={t.id}
-                ref={(el) => {
-                  itemRefs.current[t.id] = el;
-                }}
-                className={`rounded-md border p-3 transition-shadow ${
-                  activeThreadId === t.id
-                    ? "border-amber-400 ring-2 ring-amber-300/60"
-                    : t.status === "resolved"
-                      ? "border-emerald-200 bg-emerald-50/40 dark:bg-emerald-950/20"
-                      : "border-border"
-                }`}
-              >
-                <div className="flex items-center justify-between mb-2">
-                  <span
-                    className={`text-[10px] px-1.5 py-0.5 rounded ${
-                      t.status === "resolved"
-                        ? "bg-emerald-100 text-emerald-800"
-                        : "bg-amber-100 text-amber-800"
-                    }`}
-                  >
-                    {t.status}
-                  </span>
-                </div>
-
-                {/* Anchored quote — what this thread is pinned to. Click to jump. */}
-                {t.anchor?.quote && (
-                  <button
-                    type="button"
-                    onClick={() => onFocusAnchor?.(t.anchor!)}
-                    className="group mb-2 block w-full text-left rounded border-l-2 border-amber-400 bg-amber-50/50 dark:bg-amber-950/20 px-2 py-1 text-xs italic text-foreground/75 hover:bg-amber-100/70"
-                    title="Jump to this text in the document"
-                  >
-                    <Quote className="inline h-3 w-3 mr-1 text-amber-600 align-[-1px]" />
-                    {shortQuote(t.anchor.quote)}
-                  </button>
-                )}
-
-                {/* First comment is the thread root; the rest are replies,
-                    nested under it with a connector rail. */}
-                {t.comments.length > 0 && (
-                  <div className="text-sm">
-                    <div className="text-xs text-muted-foreground">
-                      <span className="font-medium text-foreground">
-                        {t.comments[0].author}
-                      </span>{" "}
-                      · {when(t.comments[0].createdAt)}
-                    </div>
-                    <CommentBody body={t.comments[0].body} members={members} />
-                  </div>
-                )}
-                {t.comments.length > 1 && (
-                  <ul className="mt-2 ml-2 space-y-2 border-l-2 border-border pl-3">
-                    {t.comments.slice(1).map((c) => (
-                      <li key={c.id} className="text-sm">
-                        <div className="text-xs text-muted-foreground">
-                          <span className="font-medium text-foreground">{c.author}</span>{" "}
-                          replied · {when(c.createdAt)}
-                        </div>
-                        <CommentBody body={c.body} members={members} />
-                      </li>
-                    ))}
-                  </ul>
-                )}
-
-                {/* Resolve audit line — who closed the thread and when. */}
-                {t.status === "resolved" && t.resolvedBy && (
-                  <div className="mt-2 flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-400">
-                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                    <span>
-                      Resolved by{" "}
-                      <span className="font-medium">{t.resolvedBy}</span>
-                      {t.resolvedAt && <> · {when(t.resolvedAt)}</>}
-                    </span>
-                  </div>
-                )}
-
-                {!readOnly &&
-                  (replyFor === t.id ? (
-                    <div className="mt-2">
-                      <MentionTextarea
-                        members={members}
-                        value={replyText}
-                        onValueChange={setReplyText}
-                        placeholder="Reply… use @ to tag someone"
-                        rows={2}
-                        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-y"
-                        autoFocus
-                      />
-                      <div className="flex justify-end gap-2 mt-1">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => {
-                            setReplyFor(null);
-                            setReplyText("");
-                          }}
-                        >
-                          Cancel
-                        </Button>
-                        <Button size="sm" onClick={() => reply(t.id)} disabled={busy || !replyText.trim()}>
-                          Reply
-                        </Button>
-                      </div>
-                    </div>
+          <>
+            {count === 0 ? (
+              <p className="text-sm text-muted-foreground py-2">No open comments.</p>
+            ) : (
+              <ul className="space-y-3">{openThreads.map(renderThread)}</ul>
+            )}
+            {resolvedThreads.length > 0 && (
+              <div className="mt-4">
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
+                  aria-expanded={showResolved}
+                  onClick={() => setShowResolved((v) => !v)}
+                  data-testid="annotations-resolved-toggle"
+                >
+                  {showResolved ? (
+                    <ChevronDown className="h-3.5 w-3.5" />
                   ) : (
-                    <div className="mt-3 flex items-center gap-2">
-                      <button
-                        type="button"
-                        className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
-                        onClick={() => {
-                          setReplyFor(t.id);
-                          setReplyText("");
-                        }}
-                      >
-                        <CornerDownRight className="h-3 w-3" /> Reply
-                      </button>
-                      {t.status === "open" ? (
-                        <button
-                          type="button"
-                          disabled={busy}
-                          className="inline-flex items-center gap-1 rounded-md border border-emerald-600 bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50"
-                          onClick={() => toggleStatus(t)}
-                        >
-                          <Check className="h-3.5 w-3.5" /> Resolve
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          disabled={busy}
-                          className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
-                          onClick={() => toggleStatus(t)}
-                        >
-                          <RotateCcw className="h-3 w-3" /> Reopen
-                        </button>
-                      )}
-                    </div>
-                  ))}
-              </li>
-            ))}
-          </ul>
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  )}
+                  Resolved ({resolvedThreads.length})
+                </button>
+                {showResolved && (
+                  <ul className="mt-2 space-y-3">{resolvedThreads.map(renderThread)}</ul>
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
     </section>
