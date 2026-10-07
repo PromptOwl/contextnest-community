@@ -109,6 +109,23 @@ describe("boards", () => {
     expect((await req(writer, "POST", `/${sprint}/rank`, { key: "k", order: [1, 2] })).status).toBe(400);
   });
 
+  it("rank never gets stuck at the size limit: the least recently ranked column is dropped", async () => {
+    const id = (await req(writer, "POST", "", { name: "Big" })).data.board.id;
+    // ~80 KB per column, so the fourth column pushes past the 256 KB cap.
+    const order = Array.from({ length: 2000 }, (_, i) => `nodes/${"x".repeat(30)}-${i}`);
+    for (const col of ["a", "b", "c", "d"]) {
+      expect((await req(writer, "POST", `/${id}/rank`, { key: `tag:::${col}`, order })).status).toBe(200);
+    }
+    const ranks = (await req(writer, "GET", "")).data.boards.find((b: any) => b.id === id).config.ranks;
+    expect(Object.keys(ranks)).toEqual(["tag:::b", "tag:::c", "tag:::d"]);
+    expect((await req(writer, "DELETE", `/${id}`)).status).toBe(200);
+  });
+
+  it("position is bounded", async () => {
+    expect((await req(writer, "PATCH", `/${sprint}`, { position: 2 ** 31 })).status).toBe(400);
+    expect((await req(writer, "PATCH", `/${sprint}`, { position: -1 })).status).toBe(400);
+  });
+
   it("delete: creator or nest owner, nobody else", async () => {
     const extra = (await req(writer, "POST", "", { name: "Scratch" })).data.board.id;
     await resetAuthRateLimit();

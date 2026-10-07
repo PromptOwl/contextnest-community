@@ -321,10 +321,13 @@ export function MaturityBoard({
 
   useEffect(() => {
     let cancelled = false;
+    seeding.current = false;
+    // A failed list leaves boards unset (browser layout), never [] — an empty
+    // list would seed a duplicate "Board" on top of the real ones.
     api
       .listBoards(nestId)
       .then(({ boards }) => !cancelled && setBoards(boards))
-      .catch(() => !cancelled && setBoards([]));
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -361,14 +364,17 @@ export function MaturityBoard({
   // Layout edits save to the active board, debounced so dragging headers or
   // typing a namespace is one write. Ranks are written separately (per
   // column), so they're stripped here — the server keeps the stored ones.
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // One timer per board: switching boards mid-debounce must not cancel the
+  // previous board's pending save.
+  const saveTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const persist = useCallback(
     (next: BoardSettings) => {
       saveConfig(nestId, next);
       const board = activeBoard;
       if (!board || !canEditDocs) return;
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => {
+      clearTimeout(saveTimers.current.get(board.id));
+      saveTimers.current.set(board.id, setTimeout(() => {
+        saveTimers.current.delete(board.id);
         const { ranks: _ranks, ...config } = next;
         api
           .updateBoard(nestId, board.id, { config })
@@ -376,7 +382,7 @@ export function MaturityBoard({
             setBoards((bs) => bs?.map((b) => (b.id === saved.id ? saved : b)) ?? bs),
           )
           .catch((e: any) => toast.error(e?.message || "Couldn't save the board"));
-      }, 400);
+      }, 400));
     },
     [nestId, activeBoard, canEditDocs],
   );
@@ -475,6 +481,8 @@ export function MaturityBoard({
         const { board: saved } = await api.rankBoardColumn(nestId, board.id, key, order);
         setBoards((bs) => bs?.map((b) => (b.id === saved.id ? saved : b)) ?? bs);
       } catch (e: any) {
+        // Roll back: never show an order that wasn't saved.
+        setConfig((prev) => ({ ...prev, ranks: { ...(prev.ranks ?? {}), [key]: current } }));
         toast.error(e?.message || "Couldn't save the order");
       }
     },
@@ -705,6 +713,8 @@ export function MaturityBoard({
         const { board } = await api.createBoard(nestId, {
           name: from ? `${from.name} copy` : "Untitled board",
           config: from ? from.config : NEW_BOARD_CONFIG,
+          // A copy of a private board stays private.
+          private: from?.private === true,
         });
         upsertBoard(board);
         setActiveId(board.id);
@@ -729,6 +739,9 @@ export function MaturityBoard({
   const [pendingDelete, setPendingDelete] = useState<api.SavedBoard | null>(null);
   const removeBoard = useCallback(
     async (b: api.SavedBoard) => {
+      // A pending layout save to a deleted board would only toast an error.
+      clearTimeout(saveTimers.current.get(b.id));
+      saveTimers.current.delete(b.id);
       try {
         await api.deleteBoard(nestId, b.id);
         setBoards((bs) => bs?.filter((x) => x.id !== b.id) ?? bs);
