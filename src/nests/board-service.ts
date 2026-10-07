@@ -14,7 +14,7 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "../db/client.js";
 import type { NestPermission } from "../shared/access.js";
-import type { SqlParam } from "../db/adapter.js";
+import type { Querier, SqlParam } from "../db/adapter.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
 
 const DIMENSIONS = ["folder", "status", "tag", "assignee", "priority"] as const;
@@ -76,6 +76,7 @@ const strList = (v: unknown, what: string): string[] | undefined => {
     throw new ValidationError(`${what} must be a list of strings`);
   }
   if (v.length > MAX_LIST) throw new ValidationError(`${what} is too long`);
+  if (v.some((x) => x.length > 600)) throw new ValidationError(`${what} has an entry over 600 characters`);
   return [...new Set(v as string[])];
 };
 
@@ -234,6 +235,21 @@ export async function createBoard(
   return getVisible(nestId, id, userId);
 }
 
+/** A board's stored config, read inside `tx` and row-locked on Postgres, so a
+ *  concurrent rank or layout save can't be lost between this read and the write. */
+async function lockedConfig(tx: Querier, boardId: string): Promise<BoardConfig> {
+  const lock = getDb().dialect === "postgres" ? " FOR UPDATE" : "";
+  const row = (await tx.get(`SELECT config_json FROM boards WHERE id = ?${lock}`, [boardId])) as
+    | { config_json: string }
+    | undefined;
+  if (!row) throw new NotFoundError("Board not found");
+  try {
+    return JSON.parse(row.config_json);
+  } catch {
+    return { dimension: "folder" };
+  }
+}
+
 export async function updateBoard(
   nestId: string,
   boardId: string,
@@ -255,25 +271,36 @@ export async function updateBoard(
     sets.push("private = ?");
     params.push(patch.private === true ? 1 : 0);
   }
-  if (patch.config !== undefined) {
-    const next = cleanConfig(patch.config);
-    // Ranks are written by rankColumn; a config save that omits them (the
-    // usual layout change) must not wipe them.
-    if (next.ranks === undefined && board.config.ranks) next.ranks = board.config.ranks;
-    sets.push("config_json = ?");
-    params.push(JSON.stringify(next));
-  }
+  const next = patch.config !== undefined ? cleanConfig(patch.config) : undefined;
   if (patch.position !== undefined) {
-    if (typeof patch.position !== "number" || !Number.isInteger(patch.position)) {
-      throw new ValidationError("position must be an integer");
+    if (
+      typeof patch.position !== "number" ||
+      !Number.isInteger(patch.position) ||
+      patch.position < 0 ||
+      patch.position > 10_000
+    ) {
+      throw new ValidationError("position must be an integer from 0 to 10000");
     }
     sets.push("position = ?");
     params.push(patch.position);
   }
-  if (sets.length === 0) return board;
-  sets.push("updated_at = ?");
-  params.push(now());
-  await getDb().run(`UPDATE boards SET ${sets.join(", ")} WHERE id = ?`, [...params, boardId]);
+  if (sets.length === 0 && !next) return board;
+  await getDb().transaction(async (tx) => {
+    if (next) {
+      // Ranks are written by rankColumn; a layout save that omits them keeps
+      // the stored ones, read under the row lock so a rank landing meanwhile
+      // isn't overwritten.
+      if (next.ranks === undefined) {
+        const stored = (await lockedConfig(tx, boardId)).ranks;
+        if (stored) next.ranks = stored;
+      }
+      sets.push("config_json = ?");
+      params.push(JSON.stringify(next));
+    }
+    sets.push("updated_at = ?");
+    params.push(now());
+    await tx.run(`UPDATE boards SET ${sets.join(", ")} WHERE id = ?`, [...params, boardId]);
+  });
   return getVisible(nestId, boardId, userId);
 }
 
@@ -296,17 +323,20 @@ export async function rankColumn(
   if (!order) throw new ValidationError("order is required");
   await getVisible(nestId, boardId, userId);
   await getDb().transaction(async (tx) => {
-    const row = (await tx.get("SELECT config_json FROM boards WHERE id = ?", [boardId])) as
-      | { config_json: string }
-      | undefined;
-    if (!row) throw new NotFoundError("Board not found");
-    let config: BoardConfig;
-    try {
-      config = JSON.parse(row.config_json);
-    } catch {
-      config = { dimension: "folder" };
+    const config = await lockedConfig(tx, boardId);
+    // This column goes last; past the key/size limits the least recently
+    // ranked columns are dropped, so a board never becomes un-rankable.
+    const ranks = { ...(config.ranks ?? {}) };
+    delete ranks[key];
+    ranks[key] = order;
+    const keys = Object.keys(ranks);
+    while (
+      keys.length > 1 &&
+      (keys.length > MAX_KEYS || JSON.stringify({ ...config, ranks }).length > MAX_CONFIG_BYTES)
+    ) {
+      delete ranks[keys.shift()!];
     }
-    config.ranks = { ...(config.ranks ?? {}), [key]: order };
+    config.ranks = ranks;
     const clean = cleanConfig(config);
     await tx.run("UPDATE boards SET config_json = ?, updated_at = ? WHERE id = ?", [
       JSON.stringify(clean),

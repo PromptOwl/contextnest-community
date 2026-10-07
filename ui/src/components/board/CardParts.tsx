@@ -35,7 +35,15 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { initialsOf, personTint } from "../AuthorshipChips";
+import { COLLAB_PERMISSIONS } from "../CollaboratorManager";
 import {
   PRIORITIES,
   PRIORITY_LABELS,
@@ -219,6 +227,8 @@ export function Avatar({ email, size = "md" }: { email: string; size?: "sm" | "m
 export interface Person {
   email: string;
   name: string | null;
+  /** False for a directory suggestion: picking them asks to share the nest first. */
+  member?: boolean;
 }
 
 export function AssigneeMenu({
@@ -232,7 +242,7 @@ export function AssigneeMenu({
   people: Person[];
   me?: string;
   editable: boolean;
-  onChange: (email: string | null) => void;
+  onChange: (email: string | null, member?: boolean) => void;
 }) {
   const [q, setQ] = useState("");
   const current = assignee ? people.find((p) => p.email.toLowerCase() === assignee) : undefined;
@@ -285,7 +295,7 @@ export function AssigneeMenu({
             {list.map((p) => (
               <DropdownMenuItem
                 key={p.email}
-                onSelect={() => onChange(p.email.toLowerCase())}
+                onSelect={() => onChange(p.email.toLowerCase(), p.member !== false)}
                 className="gap-2"
               >
                 <Avatar email={p.email} size="sm" />
@@ -295,6 +305,11 @@ export function AssigneeMenu({
                     <span className="text-muted-foreground"> (me)</span>
                   )}
                 </span>
+                {p.member === false && (
+                  <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
+                    not on nest
+                  </span>
+                )}
               </DropdownMenuItem>
             ))}
             {list.length === 0 && (
@@ -458,6 +473,79 @@ export function GovernedMoveDialog({
           <AlertDialogAction onClick={onConfirm}>
             {verb === "Moving" ? "Move as draft" : "Save as draft"}
           </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+export function DeleteBoardDialog({
+  name,
+  onCancel,
+  onConfirm,
+}: {
+  name: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog open={name !== null} onOpenChange={(o) => !o && onCancel()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete the board “{name}”?</AlertDialogTitle>
+          <AlertDialogDescription>
+            Its layout, filter and card order are removed. The documents on it are not touched.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel onClick={onCancel}>Cancel</AlertDialogCancel>
+          <AlertDialogAction asChild>
+            <Button variant="destructive" onClick={onConfirm}>
+              Delete board
+            </Button>
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+/** Owner/admin picked someone off the nest: share it with them, then assign. */
+export function ShareAndAssignDialog({
+  email,
+  onCancel,
+  onConfirm,
+}: {
+  email: string | null;
+  onCancel: () => void;
+  onConfirm: (permission: string) => void;
+}) {
+  const [permission, setPermission] = useState("write");
+  return (
+    <AlertDialog open={!!email} onOpenChange={(o) => !o && onCancel()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Share this nest to assign them?</AlertDialogTitle>
+          <AlertDialogDescription>
+            <span className="font-medium text-foreground">{email}</span> isn't on this nest.
+            Share it with them as a collaborator, then assign the card.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <Select value={permission} onValueChange={setPermission}>
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {COLLAB_PERMISSIONS.map((p) => (
+              <SelectItem key={p.value} value={p.value}>
+                {p.label} — {p.hint}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <AlertDialogFooter>
+          <AlertDialogCancel onClick={onCancel}>Cancel</AlertDialogCancel>
+          <AlertDialogAction onClick={() => onConfirm(permission)}>Share and assign</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

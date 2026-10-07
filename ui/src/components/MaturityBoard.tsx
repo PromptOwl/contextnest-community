@@ -87,9 +87,11 @@ import {
   AssigneeMenu,
   Avatar,
   DueChip,
+  DeleteBoardDialog,
   GovernedMoveDialog,
   PriorityIcon,
   PriorityMenu,
+  ShareAndAssignDialog,
   SubItemChip,
 } from "./board/CardParts";
 
@@ -242,6 +244,9 @@ export function MaturityBoard({
   // Same derivation NestView uses. Starts false so a read-only viewer never
   // sees a draggable card during the fetch, then flips on for writers.
   const [canEditDocs, setCanEditDocs] = useState(false);
+  // Owner/admin may share the nest from the assignee picker; others only see members.
+  const [canShare, setCanShare] = useState(false);
+  const [pendingShare, setPendingShare] = useState<{ id: string; email: string } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -249,6 +254,7 @@ export function MaturityBoard({
       .getNest(nestId)
       .then((meta: any) => {
         if (cancelled) return;
+        setCanShare(isOwner || isAdmin || meta?.permission === "admin");
         setCanEditDocs(
           deriveNestCaps({
             roles: meta?.roles ?? [],
@@ -332,10 +338,13 @@ export function MaturityBoard({
 
   useEffect(() => {
     let cancelled = false;
+    seeding.current = false;
+    // A failed list leaves boards unset (browser layout), never [] — an empty
+    // list would seed a duplicate "Board" on top of the real ones.
     api
       .listBoards(nestId)
       .then(({ boards }) => !cancelled && setBoards(boards))
-      .catch(() => !cancelled && setBoards([]));
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -372,14 +381,17 @@ export function MaturityBoard({
   // Layout edits save to the active board, debounced so dragging headers or
   // typing a namespace is one write. Ranks are written separately (per
   // column), so they're stripped here — the server keeps the stored ones.
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // One timer per board: switching boards mid-debounce must not cancel the
+  // previous board's pending save.
+  const saveTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const persist = useCallback(
     (next: BoardSettings) => {
       saveConfig(nestId, next);
       const board = activeBoard;
       if (!board || !canEditDocs) return;
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => {
+      clearTimeout(saveTimers.current.get(board.id));
+      saveTimers.current.set(board.id, setTimeout(() => {
+        saveTimers.current.delete(board.id);
         const { ranks: _ranks, ...config } = next;
         api
           .updateBoard(nestId, board.id, { config })
@@ -387,7 +399,7 @@ export function MaturityBoard({
             setBoards((bs) => bs?.map((b) => (b.id === saved.id ? saved : b)) ?? bs),
           )
           .catch((e: any) => toast.error(e?.message || "Couldn't save the board"));
-      }, 400);
+      }, 400));
     },
     [nestId, activeBoard, canEditDocs],
   );
@@ -442,7 +454,9 @@ export function MaturityBoard({
     () =>
       nodes.filter(
         (n) =>
-          (!config.tasksOnly || n.type === "task") &&
+          // Without the engine's task type "+ Add task" makes documents, so
+          // Tasks only would hide every card added here.
+          (!config.tasksOnly || !typeTaskEnabled || n.type === "task") &&
           matchesAssigneeFilter(n, assigneeFilter) &&
           // Linear's "completed issues: past week/month" display option.
           !(
@@ -456,7 +470,7 @@ export function MaturityBoard({
             ),
           ),
       ),
-    [nodes, config.tasksOnly, config.filterTags, config.hideDoneAfterDays, assigneeFilter],
+    [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, config.hideDoneAfterDays, assigneeFilter],
   );
 
   const { columns, byColumn } = useMemo(
@@ -490,6 +504,8 @@ export function MaturityBoard({
         const { board: saved } = await api.rankBoardColumn(nestId, board.id, key, order);
         setBoards((bs) => bs?.map((b) => (b.id === saved.id ? saved : b)) ?? bs);
       } catch (e: any) {
+        // Roll back: never show an order that wasn't saved.
+        setConfig((prev) => ({ ...prev, ranks: { ...(prev.ranks ?? {}), [key]: current } }));
         toast.error(e?.message || "Couldn't save the order");
       }
     },
@@ -506,9 +522,12 @@ export function MaturityBoard({
     enabled: !!nestId && canEditDocs,
   });
   const people = useMemo(
-    () => (roster?.people ?? []).filter((p) => !!p.email),
-    [roster],
+    () =>
+      (roster?.people ?? []).filter((p) => !!p.email && (canShare || p.member !== false)),
+    [roster, canShare],
   );
+  // People a card can land on as-is (an assignee column needs no share step).
+  const members = useMemo(() => people.filter((p) => p.member !== false), [people]);
 
   const governance = useMemo(
     () => ({
@@ -777,6 +796,8 @@ export function MaturityBoard({
         const { board } = await api.createBoard(nestId, {
           name: from ? `${from.name} copy` : "Untitled board",
           config: from ? from.config : NEW_BOARD_CONFIG,
+          // A copy of a private board stays private.
+          private: from?.private === true,
         });
         upsertBoard(board);
         setActiveId(board.id);
@@ -798,9 +819,12 @@ export function MaturityBoard({
     },
     [nestId, upsertBoard],
   );
+  const [pendingDelete, setPendingDelete] = useState<api.SavedBoard | null>(null);
   const removeBoard = useCallback(
     async (b: api.SavedBoard) => {
-      if (!window.confirm(`Delete the board "${b.name}"? The documents on it are not touched.`)) return;
+      // A pending layout save to a deleted board would only toast an error.
+      clearTimeout(saveTimers.current.get(b.id));
+      saveTimers.current.delete(b.id);
       try {
         await api.deleteBoard(nestId, b.id);
         setBoards((bs) => bs?.filter((x) => x.id !== b.id) ?? bs);
@@ -885,7 +909,7 @@ export function MaturityBoard({
             value.trim().replace(/^#/, "");
       if (effectiveConfig.dimension === "assignee") {
         const email = value.trim().toLowerCase();
-        if (!people.some((p) => p.email.toLowerCase() === email)) {
+        if (!members.some((p) => p.email.toLowerCase() === email)) {
           toast("Pick someone on this nest — share the nest with them first.");
           return;
         }
@@ -926,7 +950,7 @@ export function MaturityBoard({
       effectiveConfig.dimension,
       effectiveConfig.hiddenColumns,
       updateLayout,
-      people,
+      members,
     ],
   );
 
@@ -1258,7 +1282,11 @@ export function MaturityBoard({
                       people={people}
                       me={me}
                       editable={canEditDocs}
-                      onChange={(assignee) => patchFields(n.id, { assignee })}
+                      onChange={(assignee, member) =>
+                        assignee && member === false
+                          ? setPendingShare({ id: n.id, email: assignee })
+                          : patchFields(n.id, { assignee })
+                      }
                     />
                   </span>
                 </div>
@@ -1375,7 +1403,7 @@ export function MaturityBoard({
               />
               {config.dimension === "assignee" && (
                 <datalist id="board-people">
-                  {people.map((p) => (
+                  {members.map((p) => (
                     <option key={p.email} value={p.email}>
                       {p.name ?? p.email}
                     </option>
@@ -1477,7 +1505,7 @@ export function MaturityBoard({
                         <>
                           <DropdownMenuSeparator />
                           <DropdownMenuItem
-                            onSelect={() => void removeBoard(b)}
+                            onSelect={() => setPendingDelete(b)}
                             className="text-destructive focus:text-destructive"
                           >
                             Delete board
@@ -1625,15 +1653,17 @@ export function MaturityBoard({
       {/* Project-board bar: tasks-only toggle + the person quick-filter
           (Jira/ClickUp's avatar row — click faces to show only their cards). */}
       <div className="flex flex-wrap items-center gap-3">
-        <label className="flex items-center gap-1.5 text-sm text-muted-foreground cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={!!config.tasksOnly}
-            onChange={(e) => updateConfig({ tasksOnly: e.target.checked })}
-            className="h-3.5 w-3.5"
-          />
-          Tasks only
-        </label>
+        {typeTaskEnabled && (
+          <label className="flex items-center gap-1.5 text-sm text-muted-foreground cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={!!config.tasksOnly}
+              onChange={(e) => updateConfig({ tasksOnly: e.target.checked })}
+              className="h-3.5 w-3.5"
+            />
+            Tasks only
+          </label>
+        )}
         <label className="flex items-center gap-1.5 text-sm text-muted-foreground">
           Completed
           <select
@@ -1863,6 +1893,31 @@ export function MaturityBoard({
           const m = pending;
           setPending(null);
           if (m) void m.run();
+        }}
+      />
+      <DeleteBoardDialog
+        name={pendingDelete?.name ?? null}
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => {
+          const b = pendingDelete;
+          setPendingDelete(null);
+          if (b) void removeBoard(b);
+        }}
+      />
+      <ShareAndAssignDialog
+        email={pendingShare?.email ?? null}
+        onCancel={() => setPendingShare(null)}
+        onConfirm={async (permission) => {
+          const s = pendingShare;
+          setPendingShare(null);
+          if (!s) return;
+          try {
+            await api.addCollaborator(nestId, { email: s.email, permission });
+          } catch (e: any) {
+            toast.error(e?.message || "Couldn't share the nest");
+            return;
+          }
+          await patchFields(s.id, { assignee: s.email });
         }}
       />
     </div>

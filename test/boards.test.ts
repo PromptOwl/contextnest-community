@@ -70,6 +70,13 @@ describe("boards", () => {
     expect((await req(owner, "PATCH", `/${mine}`, { name: "x" })).status).toBe(404);
   });
 
+  it("creator emails go to writers only — read tier also serves public visitors", async () => {
+    const w = await req(writer, "GET", "");
+    expect(w.data.boards[0].created_by_email).toBe("writer@acme.com");
+    const r = await req(reader, "GET", "");
+    expect(r.data.boards[0].created_by_email).toBeNull();
+  });
+
   it("readers can't create or change boards; outsiders can't see them", async () => {
     expect((await req(reader, "POST", "", { name: "Nope" })).status).toBe(403);
     expect((await req(reader, "PATCH", `/${sprint}`, { name: "Nope" })).status).toBe(403);
@@ -100,6 +107,27 @@ describe("boards", () => {
     expect((await req(writer, "POST", "", { name: "x".repeat(81) })).status).toBe(400);
     expect((await req(writer, "POST", "", { name: "Bad", config: { dimension: "people" } })).status).toBe(400);
     expect((await req(writer, "POST", `/${sprint}/rank`, { key: "k", order: [1, 2] })).status).toBe(400);
+    expect((await req(writer, "POST", `/${sprint}/rank`, { key: "k", order: ["x".repeat(601)] })).status).toBe(400);
+    // A JSON body that isn't an object is a 400, not a 500.
+    expect((await req(writer, "POST", "", "text")).status).toBe(400);
+    expect((await req(writer, "PATCH", `/${sprint}`, ["x"])).status).toBe(400);
+  });
+
+  it("rank never gets stuck at the size limit: the least recently ranked column is dropped", async () => {
+    const id = (await req(writer, "POST", "", { name: "Big" })).data.board.id;
+    // ~80 KB per column, so the fourth column pushes past the 256 KB cap.
+    const order = Array.from({ length: 2000 }, (_, i) => `nodes/${"x".repeat(30)}-${i}`);
+    for (const col of ["a", "b", "c", "d"]) {
+      expect((await req(writer, "POST", `/${id}/rank`, { key: `tag:::${col}`, order })).status).toBe(200);
+    }
+    const ranks = (await req(writer, "GET", "")).data.boards.find((b: any) => b.id === id).config.ranks;
+    expect(Object.keys(ranks)).toEqual(["tag:::b", "tag:::c", "tag:::d"]);
+    expect((await req(writer, "DELETE", `/${id}`)).status).toBe(200);
+  });
+
+  it("position is bounded", async () => {
+    expect((await req(writer, "PATCH", `/${sprint}`, { position: 2 ** 31 })).status).toBe(400);
+    expect((await req(writer, "PATCH", `/${sprint}`, { position: -1 })).status).toBe(400);
   });
 
   it("delete: creator or nest owner, nobody else", async () => {

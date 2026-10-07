@@ -601,6 +601,37 @@ Errors:
 - `404 Folder not found` — path doesn't exist under `DATA_ROOT`.
 - `403 Only the server admin can delete folders` — non-admin in non-open mode.
 
+### Saved boards — `/nests/:nestId/boards`
+Named Board views of a nest (columns, filters, card order). A board is a view, not a copy: it stores no documents, and reordering cards never creates a document version. **Shared** boards are visible to everyone who can read the nest; **private** boards only to their creator (anyone else gets `404`). Any write+ caller can edit a shared board's name, config and position.
+
+**GET** `/nests/:nestId/boards` (read+) — the caller's visible boards, by `position`:
+```json
+{ "boards": [{
+  "id": "…", "nest_id": "…", "name": "Sprint", "private": false, "position": 0,
+  "created_by": "<userId>", "created_by_email": "a@x.com",
+  "config": {
+    "dimension": "tag", "tagNamespace": "", "tasksOnly": true, "filterTags": ["launch"],
+    "layouts": { "tag:": { "columnOrder": ["todo", "doing", "done"], "hiddenColumns": [] } },
+    "ranks": { "tag:::todo": ["nodes/b", "nodes/a"] }
+  },
+  "created_at": "…", "updated_at": "…"
+}] }
+```
+`created_by_email` is `null` for callers below write — the read tier also serves public/org visitors, and member emails stay write-tier (as with `GET /collaborators`).
+
+**POST** `/nests/:nestId/boards` (write+) — `{ "name": "Sprint", "private": false, "config": { … } }` → `201 { "board": … }`. `config` defaults to `{ "dimension": "tag" }`.
+
+**PATCH** `/nests/:nestId/boards/:boardId` (write+) — any of `name`, `private`, `config`, `position` → `{ "board": … }`.
+- Only the creator may change `private` (`403` otherwise).
+- A `config` without `ranks` keeps the stored ranks.
+- `position`: integer `0`–`10000`.
+
+**POST** `/nests/:nestId/boards/:boardId/rank` (write+) — `{ "key": "tag:::todo", "order": ["nodes/b", "nodes/a"] }` → `{ "board": … }`. Sets one column's card order, merged into the stored ranks under a row lock, so people reordering different columns don't overwrite each other. Past the size limits, the least recently ranked columns are dropped.
+
+**DELETE** `/nests/:nestId/boards/:boardId` (write+) — the creator, or a nest owner/admin → `{ "deleted": true }`.
+
+Limits (`400` when exceeded): 100 boards per nest; `name` ≤ 80 characters; config ≤ 256 KB; ≤ 500 layout/rank keys; ≤ 2000 ids per list, each ≤ 600 characters; `config.dimension` ∈ `folder` / `status` / `tag`. A body that isn't a JSON object → `400`. Boards are deleted with their nest.
+
 ---
 
 ## 3. Collaborators (direct nest sharing)
@@ -1328,7 +1359,7 @@ Access is recorded when a document is opened (`GET …/nodes/:id`, MCP `context_
 The collaborator-facing `GET …/activity` and `GET …/nodes/:id/activity` feeds are unchanged and never include access rows.
 
 ### GET `/nests/:nestId/feed`
-Query: `?filter=all|changes|comments&limit=50&offset=0` (filter defaults to `all`, limit caps at 200, offset caps at 10 000)
+Query: `?filter=all|changes|comments&limit=50&offset=0&resolved=include` (filter defaults to `all`, limit caps at 200, offset caps at 10 000)
 
 Nest **activity feed** — pending change submissions (the exact rows
 `/review-queue` shows, every field intact, plus the caller's `canReview`)
@@ -1339,6 +1370,11 @@ newest first. Additive sibling of `/review-queue`; that endpoint and the MCP
 Comment items are access-filtered to documents the caller can read (same
 resolution as node listing: public readers see approved docs only; grants and
 steward scope honored). Change items mirror the queue (not access-filtered).
+
+Comment items on **resolved** threads are left out (and out of
+`counts.comments`): resolving a thread is how its comments leave the feed.
+Pass `resolved=include` to get them back; the item shape is the same either
+way (`resolved` is still reported).
 
 ```json
 {
@@ -1386,7 +1422,7 @@ The UI deep-links a comment item to its document with the thread focused via
 
 ### Notification rows (`GET /me/work` → `notifications`, `GET /me/notifications`)
 
-Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review verdicts, document deletion flags, mentions); nest-level rows have `node_id: null`.
+Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review verdicts, document deletion flags, mentions, `comment_reply` thread replies); nest-level rows have `node_id: null`.
 
 Unread `nest_invite` rows are what the Nests page shows as **Pending invites**. Accept marks them read (`POST /me/notifications/read`) and opens the nest.
 
@@ -1617,7 +1653,7 @@ The comments above are flat per-node threads. **Annotations** are the highlight-
 
 - `GET /nests/:nestId/nodes/:nodeId/annotations` — list threads with their replies and `open` / `resolved` status.
 - `POST /nests/:nestId/nodes/:nodeId/annotations` — open a thread. Body: `{ body, anchor?: { start, end, text }, snapshotVersion? }`. No `anchor` = a whole-document (or whole-artifact) thread.
-- `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/comments` — reply. Body: `{ body }`.
+- `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/comments` — reply. Body: `{ body }`. A reply on a resolved thread reopens it (the MCP `context_comment` reply does the same). Everyone already in the thread (its opener and earlier repliers, minus the replier and anyone the reply @mentions) gets a `comment_reply` notification — an inbox row linking the document, plus an email when SMTP is configured.
 - `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/resolve` · `/reopen`.
 - `GET /nests/:nestId/comment-counts` — `{ "<nodeId>": <open thread count>, … }` for the whole nest in one call (the UI's "most commented" sort).
 
