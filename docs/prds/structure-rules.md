@@ -248,12 +248,12 @@ Per the sync discipline, all of this lands in the engine repo first and ships in
   | `context_import_pdf` | guard; `checkDocument` for a new PDF, `checkUpdate` for a new version; scaffolding |
   | `context_delete` / deprecated `delete_document` | `assertStructureDelete` |
   | deprecated `create_document` / `update_document` | guard + `checkDocument` + scaffolding / `checkUpdate` (they write storage directly) |
-  | `approveReview` / `approveSuggestion` | re-checked against the rules in force; an approved held create is scaffolded (`scaffoldApprovedCreate`) |
+  | every publish, approvals included | `publishDocument`/`publishDocuments` judge it against the rules in force (`assertStructurePublish`: a first publish in full, a later one against the sealed head) and scaffold first publishes (`scaffoldFirstPublish`); `commitNewVersion` does the same for suggestion approval, rollback and czar direct edits |
   | `context_publish` | a first publish is judged in full and scaffolds the folders the document alone occupies; a later publish is judged against the last sealed version (an out-of-band edit). Community's review approve publishes through this op, so it is covered with no Community-side check |
   | `ctx pull` | guard on `includes[].to`; `checkDocument`/`checkUpdate` per pulled document (a refusal is reported as a conflict); scaffolding |
 
 - **Security fix.** `context_import`'s `files[]` refuses paths under `.context/`. Today `overwrite: true` lets any caller rewrite `config.yaml`, which means the structure rules *and* the review gate. No write op accepts a document id under a reserved path either (see §3.2; `assertWritableDocumentId`).
-- **Shared IO helpers** (`structure-store.ts`, exported): `enforcedStructure(storage)` (the rules only when enforced), `missingFolders(storage, id)` and `scaffoldFolders(storage, rules, created)` (best-effort scaffolding), `scaffoldApprovedCreate(storage, rules, id)`, `assertStructureUpdate(storage, id, beforeRaw, afterRaw)` and `assertStructureDelete(storage, id)` (the required-file guard; it counts document files of any status from directory listings — rejected and forgotten files count, and each can be deleted first). Approvals, `ctx pull`, the legacy MCP tools and Community's own write paths use these, so nobody re-implements scaffolding or the enforce gate.
+- **Shared IO helpers** (`structure-store.ts`, exported): `enforcedStructure(storage)` (the rules only when enforced), `missingFolders(storage, id)` and `scaffoldFolders(storage, rules, created)` (best-effort scaffolding), `assertStructurePublish(storage, rules, node)` / `structurePublishViolations` and `scaffoldFirstPublish(storage, rules, ids)` (called by every publish), `isEnforced(config)`, `assertStructureUpdate(storage, id, beforeRaw, afterRaw)` and `assertStructureDelete(storage, id)` (the required-file guard; it counts document files of any status from directory listings — rejected and forgotten files count, and each can be deleted first). Approvals, `ctx pull`, the legacy MCP tools and Community's own write paths use these, so nobody re-implements scaffolding or the enforce gate.
 
 - **Skip flag.** A new `OperationContext.structure?: "skip"`. It is set only by trusted binding code for system writers (see §6) and is never read from operation input. Under it the rules are not enforced, and `context_import` may land `.context/` files: that is how a bundle restore brings the source nest's `config.yaml`, rules included.
 
@@ -427,7 +427,7 @@ Every phase is built **test-first**:
 3. Hand the phase to the **QA agent** (`.claude/agents/qa-adversary.md`, in both repos). It only **runs** the suites and **attacks** the change. It never edits code. It reports blocking findings with exact repros and ends with a `PASS` or `BLOCKED` verdict.
 4. Each blocking finding is fixed test-first: a failing test that reproduces it, then the fix. QA runs again until the verdict is `PASS`.
 
-### 10.1 Engine phase (ContextNest) — re-review pending (round 6)
+### 10.1 Engine phase (ContextNest) — re-review pending (round 7)
 
 - Round 1 (`9c8c3a3`) passed every suite, but QA and the architecture review returned `BLOCKED` / `Needs rework`: ReDoS bypasses, closed-mode bypass through system-path look-alikes, legacy configs refusing writes, a stranded write when scaffolding failed, and unenforced paths (deprecated `delete_document`, `ctx pull`, approvals).
 - Round 2 (`e81d3f1`) wrote a failing test for every finding, then fixed them. Both reviewers re-ran and found more:
@@ -470,6 +470,25 @@ Every phase is built **test-first**:
   - non-boolean `enforce` fails closed;
   - `NestStorage.init` keeps the rules over a re-init;
   - `setStructure` refuses a config symlinked outside the vault.
+
+  On that head both reviews found more. QA returned `BLOCKED`:
+  - case-folded roots let `NODES/` and `nodes:x/` skip closed rules on case-sensitive volumes;
+  - scaffolding a deep id's first publish still cost depth² directory reads (11 s at depth 500);
+  - the trailing-dot trim regex was quadratic.
+
+  The architecture review returned `Needs rework`:
+  - czar direct edits and rollbacks sealed versions with no guard;
+  - the publish judge broke chain recovery when history was damaged.
+- Round 7 (`88e696a`) fixed those test-first:
+  - fold to refuse, never to exempt: the checker compares roots exactly, and the guard refuses other spellings of `nodes/`;
+  - one directory crawl per top-level folder, with held-for-review siblings ignored when scaffolding;
+  - a linear trim;
+  - `commitNewVersion` guarded and judged;
+  - damaged history judged in full, judged before any repair;
+  - import overwrites judged as their publish, and planted history refused;
+  - a malformed `structure` switch fails closed;
+  - a stricter re-init guard;
+  - starters published as one batch.
 
   QA and the architecture review re-run on that head; their verdicts gate this phase.
 
