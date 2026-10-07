@@ -129,3 +129,19 @@ describe("assignment on a governed document", () => {
     expect(work.notifications.filter((x: any) => x.kind === "assigned" && x.nest_id === gid)).toHaveLength(0);
   });
 });
+
+describe("assigned list past the cap", () => {
+  it("keeps the soonest-due cards when there are more than 100", async () => {
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Backlog" }, owner.apiKey);
+    const bid = data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${bid}/collaborators`, { email: ann.email, permission: "write" }, owner.apiKey);
+    const add = (title: string, due: string) =>
+      jsonRequest(app, "POST", `/nests/${bid}/nodes`, { title, content: "x", type: "task", assignee: ann.email, due }, owner.apiKey);
+    for (let i = 0; i < 100; i++) await add(`later-${i}`, "2027-12-31");
+    // Indexed last, so a cap applied before sorting would drop it.
+    await add("urgent", "2020-01-01");
+    const work = (await jsonRequest(app, "GET", "/me/work", undefined, ann.apiKey)).data;
+    expect(work.assigned).toHaveLength(100);
+    expect(work.assigned[0].title).toBe("urgent");
+  }, 60_000);
+});

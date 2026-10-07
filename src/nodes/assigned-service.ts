@@ -40,7 +40,7 @@ export async function listAssignedTo(
     [...nestIds, `%${me}%`],
   )) as Array<{ nest_id: string; node_id: string; frontmatter_json: string }>;
 
-  const out: AssignedItem[] = [];
+  const candidates: AssignedItem[] = [];
   for (const r of rows) {
     let fm: any;
     try {
@@ -50,8 +50,7 @@ export async function listAssignedTo(
     }
     const f = taskFieldsOf(fm?.metadata);
     if (f.assignee !== me || f.completed_at) continue;
-    if (!(await canReadNode(r.nest_id, r.node_id, userId, me))) continue;
-    out.push({
+    candidates.push({
       nest_id: r.nest_id,
       nest_name: nestName.get(r.nest_id) ?? r.nest_id,
       node_id: r.node_id,
@@ -61,12 +60,20 @@ export async function listAssignedTo(
       priority: f.priority ?? null,
       assigned_at: f.assigned_at ?? null,
     });
-    if (out.length >= MAX_ITEMS) break;
   }
-  // Overdue and soonest first (no due date last), then most recently assigned.
-  return out.sort(
+  // Sort before capping, so the soonest-due cards are the ones kept: overdue
+  // and soonest first (no due date last), then most recently assigned. The
+  // access check then runs only until the cap fills.
+  candidates.sort(
     (a, b) =>
       (a.due ?? "9999").localeCompare(b.due ?? "9999") ||
       (b.assigned_at ?? "").localeCompare(a.assigned_at ?? ""),
   );
+  const out: AssignedItem[] = [];
+  for (const c of candidates) {
+    if (!(await canReadNode(c.nest_id, c.node_id, userId, me))) continue;
+    out.push(c);
+    if (out.length >= MAX_ITEMS) break;
+  }
+  return out;
 }
