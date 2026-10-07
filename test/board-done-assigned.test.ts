@@ -104,3 +104,28 @@ describe("board config: groupings and swimlanes", () => {
     expect(bad.status).toBe(400);
   });
 });
+
+describe("assignment on a governed document", () => {
+  it("doesn't notify while the assignment is only a draft", async () => {
+    const { mkdirSync, writeFileSync } = await import("fs");
+    const { join } = await import("path");
+    const ed = await registerUser(app, "ed@acme.com", "Ed");
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Policies" }, owner.apiKey);
+    const gid = data.nest.id;
+    for (const u of [ann, ed]) {
+      await jsonRequest(app, "POST", `/nests/${gid}/collaborators`, { email: u.email, permission: "write" }, owner.apiKey);
+    }
+    await jsonRequest(app, "PATCH", `/nests/${gid}/settings`, { stewardship_enabled: true, allow_self_approve: false }, owner.apiKey);
+    mkdirSync(join(env.dataDir, "nests", gid), { recursive: true });
+    writeFileSync(join(env.dataDir, "nests", gid, "stewards.yaml"), `version: 1\nnest:\n  - email: ${ed.email}, role: editor\n`);
+    await jsonRequest(app, "POST", `/nests/${gid}/stewards/sync`, {}, owner.apiKey);
+
+    // Assigned on create and on edit — both land as drafts for review.
+    await jsonRequest(app, "POST", `/nests/${gid}/nodes`, { title: "policy", content: "x", assignee: ann.email }, ed.apiKey);
+    await jsonRequest(app, "POST", `/nests/${gid}/nodes`, { title: "rules", content: "y" }, owner.apiKey);
+    await jsonRequest(app, "PATCH", `/nests/${gid}/nodes/nodes/rules`, { assignee: ann.email }, ed.apiKey);
+
+    const work = (await jsonRequest(app, "GET", "/me/work", undefined, ann.apiKey)).data;
+    expect(work.notifications.filter((x: any) => x.kind === "assigned" && x.nest_id === gid)).toHaveLength(0);
+  });
+});

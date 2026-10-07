@@ -1866,7 +1866,8 @@ async function createNodeOnce(
 
     await trackEvent("node.create", { nestId, nodeId: id });
     const createdAssignee = taskFieldsOf(node.frontmatter.metadata).assignee;
-    if (createdAssignee) {
+    // A draft's assignment isn't real until a reviewer approves it.
+    if (createdAssignee && published) {
       await notifyAssigned({
         nestId,
         nodeId: id,
@@ -2525,7 +2526,9 @@ export async function updateNode(
       }
 
       const nextAssignee = taskFieldsOf(node.frontmatter.metadata).assignee ?? null;
-      if (nextAssignee && nextAssignee !== priorAssignee) {
+      // Only a published edit notifies: a drafted assignment may be rejected.
+      const savedAsDraft = publishReason === null || isAuthorEditingOwnReview;
+      if (nextAssignee && nextAssignee !== priorAssignee && !savedAsDraft) {
         await notifyAssigned({
           nestId,
           nodeId,
