@@ -936,6 +936,21 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     "ALTER TABLE nests ADD COLUMN IF NOT EXISTS done_tags TEXT NOT NULL DEFAULT 'done'",
   );
 
+  // Migration 053 parity: metacognition agents.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS metacognition_agents (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      persona_user_id TEXT NOT NULL,
+      config_json TEXT NOT NULL DEFAULT '{}',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      updated_at TEXT NOT NULL DEFAULT ${NOW},
+      PRIMARY KEY (nest_id, node_id)
+    );
+  `);
+
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(
     "UPDATE nests SET visibility = 'public' WHERE user_id = ? AND visibility = 'private'",

@@ -61,6 +61,7 @@ import {
   runDetailRoutes,
 } from "./workflow/run-routes.js";
 import { scheduleRoutes } from "./workflow/schedule-routes.js";
+import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
 import { sendTestNotification } from "./notify/dispatch.js";
@@ -612,6 +613,9 @@ export function createApp(): Hono<AuthEnv> {
       // launcher whenever the feature is on and explains the missing key,
       // rather than hiding it.
       hootie_enabled: config.HOOTIE_ENABLED,
+      // Metacognition agents (default OFF; needs the workflow plane too). Off →
+      // /nests/:id/metacognition 404s and the Workflows view hides its tab.
+      metacognition_enabled: config.FEATURE_WORKFLOW_PLANE && config.FEATURE_METACOGNITION,
       // The identity every surface shows: the admin's custom name/logo/
       // colour/greeting on an enterprise licence, the default Hootie
       // otherwise (enforced here, not in the client). Public: the launcher
@@ -824,6 +828,7 @@ export function createApp(): Hono<AuthEnv> {
     type_table_enabled: config.TYPE_TABLE_ENABLED,
     type_task_enabled: ACCEPTED_NODE_TYPES.has("task"),
     hootie_enabled: config.HOOTIE_ENABLED,
+    metacognition_enabled: config.FEATURE_WORKFLOW_PLANE && config.FEATURE_METACOGNITION,
     // The model in use: the admin's pick, else the gateway's default (see hootieModel).
     hootie_model: hootieModel(resolveModelCredential()),
     // Custom identity (enterprise). The stored values are returned even when
@@ -2960,6 +2965,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/run", runTriggerRoutes);
   nestsApp.route("/:nestId/runs", runListRoutes);
   nestsApp.route("/:nestId/schedules", scheduleRoutes);
+  nestsApp.route("/:nestId/metacognition", metacognitionRoutes);
   nestsApp.route("/:nestId/env", envRoutes);
   nestsApp.route("/:nestId/connectors", connectorRoutes);
   nestsApp.route("/:nestId/hooks", hookNestRoutes);

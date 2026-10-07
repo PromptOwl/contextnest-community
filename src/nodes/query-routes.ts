@@ -43,6 +43,7 @@ import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { recordNodeAccess } from "../governance/access-log.js";
+import { serverRunNodeIds } from "../metacognition/store.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
 
@@ -189,7 +190,10 @@ queryRoutes.get("/runnables", async (c) => {
     // run the thing, so this surface pays for the file reads.
     withContent: true,
   });
-  const runnables = all.map((n) => ({
+  // Metacognition agents are executed by this server; an external
+  // orchestrator that also ran them on their schedule would double them up.
+  const serverRun = config.FEATURE_METACOGNITION ? await serverRunNodeIds(nestId) : new Set<string>();
+  const runnables = all.filter((n) => !serverRun.has(n.id)).map((n) => ({
     id: n.id,
     title: n.title,
     type: n.type,
