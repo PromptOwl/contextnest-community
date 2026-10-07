@@ -129,6 +129,8 @@ export async function submitForReview(params: {
           await versionManager.createVersion(node, params.requestedBy, {
             note: params.note || "Submitted for review",
             ...(params.client ? { client: params.client } : {}),
+            // Read just above under the node lock — no second read.
+            knownHistory: history,
           });
         }
       } catch (err) {
