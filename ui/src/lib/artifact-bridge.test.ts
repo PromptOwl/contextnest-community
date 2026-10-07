@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { highlightItems, parseBridgeMessage } from "./artifact-bridge";
+import { highlightPayload, parseBridgeMessage } from "./artifact-bridge";
 import { hostedArtifactUrl } from "./api";
 
 // The iframe is attacker-authorable HTML: everything it posts is untrusted.
@@ -39,8 +39,8 @@ describe("parseBridgeMessage", () => {
 });
 
 // What crosses into untrusted artifact code: quotes from the artifact's own
-// text and thread ids. Never comment bodies, authors or anything else.
-describe("highlightItems (parent → iframe payload)", () => {
+// text, keyed by throwaway ids. Never thread ids, comment bodies or authors.
+describe("highlightPayload (parent → iframe payload)", () => {
   const thread = (id: string, status: "open" | "resolved", quote?: string) => ({
     id,
     status,
@@ -49,18 +49,27 @@ describe("highlightItems (parent → iframe payload)", () => {
     comments: [{ id: "c1", author: "secret@acme.com", body: "private review note", createdAt: "x" }],
   });
 
-  it("carries only id, quote and before — no bodies, authors or after-context", () => {
-    const items = highlightItems([thread("t1", "open", "MRR of $400K")] as any);
-    expect(items).toEqual([{ id: "t1", quote: "MRR of $400K", before: "ctx " }]);
-    expect(JSON.stringify(items)).not.toMatch(/secret@acme|private review note|tail/);
+  it("carries only an opaque id, the quote and before — no thread ids, bodies, authors or after-context", () => {
+    const p = highlightPayload([thread("thr_secret_1", "open", "MRR of $400K")] as any, "thr_secret_1");
+    expect(p.items).toEqual([{ id: "h0", quote: "MRR of $400K", before: "ctx " }]);
+    expect(p.active).toBe("h0");
+    expect(JSON.stringify(p)).not.toMatch(/thr_secret_1|secret@acme|private review note|tail/);
+  });
+
+  it("maps the opaque ids back to threads, and nothing else", () => {
+    const p = highlightPayload([thread("t1", "open", "a"), thread("t2", "open", "b")] as any, null);
+    expect(p.active).toBeNull();
+    expect(p.threadIdFor("h1")).toBe("t2");
+    expect(p.threadIdFor("t1")).toBeUndefined();
+    expect(p.threadIdFor("h9")).toBeUndefined();
   });
 
   it("only open, anchored threads", () => {
-    expect(
-      highlightItems([thread("a", "resolved", "q"), thread("b", "open"), thread("c", "open", "q")] as any).map(
-        (i) => i.id,
-      ),
-    ).toEqual(["c"]);
+    const p = highlightPayload(
+      [thread("a", "resolved", "q"), thread("b", "open"), thread("c", "open", "q")] as any,
+      null,
+    );
+    expect(p.items.map((i) => p.threadIdFor(i.id))).toEqual(["c"]);
   });
 });
 

@@ -15,7 +15,8 @@
  *   click scrolls a sticky toolbar button into view first, which would move
  *   the page the test is measuring.
  * - CI runs this suite against the deployed server. Until a server serves
- *   the viewer bridge (`/hosted?embed=1`), the suite skips rather than fail.
+ *   the viewer bridge (`/hosted?embed=1`), the suite skips rather than fail;
+ *   CN_EXPECT_BRIDGE=1 turns that skip into a failure.
  * - Serial: the cases share the seeded nest.
  */
 
@@ -94,6 +95,11 @@ test.describe('Annotations keep your place', () => {
   });
 
   test.beforeEach(() => {
+    // Once the bridge is deployed everywhere, set CN_EXPECT_BRIDGE=1 so a
+    // server that stops serving it fails here instead of skipping quietly.
+    if (process.env.CN_EXPECT_BRIDGE === '1') {
+      expect(bridgeDeployed, '/hosted?embed=1 no longer serves the viewer bridge').toBe(true);
+    }
     test.skip(!bridgeDeployed, 'The server under test does not serve the viewer bridge yet (pre-CU-wdqcq040et).');
   });
 

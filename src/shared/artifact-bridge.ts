@@ -16,10 +16,11 @@
  *
  * It grants the artifact nothing new: the page could already postMessage its
  * parent, and the parent validates every message (ui/src/lib/artifact-bridge.ts).
- * The parent sends only quotes taken from the artifact's own text, plus thread
- * ids — never comment bodies or authors. What the artifact's own scripts CAN
- * learn is which of its passages have open threads (and their opaque ids);
- * that is the accepted cost of painting highlights inside the frame.
+ * The parent sends only quotes taken from the artifact's own text, keyed by
+ * throwaway ids ("h0"…) — never real thread ids, comment bodies or authors.
+ * What the artifact's own scripts CAN learn is which of its passages have
+ * open threads; that is the accepted cost of painting highlights inside the
+ * frame.
  *
  * Matching ignores whitespace on both sides: the viewer's quotes come from the
  * extracted text (block newlines, collapsed runs), the DOM has neither.
@@ -42,6 +43,7 @@ const BRIDGE_JS = String.raw`(function () {
   // that follows the last within 2s doubles the wait, up to 8s; a quiet
   // spell resets it to 250ms.
   var cache = null, repaintT = 0, last = null, delay = 250, lastRepaint = 0;
+  var styleEl = null; // our ::highlight <style>, inserted on first paint
   try {
     new MutationObserver(function (records) {
       var ours = records.every(function (r) {
@@ -156,6 +158,8 @@ const BRIDGE_JS = String.raw`(function () {
     var idx = index();
     if (!idx.text.length) return;
     var s = strip(snippet), at = -1;
+    // Prefixes shorter than 8 chars match too much to trust; below that we
+    // fall back to the same fraction of the way through the page.
     for (var len = Math.min(s.length, 40); len >= 8 && at < 0; len = Math.floor(len / 2)) {
       at = find(idx.text, s.slice(0, len), frac);
     }
@@ -165,7 +169,6 @@ const BRIDGE_JS = String.raw`(function () {
   }
 
   var ranges = [];
-  var styleEl = null;
   function paint(items, active) {
     if (!(window.CSS && CSS.highlights && window.Highlight)) return;
     last = { items: items, active: active };

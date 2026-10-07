@@ -36,7 +36,7 @@ import {
 } from "../lib/anchor-highlight";
 import { paintableThreads } from "../lib/comment-threads";
 import { useKeepPlace, type Place } from "../lib/view-place";
-import { highlightItems, parseBridgeMessage, postToBridge } from "../lib/artifact-bridge";
+import { highlightPayload, parseBridgeMessage, postToBridge } from "../lib/artifact-bridge";
 import { DocumentViewer } from "./DocumentViewer";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -477,13 +477,14 @@ export function ArtifactViewer({
     );
   }, []);
 
+  // Maps the opaque ids the frame knows ("h0"…) back to threads; rebuilt
+  // with every payload sent.
+  const threadIdForRef = useRef<(id: string) => string | undefined>(() => undefined);
   const sendHighlights = useCallback(() => {
     if (!frameReadyRef.current) return;
-    postToBridge(iframeRef.current, {
-      type: "cn-highlights",
-      items: highlightItems(threadsRef.current),
-      active: activeRef.current,
-    });
+    const p = highlightPayload(threadsRef.current, activeRef.current);
+    threadIdForRef.current = p.threadIdFor;
+    postToBridge(iframeRef.current, { type: "cn-highlights", items: p.items, active: p.active });
   }, []);
 
   const surfaceKey =
@@ -543,8 +544,11 @@ export function ArtifactViewer({
         if (modeRef.current === "preview") {
           placeRef.current = { snippet: m.snippet, frac: m.frac, y: null };
         }
-      } else if (threadsRef.current.some((t) => t.id === m.id)) {
-        selectThread(m.id);
+      } else {
+        // Only ids from the payload we sent map to a thread; anything else
+        // the frame makes up resolves to nothing.
+        const id = threadIdForRef.current(m.id);
+        if (id && threadsRef.current.some((t) => t.id === id)) selectThread(id);
       }
     };
     window.addEventListener("message", onMessage);

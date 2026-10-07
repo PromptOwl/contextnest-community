@@ -46,16 +46,26 @@ export interface HighlightItem {
 
 /**
  * The only thread data that crosses into the artifact's (untrusted) frame:
- * open anchored threads, as id + quote + the `before` context that picks
- * between repeats. The quote and context are the artifact's own text; comment
- * bodies, authors and everything else stay in the parent.
+ * open anchored threads, as quote + the `before` context that picks between
+ * repeats — both the artifact's own text — keyed by throwaway ids ("h0",
+ * "h1"…) that only this payload's `threadIdFor` can map back. Thread ids,
+ * comment bodies, authors and everything else stay in the parent.
  */
-export function highlightItems(threads: readonly AnnotationThread[]): HighlightItem[] {
-  return paintableThreads(threads).map((t) => ({
-    id: t.id,
-    quote: t.anchor!.quote,
-    before: t.anchor!.before ?? "",
-  }));
+export function highlightPayload(
+  threads: readonly AnnotationThread[],
+  activeThreadId: string | null,
+): { items: HighlightItem[]; active: string | null; threadIdFor: (id: string) => string | undefined } {
+  const open = paintableThreads(threads);
+  const items = open.map((t, i) => ({ id: `h${i}`, quote: t.anchor!.quote, before: t.anchor!.before ?? "" }));
+  const at = open.findIndex((t) => t.id === activeThreadId);
+  return {
+    items,
+    active: at >= 0 ? `h${at}` : null,
+    threadIdFor: (id) => {
+      const m = /^h(\d+)$/.exec(id);
+      return m ? open[Number(m[1])]?.id : undefined;
+    },
+  };
 }
 
 /** Parent → iframe. Target "*" because the sandboxed frame's origin is opaque. */
