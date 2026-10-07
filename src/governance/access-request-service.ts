@@ -369,6 +369,8 @@ export async function createAccessRequest(params: {
   // Decided in SQL against a cutoff in the column's own format ('YYYY-MM-DD
   // HH:MM:SS', UTC — nowExpr on both backends), so a timestamp JS can't parse
   // can never switch the cooldown off; the clock only shapes the message.
+  // The text comparison relies on resolved_at staying in that second-
+  // resolution format (decideAccessRequest writes it with nowExpr).
   const cutoff = sqlTime(new Date(Date.now() - ASK_AGAIN_AFTER_MS));
   const recentDenial = (await db.get(
     `SELECT resolved_at FROM access_requests
@@ -590,6 +592,13 @@ export async function decideAccessRequest(params: {
         // pending, so the new ask was accepted), and the one-pending index
         // refuses a second. The newer ask carries the request; drop this
         // claimed row so nothing reads 'approved' with no grant behind it.
+        console.warn(
+          "[access] approval claim released by deletion — a newer ask superseded it",
+          params.nestId,
+          params.id,
+          pending.requested_by,
+          params.decidedByEmail,
+        );
         await db.run("DELETE FROM access_requests WHERE id = ? AND status = 'approved'", [params.id]);
       }
       throw err;
