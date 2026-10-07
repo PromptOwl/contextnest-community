@@ -601,6 +601,37 @@ Errors:
 - `404 Folder not found` — path doesn't exist under `DATA_ROOT`.
 - `403 Only the server admin can delete folders` — non-admin in non-open mode.
 
+### Saved boards — `/nests/:nestId/boards`
+Named Board views of a nest (columns, filters, card order). A board is a view, not a copy: it stores no documents, and reordering cards never creates a document version. **Shared** boards are visible to everyone who can read the nest; **private** boards only to their creator (anyone else gets `404`). Any write+ caller can edit a shared board's name, config and position.
+
+**GET** `/nests/:nestId/boards` (read+) — the caller's visible boards, by `position`:
+```json
+{ "boards": [{
+  "id": "…", "nest_id": "…", "name": "Sprint", "private": false, "position": 0,
+  "created_by": "<userId>", "created_by_email": "a@x.com",
+  "config": {
+    "dimension": "tag", "tagNamespace": "", "tasksOnly": true, "filterTags": ["launch"],
+    "layouts": { "tag:": { "columnOrder": ["todo", "doing", "done"], "hiddenColumns": [] } },
+    "ranks": { "tag:::todo": ["nodes/b", "nodes/a"] }
+  },
+  "created_at": "…", "updated_at": "…"
+}] }
+```
+`created_by_email` is `null` for callers below write — the read tier also serves public/org visitors, and member emails stay write-tier (as with `GET /collaborators`).
+
+**POST** `/nests/:nestId/boards` (write+) — `{ "name": "Sprint", "private": false, "config": { … } }` → `201 { "board": … }`. `config` defaults to `{ "dimension": "tag" }`.
+
+**PATCH** `/nests/:nestId/boards/:boardId` (write+) — any of `name`, `private`, `config`, `position` → `{ "board": … }`.
+- Only the creator may change `private` (`403` otherwise).
+- A `config` without `ranks` keeps the stored ranks.
+- `position`: integer `0`–`10000`.
+
+**POST** `/nests/:nestId/boards/:boardId/rank` (write+) — `{ "key": "tag:::todo", "order": ["nodes/b", "nodes/a"] }` → `{ "board": … }`. Sets one column's card order, merged into the stored ranks under a row lock, so people reordering different columns don't overwrite each other. Past the size limits, the least recently ranked columns are dropped.
+
+**DELETE** `/nests/:nestId/boards/:boardId` (write+) — the creator, or a nest owner/admin → `{ "deleted": true }`.
+
+Limits (`400` when exceeded): 100 boards per nest; `name` ≤ 80 characters; config ≤ 256 KB; ≤ 500 layout/rank keys; ≤ 2000 ids per list, each ≤ 600 characters; `config.dimension` ∈ `folder` / `status` / `tag`. A body that isn't a JSON object → `400`. Boards are deleted with their nest.
+
 ---
 
 ## 3. Collaborators (direct nest sharing)

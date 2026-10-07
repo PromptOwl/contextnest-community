@@ -83,6 +83,7 @@ const HISTORICAL_MIGRATIONS = [
   "047_node_access_events",
   "048_license_cache_features",
   "049_license_cache_gateway",
+  "051_boards",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -911,6 +912,22 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       created_at TEXT NOT NULL DEFAULT ${NOW}
     );
     CREATE INDEX IF NOT EXISTS idx_headless_readers_nest ON headless_readers(nest_id);
+  `);
+
+  // Migration 051 parity: saved Board views.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS boards (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      private INTEGER NOT NULL DEFAULT 0,
+      position INTEGER NOT NULL DEFAULT 0,
+      config_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      updated_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE INDEX IF NOT EXISTS idx_boards_nest ON boards(nest_id, position);
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

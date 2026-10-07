@@ -189,6 +189,10 @@ export interface BoardSettings {
   layouts: Record<string, ColumnLayout>;
   /** Show only `task` nodes — a project board rather than a nest map. */
   tasksOnly?: boolean;
+  /** Show only cards carrying every one of these tags (bare, no "#"). */
+  filterTags?: string[];
+  /** Saved boards only: per-column card order, keyed by board-rank's rankKey. */
+  ranks?: Record<string, string[]>;
 }
 
 /**
