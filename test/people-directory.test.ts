@@ -378,3 +378,54 @@ describe("people suggestions with the directory toggle on", () => {
     ]);
   });
 });
+
+// The board's assignee picker offers only members; a directory suggestion is
+// marked so an owner can share the nest first instead of hitting a 400.
+describe("mentionable marks who is on the nest", () => {
+  let app: any;
+  let owner: { apiKey: string; email: string };
+  let outsider: { apiKey: string; email: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    process.env.PEOPLE_SUGGEST_ALL_USERS = "true";
+    setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@acme.com", "Owner");
+    await resetAuthRateLimit();
+    outsider = await registerUser(app, "outsider@acme.com", "Outsider");
+    await resetAuthRateLimit();
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Board" }, owner.apiKey);
+    nestId = data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "card", content: "x" }, owner.apiKey);
+  });
+
+  afterAll(() => {
+    delete process.env.PEOPLE_SUGGEST_ALL_USERS;
+  });
+
+  const member = async (email: string) => {
+    const { data } = await jsonRequest(app, "GET", `/nests/${nestId}/mentionable`, undefined, owner.apiKey);
+    return (data.people as Array<{ email: string; member: boolean }>).find(
+      (p) => p.email.toLowerCase() === email,
+    )?.member;
+  };
+  const assign = () =>
+    jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/nodes/card`, { assignee: outsider.email }, owner.apiKey);
+
+  it("a directory user is not a member and can't be assigned until shared", async () => {
+    expect(await member(owner.email)).toBe(true);
+    expect(await member(outsider.email)).toBe(false);
+    expect((await assign()).status).toBe(400);
+
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: outsider.email, permission: "write" },
+      owner.apiKey,
+    );
+    expect(await member(outsider.email)).toBe(true);
+    expect((await assign()).status).toBe(200);
+  });
+});

@@ -2420,7 +2420,7 @@ export async function listCollaborators(nestId: string) {
  *  so a read-only reviewer's comment box can offer the roster too — unlike
  *  listCollaborators, which needs write. */
 export async function listMentionablePeople(nestId: string) {
-  return request<{ people: Array<{ email: string; name: string | null }> }>(
+  return request<{ people: Array<{ email: string; name: string | null; member?: boolean }> }>(
     `/nests/${nestId}/mentionable`,
   );
 }
