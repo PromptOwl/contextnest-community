@@ -316,6 +316,25 @@ export async function approve(params: {
       }
     }
 
+    // Publish FIRST, then record: a document the engine will not publish must
+    // not be recorded as approved (same as bulk approve). The engine publish
+    // gives the file frontmatter.checksum + status:published, without which
+    // drift detection silently no-ops on later local edits.
+    const note = params.note || `Approved review request ${pending.id}`;
+    let engineVersion: number;
+    try {
+      // Publish through the engine's canonical operation, so an approval seals
+      // its version and checkpoint exactly the way every other surface does —
+      // and regenerates the index, which a bare publish call does not.
+      ({ version: engineVersion } = await engineApi.run<{ version: number }>(
+        "context_publish",
+        { id: params.nodeId, note },
+        await opContext(params.nestId, params.approvedBy),
+      ));
+    } catch (err: any) {
+      throw new Error(`Couldn't publish this document: ${err?.message ?? err}`);
+    }
+
     await markApproved({
       nestId: params.nestId,
       nodeId: params.nodeId,
@@ -326,19 +345,7 @@ export async function approve(params: {
       version,
     });
 
-    // Run engine publish so the on-disk file gets frontmatter.checksum +
-    // status:published. Without this, drift detection silently no-ops on
-    // subsequent local edits (see integrity.ts:133 — no checksum = drifted:false).
     try {
-      const note = params.note || `Approved review request ${pending.id}`;
-      // Publish through the engine's canonical operation, so an approval seals
-      // its version and checkpoint exactly the way every other surface does —
-      // and regenerates the index, which a bare publish call does not.
-      const { version: engineVersion } = await engineApi.run<{ version: number }>(
-        "context_publish",
-        { id: params.nodeId, note },
-        await opContext(params.nestId, params.approvedBy),
-      );
       await mirrorPublished({
         nestId: params.nestId,
         nodeId: params.nodeId,
@@ -349,8 +356,9 @@ export async function approve(params: {
         client: params.client,
       });
     } catch (err) {
+      // Published and recorded; only the DB's copy of the new version failed.
       console.error(
-        `publishDocument failed for ${params.nestId}/${params.nodeId} on approve:`,
+        `version mirror failed for ${params.nestId}/${params.nodeId} on approve:`,
         err,
       );
     }
