@@ -199,6 +199,8 @@ export async function notifyReviewResolved(params: {
   resolvedBy: string;
   requestedBy: string;
   reviewId: string;
+  /** The document's describeNode label, when the caller already resolved it. */
+  label?: string;
 }): Promise<number> {
   const { nestId, nodeId, status, resolvedBy, requestedBy, reviewId } = params;
   const db = getDb();
@@ -221,7 +223,7 @@ export async function notifyReviewResolved(params: {
     recipients.delete(resolvedBy.toLowerCase()); // not the person who clicked
 
     const now = new Date().toISOString();
-    const label = await describeNode(nestId, nodeId);
+    const label = params.label ?? (await describeNode(nestId, nodeId));
     let created = 0;
     for (const email of recipients) {
       await db.run(
