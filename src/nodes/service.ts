@@ -2357,9 +2357,9 @@ export async function updateNode(
       const publishReason = await autoPublishReason(nestId, userEmail, {
         tags: currentTags,
         metadata: node.frontmatter.metadata,
-        // The type the node had BEFORE this edit: converting a governed
-        // document into a task must not be the edit that skips its review.
-        type: storedType,
+        // A task only if it is one before AND after this edit: converting a
+        // document into a task, or a task into anything else, is reviewed.
+        type: patch.type === undefined || patch.type === storedType ? storedType : undefined,
       });
 
       // Stewardship lock: a node with an open review request is frozen for

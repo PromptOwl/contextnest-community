@@ -17,6 +17,10 @@ import {
   registerUser,
   jsonRequest,
 } from "./helpers.js";
+import { ACCEPTED_NODE_TYPES } from "../src/nodes/service.js";
+
+// Every case here creates a `task`; the type is off until the engine ships it.
+const describeTask = describe.runIf(ACCEPTED_NODE_TYPES.has("task"));
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -72,7 +76,7 @@ beforeAll(async () => {
 
 afterAll(() => env.cleanup());
 
-describe("tasks skip review", () => {
+describeTask("tasks skip review", () => {
   it("an editor's document drafts, but their task publishes", async () => {
     await create(editor, { title: "spec", content: "a spec" });
     expect((await listed("spec")).status).toBe("draft");
@@ -117,7 +121,15 @@ describe("tasks skip review", () => {
   });
 });
 
-describe("board fields", () => {
+// Board fields don't need the task type, so this runs on any engine.
+describe("board fields on a plain document", () => {
+  it("works on a plain document too", async () => {
+    await create(owner, { title: "brief", content: "y", priority: "low" });
+    expect((await get("brief")).priority).toBe("low");
+  });
+});
+
+describeTask("board fields", () => {
   it("set on create and returned on read and list", async () => {
     await create(editor, {
       title: "write-copy",
@@ -153,11 +165,6 @@ describe("board fields", () => {
     expect(cleared.due).toBeUndefined();
   });
 
-  it("works on a plain document too", async () => {
-    await create(owner, { title: "brief", content: "y", priority: "low" });
-    expect((await get("brief")).priority).toBe("low");
-  });
-
   it("refuses someone who isn't on the nest", async () => {
     const { status, data } = await patch(editor, "write-copy", { assignee: outsider.email });
     expect(status).toBe(400);
@@ -183,7 +190,7 @@ describe("board fields", () => {
   });
 });
 
-describe("converting to a task is not a review bypass", () => {
+describeTask("converting to a task is not a review bypass", () => {
   it("an editor converting a governed document into a task still drafts that edit", async () => {
     // Starts as a draft (no self-approve here). Were the gate reading the
     // post-patch type, this edit would publish the converted node outright.
@@ -193,9 +200,18 @@ describe("converting to a task is not a review bypass", () => {
     expect(n.type).toBe("task");
     expect(n.status).toBe("draft");
   });
+
+  it("converting a published task into a document drafts that edit", async () => {
+    await create(editor, { title: "chore", content: "x", type: "task" });
+    expect((await listed("chore")).status).toBe("published");
+    await patch(editor, "chore", { type: "document", content: "now a policy" });
+    const n = await listed("chore");
+    expect(n.type).toBe("document");
+    expect(n.status).toBe("draft");
+  });
 });
 
-describe("board composer contract", () => {
+describeTask("board composer contract", () => {
   it("accepts the composer's empty-notes body and a column placement", async () => {
     const { status, data } = await create(editor, {
       title: "from-the-board",
