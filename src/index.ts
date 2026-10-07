@@ -22,6 +22,7 @@ import { loadActiveCommunitySites } from "./auth/community-sites.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
 import { startScheduler } from "./workflow/scheduler.js";
 import { sweepStale } from "./shared/rate-limit.js";
+import { bannerHeading } from "./shared/startup-banner.js";
 
 async function main() {
   // Initialize the database backend (SQLite by default, or Postgres/Cloud SQL
@@ -164,7 +165,7 @@ async function main() {
       : `sqlite (${config.DATABASE_PATH})`;
 
   console.log(`
-  ContextNest Community Server v0.1.0
+  ${bannerHeading()}
   ────────────────────────────────────
   Port:      ${config.PORT}
   Data:      ${config.DATA_ROOT}
