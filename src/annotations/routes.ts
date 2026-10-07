@@ -204,5 +204,7 @@ annotationRoutes.get("/:nodeId{.+}/hosted", async (c) => {
   if (served != null) c.header("X-Artifact-Snapshot", String(served));
   // ?embed=1 — the in-app viewer's iframe: append the place/highlight bridge
   // (see src/shared/artifact-bridge.ts). Everyone else gets the bytes as-is.
+  // Exactly "1" on purpose: an internal flag only the viewer sends, so any
+  // other value (embed=true, embed=) serves the plain page rather than guess.
   return c.html(c.req.query("embed") === "1" ? injectArtifactBridge(html) : html);
 });

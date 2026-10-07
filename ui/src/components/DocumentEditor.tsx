@@ -703,6 +703,7 @@ export function DocumentEditor({
     let tries = 0;
     let id = 0;
     let observer: MutationObserver | null = null;
+    let repaintTimer: ReturnType<typeof setTimeout> | undefined;
     const paint = () => {
       const container = findContainer();
       if (!container) {
@@ -711,10 +712,15 @@ export function DocumentEditor({
       }
       // The editor can rebuild its DOM without `content` changing (initial
       // setContent, node views), which strands the ranges — repaint then.
+      // Debounced: while typing, every keystroke mutates the DOM, and a
+      // repaint per frame would rebuild the text index on each one.
       if (inEditor && !observer) {
         observer = new MutationObserver(() => {
-          cancelAnimationFrame(id);
-          id = requestAnimationFrame(paint);
+          clearTimeout(repaintTimer);
+          repaintTimer = setTimeout(() => {
+            cancelAnimationFrame(id);
+            id = requestAnimationFrame(paint);
+          }, 200);
         });
         observer.observe(container, { childList: true, subtree: true, characterData: true });
       }
@@ -750,9 +756,18 @@ export function DocumentEditor({
         pendingFocusRef.current = null;
       }
     };
-    id = requestAnimationFrame(paint);
+    // In the editor `content` changes on every keystroke, re-running this
+    // effect; the delay (reset by each re-run) makes that a debounce.
+    if (inEditor) {
+      repaintTimer = setTimeout(() => {
+        id = requestAnimationFrame(paint);
+      }, 200);
+    } else {
+      id = requestAnimationFrame(paint);
+    }
     return () => {
       cancelAnimationFrame(id);
+      clearTimeout(repaintTimer);
       observer?.disconnect();
     };
   }, [anchoredThreads, content, mode, rawMode, compareVersion, isNew, commentMode]);
@@ -3577,54 +3592,54 @@ export function DocumentEditor({
                         // Clicking a painted quote while editing selects its
                         // thread (the click still places the caret).
                         <div ref={editorSurfaceRef} data-place-surface onClick={onDocClick}>
-                        <MarkdownEditor
-                          ref={editorRef}
-                          content={content}
-                          onChange={(next) => {
-                            setContent(next);
-                            // TipTap onUpdate fires only on real user input here.
-                            setTouched(true);
-                          }}
-                          onSave={handleSave}
-                          onBlur={saveOnBlur}
-                          nestId={nestId}
-                          currentNodeId={isNew ? undefined : nodeId}
-                          editable={!fieldsDisabled}
-                          onRequestDocLink={() => setShowDocPicker(true)}
-                          onUploadImage={async (file) => {
-                            const { url } = await api.uploadAsset(nestId, file);
-                            return url;
-                          }}
-                          onWikiLinkClick={handleWikiLinkClick}
-                          placeholder="Start writing, or select text to format it…"
-                          // Nobody gets the caret on open: a new document focuses
-                          // Title (see the effect below), an existing one reads as
-                          // a page until you click into it — "end" would also
-                          // scroll a long document to its last line on arrival.
-                          autofocus={false}
-                          variant="page"
-                          toolbarHidden={!pageActive}
-                          toolbarEnd={
-                            <>
-                              {/* Rich ↔ raw markdown at the editor's own right end, where the
-                                  writer already is (it used to hide in ⋮). */}
-                              {!isSourceOnly && compareVersion == null && !isArtifactDraft && (
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-7 px-2 text-xs"
-                                  onClick={() => setRawMode(true)}
-                                  title="Edit the raw markdown"
-                                  data-testid="document-editor-markdown-toggle"
-                                >
-                                  <Code2 className="h-3.5 w-3.5 sm:mr-1.5" />
-                                  <span className="hidden sm:inline">Markdown</span>
-                                </Button>
-                              )}
-                            </>
-                          }
-                        />
+                          <MarkdownEditor
+                            ref={editorRef}
+                            content={content}
+                            onChange={(next) => {
+                              setContent(next);
+                              // TipTap onUpdate fires only on real user input here.
+                              setTouched(true);
+                            }}
+                            onSave={handleSave}
+                            onBlur={saveOnBlur}
+                            nestId={nestId}
+                            currentNodeId={isNew ? undefined : nodeId}
+                            editable={!fieldsDisabled}
+                            onRequestDocLink={() => setShowDocPicker(true)}
+                            onUploadImage={async (file) => {
+                              const { url } = await api.uploadAsset(nestId, file);
+                              return url;
+                            }}
+                            onWikiLinkClick={handleWikiLinkClick}
+                            placeholder="Start writing, or select text to format it…"
+                            // Nobody gets the caret on open: a new document focuses
+                            // Title (see the effect below), an existing one reads as
+                            // a page until you click into it — "end" would also
+                            // scroll a long document to its last line on arrival.
+                            autofocus={false}
+                            variant="page"
+                            toolbarHidden={!pageActive}
+                            toolbarEnd={
+                              <>
+                                {/* Rich ↔ raw markdown at the editor's own right end, where the
+                                    writer already is (it used to hide in ⋮). */}
+                                {!isSourceOnly && compareVersion == null && !isArtifactDraft && (
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 px-2 text-xs"
+                                    onClick={() => setRawMode(true)}
+                                    title="Edit the raw markdown"
+                                    data-testid="document-editor-markdown-toggle"
+                                  >
+                                    <Code2 className="h-3.5 w-3.5 sm:mr-1.5" />
+                                    <span className="hidden sm:inline">Markdown</span>
+                                  </Button>
+                                )}
+                              </>
+                            }
+                          />
                         </div>
                       )}
                     </div>

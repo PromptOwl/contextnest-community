@@ -31,8 +31,16 @@ const BRIDGE_JS = String.raw`(function () {
   var WS = /\s/;
   function post(m) { try { P.postMessage(m, "*"); } catch (e) {} }
 
-  // Whitespace-free text of the page + where each char lives.
-  function index() {
+  // Whitespace-free text of the page + where each char lives. Built once and
+  // reused until the DOM changes — scrolling alone never rebuilds it.
+  var cache = null;
+  try {
+    new MutationObserver(function () { cache = null; }).observe(document.documentElement, {
+      childList: true, subtree: true, characterData: true
+    });
+  } catch (e) {}
+  function index() { return cache || (cache = build()); }
+  function build() {
     var root = document.body || document.documentElement;
     var w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode: function (n) {
@@ -40,16 +48,17 @@ const BRIDGE_JS = String.raw`(function () {
         return p && SKIP[p.nodeName] ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
       }
     });
-    var text = "", nodes = [], offs = [], n;
+    var text = "", nodes = [], offs = [], starts = new Map(), n;
     while ((n = w.nextNode())) {
       var d = n.data;
+      starts.set(n, text.length);
       for (var i = 0; i < d.length; i++) {
         var c = d.charAt(i);
         if (WS.test(c)) continue;
         text += c; nodes.push(n); offs.push(i);
       }
     }
-    return { text: text, nodes: nodes, offs: offs };
+    return { text: text, nodes: nodes, offs: offs, starts: starts };
   }
   function strip(s) { return String(s || "").replace(/\s+/g, ""); }
   function charRect(idx, i) {
@@ -63,10 +72,25 @@ const BRIDGE_JS = String.raw`(function () {
       b.right > 0 && b.left < innerWidth;
   }
 
-  // The first visible character, scanning node by node.
+  // The first text at the top of the view: hit-test a few points down the
+  // page (cheap), and only if none lands on text, scan node by node.
   function place() {
     var idx = index();
     if (!idx.text.length) return null;
+    var xs = [innerWidth / 2, innerWidth / 4, (innerWidth * 3) / 4, 24];
+    for (var y = 2; y < innerHeight / 2; y += 12) {
+      for (var k = 0; k < xs.length; k++) {
+        var c = caret(xs[k], y);
+        if (!c || !c.node || c.node.nodeType !== 3 || !idx.starts.has(c.node)) continue;
+        // A node that begins inside the view counts from its start (a point
+        // right of a short heading resolves to the heading's end).
+        var nr = document.createRange();
+        nr.selectNodeContents(c.node);
+        var off = nr.getBoundingClientRect().top >= -4 ? 0 : c.offset;
+        var at = idx.starts.get(c.node) + c.node.data.slice(0, off).replace(/\s+/g, "").length;
+        if (at < idx.text.length) return { snippet: idx.text.slice(at, at + 40), frac: at / idx.text.length };
+      }
+    }
     var r = document.createRange(), last = null;
     for (var i = 0; i < idx.nodes.length; i++) {
       var nd = idx.nodes[i];
@@ -199,6 +223,11 @@ const BRIDGE_JS = String.raw`(function () {
  * The artifact with the bridge appended. Appended, not prepended: a script
  * ahead of `<!doctype html>` would drop the page into quirks mode. Content
  * after `</html>` is parsed into the body, which is where it should run.
+ *
+ * Known gap: an artifact whose markup ends inside an unclosed `<script>`,
+ * `<!--`, `<textarea>` or `<plaintext>` swallows the bridge as text. Nothing
+ * breaks — the viewer never hears `cn-ready`, so that preview simply gets no
+ * highlights and no place-keeping.
  */
 export function injectArtifactBridge(html: string): string {
   return `${html}\n<script data-cn-bridge>${BRIDGE_JS}</script>\n`;

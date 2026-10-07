@@ -76,6 +76,15 @@ const testRun = [
     enabled: true,
     independent: true, // Arranges its own nest, reviews and requests
   },
+  {
+    // Annotations keep your place + highlights in every view (CN-ANNO-001 …
+    // CN-ANNO-004). Serial: the cases share one seeded nest. Skips itself on
+    // a server that doesn't serve the viewer bridge yet.
+    file: 'annotations/annotate_keep_place.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest, artifact, doc and comments
+  },
   // ── Add new suites here (governance, documents, …) ────────────────────────
   // ── Teardown (always runs last, even on failure) ───────────────────────────
   {

@@ -279,6 +279,9 @@ function scrollBox(el: Element | null): HTMLElement | null {
  * `restoreElsewhere` gets the place instead, and the caller feeds the place
  * from that surface into the returned ref itself.
  */
+/** How long after a switch the place stays pinned through reflows. */
+const SETTLE_MS = 600;
+
 export function useKeepPlace(opts: {
   surfaceKey: string;
   /** Changing it forgets the place (another document). */
@@ -327,12 +330,15 @@ export function useKeepPlace(opts: {
     const place = placeRef.current;
     if (!place) return;
     let raf = 0;
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    let resize: ResizeObserver | null = null;
     const deadline = performance.now() + 3000;
     const done = () => {
       // Let the scroll this restore caused pass before capturing again.
-      setTimeout(() => {
+      settle = setTimeout(() => {
+        resize?.disconnect();
         restoringRef.current = false;
-      }, 250);
+      }, SETTLE_MS);
     };
     const attempt = () => {
       const el = getSurface.current();
@@ -343,13 +349,23 @@ export function useKeepPlace(opts: {
       }
       // The new surface may mount its text late (TipTap, a lazy viewer).
       const last = performance.now() > deadline;
-      if (restorePlace(el, place, last) || last) done();
-      else raf = requestAnimationFrame(attempt);
+      if (restorePlace(el, place, last) || last) {
+        // The page often reflows right after a switch (a side rail opens,
+        // narrowing the text; images load) — keep the place pinned while
+        // it settles.
+        if (typeof ResizeObserver !== "undefined") {
+          resize = new ResizeObserver(() => restorePlace(el, place, true));
+          resize.observe(el);
+        }
+        done();
+      } else raf = requestAnimationFrame(attempt);
     };
     restoringRef.current = true;
     attempt();
     return () => {
       cancelAnimationFrame(raf);
+      clearTimeout(settle);
+      resize?.disconnect();
       restoringRef.current = false;
     };
   }, [opts.surfaceKey]);
