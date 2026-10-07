@@ -528,7 +528,8 @@ governanceRoutes.post("/deletion-requests/:id/withdraw", async (c) => {
   return c.json({ withdrawn: true, request });
 });
 
-// GET /nests/:nestId/feed?filter=all|changes|comments&limit=&offset=
+// GET /nests/:nestId/feed?filter=all|changes|comments&limit=&offset=&resolved=include
+// Comment activity on resolved threads is left out unless resolved=include.
 // Activity feed: pending change submissions (the same rows the review queue
 // shows, every field intact) interleaved with annotation activity (new
 // comment threads + replies), newest first. ADDITIVE sibling of
@@ -561,6 +562,7 @@ governanceRoutes.get("/feed", async (c) => {
     filter,
     limit,
     offset,
+    includeResolved: c.req.query("resolved") === "include",
   });
   return c.json({ ...result, filter, limit, offset });
 });

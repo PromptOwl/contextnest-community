@@ -104,6 +104,10 @@ export async function getNestFeed(params: {
   filter?: FeedFilter;
   limit?: number;
   offset?: number;
+  /** Include activity on RESOLVED threads. Off by default: a resolved thread
+   *  is done, and the feed reads as an inbox — resolving is how a comment
+   *  leaves it. Item shape is unchanged either way (`resolved` stays). */
+  includeResolved?: boolean;
 }): Promise<NestFeed> {
   const db = getDb();
   const filter = params.filter ?? "all";
@@ -196,13 +200,14 @@ export async function getNestFeed(params: {
     if (accessible.length > 0) {
       const placeholders = accessible.map(() => "?").join(",");
       const ids = accessible.map((n) => n.id);
+      const statusClause = params.includeResolved ? "" : " AND t.status = 'open'";
       commentsTotal = Number(
         (
           (await db.get(
             `SELECT COUNT(*) AS c
                FROM annotation_comments c
                JOIN annotation_threads t ON t.id = c.thread_id
-              WHERE t.nest_id = ? AND t.node_id IN (${placeholders})`,
+              WHERE t.nest_id = ? AND t.node_id IN (${placeholders})${statusClause}`,
             [params.nestId, ...ids],
           )) as { c: number | string }
         ).c,
@@ -219,7 +224,7 @@ export async function getNestFeed(params: {
                   ) THEN 0 ELSE 1 END AS is_reply
              FROM annotation_comments c
              JOIN annotation_threads t ON t.id = c.thread_id
-            WHERE t.nest_id = ? AND t.node_id IN (${placeholders})
+            WHERE t.nest_id = ? AND t.node_id IN (${placeholders})${statusClause}
             ORDER BY c.created_at DESC, c.id DESC
             LIMIT ?`,
           [params.nestId, ...ids, fetchWindow],

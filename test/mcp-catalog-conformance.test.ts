@@ -188,8 +188,7 @@ const CASES: Case[] = [
     args: { query: "deal" },
     catalog: "context_search",
     // No `score`: this is a term-containment filter, not a ranked search, and
-    // the catalog makes score optional. `count` is in the catalog since
-    // engine 2.10 (PromptOwl/ContextNest#103).
+    // the catalog makes score optional. `count` conforms since engine 2.10.0.
   },
   {
     tool: "context_query",
