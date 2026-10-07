@@ -130,13 +130,19 @@ export async function stubMyWork(page, respond) {
 export async function stubNotifications(page, notifications) {
   let current = notifications;
   await page.route(onMyWork, async (route) => {
-    const response = await route.fetch();
-    const body = await response.json().catch(() => emptyWork());
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ ...body, notifications: current }),
-    });
+    // A page.reload() aborts the in-flight read ("Request context disposed");
+    // the reloaded page asks again, so the dropped one can simply be let go.
+    try {
+      const response = await route.fetch();
+      const body = await response.json().catch(() => emptyWork());
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...body, notifications: current }),
+      });
+    } catch {
+      /* request gone with the page it belonged to */
+    }
   });
   return (next) => {
     current = next;

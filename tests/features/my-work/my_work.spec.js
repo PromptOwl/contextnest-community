@@ -50,6 +50,15 @@ const secondaryRole = samples.secondary_user ?? null;
 const NEEDS_SECOND_ACCOUNT =
   'secondary_user is not configured — My Work rows are raised by a second account. See tests/env.template.';
 
+/**
+ * How long a decision may take to land. On nest-dev an approve, reject or
+ * delete commits to the vault and answers in 5–11s (a bulk approve of two took
+ * 11s), well past the 5s expect default; locally it is well under a second.
+ * Only the first check after a write waits this long — once it has landed,
+ * the rest read settled state.
+ */
+const WRITE = { timeout: 30_000 };
+
 // ── Shared helpers ─────────────────────────────────────────────────────────
 
 /** Name suffix that marks this suite's shared nest in the entity registry. */
@@ -556,7 +565,7 @@ test.describe('My Work', () => {
       await expect(myWork.reviewNote).toHaveValue('');
       await myWork.approveConfirm.click();
 
-      await expect(myWork.approveDialog).toHaveCount(0);
+      await expect(myWork.approveDialog).toHaveCount(0, WRITE);
       await expect(myWork.workRow(plain.title)).toHaveCount(0);
       expect((await api.latestReview(nest.id, plain.id)).status).toBe('approved');
 
@@ -565,7 +574,7 @@ test.describe('My Work', () => {
       await myWork.reviewNote.fill(note);
       await myWork.approveConfirm.click();
 
-      await expect(myWork.approveDialog).toHaveCount(0);
+      await expect(myWork.approveDialog).toHaveCount(0, WRITE);
       await expect(myWork.workRow(noted.title)).toHaveCount(0);
       const verdict = await api.latestReview(nest.id, noted.id);
       expect(verdict.status).toBe('approved');
@@ -609,7 +618,7 @@ test.describe('My Work', () => {
       await myWork.reviewNote.fill(feedback);
       await myWork.rejectConfirm.click();
 
-      await expect(myWork.rejectDialog).toHaveCount(0);
+      await expect(myWork.rejectDialog).toHaveCount(0, WRITE);
       await expect(myWork.workRow(doc.title)).toHaveCount(0);
       const verdict = await api.latestReview(nest.id, doc.id);
       expect(verdict.status).toBe('rejected');
@@ -700,7 +709,7 @@ test.describe('My Work', () => {
       await expect(myWork.reasonConfirm).toHaveText('Delete document');
       await myWork.reasonConfirm.click();
 
-      await expect(deleteDialog).toHaveCount(0);
+      await expect(deleteDialog).toHaveCount(0, WRITE);
       await expect(myWork.workRow(honoured)).toHaveCount(0);
       expect((await api.getNode(nest.id, toDelete.doc.id)).status).toBe(404);
 
@@ -722,7 +731,7 @@ test.describe('My Work', () => {
       await expect(myWork.reasonConfirm).toBeEnabled();
       await myWork.reasonConfirm.click();
 
-      await expect(rejectDialog).toHaveCount(0);
+      await expect(rejectDialog).toHaveCount(0, WRITE);
       await expect(myWork.workRow(refused)).toHaveCount(0);
       expect((await api.getNode(nest.id, toKeep.doc.id)).status).toBe(200);
       const declined = (await api.deletionRequests(nest.id, 'declined')).find(
@@ -949,7 +958,7 @@ test.describe('My Work', () => {
       await myWork.reasonConfirm.click();
 
       const success = myWork.toast('2 documents approved');
-      await expect(success).toBeVisible();
+      await expect(success).toBeVisible(WRITE);
       await expect(success).toHaveAttribute('data-type', 'success');
       await expect(approveDialog).toHaveCount(0);
       await expect(myWork.workRow(approveA.title)).toHaveCount(0);
@@ -977,7 +986,7 @@ test.describe('My Work', () => {
       await myWork.reasonConfirm.click();
 
       const warning = myWork.toast('1 rejected, 1 could not be');
-      await expect(warning).toBeVisible();
+      await expect(warning).toBeVisible(WRITE);
       await expect(warning).toContainText('No pending review for this node');
       await expect(warning).toHaveAttribute('data-type', 'warning');
 
@@ -1022,7 +1031,7 @@ test.describe('My Work', () => {
 
       await myWork.waitingWithdraw(doc.title).click();
 
-      await expect(myWork.toast('Submission withdrawn — back to Draft')).toBeVisible();
+      await expect(myWork.toast('Submission withdrawn — back to Draft')).toBeVisible(WRITE);
       await expect(myWork.waitingRow(doc.title)).toHaveCount(0);
       await expect(myWork.page).toHaveURL(/\/my-work$/);
       // Back with its author as a draft — not deleted, not still pending.
@@ -1140,7 +1149,7 @@ test.describe('My Work', () => {
       await myWork.reasonInput.fill(note);
       await myWork.reasonConfirm.click();
 
-      await expect(rejectDialog).toHaveCount(0);
+      await expect(rejectDialog).toHaveCount(0, WRITE);
       await expect(myWork.workRow(refusedReason)).toHaveCount(0);
       const declined = (await api.deletionRequests(nest.id, 'declined')).find(
         (r) => r.id === refused.id
@@ -1166,7 +1175,7 @@ test.describe('My Work', () => {
       await expect(myWork.reasonConfirm).toHaveText('Archive nest');
       await myWork.reasonConfirm.click();
 
-      await expect(archiveDialog).toHaveCount(0);
+      await expect(archiveDialog).toHaveCount(0, WRITE);
       await expect(myWork.workRow(honouredReason)).toHaveCount(0);
       // Archived, not deleted: gone from the live list, present in the archive.
       expect((await api.listNests()).some((n) => n.id === nest.id)).toBe(false);
