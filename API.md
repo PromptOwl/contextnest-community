@@ -739,7 +739,7 @@ Someone who can **see** a document, folder or nest but not change it can ask for
 }
 ```
 - `target.type` is `node` for a document's own write routes (`PATCH`/`DELETE /nodes/:id`, `…/revert`, `…/move`, `…/discard`, `…/watchers`), and `nest` for creating, uploading and every other nest-level write — creating needs nest write, which a folder share doesn't give.
-- `access_request` is the caller's latest request for that target when it is `pending` (say "Request pending", don't offer a second ask) or `denied` (carries `resolved_by` and `resolution_note`). Absent otherwise.
+- `access_request` is the caller's latest request for that target when it is `pending` (say "Request pending", don't offer a second ask) or `denied` (carries `resolved_by`, `resolution_note`, and `can_ask_again_at` — ISO, while the hour a denial holds is still running, else `null`). Absent otherwise.
 - Not sent to signed-out readers or headless access keys, and not on admin-tier refusals (visibility, roles). A nest the caller can't see is still `404` with no hint.
 
 The UI turns that body into a "Request edit access?" prompt over whatever the person was doing, so an unsaved edit stays put; viewers also get a **Request edit access** button on documents and on the nest page.
@@ -750,7 +750,7 @@ The UI turns that body into a "Request edit access?" prompt over whatever the pe
 ```
 - `target_type` ∈ `node` / `folder` / `nest`; `target_id` is the node id, a folder path (`gtm/deals`, normalized like `nodes/gtm/deals/`), or ignored for `nest`. `level` defaults to `write`.
 - `201 { request, created: true }`; asking again while one is pending → `200 { request, created: false }` with that request.
-- `404` when the caller can't see the target, `400` when they already hold that access, the nest is archived, or they aren't signed in, `429` within an hour of a denial for the same target (so a denied person can't re-file on every refused save).
+- `404` when the caller can't see the target, `400` when they already hold that access, the nest is archived, or they aren't signed in, `429` within an hour of a denial for the same target (so a denied person can't re-file on every refused save), or when the caller already has 10 requests pending in the nest.
 - Read tier: a viewer, and someone reaching the nest only through a share grant, may call it.
 - Notifies the owner and nest admins: inbox row (`access_requested`), email, nest channels.
 
@@ -758,7 +758,7 @@ The UI turns that body into a "Request edit access?" prompt over whatever the pe
 `{ requests: [...], can_decide }`. Deciders see the nest's queue; anyone else sees only their own requests. Each row: `id, nest_id, requester_id, requested_by, target_type, target_id, level, note, status, created_at, resolved_by, resolved_at, resolution_note, title`.
 
 ### GET `/nests/:nestId/access-requests/mine?target_type=&target_id=`
-`{ request }` — the caller's latest request for one target, any status, or `null`.
+`{ request }` — the caller's latest request for one target, any status (with `can_ask_again_at`), or `null`.
 
 ### POST `/nests/:nestId/access-requests/:id/approve` · `/deny`
 Body `{ "note"?: "…" }`. Owner / nest admin / server admin only (`403` otherwise). The decision is claimed atomically first, so an approve and a deny racing can't both act; an approval then grants, and a grant the plan refuses (`402`) puts the request back to pending. Approving on an archived nest is `400` (deny still works). `404` when the request isn't pending in this nest. The requester gets an inbox row (`access_approved` / `access_denied`) and an email.

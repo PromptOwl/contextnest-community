@@ -31,6 +31,8 @@ export interface AccessRequest {
   resolved_by: string | null;
   resolved_at: string | null;
   resolution_note: string | null;
+  /** Denied recently: when asking again is allowed (ISO), else null. */
+  can_ask_again_at?: string | null;
   title?: string;
 }
 
@@ -43,7 +45,13 @@ export interface AccessOffer {
   /** The latest pending / denied request, if the refusal carried one. */
   request?: Pick<
     AccessRequest,
-    "id" | "status" | "created_at" | "resolved_by" | "resolved_at" | "resolution_note"
+    | "id"
+    | "status"
+    | "created_at"
+    | "resolved_by"
+    | "resolved_at"
+    | "resolution_note"
+    | "can_ask_again_at"
   > | null;
   /** Human label, when the opener knows it (the document title). */
   label?: string;
@@ -91,4 +99,14 @@ export function describeAccessTarget(target: AccessTarget, label?: string): stri
   if (target.type === "nest") return label ? `the nest "${label}"` : "this nest";
   if (target.type === "folder") return `the folder "${label ?? target.id}"`;
   return label ? `"${label}"` : "this document";
+}
+
+/** A denial still inside its cooldown: the time asking opens again, else null. */
+export function askAgainAt(
+  request: Pick<AccessRequest, "status" | "can_ask_again_at"> | null | undefined,
+  now = Date.now(),
+): Date | null {
+  if (request?.status !== "denied" || !request.can_ask_again_at) return null;
+  const at = new Date(request.can_ask_again_at);
+  return Number.isFinite(at.getTime()) && at.getTime() > now ? at : null;
 }

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   accessOfferFromError,
+  askAgainAt,
   describeAccessTarget,
   nestIdFromApiPath,
 } from "./access-requests";
@@ -51,5 +52,17 @@ describe("helpers", () => {
     expect(describeAccessTarget({ type: "node", id: "nodes/x" }, "Pricing")).toBe('"Pricing"');
     expect(describeAccessTarget({ type: "nest", id: "n" })).toBe("this nest");
     expect(describeAccessTarget({ type: "folder", id: "gtm" })).toBe('the folder "gtm"');
+  });
+});
+
+describe("askAgainAt", () => {
+  const now = Date.parse("2026-10-07T12:00:00Z");
+  it("is the reopening time while a denial's cooldown runs, else null", () => {
+    expect(askAgainAt({ status: "denied", can_ask_again_at: "2026-10-07T12:30:00Z" }, now)?.toISOString()).toBe(
+      "2026-10-07T12:30:00.000Z",
+    );
+    expect(askAgainAt({ status: "denied", can_ask_again_at: "2026-10-07T11:00:00Z" }, now)).toBeNull();
+    expect(askAgainAt({ status: "denied", can_ask_again_at: null }, now)).toBeNull();
+    expect(askAgainAt({ status: "pending", can_ask_again_at: "2026-10-07T12:30:00Z" }, now)).toBeNull();
   });
 });

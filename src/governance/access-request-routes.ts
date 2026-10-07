@@ -21,6 +21,7 @@ import { ValidationError } from "../shared/errors.js";
 import { resolveCallerEmail } from "./access-guard.js";
 import {
   accessTargetTitle,
+  canAskAgainAt,
   canDecideAccessRequests,
   createAccessRequest,
   decideAccessRequest,
@@ -63,7 +64,9 @@ accessRequestRoutes.get("/access-requests/mine", async (c) => {
     c.req.query("target_id"),
   );
   const request = await latestAccessRequest(nestId, c.get("userId"), target);
-  return c.json({ request });
+  return c.json({
+    request: request ? { ...request, can_ask_again_at: canAskAgainAt(request) } : null,
+  });
 });
 
 accessRequestRoutes.get("/access-requests", async (c) => {

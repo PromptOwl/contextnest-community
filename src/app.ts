@@ -1886,9 +1886,13 @@ export function createApp(): Hono<AuthEnv> {
     // Access requests (CU-wdqcq041jn) are a third item type: someone asked to
     // edit something they can only read. node_id is the document for a node
     // target, else the folder path / nest id — target_type says which.
+    // Capped (500, newest first), not paginated: a person can have at most
+    // MAX_PENDING_PER_NEST waiting per nest, so the pending set stays small;
+    // the count below reflects what is shown.
     const accessAsks = await listAccessRequests({
       nestIds: [...nestName.keys()],
       status: "pending",
+      limit: 500,
     });
     const toAccessItem = (r: (typeof accessAsks)[number]) => ({
       type: "access" as const,

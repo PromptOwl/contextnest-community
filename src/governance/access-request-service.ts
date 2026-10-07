@@ -87,6 +87,20 @@ const MAX_NOTE = 2000;
  *  target again. */
 export const ASK_AGAIN_AFTER_MS = 60 * 60 * 1000;
 
+/** How many requests one person may have pending in one nest at a time. */
+export const MAX_PENDING_PER_NEST = 10;
+
+/**
+ * When a denied request may be asked again (ISO), or null when it already
+ * may — so a client can say "ask again after …" instead of offering a button
+ * that 429s. Display only: createAccessRequest decides in SQL.
+ */
+export function canAskAgainAt(r: Pick<AccessRequest, "status" | "resolved_at">): string | null {
+  if (r.status !== "denied" || !r.resolved_at) return null;
+  const at = parseSqlTime(r.resolved_at) + ASK_AGAIN_AFTER_MS;
+  return Number.isFinite(at) && at > Date.now() ? new Date(at).toISOString() : null;
+}
+
 /** A Date as the 'YYYY-MM-DD HH:MM:SS' UTC text nowExpr stores. */
 function sqlTime(d: Date): string {
   return d.toISOString().slice(0, 19).replace("T", " ");
@@ -278,6 +292,7 @@ export async function accessRequestHint(params: {
             resolved_by: latest.resolved_by,
             resolved_at: latest.resolved_at,
             resolution_note: latest.resolution_note,
+            can_ask_again_at: canAskAgainAt(latest),
           },
         }
       : {}),
@@ -335,6 +350,19 @@ export async function createAccessRequest(params: {
     [nestId, requesterId, target.type, target.id],
   );
   if (pending) return { request: rowToRequest(pending), created: false };
+
+  // Dedup is per target, so cap how many different asks one person can have
+  // waiting in a nest: each one emails every admin.
+  const open = (await db.get(
+    "SELECT COUNT(*) AS n FROM access_requests WHERE nest_id = ? AND requester_id = ? AND status = 'pending'",
+    [nestId, requesterId],
+  )) as { n: number | string };
+  if (Number(open.n) >= MAX_PENDING_PER_NEST) {
+    throw new AppError(
+      429,
+      `You already have ${MAX_PENDING_PER_NEST} access requests waiting in this nest. Wait for an answer, or ask for the folder or the whole nest instead.`,
+    );
+  }
 
   // A "no" holds for a while: without this, someone denied could re-file on
   // every refused save and fill the admins' inboxes and email with the same ask.
@@ -550,12 +578,20 @@ export async function decideAccessRequest(params: {
     try {
       await grantRequested(pending, params.decidedById, params.decidedByEmail, params.baseUrl);
     } catch (err) {
-      await db.run(
-        `UPDATE access_requests
-            SET status = 'pending', resolved_by = NULL, resolved_at = NULL, resolution_note = NULL
-          WHERE id = ? AND status = 'approved'`,
-        [params.id],
-      );
+      try {
+        await db.run(
+          `UPDATE access_requests
+              SET status = 'pending', resolved_by = NULL, resolved_at = NULL, resolution_note = NULL
+            WHERE id = ? AND status = 'approved'`,
+          [params.id],
+        );
+      } catch {
+        // The requester asked again while this claim was out (nothing was
+        // pending, so the new ask was accepted), and the one-pending index
+        // refuses a second. The newer ask carries the request; drop this
+        // claimed row so nothing reads 'approved' with no grant behind it.
+        await db.run("DELETE FROM access_requests WHERE id = ? AND status = 'approved'", [params.id]);
+      }
       throw err;
     }
   }

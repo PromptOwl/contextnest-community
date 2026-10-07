@@ -68,6 +68,7 @@ Add a row here whenever you add a `data-testid` to the UI.
 | `document-editor-request-access` | Document top bar: "Request edit access" for a viewer — `ui/src/components/DocumentEditor.tsx` |
 | `nest-request-access` | Nest header: "Request edit access" for a viewer — `ui/src/components/NestView.tsx` |
 | `request-access-pending` | Dialog shown when the caller's request is already pending |
+| `request-access-denied` | Dialog shown inside the hour after a denial: who, why, when asking reopens |
 | `request-access-loading` | Dialog while the caller's latest request is looked up |
 
 Many more test IDs already exist across `ui/src/` (governance dialogs,

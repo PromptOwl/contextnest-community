@@ -28,6 +28,7 @@ import { ReasonDialog } from "@/components/governance/ReasonDialog";
 import * as api from "@/lib/api";
 import {
   ACCESS_OFFER_EVENT,
+  askAgainAt,
   describeAccessTarget,
   type AccessOffer,
 } from "@/lib/access-requests";
@@ -96,6 +97,28 @@ export function RequestAccessDialog({
   }
 
   const denied = latest?.status === "denied" ? latest : null;
+  // A fresh "no" holds for a while (the server answers 429 inside it), so say
+  // when asking opens again instead of offering a button that would refuse.
+  const reopensAt = askAgainAt(denied);
+  if (denied && reopensAt) {
+    return (
+      <Dialog open onOpenChange={(o) => !o && onClose()}>
+        <DialogContent className="sm:max-w-[440px]" data-testid="request-access-denied">
+          <DialogHeader>
+            <DialogTitle>Edit access was denied</DialogTitle>
+            <DialogDescription>
+              {denied.resolved_by ?? "A nest admin"} denied your request for {what}
+              {denied.resolution_note ? `: “${denied.resolution_note}”` : "."} You can ask again
+              after {reopensAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button onClick={onClose}>OK</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
   return (
     <ReasonDialog
       open

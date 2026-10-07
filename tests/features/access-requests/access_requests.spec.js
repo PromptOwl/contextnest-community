@@ -127,7 +127,7 @@ test.describe('Request access on a denied write', () => {
     await expect(viewer.getByText(/published|saved as a draft/)).toBeVisible(WRITE);
   });
 
-  test('CN-ACCESS-003 a denied nest request shows who said no and why, with the option to ask again', async ({
+  test('CN-ACCESS-003 a denied nest request shows who said no, why, and when they can ask again', async ({
     primary_user,
     secondary_user,
   }) => {
@@ -155,10 +155,13 @@ test.describe('Request access on a denied write', () => {
     await owner.getByTestId('reason-dialog-confirm').click();
     await expect(deny).toHaveCount(0, WRITE);
 
+    // Inside the hour a denial holds, the viewer sees who said no, why, and
+    // when they can ask again — not a button the server would refuse.
     await viewer.reload();
     await viewer.getByTestId('nest-request-access').click();
-    await expect(viewer.getByTestId('reason-dialog-prior-decline')).toContainText(why, WRITE);
-    await expect(viewer.getByTestId('reason-dialog-confirm')).toBeEnabled();
+    const denied = viewer.getByTestId('request-access-denied');
+    await expect(denied).toContainText(why, WRITE);
+    await expect(denied).toContainText('ask again');
   });
 
   test('CN-ACCESS-004 a save refused mid-edit offers the request and keeps the edit', async ({

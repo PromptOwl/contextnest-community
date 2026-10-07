@@ -343,6 +343,9 @@ describe("request access on a denied write", () => {
       status: "denied",
       resolution_note: "Roadmap is locked this week",
     });
+    // …and when asking opens again, so the client can say so instead of
+    // offering a button that 429s.
+    expect(Date.parse(denied.data.access_request.can_ask_again_at)).toBeGreaterThan(Date.now());
 
     const readerInbox = await jsonRequest(app, "GET", "/me/work", undefined, reader.apiKey);
     expect(
@@ -595,6 +598,72 @@ describe("request access on a denied write", () => {
     expect(create.data.target).toEqual({ type: "nest", id: nestId });
   });
 
+  it("caps how many different asks one person can have waiting in a nest", async () => {
+    await resetAuthRateLimit();
+    const busy = await registerUser(app, "busy-viewer@acme.com", "Busy Viewer");
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "busy-viewer@acme.com", permission: "read" },
+      owner.apiKey,
+    );
+    const ids: string[] = [];
+    for (let i = 0; i < 11; i++) {
+      const { data } = await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes`,
+        { title: `Cap Doc ${i}`, content: "x", folder: "cap" },
+        owner.apiKey,
+      );
+      ids.push(data.node.id);
+    }
+    for (const id of ids.slice(0, 10)) {
+      const r = await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/access-requests`,
+        { target_type: "node", target_id: id },
+        busy.apiKey,
+      );
+      expect(r.status).toBe(201);
+    }
+    const eleventh = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/access-requests`,
+      { target_type: "node", target_id: ids[10] },
+      busy.apiKey,
+    );
+    expect(eleventh.status).toBe(429);
+    expect(eleventh.data.error).toMatch(/10 access requests waiting/);
+    // Clear them so the inbox assertions elsewhere aren't swamped.
+    await (await db()).run("DELETE FROM access_requests WHERE requested_by = 'busy-viewer@acme.com'");
+  });
+
+  it("a document write share doesn't make its holder a reviewer of that document", async () => {
+    // reader holds a write share on docId (approved above). Approving a
+    // review stays a steward's / owner's call, whatever the share says.
+    const submitted = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${docId}/submit-review`,
+      {},
+      owner.apiKey,
+    );
+    expect(submitted.status).toBeLessThan(300);
+    const approve = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${docId}/approve`,
+      {},
+      reader.apiKey,
+    );
+    expect(approve.status).toBe(403);
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${docId}/cancel-review`, {}, owner.apiKey);
+  });
+
   it("approving a folder request opens every document under it", async () => {
     const ask = await jsonRequest(
       app,
@@ -744,6 +813,20 @@ describe("writeTargetForPath", () => {
     expect(writeTargetForPath(n, [n, "nodes", "nodes", "deal", "watchers"], "DELETE")).toEqual({
       type: "node",
       id: "nodes/deal",
+    });
+  });
+  it("reads a trailing action word the way the router does", () => {
+    // POST …/nodes/gtm/move IS the move route for nodes/gtm — the router
+    // matches /:nodeId{.+}/move first — so naming nodes/gtm agrees with what
+    // the request actually does. PATCH has no suffix routes, so a document
+    // named "move" in a folder is named whole there.
+    expect(writeTargetForPath(n, [n, "nodes", "nodes", "gtm", "move"], "POST")).toEqual({
+      type: "node",
+      id: "nodes/gtm",
+    });
+    expect(writeTargetForPath(n, [n, "nodes", "nodes", "gtm", "move"], "PATCH")).toEqual({
+      type: "node",
+      id: "nodes/gtm/move",
     });
   });
   it("keeps a document whose slug looks like an action", () => {
