@@ -59,7 +59,12 @@ const isLive = (node: ContextNode) => node.frontmatter.status !== "rejected";
 function withDiscoveryCache<S extends NestStorage>(
   nestId: string,
   storage: S,
-): { storage: S; invalidate: () => void; desync: () => void } {
+): {
+  storage: S;
+  invalidate: () => void;
+  desync: () => void;
+  cachedDocument: (id: string) => ContextNode | null;
+} {
   const entries = new Map<string, { docs: ContextNode[]; ts: number }>();
   // The crawl in flight, if any. Cross-nest search fans out over every nest at
   // once and the palette fires a query per keystroke, so without this the same
@@ -270,7 +275,10 @@ function withDiscoveryCache<S extends NestStorage>(
   // rebuild of the DB mirror uses — it needs a fresh crawl but must not mark
   // the nest stale again, or it would undo the stamp it is about to write.
   // `desync` is for callers who mean "disk may have moved under us".
-  return { storage, invalidate, desync: () => void desync() };
+  /** The cached copy of one document, or null — never crawls or refreshes. */
+  const cachedDocument = (id: string): ContextNode | null =>
+    (entries.get("all") ?? entries.get("live"))?.docs.find((d) => d.id === id) ?? null;
+  return { storage, invalidate, desync: () => void desync(), cachedDocument };
 }
 
 type HistoryMap = Awaited<ReturnType<NestStorage["findAllHistories"]>>;
@@ -389,6 +397,12 @@ interface NestEngine {
    * rebuild is about to write.
    */
   dropDiscoveryCache: () => void;
+  /**
+   * This nest's cached copy of a document, without any I/O, or null. Only
+   * current for a document THIS process just wrote (writes fold in on the
+   * spot); another instance's write stays invisible until the cache expires.
+   */
+  cachedDocument: (id: string) => ContextNode | null;
 }
 
 class NestEngineCache {
@@ -400,7 +414,7 @@ class NestEngineCache {
       const nestPath = resolveNestPath(nestId);
       // Imported nests discover markdown anywhere in the copied folder;
       // default nests keep the engine's structured (nodes/) layout.
-      const { storage, invalidate, desync } = withDiscoveryCache(
+      const { storage, invalidate, desync, cachedDocument } = withDiscoveryCache(
         nestId,
         (await isImportedNest(nestId))
           ? new FlatNestStorage(nestPath)
@@ -419,6 +433,7 @@ class NestEngineCache {
           desync();
         },
         dropDiscoveryCache: invalidate,
+        cachedDocument,
       };
       this.cache.set(nestId, engine);
     }

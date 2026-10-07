@@ -355,7 +355,7 @@ export async function approve(params: {
     // X-Base-Version: N+1, and checkConflict (which reads node_versions)
     // sees the DB stuck at N and 409s on every save.
     try {
-      const { storage } = await engineCache.get(params.nestId);
+      const { storage, cachedDocument } = await engineCache.get(params.nestId);
       const note = params.note || `Approved review request ${pending.id}`;
       // Publish through the engine's canonical operation, so an approval seals
       // its version and checkpoint exactly the way every other surface does —
@@ -366,9 +366,11 @@ export async function approve(params: {
         await opContext(params.nestId, params.approvedBy),
       );
       if (engineVersion !== version) {
-        // The operation reports the version, not the document — re-read for the
-        // body and tags the governance row mirrors.
-        const node = await storage.readDocument(params.nodeId);
+        // The operation reports the version, not the document. The publish just
+        // wrote it through this process, so the cache holds exactly those bytes;
+        // read disk only if the cache has no entry.
+        const node =
+          cachedDocument(params.nodeId) ?? (await storage.readDocument(params.nodeId));
         const tags = (node.frontmatter.tags || []) as string[];
         await versions.createVersion({
           nestId: params.nestId,
