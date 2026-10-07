@@ -75,6 +75,15 @@ import {
   nodesWithSuggestions,
 } from "./node-index.js";
 import { config } from "../config.js";
+import { listNestPeople } from "../nests/people-service.js";
+import {
+  TASK_NODE_TYPE,
+  applyTaskFields,
+  hasTaskFieldsPatch,
+  taskFieldsOf,
+  type TaskFields,
+  type TaskFieldsPatch,
+} from "./task-fields.js";
 
 /** Reverse-lookup the auth userId from a registered email. Anonymous email → ANON. */
 async function userIdFromEmail(email: string): Promise<string> {
@@ -363,7 +372,7 @@ export function bodyOnly(nodeId: string, raw: string): string {
   }
 }
 
-export interface NodeResponse {
+export interface NodeResponse extends TaskFields {
   id: string;
   title: string;
   type: string;
@@ -412,6 +421,13 @@ export const ACCEPTED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
   "artifact",
   "table",
   "pdf",
+  // Board work item (see task-fields.ts). Only once the engine knows the type:
+  // the engine validates frontmatter.type against its own NODE_TYPES on every
+  // write, so offering it ahead of that engine would turn every task create
+  // into a 500. Board fields themselves work on any type regardless.
+  ...((NODE_TYPES as readonly string[]).includes(TASK_NODE_TYPE)
+    ? [TASK_NODE_TYPE]
+    : []),
 ]);
 
 /** A pdf node's body is the text extracted from its binary (engine §1.11). */
@@ -540,6 +556,7 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
         : undefined,
     prime: documentPrimeFlag(fm.metadata),
     ...(fm.type === "pdf" && fm.pdf ? { pdf: fm.pdf } : {}),
+    ...taskFieldsOf(fm.metadata),
   };
 }
 
@@ -1323,7 +1340,7 @@ export async function listNodesForCallerByEmail(
   });
 }
 
-export interface CreateNodeInput {
+export interface CreateNodeInput extends TaskFieldsPatch {
   title: string;
   content: string;
   type?: string;
@@ -1354,7 +1371,7 @@ export interface CreateNodeInput {
   pdf?: PdfUpload;
 }
 
-export interface UpdateNodePatch {
+export interface UpdateNodePatch extends TaskFieldsPatch {
   content?: string;
   append?: string;
   tags?: string[];
@@ -1474,7 +1491,7 @@ async function assertMayFlagPrime(
 async function autoPublishReason(
   nestId: string,
   userEmail: string,
-  doc: { tags?: readonly unknown[]; metadata?: unknown },
+  doc: { tags?: readonly unknown[]; metadata?: unknown; type?: string },
   opts: { creatorReviews?: boolean; governed?: boolean } = {},
 ): Promise<string | null> {
   // Ungoverned nest: nothing to review, nobody to review it. A caller that
@@ -1482,6 +1499,10 @@ async function autoPublishReason(
   const governed = opts.governed ?? (await isStewardshipEnabled(nestId));
   if (!governed) return "no stewards configured";
   if (await isPrimeDocument(nestId, doc.tags, doc.metadata)) return null;
+  // Board work moves column many times a day; gating every drag behind a
+  // reviewer would make a project board unusable. Prime still wins (above):
+  // a steward who flags a task prime has asked for review on purpose.
+  if (doc.type === TASK_NODE_TYPE) return "task — board work skips review";
   // Creator-reviews (a create, in a nest with the posture on): the author is
   // this document's reviewer, so v1 is theirs to publish. Only v1 — every
   // later edit, theirs included, is a change to a reviewed document and goes
@@ -1494,6 +1515,36 @@ async function autoPublishReason(
   return (await actorAutoPublishes(nestId, userEmail))
     ? "owner/admin self-approve"
     : null;
+}
+
+/** Roster / parent lookups applyTaskFields needs, bound to one nest. */
+function taskFieldsContext(
+  nestId: string,
+  storage: NestStorage,
+  nodeId: string | null,
+) {
+  return {
+    nodeId,
+    now: new Date().toISOString(),
+    roster: async () =>
+      new Set((await listNestPeople(nestId)).map((p) => p.email.toLowerCase())),
+    nodeExists: async (id: string) => {
+      try {
+        await storage.readDocument(id);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    parentOf: async (id: string) => {
+      try {
+        const n = await storage.readDocument(id);
+        return taskFieldsOf(n.frontmatter.metadata).parent ?? null;
+      } catch {
+        return null;
+      }
+    },
+  };
 }
 
 /**
@@ -1635,12 +1686,21 @@ async function createNodeOnce(
     }
 
     if (input.prime !== undefined) await assertMayFlagPrime(nestId, userEmail);
-    const metadata = {
+    const metadata: Record<string, unknown> = {
       owners: ["*"],
       scope: input.scope || "team",
       ...(input.schedule ? { schedule: input.schedule } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
     };
+    if (hasTaskFieldsPatch(input)) {
+      const { metadata: withFields } = await applyTaskFields(
+        metadata,
+        input,
+        taskFieldsContext(nestId, storage, null),
+      );
+      // Nulls on a create mean "not set" — nothing to clear yet.
+      Object.assign(metadata, withFields);
+    }
     // Creator-reviews: steward the author BEFORE deciding to publish, since v1
     // publishes on the strength of that row. A failure here fails the create
     // with nothing written — never a document published on a false premise.
@@ -1665,7 +1725,7 @@ async function createNodeOnce(
       const publishReason = await autoPublishReason(
         nestId,
         userEmail,
-        { tags, metadata },
+        { tags, metadata, type: input.type },
         { creatorReviews: creatorSteward?.canApprove === true, governed },
       );
       // Same note in the engine history and the governance row: the version
@@ -2147,6 +2207,8 @@ export async function updateNode(
       // Kept for the mention fan-out at the end: only names this save ADDS
       // notify, so the same @name surviving many saves is one event.
       const previousBody = node.body || "";
+      // For the board's moved_at stamp: a tag change is a column change.
+      const priorTags = [...((node.frontmatter.tags || []) as string[])];
 
       // Assemble the op's input alongside a local projection of the patched
       // node. The projection is what governance reads (auto-publish gate, tag
@@ -2258,6 +2320,34 @@ export async function updateNode(
         node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
         opInput.metadata = { ...(opInput.metadata as object), prime: patch.prime };
       }
+      if (hasTaskFieldsPatch(patch)) {
+        const { metadata, opMetadata } = await applyTaskFields(
+          { ...((node.frontmatter.metadata as Record<string, unknown>) ?? {}) },
+          patch,
+          taskFieldsContext(nestId, storage, nodeId),
+        );
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata: metadata as any } };
+        opInput.metadata = { ...(opInput.metadata as object), ...opMetadata };
+      }
+      // A task whose tag set changed moved column on a board. Compared as
+      // sets: the editor resends the same tags on every save, which isn't a
+      // move.
+      if (patch.tags && node.frontmatter.type === TASK_NODE_TYPE) {
+        const norm = (t: unknown) => String(t).toLowerCase().replace(/^#/, "");
+        const before = new Set(priorTags.map(norm));
+        const after = ((node.frontmatter.tags || []) as string[]).map(norm);
+        if (before.size !== after.length || after.some((t) => !before.has(t))) {
+          const movedAt = new Date().toISOString();
+          node = {
+            ...node,
+            frontmatter: {
+              ...node.frontmatter,
+              metadata: { ...(node.frontmatter.metadata as any), moved_at: movedAt },
+            },
+          };
+          opInput.metadata = { ...(opInput.metadata as object), moved_at: movedAt };
+        }
+      }
 
       const hasStewards = await isStewardshipEnabled(nestId);
       const currentTags = (node.frontmatter.tags || []) as string[];
@@ -2267,6 +2357,9 @@ export async function updateNode(
       const publishReason = await autoPublishReason(nestId, userEmail, {
         tags: currentTags,
         metadata: node.frontmatter.metadata,
+        // A task only if it is one before AND after this edit: converting a
+        // document into a task, or a task into anything else, is reviewed.
+        type: patch.type === undefined || patch.type === storedType ? storedType : undefined,
       });
 
       // Stewardship lock: a node with an open review request is frozen for

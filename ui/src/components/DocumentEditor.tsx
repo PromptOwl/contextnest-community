@@ -63,6 +63,7 @@ import {
   Zap,
   Wrench,
   Table2,
+  ListTodo,
   Pencil,
   Users,
   Share2,
@@ -247,7 +248,7 @@ export function DocumentEditor({
   const isNew = nodeId === "new";
   // Type picker: one tab stop, arrows between the choices (see the radiogroup).
   const typeRoving = useRovingFocus<HTMLDivElement>();
-  const { adminStatus, isAdmin, workflowPlaneEnabled, typeArtifactEnabled, typeTableEnabled } = useAuth();
+  const { adminStatus, isAdmin, workflowPlaneEnabled, typeArtifactEnabled, typeTableEnabled, typeTaskEnabled } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   // Inline sharing from the document view — "add folks to a context where
   // you're reading it" instead of bouncing back to the nest. Same dialog
@@ -943,6 +944,9 @@ export function DocumentEditor({
       ...(typeTableEnabled
         ? [{ value: "table", label: "Table", Icon: Table2, expects: "CSV — one header row, then data rows." }]
         : []),
+      ...(typeTaskEnabled
+        ? [{ value: "task", label: "Task", Icon: ListTodo, expects: "Markdown notes for a unit of work. Tasks skip review and carry an assignee, due date and priority on the board." }]
+        : []),
       ...(workflowPlaneEnabled
         ? [
           { value: "agent", label: "Agent", Icon: Bot, expects: "Markdown instructions an orchestrator runs; can carry a schedule." },
@@ -952,7 +956,7 @@ export function DocumentEditor({
         : []),
     ];
     return all.filter((o) => o.value !== (nodeType ?? "document"));
-  }, [typeArtifactEnabled, typeTableEnabled, workflowPlaneEnabled, nodeType]);
+  }, [typeArtifactEnabled, typeTableEnabled, typeTaskEnabled, workflowPlaneEnabled, nodeType]);
   const handleTurnInto = async () => {
     if (!turnInto || isNew) return;
     setTurningInto(true);
@@ -1725,6 +1729,9 @@ export function DocumentEditor({
     creatorIsReviewer: !!nestSettings.data?.creator_is_reviewer,
     allowSelfApprove,
     ownerOrAdmin: canFlagPrime,
+    // The stored type — mirrors the server, which gates on the type a node
+    // had before the edit, so turning a document into a task still reviews.
+    isTask: nodeType === "task",
   });
 
   // Submit saves unsaved edits first, so offer it only where that save drafts —
@@ -2993,6 +3000,14 @@ export function DocumentEditor({
                                   {
                                     value: "table", label: "Table", Icon: Table2,
                                     on: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-300"
+                                  },
+                                ]
+                                : []),
+                              ...(typeTaskEnabled
+                                ? [
+                                  {
+                                    value: "task", label: "Task", Icon: ListTodo,
+                                    on: "bg-indigo-500/15 text-indigo-700 dark:text-indigo-300"
                                   },
                                 ]
                                 : []),

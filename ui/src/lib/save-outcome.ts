@@ -19,11 +19,14 @@ export function saveOutcome(s: {
   allowSelfApprove: boolean;
   /** Nest owner or admin — the roles self-approve applies to. */
   ownerOrAdmin: boolean;
+  /** A `task` node (before this edit): board work skips review. */
+  isTask?: boolean;
 }): SaveOutcome {
   if (s.isOwnPendingReview) return "pending";
   if (!s.stewardshipEnabled) return "publish";
   // Prime is checked before every bypass: a prime document always needs review.
   if (s.prime) return "draft";
+  if (s.isTask) return "publish";
   if (s.isNew && s.creatorIsReviewer) return "publish";
   if (s.primeOnlyReview) return "publish";
   return s.allowSelfApprove && s.ownerOrAdmin ? "publish" : "draft";
