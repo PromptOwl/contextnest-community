@@ -256,7 +256,7 @@ export function MetacognitionPanel({ nestId, canConfigure }: { nestId: string; c
                   )}
                   <Badge variant="secondary" className="text-[10px] shrink-0" title="Where it may read / propose">
                     reads {a.scope.read.length ? a.scope.read.join(", ") : "everything"} · proposes in{" "}
-                    {a.scope.propose.length ? a.scope.propose.join(", ") : a.scope.read.length ? "nothing" : "anything"}
+                    {a.scope.propose[0] === "*" ? "what it reads" : a.scope.propose.length ? a.scope.propose.join(", ") : "nothing (proposals off)"}
                   </Badge>
                   <div className="flex-1" />
                   <Button
@@ -384,7 +384,7 @@ export function MetacognitionPanel({ nestId, canConfigure }: { nestId: string; c
               <Input value={draft.read} onChange={text("read")} placeholder="gtm, ops" data-testid="metacognition-read" />
             </div>
             <div className="space-y-1">
-              <Label>Proposes in (must be inside what it reads)</Label>
+              <Label>Proposes in (inside what it reads; * = anywhere it reads; empty = no proposals)</Label>
               <Input value={draft.propose} onChange={text("propose")} placeholder="gtm" data-testid="metacognition-propose" />
             </div>
           </div>
@@ -412,13 +412,13 @@ export function MetacognitionPanel({ nestId, canConfigure }: { nestId: string; c
           </div>
           <div className="space-y-1">
             <Label>
-              MCP servers — one per line: name https-url allowed,tools [ENV_KEY for a bearer token]
+              MCP servers — one per line: name https-url allowed,tools [MCP_… env name holding a bearer token]
             </Label>
             <Textarea
               rows={2}
               value={draft.mcp}
               onChange={text("mcp")}
-              placeholder="desk https://mcp.example.com/mcp search_tickets,get_ticket DESK_TOKEN"
+              placeholder="desk https://mcp.example.com/mcp search_tickets,get_ticket MCP_DESK_TOKEN"
             />
             <p className="text-[11px] text-muted-foreground">
               Only the tools you list can be called. What feeds and MCP tools return is treated as untrusted data,

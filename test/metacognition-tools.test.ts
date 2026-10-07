@@ -5,7 +5,9 @@
  * a persona's `.invalid` address.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { parseConfig, inFolders, CAPS } from "../src/metacognition/config.js";
+import http from "node:http";
+import { parseConfig, inFolders, mayProposeIn, CAPS } from "../src/metacognition/config.js";
+import { guardedFetch, readCapped, isPrivateAddress, OutboundBlockedError, OutboundTooLargeError } from "../src/metacognition/net.js";
 import { setMcpConnector, McpPool, type McpConnection } from "../src/metacognition/mcp-client.js";
 import { runTool, toolsFor, type ToolContext } from "../src/metacognition/tools.js";
 import { deliverableRecipients } from "../src/notify/email.js";
@@ -30,6 +32,26 @@ describe("parseConfig", () => {
   it("refuses a propose folder outside the read folders", () => {
     expect(() => parseConfig({ ...base, scope: { read: ["gtm"], propose: ["ops"] } })).toThrow(/outside scope.read/);
     expect(parseConfig({ ...base, scope: { read: ["gtm"], propose: ["gtm/deals"] } }).scope.propose).toEqual(["gtm/deals"]);
+  });
+
+  it("proposals: empty = nowhere, * = anywhere it reads, folders = there", () => {
+    const off = parseConfig({ ...base, scope: { read: ["gtm"] } }).scope;
+    expect(mayProposeIn("nodes/gtm/a", off)).toBe(false);
+    const wholeNestOff = parseConfig(base).scope;
+    expect(mayProposeIn("nodes/a", wholeNestOff)).toBe(false);
+    const star = parseConfig({ ...base, scope: { read: ["gtm"], propose: ["*"] } }).scope;
+    expect(mayProposeIn("nodes/gtm/a", star)).toBe(true);
+    expect(mayProposeIn("nodes/ops/a", star)).toBe(false);
+    expect(() => parseConfig({ ...base, scope: { propose: ["*", "gtm"] } })).toThrow();
+  });
+
+  it("an MCP bearer token must come from an MCP_ env value", () => {
+    const m = (auth_env: string) => ({
+      ...base,
+      mcp_servers: [{ name: "d", url: "https://mcp.example.com/mcp", allowed_tools: ["t"], auth_env }],
+    });
+    expect(() => parseConfig(m("ANTHROPIC_API_KEY"))).toThrow(/MCP_/);
+    expect(parseConfig(m("MCP_DESK_TOKEN")).mcp_servers[0].auth_env).toBe("MCP_DESK_TOKEN");
   });
 
   it("requires a persona name", () => {
@@ -105,5 +127,65 @@ describe("mail to service identities", () => {
   it("drops .invalid addresses and keeps real ones", () => {
     expect(deliverableRecipients("persona-1@agents.invalid")).toEqual([]);
     expect(deliverableRecipients(["a@acme.com", "x@headless.invalid", ""])).toEqual(["a@acme.com"]);
+  });
+});
+
+describe("outbound requests (net.ts)", () => {
+  afterEach(() => {
+    delete process.env.METACOGNITION_ALLOW_PRIVATE_URLS;
+  });
+
+  it("knows private addresses, IPv4-mapped included", () => {
+    for (const a of ["127.0.0.1", "10.1.2.3", "169.254.169.254", "::1", "::ffff:127.0.0.1", "100.64.0.1", "fd00::1"]) {
+      expect(isPrivateAddress(a), a).toBe(true);
+    }
+    expect(isPrivateAddress("93.184.216.34")).toBe(false);
+  });
+
+  it("refuses a public-looking name that resolves to a private address, without connecting", async () => {
+    const fetchIt = guardedFetch({
+      maxBytes: 1000,
+      timeoutMs: 2000,
+      resolver: async () => [{ address: "169.254.169.254", family: 4 }],
+    });
+    await expect(fetchIt("https://totally-public.example.com/feed")).rejects.toBeInstanceOf(OutboundBlockedError);
+  });
+
+  it("refuses plain http unless the dev switch is on", async () => {
+    const fetchIt = guardedFetch({ maxBytes: 1000, timeoutMs: 2000 });
+    await expect(fetchIt("http://example.com/")).rejects.toBeInstanceOf(OutboundBlockedError);
+  });
+
+  it("stops reading a response past the size cap, and doesn't follow redirects", async () => {
+    process.env.METACOGNITION_ALLOW_PRIVATE_URLS = "true"; // a local server, for the test
+    const server = http.createServer((req, res) => {
+      if (req.url === "/redirect") {
+        res.writeHead(302, { location: "http://169.254.169.254/" });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/plain" });
+      const chunk = "x".repeat(64 * 1024);
+      let n = 0;
+      const pump = () => {
+        while (n < 100 && res.write(chunk)) n++;
+        if (n < 100) res.once("drain", pump);
+        else res.end();
+      };
+      pump();
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as any).port;
+    try {
+      const fetchIt = guardedFetch({ maxBytes: 100_000, timeoutMs: 5000 });
+      const big = await fetchIt(`http://127.0.0.1:${port}/big`);
+      await expect(readCapped(big, 50_000)).rejects.toBeInstanceOf(OutboundTooLargeError);
+      const capped = await fetchIt(`http://127.0.0.1:${port}/big`);
+      await expect(capped.text()).rejects.toBeTruthy(); // the transport cap (100k) tears it down too
+      const redirect = await fetchIt(`http://127.0.0.1:${port}/redirect`);
+      expect(redirect.status).toBe(302);
+    } finally {
+      server.close();
+    }
   });
 });

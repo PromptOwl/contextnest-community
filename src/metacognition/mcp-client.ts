@@ -5,14 +5,15 @@
  * One connection per server per run, opened on first use and closed when the
  * run ends. Every URL passes the SSRF fence again at connect time (the config
  * was checked when saved, but a config can outlive a policy change), and the
- * transport's fetch refuses redirects so a public URL can't bounce the server
- * onto a private address.
+ * transport's fetch is net.ts's guarded one: the resolved address is checked
+ * at connect time, responses are capped, redirects aren't followed.
  *
  * `setMcpConnector` is the seam tests use to stand in for a real server.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { urlAllowed, type McpServerConfig } from "./config.js";
+import { guardedFetch } from "./net.js";
 
 export interface McpTool {
   name: string;
@@ -31,12 +32,16 @@ export type McpConnector = (server: McpServerConfig, token: string | null) => Pr
 const TIMEOUT_MS = 30_000;
 /** Cap on the text one tool call hands back to the model. */
 export const MAX_RESULT_CHARS = 20_000;
+/** Cap on any one HTTP response from an MCP server, before parsing. */
+const MAX_RESPONSE_BYTES = 2_000_000;
 
 const realConnector: McpConnector = async (server, token) => {
   if (!urlAllowed(server.url)) throw new Error(`MCP server "${server.name}" has a URL this server may not call`);
   const transport = new StreamableHTTPClientTransport(new URL(server.url), {
     requestInit: token ? { headers: { Authorization: `Bearer ${token}` } } : undefined,
-    fetch: (input, init) => fetch(input, { ...init, redirect: "error" }),
+    // Address checked at connect time (no DNS rebinding), body capped, no
+    // redirects — see net.ts.
+    fetch: guardedFetch({ maxBytes: MAX_RESPONSE_BYTES, timeoutMs: TIMEOUT_MS }) as any,
   });
   const client = new Client({ name: "contextnest-metacognition", version: "1.0.0" });
   await client.connect(transport, { timeout: TIMEOUT_MS });

@@ -44,6 +44,9 @@ export async function waitForMetacognitionRuns(): Promise<void> {
   await Promise.allSettled([...inFlight]);
 }
 
+/** Tool calls run per model turn; the rest are answered "not run". */
+const TOOL_CALLS_PER_TURN = 8;
+
 /** Per-turn output ceiling; the run's token cap bounds the total. */
 const TURN_MAX_TOKENS = 16_000;
 
@@ -282,7 +285,20 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
       }
 
       const results: Anthropic.ToolResultBlockParam[] = [];
-      for (const block of content.filter((b) => b.type === "tool_use")) {
+      const uses = content.filter((b) => b.type === "tool_use");
+      for (const [i, block] of uses.entries()) {
+        // Every call is answered (the API requires a result per tool_use),
+        // but only the first few in one turn run: a turn that fans out a
+        // hundred calls is not a plan, and each one costs a step.
+        if (i >= TOOL_CALLS_PER_TURN) {
+          results.push({
+            type: "tool_result",
+            tool_use_id: String(block.id),
+            content: `Not run: at most ${TOOL_CALLS_PER_TURN} tool calls per turn.`,
+            is_error: true,
+          });
+          continue;
+        }
         const input = block.input && typeof block.input === "object" ? (block.input as Record<string, unknown>) : {};
         let outcome;
         try {
@@ -344,11 +360,12 @@ function scopeLine(list: string[], none: string): string {
 
 function systemPrompt(agent: MetacognitionAgent, instructions: string): string {
   const c = agent.config;
-  const proposeScope = c.scope.propose.length
-    ? scopeLine(c.scope.propose, "")
-    : c.scope.read.length
-      ? "nowhere (proposals are off)"
-      : "anywhere you can read";
+  const proposeScope =
+    c.scope.propose[0] === "*"
+      ? "anywhere you can read"
+      : c.scope.propose.length
+        ? scopeLine(c.scope.propose, "")
+        : "nowhere (proposals are off; comment instead)";
   return [
     `You are ${agent.persona.name}, a metacognition agent that lives inside a ContextNest knowledge base. Your job is to keep it current and correct: find what is stale, contradictory, duplicated or missing, and propose fixes. You also reflect on your own past runs and on how people judged your proposals, and you adjust.`,
     "",

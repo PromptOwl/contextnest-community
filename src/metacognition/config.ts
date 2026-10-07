@@ -30,7 +30,8 @@ export interface McpServerConfig {
 export interface MetacognitionConfig {
   persona: { name: string; avatar: string | null };
   /** Folders (under nodes/) the persona may read, and propose changes in.
-   *  An empty list means the whole nest. propose ⊆ read is enforced. */
+   *  read: empty = the whole nest. propose: empty = nowhere, ["*"] = wherever
+   *  it may read; named folders must sit inside read. */
   scope: { read: string[]; propose: string[] };
   caps: {
     /** Model turns per run. */
@@ -120,10 +121,15 @@ export function parseConfig(input: unknown): MetacognitionConfig {
       : str(persona.avatar, "persona.avatar", 500);
 
   const read = folders(b.scope?.read, "scope.read");
-  const propose = folders(b.scope?.propose, "scope.propose");
+  // "*" = anywhere it may read. Empty = proposals off: an agent that may
+  // change things has to be told where, never get it by default.
+  const proposeIn = Array.isArray(b.scope?.propose) ? b.scope.propose : b.scope?.propose;
+  const anywhere = Array.isArray(proposeIn) && proposeIn.some((p: unknown) => p === "*");
+  if (anywhere && proposeIn.length > 1) throw new ValidationError('scope.propose: "*" stands alone');
+  const propose = anywhere ? ["*"] : folders(proposeIn, "scope.propose");
   // A folder the persona may propose in must be one it may read: proposing
   // blind is how an agent overwrites what it never saw.
-  if (read.length) {
+  if (read.length && !anywhere) {
     for (const p of propose) {
       if (!read.some((r) => p === r || p.startsWith(`${r}/`))) {
         throw new ValidationError(`scope.propose "${p}" is outside scope.read`);
@@ -155,6 +161,12 @@ export function parseConfig(input: unknown): MetacognitionConfig {
       m?.auth_env === undefined || m?.auth_env === null || m?.auth_env === ""
         ? undefined
         : str(m.auth_env, `mcp_servers[${i}].auth_env`, 100);
+    // Only env values named for this purpose can be sent out as a bearer
+    // token: an agent config must not be able to ship the nest's model key or
+    // a connector secret to a URL of its choosing.
+    if (auth_env && !/^MCP_[A-Z0-9_]{1,60}$/.test(auth_env)) {
+      throw new ValidationError(`mcp_servers[${i}].auth_env must be an env name starting MCP_ (e.g. MCP_DESK_TOKEN)`);
+    }
     return {
       name: n,
       url: url(m?.url, `mcp_servers[${i}].url`),
@@ -187,6 +199,17 @@ export function parseConfig(input: unknown): MetacognitionConfig {
             return m;
           })(),
   };
+}
+
+/**
+ * May the agent propose at this node id? Empty `propose` = nowhere; ["*"] =
+ * anywhere inside its read scope; otherwise inside the named folders (which
+ * the config already holds inside `read`).
+ */
+export function mayProposeIn(nodeId: string, scope: { read: string[]; propose: string[] }): boolean {
+  if (!scope.propose.length) return false;
+  if (scope.propose[0] === "*") return inFolders(nodeId, scope.read);
+  return inFolders(nodeId, scope.propose);
 }
 
 /** Is this node id inside one of these folders? Empty list = everywhere. */

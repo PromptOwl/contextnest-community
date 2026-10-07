@@ -95,8 +95,10 @@ external runners. The boundary moves only as far as it has to:
   agent's persona (a service identity), never published. Comments are
   comments. Nothing approves, publishes, deletes or changes permissions.
 - **Untrusted inputs fenced.** Feeds (configured list only), MCP results
-  (configured servers, allow-listed tools only) and trigger inputs reach the
-  model marked as outside data. URLs pass the same SSRF fence as connectors.
+  (configured servers, allow-listed tools only), trigger inputs and even the
+  nest's own document text reach the model fenced as data. Outbound requests
+  check the resolved address at connect time (no private addresses, no DNS
+  rebinding), follow no redirects, and cap response size.
 - **Bounded.** Caps on turns, tokens, wall-clock seconds and proposals per
   run, one run per agent at a time, the plane's per-nest concurrency cap.
 - **Observable.** Every reasoning step and tool call is a run step; the run's
