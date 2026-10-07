@@ -39,7 +39,7 @@ Today nothing enforces any of this:
 **Non-Goals**
 
 - **Auto-naming or renaming.** Naming is **validate-only**: the server never changes a name the caller gave.
-- A rename operation. That is a separate follow-up; see §11.
+- A rename operation. That is a separate follow-up; see §12.
 - Per-role bypass of the rules, or review-gated rule changes.
 - Any engine logic in the UI. The UI calls APIs for every check.
 
@@ -193,7 +193,7 @@ input:  { folder?: string, report?: boolean }
 output: { enforce, closed,
           folders:    [{ pattern, types, folder_name, file_name, template, required, files }],
           templates:  { <name>: { body, required_sections } },
-          resolved?:  { …the rule governing `folder`, with its template body… },   // when folder is given
+          resolved?:  { …the rule governing `folder`, with its template body… } | null,   // when folder is given
           violations?: [{ code, path, rule, message }] }                        // when report: true
 ```
 
@@ -245,13 +245,13 @@ Per the sync discipline, all of this lands in the engine repo first and ships in
 
 - **Security fix.** `context_import`'s `files[]` refuses paths under `.context/`. Today `overwrite: true` lets any caller rewrite `config.yaml`, which means the structure rules *and* the review gate.
 
-- **Skip flag.** A new `OperationContext.structure?: "skip"`. It is set only by trusted binding code for system writers (see §6) and is never read from operation input.
+- **Skip flag.** A new `OperationContext.structure?: "skip"`. It is set only by trusted binding code for system writers (see §6) and is never read from operation input. Under it the rules are not enforced, and `context_import` may land `.context/` files: that is how a bundle restore brings the source nest's `config.yaml`, rules included.
 
 - **New op and CLI.** Add `context_structure` in `api/core.ts`, the `ctx structure` command in `cli/src/index.ts`, and `remoteStructure` in `cli/src/remote.ts`.
 
 - **Plugin.** The changes are listed in §4.
 
-- **Spec.** Add §11.1 paragraphs for `structure`, `folders` patterns and formats, `templates`, and required and scaffolded structure. Add a §17 changelog line.
+- **Spec.** Add a §11.1.1 subsection with paragraphs for `structure`, `folders` patterns and formats, `templates`, and required and scaffolded structure. Add a §17 changelog line.
 
 - **Mixed versions.** An older engine strips the unknown keys, so there the rules are advisory. Release notes must say so.
 
@@ -279,7 +279,7 @@ Per the sync discipline, all of this lands in the engine repo first and ships in
   - On the server it calls the engine's exported `compileStructure` and `checkCreate`, and Community's own `slugify` for `slug`. The UI therefore shows exactly what the server will enforce.
 
 - **Write paths that don't go through an engine op** call the engine's exported checker and scaffolder directly:
-  - `moveNode` (`src/nodes/service.ts:2571`) checks the destination and scaffolds any new folder. The move keeps the file's leaf, so a non-conforming name cannot move into a folder with a name rule until a rename op exists (§11).
+  - `moveNode` (`src/nodes/service.ts:2571`) checks the destination and scaffolds any new folder. The move keeps the file's leaf, so a non-conforming name cannot move into a folder with a name rule until a rename op exists (§12).
   - `createEmptyFolder` (:1078) checks the folder and scaffolds its required children.
   - `deleteFolder` (:2972) passes the skip flag for its own children, so the required-file guard does not block deleting the whole folder.
 
@@ -398,7 +398,7 @@ clients/{client}/meetings
 
 ## 9. Phases
 
-1. **Engine (upstream PR, minor release):** schema, `structure.ts`, `setStructure`, enforcement and scaffolding in the executors, the `.context/` import fix, the `context_structure` op, `ctx structure`, the plugin changes, and the spec text.
+1. **Engine (upstream PR, minor release):** schema, `structure.ts`, `setStructure`, enforcement and scaffolding in the executors, the `.context/` import fix, the `context_structure` op, `ctx structure`, the plugin changes, and the spec text. *Implemented test-first on `PromptOwl/ContextNest` branch `claude/context-nest-hard-rules-design-yhcj6z` (§10).*
 2. **Community API and enforcement:** engine bump, the three REST routes, the MCP tool, `moveNode`/`createEmptyFolder`/`deleteFolder` checks, the skip flag, and the error mapping.
 3. **Community UI:** the Structure page (Blueprint, Templates and Compliance tabs) and the create-flow integration.
 
@@ -407,14 +407,69 @@ Each phase is shippable on its own:
 - After phase 2, Community nests enforce rules set via the API.
 - Phase 3 adds the owner-facing editor.
 
-## 10. Risks and limitations
+## 10. Test plan (TDD) and QA
+
+Every phase is built **test-first**:
+
+1. Write the failing tests for the phase (red), run them, and confirm they fail for the right reason, such as a missing module or the wrong behaviour.
+2. Implement until they pass (green), and keep every existing suite green.
+3. Hand the phase to the **QA agent** (`.claude/agents/qa-adversary.md`, in both repos). It only **runs** the suites and **attacks** the change. It never edits code. It reports blocking findings with exact repros and ends with a `PASS` or `BLOCKED` verdict.
+4. Each blocking finding is fixed test-first: a failing test that reproduces it, then the fix. QA runs again until the verdict is `PASS`.
+
+### 10.1 Engine phase (ContextNest) — done
+
+| Suite | Kind | What it pins |
+|---|---|---|
+| `packages/engine/src/__tests__/structure-rules.test.ts` | unit | Compiling: tokens, regex safety (nested and alternating repetition, lookaround, backreferences, quantifier budget, length) and config errors naming the key. Paths and exemptions; closed vs open structure; implied ancestors; folder-name formats; literal-beats-placeholder precedence (including integer-like keys); types; file names; required sections (levels, case, CRLF, prose, code fences); grandfathering on update; delete guards; scaffold plans; audit; resolve and describe; `enforceStructure`. |
+| `packages/engine/src/__tests__/structure-rules-ops.test.ts` | unit, through `createEngineApi` | Each write op refused with nothing written: create (folder, name, explicit id, sections, type, placeholder, held for review), update grandfathering, delete of a required file, import `files[]` and `documents[]`, import_pdf. Also: scaffolding (and no re-scaffold), report-only and absent rules, a bad rule refusing writes with `CONFIG_ERROR` while reads still work, the skip flag (and that it is unreachable from input), the `.context/` import refusal (path tricks included), the `context_structure` output, and `setStructure` (keeps other bytes, comments and CRLF; refuses invalid rules without writing; removes the blocks). |
+| `packages/cli/src/__tests__/structure.regression.test.ts` | regression, built `ctx` | `ctx structure` (`--json`, `--folder`, `--report`, human output); `ctx add` refusals and template pre-fill; scaffolding; `ctx delete` guard; `CONFIG_ERROR`; `--json` parity between local and remote over the built MCP server; enforcement through a remote nest. |
+| `packages/mcp-server/src/__tests__/mcp-server.regression.test.ts` (structure block) | regression, built MCP server | `context_structure` in the tool list; catalog `context_create` refusals; the deprecated `create_document` / `update_document` cannot bypass the rules; `context_import` cannot rewrite `.context/config.yaml`. |
+| `plugins/__tests__/core.unit.test.ts` (session-start, structure rules) | unit, fake `exec` | Blueprint only for the pinned or working-directory vault; silent when there are no rules or `ctx` is older; capped output. |
+| `packages/cli/src/__tests__/remote-capabilities.test.ts` (remoteAdd, structure template) | unit, fake remote | Template pre-fill only when the nest advertises `context_structure`; an explicit body wins. |
+
+### 10.2 Community API phase — tests to write first
+
+- `test/structure-routes.test.ts`, using `setupTestEnv` / `createTestApp` / `registerUser`:
+  - `GET /nests/:id/structure` for every role;
+  - `PUT` allowed only for owners and admins (`canManageStewards`), and refused for editors, reviewers, viewers and nest-scoped keys;
+  - an invalid rule is refused with 400 naming the key, and nothing is written;
+  - the activity-log entry is recorded;
+  - `POST /structure/check`: saved rules at read tier, draft rules at manage tier only, field errors, per-test results, and `slug` matching Community's `slugify`.
+- `test/structure-enforcement.test.ts`:
+  - REST create, update and delete are refused with **400** (never 500), and bulk publish reports the refusal per row;
+  - `moveNode` into a disallowed folder or name format;
+  - `createEmptyFolder` refused, and scaffolding on success;
+  - `deleteFolder` removes a folder that holds required files;
+  - a held agent write (push confirmation) is refused when confirmed;
+  - the annotations projection and import staging (nest import, bundle restore, folder sync) pass with the skip flag, and the bundle's `.context/config.yaml` lands.
+- MCP: `context_structure` on the per-nest and server-level endpoints. Refusals carry their code in `structuredContent`. `npm run lint:mcp-schemas` stays green, since there is no inline schema.
+
+### 10.3 Community UI phase — tests to write first
+
+- Playwright (`tests/`):
+  - an owner builds a rule on the Structure page, a field error comes from the check API, and the rule saves;
+  - an editor's new document is pre-filled from the template and gets a live format hint and a refusal message;
+  - the new-folder dialog previews the scaffold;
+  - the Compliance tab lists grandfathered content and "Create from template" works;
+  - viewers see the page read-only.
+- `pages.test.ts` / `nest-pages` invariants cover the new page's `meta.ts`.
+
+### 10.4 Regression gate
+
+Before any push, both repos run their full suites:
+- ContextNest: `pnpm lint`, `pnpm test`, `pnpm test:regression`, `pnpm plugins:check`.
+- Community: `npm run typecheck`, `npm test`, `npm run lint:mcp-schemas`, and `npm run test:playwright` when the UI changed.
+
+Then the QA agent repeats the run independently and attacks the change.
+
+## 11. Risks and limitations
 
 - **Mixed engine versions.** An engine older than phase 1 strips the new keys, and `ctx init` re-init rewrites the config. On such a version, rules are advisory only.
 - **On-disk edits.** Files added straight to disk, outside every write surface, cannot be refused. They show up in the compliance report.
 - **No rename.** A document whose leaf doesn't fit a destination's `file_name` cannot be moved there yet. The workaround is to create a conforming document and delete the old one, which loses its history; a rename op fixes this.
 - **Config history.** `config.yaml` is not versioned by the engine. Rule changes are audited in Community's activity log only.
 
-## 11. Out of scope / later
+## 12. Out of scope / later
 
 - A rename operation, so that a move can fix a non-conforming name.
 - Auto-naming (the server filling `{date}` or `{n}`).

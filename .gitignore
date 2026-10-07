@@ -4,7 +4,8 @@ node_modules/
 coverage/
 .env
 ui/node_modules/
-.claude/
+.claude/*
+!.claude/agents/
 # Playwright e2e
 tests/.env/
 tests/test-results/
