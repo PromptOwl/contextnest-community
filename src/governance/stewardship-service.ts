@@ -933,6 +933,8 @@ export async function canUserApprove(
   nestId: string,
   nodeId: string,
   userEmail: string,
+  /** The latest pending review's requester, when the caller already loaded it. */
+  opts: { requestedBy?: string } = {},
 ): Promise<PermissionResult> {
   const roles = await resolveUserRoles(nestId, userEmail, { nodeId });
   const allowSelf = await nestAllowsSelfApprove(nestId);
@@ -941,6 +943,7 @@ export async function canUserApprove(
   // that when a teammate submits someone else's earlier edit, the original
   // author can still approve.
   const actor =
+    opts.requestedBy ??
     (await getPendingReviewRequester(nestId, nodeId)) ??
     (await getCurrentVersionAuthor(nestId, nodeId));
   return decideApproval(roles, userEmail, allowSelf, actor);

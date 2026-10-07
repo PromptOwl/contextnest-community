@@ -113,4 +113,25 @@ describe("canUserApproveMany", () => {
       db.all = realAll;
     }
   });
+
+  it("canUserApprove skips the requester query when the caller passes it", async () => {
+    const realGet = db.get;
+    let requesterQueries = 0;
+    db.get = (sql: string, ...rest: any[]) => {
+      if (/SELECT requested_by FROM review_requests/.test(sql)) requesterQueries++;
+      return realGet.call(db, sql, ...rest);
+    };
+    try {
+      const looked = await svc.canUserApprove(nestId, "nodes/a", "nestrev@acme.com");
+      expect(requesterQueries).toBe(1);
+      requesterQueries = 0;
+      const passed = await svc.canUserApprove(nestId, "nodes/a", "nestrev@acme.com", {
+        requestedBy: "docrev@acme.com",
+      });
+      expect(requesterQueries).toBe(0);
+      expect(passed).toEqual(looked);
+    } finally {
+      db.get = realGet;
+    }
+  });
 });

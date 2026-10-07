@@ -302,6 +302,7 @@ export async function approve(params: {
         params.nestId,
         params.nodeId,
         params.approvedBy,
+        { requestedBy: pending.requested_by },
       );
       if (!check.allowed) {
         throw new Error(check.reason);
@@ -484,6 +485,7 @@ export async function reject(params: {
       params.nestId,
       params.nodeId,
       params.rejectedBy,
+      { requestedBy: pending.requested_by },
     );
     if (!check.allowed) {
       throw new Error(check.reason);
@@ -585,6 +587,7 @@ export async function cancelReview(params: {
         params.nestId,
         params.nodeId,
         params.cancelledBy,
+        { requestedBy: pending.requested_by },
       );
       if (!verdict.allowed) {
         throw new Error(
