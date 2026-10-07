@@ -987,7 +987,7 @@ export async function deletionTargetTitle(
 /** Emails of the people who can action a deletion: the nest owner plus
  *  owner/admin collaborators. Mirrors the UI's `canManage` — the tier that
  *  sees the Delete affordance is the tier that gets told about a request. */
-async function nestAdminEmails(nestId: string): Promise<string[]> {
+export async function nestAdminEmails(nestId: string): Promise<string[]> {
   const db = getDb();
   const rows = (await db.all(
     `SELECT u.email FROM nests n JOIN users u ON u.id = n.user_id WHERE n.id = ?
@@ -1001,7 +1001,7 @@ async function nestAdminEmails(nestId: string): Promise<string[]> {
 
 /** Inbox rows for /me/work. Best-effort by contract, like every other
  *  notification path here — a delivery failure must never fail the action. */
-async function inboxInsert(
+export async function inboxInsert(
   nestId: string,
   recipients: string[],
   kind: string,
@@ -1018,7 +1018,7 @@ async function inboxInsert(
         [uuid(), nestId, email.toLowerCase(), kind, subjectId, message, now],
       );
     } catch (err) {
-      console.error("[notify] deletion inbox insert failed", nestId, email, err);
+      console.error(`[notify] ${kind} inbox insert failed`, nestId, email, err);
     }
   }
 }

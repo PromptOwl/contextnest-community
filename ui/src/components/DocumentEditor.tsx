@@ -146,6 +146,8 @@ import { resolveWikiTarget, previewSnippet, decideWikiLinkAction } from "../lib/
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import { useAuth } from "../auth/AuthContext";
 import type { BreadcrumbEntry } from "../App";
+import { RequestAccessDialog } from "./RequestAccessDialog";
+import type { AccessOffer } from "../lib/access-requests";
 import { Fragment } from "react";
 
 /** HTML if it starts with a tag; else markdown. */
@@ -429,6 +431,8 @@ export function DocumentEditor({
       myStewards.some((s) => s.role === "editor" && s.scope === "nest"));
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDeletionModal, setShowDeletionModal] = useState(false);
+  // "Request edit access" for a viewer (CU-wdqcq041jn) — in place of Edit.
+  const [accessOffer, setAccessOffer] = useState<AccessOffer | null>(null);
   // Latest deletion flag on this doc. Pending hides the request button (a
   // second one would 409); declined stays visible with the note so the person
   // who asked sees the verdict instead of the flag just vanishing.
@@ -1922,6 +1926,9 @@ export function DocumentEditor({
   // behind it is a dead button.
   const moreActionDialogs = (
     <>
+      {accessOffer && (
+        <RequestAccessDialog offer={accessOffer} onClose={() => setAccessOffer(null)} />
+      )}
       {!isNew && (
         <ReasonDialog
           open={showDeletionModal}
@@ -2445,6 +2452,29 @@ export function DocumentEditor({
                 >
                   <Pencil className="h-4 w-4 mr-1.5" />
                   Edit
+                </Button>
+              )}
+              {/* A viewer gets the way to ask instead of no Edit at all. Not on
+                  an archived nest (nobody edits it) or for a signed-out reader
+                  (nobody to grant it to). */}
+              {isViewOnly && !isArchived && !isNew && !isPdfNode && !!adminStatus?.me && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() =>
+                    setAccessOffer({
+                      nestId,
+                      target: { type: "node", id: nodeId },
+                      level: "write",
+                      label: title.trim() || undefined,
+                    })
+                  }
+                  data-testid="document-editor-request-access"
+                  title="Ask the nest owner or an admin for edit access to this document"
+                >
+                  <Pencil className="h-4 w-4 mr-1.5" />
+                  Request edit access
                 </Button>
               )}
             </>

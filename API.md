@@ -721,6 +721,50 @@ Moving a document carries its **document** grants to the new id; deleting it dro
 
 Agent equivalent: the `context_grant` MCP tool takes the same four fields in one call (see §MCP and `/llms.txt`). In the UI: **Share this document** on a document's ⋯ menu, and the share icon on a folder row in the nest view.
 
+### Access requests (when a write is refused)
+
+Someone who can **see** a document, folder or nest but not change it can ask for write access instead of stopping at the refusal. The nest owner, a nest admin or the server admin decides; approving grants through the paths above — a `write` **share grant** on the document or folder, or nest **collaborator** `write` (an existing collaborator row is only ever upgraded). A viewer holding a `write` grant on a document can edit that document's routes (the share counts on top of their nest `read`).
+
+**The refusal.** A write the caller could ask about answers `403` with:
+```json
+{
+  "error": "You don't have edit access here. …",
+  "code": "forbidden",
+  "can_request_access": true,
+  "target": { "type": "node", "id": "nodes/pricing" },
+  "level": "write",
+  "required_permission": "write",
+  "your_permission": "read",
+  "access_request": { "id": "…", "status": "pending", "created_at": "…" }
+}
+```
+- `target.type` is `node` for a document's own write routes (`PATCH`/`DELETE /nodes/:id`, `…/revert`, `…/move`, `…/discard`, `…/watchers`), and `nest` for creating, uploading and every other nest-level write — creating needs nest write, which a folder share doesn't give.
+- `access_request` is the caller's latest request for that target when it is `pending` (say "Request pending", don't offer a second ask) or `denied` (carries `resolved_by` and `resolution_note`). Absent otherwise.
+- Not sent to signed-out readers or headless access keys, and not on admin-tier refusals (visibility, roles). A nest the caller can't see is still `404` with no hint.
+
+The UI turns that body into a "Request edit access?" prompt over whatever the person was doing, so an unsaved edit stays put; viewers also get a **Request edit access** button on documents and on the nest page.
+
+### POST `/nests/:nestId/access-requests`
+```json
+{ "target_type": "node", "target_id": "nodes/pricing", "level": "write", "note": "fixing the Q3 numbers" }
+```
+- `target_type` ∈ `node` / `folder` / `nest`; `target_id` is the node id, a folder path (`gtm/deals`, normalized like `nodes/gtm/deals/`), or ignored for `nest`. `level` defaults to `write`.
+- `201 { request, created: true }`; asking again while one is pending → `200 { request, created: false }` with that request.
+- `404` when the caller can't see the target, `400` when they already hold that access, the nest is archived, or they aren't signed in.
+- Read tier: a viewer, and someone reaching the nest only through a share grant, may call it.
+- Notifies the owner and nest admins: inbox row (`access_requested`), email, nest channels.
+
+### GET `/nests/:nestId/access-requests?status=pending|approved|denied|all`
+`{ requests: [...], can_decide }`. Deciders see the nest's queue; anyone else sees only their own requests. Each row: `id, nest_id, requester_id, requested_by, target_type, target_id, level, note, status, created_at, resolved_by, resolved_at, resolution_note, title`.
+
+### GET `/nests/:nestId/access-requests/mine?target_type=&target_id=`
+`{ request }` — the caller's latest request for one target, any status, or `null`.
+
+### POST `/nests/:nestId/access-requests/:id/approve` · `/deny`
+Body `{ "note"?: "…" }`. Owner / nest admin / server admin only (`403` otherwise). Approve grants first, then marks the request — a grant the plan refuses (`402`) leaves it pending. `404` when the request isn't pending in this nest. The requester gets an inbox row (`access_approved` / `access_denied`) and an email.
+
+Requests also appear in `GET /me/work` as `type: "access"` items (`request_id`, `target_type`, `level`, `reason` = the note): in `items` for whoever can decide them, in `waiting` for the requester. Agent equivalents: `context_request_access`, `context_access_requests`, `context_resolve_access_request`; a refused `context_create` / `context_update` / `context_delete` / `context_move` names `context_request_access` and carries the same `can_request_access` / `target` / `level` fields in its structured result.
+
 ---
 
 ## 3b. Teams (group sharing)

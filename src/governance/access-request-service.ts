@@ -1,0 +1,627 @@
+/**
+ * Access requests (CU-wdqcq041jn) — what a refused write turns into.
+ *
+ * Someone who can SEE a document, a folder or the nest but not change it used
+ * to get a bare 403. Now the refusal says they may ask (see
+ * `accessRequestHint`, attached by the nest middleware and the MCP write
+ * tools), the ask is one row here, and the nest owner/admins decide it from
+ * their inbox. Approving grants through the paths that already exist:
+ *   - a document → a `write` share grant on it (grants-service)
+ *   - a folder   → a `write` share grant on the folder prefix
+ *   - the nest   → nest collaborator at that level (sharing-service), or an
+ *                  upgrade of the row they already hold
+ * so nothing here invents a new kind of permission — revoking is the ordinary
+ * share/collaborator removal.
+ *
+ * Hidden nests stay hidden: asking requires being able to see the target, and
+ * an unseen one answers 404 exactly like a read would.
+ *
+ * Exported for other server features (agent personas file a request instead
+ * of failing): `createAccessRequest`, `accessRequestHint`.
+ */
+import { v4 as uuid } from "uuid";
+import { getDb } from "../db/client.js";
+import type { SqlParam } from "../db/adapter.js";
+import { nowExpr, nowMsExpr } from "../db/sql.js";
+import { config } from "../config.js";
+import { ANON_USER_ID } from "../shared/constants.js";
+import { NotFoundError, ValidationError } from "../shared/errors.js";
+import { assertSafeNodeId } from "../shared/node-id.js";
+import {
+  permissionLevel,
+  resolveNestAccess,
+  type NestPermission,
+} from "../shared/access.js";
+import { engineCache } from "../nodes/engine.js";
+import { isIdUnderFolder } from "../nodes/service.js";
+import { canReadNode, filterAccessible } from "./access-guard.js";
+import { createGrant, resolveNodeGrant } from "./grants-service.js";
+import { canManageStewards, resolveStewardsForNode } from "./stewardship-service.js";
+import { addCollaborator } from "../nests/sharing-service.js";
+import { assertCanGrant, permissionClass } from "../auth/seats.js";
+import { inboxInsert, nestAdminEmails } from "./review-service.js";
+import { markNotificationsReadBySubject } from "./notify-service.js";
+import {
+  buildDocContext,
+  buildTitleMap,
+  nestName,
+  prettyFolderPath,
+  titleForNode,
+} from "./title-resolver.js";
+import { dispatchEvent } from "../notify/dispatch.js";
+import { notifyNestEvent } from "../notify/notify.js";
+import { sendEmailToRecipient } from "../notify/email.js";
+
+export type AccessTargetType = "node" | "folder" | "nest";
+export type AccessLevel = "read" | "write";
+export type AccessRequestStatus = "pending" | "approved" | "denied";
+
+export interface AccessTarget {
+  type: AccessTargetType;
+  /** A node id, a folder path ("gtm/deals"), or the nest id. */
+  id: string;
+}
+
+export interface AccessRequest {
+  id: string;
+  nest_id: string;
+  requester_id: string;
+  requested_by: string;
+  target_type: AccessTargetType;
+  target_id: string;
+  level: AccessLevel;
+  note: string | null;
+  status: AccessRequestStatus;
+  created_at: string;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  resolution_note: string | null;
+  /** Human label: the document title, the folder path, or the nest name. */
+  title?: string;
+}
+
+const TARGET_TYPES: readonly AccessTargetType[] = ["node", "folder", "nest"];
+const LEVELS: readonly AccessLevel[] = ["read", "write"];
+const MAX_NOTE = 2000;
+
+/** Normalize a target the way every caller names it, so "gtm/deals",
+ *  "/gtm/deals/" and "nodes/gtm/deals" land on one pending row. */
+export function normalizeAccessTarget(
+  nestId: string,
+  type: unknown,
+  id: unknown,
+): AccessTarget {
+  if (!TARGET_TYPES.includes(type as AccessTargetType)) {
+    throw new ValidationError('target_type must be "node", "folder" or "nest"');
+  }
+  if (type === "nest") return { type, id: nestId };
+  const raw = typeof id === "string" ? id.trim() : "";
+  if (!raw) throw new ValidationError("target_id is required");
+  if (type === "node") return { type, id: assertSafeNodeId(raw) };
+  const folder = raw.replace(/^\/+|\/+$/g, "").replace(/^nodes\//, "");
+  if (!folder || folder === "nodes") {
+    throw new ValidationError("target_id must name a folder, not the nest root — ask for the nest instead");
+  }
+  for (const seg of folder.split("/")) {
+    if (!seg || seg === "." || seg === "..") throw new ValidationError("invalid folder");
+  }
+  return { type: "folder", id: folder };
+}
+
+/** Human label for a target, for the queue, inbox rows and emails. */
+export async function accessTargetTitle(
+  nestId: string,
+  target: AccessTarget,
+): Promise<string> {
+  if (target.type === "folder") return prettyFolderPath(target.id);
+  if (target.type === "nest") return await nestName(nestId);
+  return await titleForNode(nestId, target.id);
+}
+
+/** Can this caller see the target at all? The 404 line: asking about
+ *  something you can't see must not confirm it exists. */
+async function canSeeTarget(
+  nestId: string,
+  userId: string,
+  userEmail: string,
+  target: AccessTarget,
+): Promise<boolean> {
+  const access = await resolveNestAccess(nestId, userId);
+  if (access.permission === "none" && !access.hasGrant) return false;
+  if (target.type === "nest") return true;
+  const { storage } = await engineCache.get(nestId);
+  const docs = await storage.discoverDocuments();
+  if (target.type === "node") {
+    if (!docs.some((d) => d.id === target.id)) return false;
+    // A grantee with no nest permission reaches only what their shares cover.
+    if (access.permission === "none") {
+      return (await resolveNodeGrant(nestId, userId, target.id)) !== null;
+    }
+    return await canReadNode(nestId, target.id, userId, userEmail);
+  }
+  const inside = docs.filter((d) => isIdUnderFolder(d.id, target.id));
+  if (inside.length === 0) return false;
+  return (await filterAccessible(nestId, userId, userEmail, inside)).length > 0;
+}
+
+/** Does the caller already hold `level` on the target? Then there's nothing
+ *  to ask for, and the request would only clutter an admin's inbox. */
+async function alreadyHolds(
+  nestId: string,
+  userId: string,
+  userEmail: string,
+  target: AccessTarget,
+  level: AccessLevel,
+): Promise<boolean> {
+  if (config.AUTH_MODE === "open") return true;
+  const { permission } = await resolveNestAccess(nestId, userId);
+  if (permissionLevel(permission) >= permissionLevel(level)) return true;
+  if (target.type === "nest") return false;
+  const nodeKey = target.type === "node" ? target.id : `nodes/${target.id}`;
+  const grant = await resolveNodeGrant(nestId, userId, nodeKey);
+  if (grant && permissionLevel(grant) >= permissionLevel(level)) return true;
+  if (target.type === "node" && level === "write") {
+    // An editor steward row covering the document already lets them edit it.
+    const rows = await resolveStewardsForNode(nestId, target.id);
+    return rows.some(
+      (r) =>
+        r.steward.role === "editor" &&
+        r.steward.userEmail.toLowerCase() === userEmail.toLowerCase(),
+    );
+  }
+  return false;
+}
+
+function rowToRequest(row: any): AccessRequest {
+  return {
+    id: row.id,
+    nest_id: row.nest_id,
+    requester_id: row.requester_id,
+    requested_by: row.requested_by,
+    target_type: row.target_type,
+    target_id: row.target_id,
+    level: row.level,
+    note: row.note ?? null,
+    status: row.status,
+    created_at: row.created_at,
+    resolved_by: row.resolved_by ?? null,
+    resolved_at: row.resolved_at ?? null,
+    resolution_note: row.resolution_note ?? null,
+  };
+}
+
+export async function getAccessRequest(id: string): Promise<AccessRequest | null> {
+  const row = await getDb().get("SELECT * FROM access_requests WHERE id = ?", [id]);
+  return row ? rowToRequest(row) : null;
+}
+
+/** The caller's most recent request for this target, whatever its state —
+ *  what a refusal and the "Request access" prompt show. */
+export async function latestAccessRequest(
+  nestId: string,
+  requesterId: string,
+  target: AccessTarget,
+): Promise<AccessRequest | null> {
+  const row = await getDb().get(
+    `SELECT * FROM access_requests
+      WHERE nest_id = ? AND requester_id = ? AND target_type = ? AND target_id = ?
+      ORDER BY created_at DESC LIMIT 1`,
+    [nestId, requesterId, target.type, target.id],
+  );
+  return row ? rowToRequest(row) : null;
+}
+
+/** Callers who may never ask: no account (open-mode anonymous / signed-out
+ *  public reader) and headless access keys, which are read-only by design. */
+async function isEligibleRequester(userId: string | undefined): Promise<boolean> {
+  if (!userId || userId === ANON_USER_ID) return false;
+  const row = (await getDb().get(
+    "SELECT COALESCE(is_service, 0) AS svc FROM users WHERE id = ?",
+    [userId],
+  )) as { svc: number } | undefined;
+  return !!row && !row.svc;
+}
+
+/**
+ * What a refused write adds to its 403 body when the caller could ask for the
+ * access instead: `{ code, can_request_access, target, level }`, plus the
+ * caller's latest request for that target when it is pending (so the client
+ * says "Request pending" instead of offering a second ask) or denied (so they
+ * see the answer and the note). Null when this caller can't ask at all.
+ */
+export async function accessRequestHint(params: {
+  nestId: string;
+  userId: string | undefined;
+  target: AccessTarget;
+  level?: AccessLevel;
+}): Promise<Record<string, unknown> | null> {
+  const { nestId, userId, target } = params;
+  if (!(await isEligibleRequester(userId))) return null;
+  const level = params.level ?? "write";
+  const latest = await latestAccessRequest(nestId, userId!, target);
+  return {
+    code: "forbidden",
+    can_request_access: true,
+    target: { type: target.type, id: target.id },
+    level,
+    ...(latest && latest.status !== "approved"
+      ? {
+          access_request: {
+            id: latest.id,
+            status: latest.status,
+            created_at: latest.created_at,
+            resolved_by: latest.resolved_by,
+            resolved_at: latest.resolved_at,
+            resolution_note: latest.resolution_note,
+          },
+        }
+      : {}),
+  };
+}
+
+/**
+ * File an access request. Returns the existing pending one (created: false)
+ * rather than a second row when the caller already asked for this target.
+ * Throws NotFoundError when the caller can't see the target, ValidationError
+ * when they already hold the access or can't ask.
+ */
+export async function createAccessRequest(params: {
+  nestId: string;
+  requesterId: string;
+  requesterEmail: string;
+  targetType: unknown;
+  targetId?: unknown;
+  level?: unknown;
+  note?: unknown;
+  /** Request origin, for the notification links. */
+  baseUrl?: string;
+}): Promise<{ request: AccessRequest; created: boolean }> {
+  const { nestId, requesterId, requesterEmail } = params;
+  const target = normalizeAccessTarget(nestId, params.targetType, params.targetId);
+  const level = (params.level ?? "write") as AccessLevel;
+  if (!LEVELS.includes(level)) throw new ValidationError('level must be "read" or "write"');
+  const note =
+    typeof params.note === "string" && params.note.trim()
+      ? params.note.trim().slice(0, MAX_NOTE)
+      : null;
+
+  if (!(await isEligibleRequester(requesterId))) {
+    throw new ValidationError("Sign in to request access.");
+  }
+  if (!(await canSeeTarget(nestId, requesterId, requesterEmail, target))) {
+    throw new NotFoundError(
+      target.type === "nest" ? "Nest not found" : `${target.type === "node" ? "Node" : "Folder"} not found`,
+    );
+  }
+  const access = await resolveNestAccess(nestId, requesterId);
+  if (access.archived) {
+    throw new ValidationError("This nest is archived, so it is read-only. Ask an owner to restore it.");
+  }
+  if (await alreadyHolds(nestId, requesterId, requesterEmail, target, level)) {
+    throw new ValidationError(`You already have ${level} access to this ${target.type === "node" ? "document" : target.type}.`);
+  }
+
+  const db = getDb();
+  const pending = await db.get(
+    `SELECT * FROM access_requests
+      WHERE nest_id = ? AND requester_id = ? AND target_type = ? AND target_id = ?
+        AND status = 'pending'`,
+    [nestId, requesterId, target.type, target.id],
+  );
+  if (pending) return { request: rowToRequest(pending), created: false };
+
+  const id = uuid();
+  try {
+    // Millisecond created_at keeps "latest" exact when someone asks again
+    // moments after a denial.
+    await db.run(
+      `INSERT INTO access_requests
+         (id, nest_id, requester_id, requested_by, target_type, target_id, level, note, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ${nowMsExpr(db)})`,
+      [
+        id,
+        nestId,
+        requesterId,
+        requesterEmail.toLowerCase(),
+        target.type,
+        target.id,
+        level,
+        note,
+      ],
+    );
+  } catch (err) {
+    // Two asks racing past the check above: the partial unique index lets one
+    // in, and the other answers with the row that won.
+    const winner = await db.get(
+      `SELECT * FROM access_requests
+        WHERE nest_id = ? AND requester_id = ? AND target_type = ? AND target_id = ?
+          AND status = 'pending'`,
+      [nestId, requesterId, target.type, target.id],
+    );
+    if (winner) return { request: rowToRequest(winner), created: false };
+    throw err;
+  }
+  const request = (await getAccessRequest(id))!;
+  await notifyAccessRequested(request, params.baseUrl);
+  return { request, created: true };
+}
+
+export async function listAccessRequests(params: {
+  nestId?: string;
+  /** Cross-nest scope for the /me/work inbox — the caller's visible nests. */
+  nestIds?: string[];
+  status?: AccessRequestStatus | "all";
+  /** Only this requester's own requests. */
+  requesterId?: string;
+}): Promise<AccessRequest[]> {
+  const where: string[] = [];
+  const args: SqlParam[] = [];
+  if (params.nestId) {
+    where.push("nest_id = ?");
+    args.push(params.nestId);
+  }
+  if (params.nestIds) {
+    if (params.nestIds.length === 0) return [];
+    where.push(`nest_id IN (${params.nestIds.map(() => "?").join(",")})`);
+    args.push(...params.nestIds);
+  }
+  const status = params.status ?? "pending";
+  if (status !== "all") {
+    where.push("status = ?");
+    args.push(status);
+  }
+  if (params.requesterId) {
+    where.push("requester_id = ?");
+    args.push(params.requesterId);
+  }
+  const rows = (await getDb().all(
+    `SELECT * FROM access_requests${where.length ? ` WHERE ${where.join(" AND ")}` : ""}
+      ORDER BY created_at DESC`,
+    args,
+  )) as any[];
+  // One title map per nest, not a vault scan per row (the inbox spans nests).
+  const titlesByNest = new Map<string, Map<string, string>>();
+  const out: AccessRequest[] = [];
+  for (const row of rows) {
+    const r = rowToRequest(row);
+    let title: string;
+    if (r.target_type === "node") {
+      if (!titlesByNest.has(r.nest_id)) titlesByNest.set(r.nest_id, await buildTitleMap(r.nest_id));
+      title = titlesByNest.get(r.nest_id)!.get(r.target_id) ?? (await titleForNode(r.nest_id, r.target_id));
+    } else {
+      title = await accessTargetTitle(r.nest_id, { type: r.target_type, id: r.target_id });
+    }
+    out.push({ ...r, title });
+  }
+  return out;
+}
+
+/** The nest owner, its admins and the server admins decide. */
+export async function canDecideAccessRequests(nestId: string, userId: string): Promise<boolean> {
+  return canManageStewards(nestId, userId);
+}
+
+/** Grant what the request asked for, through the existing share paths. */
+async function grantRequested(
+  request: AccessRequest,
+  decidedById: string,
+  decidedByEmail: string,
+  baseUrl?: string,
+): Promise<void> {
+  const { nest_id: nestId, requester_id: userId, level } = request;
+  if (request.target_type === "node" || request.target_type === "folder") {
+    await createGrant({
+      nestId,
+      targetType: request.target_type === "node" ? "document" : "folder",
+      target: request.target_type === "node" ? request.target_id : `nodes/${request.target_id}`,
+      userId,
+      role: level,
+      grantedBy: decidedByEmail,
+      baseUrl,
+    });
+    return;
+  }
+  const db = getDb();
+  const existing = (await db.get(
+    "SELECT id, permission FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
+    [nestId, userId],
+  )) as { id: string; permission: NestPermission } | undefined;
+  if (existing) {
+    // Only ever an upgrade: approving "write" must not demote an admin who
+    // asked while a cap was in force.
+    if (permissionLevel(existing.permission) >= permissionLevel(level)) return;
+    await assertCanGrant([{ userId, next: permissionClass(level) }]);
+    await db.run("UPDATE nest_collaborators SET permission = ? WHERE id = ?", [level, existing.id]);
+    return;
+  }
+  await addCollaborator({
+    nestId,
+    userId,
+    permission: level,
+    grantedByUserId: decidedById,
+    grantedByEmail: decidedByEmail,
+    baseUrl,
+  });
+}
+
+/**
+ * Approve or deny a pending request. Approving grants first and marks the row
+ * second, so a grant the plan refuses (402) leaves the request pending rather
+ * than "approved" with nothing behind it. Returns null when the request isn't
+ * pending in this nest any more (already decided, or never existed here).
+ */
+export async function decideAccessRequest(params: {
+  nestId: string;
+  id: string;
+  decision: "approve" | "deny";
+  decidedById: string;
+  decidedByEmail: string;
+  note?: string;
+  baseUrl?: string;
+}): Promise<AccessRequest | null> {
+  const pending = await getAccessRequest(params.id);
+  if (!pending || pending.nest_id !== params.nestId || pending.status !== "pending") {
+    return null;
+  }
+  const note = params.note?.trim() ? params.note.trim().slice(0, MAX_NOTE) : null;
+  if (params.decision === "approve") {
+    await grantRequested(pending, params.decidedById, params.decidedByEmail, params.baseUrl);
+  }
+  const db = getDb();
+  const { changes } = await db.run(
+    `UPDATE access_requests
+        SET status = ?, resolved_by = ?, resolved_at = ${nowExpr(db)}, resolution_note = ?
+      WHERE id = ? AND status = 'pending'`,
+    [
+      params.decision === "approve" ? "approved" : "denied",
+      params.decidedByEmail.toLowerCase(),
+      note,
+      params.id,
+    ],
+  );
+  // Two deciders racing: one write lands, and only that one notifies.
+  if (changes === 0) return null;
+  const decided = (await getAccessRequest(params.id))!;
+  await notifyAccessDecided(decided, params.baseUrl);
+  return decided;
+}
+
+// ─── Notifications ────────────────────────────────────────────────────────
+// Same fan-out as deletion requests: inbox row, nest channels, direct email.
+// Best-effort — a delivery failure never fails the request or the decision.
+
+async function targetContext(
+  request: AccessRequest,
+  baseUrl?: string,
+): Promise<{ docTitle: string; path: string; link: string; noun: string }> {
+  if (request.target_type === "node") {
+    const ctx = await buildDocContext(request.nest_id, request.target_id, baseUrl);
+    return { docTitle: ctx.docTitle, path: ctx.path, link: ctx.link, noun: "document" };
+  }
+  const name = await nestName(request.nest_id);
+  return {
+    docTitle: request.target_type === "folder" ? prettyFolderPath(request.target_id) : name,
+    path: name,
+    link: baseUrl ? `${baseUrl}/?nest=${encodeURIComponent(request.nest_id)}` : "",
+    noun: request.target_type,
+  };
+}
+
+const levelWord = (level: AccessLevel) => (level === "write" ? "edit" : "view");
+
+async function notifyAccessRequested(request: AccessRequest, baseUrl?: string): Promise<void> {
+  try {
+    const ctx = await targetContext(request, baseUrl);
+    const label = `${ctx.noun === "document" ? "" : `${ctx.noun} `}"${ctx.docTitle}"`;
+    const noteText = request.note ? ` — "${request.note}"` : "";
+    const admins = (await nestAdminEmails(request.nest_id)).filter(
+      (e) => e !== request.requested_by.toLowerCase(),
+    );
+    await inboxInsert(
+      request.nest_id,
+      admins,
+      "access_requested",
+      request.id,
+      `${request.requested_by} asked for ${levelWord(request.level)} access to ${label}${noteText}`,
+    );
+    const line = `${request.requested_by} asked for ${levelWord(request.level)} access to ${ctx.noun} *${ctx.docTitle}*${noteText}`;
+    void dispatchEvent({
+      kind: "access_requested",
+      nestId: request.nest_id,
+      subjectId: request.target_id,
+      actor: request.requested_by,
+      message: line,
+    });
+    void notifyNestEvent(request.nest_id, `:key: ${line}`, undefined, { skipEmail: true });
+    if (admins.length > 0) {
+      void sendEmailToRecipient(admins, {
+        status: "access_requested",
+        docTitle: ctx.docTitle,
+        path: ctx.path,
+        link: ctx.link,
+        actor: request.requested_by,
+        permission: request.level,
+        note: request.note,
+      });
+    }
+  } catch (err) {
+    console.error("[notify] access request fan-out failed", request.nest_id, request.id, err);
+  }
+}
+
+async function notifyAccessDecided(request: AccessRequest, baseUrl?: string): Promise<void> {
+  try {
+    const approved = request.status === "approved";
+    const ctx = await targetContext(request, baseUrl);
+    const label = `${ctx.noun === "document" ? "" : `${ctx.noun} `}"${ctx.docTitle}"`;
+    const by = request.resolved_by ?? "an admin";
+    const noteText = request.resolution_note ? ` — "${request.resolution_note}"` : "";
+    // The ask is no longer actionable for any admin who got it.
+    await markNotificationsReadBySubject(request.id, "access_requested");
+    if (request.requested_by.toLowerCase() !== by.toLowerCase()) {
+      await inboxInsert(
+        request.nest_id,
+        [request.requested_by],
+        approved ? "access_approved" : "access_denied",
+        request.id,
+        approved
+          ? `${by} approved your request to ${levelWord(request.level)} ${label} — you can make your change now`
+          : `${by} denied your request to ${levelWord(request.level)} ${label}${noteText}`,
+      );
+      void sendEmailToRecipient(request.requested_by, {
+        status: approved ? "access_approved" : "access_denied",
+        docTitle: ctx.docTitle,
+        path: ctx.path,
+        link: ctx.link,
+        actor: by,
+        permission: request.level,
+        note: request.resolution_note,
+      });
+    }
+    void dispatchEvent({
+      kind: approved ? "access_approved" : "access_denied",
+      nestId: request.nest_id,
+      subjectId: request.target_id,
+      actor: by,
+      message: `${by} ${approved ? "approved" : "denied"} ${request.requested_by}'s request to ${levelWord(request.level)} ${ctx.noun} *${ctx.docTitle}*${noteText}`,
+    });
+  } catch (err) {
+    console.error("[notify] access decision fan-out failed", request.nest_id, request.id, err);
+  }
+}
+
+// ─── Which target a refused write was aimed at ────────────────────────────
+
+/** POST/DELETE suffixes on a node route that act on the node itself. */
+const NODE_ACTION_SUFFIXES = new Set(["revert", "move", "discard", "watchers"]);
+
+/**
+ * The thing a refused write was aimed at, from the request path alone (the
+ * nest middleware's `parts`: [nestId, resource, …]). A document route names
+ * the document; creating, uploading, or any other nest-level write names the
+ * nest — creation needs nest write, so a folder share wouldn't help there.
+ * Never reads the body or the database: the 403 must not cost a lookup the
+ * request didn't need, nor reveal anything the path didn't already say.
+ */
+export function writeTargetForPath(
+  nestId: string,
+  parts: string[],
+  method: string,
+): AccessTarget {
+  if (parts[1] === "nodes" && parts.length >= 3 && !(parts.length === 3 && parts[2] === "pdf")) {
+    let tail = parts.slice(2);
+    // A node id is at least "nodes/<slug>", so only a third segment can be an
+    // action suffix (PATCH never carries one).
+    if (method !== "PATCH" && tail.length > 2 && NODE_ACTION_SUFFIXES.has(tail[tail.length - 1])) {
+      tail = tail.slice(0, -1);
+    }
+    let id = tail.join("/");
+    try {
+      id = decodeURIComponent(id);
+    } catch {
+      /* malformed escape — echo as sent */
+    }
+    return { type: "node", id };
+  }
+  return { type: "nest", id: nestId };
+}

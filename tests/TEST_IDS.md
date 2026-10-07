@@ -57,6 +57,18 @@ Add a row here whenever you add a `data-testid` to the UI.
 | `work-bulk-reject` | Batch bar: Reject N |
 | `reason-dialog-input` | ReasonDialog reason textarea — `ui/src/components/governance/ReasonDialog.tsx` |
 | `reason-dialog-confirm` | ReasonDialog confirm button |
+| `reason-dialog-prior-decline` | ReasonDialog: the earlier "no" (who, when, note) above the input |
+| `my-work-access-approve` | Access-request row: Approve (grants the access) |
+| `my-work-access-deny` | Access-request row: Deny (opens the note dialog) |
+
+## Request access (`ui/src/components/RequestAccessDialog.tsx`)
+
+| Test ID | Element |
+|---|---|
+| `document-editor-request-access` | Document top bar: "Request edit access" for a viewer — `ui/src/components/DocumentEditor.tsx` |
+| `nest-request-access` | Nest header: "Request edit access" for a viewer — `ui/src/components/NestView.tsx` |
+| `request-access-pending` | Dialog shown when the caller's request is already pending |
+| `request-access-loading` | Dialog while the caller's latest request is looked up |
 
 Many more test IDs already exist across `ui/src/` (governance dialogs,
 document editor, nest tabs, …) — grep for `data-testid` and document them

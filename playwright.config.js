@@ -76,6 +76,15 @@ const testRun = [
     enabled: true,
     independent: true, // Arranges its own nest, reviews and requests
   },
+  {
+    // Request access on a denied write (CN-ACCESS-001 … CN-ACCESS-004).
+    // Serial: the cases share one seeded nest and build on each other's
+    // requests (ask → approve → deny → refused save).
+    file: 'access-requests/access_requests.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest; needs secondary_user
+  },
   // ── Add new suites here (governance, documents, …) ────────────────────────
   // ── Teardown (always runs last, even on failure) ───────────────────────────
   {
@@ -159,7 +168,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'access-requests'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -303,6 +312,17 @@ export default defineConfig({
             name: 'my-work',
             dependencies: ['setup-auth'],
             testMatch: 'tests/features/my-work/**/*.spec.js',
+            fullyParallel: false,
+            use: {
+              ...devices['Desktop Chrome'],
+              screenshot: 'only-on-failure',
+              trace: 'retain-on-failure',
+            },
+          },
+          {
+            name: 'access-requests',
+            dependencies: ['setup-auth'],
+            testMatch: 'tests/features/access-requests/**/*.spec.js',
             fullyParallel: false,
             use: {
               ...devices['Desktop Chrome'],

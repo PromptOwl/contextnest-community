@@ -18,7 +18,10 @@ import {
   Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
   FileStack, FolderPlus, X,
   Activity, BookOpen, Archive, Eye, Palette, History,
+  KeyRound,
 } from "lucide-react";
+import { RequestAccessDialog } from "./RequestAccessDialog";
+import type { AccessOffer } from "../lib/access-requests";
 import { ConnectModal } from "./ConnectModal";
 import { prettyFolderPath } from "./FolderTree";
 
@@ -167,6 +170,8 @@ export function NestView({
   // Local mirror of the nest name so inline rename feels instant while the
   // backend autosave lands. Resets if the parent passes a different nest.
   const [editableName, setEditableName] = useState(nestName);
+  // "Request edit access" for a viewer of the nest (CU-wdqcq041jn).
+  const [accessOffer, setAccessOffer] = useState<AccessOffer | null>(null);
   const lastSavedName = useRef(nestName);
   useEffect(() => {
     setEditableName(nestName);
@@ -1497,6 +1502,28 @@ export function NestView({
             Add with AI
           </Button>
         )}
+        {/* Someone who can read this nest but not add to it can ask for that
+            instead of finding no way in (CU-wdqcq041jn). Signed-in only —
+            there's no one to grant a signed-out reader anything. */}
+        {!canEditDocs && !nestArchived && !previewReader && !!adminStatus?.me && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              setAccessOffer({
+                nestId,
+                target: { type: "nest", id: nestId },
+                level: "write",
+                label: editableName || nestName,
+              })
+            }
+            data-testid="nest-request-access"
+            title="Ask the nest owner or an admin for edit access to this nest"
+          >
+            <KeyRound className="h-3.5 w-3.5 mr-1.5" />
+            Request edit access
+          </Button>
+        )}
         {canManage && !isPhone && (
           // Inside the nest, Share IS the Collaborators tab — one surface
           // for visibility, people and teams (CU-wdqcpzzzy6). On a phone it
@@ -2076,6 +2103,9 @@ export function NestView({
         />
       )}
 
+      {accessOffer && (
+        <RequestAccessDialog offer={accessOffer} onClose={() => setAccessOffer(null)} />
+      )}
       {showGenerate && (
         <GenerateContextModal
           isOpen={showGenerate}

@@ -310,6 +310,7 @@ export async function listNotifications(
             COALESCE(
               rr.node_id,
               CASE WHEN dr.target_type = 'document' THEN dr.node_id END,
+              CASE WHEN ar.target_type = 'node' THEN ar.target_id END,
               -- A mention (or a reply on a thread you're in) names the
               -- document directly; there's no request row.
               CASE WHEN n.kind IN ('mention', 'assigned', 'comment_reply') THEN n.subject_id END
@@ -320,6 +321,7 @@ export async function listNotifications(
        LEFT JOIN nests ns ON ns.id = n.nest_id
        LEFT JOIN review_requests rr ON rr.id = n.subject_id
        LEFT JOIN deletion_requests dr ON dr.id = n.subject_id
+       LEFT JOIN access_requests ar ON ar.id = n.subject_id
       WHERE LOWER(n.user_email) = LOWER(?)${opts.unreadOnly ? " AND n.read_at IS NULL" : ""}
       ORDER BY n.created_at DESC LIMIT ${limit}`,
     [userEmail],
