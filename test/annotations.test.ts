@@ -209,8 +209,17 @@ describe("annotations: hosted artifact + threaded comments", () => {
     // a doctype'd page into quirks mode); the bridge follows it.
     expect(text.startsWith(HTML)).toBe(true);
     expect(text.indexOf("data-cn-bridge")).toBeGreaterThan(text.indexOf("</html>"));
-    expect(text).toContain('data-cn-bridge');
     expect(text).toContain("cn-place");
+  });
+
+  it("only embed=1 turns the bridge on — embed=true / embed= serve the plain page", async () => {
+    for (const q of ["embed=true", "embed=", "embed=0"]) {
+      const res = await app.request(`/nests/${nestId}/nodes/${nodeId}/hosted?${q}`, {
+        headers: { Authorization: `Bearer ${alice.apiKey}` },
+      });
+      expect(res.status).toBe(200);
+      expect((await res.text()).trim()).toBe(HTML);
+    }
   });
 
   it("creates an anchored thread, threads replies, resolves and reopens", async () => {
@@ -628,6 +637,16 @@ describe("annotations: read-only collaborator can annotate", () => {
     );
     expect(resolved.status).toBe(200);
     expect(resolved.data.thread.status).toBe("resolved");
+  });
+
+  it("embed=1 doesn't loosen access: a non-member still can't load the artifact", async () => {
+    const stranger = await registerUser(app, "stranger@acme.com", "Stranger");
+    const res = await app.request(`/nests/${nestId}/nodes/${artifactId}/hosted?embed=1`, {
+      headers: { Authorization: `Bearer ${stranger.apiKey}` },
+    });
+    // 404, not 403: a private nest doesn't confirm it exists to a non-member.
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain("data-cn-bridge");
   });
 
   it("still blocks a read-only collaborator from editing the node", async () => {

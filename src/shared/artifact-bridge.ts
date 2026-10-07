@@ -33,12 +33,26 @@ const BRIDGE_JS = String.raw`(function () {
 
   // Whitespace-free text of the page + where each char lives. Built once and
   // reused until the DOM changes — scrolling alone never rebuilds it.
-  var cache = null;
+  // A page that re-renders gets its highlights repainted (debounced); our own
+  // <style> insert is skipped so painting can't retrigger itself.
+  var cache = null, repaintT = 0, last = null;
   try {
-    new MutationObserver(function () { cache = null; }).observe(document.documentElement, {
-      childList: true, subtree: true, characterData: true
-    });
+    new MutationObserver(function (records) {
+      var ours = records.every(function (r) {
+        for (var i = 0; i < r.addedNodes.length; i++) if (r.addedNodes[i] !== styleEl) return false;
+        return r.type === "childList" && r.removedNodes.length === 0 && r.addedNodes.length > 0;
+      });
+      if (ours) return;
+      cache = null;
+      if (last) {
+        clearTimeout(repaintT);
+        repaintT = setTimeout(function () { paint(last.items, last.active); }, 250);
+      }
+    }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
   } catch (e) {}
+  // Index at most this much text: a huge or constantly-changing page costs
+  // a bounded rebuild, and the place/highlights simply stop past the cap.
+  var MAX_CHARS = 300000;
   function index() { return cache || (cache = build()); }
   function build() {
     var root = document.body || document.documentElement;
@@ -57,6 +71,7 @@ const BRIDGE_JS = String.raw`(function () {
         if (WS.test(c)) continue;
         text += c; nodes.push(n); offs.push(i);
       }
+      if (text.length >= MAX_CHARS) break;
     }
     return { text: text, nodes: nodes, offs: offs, starts: starts };
   }
@@ -138,15 +153,15 @@ const BRIDGE_JS = String.raw`(function () {
   }
 
   var ranges = [];
-  var styled = false;
+  var styleEl = null;
   function paint(items, active) {
     if (!(window.CSS && CSS.highlights && window.Highlight)) return;
-    if (!styled) {
-      var st = document.createElement("style");
-      st.textContent = "::highlight(cn-comment){background-color:rgba(251,191,36,.35)}" +
+    last = { items: items, active: active };
+    if (!styleEl) {
+      styleEl = document.createElement("style");
+      styleEl.textContent = "::highlight(cn-comment){background-color:rgba(251,191,36,.35)}" +
         "::highlight(cn-comment-active){background-color:rgba(251,191,36,.75)}";
-      (document.head || document.documentElement).appendChild(st);
-      styled = true;
+      (document.head || document.documentElement).appendChild(styleEl);
     }
     var idx = index();
     ranges = [];
@@ -212,7 +227,13 @@ const BRIDGE_JS = String.raw`(function () {
     if (ev.source !== P) return;
     var m = ev.data || {};
     if (m.type === "cn-goto") goTo(m.snippet, +m.frac || 0);
-    else if (m.type === "cn-highlights" && m.items && m.items.length !== undefined) paint(m.items, m.active);
+    else if (m.type === "cn-highlights" && Array.isArray(m.items)) {
+      var items = m.items.slice(0, 500).filter(function (it) {
+        return it && typeof it.id === "string" && typeof it.quote === "string" &&
+          (it.before === undefined || typeof it.before === "string");
+      });
+      paint(items, typeof m.active === "string" ? m.active : null);
+    }
   });
   function ready() { post({ type: "cn-ready" }); report(); }
   if (document.readyState === "loading") addEventListener("DOMContentLoaded", ready);

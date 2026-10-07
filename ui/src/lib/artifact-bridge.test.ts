@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseBridgeMessage } from "./artifact-bridge";
+import { highlightItems, parseBridgeMessage } from "./artifact-bridge";
 import { hostedArtifactUrl } from "./api";
 
 // The iframe is attacker-authorable HTML: everything it posts is untrusted.
@@ -24,7 +24,7 @@ describe("parseBridgeMessage", () => {
       { type: "cn-goto", snippet: "x", frac: 0 }, // parent→iframe only
       { type: "cn-place", snippet: 5, frac: 0 },
       { type: "cn-place", snippet: "x", frac: Number.NaN },
-      { type: "cn-place", snippet: "x".repeat(1000), frac: 0 },
+      { type: "cn-place", snippet: "x".repeat(121), frac: 0 }, // bridge sends 40
       { type: "cn-activate", id: {} },
       { type: "cn-activate", id: "x".repeat(500) },
     ]) {
@@ -35,6 +35,32 @@ describe("parseBridgeMessage", () => {
   it("clamps frac into [0, 1]", () => {
     expect(parseBridgeMessage({ type: "cn-place", snippet: "x", frac: 7 })).toMatchObject({ frac: 1 });
     expect(parseBridgeMessage({ type: "cn-place", snippet: "x", frac: -2 })).toMatchObject({ frac: 0 });
+  });
+});
+
+// What crosses into untrusted artifact code: quotes from the artifact's own
+// text and thread ids. Never comment bodies, authors or anything else.
+describe("highlightItems (parent → iframe payload)", () => {
+  const thread = (id: string, status: "open" | "resolved", quote?: string) => ({
+    id,
+    status,
+    createdAt: "2026-10-07 10:00:00",
+    anchor: quote ? { quote, before: "ctx ", after: " tail", line: 3 } : null,
+    comments: [{ id: "c1", author: "secret@acme.com", body: "private review note", createdAt: "x" }],
+  });
+
+  it("carries only id, quote and before — no bodies, authors or after-context", () => {
+    const items = highlightItems([thread("t1", "open", "MRR of $400K")] as any);
+    expect(items).toEqual([{ id: "t1", quote: "MRR of $400K", before: "ctx " }]);
+    expect(JSON.stringify(items)).not.toMatch(/secret@acme|private review note|tail/);
+  });
+
+  it("only open, anchored threads", () => {
+    expect(
+      highlightItems([thread("a", "resolved", "q"), thread("b", "open"), thread("c", "open", "q")] as any).map(
+        (i) => i.id,
+      ),
+    ).toEqual(["c"]);
   });
 });
 

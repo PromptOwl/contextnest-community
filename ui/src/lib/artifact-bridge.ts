@@ -8,12 +8,15 @@
  * bridge sends, with bounded strings and a finite, clamped frac.
  */
 
+import type { AnnotationThread } from "./api";
+import { paintableThreads } from "./comment-threads";
+
 export type BridgeMessage =
   | { type: "cn-ready" }
   | { type: "cn-place"; snippet: string; frac: number }
   | { type: "cn-activate"; id: string };
 
-const MAX_SNIPPET = 200;
+const MAX_SNIPPET = 120; // the bridge sends 40
 const MAX_ID = 200;
 
 export function parseBridgeMessage(data: unknown): BridgeMessage | null {
@@ -35,6 +38,26 @@ export function parseBridgeMessage(data: unknown): BridgeMessage | null {
   }
 }
 
+export interface HighlightItem {
+  id: string;
+  quote: string;
+  before: string;
+}
+
+/**
+ * The only thread data that crosses into the artifact's (untrusted) frame:
+ * open anchored threads, as id + quote + the `before` context that picks
+ * between repeats. The quote and context are the artifact's own text; comment
+ * bodies, authors and everything else stay in the parent.
+ */
+export function highlightItems(threads: readonly AnnotationThread[]): HighlightItem[] {
+  return paintableThreads(threads).map((t) => ({
+    id: t.id,
+    quote: t.anchor!.quote,
+    before: t.anchor!.before ?? "",
+  }));
+}
+
 /** Parent → iframe. Target "*" because the sandboxed frame's origin is opaque. */
 export function postToBridge(
   frame: HTMLIFrameElement | null,
@@ -42,7 +65,7 @@ export function postToBridge(
     | { type: "cn-goto"; snippet: string; frac: number }
     | {
         type: "cn-highlights";
-        items: { id: string; quote: string; before: string }[];
+        items: HighlightItem[];
         active: string | null;
       },
 ): void {

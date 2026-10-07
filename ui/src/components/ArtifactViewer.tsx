@@ -36,7 +36,7 @@ import {
 } from "../lib/anchor-highlight";
 import { paintableThreads } from "../lib/comment-threads";
 import { useKeepPlace, type Place } from "../lib/view-place";
-import { parseBridgeMessage, postToBridge } from "../lib/artifact-bridge";
+import { highlightItems, parseBridgeMessage, postToBridge } from "../lib/artifact-bridge";
 import { DocumentViewer } from "./DocumentViewer";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -481,11 +481,7 @@ export function ArtifactViewer({
     if (!frameReadyRef.current) return;
     postToBridge(iframeRef.current, {
       type: "cn-highlights",
-      items: paintableThreads(threadsRef.current).map((t) => ({
-        id: t.id,
-        quote: t.anchor!.quote,
-        before: t.anchor!.before ?? "",
-      })),
+      items: highlightItems(threadsRef.current),
       active: activeRef.current,
     });
   }, []);
