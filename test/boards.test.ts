@@ -107,6 +107,10 @@ describe("boards", () => {
     expect((await req(writer, "POST", "", { name: "x".repeat(81) })).status).toBe(400);
     expect((await req(writer, "POST", "", { name: "Bad", config: { dimension: "people" } })).status).toBe(400);
     expect((await req(writer, "POST", `/${sprint}/rank`, { key: "k", order: [1, 2] })).status).toBe(400);
+    expect((await req(writer, "POST", `/${sprint}/rank`, { key: "k", order: ["x".repeat(601)] })).status).toBe(400);
+    // A JSON body that isn't an object is a 400, not a 500.
+    expect((await req(writer, "POST", "", "text")).status).toBe(400);
+    expect((await req(writer, "PATCH", `/${sprint}`, ["x"])).status).toBe(400);
   });
 
   it("rank never gets stuck at the size limit: the least recently ranked column is dropped", async () => {

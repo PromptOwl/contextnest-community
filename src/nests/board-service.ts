@@ -69,6 +69,7 @@ const strList = (v: unknown, what: string): string[] | undefined => {
     throw new ValidationError(`${what} must be a list of strings`);
   }
   if (v.length > MAX_LIST) throw new ValidationError(`${what} is too long`);
+  if (v.some((x) => x.length > 600)) throw new ValidationError(`${what} has an entry over 600 characters`);
   return [...new Set(v as string[])];
 };
 
