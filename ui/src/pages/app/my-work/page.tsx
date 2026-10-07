@@ -25,6 +25,8 @@ import { PageTitle } from "@/components/ui/page-title";
 import { APPROVE_BUTTON_CLASS, REJECT_BUTTON_CLASS } from "@/lib/review-actions-style";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ReasonDialog, ReviewActions } from "../../../components/governance";
+import { DueChip, PriorityIcon } from "../../../components/board/CardParts";
+import { localToday } from "../../../lib/board-tasks";
 
 export default function MyWorkPage() {
   const { openNest: onSelectNest, openReview: onOpenReview } = useAppNav();
@@ -34,6 +36,7 @@ export default function MyWorkPage() {
     items: api.WorkItem[];
     waiting: api.WorkItem[];
     notifications?: api.WatcherNotification[];
+    assigned?: api.AssignedItem[];
     pagination?: api.WorkPagination;
   }>({ items: [], waiting: [] });
   // Gates the "My Work" empty state — without it, the empty message flashes
@@ -64,6 +67,7 @@ export default function MyWorkPage() {
         items: next.items,
         waiting: next.waiting,
         notifications: next.notifications ?? prev.notifications,
+        assigned: next.assigned ?? prev.assigned,
         pagination: next.pagination,
       }));
       // A selection only means anything against the rows on screen. Carrying
@@ -289,6 +293,33 @@ export default function MyWorkPage() {
           row clicks straight to the document (circular nav), approve/reject
           inline. "My Work" = waiting on you; "Waiting on" = you handed off. */}
           <div className="space-y-5">
+            {/* Board cards assigned to you, across nests — Linear's "My
+                issues". Soonest due first; click opens the card. */}
+            {(work.assigned?.length ?? 0) > 0 && (
+              <div className="rounded-lg border">
+                <div className="flex items-center gap-2 px-4 py-2 text-sm font-medium">
+                  Assigned to you
+                  <span className="text-xs text-muted-foreground">({work.assigned!.length})</span>
+                </div>
+                <div className="divide-y border-t">
+                  {work.assigned!.map((a) => (
+                    <button
+                      key={`${a.nest_id}:${a.node_id}`}
+                      type="button"
+                      onClick={() => onOpenReview(a.nest_id, a.nest_name, a.node_id)}
+                      className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm hover:bg-muted/50"
+                    >
+                      <PriorityIcon priority={a.priority ?? undefined} />
+                      <span className="min-w-0 flex-1 truncate">{a.title}</span>
+                      {a.due && (
+                        <DueChip due={a.due} today={localToday()} editable={false} onChange={() => {}} />
+                      )}
+                      <span className="shrink-0 text-xs text-muted-foreground">{a.nest_name}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div>
               {(work.notifications?.length ?? 0) > 0 && (
                 <div className="mb-3 rounded-lg border border-amber-300/50 bg-amber-500/5">

@@ -76,6 +76,8 @@ import {
 } from "./node-index.js";
 import { config } from "../config.js";
 import { listNestPeople } from "../nests/people-service.js";
+import { nestDoneTags } from "../nests/service.js";
+import { notifyAssigned } from "../governance/assign-notify.js";
 import {
   TASK_NODE_TYPE,
   applyTaskFields,
@@ -1692,6 +1694,12 @@ async function createNodeOnce(
       ...(input.schedule ? { schedule: input.schedule } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
     };
+    if (input.type === TASK_NODE_TYPE) {
+      const done = new Set(await nestDoneTags(nestId));
+      if (tags.some((t) => done.has(String(t).toLowerCase().replace(/^#/, "")))) {
+        metadata.completed_at = new Date().toISOString();
+      }
+    }
     if (hasTaskFieldsPatch(input)) {
       const { metadata: withFields } = await applyTaskFields(
         metadata,
@@ -1857,6 +1865,17 @@ async function createNodeOnce(
     }
 
     await trackEvent("node.create", { nestId, nodeId: id });
+    const createdAssignee = taskFieldsOf(node.frontmatter.metadata).assignee;
+    // A draft's assignment isn't real until a reviewer approves it.
+    if (createdAssignee && published) {
+      await notifyAssigned({
+        nestId,
+        nodeId: id,
+        title: input.title,
+        assignee: createdAssignee,
+        actorEmail: userEmail,
+      });
+    }
     // Everything a new document mentions is new.
     if (opts.notifyMentions !== false) {
       await notifyMentions({
@@ -2209,6 +2228,7 @@ export async function updateNode(
       const previousBody = node.body || "";
       // For the board's moved_at stamp: a tag change is a column change.
       const priorTags = [...((node.frontmatter.tags || []) as string[])];
+      const priorAssignee = taskFieldsOf(node.frontmatter.metadata).assignee ?? null;
 
       // Assemble the op's input alongside a local projection of the patched
       // node. The projection is what governance reads (auto-publish gate, tag
@@ -2338,14 +2358,17 @@ export async function updateNode(
         const after = ((node.frontmatter.tags || []) as string[]).map(norm);
         if (before.size !== after.length || after.some((t) => !before.has(t))) {
           const movedAt = new Date().toISOString();
-          node = {
-            ...node,
-            frontmatter: {
-              ...node.frontmatter,
-              metadata: { ...(node.frontmatter.metadata as any), moved_at: movedAt },
-            },
-          };
-          opInput.metadata = { ...(opInput.metadata as object), moved_at: movedAt };
+          // Entering a "done" column completes the task; leaving one reopens it.
+          const done = new Set(await nestDoneTags(nestId));
+          const wasDone = [...before].some((t) => done.has(t));
+          const isDone = after.some((t) => done.has(t));
+          const stamps: Record<string, unknown> = { moved_at: movedAt };
+          if (isDone && !wasDone) stamps.completed_at = movedAt;
+          if (!isDone && wasDone) stamps.completed_at = null;
+          const metadata = { ...(node.frontmatter.metadata as any), ...stamps };
+          if (stamps.completed_at === null) delete metadata.completed_at;
+          node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+          opInput.metadata = { ...(opInput.metadata as object), ...stamps };
         }
       }
 
@@ -2502,6 +2525,19 @@ export async function updateNode(
         responseVersion = publishedVersion;
       }
 
+      const nextAssignee = taskFieldsOf(node.frontmatter.metadata).assignee ?? null;
+      // Only a published edit notifies: a drafted assignment may be rejected.
+      // Approving that draft later doesn't notify either (known gap).
+      const savedAsDraft = publishReason === null || isAuthorEditingOwnReview;
+      if (nextAssignee && nextAssignee !== priorAssignee && !savedAsDraft) {
+        await notifyAssigned({
+          nestId,
+          nodeId,
+          title: String(node.frontmatter.title || nodeId),
+          assignee: nextAssignee,
+          actorEmail: userEmail,
+        });
+      }
       // Awaited, like the other inbox fan-outs: it swallows its own failures,
       // and a local insert is cheaper than a save that returns before it lands.
       if (opts.notifyMentions !== false) {

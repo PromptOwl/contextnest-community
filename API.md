@@ -333,6 +333,7 @@ Pins are per `(user, nest)` in the `nest_pins` table and cascade with the nest. 
   "allow_self_approve": false,
   "prime_only_review": false,
   "prime_tags": ["prime-document"],
+  "done_tags": ["done"],
   "require_push_confirmation": false,
   "creator_is_reviewer": false
 }
@@ -348,6 +349,7 @@ Every field is optional; only the ones present are changed.
 - `allow_self_approve` — owner/admin writes publish immediately instead of drafting.
 - `prime_only_review` — in a governed nest, only **prime** documents need approval; everything else self-publishes. Off by default.
 - `prime_tags` — tags that mark a document prime. Accepts an array or a comma-separated string; stored and returned normalized (no leading `#`, lowercased, deduped). See `STEWARDSHIP.md → Prime documents`.
+- `done_tags` — tags whose Board columns mean "done" (default `["done"]`). A **task** whose tags change to include one gets `metadata.completed_at`; removing it clears the stamp. Same input and normalization as `prime_tags`. An empty list turns completion off. Applies to future moves only — tasks already carrying the tag are not stamped.
 - `require_push_confirmation` — the **Push Confirmation Gate** (see below). **Superadmin-only to SET**: a PATCH carrying this field from anyone who is not a server superadmin is refused with a per-field `403` (`{ "error": ..., "field": "require_push_confirmation" }`) and no other field in the same body is applied. Readable by anyone who can read the nest. Off by default.
 - `creator_is_reviewer` — in a governed nest, whoever creates a document becomes its document-scope `reviewer` and v1 publishes immediately; later changes go through review as usual (the creator approves teammates' changes, another reviewer approves the creator's). Prime documents still draft. Future creates only. Off by default. See `STEWARDSHIP.md → Creators review their own documents`.
 
@@ -663,8 +665,10 @@ Removing a collaborator stays admin-only.
 
 ### GET `/nests/:nestId/mentionable` (read+, members only)
 ```json
-{ "people": [{ "email": "owner@x.com", "name": "Olive Owner" }] }
+{ "people": [{ "email": "owner@x.com", "name": "Olive Owner", "member": true }] }
 ```
+`member` is `false` for an account offered only through `PEOPLE_SUGGEST_ALL_USERS` (not on the nest). Only members can be a card's `assignee`; the Board's picker lists non-members to owners/admins only, behind a share-the-nest step.
+
 Everyone who can reach the nest (owner, collaborators, shared-team members, stewards, grant holders) — the roster the `@mention` pickers offer and validate against. With `PEOPLE_SUGGEST_ALL_USERS` on, every registered account follows the roster; mentioning one of them from a write+ account adds them to the nest as a `read` collaborator (see `POST /comments`).
 
 Read-tier, because commenting is read-tier and a read-only reviewer is the person most likely to tag someone. The property `GET /collaborators` protects with its write tier is kept by a narrower rule: **you may see the roster if you are on it.** A caller who reaches the nest only through its visibility (`public`, or `org`) is not on the roster → `403`. Write+ callers pass regardless (they can read the fuller roster anyway).

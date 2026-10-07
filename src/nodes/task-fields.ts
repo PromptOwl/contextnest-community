@@ -40,6 +40,8 @@ export interface TaskFields {
   parent?: string;
   /** When the node last changed column on a board (its tags changed). */
   moved_at?: string;
+  /** When the task entered a "done" column (nest done_tags); cleared on leaving. */
+  completed_at?: string;
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -79,6 +81,8 @@ export function taskFieldsOf(metadata: unknown): TaskFields {
   if (parent) out.parent = parent;
   const movedAt = str(m.moved_at);
   if (movedAt) out.moved_at = movedAt;
+  const completedAt = str(m.completed_at);
+  if (completedAt) out.completed_at = completedAt;
   return out;
 }
 

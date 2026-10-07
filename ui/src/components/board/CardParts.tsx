@@ -336,9 +336,12 @@ export function AssigneeMenu({
 
 export function SubItemChip({
   items,
+  done = 0,
   onOpen,
 }: {
-  items: Array<{ id: string; title: string }>;
+  items: Array<{ id: string; title: string; completed_at?: string }>;
+  /** How many are completed — shown as Linear/ClickUp's "2/5". */
+  done?: number;
   onOpen: (id: string) => void;
 }) {
   if (items.length === 0) return null;
@@ -347,16 +350,18 @@ export function SubItemChip({
       <DropdownMenu>
         <DropdownMenuTrigger
           className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-muted tabular-nums"
-          title={`${items.length} sub-item${items.length === 1 ? "" : "s"}`}
+          title={`${done} of ${items.length} sub-item${items.length === 1 ? "" : "s"} done`}
         >
           <ListTree className="h-3 w-3" />
-          {items.length}
+          {done > 0 ? `${done}/${items.length}` : items.length}
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" onClick={stop} className="w-64">
           <DropdownMenuLabel className="text-xs">Sub-items</DropdownMenuLabel>
           {items.map((c) => (
-            <DropdownMenuItem key={c.id} onSelect={() => onOpen(c.id)} className="text-sm">
-              <span className="truncate">{c.title}</span>
+            <DropdownMenuItem key={c.id} onSelect={() => onOpen(c.id)} className="gap-2 text-sm">
+              <span className={`truncate ${c.completed_at ? "text-muted-foreground line-through" : ""}`}>
+                {c.title}
+              </span>
             </DropdownMenuItem>
           ))}
         </DropdownMenuContent>
@@ -435,11 +440,14 @@ export function AddCardComposer({
 
 export function GovernedMoveDialog({
   title,
+  verb = "Moving",
   open,
   onCancel,
   onConfirm,
 }: {
   title: string;
+  /** What the person did — dragged a card, or set a field on it. */
+  verb?: "Moving" | "Changing";
   open: boolean;
   onCancel: () => void;
   onConfirm: () => void;
@@ -452,8 +460,8 @@ export function GovernedMoveDialog({
           <AlertDialogDescription asChild>
             <div className="space-y-2">
               <p>
-                Moving <span className="font-medium text-foreground">“{title}”</span> changes
-                it, so the move is saved as a <span className="font-medium text-foreground">draft</span>.
+                {verb} <span className="font-medium text-foreground">“{title}”</span> edits
+                it, so the change is saved as a <span className="font-medium text-foreground">draft</span>.
                 A reviewer has to approve it before the published version changes.
               </p>
               <p>Tasks skip review. For project work, create tasks with “+ Add task”.</p>
@@ -462,7 +470,9 @@ export function GovernedMoveDialog({
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel onClick={onCancel}>Cancel</AlertDialogCancel>
-          <AlertDialogAction onClick={onConfirm}>Move as draft</AlertDialogAction>
+          <AlertDialogAction onClick={onConfirm}>
+            {verb === "Moving" ? "Move as draft" : "Save as draft"}
+          </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

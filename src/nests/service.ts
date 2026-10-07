@@ -311,6 +311,24 @@ export async function setPrimeTags(
   ]);
 }
 
+/**
+ * Tags whose board column means "completed" for a task (default "done").
+ * Same storage and normalisation as prime tags.
+ */
+export async function nestDoneTags(nestId: string): Promise<string[]> {
+  const row = (await getDb().get("SELECT done_tags FROM nests WHERE id = ?", [
+    nestId,
+  ])) as { done_tags: string | null } | undefined;
+  return parsePrimeTags(row?.done_tags);
+}
+
+export async function setDoneTags(nestId: string, tags: string[]): Promise<void> {
+  await getDb().run("UPDATE nests SET done_tags = ? WHERE id = ?", [
+    parsePrimeTags(tags.join(",")).join(","),
+    nestId,
+  ]);
+}
+
 /** Comma list → normalized, deduped tag names (no leading `#`, lowercased). */
 export function parsePrimeTags(raw: string | null | undefined): string[] {
   if (!raw) return [];

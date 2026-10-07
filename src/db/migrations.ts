@@ -1753,6 +1753,19 @@ export function runMigrations(db: Database.Database): void {
     `);
     recordMigration("051_boards");
   }
+
+  // 052: nests.done_tags — which board column tags mean "completed" for a
+  //   task (CU-wdqcq03xn2). Moving a task into one stamps completed_at; out of
+  //   one clears it. Comma list like prime_tags; defaults to "done".
+  if (!hasMigration("052_nest_done_tags")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("done_tags")) {
+      db.exec("ALTER TABLE nests ADD COLUMN done_tags TEXT NOT NULL DEFAULT 'done'");
+    }
+    recordMigration("052_nest_done_tags");
+  }
 }
 
 /**
