@@ -87,14 +87,12 @@ templates:
     body: "## Summary\n## Contacts\n## Engagements\n"
 ```
 
-Existing configs stay valid. A `folders:` entry that has only `description` and `template` is a literal pattern with no constraints.
+Existing configs stay valid. A `folders:` entry that has only `description` and `template` is a literal pattern with no constraints; a `template` that names nothing under `templates` is a label (no body, no required sections), and folder keys are matched literally, so a vault's own names (`Engineering`, `my notes`) work. Only `structure.enforce: true` changes what a write does.
 
 ### 3.2 Paths and patterns
 
 - **The path being checked.** It is the document id with an optional leading `nodes/` removed. This is the same rule Community's `folderToSegments` applies, and it does not depend on whether the vault uses the structured or the Obsidian layout.
-- **Exempt paths.**
-  - `sources/` is exempt **only for `type: source`** nodes. A blanket exemption would let an explicit id such as `sources/x` bypass every rule.
-  - `packs/`, `.versions/`, `_suggestions/`, `INDEX.md`, `context.md` and `context.yaml` are always exempt.
+- **Exempt paths — only at the vault root.** `packs/`, `_suggestions/`, the vault's own `CONTEXT.md`, and `sources/` for `type: source` nodes. Their look-alikes (`nodes/packs/`, `nodes/context`, dot-folders, an `INDEX` id) are ordinary paths: exempting them let any writer get around closed mode. An id is never extension-stripped. In a structured vault only `nodes/` holds content folders, so root-level folders such as `assets/` are not judged.
 - **Segments.** A pattern segment is either a literal (`meetings`) or a placeholder (`{label}`).
 - **Precedence.** When several patterns match, they are compared segment by segment, and at the first difference a literal beats a placeholder. Declaration order is not used, because JavaScript objects list integer-like keys (`"2024"`) first.
 - **Ancestors.** Ancestors of a declared pattern are allowed as folders. `clients/{client}/meetings` implies `clients` and `clients/{client}`. An ancestor holds documents only if it is declared itself.
@@ -123,13 +121,13 @@ Existing configs stay valid. A `folders:` entry that has only `description` and 
 
 - It is **implicitly anchored** (`^(?:…)$`) and takes no flags.
 - It is matched against the **slugified** name. Names are always lowercase kebab-case, because titles and folder names are slugified before they become ids. The UI says so wherever a regex is entered.
-- **Safety.** Rules are written by nest owners on a shared server, so a regex must not be able to stall the process. Every regex is compiled when the rules are saved and again when they are loaded. It is refused with `CONFIG_ERROR`, naming the key, if:
-  - it is longer than 200 characters;
-  - it uses backreferences or lookaround;
-  - it nests quantifiers (star height > 1, the `safe-regex` test); or
-  - `new RegExp` throws.
+- **Safety: a whitelist, not a blocklist.** Rules are written by nest owners on a shared server, so a regex must not be able to stall the process. QA and the architecture review both broke an earlier blocklist (bounded `{m,n}` repetition, `|` chains, a `[^]` hiding a nested group). A regex is now accepted only if it stays inside this grammar; anything else is refused with `CONFIG_ERROR` naming the key:
+  - literals, the escapes `\d \w \s \D \W \S` and escaped punctuation, `[classes]` (parsed the way JavaScript parses them), `.`, `^` and `$`;
+  - quantifiers on single atoms only, at most 3 of them variable-width (`*`, `+`, `?`, `{m,}`, `{m,n}`);
+  - `( )` / `(?: )` groups that are never quantified, with at most 4 `|` in the whole regex;
+  - at most 200 characters.
 
-  Inputs are already capped at 100 characters per path segment. Together these bound backtracking.
+  No repeated groups means no nested repetition, so a match tries at most ~n² splits per alternative. A name longer than 128 characters is refused without running the pattern. Token patterns follow the same budget: at most 3 variable-width tokens (`{slug}`, `{n}`), never two side by side.
 
 **File names are checked on the id's leaf, not the title.**
 
@@ -146,7 +144,8 @@ Existing configs stay valid. A `folders:` entry that has only `description` and 
 - **Required subfolders.** `required: true` can be set on a rule whose last segment is a literal. That folder must exist whenever its parent does.
 - **Required files.** `files: { <leaf>: { template, type? } }` lists files that must exist in every folder the rule matches.
 - **Scaffolding.** Whenever a write brings a folder into existence, its required subfolders (recursively) and required files are created with it. That covers a document create, a move, an import, or an explicit "new folder".
-  - Required files are written as **drafts** from their template.
+  - Required files are written as **drafts** from their template. A required file cannot be a `pdf`, `source` or `skill` (each needs data a template cannot supply), and when it declares a `type`, a document there must have that type.
+  - Scaffolding happens only for **enforced** writes that are **not held for review**, and it is best effort: it never fails the write that triggered it. Whatever it could not create shows up in the compliance report.
   - Placeholder folders are never scaffolded, because the engine cannot invent a client name.
   - Scaffold writes run inside the same vault lock as the write that triggered them.
 
@@ -170,10 +169,12 @@ With **`enforce: true`**:
 - **Update** cannot change the id. It is refused only if:
   - it switches the node to a type that isn't allowed, or
   - it removes a required heading the existing body had.
-- **Delete** of a required file or folder on its own is refused ("overview is required in clients/acme — delete the folder instead"). Deleting the whole parent folder is allowed.
+- **Delete** of a required file is refused while its folder (subfolders included) holds any other document; deleting it last is allowed, so a folder can be emptied even where no folder-delete operation exists. Deleting a required subfolder on its own is refused; deleting its parent is allowed.
 - **Grandfathering.** A document that broke the rules before they were saved stays readable and editable. Nothing new lands in the wrong place, but nothing old is locked. `MISSING_FOLDER` and `MISSING_FILE` on folders that already existed are report-only, and the Compliance list offers to create them.
 
-With **`enforce: false`** (the default), every rule is **report-only**. Violations appear in the compliance report and nothing is refused. This is the rollout step.
+With **`enforce: false`** (the default), every rule is **report-only**: the rules write nothing (no scaffolding) and refuse nothing; violations appear in the compliance report. This is the rollout step. A rule that does not compile refuses writes only in an enforced vault; `context_structure` reports it as `error` rather than throwing.
+
+**Approvals are re-checked.** Approving a held edit (`approveReview`) or a drift suggestion (`approveSuggestion`) is judged against the rules in force at approval time, for what the edit newly breaks. So is a held create when it is approved.
 
 **Refusals reuse `VALIDATION_FAILED`.** The message names the rule and the expected format, for example:
 
@@ -224,7 +225,7 @@ Per the sync discipline, all of this lands in the engine repo first and ships in
 
 - **New pure module `packages/engine/src/structure.ts`.** No IO.
   - `compileStructure(config)` compiles tokens and regex, including the safety checks in §3.3.
-  - `checkCreate`, `checkUpdate(existing, next)` and `checkDelete` return violations.
+  - `checkDocument`, `checkUpdate(existing, next)`, `checkFolder`, `checkDeleteDocument(rules, id, others)` and `checkDeleteFolder` return violations.
   - `scaffoldPlan(rules, newFolders)` returns the folders and files to create.
   - `auditStructure(rules, docs, folders)` produces the compliance report.
 
@@ -243,7 +244,8 @@ Per the sync discipline, all of this lands in the engine repo first and ships in
   | `context_delete` | required-file guard |
   | deprecated mcp-server `create_document` / `update_document` | `packages/mcp-server/src/index.ts:922` and `:1121`; one call each, because they write storage directly |
 
-- **Security fix.** `context_import`'s `files[]` refuses paths under `.context/`. Today `overwrite: true` lets any caller rewrite `config.yaml`, which means the structure rules *and* the review gate.
+- **Security fix.** `context_import`'s `files[]` refuses paths under `.context/`. Today `overwrite: true` lets any caller rewrite `config.yaml`, which means the structure rules *and* the review gate. No write op accepts a document id under `.context/` either (case-insensitive; Windows trailing dots and spaces ignored).
+- **Shared IO helpers** (`structure-store.ts`, exported): `enforcedStructure(storage)` (the rules only when enforced), `missingFolders(storage, id)` and `scaffoldFolders(storage, rules, created)` (best-effort scaffolding), and `assertStructureUpdate(storage, id, beforeRaw, afterRaw)`. Approvals, `ctx pull`, the legacy MCP tools and Community's own write paths use these, so nobody re-implements scaffolding or the enforce gate.
 
 - **Skip flag.** A new `OperationContext.structure?: "skip"`. It is set only by trusted binding code for system writers (see §6) and is never read from operation input. Under it the rules are not enforced, and `context_import` may land `.context/` files: that is how a bundle restore brings the source nest's `config.yaml`, rules included.
 
@@ -276,12 +278,12 @@ Per the sync discipline, all of this lands in the engine repo first and ships in
 
   - **Without `rules`,** the tests run against the saved rules. The new-document and new-folder forms use this: does this folder, title and type fit, and what slug does the title become?
   - **With `rules`,** the draft is compiled, regex safety included. `errors` points at the offending key, and the tests run against the draft. The rule editor uses this for its "Try" boxes and field errors before saving.
-  - On the server it calls the engine's exported `compileStructure` and `checkCreate`, and Community's own `slugify` for `slug`. The UI therefore shows exactly what the server will enforce.
+  - On the server it calls the engine's exported `compileStructure`, `checkDocument` and `checkFolder`, and Community's own `slugify` for `slug` (it is the function that builds Community's ids, so it is what the server will produce). The UI therefore shows exactly what the server will enforce.
 
-- **Write paths that don't go through an engine op** call the engine's exported checker and scaffolder directly:
+- **Write paths that don't go through an engine op** call the engine's exported `enforcedStructure`, checkers, `missingFolders` and `scaffoldFolders` directly — never a copy of them:
   - `moveNode` (`src/nodes/service.ts:2571`) checks the destination and scaffolds any new folder. The move keeps the file's leaf, so a non-conforming name cannot move into a folder with a name rule until a rename op exists (§12).
   - `createEmptyFolder` (:1078) checks the folder and scaffolds its required children.
-  - `deleteFolder` (:2972) passes the skip flag for its own children, so the required-file guard does not block deleting the whole folder.
+  - `deleteFolder` (:2972) first calls `checkDeleteFolder` on the folder itself (a required subfolder cannot go on its own), then passes the skip flag for its own children, so the required-file guard does not block deleting the whole folder.
 
 - **Skip flag** (passed through `opContext`, `src/nodes/engine.ts:430`, the same way `limits` travels). It is set only for system writers that derive content rather than author it:
   - the annotations projection (`nodes/<base>--annotations`);
@@ -417,6 +419,8 @@ Every phase is built **test-first**:
 4. Each blocking finding is fixed test-first: a failing test that reproduces it, then the fix. QA runs again until the verdict is `PASS`.
 
 ### 10.1 Engine phase (ContextNest) — done
+
+Round 1 (`9c8c3a3`) passed every suite but QA and the architecture review returned `BLOCKED` / `Needs rework` (ReDoS bypasses, closed-mode bypass through system-path look-alikes, legacy configs refusing writes, a stranded write when scaffolding failed, unenforced paths: deprecated `delete_document`, `ctx pull`, approvals). Round 2 (`e81d3f1`) wrote a failing test for every finding first, then fixed them; both reviewers re-run against it.
 
 | Suite | Kind | What it pins |
 |---|---|---|
