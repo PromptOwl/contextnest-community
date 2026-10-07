@@ -502,6 +502,99 @@ describe("request access on a denied write", () => {
     expect(deny.status).toBe(200);
   });
 
+  it("the cooldown holds whatever shape the stored timestamp has (Postgres-style ISO too)", async () => {
+    const ask = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/access-requests`,
+      { target_type: "node", target_id: otherDocId, level: "write" },
+      reader.apiKey,
+    );
+    expect(ask.status).toBe(201);
+    await jsonRequest(app, "POST", `/nests/${nestId}/access-requests/${ask.data.request.id}/deny`, {}, owner.apiKey);
+    await (await db()).run("UPDATE access_requests SET resolved_at = ? WHERE id = ?", [
+      new Date().toISOString(),
+      ask.data.request.id,
+    ]);
+    const again = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/access-requests`,
+      { target_type: "node", target_id: otherDocId, level: "write" },
+      reader.apiKey,
+    );
+    expect(again.status).toBe(429);
+    await (await db()).run(
+      "UPDATE access_requests SET resolved_at = '2000-01-01 00:00:00' WHERE id = ?",
+      [ask.data.request.id],
+    );
+  });
+
+  it("two asks racing file one request", async () => {
+    const body = { target_type: "folder", target_id: "gtm/racing", level: "write" };
+    // A folder needs a document in it to be askable.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Racing Doc", content: "x", folder: "gtm/racing" },
+      owner.apiKey,
+    );
+    const [a, b] = await Promise.all([
+      jsonRequest(app, "POST", `/nests/${nestId}/access-requests`, body, reader.apiKey),
+      jsonRequest(app, "POST", `/nests/${nestId}/access-requests`, body, reader.apiKey),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 201]);
+    expect(a.data.request.id).toBe(b.data.request.id);
+    await jsonRequest(app, "POST", `/nests/${nestId}/access-requests/${a.data.request.id}/deny`, {}, owner.apiKey);
+  });
+
+  it("an approval whose grant never happened (crash between claim and grant) is recoverable by asking again", async () => {
+    const ask = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/access-requests`,
+      { target_type: "node", target_id: otherDocId, level: "write" },
+      reader.apiKey,
+    );
+    expect(ask.status).toBe(201);
+    // Simulate the crash: the row says approved, no grant exists.
+    await (await db()).run(
+      "UPDATE access_requests SET status = 'approved', resolved_by = 'owner@acme.com', resolved_at = '2000-01-01 00:00:00' WHERE id = ?",
+      [ask.data.request.id],
+    );
+    const refused = await patch(reader.apiKey, otherDocId, "# still refused");
+    expect(refused.status).toBe(403);
+    expect(refused.data.can_request_access).toBe(true);
+    expect(refused.data.access_request).toBeUndefined();
+    const again = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/access-requests`,
+      { target_type: "node", target_id: otherDocId, level: "write" },
+      reader.apiKey,
+    );
+    expect(again.status).toBe(201);
+    await jsonRequest(app, "POST", `/nests/${nestId}/access-requests/${again.data.request.id}/approve`, {}, owner.apiKey);
+    expect((await patch(reader.apiKey, otherDocId, "# recovered")).status).toBe(200);
+    // Back to read-only for the cases below.
+    await (await db()).run("DELETE FROM grants WHERE nest_id = ? AND target = ?", [nestId, otherDocId]);
+  });
+
+  it("a document write share doesn't open nest-level writes (creating stays refused)", async () => {
+    // reader holds a write share on docId (approved above) but only nest read.
+    expect((await patch(reader.apiKey, docId, "# still fine")).status).toBe(200);
+    const create = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Sneaky", content: "x" },
+      reader.apiKey,
+    );
+    expect(create.status).toBe(403);
+    expect(create.data.target).toEqual({ type: "nest", id: nestId });
+  });
+
   it("approving a folder request opens every document under it", async () => {
     const ask = await jsonRequest(
       app,

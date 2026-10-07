@@ -87,6 +87,17 @@ const MAX_NOTE = 2000;
  *  target again. */
 export const ASK_AGAIN_AFTER_MS = 60 * 60 * 1000;
 
+/** A Date as the 'YYYY-MM-DD HH:MM:SS' UTC text nowExpr stores. */
+function sqlTime(d: Date): string {
+  return d.toISOString().slice(0, 19).replace("T", " ");
+}
+
+/** Parse that text (or an ISO string, with or without a zone) as UTC ms. */
+function parseSqlTime(v: string): number {
+  const iso = v.includes("T") ? v : v.replace(" ", "T");
+  return Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : `${iso}Z`);
+}
+
 /** 429: asked again too soon after a denial. */
 export class TooSoonError extends AppError {
   constructor(public minutes: number) {
@@ -219,7 +230,7 @@ export async function latestAccessRequest(
   const row = await getDb().get(
     `SELECT * FROM access_requests
       WHERE nest_id = ? AND requester_id = ? AND target_type = ? AND target_id = ?
-      ORDER BY created_at DESC LIMIT 1`,
+      ORDER BY created_at DESC, id DESC LIMIT 1`,
     [nestId, requesterId, target.type, target.id],
   );
   return row ? rowToRequest(row) : null;
@@ -327,13 +338,23 @@ export async function createAccessRequest(params: {
 
   // A "no" holds for a while: without this, someone denied could re-file on
   // every refused save and fill the admins' inboxes and email with the same ask.
-  const latest = await latestAccessRequest(nestId, requesterId, target);
-  if (latest?.status === "denied" && latest.resolved_at) {
-    const deniedAt = Date.parse(`${latest.resolved_at.replace(" ", "T")}Z`);
-    const waitMs = deniedAt + ASK_AGAIN_AFTER_MS - Date.now();
-    if (Number.isFinite(deniedAt) && waitMs > 0) {
-      throw new TooSoonError(Math.ceil(waitMs / 60_000));
-    }
+  // Decided in SQL against a cutoff in the column's own format ('YYYY-MM-DD
+  // HH:MM:SS', UTC — nowExpr on both backends), so a timestamp JS can't parse
+  // can never switch the cooldown off; the clock only shapes the message.
+  const cutoff = sqlTime(new Date(Date.now() - ASK_AGAIN_AFTER_MS));
+  const recentDenial = (await db.get(
+    `SELECT resolved_at FROM access_requests
+      WHERE nest_id = ? AND requester_id = ? AND target_type = ? AND target_id = ?
+        AND status = 'denied' AND resolved_at > ?
+      ORDER BY resolved_at DESC LIMIT 1`,
+    [nestId, requesterId, target.type, target.id, cutoff],
+  )) as { resolved_at: string } | undefined;
+  if (recentDenial) {
+    const deniedAt = parseSqlTime(recentDenial.resolved_at);
+    const minutes = Number.isFinite(deniedAt)
+      ? Math.max(1, Math.ceil((deniedAt + ASK_AGAIN_AFTER_MS - Date.now()) / 60_000))
+      : Math.round(ASK_AGAIN_AFTER_MS / 60_000);
+    throw new TooSoonError(minutes);
   }
 
   const id = uuid();
@@ -373,6 +394,8 @@ export async function createAccessRequest(params: {
 }
 
 export async function listAccessRequests(params: {
+  /** Newest first, at most this many (default 200). */
+  limit?: number;
   nestId?: string;
   /** Cross-nest scope for the /me/work inbox — the caller's visible nests. */
   nestIds?: string[];
@@ -402,11 +425,12 @@ export async function listAccessRequests(params: {
   }
   const rows = (await getDb().all(
     `SELECT * FROM access_requests${where.length ? ` WHERE ${where.join(" AND ")}` : ""}
-      ORDER BY created_at DESC`,
+      ORDER BY created_at DESC, id DESC LIMIT ${Math.min(Math.max(Math.floor(params.limit ?? 200), 1), 500)}`,
     args,
   )) as any[];
   // One title map per nest, not a vault scan per row (the inbox spans nests).
   const titlesByNest = new Map<string, Map<string, string>>();
+  const nestNames = new Map<string, string>();
   const out: AccessRequest[] = [];
   for (const row of rows) {
     const r = rowToRequest(row);
@@ -414,8 +438,11 @@ export async function listAccessRequests(params: {
     if (r.target_type === "node") {
       if (!titlesByNest.has(r.nest_id)) titlesByNest.set(r.nest_id, await buildTitleMap(r.nest_id));
       title = titlesByNest.get(r.nest_id)!.get(r.target_id) ?? (await titleForNode(r.nest_id, r.target_id));
+    } else if (r.target_type === "folder") {
+      title = prettyFolderPath(r.target_id);
     } else {
-      title = await accessTargetTitle(r.nest_id, { type: r.target_type, id: r.target_id });
+      if (!nestNames.has(r.nest_id)) nestNames.set(r.nest_id, await nestName(r.nest_id));
+      title = nestNames.get(r.nest_id)!;
     }
     out.push({ ...r, title });
   }
@@ -481,6 +508,14 @@ async function grantRequested(
  * seat with a 402, the nest was archived meanwhile), the claim is released
  * back to 'pending' and the error propagates, so the request is never
  * 'approved' with nothing behind it.
+ *
+ * The grant can't share the claim's transaction (createGrant and
+ * addCollaborator run their own writes, seat checks and emails), so a process
+ * dying between the two leaves an 'approved' row with no grant. That is
+ * recoverable, not stuck: the next refused write still offers the request
+ * (accessRequestHint never surfaces an approved row), a new ask is accepted
+ * (nothing pending, no denial), and approving it grants — every grant path
+ * here is an idempotent upsert / upgrade.
  */
 export async function decideAccessRequest(params: {
   nestId: string;
@@ -567,7 +602,14 @@ async function notifyAccessRequested(request: AccessRequest, baseUrl?: string): 
       request.id,
       `${request.requested_by} asked for ${levelWord(request.level)} access to ${label}${noteText}`,
     );
-    const line = `${request.requested_by} asked for ${levelWord(request.level)} access to ${ctx.noun} *${ctx.docTitle}*${noteText}`;
+    // Channels get an excerpt: the full note is in the inbox and the email,
+    // and a short line keeps one person's text from taking over a channel.
+    // (Slack text is escaped downstream — escapeMrkdwn — so `<!channel>` in a
+    // note posts as literal text.)
+    const excerpt = request.note
+      ? ` — "${request.note.length > 140 ? `${request.note.slice(0, 140)}…` : request.note}"`
+      : "";
+    const line = `${request.requested_by} asked for ${levelWord(request.level)} access to ${ctx.noun} *${ctx.docTitle}*${excerpt}`;
     void dispatchEvent({
       kind: "access_requested",
       nestId: request.nest_id,
