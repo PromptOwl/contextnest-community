@@ -13,11 +13,17 @@ import {
   rankColumn,
   updateBoard,
 } from "./board-service.js";
+import { permissionLevel } from "../shared/access.js";
 
 export const boardRoutes = new Hono<AuthEnv>();
 
 boardRoutes.get("/", async (c) => {
   const boards = await listBoards(c.req.param("nestId")!, c.get("userId"));
+  // Read tier reaches public/org visitors; like GET /collaborators, member
+  // emails are for writers only.
+  if (permissionLevel(c.get("nestPermission")) < permissionLevel("write")) {
+    for (const b of boards) b.created_by_email = null;
+  }
   return c.json({ boards });
 });
 

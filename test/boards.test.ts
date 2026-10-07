@@ -70,6 +70,13 @@ describe("boards", () => {
     expect((await req(owner, "PATCH", `/${mine}`, { name: "x" })).status).toBe(404);
   });
 
+  it("creator emails go to writers only — read tier also serves public visitors", async () => {
+    const w = await req(writer, "GET", "");
+    expect(w.data.boards[0].created_by_email).toBe("writer@acme.com");
+    const r = await req(reader, "GET", "");
+    expect(r.data.boards[0].created_by_email).toBeNull();
+  });
+
   it("readers can't create or change boards; outsiders can't see them", async () => {
     expect((await req(reader, "POST", "", { name: "Nope" })).status).toBe(403);
     expect((await req(reader, "PATCH", `/${sprint}`, { name: "Nope" })).status).toBe(403);

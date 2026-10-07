@@ -275,8 +275,12 @@ export async function rankColumn(
   const order = strList(input.order, "order");
   if (!order) throw new ValidationError("order is required");
   await getVisible(nestId, boardId, userId);
-  await getDb().transaction(async (tx) => {
-    const row = (await tx.get("SELECT config_json FROM boards WHERE id = ?", [boardId])) as
+  const db = getDb();
+  await db.transaction(async (tx) => {
+    // Row-locked on Postgres: without it two column ranks both read the old
+    // config and the second write drops the first column's order.
+    const lock = db.dialect === "postgres" ? " FOR UPDATE" : "";
+    const row = (await tx.get(`SELECT config_json FROM boards WHERE id = ?${lock}`, [boardId])) as
       | { config_json: string }
       | undefined;
     if (!row) throw new NotFoundError("Board not found");

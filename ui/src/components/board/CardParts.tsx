@@ -469,6 +469,37 @@ export function GovernedMoveDialog({
   );
 }
 
+export function DeleteBoardDialog({
+  name,
+  onCancel,
+  onConfirm,
+}: {
+  name: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog open={name !== null} onOpenChange={(o) => !o && onCancel()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete the board “{name}”?</AlertDialogTitle>
+          <AlertDialogDescription>
+            Its layout, filter and card order are removed. The documents on it are not touched.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel onClick={onCancel}>Cancel</AlertDialogCancel>
+          <AlertDialogAction asChild>
+            <Button variant="destructive" onClick={onConfirm}>
+              Delete board
+            </Button>
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
 /** Owner/admin picked someone off the nest: share it with them, then assign. */
 export function ShareAndAssignDialog({
   email,

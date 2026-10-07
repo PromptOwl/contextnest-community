@@ -80,6 +80,7 @@ import {
   AssigneeMenu,
   Avatar,
   DueChip,
+  DeleteBoardDialog,
   GovernedMoveDialog,
   PriorityMenu,
   ShareAndAssignDialog,
@@ -430,7 +431,9 @@ export function MaturityBoard({
     () =>
       nodes.filter(
         (n) =>
-          (!config.tasksOnly || n.type === "task") &&
+          // Without the engine's task type "+ Add task" makes documents, so
+          // Tasks only would hide every card added here.
+          (!config.tasksOnly || !typeTaskEnabled || n.type === "task") &&
           matchesAssigneeFilter(n, assigneeFilter) &&
           (config.filterTags ?? []).every((f) =>
             n.tags.some(
@@ -438,7 +441,7 @@ export function MaturityBoard({
             ),
           ),
       ),
-    [nodes, config.tasksOnly, config.filterTags, assigneeFilter],
+    [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, assigneeFilter],
   );
 
   const { columns, byColumn } = useMemo(
@@ -723,9 +726,9 @@ export function MaturityBoard({
     },
     [nestId, upsertBoard],
   );
+  const [pendingDelete, setPendingDelete] = useState<api.SavedBoard | null>(null);
   const removeBoard = useCallback(
     async (b: api.SavedBoard) => {
-      if (!window.confirm(`Delete the board "${b.name}"? The documents on it are not touched.`)) return;
       try {
         await api.deleteBoard(nestId, b.id);
         setBoards((bs) => bs?.filter((x) => x.id !== b.id) ?? bs);
@@ -1003,7 +1006,7 @@ export function MaturityBoard({
                         <>
                           <DropdownMenuSeparator />
                           <DropdownMenuItem
-                            onSelect={() => void removeBoard(b)}
+                            onSelect={() => setPendingDelete(b)}
                             className="text-destructive focus:text-destructive"
                           >
                             Delete board
@@ -1133,15 +1136,17 @@ export function MaturityBoard({
       {/* Project-board bar: tasks-only toggle + the person quick-filter
           (Jira/ClickUp's avatar row — click faces to show only their cards). */}
       <div className="flex flex-wrap items-center gap-3">
-        <label className="flex items-center gap-1.5 text-sm text-muted-foreground cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={!!config.tasksOnly}
-            onChange={(e) => updateConfig({ tasksOnly: e.target.checked })}
-            className="h-3.5 w-3.5"
-          />
-          Tasks only
-        </label>
+        {typeTaskEnabled && (
+          <label className="flex items-center gap-1.5 text-sm text-muted-foreground cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={!!config.tasksOnly}
+              onChange={(e) => updateConfig({ tasksOnly: e.target.checked })}
+              className="h-3.5 w-3.5"
+            />
+            Tasks only
+          </label>
+        )}
         {/* Tag filter: cards must carry every tag listed (saved per board). */}
         <div className="flex items-center gap-1">
           <Filter className="h-3.5 w-3.5 text-muted-foreground" />
@@ -1526,6 +1531,15 @@ export function MaturityBoard({
           const m = pendingMove;
           setPendingMove(null);
           if (m) void executeMove(m.id, m.plan, m.place);
+        }}
+      />
+      <DeleteBoardDialog
+        name={pendingDelete?.name ?? null}
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => {
+          const b = pendingDelete;
+          setPendingDelete(null);
+          if (b) void removeBoard(b);
         }}
       />
       <ShareAndAssignDialog
