@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { ValidationError } from "../shared/errors.js";
 import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
+import { injectArtifactBridge } from "../shared/artifact-bridge.js";
 import { resolveCallerEmail, canReadNode } from "../governance/access-guard.js";
 import {
   createThread,
@@ -201,5 +202,7 @@ annotationRoutes.get("/:nodeId{.+}/hosted", async (c) => {
   // surfaces. See src/shared/artifact-sandbox.ts for the full rationale.
   applyArtifactSandboxHeaders(c);
   if (served != null) c.header("X-Artifact-Snapshot", String(served));
-  return c.html(html);
+  // ?embed=1 — the in-app viewer's iframe: append the place/highlight bridge
+  // (see src/shared/artifact-bridge.ts). Everyone else gets the bytes as-is.
+  return c.html(c.req.query("embed") === "1" ? injectArtifactBridge(html) : html);
 });

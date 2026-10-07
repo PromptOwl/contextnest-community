@@ -114,6 +114,8 @@ import {
   caretAt,
 } from "../lib/anchor-highlight";
 import { outdatedThreadIds, paintableThreads } from "../lib/comment-threads";
+import { sourceRangesForAnchors, useKeepPlace } from "../lib/view-place";
+import { HighlightedTextarea } from "./HighlightedTextarea";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -516,6 +518,8 @@ export function DocumentEditor({
   // Anchor snapshotted at mouseup (selection is live then); consumed on click.
   const stagedAnchorRef = useRef<api.AnnotationAnchor | null>(null);
   const docViewRef = useRef<HTMLDivElement | null>(null);
+  // The rich editor's wrapper; its .ProseMirror is where highlights paint.
+  const editorSurfaceRef = useRef<HTMLDivElement | null>(null);
   // The body wrapper, whichever control is inside it (rich editor, raw
   // markdown, source, artifact HTML) — Enter from the title lands here.
   const bodyRef = useRef<HTMLDivElement | null>(null);
@@ -671,24 +675,49 @@ export function DocumentEditor({
     window.getSelection()?.removeAllRanges();
   }, []);
 
+  const activeThreadIdRef = useRef(activeThreadId);
+  activeThreadIdRef.current = activeThreadId;
   // Rebuild the painted comment highlights whenever the doc text or the set
-  // of anchored threads changes (and only in the rendered, non-diff view).
+  // of anchored threads changes — in the rendered view and in the rich
+  // editor (the raw markdown paints its own, see HighlightedTextarea).
   useEffect(() => {
-    const container = docViewRef.current;
-    const inRenderedView =
+    const inRenderedView = (commentMode || mode === "view") && !rawMode;
+    const inEditor = !commentMode && mode === "edit" && !rawMode;
+    const paints =
       !isNew &&
-      (commentMode || mode === "view") &&
-      !rawMode &&
+      (inRenderedView || inEditor) &&
       compareVersion == null &&
       !looksLikeHtml(content);
-    if (!container || !inRenderedView) {
+    const findContainer = () =>
+      inRenderedView
+        ? docViewRef.current
+        : (editorSurfaceRef.current?.querySelector<HTMLElement>(".ProseMirror") ?? null);
+    if (!paints || (inRenderedView && !docViewRef.current)) {
       anchorRangesRef.current = [];
       clearHighlight("comment-anchor");
       clearHighlight("comment-anchor-active");
       return;
     }
-    // Defer one frame so react-markdown has committed its DOM.
-    const id = requestAnimationFrame(() => {
+    // Defer a frame so react-markdown has committed its DOM; TipTap mounts
+    // its .ProseMirror a few frames after the wrapper, so wait for it.
+    let tries = 0;
+    let id = 0;
+    let observer: MutationObserver | null = null;
+    const paint = () => {
+      const container = findContainer();
+      if (!container) {
+        if (++tries < 60) id = requestAnimationFrame(paint);
+        return;
+      }
+      // The editor can rebuild its DOM without `content` changing (initial
+      // setContent, node views), which strands the ranges — repaint then.
+      if (inEditor && !observer) {
+        observer = new MutationObserver(() => {
+          cancelAnimationFrame(id);
+          id = requestAnimationFrame(paint);
+        });
+        observer.observe(container, { childList: true, subtree: true, characterData: true });
+      }
       const idx = buildTextIndex(container);
       const ranges: { id: string; range: Range }[] = [];
       // Only open threads paint (and hit-test): a resolved thread is done,
@@ -705,6 +734,8 @@ export function DocumentEditor({
       );
       anchorRangesRef.current = ranges;
       setHighlight("comment-anchor", ranges.map((r) => r.range));
+      const active = ranges.find((r) => r.id === activeThreadIdRef.current);
+      setHighlight("comment-anchor-active", active ? [active.range] : []);
       // Deferred focus: a comment was clicked from edit mode; now that the
       // rendered view exists and ranges are built, scroll to + emphasize it.
       if (pendingFocusRef.current) {
@@ -718,8 +749,12 @@ export function DocumentEditor({
         }
         pendingFocusRef.current = null;
       }
-    });
-    return () => cancelAnimationFrame(id);
+    };
+    id = requestAnimationFrame(paint);
+    return () => {
+      cancelAnimationFrame(id);
+      observer?.disconnect();
+    };
   }, [anchoredThreads, content, mode, rawMode, compareVersion, isNew, commentMode]);
 
   // Paint the active thread's range brighter (doc ⇄ rail emphasis).
@@ -746,6 +781,15 @@ export function DocumentEditor({
         });
         return;
       }
+      // Raw markdown paints its spans as <mark>s in the textarea's mirror.
+      if (rawMode) {
+        const mark = hit
+          ? bodyRef.current?.querySelector(`mark[data-thread-id="${CSS.escape(hit.id)}"]`)
+          : null;
+        if (mark) mark.scrollIntoView({ behavior: "smooth", block: "center" });
+        else toast.message("That highlighted text isn't in the current version.");
+        return;
+      }
       // Not rendered yet (we're in the editor) — drop into comment mode and let
       // the highlight effect scroll to it once ranges build.
       const inRenderedView = commentMode || mode === "view";
@@ -757,7 +801,7 @@ export function DocumentEditor({
       }
       toast.message("That highlighted text isn't in the current version.");
     },
-    [anchoredThreads, commentMode, mode, content],
+    [anchoredThreads, commentMode, mode, content, rawMode],
   );
 
   // Map a click inside the rendered doc onto an anchored thread (if the click
@@ -1222,6 +1266,36 @@ export function DocumentEditor({
   // Fields read-only when locked or outside edit mode; "Start Editing" or
   // dblclick opts in (drafts only — a locked doc can't enter edit).
   const fieldsDisabled = isLocked || mode !== "edit";
+
+  // Which surface shows the body. Each switch remounts it, so the place the
+  // reader was at is carried across (lib/view-place.ts).
+  const surfaceKey = loading
+    ? "loading"
+    : compareVersion != null
+      ? "diff"
+      : isSourceOnly && mode === "edit" && !commentMode
+        ? "source"
+        : rawMode
+          ? "raw"
+          : isArtifactDraft
+            ? "artifact-draft"
+            : (commentMode || mode === "view") && (isSourceOnly || !looksLikeHtml(content))
+              ? "view"
+              : "editor";
+  useKeepPlace({
+    surfaceKey,
+    resetKey: `${nestId}/${nodeId}`,
+    getSurface: () => {
+      const el = bodyRef.current?.querySelector<HTMLElement>("[data-place-surface]");
+      // The editor's toolbar is sticky at the top — read the text, not it.
+      return el?.querySelector<HTMLElement>(".ProseMirror") ?? el ?? null;
+    },
+  });
+  // Comment highlights in the raw markdown, mapped from rendered-text quotes.
+  const rawRanges = useMemo(
+    () => (rawMode ? sourceRangesForAnchors(content, paintableThreads(anchoredThreads)) : []),
+    [rawMode, content, anchoredThreads],
+  );
 
   // Declared before isDirty so the save gate below can read it.
   const hasSaveableFields = useMemo(
@@ -3416,8 +3490,11 @@ export function DocumentEditor({
                               Rich editor
                             </Button>
                           </div>
-                          <textarea
+                          <HighlightedTextarea
                             value={content}
+                            ranges={rawRanges}
+                            activeId={activeThreadId}
+                            onRangeClick={setActiveThreadId}
                             onChange={(e) => {
                               if (fieldsDisabled) return;
                               setContent(e.target.value);
@@ -3427,7 +3504,6 @@ export function DocumentEditor({
                             readOnly={fieldsDisabled}
                             spellCheck={false}
                             placeholder="# Raw markdown"
-                            className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
                             data-testid="document-editor-raw-markdown"
                           />
                         </div>
@@ -3477,6 +3553,7 @@ export function DocumentEditor({
                           onMouseMove={isNew ? undefined : onDocMouseMove}
                           className="min-h-[300px] cursor-text"
                           data-testid="document-view-surface"
+                          data-place-surface
                         >
                           {effectiveType === "table" && !isNew ? (
                             <div className="p-4">
@@ -3497,6 +3574,9 @@ export function DocumentEditor({
                           )}
                         </div>
                       ) : (
+                        // Clicking a painted quote while editing selects its
+                        // thread (the click still places the caret).
+                        <div ref={editorSurfaceRef} data-place-surface onClick={onDocClick}>
                         <MarkdownEditor
                           ref={editorRef}
                           content={content}
@@ -3545,6 +3625,7 @@ export function DocumentEditor({
                             </>
                           }
                         />
+                        </div>
                       )}
                     </div>
                   </div>

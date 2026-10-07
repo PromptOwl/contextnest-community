@@ -192,6 +192,25 @@ describe("annotations: hosted artifact + threaded comments", () => {
     expect(res.headers.get("content-security-policy") || "").toContain("sandbox");
     const text = await res.text();
     expect(text).toContain("Slide 3");
+    // Plain /hosted (Open in new tab, the annotate text fetch) stays the
+    // artifact's own bytes — no viewer bridge.
+    expect(text.trim()).toBe(HTML);
+    expect(text).not.toContain("data-cn-bridge");
+  });
+
+  it("?embed=1 adds the viewer's place/highlight bridge, still sandboxed", async () => {
+    const res = await app.request(`/nests/${nestId}/nodes/${nodeId}/hosted?embed=1`, {
+      headers: { Authorization: `Bearer ${alice.apiKey}` },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-security-policy") || "").toContain("sandbox allow-scripts");
+    const text = await res.text();
+    // The artifact comes first and untouched (a prepended script would push
+    // a doctype'd page into quirks mode); the bridge follows it.
+    expect(text.startsWith(HTML)).toBe(true);
+    expect(text.indexOf("data-cn-bridge")).toBeGreaterThan(text.indexOf("</html>"));
+    expect(text).toContain('data-cn-bridge');
+    expect(text).toContain("cn-place");
   });
 
   it("creates an anchored thread, threads replies, resolves and reopens", async () => {

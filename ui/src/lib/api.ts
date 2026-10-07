@@ -2058,8 +2058,13 @@ export function hostedArtifactUrl(
   nodeId: string,
   version?: number | null,
   cacheBust?: number | string | null,
+  opts?: { embed?: boolean },
 ): string {
   const params = new URLSearchParams();
+  // embed=1: the in-app viewer's iframe, which gets the place/highlight
+  // bridge appended (src/shared/artifact-bridge.ts). Open in new tab and the
+  // text fetch never ask for it.
+  if (opts?.embed) params.set("embed", "1");
   if (version != null) params.set("v", String(version));
   if (cacheBust != null) params.set("_", String(cacheBust));
   const qs = params.toString();
