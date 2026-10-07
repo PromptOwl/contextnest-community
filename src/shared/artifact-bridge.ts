@@ -17,7 +17,9 @@
  * It grants the artifact nothing new: the page could already postMessage its
  * parent, and the parent validates every message (ui/src/lib/artifact-bridge.ts).
  * The parent sends only quotes taken from the artifact's own text, plus thread
- * ids — never comment bodies or authors.
+ * ids — never comment bodies or authors. What the artifact's own scripts CAN
+ * learn is which of its passages have open threads (and their opaque ids);
+ * that is the accepted cost of painting highlights inside the frame.
  *
  * Matching ignores whitespace on both sides: the viewer's quotes come from the
  * extracted text (block newlines, collapsed runs), the DOM has neither.
@@ -35,7 +37,11 @@ const BRIDGE_JS = String.raw`(function () {
   // reused until the DOM changes — scrolling alone never rebuilds it.
   // A page that re-renders gets its highlights repainted (debounced); our own
   // <style> insert is skipped so painting can't retrigger itself.
-  var cache = null, repaintT = 0, last = null;
+  // Back-off: a page that keeps changing (a clock, a ticker, a chart) would
+  // otherwise rebuild the index and repaint every 250ms forever. A repaint
+  // that follows the last within 2s doubles the wait, up to 8s; a quiet
+  // spell resets it to 250ms.
+  var cache = null, repaintT = 0, last = null, delay = 250, lastRepaint = 0;
   try {
     new MutationObserver(function (records) {
       var ours = records.every(function (r) {
@@ -44,9 +50,15 @@ const BRIDGE_JS = String.raw`(function () {
       });
       if (ours) return;
       cache = null;
-      if (last) {
-        clearTimeout(repaintT);
-        repaintT = setTimeout(function () { paint(last.items, last.active); }, 250);
+      // Throttle, not debounce: a page that never stops changing would keep
+      // pushing a debounce back forever and never get repainted.
+      if (last && last.items.length && !repaintT) {
+        delay = Date.now() - lastRepaint < 2000 ? Math.min(delay * 2, 8000) : 250;
+        repaintT = setTimeout(function () {
+          repaintT = 0;
+          lastRepaint = Date.now();
+          paint(last.items, last.active);
+        }, delay);
       }
     }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
   } catch (e) {}
@@ -173,7 +185,10 @@ const BRIDGE_JS = String.raw`(function () {
         if (first < 0) first = i;
         if (tail && idx.text.slice(Math.max(0, i - tail.length), i) === tail) { at = i; break; }
       }
-      if (at < 0) at = first;
+      // No context match: only trust the quote if it occurs exactly once. A
+      // short, common quote ("the") would otherwise paint — and click
+      // through to — the wrong place.
+      if (at < 0 && first >= 0 && idx.text.indexOf(q, first + 1) === -1) at = first;
       if (at < 0) continue;
       var e = at + q.length - 1, r = document.createRange();
       r.setStart(idx.nodes[at], idx.offs[at]);
