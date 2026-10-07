@@ -950,6 +950,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       updated_at TEXT NOT NULL DEFAULT ${NOW},
       PRIMARY KEY (nest_id, node_id)
     );
+    -- One running server-executed run per agent, enforced atomically.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_server_run
+        ON runs(nest_id, agent_node) WHERE status = 'running' AND claimed_by = 'server:metacognition';
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

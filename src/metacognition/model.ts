@@ -62,6 +62,7 @@ export async function createTurn(params: {
   };
   if (!plainModels.has(key)) {
     try {
+      // `as any`: this SDK version's params type predates `output_config`.
       return (await client.messages.create(
         { ...base, thinking: { type: "adaptive" }, output_config: { effort: "medium" } } as any,
         { signal },

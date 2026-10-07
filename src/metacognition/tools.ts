@@ -551,7 +551,7 @@ async function mcpListTools(ctx: ToolContext, input: Record<string, unknown>): P
       ),
     };
   } catch (err) {
-    return { isError: true, content: `MCP server "${server.name}" could not be reached (${(err as Error).message}).` };
+    return { isError: true, content: `MCP server "${server.name}" could not be reached (${mcpWhy(err)}).` };
   }
 }
 
@@ -577,8 +577,15 @@ async function mcpCall(ctx: ToolContext, input: Record<string, unknown>): Promis
     });
     return { isError: out.isError, content: untrusted("mcp", `${server.name}/${tool}`, out.text) };
   } catch (err) {
-    return { isError: true, content: `MCP call ${server.name}/${tool} failed (${(err as Error).message}).` };
+    return { isError: true, content: `MCP call ${server.name}/${tool} failed (${mcpWhy(err)}).` };
   }
+}
+
+/** Our own refusal wording only; a transport/SDK message can name internal hosts. */
+function mcpWhy(err: unknown): string {
+  if (err instanceof OutboundBlockedError || err instanceof OutboundTooLargeError) return err.message;
+  console.warn("[metacognition] MCP error", (err as Error)?.message);
+  return "connection or protocol error";
 }
 
 /** Token for an MCP server: the nest env value it names, if any. */

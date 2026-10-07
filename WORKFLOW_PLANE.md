@@ -108,6 +108,11 @@ external runners. The boundary moves only as far as it has to:
   on its proposals (rejection notes included), and withdraws its own rejected
   drafts so the working copy is the approved text again.
 
+MCP servers are reached over Streamable HTTP through the same guarded fetch:
+each response is capped (2 MB) and an idle socket closes after 30 s, so a
+server that holds one long-lived SSE stream open will see it cut and
+reconnected. Request/response MCP servers are unaffected.
+
 A run that cannot start — no model key, instructions not yet approved, the
 configuring owner lost write access — is closed `cancelled` with
 `trace.skipped` saying why.

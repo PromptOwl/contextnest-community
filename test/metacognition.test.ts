@@ -28,6 +28,8 @@ let script: Array<Turn | ((req: any) => Turn | Promise<Turn>)> = [];
 let requests: any[] = [];
 /** The credential each request used. */
 let credentials: Array<{ source: string; baseUrl: string | null }> = [];
+/** The abort signal the loop handed the last model call. */
+let lastSignal: AbortSignal | undefined;
 
 const toolUse = (name: string, input: Record<string, unknown>, id = `tu_${name}_${Math.random().toString(36).slice(2, 8)}`) => ({
   type: "tool_use",
@@ -56,9 +58,15 @@ beforeAll(() => {
       createTurn: async (params: any) => {
         requests.push(JSON.parse(JSON.stringify(params.request)));
         credentials.push({ source: params.credential.source, baseUrl: params.credential.baseUrl });
+        lastSignal = params.signal;
         const next = script.shift();
         if (!next) return say("Nothing more to do.");
-        return typeof next === "function" ? next(params.request) : next;
+        if (typeof next !== "function") return next;
+        // A turn that takes time rejects when the loop aborts it, as the SDK does.
+        return await new Promise((resolve, reject) => {
+          params.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
+          Promise.resolve(next(params.request)).then(resolve, reject);
+        });
       },
     };
   });
@@ -105,6 +113,8 @@ const CONFIG = {
 beforeAll(async () => {
   process.env.FEATURE_WORKFLOW_PLANE = "true";
   process.env.FEATURE_METACOGNITION = "true";
+  process.env.METACOGNITION_STARTS_PER_HOUR = "1000";
+  process.env.METACOGNITION_CANCEL_POLL_MS = "50";
   env = setupTestEnv();
   app = await createTestApp("key", {
     gateway: { baseUrl: "https://gateway.promptowl.test", key: "po-key", defaultModel: "default-claude/claude-sonnet-5" },
@@ -574,6 +584,60 @@ describe("robustness", () => {
     await waitForRun(r.data.run_id);
     const leaked = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/private/sneaky`, undefined, owner.apiKey);
     expect(leaked.status).toBe(404);
+  });
+});
+
+describe("round-3 guards", () => {
+  it("two simultaneous starts: exactly one runs", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    script = [(() => gate.then(() => say("done"))) as any];
+    const [a, b] = await Promise.all([
+      jsonRequest(app, "POST", `/nests/${nestId}/metacognition/nodes/archivist/run`, {}, owner.apiKey),
+      jsonRequest(app, "POST", `/nests/${nestId}/metacognition/nodes/archivist/run`, {}, owner.apiKey),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([202, 409]);
+    release();
+    await waitForRun((a.status === 202 ? a : b).data.run_id);
+  });
+
+  it("cancelling mid-run aborts the model call in flight and stops the run", async () => {
+    requests = [];
+    let sawAbort = false;
+    script = [
+      ((req: any) => new Promise((_res, rej) => {
+        void req;
+        // The mock gets no signal param in `req`; the real abort path is
+        // exercised through createTurn's signal, captured below.
+        setTimeout(() => rej(Object.assign(new Error("aborted"), { name: "AbortError" })), 5000);
+      })) as any,
+    ];
+    const { getDb } = await import("../src/db/client.js");
+    const r = await jsonRequest(app, "POST", `/nests/${nestId}/metacognition/nodes/archivist/run`, {}, owner.apiKey);
+    await new Promise((res) => setTimeout(res, 100));
+    const cancel = await jsonRequest(app, "PATCH", `/runs/${r.data.run_id}`, { status: "cancelled" }, owner.apiKey);
+    expect(cancel.status).toBe(200);
+    const done = await waitForRun(r.data.run_id);
+    expect(done.run.status).toBe("cancelled");
+    // The row is closed at once; the run notices within its poll interval.
+    for (let i = 0; i < 40 && !lastSignal?.aborted; i++) await new Promise((res) => setTimeout(res, 25));
+    sawAbort = lastSignal?.aborted === true;
+    expect(sawAbort).toBe(true);
+    // Nothing more was asked of the model after the cancel.
+    expect(requests).toHaveLength(1);
+    void getDb;
+  });
+
+  it("starts are rate-limited per agent", async () => {
+    process.env.METACOGNITION_STARTS_PER_HOUR = "1";
+    try {
+      // The counter already holds this hour's earlier starts.
+      const r = await jsonRequest(app, "POST", `/nests/${nestId}/metacognition/nodes/archivist/run`, {}, owner.apiKey);
+      expect(r.status).toBe(409);
+      expect(String(r.data.error)).toContain("in the last hour");
+    } finally {
+      process.env.METACOGNITION_STARTS_PER_HOUR = "1000";
+    }
   });
 });
 

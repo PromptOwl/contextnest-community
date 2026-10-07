@@ -21,6 +21,7 @@ import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { ConflictError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { safeJson } from "../shared/json.js";
+import { tryConsume } from "../shared/rate-limit.js";
 import {
   resolveModelCredential,
   resolveGatewayModel,
@@ -75,6 +76,13 @@ export async function waitForMetacognitionRuns(): Promise<void> {
   await Promise.allSettled([...inFlight]);
 }
 
+/** How often a run checks whether a person cancelled it. */
+const WATCH_MS = Number(process.env.METACOGNITION_CANCEL_POLL_MS) || 2000;
+
+/** Manual/hook/trigger starts per agent per hour (schedules are bounded by
+ *  their interval). Any write-tier member can press Run; this bounds spend. */
+const startsPerHour = () => Number(process.env.METACOGNITION_STARTS_PER_HOUR) || 30;
+
 /** Tool calls run per model turn; the rest are answered "not run". */
 const TOOL_CALLS_PER_TURN = 8;
 
@@ -95,6 +103,8 @@ export async function startMetacognitionRun(opts: {
   triggeredBy: string;
   inputs?: unknown;
   credentialOverride?: ModelCredential | null;
+  /** false = not counted against the per-agent start limit (tests). */
+  rateLimited?: boolean;
 }): Promise<string> {
   const agent = await getAgent(opts.nestId, opts.nodeId);
   if (!agent) throw new NotFoundError(`${opts.nodeId} is not a metacognition agent`);
@@ -106,9 +116,13 @@ export async function startMetacognitionRun(opts: {
     nodeId: opts.nodeId,
     olderThanMs: agent.config.caps.max_seconds * 1000 + STALE_GRACE_MS,
   });
+  if (opts.rateLimited !== false && !tryConsume(`metacognition:${opts.nestId}:${opts.nodeId}`, { max: startsPerHour(), windowMs: 3600_000 })) {
+    throw new ConflictError(`${opts.nodeId} has been started ${startsPerHour()} times in the last hour; try again later`);
+  }
   const id = `run_${uuid()}`;
   const now = new Date().toISOString();
   const db = getDb();
+  try {
   await db.transaction(async (tx) => {
     // One run per agent at a time: two loops proposing against the same
     // documents would trip over each other's drafts.
@@ -139,6 +153,14 @@ export async function startMetacognitionRun(opts: {
       ],
     );
   });
+  } catch (err) {
+    // The partial unique index (one running server run per agent) is the
+    // atomic guard: two triggers racing past the SELECT above land here.
+    if (/unique|constraint/i.test((err as Error)?.message ?? "")) {
+      throw new ConflictError(`${opts.nodeId} is already running`);
+    }
+    throw err;
+  }
   launch(id, opts.credentialOverride);
   return id;
 }
@@ -168,9 +190,12 @@ async function ownerOf(agent: MetacognitionAgent): Promise<Owner | null> {
   return row ? { userId: row.id, email: row.email } : null;
 }
 
-/** A step, unless the run was closed under us (a person cancelled it). */
-async function note(runId: string, s: Parameters<typeof appendRunStep>[1]): Promise<void> {
-  await appendRunStep(runId, s);
+const note = appendRunStep;
+
+/** Has the run been closed under us (a person cancelled it)? */
+async function closedUnderUs(runId: string): Promise<boolean> {
+  const r = (await getDb().get("SELECT status FROM runs WHERE id = ?", [runId])) as { status: string } | undefined;
+  return !r || r.status !== "running";
 }
 
 async function finish(runId: string, status: "succeeded" | "failed" | "cancelled", trace: unknown): Promise<void> {
@@ -244,6 +269,17 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
   const proposals = { made: 0 };
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(new Error("max_seconds")), caps.max_seconds * 1000);
+  // A person cancelling the run stops the model call in flight too, not just
+  // the next step: check the row every few seconds and abort if it closed.
+  let cancelled = false;
+  const watch = setInterval(() => {
+    void closedUnderUs(runId).then((closed) => {
+      if (closed && !ac.signal.aborted) {
+        cancelled = true;
+        ac.abort(new Error("cancelled"));
+      }
+    }).catch(() => {});
+  }, WATCH_MS);
   const mcp = new McpPool(mcpTokenFrom(env));
   let stoppedBy = "end_turn";
   let summary = "";
@@ -349,7 +385,7 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
         try {
           outcome = await runTool(ctx, String(block.name), input);
         } catch (err) {
-          if (err instanceof ConflictError && /Run is/.test(err.message)) throw err;
+          if (err instanceof ConflictError && (await closedUnderUs(runId))) throw err;
           outcome = { isError: true, content: `That failed: ${(err as Error).message}` };
         }
         results.push({
@@ -363,10 +399,10 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
     }
     await finish(runId, "succeeded", traceOf());
   } catch (err) {
-    if (ac.signal.aborted) {
+    if (ac.signal.aborted && !cancelled) {
       stoppedBy = "max_seconds";
       await finish(runId, "succeeded", traceOf());
-    } else if (err instanceof ConflictError && /Run is/.test(err.message)) {
+    } else if (cancelled || (err instanceof ConflictError && (await closedUnderUs(runId)))) {
       // Cancelled by a person mid-run: the row is already terminal.
     } else {
       console.error(`[metacognition] run ${runId} failed`, err);
@@ -374,6 +410,7 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
     }
   } finally {
     clearTimeout(timer);
+    clearInterval(watch);
     await mcp.closeAll();
   }
 }

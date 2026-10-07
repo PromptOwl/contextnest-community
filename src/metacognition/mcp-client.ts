@@ -41,6 +41,8 @@ const realConnector: McpConnector = async (server, token) => {
     requestInit: token ? { headers: { Authorization: `Bearer ${token}` } } : undefined,
     // Address checked at connect time (no DNS rebinding), body capped, no
     // redirects — see net.ts.
+    // `as any`: the SDK's FetchLike is typed against the DOM fetch overloads;
+    // guardedFetch takes the subset the transport actually passes.
     fetch: guardedFetch({ maxBytes: MAX_RESPONSE_BYTES, timeoutMs: TIMEOUT_MS }) as any,
   });
   const client = new Client({ name: "contextnest-metacognition", version: "1.0.0" });

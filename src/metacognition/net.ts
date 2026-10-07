@@ -73,7 +73,9 @@ export function guardedLookup(resolve: Resolver = systemResolver): LookupFunctio
             return callback(new OutboundBlockedError(`${hostname} resolves to a private address; refusing to connect`));
           }
         }
-        const pick = answers[0];
+        // Prefer IPv4: a host whose first answer is an unreachable IPv6
+        // address would otherwise fail though a good IPv4 one exists.
+        const pick = answers.find((x) => x.family === 4) ?? answers[0];
         if (options?.all) return callback(null, [pick]);
         callback(null, pick.address, pick.family);
       },
@@ -151,10 +153,16 @@ export function guardedFetch(opts: { maxBytes: number; timeoutMs: number; resolv
       );
       req.on("timeout", () => req.destroy(new Error(`request timed out after ${opts.timeoutMs}ms`)));
       req.on("error", reject);
+      // One run's signal is shared by all its requests: drop the listener
+      // when this one is done, or they pile up for the rest of the run.
       const signal = init.signal;
       if (signal) {
-        if (signal.aborted) req.destroy(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
-        else signal.addEventListener("abort", () => req.destroy(new Error("aborted")), { once: true });
+        const onAbort = () => req.destroy(new Error("aborted"));
+        if (signal.aborted) onAbort();
+        else {
+          signal.addEventListener("abort", onAbort, { once: true });
+          req.on("close", () => signal.removeEventListener("abort", onAbort));
+        }
       }
       if (typeof body === "string") req.write(body);
       req.end();

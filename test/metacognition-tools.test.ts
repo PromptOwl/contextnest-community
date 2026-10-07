@@ -159,6 +159,18 @@ describe("outbound requests (net.ts)", () => {
     expect(isPrivateAddress("::ffff:a9fe:a9fe")).toBe(true); // 169.254.169.254, hex-mapped
   });
 
+  it("refuses when ANY answer is private, even if a public one comes first", async () => {
+    const fetchIt = guardedFetch({
+      maxBytes: 1000,
+      timeoutMs: 2000,
+      resolver: async () => [
+        { address: "93.184.216.34", family: 4 },
+        { address: "10.0.0.5", family: 4 },
+      ],
+    });
+    await expect(fetchIt("https://mixed.example.com/")).rejects.toBeInstanceOf(OutboundBlockedError);
+  });
+
   it("refuses plain http unless the dev switch is on", async () => {
     const fetchIt = guardedFetch({ maxBytes: 1000, timeoutMs: 2000 });
     await expect(fetchIt("http://example.com/")).rejects.toBeInstanceOf(OutboundBlockedError);

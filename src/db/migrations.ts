@@ -1785,6 +1785,9 @@ export function runMigrations(db: Database.Database): void {
         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
         PRIMARY KEY (nest_id, node_id)
       );
+      -- One running server-executed run per agent, enforced atomically.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_server_run
+        ON runs(nest_id, agent_node) WHERE status = 'running' AND claimed_by = 'server:metacognition';
     `);
     recordMigration("053_metacognition_agents");
   }
