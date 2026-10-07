@@ -530,7 +530,7 @@ Every phase is built **test-first**:
 
   QA and the architecture review re-run on that head; their verdicts gate this phase.
 
-  **Community chunker constraint.** The UI chunker (`ui/src/lib/api.ts`) splits uploads by bytes. In an enforced nest, each document's `.versions/<doc>/` files must arrive together in one call, and their head must pass the rules, or the whole set is refused. A document itself may arrive in an earlier or later call than its history.
+  **Chunked imports.** The engine judges each imported history by what the nest will hold after the call: the call's files laid over what is already there, rebuilt and hash-verified. So the UI chunker (`ui/src/lib/api.ts`), which splits by bytes, may send a document and its `.versions/` files in any order, across calls. Community's own staging (nest import, bundle restore, `context_sync_folder`) runs under `skip` (§6) and is not judged at all.
 
 | Suite | Kind | What it pins |
 |---|---|---|
