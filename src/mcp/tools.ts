@@ -2210,7 +2210,10 @@ async function runTool(
       } catch (err) {
         const e = err as { statusCode?: number; message?: string };
         if (e.statusCode === 404) return toolError(e.message ?? "Not found", "DOCUMENT_NOT_FOUND");
-        if (e.statusCode === 400) return toolError(e.message ?? "Invalid request", "VALIDATION_FAILED");
+        // 400: already held / archived / not signed in; 429: denied recently.
+        if (e.statusCode === 400 || e.statusCode === 429) {
+          return toolError(e.message ?? "Invalid request", "VALIDATION_FAILED");
+        }
         throw err;
       }
     }
@@ -2262,15 +2265,26 @@ async function runTool(
           "UNAUTHORIZED_ACTION",
         );
       }
-      const decided = await decideAccessRequest({
-        nestId,
-        id: requestId,
-        decision,
-        decidedById: userId,
-        decidedByEmail: userEmail,
-        note: typeof args.note === "string" ? args.note : undefined,
-        baseUrl: ctx.baseUrl,
-      });
+      let decided;
+      try {
+        decided = await decideAccessRequest({
+          nestId,
+          id: requestId,
+          decision,
+          decidedById: userId,
+          decidedByEmail: userEmail,
+          note: typeof args.note === "string" ? args.note : undefined,
+          baseUrl: ctx.baseUrl,
+        });
+      } catch (err) {
+        // Archived nest (400) or a plan with no seat for it (402): the request
+        // stays pending and the decider is told why.
+        const e = err as { statusCode?: number; message?: string };
+        if (e.statusCode === 400 || e.statusCode === 402) {
+          return toolError(e.message ?? "Couldn't grant the access", "VALIDATION_FAILED");
+        }
+        throw err;
+      }
       if (!decided) {
         return toolError(`No pending access request with id ${requestId}.`, "DOCUMENT_NOT_FOUND");
       }

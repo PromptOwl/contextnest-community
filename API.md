@@ -750,7 +750,7 @@ The UI turns that body into a "Request edit access?" prompt over whatever the pe
 ```
 - `target_type` ∈ `node` / `folder` / `nest`; `target_id` is the node id, a folder path (`gtm/deals`, normalized like `nodes/gtm/deals/`), or ignored for `nest`. `level` defaults to `write`.
 - `201 { request, created: true }`; asking again while one is pending → `200 { request, created: false }` with that request.
-- `404` when the caller can't see the target, `400` when they already hold that access, the nest is archived, or they aren't signed in.
+- `404` when the caller can't see the target, `400` when they already hold that access, the nest is archived, or they aren't signed in, `429` within an hour of a denial for the same target (so a denied person can't re-file on every refused save).
 - Read tier: a viewer, and someone reaching the nest only through a share grant, may call it.
 - Notifies the owner and nest admins: inbox row (`access_requested`), email, nest channels.
 
@@ -761,7 +761,7 @@ The UI turns that body into a "Request edit access?" prompt over whatever the pe
 `{ request }` — the caller's latest request for one target, any status, or `null`.
 
 ### POST `/nests/:nestId/access-requests/:id/approve` · `/deny`
-Body `{ "note"?: "…" }`. Owner / nest admin / server admin only (`403` otherwise). Approve grants first, then marks the request — a grant the plan refuses (`402`) leaves it pending. `404` when the request isn't pending in this nest. The requester gets an inbox row (`access_approved` / `access_denied`) and an email.
+Body `{ "note"?: "…" }`. Owner / nest admin / server admin only (`403` otherwise). The decision is claimed atomically first, so an approve and a deny racing can't both act; an approval then grants, and a grant the plan refuses (`402`) puts the request back to pending. Approving on an archived nest is `400` (deny still works). `404` when the request isn't pending in this nest. The requester gets an inbox row (`access_approved` / `access_denied`) and an email.
 
 Requests also appear in `GET /me/work` as `type: "access"` items (`request_id`, `target_type`, `level`, `reason` = the note): in `items` for whoever can decide them, in `waiting` for the requester. Agent equivalents: `context_request_access`, `context_access_requests`, `context_resolve_access_request`; a refused `context_create` / `context_update` / `context_delete` / `context_move` names `context_request_access` and carries the same `can_request_access` / `target` / `level` fields in its structured result.
 

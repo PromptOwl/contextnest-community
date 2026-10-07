@@ -70,10 +70,13 @@ describe("request access on a denied write", () => {
   let docId: string;
   let folderDocId: string;
   let otherDocId: string;
+  // Mutated by the plan-limit case; read by the mocked license on every call.
+  const plan: { maxSubscribers?: number | null } = {};
+  const db = async () => (await import("../src/db/client.js")).getDb();
 
   beforeAll(async () => {
     env = setupTestEnv();
-    app = await createTestApp("key");
+    app = await createTestApp("key", { entitlement: plan });
     owner = await registerUser(app, "owner@acme.com", "Owner");
     admin = await registerUser(app, "admin@acme.com", "Admin");
     await resetAuthRateLimit();
@@ -351,6 +354,23 @@ describe("request access on a denied write", () => {
       ),
     ).toBe(true);
 
+    // A "no" holds for a while, so a denied person can't re-file on every
+    // refused save and flood the admins.
+    const tooSoon = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/access-requests`,
+      { target_type: "node", target_id: otherDocId, level: "write" },
+      reader.apiKey,
+    );
+    expect(tooSoon.status).toBe(429);
+    expect(tooSoon.data.error).toMatch(/ask again in \d+ minute/);
+
+    // After the cooldown they can ask again.
+    await (await db()).run(
+      "UPDATE access_requests SET resolved_at = '2000-01-01 00:00:00' WHERE id = ?",
+      [ask.data.request.id],
+    );
     const retry = await jsonRequest(
       app,
       "POST",
@@ -360,6 +380,126 @@ describe("request access on a denied write", () => {
     );
     expect(retry.status).toBe(201);
     expect(retry.data.request.id).not.toBe(ask.data.request.id);
+    // Leave nothing pending on this document for the cases below.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/access-requests/${retry.data.request.id}/deny`,
+      {},
+      owner.apiKey,
+    );
+    await (await db()).run(
+      "UPDATE access_requests SET resolved_at = '2000-01-01 00:00:00' WHERE id = ?",
+      [retry.data.request.id],
+    );
+  });
+
+  it("an approve and a deny racing: exactly one lands, and access matches the row", async () => {
+    const ask = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/access-requests`,
+      { target_type: "node", target_id: otherDocId, level: "write" },
+      reader.apiKey,
+    );
+    expect(ask.status).toBe(201);
+    const id = ask.data.request.id;
+    const [a, d] = await Promise.all([
+      jsonRequest(app, "POST", `/nests/${nestId}/access-requests/${id}/approve`, {}, owner.apiKey),
+      jsonRequest(app, "POST", `/nests/${nestId}/access-requests/${id}/deny`, {}, admin.apiKey),
+    ]);
+    expect([a.status, d.status].sort()).toEqual([200, 404]);
+    const row = (await (await db()).get("SELECT status FROM access_requests WHERE id = ?", [id])) as {
+      status: string;
+    };
+    const edit = await patch(reader.apiKey, otherDocId, "# race");
+    expect(edit.status).toBe(row.status === "approved" ? 200 : 403);
+    // Put the document back to read-only for the reader, whatever won.
+    await (await db()).run(
+      "DELETE FROM grants WHERE nest_id = ? AND target = ?",
+      [nestId, otherDocId],
+    );
+    await (await db()).run(
+      "UPDATE access_requests SET resolved_at = '2000-01-01 00:00:00' WHERE id = ?",
+      [id],
+    );
+  });
+
+  it("an approval the plan refuses (402) leaves the request pending", async () => {
+    // A fresh viewer: someone who already holds a write share is already an
+    // editor seat, so the plan would have nothing new to refuse.
+    await resetAuthRateLimit();
+    const fresh = await registerUser(app, "plan-viewer@acme.com", "Plan Viewer");
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "plan-viewer@acme.com", permission: "read" },
+      owner.apiKey,
+    );
+    const ask = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/access-requests`,
+      { target_type: "node", target_id: otherDocId, level: "write" },
+      fresh.apiKey,
+    );
+    expect(ask.status).toBe(201);
+    plan.maxSubscribers = 0;
+    try {
+      const refused = await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/access-requests/${ask.data.request.id}/approve`,
+        {},
+        owner.apiKey,
+      );
+      expect(refused.status).toBe(402);
+    } finally {
+      delete plan.maxSubscribers;
+    }
+    const row = (await (await db()).get("SELECT status, resolved_by FROM access_requests WHERE id = ?", [
+      ask.data.request.id,
+    ])) as { status: string; resolved_by: string | null };
+    expect(row).toEqual({ status: "pending", resolved_by: null });
+    expect((await patch(fresh.apiKey, otherDocId, "# nope")).status).toBe(403);
+  });
+
+  it("an archived nest can't have access granted into it, but its requests can still be denied", async () => {
+    const { data: n } = await jsonRequest(app, "POST", "/nests", { name: "Archive Vault" }, owner.apiKey);
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${n.nest.id}/collaborators`,
+      { email: "reader@acme.com", permission: "read" },
+      owner.apiKey,
+    );
+    const ask = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${n.nest.id}/access-requests`,
+      { target_type: "nest", target_id: n.nest.id, level: "write" },
+      reader.apiKey,
+    );
+    expect(ask.status).toBe(201);
+    expect((await jsonRequest(app, "POST", `/nests/${n.nest.id}/archive`, {}, owner.apiKey)).status).toBe(200);
+    const approve = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${n.nest.id}/access-requests/${ask.data.request.id}/approve`,
+      {},
+      owner.apiKey,
+    );
+    expect(approve.status).toBe(400);
+    expect(approve.data.error).toMatch(/archived/);
+    const deny = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${n.nest.id}/access-requests/${ask.data.request.id}/deny`,
+      {},
+      owner.apiKey,
+    );
+    expect(deny.status).toBe(200);
   });
 
   it("approving a folder request opens every document under it", async () => {
@@ -523,5 +663,24 @@ describe("writeTargetForPath", () => {
     expect(writeTargetForPath(n, [n, "nodes"], "POST")).toEqual({ type: "nest", id: n });
     expect(writeTargetForPath(n, [n, "nodes", "pdf"], "POST")).toEqual({ type: "nest", id: n });
     expect(writeTargetForPath(n, [n, "edges"], "POST")).toEqual({ type: "nest", id: n });
+  });
+});
+
+describe("access-request emails escape what the requester typed", () => {
+  it("never renders the note or address as HTML", async () => {
+    const { renderEmail } = await import("../src/notify/email-render.js");
+    for (const status of ["access_requested", "access_approved", "access_denied"] as const) {
+      const { html, subject } = renderEmail({
+        status,
+        docTitle: "Pricing <b>Notes</b>",
+        path: "Vault",
+        actor: "<img src=x onerror=alert(1)>@acme.com",
+        permission: "write",
+        note: '<script>alert("x")</script> <!channel>',
+      });
+      expect(html).not.toMatch(/<script|<img|<!channel>|<b>Notes/);
+      expect(html).toContain("&lt;script&gt;");
+      expect(subject).not.toMatch(/\r|\n/);
+    }
   });
 });

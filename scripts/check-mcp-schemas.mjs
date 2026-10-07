@@ -85,7 +85,8 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // repo's governance tables and grant through its share/collaborator paths, so there is no
 // upstream descriptor to import. They mirror the REST /access-requests routes 1:1; the
 // server-level `context_request_access` derives from the per-nest definition (no new
-// literal). Mirror the names upstream if the operation is ever promoted.
+// literal). Promotion is tracked upstream in PromptOwl/ContextNest#167 — adopt the
+// descriptors and lower this by 3 if it lands there.
 const BASELINE = 48;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;

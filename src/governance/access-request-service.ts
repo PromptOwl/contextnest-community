@@ -25,7 +25,7 @@ import type { SqlParam } from "../db/adapter.js";
 import { nowExpr, nowMsExpr } from "../db/sql.js";
 import { config } from "../config.js";
 import { ANON_USER_ID } from "../shared/constants.js";
-import { NotFoundError, ValidationError } from "../shared/errors.js";
+import { AppError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import {
   permissionLevel,
@@ -83,6 +83,20 @@ export interface AccessRequest {
 const TARGET_TYPES: readonly AccessTargetType[] = ["node", "folder", "nest"];
 const LEVELS: readonly AccessLevel[] = ["read", "write"];
 const MAX_NOTE = 2000;
+/** How long a denial stands before the same person may ask for the same
+ *  target again. */
+export const ASK_AGAIN_AFTER_MS = 60 * 60 * 1000;
+
+/** 429: asked again too soon after a denial. */
+export class TooSoonError extends AppError {
+  constructor(public minutes: number) {
+    super(
+      429,
+      `This request was denied recently. You can ask again in ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+    );
+    this.name = "TooSoonError";
+  }
+}
 
 /** Normalize a target the way every caller names it, so "gtm/deals",
  *  "/gtm/deals/" and "nodes/gtm/deals" land on one pending row. */
@@ -263,7 +277,8 @@ export async function accessRequestHint(params: {
  * File an access request. Returns the existing pending one (created: false)
  * rather than a second row when the caller already asked for this target.
  * Throws NotFoundError when the caller can't see the target, ValidationError
- * when they already hold the access or can't ask.
+ * when they already hold the access or can't ask, TooSoonError within
+ * ASK_AGAIN_AFTER_MS of a denial for the same target.
  */
 export async function createAccessRequest(params: {
   nestId: string;
@@ -309,6 +324,17 @@ export async function createAccessRequest(params: {
     [nestId, requesterId, target.type, target.id],
   );
   if (pending) return { request: rowToRequest(pending), created: false };
+
+  // A "no" holds for a while: without this, someone denied could re-file on
+  // every refused save and fill the admins' inboxes and email with the same ask.
+  const latest = await latestAccessRequest(nestId, requesterId, target);
+  if (latest?.status === "denied" && latest.resolved_at) {
+    const deniedAt = Date.parse(`${latest.resolved_at.replace(" ", "T")}Z`);
+    const waitMs = deniedAt + ASK_AGAIN_AFTER_MS - Date.now();
+    if (Number.isFinite(deniedAt) && waitMs > 0) {
+      throw new TooSoonError(Math.ceil(waitMs / 60_000));
+    }
+  }
 
   const id = uuid();
   try {
@@ -445,10 +471,16 @@ async function grantRequested(
 }
 
 /**
- * Approve or deny a pending request. Approving grants first and marks the row
- * second, so a grant the plan refuses (402) leaves the request pending rather
- * than "approved" with nothing behind it. Returns null when the request isn't
+ * Approve or deny a pending request. Returns null when the request isn't
  * pending in this nest any more (already decided, or never existed here).
+ *
+ * The decision is CLAIMED first — one conditional UPDATE off 'pending' — so
+ * two deciders racing can't both act: an approve and a deny can't leave the
+ * access granted under a 'denied' row, and two approves don't both grant.
+ * Only then does an approval grant. If the grant throws (the plan refuses the
+ * seat with a 402, the nest was archived meanwhile), the claim is released
+ * back to 'pending' and the error propagates, so the request is never
+ * 'approved' with nothing behind it.
  */
 export async function decideAccessRequest(params: {
   nestId: string;
@@ -463,24 +495,35 @@ export async function decideAccessRequest(params: {
   if (!pending || pending.nest_id !== params.nestId || pending.status !== "pending") {
     return null;
   }
-  const note = params.note?.trim() ? params.note.trim().slice(0, MAX_NOTE) : null;
-  if (params.decision === "approve") {
-    await grantRequested(pending, params.decidedById, params.decidedByEmail, params.baseUrl);
+  const approve = params.decision === "approve";
+  // Archived means read-only for everyone; granting into it would be a write.
+  // Denying stays possible so the queue can still be cleared.
+  if (approve && (await resolveNestAccess(params.nestId, params.decidedById)).archived) {
+    throw new ValidationError("This nest is archived, so access can't be granted. Restore it first, or deny the request.");
   }
+  const note = params.note?.trim() ? params.note.trim().slice(0, MAX_NOTE) : null;
   const db = getDb();
   const { changes } = await db.run(
     `UPDATE access_requests
         SET status = ?, resolved_by = ?, resolved_at = ${nowExpr(db)}, resolution_note = ?
       WHERE id = ? AND status = 'pending'`,
-    [
-      params.decision === "approve" ? "approved" : "denied",
-      params.decidedByEmail.toLowerCase(),
-      note,
-      params.id,
-    ],
+    [approve ? "approved" : "denied", params.decidedByEmail.toLowerCase(), note, params.id],
   );
-  // Two deciders racing: one write lands, and only that one notifies.
+  // Someone else decided it first: only the claim that landed acts.
   if (changes === 0) return null;
+  if (approve) {
+    try {
+      await grantRequested(pending, params.decidedById, params.decidedByEmail, params.baseUrl);
+    } catch (err) {
+      await db.run(
+        `UPDATE access_requests
+            SET status = 'pending', resolved_by = NULL, resolved_at = NULL, resolution_note = NULL
+          WHERE id = ? AND status = 'approved'`,
+        [params.id],
+      );
+      throw err;
+    }
+  }
   const decided = (await getAccessRequest(params.id))!;
   await notifyAccessDecided(decided, params.baseUrl);
   return decided;
