@@ -27,7 +27,7 @@
  *
  * Plain `/hosted` (Open in new tab, the text fetch) never carries it.
  */
-const BRIDGE_JS = String.raw`(function () {
+export const BRIDGE_JS = String.raw`(function () {
   var P = window.parent;
   if (!P || P === window) return;
   var SKIP = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEMPLATE: 1, TEXTAREA: 1 };
@@ -154,6 +154,11 @@ const BRIDGE_JS = String.raw`(function () {
     if (!innerHeight) { pendingGo = [snippet, frac]; return; }
     requestAnimationFrame(function () { scrollToText(snippet, frac); });
   }
+  // Usually a resize brings the viewport; visibility changes and the next
+  // highlights message are fallbacks in case one never fires.
+  function flushGo() {
+    if (pendingGo && innerHeight) { var g = pendingGo; pendingGo = null; goTo(g[0], g[1]); }
+  }
   function scrollToText(snippet, frac) {
     var idx = index();
     if (!idx.text.length) return;
@@ -194,8 +199,12 @@ const BRIDGE_JS = String.raw`(function () {
       if (at < 0 && first >= 0 && idx.text.indexOf(q, first + 1) === -1) at = first;
       if (at < 0) continue;
       var e = at + q.length - 1, r = document.createRange();
-      r.setStart(idx.nodes[at], idx.offs[at]);
-      r.setEnd(idx.nodes[e], idx.offs[e] + 1);
+      // The cached index can trail a DOM change by one observer tick; a
+      // node removed meanwhile throws here, so skip that quote, not all.
+      try {
+        r.setStart(idx.nodes[at], idx.offs[at]);
+        r.setEnd(idx.nodes[e], idx.offs[e] + 1);
+      } catch (err) { continue; }
       ranges.push({ id: items[k].id, range: r });
     }
     CSS.highlights.set("cn-comment", new Highlight(...ranges.map(function (x) { return x.range; })));
@@ -223,10 +232,8 @@ const BRIDGE_JS = String.raw`(function () {
   }
   addEventListener("scroll", report, true);
   addEventListener("keyup", report);
-  addEventListener("resize", function () {
-    if (pendingGo && innerHeight) { var g = pendingGo; pendingGo = null; goTo(g[0], g[1]); }
-    report();
-  });
+  addEventListener("resize", function () { flushGo(); report(); });
+  document.addEventListener("visibilitychange", flushGo);
   addEventListener("hashchange", report);
   addEventListener("click", function (ev) {
     report();
@@ -251,6 +258,7 @@ const BRIDGE_JS = String.raw`(function () {
           (it.before === undefined || typeof it.before === "string");
       });
       paint(items, typeof m.active === "string" ? m.active : null);
+      flushGo();
     }
   });
   function ready() { post({ type: "cn-ready" }); report(); }
