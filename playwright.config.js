@@ -76,6 +76,14 @@ const testRun = [
     enabled: true,
     independent: true, // Arranges its own nest, reviews and requests
   },
+  {
+    // Metacognition agents (CN-META-001 … CN-META-003). Skips unless the
+    // server has FEATURE_METACOGNITION on. Serial: one seeded nest.
+    file: 'metacognition/metacognition_agents.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest
+  },
   // ── Add new suites here (governance, documents, …) ────────────────────────
   // ── Teardown (always runs last, even on failure) ───────────────────────────
   {

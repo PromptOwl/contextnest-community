@@ -22,6 +22,7 @@ import {
   Wrench,
   Table2,
   X,
+  Globe,
 } from "lucide-react";
 import {
   listEdges,
@@ -81,6 +82,7 @@ import {
 import { useAuth } from "../auth/AuthContext";
 import { NodeTypeIcon } from "./NestView";
 import { NestPageHeader } from "./NestPageHeader";
+import { MetacognitionPanel, RunCost } from "./MetacognitionPanel";
 
 interface Props {
   nestId: string;
@@ -121,6 +123,7 @@ const stepIcon = (action: string) => {
   if (action === "branch") return <Zap className="h-3.5 w-3.5" />;
   if (action === "write") return <Pencil className="h-3.5 w-3.5" />;
   if (action === "notify") return <Bell className="h-3.5 w-3.5" />;
+  if (action === "external") return <Globe className="h-3.5 w-3.5" />;
   return <span className="h-3.5 w-3.5" />;
 };
 
@@ -128,6 +131,7 @@ const timeOf = (iso: string) => formatServerDate(iso) || iso;
 
 export function WorkflowsView({ nestId, nestName, onBack }: Props) {
   const [tab, setTab] = useState("canvas");
+  const { metacognitionEnabled } = useAuth();
 
   return (
     <div>
@@ -147,6 +151,11 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
           <TabsTrigger value="table">Table</TabsTrigger>
           <TabsTrigger value="run">Run</TabsTrigger>
           <TabsTrigger value="activity">Activity</TabsTrigger>
+          {metacognitionEnabled && (
+            <TabsTrigger value="agents" data-testid="workflows-agents-tab">
+              Agents
+            </TabsTrigger>
+          )}
         </TabsList>
         <TabsContent value="canvas" className="mt-4">
           <CanvasPanel nestId={nestId} />
@@ -157,6 +166,13 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
         <TabsContent value="run" className="mt-4">
           <RunsPanel nestId={nestId} />
         </TabsContent>
+        {metacognitionEnabled && (
+          <TabsContent value="agents" className="mt-4">
+            {/* Configuring takes an owner/admin; the server enforces it and
+                the form shows its refusal to anyone else. */}
+            <MetacognitionPanel nestId={nestId} canConfigure />
+          </TabsContent>
+        )}
         <TabsContent value="activity" className="mt-4 space-y-6">
           <RunnerKeyCallout nestId={nestId} />
           <SchedulesPanel nestId={nestId} />
@@ -1394,6 +1410,19 @@ function RunTrace({
               </button>
             ))}
           </div>
+        </div>
+      )}
+
+      {(run.trace?.persona || run.trace?.skipped) && (
+        <div className="mb-3 text-xs" data-testid="run-trace-metacognition">
+          {run.trace?.persona && (
+            <div className="mb-0.5">
+              Run by <span className="font-medium">{run.trace.persona.name}</span> (metacognition, executed by this
+              server)
+            </div>
+          )}
+          <RunCost trace={run.trace} />
+          {run.trace?.summary && <div className="mt-1 text-muted-foreground whitespace-pre-wrap">{run.trace.summary}</div>}
         </div>
       )}
 

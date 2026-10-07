@@ -2249,6 +2249,18 @@ every route above with the same HTML notice, never a hint about which it was.
 
 Archived nests are skipped by the scheduler tick; restoring the nest resumes them.
 
+### Metacognition agents — the server runs these (`FEATURE_METACOGNITION`)
+
+Every route `404`s unless both `FEATURE_WORKFLOW_PLANE` and `FEATURE_METACOGNITION` are on. See [`WORKFLOW_PLANE.md`](./WORKFLOW_PLANE.md#the-one-exception-metacognition-agents).
+
+- `GET /nests/:nestId/metacognition` (write) — `{ agents: [{ node_id, enabled, persona{name,avatar,email}, scope{read[],propose[]}, caps{max_steps,max_tokens,max_seconds,max_proposals}, feeds[], mcp_servers[], model, configured_by, updated_at }] }`.
+- `GET /nests/:nestId/metacognition/:node` (write) — one agent.
+- `PUT /nests/:nestId/metacognition/:node` (owner/admin, else `403`) — make an **agent** document a metacognition agent, or update it. Body: `{ persona: { name, avatar? }, scope?: { read?: string[], propose?: string[] }, caps?: {…}, feeds?: [{ name, url }], mcp_servers?: [{ name, url, allowed_tools: string[], auth_env? }], model?, enabled? }`. Folders are under `nodes/`; empty `read` = the whole nest; `propose` must sit inside `read` (empty `propose` with a scoped `read` = proposals off). Caps are clamped to server ceilings (turns ≤ 50, tokens ≤ 2M, seconds ≤ 1800, proposals ≤ 20). Feed and MCP URLs must be public `https` (`400` otherwise); an MCP server must list `allowed_tools`. `auth_env` names a nest env value sent as a bearer token. The first save creates the persona — a service identity (`persona-…@agents.invalid`) that can't sign in and isn't listed as a person. The saver becomes `configured_by`: their access bounds the agent's.
+- `DELETE /nests/:nestId/metacognition/:node` (owner/admin) — stop treating the document as a metacognition agent. The document and the persona's history stay.
+- `POST /nests/:nestId/metacognition/:node/run` (write) — start a run now → `202 { run_id, executes: "server" }`; `409` while one is running. `POST /nests/:nestId/run/:node` does the same for a metacognition agent (no bundle is handed out), as do its schedules and inbound hooks.
+
+The run is an ordinary run (`GET /runs/:id`): `claimed_by: "server:metacognition"`, steps `read` (search/list/read), `write` (`detail.kind: "proposal"`, `"access_needed"`, `"withdrew_rejected_draft"`), `notify` (comment), `external` (feed/MCP), `branch` (`detail.kind: "reasoning"`). Its `trace` is `{ persona, model, billing: "promptowl_credits"|"own_key", usage{input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens}, est_cost_usd, proposals, stopped_by: end_turn|max_steps|max_tokens|max_seconds|refusal|turn_max_tokens, summary }`, or `{ persona, skipped }` (status `cancelled`) when it couldn't start. `POST /runs/:id/steps` on a metacognition run → `409`; `PATCH /runs/:id` accepts only `cancelled`.
+
 ### Inbound hooks — let the outside world trigger a run
 
 - `GET /nests/:nestId/hooks?agent=` (read) — list, tokens masked.

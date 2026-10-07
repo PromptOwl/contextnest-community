@@ -77,6 +77,39 @@ decisions, and inputs/trace/detail shown when the viewer has write access
 (redacted otherwise). The server still never executes; the UI observes runs that
 external runners produced.
 
+## The one exception: metacognition agents
+
+With `FEATURE_METACOGNITION=true`, an owner or admin can make an agent
+document a **metacognition agent** (`PUT /nests/:id/metacognition/:node`).
+Those the server runs itself — everything else here is still executed by
+external runners. The boundary moves only as far as it has to:
+
+- **Claimed at creation.** A metacognition run is inserted with
+  `claimed_by = "server:metacognition"`, whichever way it starts (manual
+  trigger, `POST /run/:agent`, a schedule, an inbound hook), so a poll-mode
+  runner never sees it, and `/runnables` leaves these agents out. Only the
+  server appends its steps; a person can still cancel it.
+- **Proposals only.** The loop's tools read (within the configured folders and
+  the configuring owner's access, approved text only) and propose: an edit or
+  a new document lands as a draft submitted for review, authored by the
+  agent's persona (a service identity), never published. Comments are
+  comments. Nothing approves, publishes, deletes or changes permissions.
+- **Untrusted inputs fenced.** Feeds (configured list only), MCP results
+  (configured servers, allow-listed tools only) and trigger inputs reach the
+  model marked as outside data. URLs pass the same SSRF fence as connectors.
+- **Bounded.** Caps on turns, tokens, wall-clock seconds and proposals per
+  run, one run per agent at a time, the plane's per-nest concurrency cap.
+- **Observable.** Every reasoning step and tool call is a run step; the run's
+  trace carries the persona, model, token usage, a cost estimate and who pays
+  (`promptowl_credits` or `own_key`), and the closing summary.
+- **Reflective.** Each run is shown the agent's recent runs and the verdicts
+  on its proposals (rejection notes included), and withdraws its own rejected
+  drafts so the working copy is the approved text again.
+
+A run that cannot start — no model key, instructions not yet approved, the
+configuring owner lost write access — is closed `cancelled` with
+`trace.skipped` saying why.
+
 ## Guardrails
 
 - Sub-Turing by design: within a run, flow graphs are DAGs; there are no

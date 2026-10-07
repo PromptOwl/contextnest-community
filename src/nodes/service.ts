@@ -2635,6 +2635,9 @@ export const NODE_KEYED_TABLES = [
   // document at the same id never inherits someone else's reads. The
   // deletion tombstone and whole-nest export rows (node_id NULL) survive.
   ["node_access_events", "node_id"],
+  // A metacognition agent's config (CU-wdqcq041jm): it runs the agent node, so
+  // a delete must stop it and a move must take it along.
+  ["metacognition_agents", "node_id"],
 ] as const;
 
 /** Drop every row keyed to a node id. Caller supplies the transaction. */

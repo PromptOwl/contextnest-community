@@ -85,6 +85,7 @@ const HISTORICAL_MIGRATIONS = [
   "049_license_cache_gateway",
   "051_boards",
   "052_nest_done_tags",
+  "053_metacognition_agents",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
