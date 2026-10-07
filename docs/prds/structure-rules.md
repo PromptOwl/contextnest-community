@@ -122,15 +122,15 @@ Existing configs stay valid. A `folders:` entry that has only `description` and 
 
 - It is **implicitly anchored** (`^(?:…)$`) and takes no flags.
 - It is matched against the name **exactly as it appears in the id** (folder segment, or the file's last segment). Ids that Community and the engine derive from titles and folder names are lowercase kebab-case, so the UI says so wherever a regex is entered; literal folder names in rules compare case-insensitively.
-- **Safety: a whitelist, not a blocklist.** Rules are written by nest owners on a shared server, so a regex must not be able to stall the process. QA and the architecture review both broke an earlier blocklist (bounded `{m,n}` repetition, `|` chains, a `[^]` hiding a nested group). A regex is now accepted only if it stays inside this grammar; anything else is refused with `CONFIG_ERROR` naming the key:
+- **Safety: a whitelist grammar, and never the backtracking engine.** Rules are written by nest owners on a shared server, so a regex must not be able to stall the process. Four review rounds broke every attempt to bound JavaScript's backtracking by banning constructs: a blocklist, then quantifier and alternation budgets that 256 distinct rules multiplied back into seconds. So an owner regex never runs on `RegExp`. It must stay inside this grammar; anything else is refused with `CONFIG_ERROR` naming the key:
   - literals, the escapes `\d \w \s \D \W \S` and escaped punctuation, `[classes]` (parsed the way JavaScript parses them), `.`, `^` and `$`;
-  - quantifiers on single atoms only, at most 2 of them variable-width (`*`, `+`, `?`, `{m,}`, `{m,n}`), with bounds of at most 3 digits — parsed over the whole source (a zero-padded bound once hid a quantifier from a fixed window);
-  - literal `{ } [ ]` must be escaped, and escapes are limited to `\d \w \s`, their negations, and ASCII punctuation;
-  - `( )` / `(?: )` groups that are never quantified, with at most 4 `|` in the whole regex;
+  - quantifiers `* + ? {m} {m,} {m,n}` on single atoms only, with bounds of at most 3 digits;
+  - literal `{ } [ ]` must be escaped;
+  - `( )` / `(?: )` groups with `|` alternatives, never quantified;
   - at most 200 characters.
 
-  No repeated groups means no nested repetition: a failing match explores about n²/2 splits per alternation path (at most 16 paths) — well under a millisecond at the 128-character cap. (Three variable quantifiers were allowed until the round-3 review measured ~3 s for one write meeting 256 distinct such rules.) A name longer than 128 characters is refused without running the pattern. Spec §11.1.1 states the exact grammar so other implementations build the same one.
-- **Per-check cost.** Each format is bounded, and so is a write: a vault declares at most 256 folder rules, each (format, name) result is memoized within a check, and 256 distinct worst-case regexes meeting one name cost tens of milliseconds. Token patterns keep a budget of 3 `{slug}`/`{n}` tokens (they compile to unambiguous expressions). Token patterns follow the same budget: at most 3 variable-width tokens (`{slug}`, `{n}`), never two side by side.
+  The engine parses it into a small AST and matches by carrying the set of reachable positions through each item. Because no group repeats, each item is one pass over the name, so a match costs O(items × length) whatever the pattern's shape. There is no quantifier or alternation budget. A differential test checks that the matcher agrees with `RegExp` on accepted patterns. A name longer than 128 characters is refused without running the pattern. Spec §11.1.1 states the exact grammar and requires linear-time matching from other implementations.
+- **Per-check cost.** A vault declares at most 256 folder rules, and each (format, name) result is memoized within a check. 256 distinct worst-case rules meeting one name take milliseconds. Token patterns compile to unambiguous expressions and keep their own limits: at most 3 variable-width tokens (`{slug}`, `{n}`), never two side by side.
 
 **File names are checked on the id's leaf, not the title.**
 
@@ -336,7 +336,7 @@ Folder path
 
 - Each level is a **Fixed name** or **Any name**, with a label.
 - An Any-name level takes a format: Any, Year, Date, Number or **Custom regex**.
-- The **Try** box calls `POST /structure/check` with the draft rules. A regex the server refuses (nested quantifier, lookaround, too long) is flagged right there, with the server's reason.
+- The **Try** box calls `POST /structure/check` with the draft rules. A regex the server refuses (a repeated group, lookaround, too long) is flagged right there, with the server's reason.
 
 **Step 2 — Say what can go in it.** The selected rule's right-hand pane:
 
@@ -427,7 +427,7 @@ Every phase is built **test-first**:
 3. Hand the phase to the **QA agent** (`.claude/agents/qa-adversary.md`, in both repos). It only **runs** the suites and **attacks** the change. It never edits code. It reports blocking findings with exact repros and ends with a `PASS` or `BLOCKED` verdict.
 4. Each blocking finding is fixed test-first: a failing test that reproduces it, then the fix. QA runs again until the verdict is `PASS`.
 
-### 10.1 Engine phase (ContextNest) — re-review pending
+### 10.1 Engine phase (ContextNest) — re-review pending (round 5)
 
 - Round 1 (`9c8c3a3`) passed every suite, but QA and the architecture review returned `BLOCKED` / `Needs rework`: ReDoS bypasses, closed-mode bypass through system-path look-alikes, legacy configs refusing writes, a stranded write when scaffolding failed, and unenforced paths (deprecated `delete_document`, `ctx pull`, approvals).
 - Round 2 (`e81d3f1`) wrote a failing test for every finding, then fixed them. Both reviewers re-ran and found more:
@@ -440,11 +440,22 @@ Every phase is built **test-first**:
   - template typos;
   - held creates never scaffolded.
 - Round 3 (`4caf32f`) fixed those test-first. The architecture review then found two more: `files[]` imports skipping the reserved-path guard, and ~3 s of regex work for one write across 256 distinct 3-quantifier rules. It also found case-folding gaps, and approvals that publish through `context_publish` not being re-checked.
-- Round 4 (`70c36f0`) fixed those test-first. QA's round-3 verdict and a final re-review are the gate before this phase is called done.
+- Round 4 (`70c36f0`) fixed those test-first. QA's round-3 run (on `4caf32f`) still found blockers:
+  - one regex shape that took ~1.5 s, ×256 rules;
+  - reserved paths reachable through `ids[]` and `context_publish`;
+  - malformed rule keys breaking every write even when not enforced;
+  - `ctx init` dropping the rules on re-init, and starters writing past them.
+- Round 5 (`47113eb`) fixed those test-first:
+  - the linear-time matcher above;
+  - a config schema that leaves the rule keys to `compileStructure`;
+  - the reserved-path guard on every publish, with full case folding, NTFS stream suffixes and control characters;
+  - rules carried over a re-init, and starters filtered through them.
+
+  QA and the architecture review re-run on that head; their verdicts gate this phase.
 
 | Suite | Kind | What it pins |
 |---|---|---|
-| `packages/engine/src/__tests__/structure-rules.test.ts` | unit | Compiling: tokens, regex safety (nested and alternating repetition, lookaround, backreferences, quantifier budget, length) and config errors naming the key. Paths and exemptions; closed vs open structure; implied ancestors; folder-name formats; literal-beats-placeholder precedence (including integer-like keys); types; file names; required sections (levels, case, CRLF, prose, code fences); grandfathering on update; delete guards; scaffold plans; audit; resolve and describe; `enforceStructure`. |
+| `packages/engine/src/__tests__/structure-rules.test.ts` | unit | Compiling: tokens, regex safety (the grammar, repeated groups, lookaround, backreferences, length, linear-time matching of worst-case shapes, and a differential test against `RegExp`) and config errors naming the key. Paths and exemptions; closed vs open structure; implied ancestors; folder-name formats; literal-beats-placeholder precedence (including integer-like keys); types; file names; required sections (levels, case, CRLF, prose, code fences); grandfathering on update; delete guards; scaffold plans; audit; resolve and describe; `enforceStructure`. |
 | `packages/engine/src/__tests__/structure-rules-ops.test.ts` | unit, through `createEngineApi` | Each write op refused with nothing written: create (folder, name, explicit id, sections, type, placeholder, held for review), update grandfathering, delete of a required file, import `files[]` and `documents[]`, import_pdf. Also: scaffolding (and no re-scaffold), report-only and absent rules, a bad rule refusing writes with `CONFIG_ERROR` while reads still work, the skip flag (and that it is unreachable from input), the `.context/` import refusal (path tricks included), the `context_structure` output, and `setStructure` (keeps other bytes, comments and CRLF; refuses invalid rules without writing; removes the blocks). |
 | `packages/cli/src/__tests__/structure.regression.test.ts` | regression, built `ctx` | `ctx structure` (`--json`, `--folder`, `--report`, human output); `ctx add` refusals and template pre-fill; scaffolding; `ctx delete` guard; `CONFIG_ERROR`; `--json` parity between local and remote over the built MCP server; enforcement through a remote nest. |
 | `packages/mcp-server/src/__tests__/mcp-server.regression.test.ts` (structure block) | regression, built MCP server | `context_structure` in the tool list; catalog `context_create` refusals; the deprecated `create_document` / `update_document` cannot bypass the rules; `context_import` cannot rewrite `.context/config.yaml`. |
