@@ -427,7 +427,7 @@ Every phase is built **test-first**:
 3. Hand the phase to the **QA agent** (`.claude/agents/qa-adversary.md`, in both repos). It only **runs** the suites and **attacks** the change. It never edits code. It reports blocking findings with exact repros and ends with a `PASS` or `BLOCKED` verdict.
 4. Each blocking finding is fixed test-first: a failing test that reproduces it, then the fix. QA runs again until the verdict is `PASS`.
 
-### 10.1 Engine phase (ContextNest) — re-review pending (round 8)
+### 10.1 Engine phase (ContextNest) — re-review pending (round 9)
 
 - Round 1 (`9c8c3a3`) passed every suite, but QA and the architecture review returned `BLOCKED` / `Needs rework`: ReDoS bypasses, closed-mode bypass through system-path look-alikes, legacy configs refusing writes, a stranded write when scaffolding failed, and unenforced paths (deprecated `delete_document`, `ctx pull`, approvals).
 - Round 2 (`e81d3f1`) wrote a failing test for every finding, then fixed them. Both reviewers re-ran and found more:
@@ -510,9 +510,27 @@ Every phase is built **test-first**:
   - re-init refuses any invalid YAML;
   - import paths are size-checked.
 
+  On that head the architecture review returned `Needs rework`:
+  - planted history was judged by the live document, not by its own head;
+  - an imported forget naming `../otherNest/…` erased another nest's history;
+  - an import could replace a sealed PDF binary;
+  - the `~digit` rule made legacy `draft~2` ids unerasable.
+
+  QA returned `BLOCKED`:
+  - the same planted-history bypass;
+  - `~digit` names frozen even in vaults without rules;
+  - a quadratic array spread in batch scaffolding.
+- Round 9 (`1c7c5de`, `16b6069`) fixed those test-first:
+  - every imported `.versions/<doc>/` set must arrive whole and rebuild to a head that passes the full check;
+  - forgets, imported ones included, refuse non-document ids before touching history;
+  - a sealed PDF binary is replaced only by identical bytes;
+  - a `~digit` name is judged where it resolves (`assertResolvesOutsideMachinery`) on every write and erase, never by its spelling;
+  - default-ignorable code points are dropped in name comparisons;
+  - scaffolding appends with `push` (20,000 folders: 19.8 s → 0.35 s).
+
   QA and the architecture review re-run on that head; their verdicts gate this phase.
 
-  **Community chunker constraint.** The UI chunker (`ui/src/lib/api.ts`) splits uploads by bytes. In an enforced nest, a document that the rules refuse in full must arrive with its `.versions/` files in the same call, or the history is refused. Conforming documents may be split across calls freely.
+  **Community chunker constraint.** The UI chunker (`ui/src/lib/api.ts`) splits uploads by bytes. In an enforced nest, each document's `.versions/<doc>/` files must arrive together in one call, and their head must pass the rules, or the whole set is refused. A document itself may arrive in an earlier or later call than its history.
 
 | Suite | Kind | What it pins |
 |---|---|---|
