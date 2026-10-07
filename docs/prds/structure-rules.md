@@ -427,7 +427,7 @@ Every phase is built **test-first**:
 3. Hand the phase to the **QA agent** (`.claude/agents/qa-adversary.md`, in both repos). It only **runs** the suites and **attacks** the change. It never edits code. It reports blocking findings with exact repros and ends with a `PASS` or `BLOCKED` verdict.
 4. Each blocking finding is fixed test-first: a failing test that reproduces it, then the fix. QA runs again until the verdict is `PASS`.
 
-### 10.1 Engine phase (ContextNest) — re-review pending (round 7)
+### 10.1 Engine phase (ContextNest) — re-review pending (round 8)
 
 - Round 1 (`9c8c3a3`) passed every suite, but QA and the architecture review returned `BLOCKED` / `Needs rework`: ReDoS bypasses, closed-mode bypass through system-path look-alikes, legacy configs refusing writes, a stranded write when scaffolding failed, and unenforced paths (deprecated `delete_document`, `ctx pull`, approvals).
 - Round 2 (`e81d3f1`) wrote a failing test for every finding, then fixed them. Both reviewers re-ran and found more:
@@ -490,7 +490,29 @@ Every phase is built **test-first**:
   - a stricter re-init guard;
   - starters published as one batch.
 
+  On that head QA returned `BLOCKED`:
+  - a quadratic `/#+$/` in heading parsing, reachable through required sections;
+  - batch scaffolding still quadratic across wide batches (45 s for 200 docs × depth 100);
+  - a `./` segment slipping planted history past the import guard.
+
+  The architecture review returned `Needs rework`:
+  - deletes and forgets never checked reserved paths (a keyframe could be unlinked);
+  - NTFS 8.3 short names (`VERSIO~1`) aliasing reserved folders.
+- Round 8 (`d8e997a`) fixed those test-first:
+  - `assertNotMachineryPath` on every delete, forget and storage write, refusing 8.3 short names too;
+  - linear trims;
+  - one-pass subtree totals: 100 docs × depth 100 drops from 9.3 s to 1.4 s;
+  - `.`-normalized store owners;
+  - planted history refused only for a document its full check refuses, so a chunked import can send a document before its history;
+  - the `nodes/` respelling made a structure violation, so vaults without rules are unaffected;
+  - only published documents occupy a folder for scaffolding;
+  - `structure: false` is off;
+  - re-init refuses any invalid YAML;
+  - import paths are size-checked.
+
   QA and the architecture review re-run on that head; their verdicts gate this phase.
+
+  **Community chunker constraint.** The UI chunker (`ui/src/lib/api.ts`) splits uploads by bytes. In an enforced nest, a document that the rules refuse in full must arrive with its `.versions/` files in the same call, or the history is refused. Conforming documents may be split across calls freely.
 
 | Suite | Kind | What it pins |
 |---|---|---|
