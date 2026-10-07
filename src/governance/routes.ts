@@ -199,18 +199,17 @@ governanceRoutes.get("/review-queue", async (c) => {
   // + separation-of-duties). The UI gates the Review button + queue off this
   // instead of re-deriving steward scope client-side, which diverged for
   // reviewer-stewards reaching the nest via public visibility (CU-wdqcpzudt3
-  // follow-up). Cached per node across rows.
+  // follow-up). Resolved for the whole page at once, not per row.
   const email = await getUserEmail(c);
-  const canReviewCache = new Map<string, boolean>();
-  const requests = [];
-  for (const r of result.requests) {
-    let canReview = canReviewCache.get(r.nodeId);
-    if (canReview === undefined) {
-      canReview = (await stewardship.canUserApprove(nestId, r.nodeId, email)).allowed;
-      canReviewCache.set(r.nodeId, canReview);
-    }
-    requests.push({ ...r, canReview });
-  }
+  const verdicts = await stewardship.canUserApproveMany(
+    nestId,
+    result.requests.map((r) => r.nodeId),
+    email,
+  );
+  const requests = result.requests.map((r) => ({
+    ...r,
+    canReview: verdicts.get(r.nodeId)?.allowed ?? false,
+  }));
 
   return c.json({ ...result, requests });
 });

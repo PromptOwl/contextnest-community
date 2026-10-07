@@ -935,16 +935,7 @@ export async function canUserApprove(
   userEmail: string,
 ): Promise<PermissionResult> {
   const roles = await resolveUserRoles(nestId, userEmail, { nodeId });
-  const isOwner = roles.includes("owner");
-  const isSuper = isSuperAdmin(userEmail);
   const allowSelf = await nestAllowsSelfApprove(nestId);
-  // Explicit approve-capable steward role (admin or reviewer), NOT the
-  // ownership-derived right. Owner-only callers resolve to ["owner"] and
-  // fall through to the ownership branch below; an owner who is ALSO an
-  // admin/reviewer steward keeps that role's powers here.
-  const hasStewardApprove =
-    roles.includes("admin") || roles.includes("reviewer");
-
   // The actor is the user who SUBMITTED the version for review (or the version
   // author as a fallback). We compare against review_requests.requested_by so
   // that when a teammate submits someone else's earlier edit, the original
@@ -952,6 +943,145 @@ export async function canUserApprove(
   const actor =
     (await getPendingReviewRequester(nestId, nodeId)) ??
     (await getCurrentVersionAuthor(nestId, nodeId));
+  return decideApproval(roles, userEmail, allowSelf, actor);
+}
+
+/**
+ * canUserApprove for many documents of one nest, in a fixed number of queries:
+ * the nest-wide roles and self-approve flag once, and the per-document steward
+ * rows and actors in one query each — instead of the whole set per document.
+ * Same verdicts: both go through decideApproval.
+ */
+export async function canUserApproveMany(
+  nestId: string,
+  nodeIds: string[],
+  userEmail: string,
+): Promise<Map<string, PermissionResult>> {
+  const ids = [...new Set(nodeIds)];
+  const out = new Map<string, PermissionResult>();
+  if (ids.length === 0) return out;
+  const [nestRoles, allowSelf, stewards, actors] = await Promise.all([
+    resolveNestWideRoles(nestId, userEmail),
+    nestAllowsSelfApprove(nestId),
+    stewardRowsForNodes(nestId, ids),
+    approvalActorsForNodes(nestId, ids),
+  ]);
+  const me = userEmail.toLowerCase();
+  for (const id of ids) {
+    const roles = new Set<EffectiveRole>(nestRoles);
+    for (const s of stewards.get(id) ?? []) {
+      if (s.userEmail.toLowerCase() === me) roles.add(s.role);
+    }
+    out.set(id, decideApproval([...roles], userEmail, allowSelf, actors.get(id) ?? null));
+  }
+  return out;
+}
+
+/** Largest `IN (...)` list sent in one statement (SQLite's bound-parameter cap). */
+const IN_CHUNK = 500;
+
+function chunks<T>(items: T[]): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += IN_CHUNK) out.push(items.slice(i, i + IN_CHUNK));
+  return out;
+}
+
+/**
+ * The active steward rows that resolveStewardsForNode would return for each
+ * node (document ∪ tag ∪ nest scope), for many nodes in one query per chunk.
+ */
+export async function stewardRowsForNodes(
+  nestId: string,
+  nodeIds: string[],
+): Promise<Map<string, Array<{ userEmail: string; role: StewardRole }>>> {
+  const db = getDb();
+  const ids = [...new Set(nodeIds)];
+  const out = new Map<string, Array<{ userEmail: string; role: StewardRole }>>();
+  for (const id of ids) out.set(id, []);
+  for (const chunk of chunks(ids)) {
+    const marks = chunk.map(() => "?").join(",");
+    const rows = (await db.all(
+      `
+        SELECT s.node_pattern AS node_id, s.user_email, s.role
+          FROM stewards s
+          WHERE s.nest_id = ? AND s.is_active = 1 AND s.scope = 'document'
+            AND s.node_pattern IN (${marks})
+        UNION ALL
+        SELECT nt.node_id AS node_id, s.user_email, s.role
+          FROM stewards s
+          JOIN node_tag_index nt
+            ON nt.nest_id = s.nest_id
+           AND nt.tag_name = s.tag_name
+          WHERE s.nest_id = ? AND s.is_active = 1 AND s.scope = 'tag'
+            AND nt.node_id IN (${marks})
+        UNION ALL
+        SELECT NULL AS node_id, s.user_email, s.role
+          FROM stewards s
+          WHERE s.nest_id = ? AND s.is_active = 1 AND s.scope = 'nest'
+      `,
+      [nestId, ...chunk, nestId, ...chunk, nestId],
+    )) as Array<{ node_id: string | null; user_email: string; role: StewardRole }>;
+    for (const r of rows) {
+      const entry = { userEmail: r.user_email, role: r.role };
+      // A nest-scope row covers every node.
+      for (const id of r.node_id === null ? chunk : [r.node_id]) out.get(id)?.push(entry);
+    }
+  }
+  return out;
+}
+
+/**
+ * Per node, who the approval check treats as the actor: the latest pending
+ * review's requester, else the latest version's author (see canUserApprove).
+ */
+async function approvalActorsForNodes(
+  nestId: string,
+  nodeIds: string[],
+): Promise<Map<string, string>> {
+  const db = getDb();
+  const out = new Map<string, string>();
+  for (const chunk of chunks(nodeIds)) {
+    const rows = (await db.all(
+      `SELECT node_id, requested_by FROM review_requests
+         WHERE nest_id = ? AND status = 'pending' AND node_id IN (${chunk.map(() => "?").join(",")})
+         ORDER BY requested_at DESC`,
+      [nestId, ...chunk],
+    )) as Array<{ node_id: string; requested_by: string }>;
+    // Newest first, so the first row seen per node is its latest request.
+    for (const r of rows) if (!out.has(r.node_id)) out.set(r.node_id, r.requested_by);
+  }
+  const rest = nodeIds.filter((id) => !out.has(id));
+  for (const chunk of chunks(rest)) {
+    const marks = chunk.map(() => "?").join(",");
+    const rows = (await db.all(
+      `SELECT v.node_id, v.author
+         FROM node_versions v
+         JOIN (SELECT node_id, MAX(version) AS latest FROM node_versions
+                WHERE nest_id = ? AND node_id IN (${marks}) GROUP BY node_id) m
+           ON m.node_id = v.node_id AND m.latest = v.version
+         WHERE v.nest_id = ?`,
+      [nestId, ...chunk, nestId],
+    )) as Array<{ node_id: string; author: string }>;
+    for (const r of rows) out.set(r.node_id, r.author);
+  }
+  return out;
+}
+
+/** The approval verdict from resolved facts — shared by the single and batched checks. */
+function decideApproval(
+  roles: EffectiveRole[],
+  userEmail: string,
+  allowSelf: boolean,
+  actor: string | null,
+): PermissionResult {
+  const isOwner = roles.includes("owner");
+  const isSuper = isSuperAdmin(userEmail);
+  // Explicit approve-capable steward role (admin or reviewer), NOT the
+  // ownership-derived right. Owner-only callers resolve to ["owner"] and
+  // fall through to the ownership branch below; an owner who is ALSO an
+  // admin/reviewer steward keeps that role's powers here.
+  const hasStewardApprove =
+    roles.includes("admin") || roles.includes("reviewer");
   const isOwnSubmission =
     !!actor && actor.toLowerCase() === userEmail.toLowerCase();
 

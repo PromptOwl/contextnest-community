@@ -20,7 +20,7 @@ import { sendEmailToRecipient } from "../notify/email.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { engineCache, engineApi, opContext } from "../nodes/engine.js";
-import { resolveStewardsForNode, canUserApprove } from "./stewardship-service.js";
+import { resolveStewardsForNode, canUserApprove, stewardRowsForNodes } from "./stewardship-service.js";
 import * as versions from "./version-service.js";
 import {
   buildTitleMap,
@@ -691,14 +691,19 @@ export async function getReviewQueue(params: {
   // Resolver reads node_tag_index directly — no tags argument needed.
   let requests = rows.map(rowToReviewRequest);
   if (params.stewardEmail) {
-    const filtered: ReviewRequest[] = [];
-    for (const r of requests) {
-      const stewards = await resolveStewardsForNode(r.nestId, r.nodeId);
-      if (stewards.some((s) => s.steward.userEmail === params.stewardEmail)) {
-        filtered.push(r);
-      }
-    }
-    requests = filtered;
+    // One steward query per nest on the page, not one per request.
+    const byNest = new Map<string, string[]>();
+    for (const r of requests) byNest.set(r.nestId, [...(byNest.get(r.nestId) ?? []), r.nodeId]);
+    const stewardsByNest = new Map(
+      await Promise.all(
+        [...byNest].map(async ([nid, ids]) => [nid, await stewardRowsForNodes(nid, ids)] as const),
+      ),
+    );
+    requests = requests.filter((r) =>
+      (stewardsByNest.get(r.nestId)?.get(r.nodeId) ?? []).some(
+        (s) => s.userEmail === params.stewardEmail,
+      ),
+    );
   }
 
   // Resolve human-facing document titles. The governance DB only stores
