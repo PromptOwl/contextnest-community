@@ -427,7 +427,7 @@ Every phase is built **test-first**:
 3. Hand the phase to the **QA agent** (`.claude/agents/qa-adversary.md`, in both repos). It only **runs** the suites and **attacks** the change. It never edits code. It reports blocking findings with exact repros and ends with a `PASS` or `BLOCKED` verdict.
 4. Each blocking finding is fixed test-first: a failing test that reproduces it, then the fix. QA runs again until the verdict is `PASS`.
 
-### 10.1 Engine phase (ContextNest) — re-review pending (round 10)
+### 10.1 Engine phase (ContextNest) — re-review pending (round 12)
 
 - Round 1 (`9c8c3a3`) passed every suite, but QA and the architecture review returned `BLOCKED` / `Needs rework`: ReDoS bypasses, closed-mode bypass through system-path look-alikes, legacy configs refusing writes, a stranded write when scaffolding failed, and unenforced paths (deprecated `delete_document`, `ctx pull`, approvals).
 - Round 2 (`e81d3f1`) wrote a failing test for every finding, then fixed them. Both reviewers re-ran and found more:
@@ -542,6 +542,22 @@ Every phase is built **test-first**:
   - sealed PDFs, sidecar or archive, are never replaced by other bytes;
   - deep-prefix resolution is a binary search;
   - reads refuse ids no file system holds.
+
+  The architecture review returned `Needs rework`: content hashes cover a normalized view (CR → LF) the heading parser does not share, and a history file could be judged and then refused at write, so a normalization twin planted earlier became a verified head.
+- Round 11 (`6517826`) fixed that test-first:
+  - per-file refusals run before judging;
+  - a refused file takes its whole history (a refused PDF takes its `.md`);
+  - `history.yaml` is written last, only once its history has landed;
+  - heads are judged in their normalized view;
+  - imported paths drop `.` segments;
+  - `sealedHead` requires strictly increasing versions.
+
+  QA on round 10 returned `BLOCKED`:
+  - `./` duplicate spellings of a history file (closed by round 11);
+  - the sidecar guard trusting a rewritten `.md`.
+- Round 12 (`3e56db7`) fixed those test-first:
+  - sidecars are judged against the bytes on disk;
+  - reads and erases measure names as the host file system does (NTFS: UTF-16 units).
 
   QA and the architecture review re-run on that head; their verdicts gate this phase.
 
