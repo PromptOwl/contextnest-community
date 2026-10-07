@@ -290,7 +290,7 @@ Per the sync discipline, all of this lands in the engine repo first and ships in
   - On the server it calls the engine's exported `compileStructure`, `checkDocument` and `checkFolder`, and Community's own `slugify` for `slug` (it is the function that builds Community's ids, so it is what the server will produce). The UI therefore shows exactly what the server will enforce.
 
 - **Write paths that don't go through an engine op** call the engine's exported `enforcedStructure`, checkers, `missingFolders` and `scaffoldFolders` directly — never a copy of them:
-  - `moveNode` (`src/nodes/service.ts:2571`) checks the destination and scaffolds any new folder. The move keeps the file's leaf, so a non-conforming name cannot move into a folder with a name rule until a rename op exists (§12).
+  - `moveNode` (`src/nodes/service.ts:2571`) checks the destination and scaffolds any new folder. The move keeps the file's leaf, so a non-conforming name cannot move into a folder with a name rule until a rename op exists (§12). The guard → `checkDocument` → `missingFolders` → write → `scaffoldFolders` sequence is the engine's create sequence. Before this phase, export it from the engine as one placement helper, so Community calls it rather than assembling the steps itself (architecture review, round 5).
   - `createEmptyFolder` (:1078) checks the folder and scaffolds its required children.
   - `deleteFolder` (:2972) first calls `checkDeleteFolder` on the folder itself (a required subfolder cannot go on its own), then passes the skip flag for its own children, so the required-file guard does not block deleting the whole folder.
 
@@ -427,7 +427,7 @@ Every phase is built **test-first**:
 3. Hand the phase to the **QA agent** (`.claude/agents/qa-adversary.md`, in both repos). It only **runs** the suites and **attacks** the change. It never edits code. It reports blocking findings with exact repros and ends with a `PASS` or `BLOCKED` verdict.
 4. Each blocking finding is fixed test-first: a failing test that reproduces it, then the fix. QA runs again until the verdict is `PASS`.
 
-### 10.1 Engine phase (ContextNest) — re-review pending (round 5)
+### 10.1 Engine phase (ContextNest) — re-review pending (round 6)
 
 - Round 1 (`9c8c3a3`) passed every suite, but QA and the architecture review returned `BLOCKED` / `Needs rework`: ReDoS bypasses, closed-mode bypass through system-path look-alikes, legacy configs refusing writes, a stranded write when scaffolding failed, and unenforced paths (deprecated `delete_document`, `ctx pull`, approvals).
 - Round 2 (`e81d3f1`) wrote a failing test for every finding, then fixed them. Both reviewers re-ran and found more:
@@ -450,6 +450,26 @@ Every phase is built **test-first**:
   - a config schema that leaves the rule keys to `compileStructure`;
   - the reserved-path guard on every publish, with full case folding, NTFS stream suffixes and control characters;
   - rules carried over a re-init, and starters filtered through them.
+
+  On that head QA returned `BLOCKED`, though all four round-3 blockers were confirmed fixed:
+  - a 20,000-deep id held the vault lock for ~27 s before failing;
+  - one class form (`[\d-a-z]`) disagreed with ECMAScript Annex B.
+
+  The architecture review returned `Needs rework`:
+  - only two publish paths judged and scaffolded a first publish;
+  - an update wrote its file before the reserved-path guard ran;
+  - `Nodes/` was not recognised as `nodes/`;
+  - token patterns still ran on the backtracking `RegExp`.
+- Round 6 (`56d8320`) fixed those test-first:
+  - ids over 1024 characters, or with a name over 230 bytes, are refused before any file-system call;
+  - Annex B class unions;
+  - `publishDocument(s)` judge every publish and scaffold a first one (`assertStructurePublish` / `scaffoldFirstPublish`), so every approval surface agrees;
+  - updates check the guard before writing, and trusted restores no longer lift it;
+  - roots are recognised case-insensitively;
+  - token patterns run on the linear matcher, so no `RegExp` ever runs on a name;
+  - non-boolean `enforce` fails closed;
+  - `NestStorage.init` keeps the rules over a re-init;
+  - `setStructure` refuses a config symlinked outside the vault.
 
   QA and the architecture review re-run on that head; their verdicts gate this phase.
 
