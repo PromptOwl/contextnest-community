@@ -103,9 +103,12 @@ export function AnnotationsPanel({
   );
   const itemRefs = useRef<Record<string, HTMLLIElement | null>>({});
 
-  const load = async () => {
+  // `fresh` after a write: fetchQuery would otherwise hand back the cached
+  // list for up to STALE.governance, hiding the comment just posted.
+  const load = async (fresh = false) => {
     try {
-      const { threads } = await qc.fetchQuery(reads.nodeAnnotations(nestId, nodeId));
+      const opts = reads.nodeAnnotations(nestId, nodeId);
+      const { threads } = await qc.fetchQuery(fresh ? { ...opts, staleTime: 0 } : opts);
       setThreads(threads);
       onThreadsChange?.(threads);
     } catch {
@@ -145,7 +148,7 @@ export function AnnotationsPanel({
       await api.createAnnotation(nestId, nodeId, { body, anchor: pendingAnchor ?? null });
       setDraft("");
       onClearAnchor?.();
-      await load();
+      await load(true);
     } catch (e: any) {
       toast.error(e?.message || "Failed to add comment");
     } finally {
@@ -164,7 +167,7 @@ export function AnnotationsPanel({
       if (andResolve) await api.resolveAnnotation(nestId, nodeId, threadId);
       setReplyText("");
       setReplyFor(null);
-      await load();
+      await load(true);
     } catch (e: any) {
       toast.error(e?.message || "Failed to reply");
     } finally {
@@ -180,7 +183,7 @@ export function AnnotationsPanel({
       } else {
         await api.reopenAnnotation(nestId, nodeId, t.id);
       }
-      await load();
+      await load(true);
     } catch (e: any) {
       toast.error(e?.message || "Failed to update thread");
     } finally {
@@ -311,7 +314,7 @@ export function AnnotationsPanel({
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-y"
               autoFocus
             />
-            <div className="flex justify-end gap-2 mt-1">
+            <div className="flex flex-wrap justify-end gap-2 mt-1">
               <Button
                 variant="ghost"
                 size="sm"

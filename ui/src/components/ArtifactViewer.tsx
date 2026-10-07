@@ -387,10 +387,12 @@ export function ArtifactViewer({
     guardEditLeave(() => setMode("preview"));
   }, [guardEditLeave]);
 
-  const loadThreads = useCallback(async () => {
+  // `fresh` after a write: a cached list (STALE.governance) would hide it.
+  const loadThreads = useCallback(async (fresh = false) => {
     setLoadingThreads(true);
     try {
-      const { threads } = await qc.fetchQuery(reads.nodeAnnotations(nestId, nodeId));
+      const opts = reads.nodeAnnotations(nestId, nodeId);
+      const { threads } = await qc.fetchQuery(fresh ? { ...opts, staleTime: 0 } : opts);
       setThreads(threads);
     } catch (e: any) {
       toast.error(e?.message || "Failed to load annotations");
@@ -488,7 +490,7 @@ export function ArtifactViewer({
       setDraft("");
       setSelection(null);
       window.getSelection?.()?.removeAllRanges();
-      await loadThreads();
+      await loadThreads(true);
       toast.success("Comment added");
     } catch (e: any) {
       toast.error(e?.message || "Failed to add comment");
@@ -507,7 +509,7 @@ export function ArtifactViewer({
         if (andResolve) await api.resolveAnnotation(nestId, nodeId, threadId);
         setReplyBody("");
         setReplyFor(null);
-        await loadThreads();
+        await loadThreads(true);
       } catch (e: any) {
         toast.error(e?.message || "Failed to reply");
       }
@@ -523,7 +525,7 @@ export function ArtifactViewer({
         } else {
           await api.reopenAnnotation(nestId, nodeId, t.id);
         }
-        await loadThreads();
+        await loadThreads(true);
       } catch (e: any) {
         toast.error(e?.message || "Failed to update thread");
       }
@@ -844,7 +846,7 @@ export function ArtifactViewer({
               size="icon"
               className="h-7 w-7"
               title="Refresh"
-              onClick={loadThreads}
+              onClick={() => loadThreads(true)}
             >
               <RefreshCw className="h-3.5 w-3.5" />
             </Button>
