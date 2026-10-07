@@ -113,6 +113,7 @@ import {
   clearHighlight,
   caretAt,
 } from "../lib/anchor-highlight";
+import { outdatedThreadIds, paintableThreads } from "../lib/comment-threads";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -536,6 +537,10 @@ export function DocumentEditor({
     return () => document.removeEventListener("pointerdown", onDown);
   }, [pageActive]);
   const [anchoredThreads, setAnchoredThreads] = useState<api.AnnotationThread[]>([]);
+  // Threads whose quoted text isn't in the current document text — the rail
+  // labels them "text changed". Computed with the highlights, in the
+  // rendered view; kept from the last render while editing.
+  const [outdatedIds, setOutdatedIds] = useState<Set<string>>(() => new Set());
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   // The comments rail starts closed — an empty panel beside every document
   // was a third of the width spent on nothing — and remembers the last
@@ -686,11 +691,18 @@ export function DocumentEditor({
     const id = requestAnimationFrame(() => {
       const idx = buildTextIndex(container);
       const ranges: { id: string; range: Range }[] = [];
-      for (const t of anchoredThreads) {
-        if (!t.anchor?.quote) continue;
-        const r = rangeForAnchor(container, idx, t.anchor);
+      // Only open threads paint (and hit-test): a resolved thread is done,
+      // and its highlight staying put is what made resolving feel broken.
+      for (const t of paintableThreads(anchoredThreads)) {
+        const r = rangeForAnchor(container, idx, t.anchor!);
         if (r) ranges.push({ id: t.id, range: r });
       }
+      const outdated = outdatedThreadIds(anchoredThreads, idx.text);
+      setOutdatedIds((prev) =>
+        prev.size === outdated.size && [...outdated].every((id) => prev.has(id))
+          ? prev
+          : outdated,
+      );
       anchorRangesRef.current = ranges;
       setHighlight("comment-anchor", ranges.map((r) => r.range));
       // Deferred focus: a comment was clicked from edit mode; now that the
@@ -723,6 +735,9 @@ export function DocumentEditor({
         (t) => t.anchor?.quote === anchor.quote && t.anchor?.before === anchor.before,
       );
       if (hit) setActiveThreadId(hit.id);
+      // A resolved thread has no painted range by design — selecting it in
+      // the rail is the whole action, not a "text isn't here" miss.
+      if (hit?.status === "resolved") return;
       const range = anchorRangesRef.current.find((r) => r.id === hit?.id)?.range;
       if (range) {
         range.startContainer.parentElement?.scrollIntoView({
@@ -3801,6 +3816,7 @@ export function DocumentEditor({
               onClearAnchor={() => setPendingAnchor(null)}
               onFocusAnchor={focusAnchor}
               onThreadsChange={setAnchoredThreads}
+              outdatedThreadIds={outdatedIds}
               activeThreadId={activeThreadId}
               commentMode={commentMode}
               onSetCommentMode={(on) => {

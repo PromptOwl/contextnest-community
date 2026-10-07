@@ -82,6 +82,7 @@ import {
   DueChip,
   GovernedMoveDialog,
   PriorityMenu,
+  ShareAndAssignDialog,
   SubItemChip,
 } from "./board/CardParts";
 
@@ -226,6 +227,9 @@ export function MaturityBoard({
   // Same derivation NestView uses. Starts false so a read-only viewer never
   // sees a draggable card during the fetch, then flips on for writers.
   const [canEditDocs, setCanEditDocs] = useState(false);
+  // Owner/admin may share the nest from the assignee picker; others only see members.
+  const [canShare, setCanShare] = useState(false);
+  const [pendingShare, setPendingShare] = useState<{ id: string; email: string } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -233,6 +237,7 @@ export function MaturityBoard({
       .getNest(nestId)
       .then((meta: any) => {
         if (cancelled) return;
+        setCanShare(isOwner || isAdmin || meta?.permission === "admin");
         setCanEditDocs(
           deriveNestCaps({
             roles: meta?.roles ?? [],
@@ -483,8 +488,9 @@ export function MaturityBoard({
     enabled: !!nestId && canEditDocs,
   });
   const people = useMemo(
-    () => (roster?.people ?? []).filter((p) => !!p.email),
-    [roster],
+    () =>
+      (roster?.people ?? []).filter((p) => !!p.email && (canShare || p.member !== false)),
+    [roster, canShare],
   );
 
   const governance = useMemo(
@@ -1462,7 +1468,11 @@ export function MaturityBoard({
                             people={people}
                             me={me}
                             editable={canEditDocs}
-                            onChange={(assignee) => patchFields(n.id, { assignee })}
+                            onChange={(assignee, member) =>
+                              assignee && member === false
+                                ? setPendingShare({ id: n.id, email: assignee })
+                                : patchFields(n.id, { assignee })
+                            }
                           />
                         </span>
                       </div>
@@ -1516,6 +1526,22 @@ export function MaturityBoard({
           const m = pendingMove;
           setPendingMove(null);
           if (m) void executeMove(m.id, m.plan, m.place);
+        }}
+      />
+      <ShareAndAssignDialog
+        email={pendingShare?.email ?? null}
+        onCancel={() => setPendingShare(null)}
+        onConfirm={async (permission) => {
+          const s = pendingShare;
+          setPendingShare(null);
+          if (!s) return;
+          try {
+            await api.addCollaborator(nestId, { email: s.email, permission });
+          } catch (e: any) {
+            toast.error(e?.message || "Couldn't share the nest");
+            return;
+          }
+          await patchFields(s.id, { assignee: s.email });
         }}
       />
     </div>

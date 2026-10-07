@@ -199,6 +199,8 @@ export async function notifyReviewResolved(params: {
   resolvedBy: string;
   requestedBy: string;
   reviewId: string;
+  /** The document's describeNode label, when the caller already resolved it. */
+  label?: string;
 }): Promise<number> {
   const { nestId, nodeId, status, resolvedBy, requestedBy, reviewId } = params;
   const db = getDb();
@@ -221,7 +223,7 @@ export async function notifyReviewResolved(params: {
     recipients.delete(resolvedBy.toLowerCase()); // not the person who clicked
 
     const now = new Date().toISOString();
-    const label = await describeNode(nestId, nodeId);
+    const label = params.label ?? (await describeNode(nestId, nodeId));
     let created = 0;
     for (const email of recipients) {
       await db.run(
@@ -308,8 +310,9 @@ export async function listNotifications(
             COALESCE(
               rr.node_id,
               CASE WHEN dr.target_type = 'document' THEN dr.node_id END,
-              -- A mention names the document directly; there's no request row.
-              CASE WHEN n.kind = 'mention' THEN n.subject_id END
+              -- A mention (or a reply on a thread you're in) names the
+              -- document directly; there's no request row.
+              CASE WHEN n.kind IN ('mention', 'comment_reply') THEN n.subject_id END
             ) AS node_id,
             -- Name resolved here so the inbox never fetches the nest list for it.
             COALESCE(ns.name, n.nest_id) AS nest_name
