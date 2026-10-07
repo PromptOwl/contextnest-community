@@ -427,7 +427,7 @@ Every phase is built **test-first**:
 3. Hand the phase to the **QA agent** (`.claude/agents/qa-adversary.md`, in both repos). It only **runs** the suites and **attacks** the change. It never edits code. It reports blocking findings with exact repros and ends with a `PASS` or `BLOCKED` verdict.
 4. Each blocking finding is fixed test-first: a failing test that reproduces it, then the fix. QA runs again until the verdict is `PASS`.
 
-### 10.1 Engine phase (ContextNest) — re-review pending (round 13)
+### 10.1 Engine phase (ContextNest) — re-review pending (round 15)
 
 - Round 1 (`9c8c3a3`) passed every suite, but QA and the architecture review returned `BLOCKED` / `Needs rework`: ReDoS bypasses, closed-mode bypass through system-path look-alikes, legacy configs refusing writes, a stranded write when scaffolding failed, and unenforced paths (deprecated `delete_document`, `ctx pull`, approvals).
 - Round 2 (`e81d3f1`) wrote a failing test for every finding, then fixed them. Both reviewers re-ran and found more:
@@ -568,7 +568,26 @@ Every phase is built **test-first**:
   - an imported PDF lands sealed in an encrypted vault (it landed as plaintext before this branch);
   - reads measure the `.md` file an id names.
 
-  QA (round 12, running on `3e56db7`) and a fresh architecture review on `c4eefd8` gate this phase.
+  QA on round 12 returned `BLOCKED`. Its blocker was the lone-CR fence twin, which round 13 closed. It also reported non-blocking findings: forgotten documents in an export, replay cost, archive cascades, `./` history keys, quadratic collision planning, and error paths that leaked the vault path.
+- Round 14 (`adcff0b`) fixed those test-first:
+  - a forget stub (empty body) owes no required sections, so an enforced vault's own export round-trips;
+  - `sealedHead` bounds replay work (text size × diffs);
+  - a refused archived PDF no longer takes its history;
+  - a never-sealed PDF node takes the sidecar its `.md` names;
+  - imports keep `INDEX.md`/`README.md` names, key `./` histories by slug, plan collisions in linear lookups, and report vault-relative errors.
+
+  The architecture review of round 13 returned `Needs rework`. The round-13 "companion PDF" exemption trusted an importable `.md`, so a retyped `.md` freed a pdf node's sidecar. Its check of the history already on disk also refused repairs of grandfathered documents, and judged members the disk might never hold.
+- Round 15 (`3cf0b6e`) fixed that test-first:
+  - PDFs are judged on bytes first, and the bytes a companion `.pdf` replaces are archived;
+  - the on-disk history is judged only with hash-pinned members, and only when that changes its head;
+  - a document's `.versions/` folder takes no nested paths;
+  - unreadable version artifacts are corrupt history, never "missing";
+  - a refused document takes its family;
+  - forgotten PDF bytes are refused at any path;
+  - one line model for frontmatter, headings, sections and links;
+  - import verdicts move to their own module (`api/import-verdicts.ts`).
+
+  QA and the architecture review re-run on `3cf0b6e`; their verdicts gate this phase.
 
   **Chunked imports.** The engine judges each imported history by what the nest will hold after the call: the call's files laid over what is already there, rebuilt and hash-verified. A document may arrive before or after its history, across calls. Within a history, a call must not bring `history.yaml` ahead of the keyframes and diffs it needs, since a history that does not rebuild and verify is refused. So the UI chunker (`ui/src/lib/api.ts`), which splits by bytes, should send each `.versions/<doc>/` folder's `history.yaml` last. Community's own staging (nest import, bundle restore, `context_sync_folder`) is designed to run under `skip` (§6), which leaves it unjudged. Until that flag is wired into Community's `opContext`, those imports are judged. The browser picker currently sorts `history.yaml` before `v*.md`, so a chunk boundary inside a `.versions/<doc>/` folder would get that history refused. Sort `history.yaml` last, or wire `skip`, as part of the Community phase.
 
