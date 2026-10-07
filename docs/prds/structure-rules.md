@@ -427,7 +427,7 @@ Every phase is built **test-first**:
 3. Hand the phase to the **QA agent** (`.claude/agents/qa-adversary.md`, in both repos). It only **runs** the suites and **attacks** the change. It never edits code. It reports blocking findings with exact repros and ends with a `PASS` or `BLOCKED` verdict.
 4. Each blocking finding is fixed test-first: a failing test that reproduces it, then the fix. QA runs again until the verdict is `PASS`.
 
-### 10.1 Engine phase (ContextNest) — re-review pending (round 9)
+### 10.1 Engine phase (ContextNest) — re-review pending (round 10)
 
 - Round 1 (`9c8c3a3`) passed every suite, but QA and the architecture review returned `BLOCKED` / `Needs rework`: ReDoS bypasses, closed-mode bypass through system-path look-alikes, legacy configs refusing writes, a stranded write when scaffolding failed, and unenforced paths (deprecated `delete_document`, `ctx pull`, approvals).
 - Round 2 (`e81d3f1`) wrote a failing test for every finding, then fixed them. Both reviewers re-ran and found more:
@@ -528,9 +528,24 @@ Every phase is built **test-first**:
   - default-ignorable code points are dropped in name comparisons;
   - scaffolding appends with `push` (20,000 folders: 19.8 s → 0.35 s).
 
+  The architecture review returned `Needs rework`: the import verdict rebuilt a history from the call's files while grandfathering replayed the disk, so a stale diff planted earlier changed the head after the verdict.
+
+  QA returned `BLOCKED`:
+  - a decoy under `.versions::$DATA` vouched for the real history beside it;
+  - a deep `~` erase held the lock for ~12 s;
+  - an in-batch `.md` let a sealed PDF be replaced;
+  - a `..x` folder escaped the alias check.
+- Round 10 (`9ceb7de`, `bf00665`) fixed those test-first:
+  - `sealedHead`: grandfathering trusts only a head rebuilt from its last keyframe with every replayed entry matching its `content_hash`, and judges in full otherwise;
+  - the import verdict judges what the nest will hold after the call, and refuses a history that does not rebuild and verify or ends in a refused version;
+  - look-alike machinery folders are refused before judging;
+  - sealed PDFs, sidecar or archive, are never replaced by other bytes;
+  - deep-prefix resolution is a binary search;
+  - reads refuse ids no file system holds.
+
   QA and the architecture review re-run on that head; their verdicts gate this phase.
 
-  **Chunked imports.** The engine judges each imported history by what the nest will hold after the call: the call's files laid over what is already there, rebuilt and hash-verified. So the UI chunker (`ui/src/lib/api.ts`), which splits by bytes, may send a document and its `.versions/` files in any order, across calls. Community's own staging (nest import, bundle restore, `context_sync_folder`) runs under `skip` (§6) and is not judged at all.
+  **Chunked imports.** The engine judges each imported history by what the nest will hold after the call: the call's files laid over what is already there, rebuilt and hash-verified. A document may arrive before or after its history, across calls. Within a history, a call must not bring `history.yaml` ahead of the keyframes and diffs it needs, since a history that does not rebuild and verify is refused. So the UI chunker (`ui/src/lib/api.ts`), which splits by bytes, should send each `.versions/<doc>/` folder's `history.yaml` last. Community's own staging (nest import, bundle restore, `context_sync_folder`) runs under `skip` (§6) and is not judged at all.
 
 | Suite | Kind | What it pins |
 |---|---|---|
