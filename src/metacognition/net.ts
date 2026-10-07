@@ -23,7 +23,7 @@ import http from "node:http";
 import https from "node:https";
 import dns from "node:dns";
 import { Readable, Transform } from "node:stream";
-import type { LookupFunction } from "node:net";
+import { isIP, type LookupFunction } from "node:net";
 import { isForbiddenConnectorHost } from "../notify/dispatch.js";
 import { config } from "../config.js";
 
@@ -34,9 +34,23 @@ export class OutboundBlockedError extends Error {
   }
 }
 
+/** "::ffff:7f00:1" or "::ffff:127.0.0.1" → "127.0.0.1"; anything else as-is. */
+function unmapIPv4(address: string): string {
+  const a = address.toLowerCase().replace(/^\[|\]$/g, "");
+  const m = /^(?:0{0,4}:){0,5}:?ffff:(.+)$/.exec(a.startsWith("::") ? a : "");
+  if (!m) return a;
+  const tail = m[1];
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(tail)) return tail;
+  const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail);
+  if (!hex) return a;
+  const hi = parseInt(hex[1], 16);
+  const lo = parseInt(hex[2], 16);
+  return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+}
+
 /** True for an address this server must never connect to for an agent. */
 export function isPrivateAddress(address: string): boolean {
-  const a = address.toLowerCase().replace(/^::ffff:/, ""); // IPv4-mapped IPv6
+  const a = unmapIPv4(address);
   if (isForbiddenConnectorHost(a)) return true;
   const m = a.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
   // Carrier-grade NAT (100.64/10) — not public, often internal in clouds.
@@ -85,6 +99,11 @@ export function guardedFetch(opts: { maxBytes: number; timeoutMs: number; resolv
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
     if (url.protocol !== "https:" && !(config.METACOGNITION_ALLOW_PRIVATE_URLS && url.protocol === "http:")) {
       return Promise.reject(new OutboundBlockedError(`${url.protocol} is not allowed`));
+    }
+    // An IP-literal host never goes through `lookup`, so check it here.
+    const host = url.hostname.replace(/^\[|\]$/g, "");
+    if (isIP(host) && !config.METACOGNITION_ALLOW_PRIVATE_URLS && isPrivateAddress(host)) {
+      return Promise.reject(new OutboundBlockedError(`${host} is a private address; refusing to connect`));
     }
     const headers: Record<string, string> = {};
     new Headers(init.headers ?? (input instanceof Request ? input.headers : undefined)).forEach((v, k) => {

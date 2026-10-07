@@ -67,7 +67,12 @@ export async function createTurn(params: {
         { signal },
       )) as TurnResult;
     } catch (err) {
-      if ((err as { status?: number })?.status !== 400) throw err;
+      // Only a rejection of the tuning itself falls back. Any other 400 (a
+      // bad tools or messages payload) is a real error: retrying would bill a
+      // second round trip and mark a capable model "plain" for good.
+      const e = err as { status?: number; error?: { error?: { message?: string } }; message?: string };
+      const msg = `${e?.error?.error?.message ?? ""} ${e?.message ?? ""}`.toLowerCase();
+      if (e?.status !== 400 || !/thinking|effort|output_config|adaptive/.test(msg)) throw err;
       const plain = (await client.messages.create(base, { signal })) as TurnResult;
       plainModels.add(key);
       return plain;
@@ -85,7 +90,8 @@ function clientFor(apiKey: string, baseUrl: string | null): Anthropic {
 }
 
 /**
- * List price per million tokens, by model family, for the run's cost
+ * List price per million tokens (Anthropic first-party, as of 2026-09-25), by
+ * model family, for the run's cost
  * ESTIMATE. Not a bill: PromptOwl's gateway meters credits itself, and an own
  * key is billed by the customer's provider. A model this doesn't recognise
  * gets no estimate rather than a wrong one.

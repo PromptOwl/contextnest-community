@@ -214,6 +214,15 @@ ${config.AUTH_MODE === "key" ? `
   // Workflow-plane interval schedules → run rows (no-op unless the flag is on).
   startScheduler();
 
+  // Metacognition runs execute in this process; any still "running" from a
+  // previous process lost their loop. Close them so the agents aren't stuck.
+  if (config.FEATURE_METACOGNITION) {
+    void import("./metacognition/service.js")
+      .then((m) => m.recoverOrphanedRuns())
+      .then((n) => n && console.log(`[metacognition] closed ${n} run(s) left running by a previous process`))
+      .catch((err) => console.error("[metacognition] orphan sweep failed", err));
+  }
+
   // Rate-limit bucket GC — bounded keys can still accumulate across a long
   // uptime; sweep expired buckets every 10 minutes.
   setInterval(() => sweepStale(), 10 * 60_000).unref?.();

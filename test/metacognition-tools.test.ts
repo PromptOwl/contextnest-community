@@ -151,6 +151,14 @@ describe("outbound requests (net.ts)", () => {
     await expect(fetchIt("https://totally-public.example.com/feed")).rejects.toBeInstanceOf(OutboundBlockedError);
   });
 
+  it("checks IP-literal hosts too (they never reach the DNS lookup)", async () => {
+    const fetchIt = guardedFetch({ maxBytes: 1000, timeoutMs: 2000 });
+    for (const u of ["https://127.0.0.1/", "https://[::1]/", "https://[::ffff:7f00:1]/", "https://[::ffff:169.254.169.254]/"]) {
+      await expect(fetchIt(u), u).rejects.toBeInstanceOf(OutboundBlockedError);
+    }
+    expect(isPrivateAddress("::ffff:a9fe:a9fe")).toBe(true); // 169.254.169.254, hex-mapped
+  });
+
   it("refuses plain http unless the dev switch is on", async () => {
     const fetchIt = guardedFetch({ maxBytes: 1000, timeoutMs: 2000 });
     await expect(fetchIt("http://example.com/")).rejects.toBeInstanceOf(OutboundBlockedError);

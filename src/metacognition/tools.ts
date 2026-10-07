@@ -218,12 +218,12 @@ async function accessNeeded(
 }
 
 /** Neutralise anything in outside text that could open or close a fence. */
-function defang(text: string): string {
-  return text.replace(/<(\/?)(untrusted_|nest_document)/gi, "<$1 $2");
+export function defang(text: string): string {
+  return text.replace(/<(\/?)(untrusted_|nest_document|agent_memory)/gi, "<$1 $2");
 }
 
 /** An attribute value that can't break out of its quotes or the tag. */
-function attr(v: string): string {
+export function attr(v: string): string {
   return v.replace(/[^\w./:@ -]/g, "_").slice(0, 200);
 }
 
