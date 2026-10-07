@@ -2527,6 +2527,7 @@ export async function updateNode(
 
       const nextAssignee = taskFieldsOf(node.frontmatter.metadata).assignee ?? null;
       // Only a published edit notifies: a drafted assignment may be rejected.
+      // Approving that draft later doesn't notify either (known gap).
       const savedAsDraft = publishReason === null || isAuthorEditingOwnReview;
       if (nextAssignee && nextAssignee !== priorAssignee && !savedAsDraft) {
         await notifyAssigned({

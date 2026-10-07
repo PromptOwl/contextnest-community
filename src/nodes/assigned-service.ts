@@ -36,7 +36,7 @@ export async function listAssignedTo(
   const rows = (await getDb().all(
     `SELECT nest_id, node_id, frontmatter_json FROM node_index
       WHERE nest_id IN (${nestIds.map(() => "?").join(",")})
-        AND frontmatter_json LIKE ?`,
+        AND LOWER(frontmatter_json) LIKE ?`,
     [...nestIds, `%${me}%`],
   )) as Array<{ nest_id: string; node_id: string; frontmatter_json: string }>;
 

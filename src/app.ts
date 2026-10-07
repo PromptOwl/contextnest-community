@@ -1981,7 +1981,11 @@ export function createApp(): Hono<AuthEnv> {
       items.filter((i) => i.type === "deletion").length +
       waiting.filter((i) => i.type === "deletion").length;
     // Board cards assigned to me (open ones), across every nest I can see.
-    const assigned = await listAssignedTo(me, userId, nestName);
+    // Best-effort: a failure here must not take the reviews inbox down with it.
+    const assigned = await listAssignedTo(me, userId, nestName).catch((err) => {
+      console.error("[me/work] assigned list failed", err);
+      return [];
+    });
     return c.json({
       items,
       waiting,
