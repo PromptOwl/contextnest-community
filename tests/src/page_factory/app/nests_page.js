@@ -62,7 +62,9 @@ class NestsPage {
     this.manageKeysButton = this.connectDialog.getByRole('button', { name: 'Manage API keys' });
 
     // ── Header actions ────────────────────────────────────────────────────
-    this.newNestButton = page.getByRole('button', { name: 'New Nest' });
+    // exact: a nest card is a role=button named after the nest, so a nest
+    // called "Nest new" also matches a substring query.
+    this.newNestButton = page.getByRole('button', { name: 'New Nest', exact: true });
     this.importFolderButton = page.getByRole('button', { name: 'Import Folder' });
 
     // ── Create-nest dialog ────────────────────────────────────────────────
@@ -79,9 +81,8 @@ class NestsPage {
     this.importDialog = page.getByRole('dialog', { name: 'Import into a new nest' });
 
     // ── Filter / sort controls ────────────────────────────────────────────
-    // NOTE: the filter bar only renders once the account has more than 5
-    // nests and archived is off — use pageTitle as the loaded-landmark, not
-    // these.
+    // NOTE: the filter bar renders whatever the nest count, but only while
+    // archived is off — use pageTitle as the loaded-landmark, not these.
     this.filterInput = page.getByTestId('nest-filter-input');
     this.scopeSelect = page.getByTestId('nest-scope-select');
     this.sortSelect = page.getByTestId('nest-sort-select');

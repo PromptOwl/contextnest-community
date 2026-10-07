@@ -67,6 +67,15 @@ const testRun = [
     enabled: true,
     independent: true, // Arranges its own nests; depends only on the orphan sweep
   },
+  {
+    // My Work (CN-WORK-001 … CN-WORK-020). Serial on purpose: the cases share
+    // one inbox and one seeded nest, so a parallel run would have them
+    // approving, selecting and counting each other's reviews.
+    file: 'my-work/my_work.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest, reviews and requests
+  },
   // ── Add new suites here (governance, documents, …) ────────────────────────
   // ── Teardown (always runs last, even on failure) ───────────────────────────
   {
@@ -150,7 +159,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard'];
+const standaloneNames = ['auth', 'dashboard', 'my-work'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -283,6 +292,17 @@ export default defineConfig({
             name: 'dashboard',
             dependencies: ['setup-auth'],
             testMatch: 'tests/features/dashboard/**/*.spec.js',
+            fullyParallel: false,
+            use: {
+              ...devices['Desktop Chrome'],
+              screenshot: 'only-on-failure',
+              trace: 'retain-on-failure',
+            },
+          },
+          {
+            name: 'my-work',
+            dependencies: ['setup-auth'],
+            testMatch: 'tests/features/my-work/**/*.spec.js',
             fullyParallel: false,
             use: {
               ...devices['Desktop Chrome'],
