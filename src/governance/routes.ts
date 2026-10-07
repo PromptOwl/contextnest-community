@@ -264,20 +264,20 @@ governanceRoutes.post("/review-queue/bulk", async (c) => {
   // One batch is one call: validated once, recorded on the batch's trace row,
   // and carried onto every version the approvals seal (§9.4).
   const client = attributeRequest(c, body.client);
-  const results: Array<{ nodeId: string; ok: boolean; error?: string }> = [];
-  for (const nodeId of nodeIds) {
-    try {
-      if (body.action === "approve") {
-        await reviews.approve({
-          nestId,
-          nodeId,
-          approvedBy: userEmail,
-          note: body.note,
-          override: false,
-          baseUrl,
-          client,
-        });
-      } else {
+  let results: Array<{ nodeId: string; ok: boolean; error?: string }> = [];
+  if (body.action === "approve") {
+    // One engine publish for the whole batch — one checkpoint, one index rebuild.
+    results = await reviews.approveMany({
+      nestId,
+      nodeIds,
+      approvedBy: userEmail,
+      note: body.note,
+      baseUrl,
+      client,
+    });
+  } else {
+    for (const nodeId of nodeIds) {
+      try {
         await reviews.reject({
           nestId,
           nodeId,
@@ -285,10 +285,10 @@ governanceRoutes.post("/review-queue/bulk", async (c) => {
           note: body.note!,
           baseUrl,
         });
+        results.push({ nodeId, ok: true });
+      } catch (err: any) {
+        results.push({ nodeId, ok: false, error: err?.message || "Failed" });
       }
-      results.push({ nodeId, ok: true });
-    } catch (err: any) {
-      results.push({ nodeId, ok: false, error: err?.message || "Failed" });
     }
   }
   // No override path here: forcing past a refusal is a per-document decision.
