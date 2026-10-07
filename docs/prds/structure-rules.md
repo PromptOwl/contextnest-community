@@ -93,7 +93,7 @@ Existing configs stay valid. A `folders:` entry that has only `description` and 
 
 - **The path being checked.** It is the document id with an optional leading `nodes/` removed. This is the same rule Community's `folderToSegments` applies, and it does not depend on whether the vault uses the structured or the Obsidian layout.
 - **Exempt paths — only at the vault root.** `packs/` and `_suggestions/` (their own files), the vault's own `CONTEXT.md`, and `sources/` for `type: source` nodes. Their look-alikes (`nodes/packs/`, `nodes/context`, dot-folders, an `INDEX` id) are ordinary paths: exempting them let any writer get around closed mode. An id is never extension-stripped. In a structured vault only `nodes/` holds content folders, so root-level folders such as `assets/` are not judged.
-- **Reserved paths — never writable as documents,** rules or not: any `.context`, `.versions` or `_suggestions` segment (any depth, case-insensitive, Windows trailing dots and spaces ignored), a root `packs/`, or a `\` in the id (a separator on Windows, a file-name character elsewhere). Every write path calls the engine's `assertWritableDocumentId`; in a flat vault, exempting root `packs/`/`_suggestions/` without this let documents be created there and discovered as nodes.
+- **Reserved paths — never writable as documents,** rules or not: any `.context`, `.versions` or `_suggestions` segment (any depth, case-insensitive, Windows trailing dots and spaces ignored), a root `packs/`, or a `\` in the id (a separator on Windows, a file-name character elsewhere). Every engine write path calls `assertWritableDocumentId` (`context_import` `files[]` included, for document files); in a flat vault, exempting root `packs/`/`_suggestions/` without this let documents be created there and discovered as nodes. Community's own write paths must call it too: `moveNode` on the destination id, and `createEmptyFolder` on the folder path. Literal keys that differ only in case are one pattern declared twice and refused.
 - **Segments.** A pattern segment is either a literal (`meetings`) or a placeholder (`{label}`).
 - **Precedence.** When several patterns match, they are compared segment by segment, and at the first difference a literal beats a placeholder. Declaration order is not used, because JavaScript objects list integer-like keys (`"2024"`) first.
 - **Ancestors.** Ancestors of a declared pattern are allowed as folders. `clients/{client}/meetings` implies `clients` and `clients/{client}`. An ancestor holds documents only if it is declared itself.
@@ -124,13 +124,13 @@ Existing configs stay valid. A `folders:` entry that has only `description` and 
 - It is matched against the name **exactly as it appears in the id** (folder segment, or the file's last segment). Ids that Community and the engine derive from titles and folder names are lowercase kebab-case, so the UI says so wherever a regex is entered; literal folder names in rules compare case-insensitively.
 - **Safety: a whitelist, not a blocklist.** Rules are written by nest owners on a shared server, so a regex must not be able to stall the process. QA and the architecture review both broke an earlier blocklist (bounded `{m,n}` repetition, `|` chains, a `[^]` hiding a nested group). A regex is now accepted only if it stays inside this grammar; anything else is refused with `CONFIG_ERROR` naming the key:
   - literals, the escapes `\d \w \s \D \W \S` and escaped punctuation, `[classes]` (parsed the way JavaScript parses them), `.`, `^` and `$`;
-  - quantifiers on single atoms only, at most 3 of them variable-width (`*`, `+`, `?`, `{m,}`, `{m,n}`), with bounds of at most 3 digits — parsed over the whole source (a zero-padded bound once hid a quantifier from a fixed window);
+  - quantifiers on single atoms only, at most 2 of them variable-width (`*`, `+`, `?`, `{m,}`, `{m,n}`), with bounds of at most 3 digits — parsed over the whole source (a zero-padded bound once hid a quantifier from a fixed window);
   - literal `{ } [ ]` must be escaped, and escapes are limited to `\d \w \s`, their negations, and ASCII punctuation;
   - `( )` / `(?: )` groups that are never quantified, with at most 4 `|` in the whole regex;
   - at most 200 characters.
 
-  No repeated groups means no nested repetition: a failing match explores about n³/6 splits per alternation path (at most 16 paths) — tens of milliseconds at the 128-character cap. A name longer than 128 characters is refused without running the pattern. Spec §11.1.1 states the exact grammar so other implementations build the same one.
-- **Per-check cost.** Each format is bounded, and so is a write: a vault declares at most 256 folder rules, and each (format, name) result is memoized within a check, so rules sharing a slow pattern cost one evaluation. Token patterns follow the same budget: at most 3 variable-width tokens (`{slug}`, `{n}`), never two side by side.
+  No repeated groups means no nested repetition: a failing match explores about n²/2 splits per alternation path (at most 16 paths) — well under a millisecond at the 128-character cap. (Three variable quantifiers were allowed until the round-3 review measured ~3 s for one write meeting 256 distinct such rules.) A name longer than 128 characters is refused without running the pattern. Spec §11.1.1 states the exact grammar so other implementations build the same one.
+- **Per-check cost.** Each format is bounded, and so is a write: a vault declares at most 256 folder rules, each (format, name) result is memoized within a check, and 256 distinct worst-case regexes meeting one name cost tens of milliseconds. Token patterns keep a budget of 3 `{slug}`/`{n}` tokens (they compile to unambiguous expressions). Token patterns follow the same budget: at most 3 variable-width tokens (`{slug}`, `{n}`), never two side by side.
 
 **File names are checked on the id's leaf, not the title.**
 
@@ -249,6 +249,7 @@ Per the sync discipline, all of this lands in the engine repo first and ships in
   | `context_delete` / deprecated `delete_document` | `assertStructureDelete` |
   | deprecated `create_document` / `update_document` | guard + `checkDocument` + scaffolding / `checkUpdate` (they write storage directly) |
   | `approveReview` / `approveSuggestion` | re-checked against the rules in force; an approved held create is scaffolded (`scaffoldApprovedCreate`) |
+  | `context_publish` | a first publish is judged in full and scaffolds the folders the document alone occupies; a later publish is judged against the last sealed version (an out-of-band edit). Community's review approve publishes through this op, so it is covered with no Community-side check |
   | `ctx pull` | guard on `includes[].to`; `checkDocument`/`checkUpdate` per pulled document (a refusal is reported as a conflict); scaffolding |
 
 - **Security fix.** `context_import`'s `files[]` refuses paths under `.context/`. Today `overwrite: true` lets any caller rewrite `config.yaml`, which means the structure rules *and* the review gate. No write op accepts a document id under a reserved path either (see §3.2; `assertWritableDocumentId`).
@@ -280,12 +281,12 @@ Per the sync discipline, all of this lands in the engine repo first and ships in
 
   ```text
   body:     { rules?, tests?: [{ folder, title?, name?, type? }] }
-  response: { errors: [{ key, message }], results: [{ ok, slug, violations }] }
+  response: { errors: [{ key, message }], warnings: [string], results: [{ ok, slug, violations }] }
   ```
 
   - **Caps.** `rules` must compile within the engine's limits (256 folder rules), and a call takes at most 50 `tests`; bigger bodies are refused with 413/400.
   - **Without `rules`,** the tests run against the saved rules. The new-document and new-folder forms use this: does this folder, title and type fit, and what slug does the title become?
-  - **With `rules`,** the draft is compiled, regex safety included. `errors` points at the offending key, and the tests run against the draft. The rule editor uses this for its "Try" boxes and field errors before saving.
+  - **With `rules`,** the draft is compiled, regex safety included. `errors` points at the offending key, `warnings` names what compiles but looks wrong (a template name with no entry under `templates` — the editor is where that typo happens), and the tests run against the draft. The rule editor uses this for its "Try" boxes and field errors before saving.
   - On the server it calls the engine's exported `compileStructure`, `checkDocument` and `checkFolder`, and Community's own `slugify` for `slug` (it is the function that builds Community's ids, so it is what the server will produce). The UI therefore shows exactly what the server will enforce.
 
 - **Write paths that don't go through an engine op** call the engine's exported `enforcedStructure`, checkers, `missingFolders` and `scaffoldFolders` directly — never a copy of them:
@@ -438,7 +439,8 @@ Every phase is built **test-first**:
   - non-ASCII section anchors;
   - template typos;
   - held creates never scaffolded.
-- Round 3 (`4caf32f`) fixed those test-first. A third review run is the gate before this phase is called done.
+- Round 3 (`4caf32f`) fixed those test-first. The architecture review then found two more: `files[]` imports skipping the reserved-path guard, and ~3 s of regex work for one write across 256 distinct 3-quantifier rules. It also found case-folding gaps, and approvals that publish through `context_publish` not being re-checked.
+- Round 4 (`70c36f0`) fixed those test-first. QA's round-3 verdict and a final re-review are the gate before this phase is called done.
 
 | Suite | Kind | What it pins |
 |---|---|---|
