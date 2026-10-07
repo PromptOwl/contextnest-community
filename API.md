@@ -1328,7 +1328,7 @@ Access is recorded when a document is opened (`GET …/nodes/:id`, MCP `context_
 The collaborator-facing `GET …/activity` and `GET …/nodes/:id/activity` feeds are unchanged and never include access rows.
 
 ### GET `/nests/:nestId/feed`
-Query: `?filter=all|changes|comments&limit=50&offset=0` (filter defaults to `all`, limit caps at 200, offset caps at 10 000)
+Query: `?filter=all|changes|comments&limit=50&offset=0&resolved=include` (filter defaults to `all`, limit caps at 200, offset caps at 10 000)
 
 Nest **activity feed** — pending change submissions (the exact rows
 `/review-queue` shows, every field intact, plus the caller's `canReview`)
@@ -1339,6 +1339,11 @@ newest first. Additive sibling of `/review-queue`; that endpoint and the MCP
 Comment items are access-filtered to documents the caller can read (same
 resolution as node listing: public readers see approved docs only; grants and
 steward scope honored). Change items mirror the queue (not access-filtered).
+
+Comment items on **resolved** threads are left out (and out of
+`counts.comments`): resolving a thread is how its comments leave the feed.
+Pass `resolved=include` to get them back; the item shape is the same either
+way (`resolved` is still reported).
 
 ```json
 {
@@ -1386,7 +1391,7 @@ The UI deep-links a comment item to its document with the thread focused via
 
 ### Notification rows (`GET /me/work` → `notifications`, `GET /me/notifications`)
 
-Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review verdicts, document deletion flags, mentions); nest-level rows have `node_id: null`.
+Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review verdicts, document deletion flags, mentions, `comment_reply` thread replies); nest-level rows have `node_id: null`.
 
 Unread `nest_invite` rows are what the Nests page shows as **Pending invites**. Accept marks them read (`POST /me/notifications/read`) and opens the nest.
 
@@ -1617,7 +1622,7 @@ The comments above are flat per-node threads. **Annotations** are the highlight-
 
 - `GET /nests/:nestId/nodes/:nodeId/annotations` — list threads with their replies and `open` / `resolved` status.
 - `POST /nests/:nestId/nodes/:nodeId/annotations` — open a thread. Body: `{ body, anchor?: { start, end, text }, snapshotVersion? }`. No `anchor` = a whole-document (or whole-artifact) thread.
-- `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/comments` — reply. Body: `{ body }`.
+- `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/comments` — reply. Body: `{ body }`. A reply on a resolved thread reopens it (the MCP `context_comment` reply does the same). Everyone already in the thread (its opener and earlier repliers, minus the replier and anyone the reply @mentions) gets a `comment_reply` notification — an inbox row linking the document, plus an email when SMTP is configured.
 - `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/resolve` · `/reopen`.
 - `GET /nests/:nestId/comment-counts` — `{ "<nodeId>": <open thread count>, … }` for the whole nest in one call (the UI's "most commented" sort).
 
