@@ -230,6 +230,9 @@ export async function getHealth() {
     /** Hootie in the nest (default OFF — admins opt in). Off → the launcher
      *  is hidden and POST /nests/:id/chat 404s. */
     hootie_enabled?: boolean;
+    /** Metacognition agents: server-run, persona-attributed, proposals only.
+     *  Needs the workflow plane too. Off → the Workflows "Agents" tab hides. */
+    metacognition_enabled?: boolean;
     /** The assistant identity to show: the admin's custom one on an
      *  enterprise licence, the default Hootie otherwise (server-enforced). */
     hootie_brand?: HootieBrand;
@@ -304,6 +307,7 @@ export interface AdminSettings {
    *  such as `ollama/…` when routed through a gateway). */
   hootie_model: string;
   subagent_runs_enabled: boolean;
+  metacognition_enabled: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
@@ -3440,5 +3444,71 @@ export async function rankBoardColumn(
 export async function deleteBoard(nestId: string, boardId: string) {
   return request<{ deleted: boolean }>(`/nests/${nestId}/boards/${boardId}`, {
     method: "DELETE",
+  });
+}
+
+// ─── Metacognition agents (CU-wdqcq041jm) ─────────────────────────────────
+
+export interface MetacognitionAgentConfig {
+  persona: { name: string; avatar: string | null };
+  scope: { read: string[]; propose: string[] };
+  caps: { max_steps: number; max_tokens: number; max_seconds: number; max_proposals: number };
+  feeds: Array<{ name: string; url: string }>;
+  mcp_servers: Array<{ name: string; url: string; allowed_tools: string[]; auth_env?: string }>;
+  model: string | null;
+}
+
+export interface MetacognitionAgent extends Omit<MetacognitionAgentConfig, "persona"> {
+  node_id: string;
+  enabled: boolean;
+  persona: { name: string; avatar: string | null; email: string };
+  configured_by: string;
+  updated_at: string;
+}
+
+/** What a metacognition run records on its trace (write tier). */
+export interface MetacognitionTrace {
+  persona?: { name: string; avatar: string | null };
+  model?: string;
+  billing?: "promptowl_credits" | "own_key";
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+  };
+  est_cost_usd?: number | null;
+  proposals?: number;
+  stopped_by?: string;
+  summary?: string;
+  skipped?: string;
+  error?: string;
+}
+
+export async function listMetacognitionAgents(nestId: string) {
+  const r = await request<{ agents: MetacognitionAgent[] }>(`/nests/${nestId}/metacognition`);
+  return r.agents;
+}
+
+export async function saveMetacognitionAgent(
+  nestId: string,
+  nodeId: string,
+  body: MetacognitionAgentConfig & { enabled: boolean },
+) {
+  const r = await request<{ agent: MetacognitionAgent }>(`/nests/${nestId}/metacognition/${nodeId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+  return r.agent;
+}
+
+export async function deleteMetacognitionAgent(nestId: string, nodeId: string) {
+  return request<{ deleted: boolean }>(`/nests/${nestId}/metacognition/${nodeId}`, { method: "DELETE" });
+}
+
+export async function runMetacognitionAgent(nestId: string, nodeId: string) {
+  return request<{ run_id: string; executes: "server" }>(`/nests/${nestId}/metacognition/${nodeId}/run`, {
+    method: "POST",
+    body: "{}",
   });
 }

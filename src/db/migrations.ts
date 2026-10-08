@@ -1817,6 +1817,31 @@ export function runMigrations(db: Database.Database): void {
     }
     recordMigration("053_license_cache_own_gateway");
   }
+
+  // 054: metacognition agents (CU-wdqcq041jm). One row per agent node the
+  //   SERVER runs as a persona: the persona's service identity (users.is_service
+  //   = 1, no key, no password), and the run config (scope, caps, feeds, MCP
+  //   servers) as a JSON blob metacognition/config.ts validates. created_by is
+  //   the owner/admin whose access bounds what the persona may read and propose.
+  if (!hasMigration("054_metacognition_agents")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS metacognition_agents (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        persona_user_id TEXT NOT NULL,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (nest_id, node_id)
+      );
+      -- One running server-executed run per agent, enforced atomically.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_server_run
+        ON runs(nest_id, agent_node) WHERE status = 'running' AND claimed_by = 'server:metacognition';
+    `);
+    recordMigration("054_metacognition_agents");
+  }
 }
 
 /**

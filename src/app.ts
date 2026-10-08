@@ -60,6 +60,7 @@ import {
   runDetailRoutes,
 } from "./workflow/run-routes.js";
 import { scheduleRoutes } from "./workflow/schedule-routes.js";
+import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
 import { sendTestNotification } from "./notify/dispatch.js";
@@ -616,6 +617,9 @@ export function createApp(): Hono<AuthEnv> {
       // launcher whenever the feature is on and explains the missing key,
       // rather than hiding it.
       hootie_enabled: config.HOOTIE_ENABLED,
+      // Metacognition agents (default OFF; needs the workflow plane too). Off →
+      // /nests/:id/metacognition 404s and the Workflows view hides its tab.
+      metacognition_enabled: config.FEATURE_WORKFLOW_PLANE && config.FEATURE_METACOGNITION,
       // The identity every surface shows: the admin's custom name/logo/
       // colour/greeting on an enterprise licence, the default Hootie
       // otherwise (enforced here, not in the client). Public: the launcher
@@ -843,6 +847,7 @@ export function createApp(): Hono<AuthEnv> {
     // Own-provider keys PromptOwl holds for this licence (masked tails only).
     own_providers: hasEntitlement("byok") ? getOwnGateway()?.providers ?? {} : {},
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
+    metacognition_enabled: config.FEATURE_METACOGNITION,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
@@ -1144,6 +1149,17 @@ export function createApp(): Hono<AuthEnv> {
           name: "FEATURE_SUBAGENT_RUNS",
           value: body.subagent_runs_enabled ? "true" : null,
         });
+      }
+    }
+    // Metacognition agents run on the plane's runs and schedules, so they
+    // need it on, same as sub-agent runs. Off clears the row (falls to env).
+    if ("metacognition_enabled" in body) {
+      const planeOn =
+        "workflow_plane_enabled" in body ? !!body.workflow_plane_enabled : config.FEATURE_WORKFLOW_PLANE;
+      if (body.metacognition_enabled && !planeOn) {
+        addError("metacognition_enabled", "Metacognition agents require the Workflow plane to be turned on.");
+      } else {
+        pending.push({ name: "FEATURE_METACOGNITION", value: body.metacognition_enabled ? "true" : null });
       }
     }
     // Sub-agent recursion caps. Same [min,max] the config getters clamp to, so
@@ -2979,6 +2995,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/run", runTriggerRoutes);
   nestsApp.route("/:nestId/runs", runListRoutes);
   nestsApp.route("/:nestId/schedules", scheduleRoutes);
+  nestsApp.route("/:nestId/metacognition", metacognitionRoutes);
   nestsApp.route("/:nestId/env", envRoutes);
   nestsApp.route("/:nestId/connectors", connectorRoutes);
   nestsApp.route("/:nestId/hooks", hookNestRoutes);

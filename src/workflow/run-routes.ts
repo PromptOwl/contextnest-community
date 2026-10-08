@@ -27,6 +27,7 @@ import { cancelDescendants } from "./run-service.js";
 import { envValues } from "./env-routes.js";
 import { dispatchEvent } from "../notify/dispatch.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "../auth/license-copy.js";
+import { SERVER_CLAIM, getAgent } from "../metacognition/store.js";
 
 const RUNNABLE_TYPES = ["agent", "skill"];
 
@@ -36,6 +37,7 @@ interface RunRow {
   agent_node: string;
   triggered_by: string;
   status: string;
+  claimed_by?: string | null;
   inputs: string | null;
   trace: string | null;
   started_at: string;
@@ -289,6 +291,26 @@ runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
     .json<{ inputs?: unknown; parent_run_id?: unknown }>()
     .catch(() => ({}) as { inputs?: unknown; parent_run_id?: unknown });
 
+  // A metacognition agent runs in this server, not in an external runner:
+  // the trigger starts it here and hands out no bundle (no env values, no
+  // instructions) — there is nothing for a caller to execute.
+  if (config.FEATURE_METACOGNITION) {
+    const meta = await getAgent(nestId, agentNode);
+    if (meta?.enabled) {
+      if (body.parent_run_id !== undefined && body.parent_run_id !== null) {
+        throw new ValidationError("A metacognition agent can't run as a sub-agent");
+      }
+      const { startMetacognitionRun } = await import("../metacognition/service.js");
+      const runId = await startMetacognitionRun({
+        nestId,
+        nodeId: agentNode,
+        triggeredBy: await resolveCallerEmail(c.get("userId")),
+        inputs: body.inputs,
+      });
+      return c.json({ run_id: runId, executes: "server" }, 202);
+    }
+  }
+
   // Sub-agent (nested) run? Validate the parent chain before creating anything.
   let parentRunId: string | null = null;
   let depth = 0;
@@ -460,6 +482,11 @@ runDetailRoutes.post("/:id/steps", requireWorkflowPlane, async (c) => {
   if (run.status !== "running") {
     throw new ConflictError(`Run is ${run.status} — steps can't be appended`);
   }
+  // A metacognition run is executed by this server, which writes its own
+  // trace. Nobody else may add to it — the trace is the agent's audit.
+  if (run.claimed_by === SERVER_CLAIM) {
+    throw new ConflictError("This run is executed by the server; its steps are recorded by the server");
+  }
   const body = await c.req.json<Record<string, unknown>>();
   if (typeof body.action !== "string" || !body.action.trim()) {
     throw new ValidationError("action is required (read|write|branch|notify|external)");
@@ -512,6 +539,11 @@ runDetailRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
     !["running", "succeeded", "failed", "cancelled"].includes(status)
   ) {
     throw new ValidationError("status must be running | succeeded | failed | cancelled");
+  }
+  // Only stopping a server-executed run is a person's call; its outcome is
+  // the server's to record.
+  if (run.claimed_by === SERVER_CLAIM && status !== "cancelled") {
+    throw new ConflictError("This run is executed by the server — it can be cancelled, not closed");
   }
   const terminal = status !== "running";
   // Compare-and-swap on the status, same as closeRun: the check above read the

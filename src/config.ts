@@ -593,6 +593,34 @@ export const config = {
   get FEATURE_SUBAGENT_RUNS(): boolean {
     return process.env.FEATURE_SUBAGENT_RUNS === "true";
   },
+  /**
+   * Metacognition agents (CU-wdqcq041jm): agent nodes the SERVER runs as a
+   * persona — a native ReAct loop on the nest's model key that reads within a
+   * configured scope and changes the nest only by filing proposals for review.
+   * Off by default. Requires FEATURE_WORKFLOW_PLANE (runs, schedules and the
+   * run trace are the plane's). This is the one place the server executes an
+   * agent itself; see WORKFLOW_PLANE.md.
+   */
+  get FEATURE_METACOGNITION(): boolean {
+    return process.env.FEATURE_METACOGNITION === "true";
+  },
+  /**
+   * Development only: let a metacognition agent's feeds and MCP servers be
+   * plain-http or private addresses (a local MCP server, a feed on the LAN).
+   * Off, which is the only safe production setting: the server fetches these
+   * from its own network position.
+   */
+  get METACOGNITION_ALLOW_PRIVATE_URLS(): boolean {
+    return process.env.METACOGNITION_ALLOW_PRIVATE_URLS === "true";
+  },
+  /** Manual/hook starts per metacognition agent per hour; bounds spend. */
+  get METACOGNITION_STARTS_PER_HOUR(): number {
+    return Number(process.env.METACOGNITION_STARTS_PER_HOUR) || 30;
+  },
+  /** How often a running metacognition agent checks for a person's cancel (ms). */
+  get METACOGNITION_CANCEL_POLL_MS(): number {
+    return Number(process.env.METACOGNITION_CANCEL_POLL_MS) || 2000;
+  },
   /** Hard ceiling on sub-agent nesting depth — keeps the call tree finite
    *  (haltable / statically bounded). Clamped to [1, 32]. */
   get SUBAGENT_MAX_DEPTH(): number {

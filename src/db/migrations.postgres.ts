@@ -82,6 +82,7 @@ const HISTORICAL_MIGRATIONS = [
   "051_boards",
   "052_nest_done_tags",
   "053_license_cache_own_gateway",
+  "054_metacognition_agents",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -944,6 +945,24 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
   await db.exec(
     "ALTER TABLE nests ADD COLUMN IF NOT EXISTS done_tags TEXT NOT NULL DEFAULT 'done'",
   );
+
+  // Migration 054 parity: metacognition agents.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS metacognition_agents (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      persona_user_id TEXT NOT NULL,
+      config_json TEXT NOT NULL DEFAULT '{}',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      updated_at TEXT NOT NULL DEFAULT ${NOW},
+      PRIMARY KEY (nest_id, node_id)
+    );
+    -- One running server-executed run per agent, enforced atomically.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_server_run
+        ON runs(nest_id, agent_node) WHERE status = 'running' AND claimed_by = 'server:metacognition';
+  `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(

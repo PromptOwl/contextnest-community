@@ -77,6 +77,14 @@ const testRun = [
     independent: true, // Arranges its own nest, reviews and requests
   },
   {
+    // Metacognition agents (CN-META-001 … CN-META-003). Skips unless the
+    // server has FEATURE_METACOGNITION on. Serial: one seeded nest.
+    file: 'metacognition/metacognition_agents.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest
+  },
+  {
     // Annotations keep your place + highlights in every view (CN-ANNO-001 …
     // CN-ANNO-004). Serial: the cases share one seeded nest. Skips itself on
     // a server that doesn't serve the viewer bridge yet.

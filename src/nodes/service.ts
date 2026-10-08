@@ -1465,6 +1465,13 @@ export interface WriteOptions {
    * uses it: its "nothing changed since" check has to hold at write time.
    */
   expectHead?: number;
+  /**
+   * Never publish this write, whatever the nest's posture (ungoverned,
+   * prime-only, self-approve, creator-reviews): it lands as a draft for a
+   * reviewer. A metacognition agent's proposals use it — an agent's change is
+   * a proposal by definition, so no bypass that exists for people applies.
+   */
+  alwaysDraft?: boolean;
 }
 
 /** Refuse the write if the node's head moved past what the caller saw.
@@ -1773,12 +1780,14 @@ async function createNodeOnce(
     let published = false;
     let publishNote: string | undefined;
     try {
-      const publishReason = await autoPublishReason(
-        nestId,
-        userEmail,
-        { tags, metadata, type: input.type },
-        { creatorReviews: creatorSteward?.canApprove === true, governed },
-      );
+      const publishReason = opts.alwaysDraft
+        ? null
+        : await autoPublishReason(
+            nestId,
+            userEmail,
+            { tags, metadata, type: input.type },
+            { creatorReviews: creatorSteward?.canApprove === true, governed },
+          );
       // Same note in the engine history and the governance row: the version
       // history an admin reads in the UI comes from node_versions, so leaving
       // the reason only in history.yaml hides it from the audit that matters.
@@ -2420,7 +2429,7 @@ export async function updateNode(
       // Resolved from the POST-patch tags and metadata — so an edit that adds
       // a prime tag gates itself, and one that clears the doc flag can't
       // un-gate a prime-tagged doc.
-      const publishReason = await autoPublishReason(nestId, userEmail, {
+      const publishReason = opts.alwaysDraft ? null : await autoPublishReason(nestId, userEmail, {
         tags: currentTags,
         metadata: node.frontmatter.metadata,
         // A task only if it is one before AND after this edit: converting a
@@ -2669,6 +2678,9 @@ export const NODE_KEYED_TABLES = [
   // document at the same id never inherits someone else's reads. The
   // deletion tombstone and whole-nest export rows (node_id NULL) survive.
   ["node_access_events", "node_id"],
+  // A metacognition agent's config (CU-wdqcq041jm): it runs the agent node, so
+  // a delete must stop it and a move must take it along.
+  ["metacognition_agents", "node_id"],
 ] as const;
 
 /** Drop every row keyed to a node id. Caller supplies the transaction. */

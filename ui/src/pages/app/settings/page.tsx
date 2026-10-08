@@ -105,6 +105,7 @@ const TABS: {
     keys: [
       "workflow_plane_enabled",
       "subagent_runs_enabled",
+      "metacognition_enabled",
       "subagent_max_depth",
       "subagent_max_children",
       "promptowl_teams_enabled",
@@ -1017,9 +1018,41 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                         // Turning the plane off makes sub-agent runs inert; keep
                         // the two consistent so the server never sees the
                         // dependent-flag-without-parent state.
-                        ...(v ? {} : { subagent_runs_enabled: false }),
+                        ...(v ? {} : { subagent_runs_enabled: false, metacognition_enabled: false }),
                       })
                     }
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Metacognition agents — server-run, so they need the plane */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Metacognition agents</CardTitle>
+                <CardDescription>
+                  Agent documents this server runs itself, as a named persona,
+                  on the nest's model key. They read the folders they are given
+                  and only ever file proposals for review — they never publish.
+                  Runs use PromptOwl credits, or your own key. Requires the
+                  workflow plane.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.metacognition_enabled ? "On" : "Off"}
+                    {!draft.workflow_plane_enabled && (
+                      <span className="text-muted-foreground">
+                        {" "}
+                        · enable the workflow plane first
+                      </span>
+                    )}
+                  </span>
+                  <Switch
+                    checked={draft.metacognition_enabled}
+                    disabled={!draft.workflow_plane_enabled}
+                    onCheckedChange={(v) => set({ metacognition_enabled: v })}
                   />
                 </div>
               </CardContent>
