@@ -2880,7 +2880,8 @@ export function createApp(): Hono<AuthEnv> {
   // GET /nests/:nestId/activity-log?node=<id> | ?folder=<path> — the admin
   // activity log for one document, one folder, or (neither) the whole nest:
   // who changed, reviewed, commented on, deleted, read, retrieved or exported
-  // it (CU-wdqcq03aw2). Same guard as /trace above — owner, nest admin, or
+  // it (CU-wdqcq03aw2). ?agent=<name> narrows it to one agent ("what did
+  // agent X read"); read rows carry the version served. Same guard as /trace above — owner, nest admin, or
   // server admin; everyone else 403. Registered before the sub-routers so it
   // matches first under the LinearRouter.
   nestsApp.get("/:nestId/activity-log", async (c) => {
@@ -2920,6 +2921,11 @@ export function createApp(): Hono<AuthEnv> {
       scope,
       types: types as ActivityType[] | undefined,
       actor: c.req.query("actor") || undefined,
+      agent: (() => {
+        const a = c.req.query("agent")?.trim();
+        if (a && a.length > 200) throw new ValidationError("agent must be at most 200 characters");
+        return a || undefined;
+      })(),
       limit: Number(c.req.query("limit") ?? 50),
       offset: Number(c.req.query("offset") ?? 0),
     });

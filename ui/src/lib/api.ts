@@ -747,6 +747,9 @@ export interface NestSettings {
   require_push_confirmation: boolean;
   /** The person who creates a document becomes its reviewer; v1 publishes. */
   creator_is_reviewer: boolean;
+  /** Reads, pulls and exports are recorded in the activity log (default on).
+   *  Only the owner or server admin may turn it off. */
+  access_log_enabled?: boolean;
 }
 
 export async function getNestSettings(nestId: string) {
@@ -763,6 +766,8 @@ export async function updateNestSettings(
     /** Superadmin-only — a per-field 403 is returned to anyone else. */
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
+    /** Owner / server admin only to turn OFF; any nest admin may turn on. */
+    access_log_enabled?: boolean;
   },
 ) {
   return request<NestSettings>(`/nests/${nestId}/settings`, {
@@ -1895,7 +1900,7 @@ export type ActivityLogScope =
 export async function getActivityLog(
   nestId: string,
   scope: ActivityLogScope,
-  opts: { types?: ActivityLogType[]; actor?: string; limit?: number; offset?: number } = {},
+  opts: { types?: ActivityLogType[]; actor?: string; agent?: string; limit?: number; offset?: number } = {},
 ) {
   const params = new URLSearchParams({
     limit: String(opts.limit ?? 50),
@@ -1905,6 +1910,7 @@ export async function getActivityLog(
   if (scope.kind === "folder") params.set("folder", scope.folder);
   if (opts.types?.length) params.set("type", opts.types.join(","));
   if (opts.actor) params.set("actor", opts.actor);
+  if (opts.agent) params.set("agent", opts.agent);
   return request<{ items: ActivityLogItem[]; limit: number; offset: number; hasMore: boolean }>(
     `/nests/${encodeURIComponent(nestId)}/activity-log?${params.toString()}`,
   );

@@ -22,6 +22,8 @@ import {
   renameNest,
   isStewardshipEnabled,
   setStewardshipEnabled,
+  nestAccessLogEnabled,
+  setAccessLogEnabled,
   disableStewardshipAndWipeGovernance,
   nestAllowsSelfApprove,
   nestCreatorIsReviewer,
@@ -747,6 +749,7 @@ nestRoutes.get("/:nestId/settings", async (c) => {
     // anyone who can read the nest so the CLI/UI knows the posture.
     require_push_confirmation: await nestRequiresPushConfirmation(nestId),
     creator_is_reviewer: await nestCreatorIsReviewer(nestId),
+    access_log_enabled: await nestAccessLogEnabled(nestId),
   });
 });
 
@@ -779,7 +782,28 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     done_tags?: string[] | string;
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
+    access_log_enabled?: boolean;
   }>();
+
+  // Read logging (the record of what each person and agent read) is an audit
+  // control. Any admin may turn it ON; turning it OFF stays with the owner or
+  // the server license-admin, like disabling stewardship — an admin
+  // collaborator must not be able to switch off the record of their own
+  // reads. Refused before anything in the body is applied.
+  if (
+    body.access_log_enabled === false &&
+    !isServerAdmin &&
+    permission !== "owner"
+  ) {
+    return c.json(
+      {
+        error:
+          "Only the nest owner or the server license-admin can turn off read logging.",
+        field: "access_log_enabled",
+      },
+      403,
+    );
+  }
 
   // Push Confirmation Gate is a SERVER-admin (superadmin) control, not a
   // per-nest owner setting — the whole point is that a nest admin cannot turn
@@ -853,6 +877,10 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
   if (typeof body.creator_is_reviewer === "boolean") {
     await setCreatorIsReviewer(nestId, body.creator_is_reviewer);
   }
+  // Read logging: checked up front (see the guard after the body parse).
+  if (typeof body.access_log_enabled === "boolean") {
+    await setAccessLogEnabled(nestId, body.access_log_enabled);
+  }
 
   return c.json({
     stewardship_enabled: await isStewardshipEnabled(nestId),
@@ -862,6 +890,7 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     done_tags: await nestDoneTags(nestId),
     require_push_confirmation: await nestRequiresPushConfirmation(nestId),
     creator_is_reviewer: await nestCreatorIsReviewer(nestId),
+    access_log_enabled: await nestAccessLogEnabled(nestId),
     wiped,
   });
 });

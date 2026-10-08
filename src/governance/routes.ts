@@ -7,11 +7,12 @@
  */
 
 import { Hono } from "hono";
+import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import { ValidationError, ConflictError } from "../shared/errors.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requestBaseUrl } from "../shared/base-url.js";
-import { attributeRequest } from "../shared/client-metadata.js";
+import { attributeRequest, readClient } from "../shared/client-metadata.js";
 import { getDb } from "../db/client.js";
 import * as stewardship from "./stewardship-service.js";
 import * as reviews from "./review-service.js";
@@ -780,8 +781,23 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions/:version{[0-9]+}", async (c) => 
   }
 
   const { storage, versions: versionManager } = await engineCache.get(nestId);
+  // A historical version's full body is a read of that version: record it in
+  // the activity log like any other read (fire-and-forget).
+  const recordVersionRead = () =>
+    recordNodeAccess({
+      nestId,
+      nodeIds: [nodeId],
+      action: "read",
+      surface: "api",
+      userId,
+      userEmail,
+      client: readClient(c),
+      versions: { [nodeId]: version },
+      detail: "version",
+    });
   try {
     const raw = await versionManager.reconstructVersion(nodeId, version);
+    recordVersionRead();
     return c.json({ version, content: bodyOnly(nodeId, raw) });
   } catch (err) {
     // The unreviewed draft on top is never in the chain (see the draft branch
@@ -790,6 +806,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions/:version{[0-9]+}", async (c) => 
     try {
       const node = await storage.readDocument(nodeId);
       if ((node.frontmatter.version ?? 1) === version) {
+        recordVersionRead();
         return c.json({ version, content: node.body ?? "" });
       }
     } catch {

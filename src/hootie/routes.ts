@@ -47,6 +47,7 @@ import {
   ModelRefusedError,
 } from "./model.js";
 import { effectiveHootieBrand } from "./brand.js";
+import type { ClientMetadata } from "../shared/client-metadata.js";
 
 export const hootieRoutes = new Hono<AuthEnv>();
 
@@ -59,6 +60,8 @@ const MAX_HISTORY_CHARS = 8000;
 const MAX_HISTORY_RAW = MAX_HISTORY_TURNS * 4;
 /** Retrieval budget per source (anchor document, question) — tokens. */
 const CONTEXT_BUDGET = 6000;
+/** How Hootie's own retrievals are attributed in the activity log. */
+const HOOTIE_CLIENT: ClientMetadata = { agent: "hootie" };
 /**
  * Chats one person may start per window, across ALL nests — the budget
  * guards one server-wide key, so it is keyed per user, not per nest. Each
@@ -185,6 +188,10 @@ hootieRoutes.post("/chat", async (c) => {
       nestId,
       userId,
       baseUrl,
+      // Hootie pulls these on the person's behalf: record it as Hootie's
+      // read, so the activity log tells it apart from the person opening
+      // the document themselves.
+      client: HOOTIE_CLIENT,
       body: {
         selector: `[[${nodeId}]]`,
         hops: 1,
@@ -208,6 +215,10 @@ hootieRoutes.post("/chat", async (c) => {
       nestId,
       userId,
       baseUrl,
+      // Hootie pulls these on the person's behalf: record it as Hootie's
+      // read, so the activity log tells it apart from the person opening
+      // the document themselves.
+      client: HOOTIE_CLIENT,
       body: { prompt: question, max_tokens: CONTEXT_BUDGET },
     });
     take(r);

@@ -1732,6 +1732,45 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("049_license_cache_gateway");
   }
 
+  // 050: agent read log — which version a read was served, and which agent
+  //   made it. node_access_events.version is the version the caller actually
+  //   got (NULL where the surface hands back no single version); .agent is the
+  //   caller's self-reported agent (client.agent, §9.4), split out of
+  //   client_json so "what did agent X read" is an indexed filter. Existing
+  //   rows are backfilled from client_json. nests.access_log_enabled (default
+  //   ON) lets an owner turn read logging off for a nest.
+  if (!hasMigration("050_agent_read_log")) {
+    const accessCols = (
+      db.prepare("PRAGMA table_info(node_access_events)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    const nestCols050 = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    db.transaction(() => {
+      if (accessCols.length && !accessCols.includes("version")) {
+        db.exec("ALTER TABLE node_access_events ADD COLUMN version INTEGER");
+      }
+      if (accessCols.length && !accessCols.includes("agent")) {
+        db.exec("ALTER TABLE node_access_events ADD COLUMN agent TEXT");
+        db.exec(`
+          UPDATE node_access_events
+             SET agent = LOWER(json_extract(client_json, '$.agent'))
+           WHERE client_json IS NOT NULL AND json_valid(client_json)
+             AND json_type(client_json, '$.agent') = 'text'
+        `);
+      }
+      if (accessCols.length) {
+        db.exec(
+          "CREATE INDEX IF NOT EXISTS idx_node_access_agent ON node_access_events(nest_id, agent, id)",
+        );
+      }
+      if (!nestCols050.includes("access_log_enabled")) {
+        db.exec("ALTER TABLE nests ADD COLUMN access_log_enabled INTEGER NOT NULL DEFAULT 1");
+      }
+    })();
+    recordMigration("050_agent_read_log");
+  }
+
   // 051: saved Board views (CU-wdqcq03xn2). One row per named board on a nest;
   //   the view itself (dimension, columns, filter, per-column card rank) is a
   //   JSON blob the UI owns — board-routes.ts validates its shape. private=1

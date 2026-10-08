@@ -10,7 +10,7 @@ import { ValidationError, NotFoundError } from "../shared/errors.js";
 // id is rejected up front by the assertSafeNodeId chokepoint mounted on
 // /nests/:nestId/nodes/:nodeId{.+} in app.ts — covers every node route across
 // this + the annotations + governance routers, so handlers here can trust nodeId.
-import { attributeRequest } from "../shared/client-metadata.js";
+import { attributeRequest, readClient } from "../shared/client-metadata.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { getDb } from "../db/client.js";
 import * as versions from "../governance/version-service.js";
@@ -470,7 +470,10 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     surface: "api",
     userId,
     userEmail,
-    client: c.get("clientMetadata"),
+    client: readClient(c),
+    // The version in the response is the one served (the live draft, or the
+    // reconstructed latest approved version when there is pending drift).
+    versions: { [node.id]: response.version },
   });
   const publicReader = await isPublicReader(nestId, userId);
 

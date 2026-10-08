@@ -8,6 +8,7 @@ import {
   ForbiddenError,
 } from "../shared/errors.js";
 import { rebuildNodeIndex } from "./node-index.js";
+import { readClient } from "../shared/client-metadata.js";
 import { queryTableNode } from "../tables/query.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import {
@@ -253,6 +254,7 @@ queryRoutes.post("/context", async (c) => {
     userId: c.get("userId"),
     baseUrl: requestBaseUrl(c.req.url),
     body,
+    client: readClient(c),
   });
   return c.json(result);
 });
@@ -281,6 +283,19 @@ queryRoutes.post("/table-query", async (c) => {
     typeof body.query === "string" ? body.query : "",
     body.include_drafts === true,
   );
+  // Admin activity log: the table the rows came from, at the version queried.
+  const tableUser = c.get("userId");
+  recordNodeAccess({
+    nestId,
+    nodeIds: [result.table],
+    action: "retrieve",
+    surface: "api",
+    userId: tableUser,
+    userEmail: await resolveCallerEmail(tableUser),
+    client: readClient(c),
+    ...(result.version ? { versions: { [result.table]: result.version } } : {}),
+    detail: "table-query",
+  });
   return c.json(result);
 });
 
@@ -306,7 +321,7 @@ queryRoutes.post("/query", async (c) => {
     surface: "api",
     userId,
     userEmail,
-    client: c.get("clientMetadata"),
+    client: readClient(c),
     detail: "query",
   });
 
@@ -346,7 +361,7 @@ queryRoutes.get("/search", async (c) => {
     surface: "api",
     userId,
     userEmail,
-    client: c.get("clientMetadata"),
+    client: readClient(c),
     detail: "search",
   });
 
@@ -494,7 +509,7 @@ queryRoutes.get("/export", async (c) => {
       surface: "api",
       userId: bundleUser,
       userEmail: await resolveCallerEmail(bundleUser),
-      client: c.get("clientMetadata"),
+      client: readClient(c),
       detail: includeDrafts ? "bundle export (incl. drafts)" : "bundle export",
     });
     const filename = `nest-${nestId}.zip`;
@@ -579,7 +594,7 @@ queryRoutes.get("/export", async (c) => {
     surface: "api",
     userId,
     userEmail,
-    client: c.get("clientMetadata"),
+    client: readClient(c),
     detail: `markdown export (${included.length} documents${selector ? ", selector" : ""})`,
   });
 

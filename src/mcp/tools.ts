@@ -232,6 +232,13 @@ export interface McpToolContext {
    * A label, never an identity: no gate below may branch on it.
    */
   client?: ClientMetadata;
+  /**
+   * The version each document body was served at during this call, filled in
+   * by resolveLlmBody (the one place a body is chosen) and read back by the
+   * activity log so a read records exactly what the agent got. Set fresh per
+   * call by handleToolCall.
+   */
+  servedVersions?: Map<string, number>;
 }
 
 export const TOOL_DEFINITIONS = [
@@ -866,13 +873,20 @@ async function resolveLlmBody(
   const stewardship = gate
     ? gate.stewardshipEnabled
     : await isStewardshipEnabled(ctx.nestId);
-  if (!stewardship) return node.body || "";
+  if (!stewardship) {
+    // Ungoverned: the live body, which is the document's current version.
+    const live = Number(node.frontmatter?.version);
+    if (Number.isInteger(live) && live > 0) ctx.servedVersions?.set(node.id, live);
+    return node.body || "";
+  }
   const approved = gate
     ? (gate.approvedVersions?.get(node.id) ?? null)
     : await versions.getApprovedVersion(ctx.nestId, node.id);
   if (approved == null) return null;
   try {
-    return (await reconstructApproved(ctx.versionManager, ctx.nestId, node.id, approved)).raw;
+    const raw = (await reconstructApproved(ctx.versionManager, ctx.nestId, node.id, approved)).raw;
+    ctx.servedVersions?.set(node.id, approved);
+    return raw;
   } catch (err) {
     console.error("reconstructVersion failed", node.id, approved, err);
     return null;
@@ -891,12 +905,20 @@ const ACCESS_BY_TOOL: Record<string, AccessAction> = {
 function recordToolAccess(toolName: string, result: ToolResult, ctx: McpToolContext): void {
   const action = ACCESS_BY_TOOL[toolName];
   if (!action || typeof result === "string" || result.isError || !ctx.nestId) return;
-  const data = result.data as { id?: unknown; documents?: Array<{ id?: unknown }> } | undefined;
+  // context_get names one document (`id`), context_query a list
+  // (`documents`), context_search its page (`results`). Missing `results`
+  // meant an agent's search — the most common read — was never recorded.
+  const data = result.data as
+    | { id?: unknown; documents?: Array<{ id?: unknown }>; results?: Array<{ id?: unknown }> }
+    | undefined;
+  const listed = (xs: unknown) =>
+    Array.isArray(xs)
+      ? xs.map((d) => (d as { id?: unknown })?.id).filter((id): id is string => typeof id === "string")
+      : [];
   const ids = [
     ...(typeof data?.id === "string" ? [data.id] : []),
-    ...(Array.isArray(data?.documents)
-      ? data.documents.map((d) => d?.id).filter((id): id is string => typeof id === "string")
-      : []),
+    ...listed(data?.documents),
+    ...listed(data?.results),
   ];
   if (!ids.length) return;
   recordNodeAccess({
@@ -907,6 +929,7 @@ function recordToolAccess(toolName: string, result: ToolResult, ctx: McpToolCont
     userId: ctx.userId,
     userEmail: ctx.userEmail,
     client: ctx.client,
+    ...(ctx.servedVersions?.size ? { versions: Object.fromEntries(ctx.servedVersions) } : {}),
     detail: toolName,
   });
 }
@@ -944,7 +967,7 @@ export async function handleToolCall(
     });
     return toolError((err as Error).message, "VALIDATION_FAILED");
   }
-  const attributed: McpToolContext = { ...ctx, client };
+  const attributed: McpToolContext = { ...ctx, client, servedVersions: new Map() };
   // Headless access keys (CU-wdqcq0314u) read and nothing else. Checked here,
   // the one seam both MCP surfaces share, so no tool — including one added
   // later — is reachable with an access key unless it is on the read list.
@@ -1206,6 +1229,20 @@ async function runTool(
         String(args.query ?? ""),
         false,
       );
+      // Admin activity log: the table the rows came from, at the version
+      // queried. Prose-only result, so it records here rather than through
+      // recordToolAccess.
+      recordNodeAccess({
+        nestId,
+        nodeIds: [result.table],
+        action: "retrieve",
+        surface: "mcp",
+        userId: ctx.userId,
+        userEmail: ctx.userEmail,
+        client: ctx.client,
+        ...(result.version ? { versions: { [result.table]: result.version } } : {}),
+        detail: "context_table_query",
+      });
       // Compact CSV back out — models read it fine and it round-trips.
       const lines = [
         result.columns.join(","),

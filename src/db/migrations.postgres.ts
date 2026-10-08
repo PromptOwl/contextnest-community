@@ -78,6 +78,7 @@ const HISTORICAL_MIGRATIONS = [
   "047_node_access_events",
   "048_license_cache_features",
   "049_license_cache_gateway",
+  "050_agent_read_log",
   "051_boards",
   "052_nest_done_tags",
   "053_license_cache_own_gateway",
@@ -678,6 +679,11 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_node_access_node ON node_access_events(nest_id, node_id, id);
     CREATE INDEX IF NOT EXISTS idx_node_access_nest ON node_access_events(nest_id, id);
     CREATE INDEX IF NOT EXISTS idx_node_access_ts ON node_access_events(ts);
+    -- migration 050: the version the read was served, and the agent that
+    -- made it (client.agent split out so per-agent queries are indexed).
+    ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS version INTEGER;
+    ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS agent TEXT;
+    CREATE INDEX IF NOT EXISTS idx_node_access_agent ON node_access_events(nest_id, agent, id);
 
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,
@@ -910,6 +916,12 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       created_at TEXT NOT NULL DEFAULT ${NOW}
     );
     CREATE INDEX IF NOT EXISTS idx_headless_readers_nest ON headless_readers(nest_id);
+  `);
+
+  // Migration 050 parity: read logging is on for every nest unless an owner
+  // turns it off.
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS access_log_enabled INTEGER NOT NULL DEFAULT 1;
   `);
 
   // Migration 051 parity: saved Board views.
