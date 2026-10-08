@@ -1918,12 +1918,24 @@ export function createApp(): Hono<AuthEnv> {
     // Capped (500, newest first), not paginated: a person can have at most
     // MAX_PENDING_PER_NEST waiting per nest, so the pending set stays small;
     // the count below reflects what is shown.
-    const accessAsks = await listAccessRequests({
-      nestIds: [...nestName.keys()],
-      status: "pending",
-      limit: 500,
-    });
-    const toAccessItem = (r: (typeof accessAsks)[number]) => ({
+    // Decider nests first, so only rows this caller can act on (or filed) load.
+    const deciderNestIds = (
+      await Promise.all(
+        [...nestName.keys()].map(async (id) =>
+          (await canDecideAccessRequests(id, userId)) ? id : null,
+        ),
+      )
+    ).filter((id): id is string => id !== null);
+    const [decidable, myAccessAsks] = await Promise.all([
+      listAccessRequests({ nestIds: deciderNestIds, status: "pending", limit: 500 }),
+      listAccessRequests({
+        nestIds: [...nestName.keys()],
+        requesterId: userId,
+        status: "pending",
+        limit: 500,
+      }),
+    ]);
+    const toAccessItem = (r: (typeof decidable)[number]) => ({
       type: "access" as const,
       nest_id: r.nest_id,
       nest_name: nestName.get(r.nest_id)!,
@@ -1998,26 +2010,14 @@ export function createApp(): Hono<AuthEnv> {
         .filter((r) => nestManage.get(r.nestId))
         .map(toDeletionItem),
     );
-    // Waiting on me: asks I can decide (owner / nest admin / server admin),
-    // resolved once per nest. Waiting on others: the ones I filed.
-    const othersAccess = accessAsks.filter((r) => r.requester_id !== userId);
-    const nestDecide = new Map<string, boolean>(
-      await Promise.all(
-        [...new Set(othersAccess.map((r) => r.nest_id))].map(
-          async (nestId): Promise<[string, boolean]> => [
-            nestId,
-            await canDecideAccessRequests(nestId, userId),
-          ],
-        ),
-      ),
-    );
+    // Waiting on me: asks I can decide. Waiting on others: the ones I filed.
     items.push(
-      ...othersAccess.filter((r) => nestDecide.get(r.nest_id)).map(toAccessItem),
+      ...decidable.filter((r) => r.requester_id !== userId).map(toAccessItem),
     );
     items.sort(byNewest);
     waiting.push(
       ...deletions.filter((r) => r.requestedBy === me).map(toDeletionItem),
-      ...accessAsks.filter((r) => r.requester_id === userId).map(toAccessItem),
+      ...myAccessAsks.map(toAccessItem),
     );
     waiting.sort(byNewest);
     // Watcher notifications (HITL tags) ride along so the inbox is one call.

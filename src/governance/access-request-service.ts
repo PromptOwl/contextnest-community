@@ -493,10 +493,14 @@ async function grantRequested(
 ): Promise<void> {
   const { nest_id: nestId, requester_id: userId, level } = request;
   if (request.target_type === "node" || request.target_type === "folder") {
+    const target = request.target_type === "node" ? request.target_id : `nodes/${request.target_id}`;
+    // Only ever an upgrade: createGrant overwrites, so a share given since must not drop.
+    const held = await resolveNodeGrant(nestId, userId, target);
+    if (held && permissionLevel(held) >= permissionLevel(level)) return;
     await createGrant({
       nestId,
       targetType: request.target_type === "node" ? "document" : "folder",
-      target: request.target_type === "node" ? request.target_id : `nodes/${request.target_id}`,
+      target,
       userId,
       role: level,
       grantedBy: decidedByEmail,
@@ -631,6 +635,8 @@ async function targetContext(
 }
 
 const levelWord = (level: AccessLevel) => (level === "write" ? "edit" : "view");
+const excerpt = (note: string | null) =>
+  note ? ` — "${note.length > 140 ? `${note.slice(0, 140)}…` : note}"` : "";
 
 async function notifyAccessRequested(request: AccessRequest, baseUrl?: string): Promise<void> {
   try {
@@ -651,10 +657,7 @@ async function notifyAccessRequested(request: AccessRequest, baseUrl?: string): 
     // and a short line keeps one person's text from taking over a channel.
     // (Slack text is escaped downstream — escapeMrkdwn — so `<!channel>` in a
     // note posts as literal text.)
-    const excerpt = request.note
-      ? ` — "${request.note.length > 140 ? `${request.note.slice(0, 140)}…` : request.note}"`
-      : "";
-    const line = `${request.requested_by} asked for ${levelWord(request.level)} access to ${ctx.noun} *${ctx.docTitle}*${excerpt}`;
+    const line = `${request.requested_by} asked for ${levelWord(request.level)} access to ${ctx.noun} *${ctx.docTitle}*${excerpt(request.note)}`;
     void dispatchEvent({
       kind: "access_requested",
       nestId: request.nest_id,
@@ -713,7 +716,7 @@ async function notifyAccessDecided(request: AccessRequest, baseUrl?: string): Pr
       nestId: request.nest_id,
       subjectId: request.target_id,
       actor: by,
-      message: `${by} ${approved ? "approved" : "denied"} ${request.requested_by}'s request to ${levelWord(request.level)} ${ctx.noun} *${ctx.docTitle}*${noteText}`,
+      message: `${by} ${approved ? "approved" : "denied"} ${request.requested_by}'s request to ${levelWord(request.level)} ${ctx.noun} *${ctx.docTitle}*${excerpt(request.resolution_note)}`,
     });
   } catch (err) {
     console.error("[notify] access decision fan-out failed", request.nest_id, request.id, err);

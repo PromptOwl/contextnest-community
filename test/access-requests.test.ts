@@ -683,6 +683,38 @@ describe("request access on a denied write", () => {
     expect((await patch(reader.apiKey, folderDocId, "# deal edit")).status).toBe(200);
   });
 
+  it("approving an older read request never lowers a write share given since", async () => {
+    await resetAuthRateLimit();
+    const late = await registerUser(app, "late@acme.com", "Late");
+    const share = (target_type: string, target: string, role: string) =>
+      jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/grants`,
+        { target_type, target, email: "late@acme.com", role },
+        owner.apiKey,
+      );
+    expect((await share("document", folderDocId, "read")).status).toBeLessThan(300);
+    const ask = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/access-requests`,
+      { target_type: "folder", target_id: "gtm", level: "read" },
+      late.apiKey,
+    );
+    expect(ask.status).toBe(201);
+    expect((await share("folder", "nodes/gtm", "write")).status).toBeLessThan(300);
+    const ok = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/access-requests/${ask.data.request.id}/approve`,
+      {},
+      owner.apiKey,
+    );
+    expect(ok.status).toBe(200);
+    expect((await patch(late.apiKey, folderDocId, "# late edit")).status).toBe(200);
+  });
+
   it("someone reaching the nest only through a share can ask, and approval works", async () => {
     const refused = await patch(grantee.apiKey, docId, "# grantee edit");
     expect(refused.status).toBe(403);

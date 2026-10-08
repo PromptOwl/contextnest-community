@@ -48,6 +48,7 @@ export default function MyWorkPage() {
   const [deletionAction, setDeletionAction] = useState<"delete" | "decline">("delete");
   // Access request being denied from the inbox (the note dialog is open).
   const [denyAccessTarget, setDenyAccessTarget] = useState<api.WorkItem | null>(null);
+  const [approvingAccessId, setApprovingAccessId] = useState<string | null>(null);
   // Bulk review straight from the inbox, keyed "<nestId>:<nodeId>" since this
   // list spans nests. Deletion rows are never selectable — they resolve
   // through their own flow and carry a different decision.
@@ -218,12 +219,15 @@ export default function MyWorkPage() {
   // Access requests (CU-wdqcq041jn): approve grants the access straight away;
   // deny opens a dialog for an optional note to the requester.
   const approveAccessItem = async (w: api.WorkItem) => {
+    setApprovingAccessId(w.request_id!);
     try {
       await api.approveAccessRequest(w.nest_id, w.request_id!);
-      toast.success(`${w.requested_by} can now edit "${w.title}"`);
+      toast.success(`${w.requested_by} can now ${w.level === "read" ? "view" : "edit"} "${w.title}"`);
       dropWorkItem(w);
     } catch (err: any) {
       toast.error(err?.message || "Couldn't approve the request");
+    } finally {
+      setApprovingAccessId(null);
     }
   };
   const denyAccessItem = async (note: string) => {
@@ -571,6 +575,7 @@ export default function MyWorkPage() {
                                 variant="outline"
                                 className={APPROVE_BUTTON_CLASS}
                                 onClick={() => void approveAccessItem(w)}
+                                disabled={approvingAccessId === w.request_id}
                                 data-testid="my-work-access-approve"
                               >
                                 <CheckCircle2 className="h-4 w-4 mr-2" /> Approve
