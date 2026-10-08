@@ -1,5 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import type React from "react";
+import { useQuery } from "@tanstack/react-query";
+import { reads } from "../lib/queries";
 import { formatServerDate } from "../lib/dates";
 import {
   ArrowLeft,
@@ -132,6 +134,10 @@ const timeOf = (iso: string) => formatServerDate(iso) || iso;
 export function WorkflowsView({ nestId, nestName, onBack }: Props) {
   const [tab, setTab] = useState("canvas");
   const { metacognitionEnabled } = useAuth();
+  // Configuring an agent takes owner/admin on the nest (the server enforces it).
+  const { data: nestMeta } = useQuery({ ...reads.nest(nestId), enabled: metacognitionEnabled });
+  const permission = (nestMeta as { permission?: string } | undefined)?.permission;
+  const canConfigureAgents = permission === "owner" || permission === "admin";
 
   return (
     <div>
@@ -168,9 +174,7 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
         </TabsContent>
         {metacognitionEnabled && (
           <TabsContent value="agents" className="mt-4">
-            {/* Configuring takes an owner/admin; the server enforces it and
-                the form shows its refusal to anyone else. */}
-            <MetacognitionPanel nestId={nestId} canConfigure />
+            <MetacognitionPanel nestId={nestId} canConfigure={canConfigureAgents} />
           </TabsContent>
         )}
         <TabsContent value="activity" className="mt-4 space-y-6">

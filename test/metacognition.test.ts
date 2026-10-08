@@ -637,6 +637,30 @@ describe("round-3 guards", () => {
     void getDb;
   });
 
+  it("a start refused because the agent is busy doesn't use up the hourly budget", async () => {
+    const { _reset } = await import("../src/shared/rate-limit.js");
+    _reset();
+    process.env.METACOGNITION_STARTS_PER_HOUR = "2";
+    try {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      script = [(() => gate.then(() => say("done"))) as any];
+      const first = await jsonRequest(app, "POST", `/nests/${nestId}/metacognition/nodes/archivist/run`, {}, owner.apiKey);
+      expect(first.status).toBe(202);
+      const busy = await jsonRequest(app, "POST", `/nests/${nestId}/metacognition/nodes/archivist/run`, {}, owner.apiKey);
+      expect(busy.status).toBe(409);
+      expect(String(busy.data.error)).toContain("already running");
+      release();
+      await waitForRun(first.data.run_id);
+      script = [say("done")];
+      const second = await jsonRequest(app, "POST", `/nests/${nestId}/metacognition/nodes/archivist/run`, {}, owner.apiKey);
+      expect(second.status).toBe(202);
+      await waitForRun(second.data.run_id);
+    } finally {
+      process.env.METACOGNITION_STARTS_PER_HOUR = "1000";
+    }
+  });
+
   it("starts are rate-limited per agent", async () => {
     process.env.METACOGNITION_STARTS_PER_HOUR = "1";
     try {

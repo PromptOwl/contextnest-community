@@ -18,10 +18,11 @@
 import { v4 as uuid } from "uuid";
 import type Anthropic from "@anthropic-ai/sdk";
 import { getDb } from "../db/client.js";
+import { DocumentNotFoundError } from "@promptowl/contextnest-engine";
 import { config } from "../config.js";
 import { ConflictError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { safeJson } from "../shared/json.js";
-import { tryConsume } from "../shared/rate-limit.js";
+import { isLimited, recordFailure } from "../shared/rate-limit.js";
 import {
   resolveModelCredential,
   resolveGatewayModel,
@@ -113,51 +114,55 @@ export async function startMetacognitionRun(opts: {
     nodeId: opts.nodeId,
     olderThanMs: agent.config.caps.max_seconds * 1000 + STALE_GRACE_MS,
   });
-  if (opts.rateLimited !== false && !tryConsume(`metacognition:${opts.nestId}:${opts.nodeId}`, { max: startsPerHour(), windowMs: 3600_000 })) {
-    throw new ConflictError(`${opts.nodeId} has been started ${startsPerHour()} times in the last hour; try again later`);
+  const limitKey = `metacognition:${opts.nestId}:${opts.nodeId}`;
+  const limit = { max: startsPerHour(), windowMs: 3600_000 };
+  if (opts.rateLimited !== false && isLimited(limitKey, limit)) {
+    throw new ConflictError(`${opts.nodeId} has been started ${limit.max} times in the last hour; try again later`);
   }
   const id = `run_${uuid()}`;
   const now = new Date().toISOString();
   const db = getDb();
   try {
-  await db.transaction(async (tx) => {
-    // One run per agent at a time: two loops proposing against the same
-    // documents would trip over each other's drafts.
-    const busy = (await tx.get(
-      `SELECT id FROM runs WHERE nest_id = ? AND agent_node = ? AND status = 'running' AND claimed_by = ?`,
-      [opts.nestId, opts.nodeId, SERVER_CLAIM],
-    )) as { id: string } | undefined;
-    if (busy) throw new ConflictError(`${opts.nodeId} is already running (${busy.id})`);
-    const roots = (await tx.get(
-      `SELECT COUNT(*) AS n FROM runs WHERE nest_id = ? AND parent_run_id IS NULL AND status = 'running'`,
-      [opts.nestId],
-    )) as { n: number | string };
-    if (Number(roots.n) >= config.RUN_MAX_CONCURRENT_ROOTS) {
-      throw new ConflictError(`too many concurrent runs: ${roots.n} already running`);
-    }
-    await tx.run(
-      `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at, parent_run_id, depth, claimed_by, claimed_at)
-       VALUES (?, ?, ?, ?, 'running', ?, ?, NULL, 0, ?, ?)`,
-      [
-        id,
-        opts.nestId,
-        opts.nodeId,
-        opts.triggeredBy,
-        opts.inputs === undefined ? null : JSON.stringify(opts.inputs),
-        now,
-        SERVER_CLAIM,
-        now,
-      ],
-    );
-  });
+    await db.transaction(async (tx) => {
+      // One run per agent at a time: two loops proposing against the same
+      // documents would trip over each other's drafts.
+      const busy = (await tx.get(
+        `SELECT id FROM runs WHERE nest_id = ? AND agent_node = ? AND status = 'running' AND claimed_by = ?`,
+        [opts.nestId, opts.nodeId, SERVER_CLAIM],
+      )) as { id: string } | undefined;
+      if (busy) throw new ConflictError(`${opts.nodeId} is already running (${busy.id})`);
+      const roots = (await tx.get(
+        `SELECT COUNT(*) AS n FROM runs WHERE nest_id = ? AND parent_run_id IS NULL AND status = 'running'`,
+        [opts.nestId],
+      )) as { n: number | string };
+      if (Number(roots.n) >= config.RUN_MAX_CONCURRENT_ROOTS) {
+        throw new ConflictError(`too many concurrent runs: ${roots.n} already running`);
+      }
+      await tx.run(
+        `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at, parent_run_id, depth, claimed_by, claimed_at)
+         VALUES (?, ?, ?, ?, 'running', ?, ?, NULL, 0, ?, ?)`,
+        [
+          id,
+          opts.nestId,
+          opts.nodeId,
+          opts.triggeredBy,
+          opts.inputs === undefined ? null : JSON.stringify(opts.inputs),
+          now,
+          SERVER_CLAIM,
+          now,
+        ],
+      );
+    });
   } catch (err) {
     // The partial unique index (one running server run per agent) is the
     // atomic guard: two triggers racing past the SELECT above land here.
-    if (/unique|constraint/i.test((err as Error)?.message ?? "")) {
+    if (/unique constraint/i.test((err as Error)?.message ?? "")) {
       throw new ConflictError(`${opts.nodeId} is already running`);
     }
     throw err;
   }
+  // Counted only once a run exists: a refused start (busy, at cap) costs nothing.
+  if (opts.rateLimited !== false) recordFailure(limitKey, limit);
   launch(id, opts.credentialOverride);
   return id;
 }
@@ -263,8 +268,12 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
   try {
     const doc = await storage.readDocument(agent.node_id);
     instructions = await resolveExportBody(nestId, agent.node_id, doc.body || "");
-  } catch {
-    instructions = null;
+  } catch (err) {
+    // Only a missing document is "no instructions"; a storage error fails the run.
+    if (!(err instanceof DocumentNotFoundError)) {
+      await finish(runId, "failed", { persona, error: describe(err) });
+      return;
+    }
   }
   if (instructions === null) {
     await skip("The agent's instructions have no approved version yet. Approve the agent document first.");

@@ -7,6 +7,7 @@
  * listing and running take write.
  */
 import { Hono } from "hono";
+import { DocumentNotFoundError } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { config } from "../config.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
@@ -97,19 +98,23 @@ metacognitionRoutes.put("/:nodeId{.+}", requireMetacognition, async (c) => {
   let doc;
   try {
     doc = await storage.readDocument(nodeId);
-  } catch {
-    throw new ValidationError(`No document ${nodeId}`);
+  } catch (err) {
+    if (err instanceof DocumentNotFoundError) throw new ValidationError(`No document ${nodeId}`);
+    throw err;
   }
   if ((doc.frontmatter.type || "document") !== "agent") {
     throw new ValidationError(`${nodeId} is a "${doc.frontmatter.type || "document"}" — only an agent document can be a metacognition agent.`);
   }
   const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
+  if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
+    throw new ValidationError("enabled must be true or false");
+  }
   const parsed = parseConfig(body);
   const agent = await upsertAgent({
     nestId,
     nodeId,
     config: parsed,
-    enabled: body.enabled === undefined ? true : body.enabled === true,
+    enabled: body.enabled !== false,
     createdBy: await resolveCallerEmail(c.get("userId")),
   });
   return c.json({ agent: toResponse(agent) });

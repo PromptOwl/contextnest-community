@@ -239,15 +239,15 @@ export default defineConfig({
     // Playwright-managed download is unavailable (e.g. sandboxed CI).
     ...(process.env.PLAYWRIGHT_SLOW_MO || process.env.PLAYWRIGHT_CHROMIUM_PATH
       ? {
-        launchOptions: {
-          ...(process.env.PLAYWRIGHT_SLOW_MO
-            ? { slowMo: parseInt(process.env.PLAYWRIGHT_SLOW_MO) }
-            : {}),
-          ...(process.env.PLAYWRIGHT_CHROMIUM_PATH
-            ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }
-            : {}),
-        },
-      }
+          launchOptions: {
+            ...(process.env.PLAYWRIGHT_SLOW_MO
+              ? { slowMo: parseInt(process.env.PLAYWRIGHT_SLOW_MO) }
+              : {}),
+            ...(process.env.PLAYWRIGHT_CHROMIUM_PATH
+              ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }
+              : {}),
+          },
+        }
       : {}),
   },
 
@@ -294,40 +294,40 @@ export default defineConfig({
     // duplicate test runs when running the full suite.
     ...(includeStandalone
       ? [
-        {
-          name: 'auth',
-          dependencies: ['setup-auth'],
-          testMatch: 'tests/features/auth/**/*.spec.js',
-          fullyParallel: false,
-          use: {
-            ...devices['Desktop Chrome'],
-            screenshot: 'only-on-failure',
-            trace: 'retain-on-failure',
+          {
+            name: 'auth',
+            dependencies: ['setup-auth'],
+            testMatch: 'tests/features/auth/**/*.spec.js',
+            fullyParallel: false,
+            use: {
+              ...devices['Desktop Chrome'],
+              screenshot: 'only-on-failure',
+              trace: 'retain-on-failure',
+            },
           },
-        },
-        {
-          name: 'dashboard',
-          dependencies: ['setup-auth'],
-          testMatch: 'tests/features/dashboard/**/*.spec.js',
-          fullyParallel: false,
-          use: {
-            ...devices['Desktop Chrome'],
-            screenshot: 'only-on-failure',
-            trace: 'retain-on-failure',
+          {
+            name: 'dashboard',
+            dependencies: ['setup-auth'],
+            testMatch: 'tests/features/dashboard/**/*.spec.js',
+            fullyParallel: false,
+            use: {
+              ...devices['Desktop Chrome'],
+              screenshot: 'only-on-failure',
+              trace: 'retain-on-failure',
+            },
           },
-        },
-        {
-          name: 'my-work',
-          dependencies: ['setup-auth'],
-          testMatch: 'tests/features/my-work/**/*.spec.js',
-          fullyParallel: false,
-          use: {
-            ...devices['Desktop Chrome'],
-            screenshot: 'only-on-failure',
-            trace: 'retain-on-failure',
+          {
+            name: 'my-work',
+            dependencies: ['setup-auth'],
+            testMatch: 'tests/features/my-work/**/*.spec.js',
+            fullyParallel: false,
+            use: {
+              ...devices['Desktop Chrome'],
+              screenshot: 'only-on-failure',
+              trace: 'retain-on-failure',
+            },
           },
-        },
-      ]
+        ]
       : []),
   ],
 });
