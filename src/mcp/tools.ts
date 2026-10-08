@@ -44,7 +44,7 @@ import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
 } from "../nests/unsynced-service.js";
-import { isServerAdminUserId } from "../shared/access.js";
+import { isServerAdminUserId, isPublicReader } from "../shared/access.js";
 import { config } from "../config.js";
 import {
   createNode,
@@ -1223,11 +1223,21 @@ async function runTool(
     }
 
     case "context_table_query": {
+      // Same read as every other MCP body read (resolveLlmBody): gated by
+      // canReadNode, and approved rows only on a governed nest or for a
+      // public reader — never the unapproved working copy.
       const result = await queryTableNode(
         nestId,
         String(args.table ?? ""),
         String(args.query ?? ""),
         false,
+        {
+          userId: ctx.userId,
+          userEmail: ctx.userEmail,
+          approvedOnly:
+            (await isStewardshipEnabled(nestId)) ||
+            (await isPublicReader(nestId, ctx.userId)),
+        },
       );
       // Admin activity log: the table the rows came from, at the version
       // queried. Prose-only result, so it records here rather than through
@@ -2275,6 +2285,15 @@ async function runTool(
     case "context_versions": {
       const node = await resolveTargetNode(storage, args);
       if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
+      // Version history is a node read, gated like REST GET .../versions: a
+      // caller who cannot open the node does not get its editors, statuses and
+      // change notes either. Answered as a miss, so it is no existence oracle.
+      if (!(await canReadNode(ctx.nestId, node.id, ctx.userId, ctx.userEmail))) {
+        return toolError(
+          `Node not found: ${args.id ?? args.title}`,
+          "DOCUMENT_NOT_FOUND",
+        );
+      }
       // See context_update: an id wins over a title sent with it.
       const label = args.id ? node.frontmatter.title : args.title;
 
