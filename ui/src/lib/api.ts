@@ -356,7 +356,13 @@ export interface AdminSettings {
   ses_secret_access_key?: string | null;
   notify_email_from: string;
   notify_email_to: string;
-  anthropic_api_key?: string | null
+  anthropic_api_key?: string | null;
+  /** Own-provider keys PromptOwl holds for this licence (byok): masked tails only. */
+  own_providers?: Record<string, { masked: string; updatedAt: string | null }>;
+  /** Key a call without an own-provider model uses: own Anthropic key, or PromptOwl credits. */
+  model_source?: "own" | "promptowl" | null;
+  /** Write-only: provider → key to set, or null to clear. Sent to PromptOwl, never stored here. */
+  provider_keys?: Record<string, string | null>;
 }
 
 export async function getAdminSettings() {
@@ -451,7 +457,7 @@ export async function getAdminLicense() {
 
 /** Models this server's credential can reach (admin), and the one Hootie uses now. */
 export async function getAdminModels() {
-  return request<{ models: string[]; current: string; source: "own" | "promptowl" | null; error?: string }>(
+  return request<{ models: string[]; current: string; source: "own" | "promptowl" | null; own_models?: string[]; error?: string }>(
     "/admin/models",
   );
 }

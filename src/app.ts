@@ -142,6 +142,9 @@ import {
   getPendingRejections,
   getEntitlement,
   getOwnGateway,
+  setOwnProviderKey,
+  validateLicense,
+  OWN_KEY_PROVIDERS,
   DEFAULT_LICENSE_CONTACT,
   type LicenseInfo,
 } from "./auth/license.js";
@@ -835,6 +838,10 @@ export function createApp(): Hono<AuthEnv> {
     hootie_branding_available: hootieBrandingAvailable(),
     // Own key + gateway fields are in effect and editable only with byok.
     byok_available: hasEntitlement("byok"),
+    // Own-provider keys PromptOwl holds for this licence (masked tails only).
+    own_providers: hasEntitlement("byok") ? getOwnGateway()?.providers ?? {} : {},
+    // Which key a call without an own-provider model uses: own (Anthropic key) or promptowl (credits).
+    model_source: resolveModelCredential()?.source ?? null,
     anthropic_base_url: config.ANTHROPIC_BASE_URL,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
@@ -975,11 +982,16 @@ export function createApp(): Hono<AuthEnv> {
 
     // Own model key / gateway: Enterprise only (pricing spec §9.3, licence
     // feature byok). Setting one is refused whole; clearing is always allowed.
+    const providerKeysIn =
+      body.provider_keys && typeof body.provider_keys === "object" && !Array.isArray(body.provider_keys)
+        ? (body.provider_keys as Record<string, unknown>)
+        : null;
     if (
       !hasEntitlement("byok") &&
-      (["anthropic_api_key", "anthropic_base_url"] as const).some(
+      ((["anthropic_api_key", "anthropic_base_url"] as const).some(
         (f) => f in body && String(body[f] ?? "").trim() !== "",
-      )
+      ) ||
+        Object.values(providerKeysIn ?? {}).some((v) => String(v ?? "").trim() !== ""))
     ) {
       return c.json(
         {
@@ -1135,6 +1147,21 @@ export function createApp(): Hono<AuthEnv> {
         if (rejected) addError("anthropic_api_key", rejected);
         else pending.push({ name: "ANTHROPIC_API_KEY", value: key });
       }
+    }
+    // Own-provider keys (byok): checked and stored by PromptOwl, in LiteLLM
+    // only — sent after every other field validates, never kept here.
+    const providerKeys: Array<[string, string | null]> = [];
+    if ("provider_keys" in body) {
+      if (!providerKeysIn) addError("provider_keys", "provider_keys must be an object of provider → key.");
+      else
+        for (const [p, v] of Object.entries(providerKeysIn)) {
+          const field = `provider_keys.${p}`;
+          if (!(OWN_KEY_PROVIDERS as readonly string[]).includes(p)) addError(field, `Unknown model provider "${p}".`);
+          else if (v === null || v === "") providerKeys.push([p, null]);
+          else if (typeof v !== "string" || !v.trim() || /\s/.test(v.trim()) || v.trim().length > 512)
+            addError(field, "Paste the provider's API key as one line.");
+          else providerKeys.push([p, v.trim()]);
+        }
     }
     if ("subagent_runs_enabled" in body) {
       // Depends on the plane: enabling recursion without the plane's run routes
@@ -1569,6 +1596,21 @@ export function createApp(): Hono<AuthEnv> {
         );
       }
     }
+
+    // Own-provider keys go to PromptOwl, which tests each with the provider.
+    // ponytail: one at a time, so a later refusal leaves earlier ones saved;
+    // the error names the provider that failed.
+    for (const [p, v] of providerKeys) {
+      const refused = await setOwnProviderKey(p, v);
+      if (refused) {
+        if (providerKeys[0][0] !== p) await validateLicense({ forceFresh: true });
+        return c.json(
+          { error: refused, fieldErrors: { [`provider_keys.${p}`]: refused }, settings: currentServerSettings() },
+          400,
+        );
+      }
+    }
+    if (providerKeys.length) await validateLicense({ forceFresh: true });
 
     // All valid: persist first, then mutate live env. Ordering persist-before-
     // live means a DB failure aborts before the running server changes, so a

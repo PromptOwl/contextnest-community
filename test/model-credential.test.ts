@@ -278,3 +278,63 @@ describe("the Hootie model picks the key (own providers, byok)", () => {
     expect(res.data.source).toBe("promptowl");
   });
 });
+
+describe("own-provider keys from Settings (byok)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function promptowl(answer: (body: any) => Response) {
+    const realFetch = globalThis.fetch;
+    const sent: any[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: any, init?: any) => {
+      if (!String(url).endsWith("/api/license/own-models")) return realFetch(url, init);
+      const body = JSON.parse(init.body);
+      sent.push(body);
+      return answer(body);
+    });
+    return sent;
+  }
+
+  it("forwards each key to PromptOwl and never stores it on this server", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY, ownGateway: OWN_GW });
+    const sent = promptowl(() => new Response(JSON.stringify({ providers: {} })));
+    const res = await jsonRequest(
+      app, "PATCH", "/admin/settings", { provider_keys: { openai: " sk-openai-1234 ", gemini: null } }, owner.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(sent.map((b) => [b.provider, b.api_key])).toEqual([["openai", "sk-openai-1234"], ["gemini", null]]);
+    expect(JSON.stringify(res.data)).not.toContain("sk-openai-1234");
+    expect(res.data.settings.own_providers).toEqual(OWN_GW.providers);
+    const { getDb } = await import("../src/db/client.js");
+    const rows = JSON.stringify(await getDb().all("SELECT * FROM server_settings"));
+    expect(rows).not.toContain("sk-openai-1234");
+  });
+
+  it("a key the provider refuses comes back as that provider's field error", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY });
+    promptowl(() => new Response(JSON.stringify({ error: "Incorrect API key" }), { status: 400 }));
+    const res = await jsonRequest(app, "PATCH", "/admin/settings", { provider_keys: { openai: "sk-bad" } }, owner.apiKey);
+    expect(res.status).toBe(400);
+    expect(res.data.fieldErrors).toEqual({ "provider_keys.openai": "Incorrect API key" });
+  });
+
+  it("refuses without byok, and rejects unknown providers before calling PromptOwl", async () => {
+    const { app, owner } = await boot({ gateway: GATEWAY });
+    const sent = promptowl(() => new Response("{}"));
+    const noByok = await jsonRequest(app, "PATCH", "/admin/settings", { provider_keys: { openai: "sk-x" } }, owner.apiKey);
+    expect(noByok.status).toBe(403);
+    expect(noByok.data.code).toBe("byok_required");
+
+    const byok = await boot({ features: ["byok"], gateway: GATEWAY });
+    const unknown = await jsonRequest(byok.app, "PATCH", "/admin/settings", { provider_keys: { mistral: "k" } }, byok.owner.apiKey);
+    expect(unknown.status).toBe(400);
+    expect(unknown.data.fieldErrors["provider_keys.mistral"]).toMatch(/Unknown/);
+    expect(sent).toEqual([]);
+  });
+
+  it("Settings says which key calls fall back to", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY });
+    const res = await jsonRequest(app, "GET", "/admin/settings", undefined, owner.apiKey);
+    expect(res.data.model_source).toBe("promptowl");
+    expect(res.data.own_providers).toEqual({});
+  });
+});

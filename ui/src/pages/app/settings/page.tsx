@@ -143,6 +143,7 @@ const TABS: {
     keys: [
       "anthropic_api_key",
       "anthropic_base_url",
+      "provider_keys",
       "hootie_enabled",
       "hootie_model",
       "hootie_name",
@@ -214,21 +215,116 @@ const noAutofill = (type: string) =>
 /** Hootie's model: one of the models this server's key can reach (PromptOwl's
  *  team models on the gateway, the provider's on an own key). If the list
  *  can't be loaded, a name can still be typed. */
+/** Providers an Enterprise (byok) server can add its own key for; Anthropic has its own card. */
+const OWN_PROVIDERS = [
+  ["openai", "OpenAI"],
+  ["gemini", "Google Gemini"],
+  ["grok", "xAI Grok"],
+  ["groq", "Groq"],
+] as const;
+
+/**
+ * Own-provider keys. Write-only like the Anthropic key: staged in the draft as
+ * `provider_keys` (string = set, null = clear) and sent with the global Save;
+ * PromptOwl checks and keeps them, this server only sees the masked tail.
+ */
+function ProviderKeysCard({
+  draft,
+  current,
+  fieldErrors,
+  set,
+}: {
+  draft: Record<string, string | null>;
+  current: Record<string, { masked: string }>;
+  fieldErrors: Record<string, string>;
+  set: (next: Record<string, string | null>) => void;
+}) {
+  const stage = (p: string, v: string | null | undefined) => {
+    const next = { ...draft };
+    // Typing then deleting must not read as "clear": empty = untouched.
+    if (v === undefined || v === "") delete next[p];
+    else next[p] = v;
+    set(next);
+  };
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Other model providers</CardTitle>
+        <CardDescription>
+          Your own keys for these providers. Pick one of their models for Hootie
+          and it runs on your key; any other model keeps using the key above or
+          PromptOwl's virtual key on your plan's credits. Each key is checked
+          with the provider when you save and kept by PromptOwl's model gateway,
+          not on this server.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {OWN_PROVIDERS.map(([p, label]) => (
+          <div key={p} className="space-y-1.5" data-testid={`settings-provider-${p}`}>
+            <Label htmlFor={`provider-key-${p}`}>{label}</Label>
+            <div className="text-xs text-muted-foreground">
+              {draft[p] === null
+                ? "Will be cleared when you save."
+                : current[p]
+                  ? `Current: ••••${current[p].masked}`
+                  : "Not set."}
+            </div>
+            <TextField
+              id={`provider-key-${p}`}
+              type="password"
+              error={fieldErrors[`provider_keys.${p}`]}
+              value={typeof draft[p] === "string" ? (draft[p] as string) : ""}
+              placeholder="Paste to set or replace"
+              onChange={(v) => stage(p, v)}
+            />
+            {current[p] && draft[p] !== null && (
+              <button type="button" className="text-xs text-destructive hover:underline" onClick={() => stage(p, null)}>
+                Clear key
+              </button>
+            )}
+            {draft[p] === null && (
+              <button type="button" className="text-xs text-muted-foreground hover:underline" onClick={() => stage(p, undefined)}>
+                Keep current key
+              </button>
+            )}
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** "community-<licence>-openai/gpt-5.6-sol" → "gpt-5.6-sol · OpenAI (your key)". */
+function modelLabel(m: string, own: string[]): string {
+  if (!own.includes(m)) return m;
+  const slash = m.indexOf("/");
+  const provider = m.slice(0, slash).split("-").pop() ?? "";
+  const name = OWN_PROVIDERS.find(([p]) => p === provider)?.[1] ?? provider;
+  return `${m.slice(slash + 1)} · ${name} (your key)`;
+}
+
 function HootieModelField({
   value,
   error,
   onChange,
+  reloadKey,
 }: {
   value: string;
   error?: string;
   onChange: (v: string) => void;
+  /** Changes when the own-provider keys change, so the list is fetched again. */
+  reloadKey?: string;
 }) {
   const [models, setModels] = useState<string[] | null>(null);
+  const [own, setOwn] = useState<string[]>([]);
   useEffect(() => {
     getAdminModels()
-      .then((r) => setModels(r.models))
+      .then((r) => {
+        setModels(r.models);
+        setOwn(r.own_models ?? []);
+      })
       .catch(() => setModels([]));
-  }, []);
+  }, [reloadKey]);
   // Keep the saved model selectable even if the key no longer lists it.
   const options = models && value && !models.includes(value) ? [value, ...models] : (models ?? []);
   return (
@@ -246,7 +342,7 @@ function HootieModelField({
           <SelectContent>
             {options.map((m) => (
               <SelectItem key={m} value={m}>
-                {m}
+                {modelLabel(m, own)}
               </SelectItem>
             ))}
           </SelectContent>
@@ -534,6 +630,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
         const v = draft[k];
         return (typeof v === "string" && v.trim() !== "") || v === null;
       }
+      if (k === "provider_keys") return Object.keys(draft.provider_keys ?? {}).length > 0;
       return (
         ((draft as unknown as Record<string, unknown>)[k] ?? "") !==
         (base[k] ?? "")
@@ -565,7 +662,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
       setFieldErrors(errs);
       const badFields = Object.keys(errs);
       const owns = (t: (typeof TABS)[number]) =>
-        badFields.some((f) => (t.keys as string[]).includes(f));
+        // "provider_keys.openai" belongs to the tab holding "provider_keys".
+        badFields.some((f) => (t.keys as string[]).includes(f.split(".")[0]));
       const offending = badFields.length
         ? TABS.find(owns)
         : TABS.find((t) => t.keys.some((k) => dirtyKeys.includes(k)));
@@ -1750,7 +1848,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 <CardDescription>
                   The server-wide model key. Runners pick it up automatically
                   (every nest, unless a nest overrides it in its Tool
-                  environment). No key, no LLM calls. Checked against the
+                  environment). Without one, Hootie and runs use PromptOwl's
+                  virtual key on your plan's credits. Checked against the
                   provider when you save, so a bad key is refused here rather
                   than failing later. Stored server-side; shown masked.
                 </CardDescription>
@@ -1782,7 +1881,9 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     ? "Will be cleared when you save."
                     : settings?.anthropic_api_key_masked
                       ? `Current: ${settings.anthropic_api_key_masked}`
-                      : "Not set — runs can't execute until a key exists here or in a nest's Tool environment."}
+                      : settings?.model_source === "promptowl"
+                        ? "Not set — Hootie and runs use PromptOwl's virtual key on your plan's credits."
+                        : "Not set — runs can't execute until a key exists here or in a nest's Tool environment."}
                 </div>
                 <TextField
                   error={fieldErrors.anthropic_api_key}
@@ -1818,6 +1919,15 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 )}
               </CardContent>
             </Card>
+
+            {settings?.byok_available !== false && (
+              <ProviderKeysCard
+                draft={draft.provider_keys ?? {}}
+                current={settings?.own_providers ?? {}}
+                fieldErrors={fieldErrors}
+                set={(provider_keys) => set({ provider_keys })}
+              />
+            )}
 
             {/* Hootie in the nest — the assistant on every page. Sits under
                 the key it depends on: switching it on without a key gives
@@ -1856,6 +1966,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   value={draft.hootie_model ?? ""}
                   error={fieldErrors.hootie_model}
                   onChange={(v) => set({ hootie_model: v })}
+                  reloadKey={JSON.stringify(settings?.own_providers ?? {})}
                 />
                 {settings?.byok_available !== false && (
                 <div className="space-y-1.5">

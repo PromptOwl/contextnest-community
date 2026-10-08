@@ -179,6 +179,38 @@ export function getOwnGateway(): OwnGateway | null {
 const ownGatewaySummary = (g: OwnGateway | null) =>
   g ? `on …${g.key.slice(-4)}, ${g.models.length} models (${Object.keys(g.providers).join(", ") || "no providers"})` : "off";
 
+/** Providers a server admin can add their own key for (Anthropic has its own setting). */
+export const OWN_KEY_PROVIDERS = ["openai", "gemini", "grok", "groq"] as const;
+
+/**
+ * Set (apiKey) or clear (null) one own-provider key. The key goes to
+ * PromptOwl, which keeps it in LiteLLM only; this server never stores it.
+ * Refresh the licence afterwards to pick up the new key and models.
+ * @returns null when saved, else the message to show.
+ */
+export async function setOwnProviderKey(provider: string, apiKey: string | null): Promise<string | null> {
+  const what = apiKey ? `set …${apiKey.slice(-4)}` : "clear";
+  try {
+    const res = await fetch(`${config.PROMPTOWL_API_URL.replace(/\/$/, "")}/api/license/own-models`, {
+      method: "POST",
+      headers: config.PROMPTOWL_FETCH_HEADERS,
+      body: JSON.stringify({ key: config.PROMPTOWL_KEY, provider, api_key: apiKey }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const data = (await res.json().catch(() => ({}))) as { error?: unknown };
+    if (res.ok) {
+      console.log(`[license] own-provider ${provider}: ${what} → ok`);
+      return null;
+    }
+    const message = typeof data.error === "string" ? data.error : `PromptOwl answered ${res.status}`;
+    console.log(`[license] own-provider ${provider}: ${what} → refused: ${message}`);
+    return message;
+  } catch (err) {
+    console.warn(`[license] own-provider ${provider}: ${what} → failed:`, err instanceof Error ? err.message : err);
+    return "Could not reach PromptOwl to save the key. Try again in a moment.";
+  }
+}
+
 /** Logged only when it changes, so the 60s licence poll stays quiet. */
 function setOwnGateway(next: OwnGateway | null): void {
   const before = ownGatewaySummary(currentOwnGateway);

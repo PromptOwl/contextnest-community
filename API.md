@@ -2367,6 +2367,24 @@ Hootie fields: `hootie_enabled` (default `false`), `hootie_brand` — `{ name, l
 ### Hootie identity — `/admin/settings` fields (Enterprise)
 `hootie_name` (one line, ≤40 chars), `hootie_logo_url` (`https://` image: `.png`/`.jpg`/`.gif`/`.webp`), `hootie_accent_color` (hex, normalised to `#rrggbb`), `hootie_greeting` (one line, ≤200 chars). `""` resets a field to the default. GET returns the stored values plus `hootie_branding_available`. "Enterprise licence" here means the licence carries the `hootie_branding` feature (PromptOwl's licence check returns the licence's `features`; an Enterprise licence has it by default, and PromptOwl can grant or revoke it per licence). A PATCH that would **change** any of these without it is refused as a whole — `403 { code: "enterprise_required" }` (the code name is kept for wire compatibility; it means the licence lacks `hootie_branding`), nothing written, including the request's other fields. Sending back the stored values unchanged is allowed (they are ignored). Invalid values → `400` with `fieldErrors` keyed by field. `hootie_enabled` is written explicitly (`true`/`false`), so a UI choice beats the deploy env.
 
+### Own model providers — `/admin/settings` fields (Enterprise, `byok`)
+A server admin can add their own key for OpenAI, Google Gemini, xAI Grok or Groq (Anthropic keeps `anthropic_api_key`). PATCH `provider_keys` with provider → key to set, or `null` to clear:
+
+```json
+{ "provider_keys": { "openai": "sk-…", "groq": null } }
+```
+
+Each key goes to PromptOwl, which checks it with the provider and keeps it in its LiteLLM model gateway under this licence; this server never stores it. GET returns only the tails, plus which key calls without an own-provider model use:
+
+```json
+{
+  "own_providers": { "openai": { "masked": "9876", "updatedAt": "2026-10-08T09:12:00.000Z" } },
+  "model_source": "promptowl"
+}
+```
+
+`model_source`: `own` (the server's Anthropic key), `promptowl` (PromptOwl's virtual key on the plan's credits) or `null` (no key at all). Setting a provider key without `byok` → `403 { code: "byok_required" }`. An unknown provider, or a key the provider refuses → `400` with `fieldErrors["provider_keys.<provider>"]`. Keys are sent one at a time after every other field validates, so when a later provider is refused, the earlier ones in the same request stay saved. With `byok`, `GET /admin/models` adds the licence's own-provider models (named `community-<licence>-<provider>/<model>`) to `models` and lists them in `own_models`. Picking one for Hootie (`hootie_model`) makes Hootie run on the own key; any other model keeps the key above.
+
 ### Superadmins — GET/POST `/admin/super-admins`, DELETE `/admin/super-admins/:email` (server-admin only)
 Grant and revoke **superadmins** (server-wide admins) from the API/UI instead of only via `access.yaml`. The effective superadmin set is the union of three sources, surfaced per row as `source`:
 
