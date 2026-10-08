@@ -274,6 +274,16 @@ describe("the Hootie model picks the key (own providers, byok)", () => {
     });
   });
 
+  it("an own model name with no group is skipped, not cut into a wrong one", async () => {
+    const route = await routeFor({
+      features: ["byok"],
+      gateway: GATEWAY,
+      // Cut by one character, "zz-openaiX" would read as group "zz-openai".
+      ownGateway: { ...OWN_GW, models: ["zz-openaiX", OWN_MODEL] },
+    });
+    expect(route("default-openai/gpt-4o")?.model).toBe("community-lic1-openai/gpt-4o");
+  });
+
   it("everything else keeps today's key", async () => {
     const route = await routeFor({ features: ["byok"], gateway: GATEWAY, ownGateway: OWN_GW });
     expect(route("default-grok/grok-4")).toBeNull(); // no own Grok key

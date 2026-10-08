@@ -79,7 +79,7 @@ export function ownModelRoute(callModel: string): { credential: ModelCredential;
   // group's last dash part (PromptOwl's groups are "<instance>-<provider>"), so a
   // group like "team-azure-openai" would read as openai; match exact groups if one appears.
   if (!own || !provider || !(OWN_KEY_PROVIDERS as readonly string[]).includes(provider)) return null;
-  const group = own.models.map((m) => m.slice(0, m.indexOf("/"))).find((g) => providerOf(`${g}/`) === provider);
+  const group = own.models.filter((m) => m.includes("/")).map((m) => m.slice(0, m.indexOf("/"))).find((g) => providerOf(`${g}/`) === provider);
   if (!group) return null;
   return {
     credential: { apiKey: own.key, baseUrl: own.baseUrl, source: "own", defaultModel: null },

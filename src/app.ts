@@ -1585,17 +1585,19 @@ export function createApp(): Hono<AuthEnv> {
     // the error names the provider that failed. Without byok there is no own
     // key to clear (PromptOwl blocks it), so nothing is sent.
     const toSend = hasEntitlement("byok") ? providerKeys : [];
+    let savedAny = false;
     for (const [p, v] of toSend) {
       const refused = await setOwnProviderKey(p, v);
       if (refused) {
-        if (toSend[0][0] !== p) await validateLicense({ forceFresh: true });
+        if (savedAny) await validateLicense({ forceFresh: true });
         return c.json(
           { error: refused, fieldErrors: { [`provider_keys.${p}`]: refused }, settings: currentServerSettings() },
           400,
         );
       }
+      savedAny = true;
     }
-    if (toSend.length) await validateLicense({ forceFresh: true });
+    if (savedAny) await validateLicense({ forceFresh: true });
 
     return c.json({ settings: currentServerSettings() });
   });

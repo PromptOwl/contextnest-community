@@ -100,12 +100,13 @@ hootieRoutes.post("/chat", async (c) => {
     );
   }
   // Stored as a plain name; on PromptOwl's gateway the team prefix goes on here.
-  const gatewayModel = await resolveGatewayModel(baseCredential, hootieModel(baseCredential));
+  const picked = hootieModel(baseCredential);
+  const gatewayModel = await resolveGatewayModel(baseCredential, picked);
   // With byok, a provider the admin added their own key for runs on that key.
   const own = ownModelRoute(gatewayModel);
   const credential = own?.credential ?? baseCredential;
   const callModel = own?.model ?? gatewayModel;
-  console.log(`[hootie] model=${config.HOOTIE_MODEL} call=${callModel} ${credentialLabel(credential)}`);
+  console.log(`[hootie] model=${picked} call=${callModel} ${credentialLabel(credential)}`);
 
   let body: ChatBody;
   try {
