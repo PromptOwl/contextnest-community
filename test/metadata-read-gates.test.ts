@@ -186,6 +186,8 @@ describe("metadata read gates — public reader of a governed nest", () => {
     expect(census.data.census.folders.map((f: any) => f.path)).toContain("empty/shelf");
     const theirs = await jsonRequest(app, "GET", `/nests/${nestId}/folders`, undefined, outsider.apiKey);
     expect(theirs.data.folders.map((f: any) => f.path)).not.toContain("empty/shelf");
+    const theirCensus = await jsonRequest(app, "GET", `/nests/${nestId}/census`, undefined, outsider.apiKey);
+    expect(theirCensus.data.census.folders.map((f: any) => f.path)).not.toContain("empty/shelf");
   });
 
   it("census folder tree hides folders holding only unreadable documents", async () => {

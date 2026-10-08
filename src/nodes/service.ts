@@ -1292,8 +1292,10 @@ export async function nestCensus(
   // only for a caller who reads every document. For anyone narrowed (a public
   // reader, a scoped steward) the walk would name folders that hold only what
   // they cannot open, so their tree is the folders of `visible` alone; same
-  // rule as listNestFolders.
-  if (visible.length === documents.length) {
+  // rule as listNestFolders, and the same readsWholeNest predicate, so a
+  // narrowed caller who happens to reach every existing document still gets the
+  // same tree here as from /folders.
+  if (await readsWholeNest(nestId, userId, userEmail)) {
     for (const path of await vaultFolderPaths(nestId)) paths.add(path);
   }
   // Same roll-up the folders endpoint uses — the two describe the same tree
