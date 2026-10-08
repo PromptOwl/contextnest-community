@@ -17,12 +17,26 @@
  * artifact's *extracted text* (the same text the nest indexes), per the W3C
  * TextQuote anchor model.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback, useEffect, useMemo, useRef, useState,
+  type MouseEvent as ReactMouseEvent, type ReactNode,
+} from "react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import type { AnnotationThread } from "../lib/api";
 import { extractText, buildAnchor } from "../lib/artifact-text";
+import {
+  buildTextIndex,
+  caretAt,
+  clearHighlight,
+  locateInText,
+  rangeForAnchor,
+  setHighlight,
+} from "../lib/anchor-highlight";
+import { paintableThreads } from "../lib/comment-threads";
+import { useKeepPlace, type Place } from "../lib/view-place";
+import { highlightPayload, parseBridgeMessage, postToBridge } from "../lib/artifact-bridge";
 import { DocumentViewer } from "./DocumentViewer";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -208,6 +222,14 @@ export function ArtifactViewer({
     nodeId,
     viewingVersion ?? snapshot,
     iframeKey,
+  );
+  // The in-app iframe asks for the viewer bridge; Open in new tab doesn't.
+  const embedUrl = api.hostedArtifactUrl(
+    nestId,
+    nodeId,
+    viewingVersion ?? snapshot,
+    iframeKey,
+    { embed: true },
   );
 
   const loadVersions = useCallback(async () => {
@@ -424,6 +446,191 @@ export function ArtifactViewer({
         ?.scrollIntoView({ behavior: "smooth", block: "center" });
     });
   }, [threads, loadingThreads, initialThreadId]);
+
+  // ── Place + highlights across Preview ⇄ Annotate ───────────────────────
+  // The iframe stays mounted (hidden) outside Preview, so it keeps its own
+  // scroll; the viewer bridge inside it (src/shared/artifact-bridge.ts)
+  // reports the text at the top of its view and scrolls to text we name, so
+  // a toggle lands on the same passage. The Annotate pane and the iframe
+  // both paint the open threads' quotes.
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const mdPreviewRef = useRef<HTMLDivElement | null>(null);
+  const frameReadyRef = useRef(false);
+  const pendingGotoRef = useRef<Place | null>(null);
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  const threadsRef = useRef(threads);
+  threadsRef.current = threads;
+  const activeRef = useRef(activeThreadId);
+  activeRef.current = activeThreadId;
+  const anchorRangesRef = useRef<{ id: string; range: Range }[]>([]);
+
+  const gotoInFrame = useCallback((place: Pick<Place, "snippet" | "frac">) => {
+    if (!frameReadyRef.current) {
+      pendingGotoRef.current = { ...place, y: null };
+      return;
+    }
+    // After the frame that un-hides it, so the iframe has laid out again.
+    requestAnimationFrame(() =>
+      postToBridge(iframeRef.current, { type: "cn-goto", snippet: place.snippet, frac: place.frac }),
+    );
+  }, []);
+
+  // Maps the opaque ids the frame knows ("h0"…) back to threads; rebuilt
+  // with every payload sent.
+  const threadIdForRef = useRef<(id: string) => string | undefined>(() => undefined);
+  const sendHighlights = useCallback(() => {
+    if (!frameReadyRef.current) return;
+    const p = highlightPayload(threadsRef.current, activeRef.current);
+    threadIdForRef.current = p.threadIdFor;
+    postToBridge(iframeRef.current, { type: "cn-highlights", items: p.items, active: p.active });
+  }, []);
+
+  const surfaceKey =
+    mode === "annotate"
+      ? textLoading || !extractedText
+        ? "annotate-loading"
+        : "annotate"
+      : mode === "preview"
+        ? bodyIsHtml
+          ? "preview-frame"
+          : "preview-md"
+        : "edit";
+  const placeRef = useKeepPlace({
+    surfaceKey,
+    resetKey: `${nestId}/${nodeId}`,
+    getSurface: () =>
+      surfaceKey === "annotate"
+        ? preRef.current
+        : surfaceKey === "preview-md"
+          ? mdPreviewRef.current
+          : null,
+    restoreElsewhere: (place) => {
+      if (surfaceKey === "preview-frame") gotoInFrame(place);
+    },
+  });
+
+  // A reloaded iframe has to say ready again before it can take messages.
+  useEffect(() => {
+    frameReadyRef.current = false;
+  }, [iframeKey, embedUrl]);
+
+  const selectThread = useCallback((id: string) => {
+    setActiveThreadId(id);
+    setCommentsOpen(true);
+    requestAnimationFrame(() => {
+      document
+        .getElementById(`annotation-thread-${id}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  }, []);
+
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      const frame = iframeRef.current;
+      if (!frame || e.source !== frame.contentWindow) return;
+      const m = parseBridgeMessage(e.data);
+      if (!m) return;
+      if (m.type === "cn-ready") {
+        frameReadyRef.current = true;
+        sendHighlights();
+        const pending = pendingGotoRef.current;
+        pendingGotoRef.current = null;
+        if (pending) gotoInFrame(pending);
+      } else if (m.type === "cn-place") {
+        // Only while it's the surface on screen: a reload behind Annotate
+        // would otherwise report "top of page" over the reader's place.
+        if (modeRef.current === "preview") {
+          placeRef.current = { snippet: m.snippet, frac: m.frac, y: null };
+        }
+      } else {
+        // Only ids from the payload we sent map to a thread; anything else
+        // the frame makes up resolves to nothing.
+        const id = threadIdForRef.current(m.id);
+        if (id && threadsRef.current.some((t) => t.id === id)) selectThread(id);
+      }
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [sendHighlights, gotoInFrame, selectThread, placeRef]);
+
+  useEffect(() => {
+    sendHighlights();
+  }, [threads, activeThreadId, sendHighlights]);
+
+  // Paint the open threads' quotes over the Annotate pane's text — the same
+  // CSS Custom Highlight layer the document page uses.
+  useEffect(() => {
+    const pre = preRef.current;
+    if (mode !== "annotate" || !pre || !extractedText) {
+      anchorRangesRef.current = [];
+      clearHighlight("artifact-anchor");
+      clearHighlight("artifact-anchor-active");
+      return;
+    }
+    const idx = buildTextIndex(pre);
+    const ranges: { id: string; range: Range }[] = [];
+    for (const t of paintableThreads(threads)) {
+      const r = rangeForAnchor(pre, idx, t.anchor!);
+      if (r) ranges.push({ id: t.id, range: r });
+    }
+    anchorRangesRef.current = ranges;
+    setHighlight("artifact-anchor", ranges.map((r) => r.range));
+    const hit = ranges.find((r) => r.id === activeThreadId);
+    setHighlight("artifact-anchor-active", hit ? [hit.range] : []);
+  }, [mode, extractedText, threads, activeThreadId]);
+
+  useEffect(
+    () => () => {
+      clearHighlight("artifact-anchor");
+      clearHighlight("artifact-anchor-active");
+    },
+    [],
+  );
+
+  // A click on a painted quote selects its thread in the rail.
+  const onTextClick = useCallback(
+    (e: ReactMouseEvent) => {
+      const caret = caretAt(e.clientX, e.clientY);
+      if (!caret) return;
+      for (const { id, range } of anchorRangesRef.current) {
+        try {
+          if (range.isPointInRange(caret.node, caret.offset)) {
+            selectThread(id);
+            return;
+          }
+        } catch {
+          /* detached after a re-render */
+        }
+      }
+    },
+    [selectThread],
+  );
+
+  // A click on a thread's quote in the rail goes to it, in whichever view.
+  const focusThread = useCallback(
+    (t: AnnotationThread) => {
+      setActiveThreadId(t.id);
+      if (!t.anchor?.quote || t.status === "resolved") return;
+      if (mode === "annotate") {
+        const range = anchorRangesRef.current.find((r) => r.id === t.id)?.range;
+        if (!range) {
+          toast.message("That highlighted text isn't in this version.");
+          return;
+        }
+        const top = range.getBoundingClientRect().top;
+        window.scrollBy({ top: top - window.innerHeight / 3, behavior: "smooth" });
+      } else if (mode === "preview" && bodyIsHtml) {
+        const at = extractedText ? locateInText(extractedText, t.anchor) : null;
+        gotoInFrame({
+          snippet: t.anchor.quote.slice(0, 48),
+          frac: at && extractedText ? at.start / extractedText.length : 0,
+        });
+      }
+    },
+    [mode, bodyIsHtml, extractedText, gotoInFrame],
+  );
 
   // Lazily fetch + extract the artifact text the first time the user enters
   // Annotate mode (also feeds the snapshot badge if the prop was unknown).
@@ -790,21 +997,13 @@ export function ArtifactViewer({
               )}
             </div>
           ) : mode === "preview" && !bodyIsHtml ? (
-            <DocumentViewer
-              content={rawBody ?? ""}
-              className="flex-1 min-h-[70vh] max-h-none overflow-visible rounded-lg border bg-background"
-            />
-          ) : mode === "preview" ? (
-            <iframe
-              key={iframeKey}
-              src={hostedUrl}
-              title={title || nodeId}
-              // Defense-in-depth alongside the server's CSP `sandbox` header.
-              // No `allow-same-origin` → opaque origin, no host cookie/storage.
-              sandbox="allow-scripts allow-popups allow-modals"
-              className="w-full flex-1 min-h-[70vh] rounded-lg border bg-white"
-            />
-          ) : (
+            <div ref={mdPreviewRef} className="flex-1 flex flex-col">
+              <DocumentViewer
+                content={rawBody ?? ""}
+                className="flex-1 min-h-[70vh] max-h-none overflow-visible rounded-lg border bg-background"
+              />
+            </div>
+          ) : mode === "preview" ? null : (
             <div className="flex-1 flex flex-col min-h-[70vh] rounded-lg border bg-background">
               <div className="px-3 py-2 border-b bg-muted/30 text-xs text-muted-foreground">
                 Select text below to anchor a comment to it. This is the
@@ -818,12 +1017,32 @@ export function ArtifactViewer({
                 <pre
                   ref={preRef}
                   onMouseUp={onTextMouseUp}
+                  onClick={onTextClick}
                   className="flex-1 overflow-auto whitespace-pre-wrap break-words p-4 text-sm leading-relaxed font-sans selection:bg-amber-200"
                 >
                   {extractedText || "(no extractable text)"}
                 </pre>
               )}
             </div>
+          )}
+          {/* Mounted in every mode (hidden outside Preview) so switching
+              views doesn't reload it to the top — see the place machinery. */}
+          {bodyIsHtml && (
+            <iframe
+              ref={iframeRef}
+              key={iframeKey}
+              src={embedUrl}
+              title={title || nodeId}
+              // Defense-in-depth alongside the server's CSP `sandbox` header.
+              // No `allow-same-origin` → opaque origin, no host cookie/storage.
+              sandbox="allow-scripts allow-popups allow-modals"
+              className={cn(
+                "w-full flex-1 min-h-[70vh] rounded-lg border bg-white",
+                mode !== "preview" && "hidden",
+              )}
+              aria-hidden={mode !== "preview"}
+              data-testid="artifact-preview-frame"
+            />
           )}
         </div>
 
@@ -913,6 +1132,8 @@ export function ArtifactViewer({
                   <ThreadCard
                     key={t.id}
                     thread={t}
+                    active={activeThreadId === t.id}
+                    onFocusQuote={() => focusThread(t)}
                     currentEmail={currentEmail}
                     replyOpen={replyFor === t.id}
                     replyBody={replyBody}
@@ -946,6 +1167,8 @@ export function ArtifactViewer({
                   <ThreadCard
                     key={t.id}
                     thread={t}
+                    active={activeThreadId === t.id}
+                    onFocusQuote={() => focusThread(t)}
                     currentEmail={currentEmail}
                     replyOpen={replyFor === t.id}
                     replyBody={replyBody}
@@ -1049,6 +1272,10 @@ export function ArtifactViewer({
 
 interface ThreadCardProps {
   thread: AnnotationThread;
+  /** Selected from a painted quote (or by clicking its own quote). */
+  active?: boolean;
+  /** Go to the quote in the artifact. */
+  onFocusQuote?: () => void;
   currentEmail?: string;
   replyOpen: boolean;
   replyBody: string;
@@ -1062,6 +1289,8 @@ interface ThreadCardProps {
 
 function ThreadCard({
   thread,
+  active = false,
+  onFocusQuote,
   replyOpen,
   replyBody,
   onReplyOpen,
@@ -1074,9 +1303,12 @@ function ThreadCard({
   return (
     <div
       id={`annotation-thread-${thread.id}`}
-      className={`rounded-lg border p-2.5 text-sm ${
-        resolved ? "bg-muted/40 opacity-80" : "bg-background"
-      }`}
+      className={cn(
+        "rounded-lg border p-2.5 text-sm",
+        resolved ? "bg-muted/40 opacity-80" : "bg-background",
+        active && "ring-2 ring-amber-400",
+      )}
+      data-active={active || undefined}
     >
       <div className="flex items-center justify-between mb-1.5">
         <Badge
@@ -1104,11 +1336,16 @@ function ThreadCard({
       </div>
 
       {thread.anchor ? (
-        <div className="mb-1.5 text-xs rounded border-l-2 border-amber-300 bg-amber-50/60 px-2 py-1 text-amber-900">
+        <button
+          type="button"
+          onClick={onFocusQuote}
+          title="Go to this text"
+          className="mb-1.5 block w-full text-left text-xs rounded border-l-2 border-amber-300 bg-amber-50/60 px-2 py-1 text-amber-900 hover:bg-amber-100/70"
+        >
           "{thread.anchor.quote.length > 100
             ? thread.anchor.quote.slice(0, 100) + "…"
             : thread.anchor.quote}"
-        </div>
+        </button>
       ) : (
         <div className="mb-1.5 text-xs text-muted-foreground italic">
           Whole-artifact comment
