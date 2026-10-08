@@ -177,7 +177,7 @@ async function buildRunBundle(nestId: string, agentNode: string) {
     }
   }
   // Env store values ride along for the tools AND the runner's own LLM key
-  // (ANTHROPIC_API_KEY set from the UI). The bundle requires write
+  // (a nest's own key with byok, else PromptOwl's gateway). The bundle requires write
   // permission to obtain, and this is the ONLY surface that returns full
   // values (the /env routes mask them).
   const env = await envValues(nestId);

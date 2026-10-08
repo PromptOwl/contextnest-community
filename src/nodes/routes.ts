@@ -10,7 +10,7 @@ import { ValidationError, NotFoundError } from "../shared/errors.js";
 // id is rejected up front by the assertSafeNodeId chokepoint mounted on
 // /nests/:nestId/nodes/:nodeId{.+} in app.ts — covers every node route across
 // this + the annotations + governance routers, so handlers here can trust nodeId.
-import { attributeRequest } from "../shared/client-metadata.js";
+import { attributeRequest, readClient } from "../shared/client-metadata.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { getDb } from "../db/client.js";
 import * as versions from "../governance/version-service.js";
@@ -252,29 +252,10 @@ nodeRoutes.post("/", async (c) => {
 // These must be registered BEFORE the /:nodeId{.+} catch-all.
 // Import governance services inline to avoid circular deps.
 
-// GET /nests/:nestId/nodes/:nodeId/stewards
-nodeRoutes.get("/:nodeId{.+}/stewards", async (c) => {
-  const nestId = c.req.param("nestId")!;
-  const nodeId = c.req.param("nodeId")!;
-
-  const { resolveStewardsWithFallback } = await import("../governance/stewardship-service.js");
-  const { stewards, fallbackToOwner, ownerEmail } = await resolveStewardsWithFallback(
-    nestId,
-    nodeId,
-  );
-  return c.json({
-    nodeId,
-    stewards: stewards.map((r: any) => ({
-      email: r.steward.userEmail,
-      role: r.steward.role,
-      scope: r.steward.scope,
-      source: r.source,
-      priority: r.priority,
-    })),
-    fallbackToOwner,
-    ownerEmail,
-  });
-});
+// NOTE: no `/:nodeId{.+}/stewards` handler here, for the same reason as
+// /versions below: governanceNodeRoutes serves that path first. The copy that
+// used to sit here was unreachable and ungated — a second, looser door onto
+// the same data if the mount order ever changed. The gated one lives there.
 
 // NOTE: no `/:nodeId{.+}/versions` handler here. governanceNodeRoutes is
 // mounted ahead of nodeRoutes (see app.ts) and registers the same path, so a
@@ -470,7 +451,10 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     surface: "api",
     userId,
     userEmail,
-    client: c.get("clientMetadata"),
+    client: readClient(c),
+    // The version in the response is the one served (the live draft, or the
+    // reconstructed latest approved version when there is pending drift).
+    versions: { [node.id]: response.version },
   });
   const publicReader = await isPublicReader(nestId, userId);
 

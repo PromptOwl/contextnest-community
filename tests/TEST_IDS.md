@@ -79,3 +79,10 @@ Add a row here whenever you add a `data-testid` to the UI.
 Many more test IDs already exist across `ui/src/` (governance dialogs,
 document editor, nest tabs, …) — grep for `data-testid` and document them
 here as page objects start using them.
+
+## Annotations (`ui/src/components/ArtifactViewer.tsx`, `HighlightedTextarea.tsx`)
+
+| Test ID | Element |
+|---|---|
+| `artifact-preview-frame` | Hosted artifact preview iframe (mounted once, hidden outside Preview) |
+| `raw-markdown-highlights` | Mirror layer under the raw markdown textarea; commented spans are `mark[data-thread-id]` |

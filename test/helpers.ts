@@ -82,6 +82,8 @@ export async function createTestApp(
     entitlement?: Partial<import("../src/auth/license.js").Entitlement>;
     /** The PromptOwl model gateway the licence check hands out (default none). */
     gateway?: { baseUrl: string; key: string; defaultModel?: string | null } | null;
+    /** The licence's own-provider gateway (byok; default none). */
+    ownGateway?: import("../src/auth/license.js").OwnGateway | null;
   } = {},
 ) {
   process.env.AUTH_MODE = authMode;
@@ -107,6 +109,7 @@ export async function createTestApp(
         ...(opts.licenseOverrides ?? {}),
       }),
       getModelGateway: () => (opts.gateway ? { defaultModel: null, ...opts.gateway } : null),
+      getOwnGateway: () => opts.ownGateway ?? null,
       getEntitlement: () => ({
         plan: "enterprise",
         maxUsers: null,

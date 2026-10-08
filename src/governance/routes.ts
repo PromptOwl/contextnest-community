@@ -7,11 +7,13 @@
  */
 
 import { Hono } from "hono";
+import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
+import { isPublicReader } from "../shared/access.js";
 import { ValidationError, ConflictError } from "../shared/errors.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requestBaseUrl } from "../shared/base-url.js";
-import { attributeRequest } from "../shared/client-metadata.js";
+import { attributeRequest, readClient } from "../shared/client-metadata.js";
 import { getDb } from "../db/client.js";
 import * as stewardship from "./stewardship-service.js";
 import * as reviews from "./review-service.js";
@@ -650,19 +652,33 @@ governanceNodeRoutes.get("/:nodeId{.+}/stewards", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
+  // Same node-level gate as /versions below: a document the caller cannot
+  // open must not hand out who stewards it (that names it, and its people).
+  const userId = c.get("userId");
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
+    return c.json(
+      { error: "Access denied — no steward assignment for this node" },
+      403,
+    );
+  }
+
   const { stewards: resolved, fallbackToOwner, ownerEmail } =
     await stewardship.resolveStewardsWithFallback(nestId, nodeId);
+  // Members see who reviews their work; a public reader is an outsider and
+  // gets the roles without anyone's email address.
+  const hideEmails = await isPublicReader(nestId, userId);
   return c.json({
     nodeId,
     stewards: resolved.map((r) => ({
-      email: r.steward.userEmail,
+      ...(hideEmails ? {} : { email: r.steward.userEmail }),
       role: r.steward.role,
       scope: r.steward.scope,
-      source: r.source,
+      ...(hideEmails ? {} : { source: r.source }),
       priority: r.priority,
     })),
     fallbackToOwner,
-    ownerEmail,
+    ownerEmail: hideEmails ? null : ownerEmail,
   });
 });
 
@@ -780,8 +796,23 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions/:version{[0-9]+}", async (c) => 
   }
 
   const { storage, versions: versionManager } = await engineCache.get(nestId);
+  // A historical version's full body is a read of that version: record it in
+  // the activity log like any other read (fire-and-forget).
+  const recordVersionRead = () =>
+    recordNodeAccess({
+      nestId,
+      nodeIds: [nodeId],
+      action: "read",
+      surface: "api",
+      userId,
+      userEmail,
+      client: readClient(c),
+      versions: { [nodeId]: version },
+      detail: "version",
+    });
   try {
     const raw = await versionManager.reconstructVersion(nodeId, version);
+    recordVersionRead();
     return c.json({ version, content: bodyOnly(nodeId, raw) });
   } catch (err) {
     // The unreviewed draft on top is never in the chain (see the draft branch
@@ -790,6 +821,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions/:version{[0-9]+}", async (c) => 
     try {
       const node = await storage.readDocument(nodeId);
       if ((node.frontmatter.version ?? 1) === version) {
+        recordVersionRead();
         return c.json({ version, content: node.body ?? "" });
       }
     } catch {

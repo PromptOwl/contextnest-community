@@ -137,6 +137,11 @@ export async function getScopedActivity(params: {
   scope: ActivityScope;
   types?: ActivityType[];
   actor?: string;
+  /** Only events made through this agent (the caller's `client.agent`,
+   *  case-insensitive exact) — "what did agent X read and change". Events
+   *  with no agent (reviews, comments, deletions, a person's own reads) are
+   *  left out when set. */
+  agent?: string;
   limit: number;
   offset: number;
 }): Promise<ActivityLogPage> {
@@ -147,11 +152,13 @@ export async function getScopedActivity(params: {
   const wanted = new Set<ActivityType>(params.types?.length ? params.types : ACTIVITY_TYPES);
   const want = (source: string) => SOURCE_TYPES[source].some((t) => wanted.has(t));
   const actor = params.actor?.trim() || undefined;
+  const agent = params.agent?.trim().toLowerCase() || undefined;
   const db = getDb();
   const items: ActivityLogItem[] = [];
   const push = (it: ActivityLogItem) => {
     if (!wanted.has(it.type)) return;
     if (actor && it.actor.toLowerCase() !== actor.toLowerCase()) return;
+    if (agent && it.agent?.toLowerCase() !== agent) return;
     items.push(it);
   };
 
@@ -301,18 +308,21 @@ export async function getScopedActivity(params: {
     // in the same second as the first version still counts as "after".
     const sinceMs = since ? Math.floor(Date.parse(toIso(since)) / 1000) * 1000 : NaN;
     const a = actorSql(actor, ["COALESCE(e.user_email, u.email)"]);
+    // Agent filter pushed into SQL (indexed, migration 050) so the LIMIT
+    // window is spent on matching rows.
+    const ag = agent ? { sql: " AND e.agent = ?", args: [agent] } : { sql: "", args: [] as string[] };
     const actions = (["read", "retrieved", "exported"] as const)
       .filter((t) => wanted.has(t))
       .map((t) => (t === "retrieved" ? "retrieve" : t === "exported" ? "export" : "read"));
     try {
       const rows = (await db.all(
-        `SELECT e.id, e.ts, e.node_id, e.action, e.surface, e.client_json, e.detail,
+        `SELECT e.id, e.ts, e.node_id, e.action, e.surface, e.client_json, e.detail, e.version,
                 COALESCE(e.user_email, u.email, e.user_id) AS actor
            FROM node_access_events e LEFT JOIN users u ON u.id = e.user_id
-          WHERE e.nest_id = ? AND e.action IN (${actions.map(() => "?").join(", ")})${s.sql}${a.sql}
+          WHERE e.nest_id = ? AND e.action IN (${actions.map(() => "?").join(", ")})${s.sql}${a.sql}${ag.sql}
           ORDER BY e.id DESC
           LIMIT ?`,
-        [nestId, ...actions, ...s.args, ...a.args, window],
+        [nestId, ...actions, ...s.args, ...a.args, ...ag.args, window],
       )) as any[];
       for (const r of rows) {
         if (r.node_id == null && Number.isFinite(sinceMs) && Date.parse(toIso(r.ts)) < sinceMs) continue;
@@ -326,6 +336,8 @@ export async function getScopedActivity(params: {
           ...(client ? { client } : {}),
           at: toIso(r.ts),
           surface: r.surface,
+          // The version the caller was served, where the surface knew it.
+          ...(r.version != null ? { version: Number(r.version) } : {}),
           ...(r.detail ? { detail: r.detail } : {}),
         });
       }

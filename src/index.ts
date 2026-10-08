@@ -13,6 +13,7 @@ import {
   validateLicense,
   startLicenseSafetyPoll,
 } from "./auth/license.js";
+import { moveStoredAnthropicKey } from "./shared/model-credential.js";
 import { startTelemetryLoop, trackEvent } from "./telemetry/tracker.js";
 import {
   loadAccessConfig,
@@ -22,6 +23,7 @@ import { loadActiveCommunitySites } from "./auth/community-sites.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
 import { startScheduler } from "./workflow/scheduler.js";
 import { sweepStale } from "./shared/rate-limit.js";
+import { bannerHeading } from "./shared/startup-banner.js";
 
 async function main() {
   // Initialize the database backend (SQLite by default, or Postgres/Cloud SQL
@@ -97,6 +99,8 @@ async function main() {
   // can't hide a suspension; unreachable falls back to the cache as before.
   const license = await validateLicense({ forceFresh: true });
 
+  await moveStoredAnthropicKey();
+
   if (!license.valid) {
     console.warn(`
   WARNING: No valid PromptOwl license key found.
@@ -164,7 +168,7 @@ async function main() {
       : `sqlite (${config.DATABASE_PATH})`;
 
   console.log(`
-  ContextNest Community Server v0.1.0
+  ${bannerHeading()}
   ────────────────────────────────────
   Port:      ${config.PORT}
   Data:      ${config.DATA_ROOT}
@@ -206,6 +210,12 @@ ${config.AUTH_MODE === "key" ? `
   ⚠️  Running in open mode — no authentication.
      Anyone who can reach this port has full read/write + admin access.
      Bind to 127.0.0.1 only, or switch to AUTH_MODE=key before exposing.
+`);
+  }
+  if (config.HOOTIE_DEBUG_LOG) {
+    console.warn(`
+  ⚠️  HOOTIE_DEBUG_LOG is on — every Hootie prompt and answer, including the
+     nest documents behind it, is written to the logs. Testing only.
 `);
   }
 

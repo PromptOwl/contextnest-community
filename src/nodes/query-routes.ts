@@ -8,11 +8,13 @@ import {
   ForbiddenError,
 } from "../shared/errors.js";
 import { rebuildNodeIndex } from "./node-index.js";
+import { readClient } from "../shared/client-metadata.js";
 import { queryTableNode } from "../tables/query.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import {
   resolveCallerEmail,
   filterAccessible,
+  readsWholeNest,
 } from "../governance/access-guard.js";
 import {
   resolveContext,
@@ -257,6 +259,7 @@ queryRoutes.post("/context", async (c) => {
     userId: c.get("userId"),
     baseUrl: requestBaseUrl(c.req.url),
     body,
+    client: readClient(c),
   });
   return c.json(result);
 });
@@ -279,12 +282,33 @@ queryRoutes.post("/table-query", async (c) => {
   }>();
   const ref = typeof body.table === "string" ? body.table.trim() : "";
   if (!ref) throw new ValidationError("table is required — [[Title]] or node id");
+  // Gated like GET /nodes/:id: canReadNode, and a public/org reader gets the
+  // approved version's rows, never the working copy's.
+  const userId = c.get("userId");
   const result = await queryTableNode(
     nestId,
     ref,
     typeof body.query === "string" ? body.query : "",
     body.include_drafts === true,
+    {
+      userId,
+      userEmail: await resolveCallerEmail(userId),
+      approvedOnly: await isPublicReader(nestId, userId),
+    },
   );
+  // Admin activity log: the table the rows came from, at the version queried.
+  const tableUser = c.get("userId");
+  recordNodeAccess({
+    nestId,
+    nodeIds: [result.table],
+    action: "retrieve",
+    surface: "api",
+    userId: tableUser,
+    userEmail: await resolveCallerEmail(tableUser),
+    client: readClient(c),
+    ...(result.version ? { versions: { [result.table]: result.version } } : {}),
+    detail: "table-query",
+  });
   return c.json(result);
 });
 
@@ -310,7 +334,7 @@ queryRoutes.post("/query", async (c) => {
     surface: "api",
     userId,
     userEmail,
-    client: c.get("clientMetadata"),
+    client: readClient(c),
     detail: "query",
   });
 
@@ -350,7 +374,7 @@ queryRoutes.get("/search", async (c) => {
     surface: "api",
     userId,
     userEmail,
-    client: c.get("clientMetadata"),
+    client: readClient(c),
     detail: "search",
   });
 
@@ -363,20 +387,24 @@ queryRoutes.get("/search", async (c) => {
 
 // GET /nests/:nestId/overview
 queryRoutes.get("/overview", async (c) => {
-  const { storage } = await engineCache.get(c.req.param("nestId")!);
-  // Derived annotation projections stay out of the counts and — because this
-  // is where the tag facet comes from — out of tag filtering too.
-  const documents = (await storage.discoverDocuments()).filter(
-    (d) => !isDerivedAnnotationsNode(d.id),
-  );
+  // Caller-gated, like MCP context_overview: this used to list every node's
+  // title, tags and a body excerpt straight off disk, so a public reader could
+  // read a governed nest's unapproved drafts here. listNodesForCaller applies
+  // filterAccessible and serves public readers the approved body. It also
+  // keeps the derived annotation projections out, as this route always did.
+  const documents = (
+    await listNodesForCaller(c.req.param("nestId")!, c.get("userId"), {
+      withContent: true,
+    })
+  ).filter((d) => !isDerivedAnnotationsNode(d.id));
 
   const types: Record<string, number> = {};
   const tags: Record<string, number> = {};
 
   for (const node of documents) {
-    const t = node.frontmatter.type || "document";
+    const t = node.type || "document";
     types[t] = (types[t] || 0) + 1;
-    for (const tag of node.frontmatter.tags || []) {
+    for (const tag of node.tags || []) {
       tags[tag] = (tags[tag] || 0) + 1;
     }
   }
@@ -387,10 +415,10 @@ queryRoutes.get("/overview", async (c) => {
     tags,
     nodes: documents.map((n) => ({
       id: n.id,
-      title: n.frontmatter.title,
-      type: n.frontmatter.type || "document",
-      tags: n.frontmatter.tags || [],
-      snippet: (n.body || "").slice(0, 120).replace(/\n/g, " "),
+      title: n.title,
+      type: n.type || "document",
+      tags: n.tags || [],
+      snippet: (n.content || "").slice(0, 120).replace(/\n/g, " "),
     })),
   });
 });
@@ -411,12 +439,15 @@ queryRoutes.get("/census", async (c) => {
 // The nest's folder tree on its own, for callers that need the SHAPE of the
 // vault (a navigable tree, a folder picker) and none of its content. Reads
 // directory entries only — no document is opened, so this stays cheap on a
-// vault where listing the documents would not be.
+// vault where listing the documents would not be. A caller who cannot read
+// the whole nest gets the tree of what they CAN read (see listNestFolders).
 queryRoutes.get("/folders", async (c) => {
   const q = c.req.query();
+  const userId = c.get("userId");
   const folders = await listNestFolders(c.req.param("nestId")!, {
     ...(q.folder !== undefined ? { folder: q.folder } : {}),
     ...(q.recursive === "0" || q.recursive === "false" ? { recursive: false } : {}),
+    caller: { userId, userEmail: await resolveCallerEmail(userId) },
   });
   return c.json({ folders });
 });
@@ -461,9 +492,30 @@ queryRoutes.post("/reindex", async (c) => {
 // GET /nests/:nestId/comment-counts
 // Per-node annotation (comment) counts for the whole nest, so the UI can sort
 // document lists by "most comments" in one call instead of N per-node fetches.
+// Keyed by node id, so it is narrowed to the documents the caller can read: an
+// unreadable draft's id — and the fact someone is discussing it — must not
+// reach a caller who would be refused opening it.
 queryRoutes.get("/comment-counts", async (c) => {
-  const counts = await countThreadsByNode(c.req.param("nestId")!);
-  return c.json({ counts });
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const userEmail = await resolveCallerEmail(userId);
+  const counts = await countThreadsByNode(nestId);
+  if (await readsWholeNest(nestId, userId, userEmail)) return c.json({ counts });
+  const readable = new Set(
+    (
+      await filterAccessible(
+        nestId,
+        userId,
+        userEmail,
+        Object.keys(counts).map((id) => ({ id })),
+      )
+    ).map((n) => n.id),
+  );
+  return c.json({
+    counts: Object.fromEntries(
+      Object.entries(counts).filter(([id]) => readable.has(id)),
+    ),
+  });
 });
 
 // GET /nests/:nestId/context
@@ -498,7 +550,7 @@ queryRoutes.get("/export", async (c) => {
       surface: "api",
       userId: bundleUser,
       userEmail: await resolveCallerEmail(bundleUser),
-      client: c.get("clientMetadata"),
+      client: readClient(c),
       detail: includeDrafts ? "bundle export (incl. drafts)" : "bundle export",
     });
     const filename = `nest-${nestId}.zip`;
@@ -583,7 +635,7 @@ queryRoutes.get("/export", async (c) => {
     surface: "api",
     userId,
     userEmail,
-    client: c.get("clientMetadata"),
+    client: readClient(c),
     detail: `markdown export (${included.length} documents${selector ? ", selector" : ""})`,
   });
 
