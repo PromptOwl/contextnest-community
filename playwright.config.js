@@ -77,6 +77,15 @@ const testRun = [
     independent: true, // Arranges its own nest, reviews and requests
   },
   {
+    // Request access on a denied write (CN-ACCESS-001 … CN-ACCESS-004).
+    // Serial: the cases share one seeded nest and build on each other's
+    // requests (ask → approve → deny → refused save).
+    file: 'access-requests/access_requests.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest; needs secondary_user
+  },
+  {
     // Metacognition agents (CN-META-001 … CN-META-003). Skips unless the
     // server has FEATURE_METACOGNITION on. Serial: one seeded nest.
     file: 'metacognition/metacognition_agents.spec.js',
@@ -176,7 +185,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'access-requests'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -239,15 +248,15 @@ export default defineConfig({
     // Playwright-managed download is unavailable (e.g. sandboxed CI).
     ...(process.env.PLAYWRIGHT_SLOW_MO || process.env.PLAYWRIGHT_CHROMIUM_PATH
       ? {
-          launchOptions: {
-            ...(process.env.PLAYWRIGHT_SLOW_MO
-              ? { slowMo: parseInt(process.env.PLAYWRIGHT_SLOW_MO) }
-              : {}),
-            ...(process.env.PLAYWRIGHT_CHROMIUM_PATH
-              ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }
-              : {}),
-          },
-        }
+        launchOptions: {
+          ...(process.env.PLAYWRIGHT_SLOW_MO
+            ? { slowMo: parseInt(process.env.PLAYWRIGHT_SLOW_MO) }
+            : {}),
+          ...(process.env.PLAYWRIGHT_CHROMIUM_PATH
+            ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }
+            : {}),
+        },
+      }
       : {}),
   },
 
@@ -294,40 +303,51 @@ export default defineConfig({
     // duplicate test runs when running the full suite.
     ...(includeStandalone
       ? [
-          {
-            name: 'auth',
-            dependencies: ['setup-auth'],
-            testMatch: 'tests/features/auth/**/*.spec.js',
-            fullyParallel: false,
-            use: {
-              ...devices['Desktop Chrome'],
-              screenshot: 'only-on-failure',
-              trace: 'retain-on-failure',
-            },
+        {
+          name: 'auth',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/auth/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
           },
-          {
-            name: 'dashboard',
-            dependencies: ['setup-auth'],
-            testMatch: 'tests/features/dashboard/**/*.spec.js',
-            fullyParallel: false,
-            use: {
-              ...devices['Desktop Chrome'],
-              screenshot: 'only-on-failure',
-              trace: 'retain-on-failure',
-            },
+        },
+        {
+          name: 'dashboard',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/dashboard/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
           },
-          {
-            name: 'my-work',
-            dependencies: ['setup-auth'],
-            testMatch: 'tests/features/my-work/**/*.spec.js',
-            fullyParallel: false,
-            use: {
-              ...devices['Desktop Chrome'],
-              screenshot: 'only-on-failure',
-              trace: 'retain-on-failure',
-            },
+        },
+        {
+          name: 'my-work',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/my-work/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
           },
-        ]
+        },
+        {
+          name: 'access-requests',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/access-requests/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+      ]
       : []),
   ],
 });

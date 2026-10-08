@@ -13,6 +13,12 @@
  */
 
 import { clearDraft } from "./draft";
+import {
+  ACCESS_OFFER_EVENT,
+  accessOfferFromError,
+  type AccessRequest,
+  type AccessTarget,
+} from "./access-requests";
 import type { NestBranding } from "./branding";
 
 /**
@@ -91,6 +97,17 @@ async function request<T = any>(
     // license banner offers admins the way to change plans (one listener).
     if (res.status === 402 && data.code === "plan_limit" && typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("license:plan-limit", { detail: data }));
+    }
+    // A write refused for someone who could ask for the access instead
+    // (CU-wdqcq041jn): one listener (RequestAccessHost) offers the request over
+    // whatever they were doing. The caller still gets the error, so its own
+    // state — an unsaved edit above all — stays as it was.
+    const offer =
+      (options.method ?? "GET").toUpperCase() !== "GET"
+        ? accessOfferFromError(path, res.status, data)
+        : null;
+    if (offer && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent(ACCESS_OFFER_EVENT, { detail: offer }));
     }
     throw err;
   }
@@ -1688,6 +1705,50 @@ export async function getDeletionRequests(nestId: string, status = "pending") {
   );
 }
 
+// ─── Access requests (CU-wdqcq041jn) ─────────────────────────────────────
+
+/** Ask for write access to a document, folder or the nest. 201 = filed,
+ *  200 = the pending one already there (`created: false`). */
+export async function requestAccess(
+  nestId: string,
+  target: AccessTarget,
+  note?: string,
+) {
+  return request<{ request: AccessRequest; created: boolean }>(
+    `/nests/${nestId}/access-requests`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        target_type: target.type,
+        target_id: target.id,
+        level: "write",
+        ...(note ? { note } : {}),
+      }),
+    },
+  );
+}
+
+/** The caller's latest request for one target, whatever its state. */
+export async function getMyAccessRequest(nestId: string, target: AccessTarget) {
+  return request<{ request: AccessRequest | null }>(
+    `/nests/${nestId}/access-requests/mine?target_type=${encodeURIComponent(target.type)}&target_id=${encodeURIComponent(target.id)}`,
+  );
+}
+
+export async function approveAccessRequest(nestId: string, id: string, note?: string) {
+  return request<{ request: AccessRequest }>(
+    `/nests/${nestId}/access-requests/${id}/approve`,
+    { method: "POST", body: JSON.stringify(note ? { note } : {}) },
+  );
+}
+
+export async function denyAccessRequest(nestId: string, id: string, note?: string) {
+  return request<{ request: AccessRequest }>(
+    `/nests/${nestId}/access-requests/${id}/deny`,
+    { method: "POST", body: JSON.stringify(note ? { note } : {}) },
+  );
+}
+
 export async function approveDeletionRequest(nestId: string, id: string) {
   return request<{ deleted: boolean; nodeId: string }>(
     `/nests/${nestId}/deletion-requests/${id}/delete`,
@@ -2758,8 +2819,9 @@ export async function getNestGraph(nestId: string) {
 
 export interface WorkItem {
   /** "deletion" = someone asked for the document to be deleted; only nest
-   *  owners/admins get those in the waiting-on-me bucket. */
-  type: "review" | "deletion";
+   *  owners/admins get those in the waiting-on-me bucket. "access" = someone
+   *  who can only read asked to edit (CU-wdqcq041jn) — same owners/admins. */
+  type: "review" | "deletion" | "access";
   nest_id: string;
   nest_name: string;
   node_id: string;
@@ -2773,7 +2835,9 @@ export interface WorkItem {
   /** Deletion items only. For "folder"/"nest"/"nest_archive", node_id is a
    *  folder path or the nest id — NOT a document id, so don't open the editor
    *  on it. "nest_archive" is the reversible ask: honouring it archives. */
-  target_type?: "document" | "folder" | "nest" | "nest_archive";
+  target_type?: "document" | "folder" | "nest" | "nest_archive" | "node";
+  /** Access items only: the level asked for. */
+  level?: "read" | "write";
 }
 
 export interface WatcherNotification {

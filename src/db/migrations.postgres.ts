@@ -83,6 +83,7 @@ const HISTORICAL_MIGRATIONS = [
   "052_nest_done_tags",
   "053_license_cache_own_gateway",
   "054_metacognition_agents",
+  "055_access_requests",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -945,6 +946,31 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
   await db.exec(
     "ALTER TABLE nests ADD COLUMN IF NOT EXISTS done_tags TEXT NOT NULL DEFAULT 'done'",
   );
+
+  // Migration 055 parity: access requests (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS access_requests (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      requester_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      requested_by TEXT NOT NULL,
+      target_type TEXT NOT NULL CHECK(target_type IN ('node', 'folder', 'nest')),
+      target_id TEXT NOT NULL,
+      level TEXT NOT NULL DEFAULT 'write' CHECK(level IN ('read', 'write')),
+      note TEXT,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending', 'approved', 'denied')),
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      resolved_by TEXT,
+      resolved_at TEXT,
+      resolution_note TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_access_requests_pending
+      ON access_requests(nest_id, requester_id, target_type, target_id)
+      WHERE status = 'pending';
+    CREATE INDEX IF NOT EXISTS idx_access_requests_nest
+      ON access_requests(nest_id, status);
+  `);
 
   // Migration 054 parity: metacognition agents.
   await db.exec(`

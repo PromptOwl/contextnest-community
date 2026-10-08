@@ -2708,6 +2708,13 @@ async function purgeNodeKeyedRows(
      WHERE nest_id = ? AND target_type = 'document' AND target = ?`,
     [nestId, nodeId],
   );
+  // A request for access to this document asks about something that no longer
+  // exists; a later document at the same id must not inherit it.
+  await tx.run(
+    `DELETE FROM access_requests
+     WHERE nest_id = ? AND target_type = 'node' AND target_id = ?`,
+    [nestId, nodeId],
+  );
 }
 
 /** Repoint every row keyed to `oldId` at `newId`. Caller supplies the transaction. */
@@ -2731,6 +2738,11 @@ async function rewriteNodeKeyedRows(
   await tx.run(
     `UPDATE grants SET target = ?
      WHERE nest_id = ? AND target_type = 'document' AND target = ?`,
+    [newId, nestId, oldId],
+  );
+  await tx.run(
+    `UPDATE access_requests SET target_id = ?
+     WHERE nest_id = ? AND target_type = 'node' AND target_id = ?`,
     [newId, nestId, oldId],
   );
 }

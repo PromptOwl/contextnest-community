@@ -100,6 +100,13 @@ import {
   serverMcpRoutes,
 } from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
+import { accessRequestRoutes } from "./governance/access-request-routes.js";
+import {
+  accessRequestHint,
+  canDecideAccessRequests,
+  listAccessRequests,
+  writeTargetForPath,
+} from "./governance/access-request-service.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
 import { nestScopedKeyGuard } from "./auth/nest-scope-guard.js";
 import {
@@ -1905,9 +1912,47 @@ export function createApp(): Hono<AuthEnv> {
       // must not treat it as a document to open.
       target_type: r.targetType,
     });
+    // Access requests (CU-wdqcq041jn) are a third item type: someone asked to
+    // edit something they can only read. node_id is the document for a node
+    // target, else the folder path / nest id — target_type says which.
+    // Capped (500, newest first), not paginated: a person can have at most
+    // MAX_PENDING_PER_NEST waiting per nest, so the pending set stays small;
+    // the count below reflects what is shown.
+    // Decider nests first, so only rows this caller can act on (or filed) load.
+    const deciderNestIds = (
+      await Promise.all(
+        [...nestName.keys()].map(async (id) =>
+          (await canDecideAccessRequests(id, userId)) ? id : null,
+        ),
+      )
+    ).filter((id): id is string => id !== null);
+    const [decidable, myAccessAsks] = await Promise.all([
+      listAccessRequests({ nestIds: deciderNestIds, status: "pending", limit: 500 }),
+      listAccessRequests({
+        nestIds: [...nestName.keys()],
+        requesterId: userId,
+        status: "pending",
+        limit: 500,
+      }),
+    ]);
+    const toAccessItem = (r: (typeof decidable)[number]) => ({
+      type: "access" as const,
+      nest_id: r.nest_id,
+      nest_name: nestName.get(r.nest_id)!,
+      node_id: r.target_id,
+      title: r.title || r.target_id,
+      requested_by: r.requested_by,
+      requested_at: r.created_at,
+      priority: "normal" as const,
+      reason: r.note ?? "",
+      request_id: r.id,
+      target_type: r.target_type,
+      level: r.level,
+    });
     type WorkItem =
       | ReturnType<typeof toItem>
-      | ReturnType<typeof toDeletionItem>;
+      | ReturnType<typeof toDeletionItem>
+      | ReturnType<typeof toAccessItem>;
     const byNewest = (a: { requested_at: string }, b: { requested_at: string }) =>
       a.requested_at < b.requested_at ? 1 : -1;
     // items = waiting on ME (someone else asked); waiting = I asked, waiting on them.
@@ -1965,9 +2010,14 @@ export function createApp(): Hono<AuthEnv> {
         .filter((r) => nestManage.get(r.nestId))
         .map(toDeletionItem),
     );
+    // Waiting on me: asks I can decide. Waiting on others: the ones I filed.
+    items.push(
+      ...decidable.filter((r) => r.requester_id !== userId).map(toAccessItem),
+    );
     items.sort(byNewest);
     waiting.push(
       ...deletions.filter((r) => r.requestedBy === me).map(toDeletionItem),
+      ...myAccessAsks.map(toAccessItem),
     );
     waiting.sort(byNewest);
     // Watcher notifications (HITL tags) ride along so the inbox is one call.
@@ -2002,13 +2052,13 @@ export function createApp(): Hono<AuthEnv> {
         }),
       ]);
     const reviewTotal = approvableReviewTotal + myReviewsElsewhereTotal;
-    // Deletion flags ride the same two buckets (above) but aren't paginated
-    // (listDeletionRequests always fetches every pending one), so folding in
+    // Deletion flags and access requests ride the same two buckets (above)
+    // but aren't paginated (both lists fetch every pending one), so folding in
     // however many are actually shown keeps the total exact regardless of
     // which review page this call fetched.
-    const deletionsShown =
-      items.filter((i) => i.type === "deletion").length +
-      waiting.filter((i) => i.type === "deletion").length;
+    const requestsShown =
+      items.filter((i) => i.type === "deletion" || i.type === "access").length +
+      waiting.filter((i) => i.type === "deletion" || i.type === "access").length;
     // Board cards assigned to me (open ones), across every nest I can see.
     // Best-effort: a failure here must not take the reviews inbox down with it.
     const assigned = await listAssignedTo(me, userId, nestName).catch((err) => {
@@ -2021,7 +2071,7 @@ export function createApp(): Hono<AuthEnv> {
       notifications,
       assigned,
       pagination: {
-        total: reviewTotal + deletionsShown,
+        total: reviewTotal + requestsShown,
         limit,
         offset,
         has_more: offset + requests.length < total,
@@ -2557,6 +2607,17 @@ export function createApp(): Hono<AuthEnv> {
         // handler's filterAccessible scopes every result to their grants, so
         // they can never read past what they were shared (same as the list).
         grantNestVisible = access.hasGrant;
+      } else if (
+        parts[1] === "access-requests" &&
+        ((parts.length === 2 && c.req.method === "POST") ||
+          (parts.length === 3 && parts[2] === "mine" && c.req.method === "GET"))
+      ) {
+        // Asking for more access (CU-wdqcq041jn), for someone who reaches this
+        // nest only through a document or folder share — the person a refused
+        // write most often stops. Filing and reading back their OWN request is
+        // all this opens; the service 404s a target they can't see, and
+        // deciding stays owner/admin-only in the handler.
+        grantNestVisible = access.hasGrant;
       } else if (isPinAction) {
         // Pinning, for someone who reaches this nest only through a document or
         // folder grant. They see the nest on their dashboard, so they see its
@@ -2587,6 +2648,27 @@ export function createApp(): Hono<AuthEnv> {
             "The nest id may be wrong, or these credentials have no access to it. Ask the nest owner to share the nest with you, then reconnect.",
         });
       }
+    }
+
+    // A nest VIEWER can hold a write share on one document or folder (an
+    // approved access request is exactly that). The share has to count on that
+    // node's write routes too, or the grant would read as access and refuse
+    // every edit. Reads don't need it — the viewer already reads the nest.
+    if (
+      permission === "read" &&
+      !grantRole &&
+      access.hasGrant &&
+      parts[1] === "nodes" &&
+      parts.length >= 3 &&
+      c.req.method !== "GET"
+    ) {
+      let targetTail = parts.slice(2).join("/");
+      try {
+        targetTail = decodeURIComponent(targetTail);
+      } catch {
+        /* malformed escape — resolve as-is */
+      }
+      grantRole = await resolveNodeGrant(nestId, userId, targetTail);
     }
 
     let required: NestPermission = "read";
@@ -2648,6 +2730,11 @@ export function createApp(): Hono<AuthEnv> {
     const isDeletionRequestAction =
       /\/request-deletion$/.test(path) ||
       /\/deletion-requests\/[^/]+\/withdraw$/.test(path);
+    // Asking for access is what a viewer does (CU-wdqcq041jn), so the whole
+    // /access-requests surface sits at read tier. Approve/deny are refused in
+    // the handler for anyone but the owner, a nest admin or the server admin.
+    // Exact resource segment, so a node slugged "access-requests" stays a node.
+    const isAccessRequestAction = parts[1] === "access-requests";
     // isNestLifecycleAction (archive/restore) is defined above, next to
     // isMcpTransport — the open-mode branch needs it too, and that branch runs
     // before this point.
@@ -2733,6 +2820,7 @@ export function createApp(): Hono<AuthEnv> {
       !isPushDecisionPath &&
       !isCommentAction &&
       !isDeletionRequestAction &&
+      !isAccessRequestAction &&
       !isNestLifecycleAction &&
       !isPinAction &&
       !isAnnotationAction &&
@@ -2825,21 +2913,43 @@ export function createApp(): Hono<AuthEnv> {
           { archived: true },
         );
       }
+      // Someone who can see the target but not change it may ask for the
+      // access instead of stopping here (CU-wdqcq041jn). Writes only: a GET
+      // held at write tier (the collaborator roster, hooks) is a read the UI
+      // makes on its own, not something the person tried to change, and
+      // admin-tier routes (visibility, roles) aren't something to request.
+      const hint =
+        required === "write" &&
+        c.req.method !== "GET" &&
+        effectiveLevel >= permissionLevel("read")
+          ? await accessRequestHint({
+              nestId,
+              userId,
+              target: writeTargetForPath(nestId, parts, c.req.method),
+            })
+          : null;
       return deny(
         403,
-        `You don't have access to perform this action on this nest. Required permission: '${required}', your permission: '${permission}'. Ask the nest owner or a server admin to grant you ${required} access.`,
+        hint
+          ? `You don't have edit access here. Your permission: '${permission}'. You can request write access from the nest owner or an admin (POST /nests/${nestId}/access-requests).`
+          : `You don't have access to perform this action on this nest. Required permission: '${required}', your permission: '${permission}'. Ask the nest owner or a server admin to grant you ${required} access.`,
         {
           required_permission: required,
           your_permission: permission,
+          ...hint,
         },
       );
     }
 
-    // Downstream sees the grant role when the caller is acting purely via a
-    // grant (nest permission "none") — so node handlers treat them correctly.
+    // Downstream sees the grant role when it outranks the nest permission — a
+    // caller acting purely via a grant (nest permission "none"), or a viewer
+    // holding a write share on this node — so node handlers treat them
+    // correctly.
     c.set(
       "nestPermission",
-      permission === "none" && grantRole ? grantRole : permission,
+      grantRole && permissionLevel(grantRole) > permissionLevel(permission)
+        ? grantRole
+        : permission,
     );
     return next();
   });
@@ -2953,6 +3063,7 @@ export function createApp(): Hono<AuthEnv> {
 
   // Nest-scoped sub-routes
   // Governance nest-level routes (stewards, review-queue)
+  nestsApp.route("/:nestId", accessRequestRoutes);
   nestsApp.route("/:nestId", governanceRoutes);
   // Node-level sub-routers all share the /:nestId/nodes base and rely on a
   // greedy /:nodeId{.+} param (node ids are multi-segment paths). Under the

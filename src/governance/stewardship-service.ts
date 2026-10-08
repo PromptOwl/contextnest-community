@@ -16,6 +16,7 @@ import { resolveTeamRolesForUser } from "./teams-service.js";
 import { nestAllowsSelfApprove } from "../nests/service.js";
 import { config, isEmailish } from "../config.js";
 import { assertCanGrant, stewardClass } from "../auth/seats.js";
+import { resolveNodeGrant } from "./grants-service.js";
 import {
   type EffectiveRole,
   collabPermToRole,
@@ -891,6 +892,13 @@ export async function canUserEdit(
       reason: "editor access (collaborator or steward)",
       role: roles.includes("admin") ? "admin" : "editor",
     };
+  }
+  // A write share on this document or its folder (e.g. an approved access
+  // request) is edit access too — the REST middleware already honours it, and
+  // MCP must agree or the same person could edit in the UI but not by agent.
+  const userId = await userIdForEmail(userEmail);
+  if (userId && (await resolveNodeGrant(nestId, userId, nodeId)) === "write") {
+    return { allowed: true, reason: "write share on this document", role: "editor" };
   }
   return { allowed: false, reason: "no editor role on this node", role: null };
 }

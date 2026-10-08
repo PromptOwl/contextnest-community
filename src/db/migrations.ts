@@ -1806,6 +1806,41 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("052_nest_done_tags");
   }
 
+  // 055: access requests (CU-wdqcq041jn). Someone who can SEE a document,
+  //   folder or nest but not change it asks for write access instead of hitting
+  //   a dead-end 403; a nest owner/admin approves (which grants through the
+  //   existing share/collaborator paths) or denies with a note. One pending row
+  //   per (nest, requester, target); resolved rows stay as the record, and the
+  //   latest one is what the next refusal shows ("pending" / "denied").
+  if (!hasMigration("055_access_requests")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS access_requests (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          requester_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          requested_by TEXT NOT NULL,      -- email, for display and inbox rows
+          target_type TEXT NOT NULL CHECK(target_type IN ('node', 'folder', 'nest')),
+          target_id TEXT NOT NULL,         -- node id, folder path, or the nest id
+          level TEXT NOT NULL DEFAULT 'write' CHECK(level IN ('read', 'write')),
+          note TEXT,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending', 'approved', 'denied')),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          resolved_by TEXT,                -- email
+          resolved_at TEXT,
+          resolution_note TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_access_requests_pending
+          ON access_requests(nest_id, requester_id, target_type, target_id)
+          WHERE status = 'pending';
+        CREATE INDEX IF NOT EXISTS idx_access_requests_nest
+          ON access_requests(nest_id, status);
+      `);
+    })();
+    recordMigration("055_access_requests");
+  }
+
   // 053: license_cache.own_gateway_json — the licence's own-provider LiteLLM
   //   key (byok) and its model list, encrypted like gateway_json.
   if (!hasMigration("053_license_cache_own_gateway")) {

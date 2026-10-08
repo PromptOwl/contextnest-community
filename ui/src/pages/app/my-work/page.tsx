@@ -17,7 +17,7 @@ import {
   Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle,
 } from "lucide-react";
 import { BULK_REVIEW_LIMIT } from "../../../lib/constants";
-import { splitWorkItems } from "../../../lib/my-work-groups";
+import { splitWorkItems, workItemKey } from "../../../lib/my-work-groups";
 import { toast } from "sonner";
 import { relTime, formatServerDate } from "../../../lib/dates";
 import { Button } from "@/components/ui/button";
@@ -46,6 +46,9 @@ export default function MyWorkPage() {
   // Deletion flag being resolved from the inbox, and which dialog it opens.
   const [deletionTarget, setDeletionTarget] = useState<api.WorkItem | null>(null);
   const [deletionAction, setDeletionAction] = useState<"delete" | "decline">("delete");
+  // Access request being denied from the inbox (the note dialog is open).
+  const [denyAccessTarget, setDenyAccessTarget] = useState<api.WorkItem | null>(null);
+  const [approvingAccessId, setApprovingAccessId] = useState<string | null>(null);
   // Bulk review straight from the inbox, keyed "<nestId>:<nodeId>" since this
   // list spans nests. Deletion rows are never selectable — they resolve
   // through their own flow and carry a different decision.
@@ -205,7 +208,33 @@ export default function MyWorkPage() {
   // not delete (CU-wdqcq01pe5).
   const isArchiveAsk = (w: api.WorkItem) => w.target_type === "nest_archive";
   const workItemKind = (w: api.WorkItem) =>
-    w.type !== "deletion" ? "Review" : isArchiveAsk(w) ? "Archive" : "Deletion";
+    w.type === "access"
+      ? "Access"
+      : w.type !== "deletion"
+        ? "Review"
+        : isArchiveAsk(w)
+          ? "Archive"
+          : "Deletion";
+
+  // Access requests (CU-wdqcq041jn): approve grants the access straight away;
+  // deny opens a dialog for an optional note to the requester.
+  const approveAccessItem = async (w: api.WorkItem) => {
+    setApprovingAccessId(w.request_id!);
+    try {
+      await api.approveAccessRequest(w.nest_id, w.request_id!);
+      toast.success(`${w.requested_by} can now ${w.level === "read" ? "view" : "edit"} "${w.title}"`);
+      dropWorkItem(w);
+    } catch (err: any) {
+      toast.error(err?.message || "Couldn't approve the request");
+    } finally {
+      setApprovingAccessId(null);
+    }
+  };
+  const denyAccessItem = async (note: string) => {
+    const w = denyAccessTarget!;
+    await api.denyAccessRequest(w.nest_id, w.request_id!, note || undefined);
+    dropWorkItem(w);
+  };
 
   // Resolve a deletion flag straight from the inbox. Delete needs a confirm and
   // decline needs a note, so both go through ReasonDialog; the handlers throw
@@ -245,7 +274,10 @@ export default function MyWorkPage() {
   // not a document id — opening the editor on it lands on a page for a node
   // that was never there. Send those to the nest instead.
   const openWorkItem = (w: api.WorkItem) => {
-    if (w.type === "deletion" && w.target_type && w.target_type !== "document") {
+    if (
+      (w.type === "deletion" && w.target_type && w.target_type !== "document") ||
+      (w.type === "access" && w.target_type !== "node")
+    ) {
       onSelectNest(w.nest_id, w.nest_name, false, false);
       return;
     }
@@ -272,9 +304,7 @@ export default function MyWorkPage() {
   const dropWorkItem = (w: api.WorkItem) => {
     setWork((prev) => ({
       ...prev,
-      items: prev.items.filter(
-        (i) => !(i.nest_id === w.nest_id && i.node_id === w.node_id),
-      ),
+      items: prev.items.filter((i) => workItemKey(i) !== workItemKey(w)),
     }));
     // A row resolved on its own can't stay in the batch selection.
     setWorkSelected((prev) => {
@@ -494,7 +524,7 @@ export default function MyWorkPage() {
                   {[...reviewItems, ...requestItems].map((w, i) => {
                     const key = `${w.nest_id}:${w.node_id}`;
                     return (
-                      <Fragment key={key}>
+                      <Fragment key={workItemKey(w)}>
                       {i === reviewItems.length && (
                         <div className="bg-muted/40 px-4 py-2 text-sm text-muted-foreground">
                           {requestItems.length} {requestItems.length === 1 ? "request" : "requests"} · approve or reject each one
@@ -539,7 +569,27 @@ export default function MyWorkPage() {
                           </span>
                         </button>
                         <div className="flex items-center gap-2 shrink-0">
-                          {w.type === "deletion" ? (
+                          {w.type === "access" ? (
+                            <>
+                              <Button
+                                variant="outline"
+                                className={APPROVE_BUTTON_CLASS}
+                                onClick={() => void approveAccessItem(w)}
+                                disabled={approvingAccessId === w.request_id}
+                                data-testid="my-work-access-approve"
+                              >
+                                <CheckCircle2 className="h-4 w-4 mr-2" /> Approve
+                              </Button>
+                              <Button
+                                variant="outline"
+                                className={REJECT_BUTTON_CLASS}
+                                onClick={() => setDenyAccessTarget(w)}
+                                data-testid="my-work-access-deny"
+                              >
+                                <XCircle className="h-4 w-4 mr-2" /> Deny
+                              </Button>
+                            </>
+                          ) : w.type === "deletion" ? (
                             <>
                               {/* Honouring an archive ask archives — it is an
                                   approval, not a destruction, so it says so and
@@ -604,7 +654,7 @@ export default function MyWorkPage() {
                 <div className="rounded-lg border divide-y overflow-hidden">
                   {work.waiting.map((w) => (
                     <div
-                      key={`${w.nest_id}:${w.node_id}`}
+                      key={workItemKey(w)}
                       className="flex items-center gap-3 px-4 py-2 hover:bg-muted/40 group text-sm"
                     >
                       <button
@@ -614,16 +664,18 @@ export default function MyWorkPage() {
                         <span className="font-medium truncate">{w.title}</span>
                         <span className="text-xs text-muted-foreground shrink-0">
                           in {w.nest_name} ·{" "}
-                          {w.type === "deletion" ? "requested" : "submitted"}{" "}
+                          {w.type === "review" ? "submitted" : "requested"}{" "}
                           {relTime(w.requested_at)}
                         </span>
                         <span className="flex-1" />
                         <span className="text-xs text-muted-foreground">
-                          {w.type !== "deletion"
-                            ? "Pending Review"
-                            : isArchiveAsk(w)
-                              ? "Archive Requested"
-                              : "Deletion Requested"}
+                          {w.type === "access"
+                            ? "Access Requested"
+                            : w.type !== "deletion"
+                              ? "Pending Review"
+                              : isArchiveAsk(w)
+                                ? "Archive Requested"
+                                : "Deletion Requested"}
                         </span>
                       </button>
                       {w.type === "deletion" && w.request_id && (
@@ -742,6 +794,21 @@ export default function MyWorkPage() {
           }
           destructive={workBulkAction === "reject"}
           onConfirm={(reason) => runWorkBulkReview(workBulkAction, reason)}
+        />
+      )}
+
+      {denyAccessTarget && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setDenyAccessTarget(null)}
+          title={`Deny ${denyAccessTarget.requested_by}'s request?`}
+          description={`They asked to edit "${denyAccessTarget.title}"${denyAccessTarget.reason ? `: "${denyAccessTarget.reason}"` : ""}. They keep the access they have now and are told your answer.`}
+          label="Note to them (optional)"
+          optionalReason
+          placeholder="e.g. pricing is locked until the quarter closes"
+          confirmLabel="Deny"
+          destructive
+          onConfirm={denyAccessItem}
         />
       )}
 

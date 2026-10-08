@@ -48,6 +48,9 @@ const EVENT_EMOJI: Record<string, string> = {
   deletion_requested: ":wastebasket:",
   deletion_deleted: ":wastebasket:",
   deletion_declined: ":no_entry_sign:",
+  access_requested: ":key:",
+  access_approved: ":key:",
+  access_denied: ":no_entry_sign:",
 };
 
 /** Event kinds review-service ALSO sends through notify.ts's debounced
