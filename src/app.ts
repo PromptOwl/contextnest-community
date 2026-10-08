@@ -847,6 +847,7 @@ export function createApp(): Hono<AuthEnv> {
     // Own-provider keys PromptOwl holds for this licence (masked tails only).
     own_providers: hasEntitlement("byok") ? getOwnGateway()?.providers ?? {} : {},
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
+    metacognition_enabled: config.FEATURE_METACOGNITION,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
@@ -1148,6 +1149,17 @@ export function createApp(): Hono<AuthEnv> {
           name: "FEATURE_SUBAGENT_RUNS",
           value: body.subagent_runs_enabled ? "true" : null,
         });
+      }
+    }
+    // Metacognition agents run on the plane's runs and schedules, so they
+    // need it on, same as sub-agent runs. Off clears the row (falls to env).
+    if ("metacognition_enabled" in body) {
+      const planeOn =
+        "workflow_plane_enabled" in body ? !!body.workflow_plane_enabled : config.FEATURE_WORKFLOW_PLANE;
+      if (body.metacognition_enabled && !planeOn) {
+        addError("metacognition_enabled", "Metacognition agents require the Workflow plane to be turned on.");
+      } else {
+        pending.push({ name: "FEATURE_METACOGNITION", value: body.metacognition_enabled ? "true" : null });
       }
     }
     // Sub-agent recursion caps. Same [min,max] the config getters clamp to, so

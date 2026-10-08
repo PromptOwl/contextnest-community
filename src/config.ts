@@ -613,6 +613,14 @@ export const config = {
   get METACOGNITION_ALLOW_PRIVATE_URLS(): boolean {
     return process.env.METACOGNITION_ALLOW_PRIVATE_URLS === "true";
   },
+  /** Manual/hook starts per metacognition agent per hour; bounds spend. */
+  get METACOGNITION_STARTS_PER_HOUR(): number {
+    return Number(process.env.METACOGNITION_STARTS_PER_HOUR) || 30;
+  },
+  /** How often a running metacognition agent checks for a person's cancel (ms). */
+  get METACOGNITION_CANCEL_POLL_MS(): number {
+    return Number(process.env.METACOGNITION_CANCEL_POLL_MS) || 2000;
+  },
   /** Hard ceiling on sub-agent nesting depth — keeps the call tree finite
    *  (haltable / statically bounded). Clamped to [1, 32]. */
   get SUBAGENT_MAX_DEPTH(): number {

@@ -199,7 +199,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setTypeTableEnabled(h.type_table_enabled !== false);
         setTypeTaskEnabled(h.type_task_enabled === true);
         setHootieEnabled(h.hootie_enabled === true);
-      setMetacognitionEnabled(h.metacognition_enabled === true);
+        setMetacognitionEnabled(h.metacognition_enabled === true);
         setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
         setRunnerKeyConfigured(!!h.runner_key_configured);
         setSharedDeployment(!!h.shared_deployment);

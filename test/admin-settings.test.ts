@@ -284,6 +284,33 @@ describe("/admin/settings — validation", () => {
     expect(await persistedSetting("FEATURE_SUBAGENT_RUNS")).toBeNull();
   });
 
+  it("metacognition agents: refused without the plane, toggled on and off with it", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const refused = await jsonRequest(app, "PATCH", "/admin/settings", { metacognition_enabled: true }, admin.apiKey);
+    expect(refused.status).toBe(400);
+    expect(refused.data.fieldErrors).toHaveProperty("metacognition_enabled");
+    expect(await persistedSetting("FEATURE_METACOGNITION")).toBeUndefined();
+
+    const on = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { workflow_plane_enabled: true, metacognition_enabled: true },
+      admin.apiKey,
+    );
+    expect(on.status).toBe(200);
+    expect(on.data.settings.metacognition_enabled).toBe(true);
+    expect(await persistedSetting("FEATURE_METACOGNITION")).toBe("true");
+    const health = await jsonRequest(app, "GET", "/health");
+    expect(health.data.metacognition_enabled).toBe(true);
+
+    const off = await jsonRequest(app, "PATCH", "/admin/settings", { metacognition_enabled: false }, admin.apiKey);
+    expect(off.data.settings.metacognition_enabled).toBe(false);
+    expect(await persistedSetting("FEATURE_METACOGNITION")).toBeNull();
+  });
+
   it("applies NOTHING when one field of a multi-field PATCH is invalid", async () => {
     const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
     const admin = await registerUser(app, OWNER_EMAIL);

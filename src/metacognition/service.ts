@@ -76,12 +76,9 @@ export async function waitForMetacognitionRuns(): Promise<void> {
   await Promise.allSettled([...inFlight]);
 }
 
-/** How often a run checks whether a person cancelled it. */
-const WATCH_MS = Number(process.env.METACOGNITION_CANCEL_POLL_MS) || 2000;
-
 /** Manual/hook/trigger starts per agent per hour (schedules are bounded by
  *  their interval). Any write-tier member can press Run; this bounds spend. */
-const startsPerHour = () => Number(process.env.METACOGNITION_STARTS_PER_HOUR) || 30;
+const startsPerHour = () => config.METACOGNITION_STARTS_PER_HOUR;
 
 /** Tool calls run per model turn; the rest are answered "not run". */
 const TOOL_CALLS_PER_TURN = 8;
@@ -206,6 +203,17 @@ async function finish(runId: string, status: "succeeded" | "failed" | "cancelled
   }
 }
 
+async function recordCancelledUsage(runId: string, trace: Record<string, unknown>): Promise<void> {
+  const db = getDb();
+  const row = (await db.get("SELECT trace FROM runs WHERE id = ? AND status = 'cancelled'", [runId])) as { trace: string | null } | undefined;
+  if (!row) return;
+  const prior = (safeJson(row.trace) as Record<string, unknown> | null) ?? {};
+  await db.run("UPDATE runs SET trace = ? WHERE id = ? AND status = 'cancelled'", [
+    JSON.stringify({ ...prior, ...trace, stopped_by: "cancelled" }),
+    runId,
+  ]);
+}
+
 async function executeRun(runId: string, credentialOverride?: ModelCredential | null): Promise<void> {
   const db = getDb();
   const run = (await db.get("SELECT * FROM runs WHERE id = ?", [runId])) as
@@ -279,7 +287,7 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
         ac.abort(new Error("cancelled"));
       }
     }).catch(() => {});
-  }, WATCH_MS);
+  }, config.METACOGNITION_CANCEL_POLL_MS);
   const mcp = new McpPool(mcpTokenFrom(env));
   let stoppedBy = "end_turn";
   let summary = "";
@@ -403,7 +411,9 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
       stoppedBy = "max_seconds";
       await finish(runId, "succeeded", traceOf());
     } else if (cancelled || (err instanceof ConflictError && (await closedUnderUs(runId)))) {
-      // Cancelled by a person mid-run: the row is already terminal.
+      // Cancelled by a person mid-run: the row is already terminal, but the
+      // tokens it spent still belong in the trace.
+      await recordCancelledUsage(runId, traceOf());
     } else {
       console.error(`[metacognition] run ${runId} failed`, err);
       await finish(runId, "failed", { ...traceOf(), error: describe(err) });

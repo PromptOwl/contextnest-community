@@ -625,6 +625,15 @@ describe("round-3 guards", () => {
     expect(sawAbort).toBe(true);
     // Nothing more was asked of the model after the cancel.
     expect(requests).toHaveLength(1);
+    // What it spent before the cancel still lands on the trace.
+    let trace: any;
+    for (let i = 0; i < 400 && !trace?.billing; i++) {
+      trace = (await jsonRequest(app, "GET", `/runs/${r.data.run_id}`, undefined, owner.apiKey)).data.run.trace;
+      if (!trace?.billing) await new Promise((res) => setTimeout(res, 25));
+    }
+    expect(trace.billing).toBe("promptowl_credits");
+    expect(trace.usage).toBeDefined();
+    expect(trace.stopped_by).toBe("cancelled");
     void getDb;
   });
 

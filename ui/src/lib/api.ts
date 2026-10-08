@@ -307,6 +307,7 @@ export interface AdminSettings {
    *  such as `ollama/…` when routed through a gateway). */
   hootie_model: string;
   subagent_runs_enabled: boolean;
+  metacognition_enabled: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
