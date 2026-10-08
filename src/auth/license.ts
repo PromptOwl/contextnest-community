@@ -176,6 +176,17 @@ export function getOwnGateway(): OwnGateway | null {
   return currentOwnGateway;
 }
 
+const ownGatewaySummary = (g: OwnGateway | null) =>
+  g ? `on …${g.key.slice(-4)}, ${g.models.length} models (${Object.keys(g.providers).join(", ") || "no providers"})` : "off";
+
+/** Logged only when it changes, so the 60s licence poll stays quiet. */
+function setOwnGateway(next: OwnGateway | null): void {
+  const before = ownGatewaySummary(currentOwnGateway);
+  const after = ownGatewaySummary(next);
+  if (before !== after) console.log(`[license] own-provider key: ${after}`);
+  currentOwnGateway = next;
+}
+
 function parseOwnGateway(raw: unknown): OwnGateway | null {
   const base = parseGateway(raw);
   if (!base) return null;
@@ -567,7 +578,7 @@ function cachedFeatures(json: string | null | undefined): string[] | null {
 async function fromCache(cached: CachedLicenseRow): Promise<LicenseInfo> {
   if (cached.owner_email) lastOwnerEmail = cached.owner_email;
   currentGateway = await gatewayFromCache(cached.gateway_json, parseGateway);
-  currentOwnGateway = await gatewayFromCache(cached.own_gateway_json, parseOwnGateway);
+  setOwnGateway(await gatewayFromCache(cached.own_gateway_json, parseOwnGateway));
   return withMeta({
     valid: true,
     tier: cached.tier,
@@ -596,7 +607,7 @@ export async function validateLicense(
   currentLicense = info;
   if (!info.valid) {
     currentGateway = null;
-    currentOwnGateway = null;
+    setOwnGateway(null);
   }
   return info;
 }
@@ -790,7 +801,7 @@ async function _validateLicenseImpl(
       const gatewayJson = currentGateway
         ? await encryptSecret(JSON.stringify(currentGateway))
         : null;
-      currentOwnGateway = parseOwnGateway(data.own_gateway);
+      setOwnGateway(parseOwnGateway(data.own_gateway));
       const ownGatewayJson = currentOwnGateway
         ? await encryptSecret(JSON.stringify(currentOwnGateway))
         : null;

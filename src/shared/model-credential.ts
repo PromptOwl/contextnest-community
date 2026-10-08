@@ -47,6 +47,13 @@ export function resolveModelCredential(
     : null;
 }
 
+/** For logs: which key a call uses and why; the key only by its last 4 characters. */
+export function credentialLabel(c: ModelCredential): string {
+  const via =
+    c.source === "promptowl" ? "promptowl-credits" : getOwnGateway()?.key === c.apiKey ? "own-provider(LiteLLM)" : "own-anthropic";
+  return `key=${via} …${c.apiKey.slice(-4)} base=${c.baseUrl || "anthropic"}`;
+}
+
 /** "default-claude/claude-sonnet-5" → "claude-sonnet-5": PromptOwl's instance prefix off. */
 export function bareModelName(id: string): string {
   const i = id.indexOf("/");

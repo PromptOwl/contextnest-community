@@ -579,6 +579,11 @@ export const config = {
   get HOOTIE_MODEL(): string {
     return process.env.HOOTIE_MODEL || "claude-sonnet-5"; // efficient default (pricing spec §6.6)
   },
+  /** Testing aid: log Hootie's full model request and answer (nest content!).
+   *  Off by default; summaries (model, key tail, tokens) are always logged. */
+  get HOOTIE_DEBUG_LOG(): boolean {
+    return process.env.HOOTIE_DEBUG_LOG === "true";
+  },
   /**
    * Where the Anthropic-shaped model calls go. Empty = Anthropic directly.
    * Set to a LiteLLM (or PromptOwl) gateway to route Hootie AND agent runs

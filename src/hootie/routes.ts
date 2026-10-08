@@ -26,7 +26,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AuthEnv } from "../auth/middleware.js";
 import { config } from "../config.js";
-import { resolveModelCredential, hootieModel, resolveGatewayModel } from "../shared/model-credential.js";
+import { resolveModelCredential, hootieModel, resolveGatewayModel, credentialLabel } from "../shared/model-credential.js";
 import { hasEntitlement } from "../auth/entitlements.js";
 import {
   resolveContext,
@@ -101,6 +101,7 @@ hootieRoutes.post("/chat", async (c) => {
   }
   // Stored as a plain name; on PromptOwl's gateway the team prefix goes on here.
   const callModel = await resolveGatewayModel(credential, hootieModel(credential));
+  console.log(`[hootie] model=${config.HOOTIE_MODEL} call=${callModel} ${credentialLabel(credential)}`);
 
   let body: ChatBody;
   try {

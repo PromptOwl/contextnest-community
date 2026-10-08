@@ -58,6 +58,7 @@ export async function* streamAnswer(params: AnswerParams): AsyncGenerator<string
     yield* answer(client, params, true, state);
   } catch (err) {
     if (state.started || (err as { status?: number })?.status !== 400) throw err;
+    console.log(`[hootie] model=${params.model} rejected the tuned request (400); retrying bare`);
     yield* answer(client, params, false);
     plainModels.add(key);
   }
@@ -69,6 +70,16 @@ async function* answer(
   tuned: boolean,
   state = { started: false },
 ): AsyncGenerator<string> {
+  const startedAt = Date.now();
+  const question = params.turns[params.turns.length - 1]?.content ?? "";
+  console.log(
+    `[hootie] → request model=${params.model} base=${params.baseUrl || "anthropic"} tuned=${tuned} ` +
+      `system=${params.system.length} chars turns=${params.turns.length} question=${question.length} chars`,
+  );
+  if (config.HOOTIE_DEBUG_LOG) {
+    console.log("[hootie][debug] system:\n" + params.system);
+    console.log("[hootie][debug] turns:\n" + JSON.stringify(params.turns, null, 2));
+  }
   const stream = client.messages.stream(
     tuned
       ? {
@@ -102,6 +113,14 @@ async function* answer(
     }
   }
   const final = await stream.finalMessage();
+  const text = (final.content ?? []).map((b) => (b.type === "text" ? b.text : "")).join("");
+  const u = final.usage;
+  console.log(
+    `[hootie] ← response model=${final.model} stop=${final.stop_reason} in=${u?.input_tokens ?? "?"} ` +
+      `out=${u?.output_tokens ?? "?"} cache_read=${u?.cache_read_input_tokens ?? 0} ` +
+      `text=${text.length} chars ${((Date.now() - startedAt) / 1000).toFixed(1)}s`,
+  );
+  if (config.HOOTIE_DEBUG_LOG) console.log("[hootie][debug] answer:\n" + text);
   if (final.stop_reason === "refusal") {
     throw new ModelRefusedError(
       final.stop_details?.explanation || "The model declined to answer that.",
