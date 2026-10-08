@@ -45,6 +45,7 @@ export interface EmailEventDetails {
   status:
     | "approved"
     | "mention"
+    | "comment_reply"
     | "rejected"
     | "pending_review"
     | "shared"
@@ -84,6 +85,7 @@ const STATUS_META: Record<
 > = {
   approved: { subjectWord: "approved", label: "Approved", color: "#16a34a" },
   mention: { subjectWord: "mentioned you", label: "Mention", color: "#7c3aed" },
+  comment_reply: { subjectWord: "replied", label: "Reply", color: "#7c3aed" },
   rejected: { subjectWord: "rejected", label: "Rejected", color: "#dc2626" },
   pending_review: {
     subjectWord: "awaiting review",
@@ -203,6 +205,19 @@ const TEMPLATES: Record<EmailEventDetails["status"], EmailTemplate> = {
     linkLabel: "Open document",
     lineT: (x) => `You were mentioned in ${x.title}${x.byT}${x.noteT}.`,
     lineH: (x) => `You were mentioned in ${x.doc}${x.byH}${x.noteH}.`,
+    rows: (x) => [plainRow("Nest", x.d.path)],
+  },
+  // A reply on a comment thread the recipient took part in. Addressed to
+  // "you" like a mention; `note` carries the reply's own words.
+  comment_reply: {
+    heading: (x) =>
+      `${x.d.actor || "Someone"} replied to a comment on ${x.title}`,
+    detailsHeader: "Document details",
+    linkLabel: "Open document",
+    lineT: (x) =>
+      `There's a new reply in a comment thread you're part of on ${x.title}${x.byT}${x.noteT}.`,
+    lineH: (x) =>
+      `There's a new reply in a comment thread you're part of on ${x.doc}${x.byH}${x.noteH}.`,
     rows: (x) => [plainRow("Nest", x.d.path)],
   },
   rejected: {

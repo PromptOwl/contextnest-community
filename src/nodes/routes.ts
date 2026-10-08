@@ -1,4 +1,5 @@
 import { recordNodeAccess } from "../governance/access-log.js";
+import type { TaskFieldsPatch } from "./task-fields.js";
 import { Hono } from "hono";
 import { parseDocument } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
@@ -58,6 +59,22 @@ import {
   toNodeResponse,
   bodyOnly,
 } from "./service.js";
+
+/** Board fields off a request body, keeping "absent" (leave alone) distinct
+ *  from null (clear). Anything that isn't a string or null is refused rather
+ *  than coerced — a number for a due date is a client bug worth surfacing. */
+function taskFieldsFromBody(body: Record<string, unknown>): TaskFieldsPatch {
+  const out: TaskFieldsPatch = {};
+  for (const k of ["assignee", "due", "priority", "parent"] as const) {
+    const v = body[k];
+    if (v === undefined) continue;
+    if (v !== null && typeof v !== "string") {
+      throw new ValidationError(`${k} must be a string or null`);
+    }
+    out[k] = v;
+  }
+  return out;
+}
 
 export const nodeRoutes = new Hono<AuthEnv>();
 
@@ -152,6 +169,10 @@ nodeRoutes.post("/", async (c) => {
     folder?: string;
     prime?: boolean;
     client?: unknown;
+    assignee?: string | null;
+    due?: string | null;
+    priority?: string | null;
+    parent?: string | null;
   }>();
 
   if (!body.title || !body.content) {
@@ -207,6 +228,7 @@ nodeRoutes.post("/", async (c) => {
       folder: body.folder,
       prime: body.prime,
       client: attributeRequest(c, body.client),
+      ...taskFieldsFromBody(body),
     },
     authorEmail,
   );
@@ -580,6 +602,10 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     prime?: boolean | null;
     client?: unknown;
     type?: string;
+    assignee?: string | null;
+    due?: string | null;
+    priority?: string | null;
+    parent?: string | null;
   }>();
   if (body.type !== undefined && typeof body.type !== "string") {
     throw new ValidationError("type must be a string");
@@ -620,6 +646,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       prime: body.prime,
       client: attributeRequest(c, body.client),
       type: body.type,
+      ...taskFieldsFromBody(body),
     },
     authorEmail,
   );

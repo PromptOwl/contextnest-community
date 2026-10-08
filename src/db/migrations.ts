@@ -1731,6 +1731,41 @@ export function runMigrations(db: Database.Database): void {
     }
     recordMigration("049_license_cache_gateway");
   }
+
+  // 051: saved Board views (CU-wdqcq03xn2). One row per named board on a nest;
+  //   the view itself (dimension, columns, filter, per-column card rank) is a
+  //   JSON blob the UI owns — board-routes.ts validates its shape. private=1
+  //   boards are visible only to created_by. 050 is taken on another branch.
+  if (!hasMigration("051_boards")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS boards (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        private INTEGER NOT NULL DEFAULT 0,
+        position INTEGER NOT NULL DEFAULT 0,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_boards_nest ON boards(nest_id, position);
+    `);
+    recordMigration("051_boards");
+  }
+
+  // 052: nests.done_tags — which board column tags mean "completed" for a
+  //   task (CU-wdqcq03xn2). Moving a task into one stamps completed_at; out of
+  //   one clears it. Comma list like prime_tags; defaults to "done".
+  if (!hasMigration("052_nest_done_tags")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("done_tags")) {
+      db.exec("ALTER TABLE nests ADD COLUMN done_tags TEXT NOT NULL DEFAULT 'done'");
+    }
+    recordMigration("052_nest_done_tags");
+  }
 }
 
 /**

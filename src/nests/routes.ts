@@ -31,6 +31,8 @@ import {
   setPrimeOnlyReview,
   nestPrimeTags,
   setPrimeTags,
+  nestDoneTags,
+  setDoneTags,
   nestRequiresPushConfirmation,
   setRequirePushConfirmation,
 } from "./service.js";
@@ -740,6 +742,7 @@ nestRoutes.get("/:nestId/settings", async (c) => {
     allow_self_approve: await nestAllowsSelfApprove(nestId),
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
+    done_tags: await nestDoneTags(nestId),
     // Push Confirmation Gate — superadmin-only to SET (see PATCH), readable by
     // anyone who can read the nest so the CLI/UI knows the posture.
     require_push_confirmation: await nestRequiresPushConfirmation(nestId),
@@ -773,6 +776,7 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     allow_self_approve?: boolean;
     prime_only_review?: boolean;
     prime_tags?: string[] | string;
+    done_tags?: string[] | string;
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
   }>();
@@ -837,6 +841,13 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
       Array.isArray(body.prime_tags) ? body.prime_tags : [body.prime_tags],
     );
   }
+  // Done columns only change how FUTURE task moves are stamped.
+  if (body.done_tags !== undefined) {
+    await setDoneTags(
+      nestId,
+      Array.isArray(body.done_tags) ? body.done_tags : [body.done_tags],
+    );
+  }
   // Creator-reviews is likewise future-only: it stewards nobody retroactively
   // and turning it off leaves every steward row it created in place.
   if (typeof body.creator_is_reviewer === "boolean") {
@@ -848,6 +859,7 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     allow_self_approve: await nestAllowsSelfApprove(nestId),
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
+    done_tags: await nestDoneTags(nestId),
     require_push_confirmation: await nestRequiresPushConfirmation(nestId),
     creator_is_reviewer: await nestCreatorIsReviewer(nestId),
     wiped,

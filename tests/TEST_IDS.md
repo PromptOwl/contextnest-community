@@ -47,6 +47,17 @@ Add a row here whenever you add a `data-testid` to the UI.
 | `pin-nest` | Pin nest button |
 | `nest-show-more` | Show more nests button |
 
+## My Work (`ui/src/pages/app/my-work/page.tsx`)
+
+| Test ID | Element |
+|---|---|
+| `document-sidebar-dashboard-my-work` | Rail entry for My Work (carries the pending-count badge) — `ui/src/components/DocumentSidebar.tsx` |
+| `work-select-all` | Batch bar: select every review checkbox |
+| `work-bulk-approve` | Batch bar: Approve N |
+| `work-bulk-reject` | Batch bar: Reject N |
+| `reason-dialog-input` | ReasonDialog reason textarea — `ui/src/components/governance/ReasonDialog.tsx` |
+| `reason-dialog-confirm` | ReasonDialog confirm button |
+
 Many more test IDs already exist across `ui/src/` (governance dialogs,
 document editor, nest tabs, …) — grep for `data-testid` and document them
 here as page objects start using them.

@@ -222,6 +222,7 @@ export async function getHealth() {
     type_artifact_enabled?: boolean;
     shared_deployment?: boolean;
     type_table_enabled?: boolean;
+    type_task_enabled?: boolean;
     subagent_runs_enabled?: boolean;
     subagent_max_depth?: number;
     subagent_max_children?: number;
@@ -286,6 +287,8 @@ export interface AdminSettings {
    *  the type only — existing nodes still read/render/version. */
   type_artifact_enabled: boolean;
   type_table_enabled: boolean;
+  /** The server accepts `task` nodes (its engine knows the type). */
+  type_task_enabled?: boolean;
   /** Hootie in the nest (default OFF — admins opt in). */
   hootie_enabled: boolean;
   /** Custom assistant identity (enterprise). "" = default. Returned even
@@ -1341,6 +1344,11 @@ export async function createNode(
     schedule?: string;
     /** Flag as prime (always needs approval). Owner/admin only. */
     prime?: boolean;
+    /** Board fields — any node; `null` clears (see src/nodes/task-fields.ts). */
+    assignee?: string | null;
+    due?: string | null;
+    priority?: string | null;
+    parent?: string | null;
   },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
@@ -1421,6 +1429,11 @@ export async function updateNode(
     prime?: boolean | null;
     /** Re-type the node ("Turn into…"). Same accepted set as create. */
     type?: string;
+    /** Board fields — any node; `null` clears (see src/nodes/task-fields.ts). */
+    assignee?: string | null;
+    due?: string | null;
+    priority?: string | null;
+    parent?: string | null;
   },
   baseVersion?: number,
 ) {
@@ -2407,7 +2420,7 @@ export async function listCollaborators(nestId: string) {
  *  so a read-only reviewer's comment box can offer the roster too — unlike
  *  listCollaborators, which needs write. */
 export async function listMentionablePeople(nestId: string) {
-  return request<{ people: Array<{ email: string; name: string | null }> }>(
+  return request<{ people: Array<{ email: string; name: string | null; member?: boolean }> }>(
     `/nests/${nestId}/mentionable`,
   );
 }
@@ -2770,6 +2783,18 @@ export interface WorkPagination {
   has_more: boolean;
 }
 
+/** A board card assigned to the caller (open ones only), from /me/work. */
+export interface AssignedItem {
+  nest_id: string;
+  nest_name: string;
+  node_id: string;
+  title: string;
+  type: string;
+  due: string | null;
+  priority: string | null;
+  assigned_at: string | null;
+}
+
 export async function getMyWork(opts?: { limit?: number; offset?: number }) {
   const q = new URLSearchParams();
   if (opts?.limit != null) q.set("limit", String(opts.limit));
@@ -2779,6 +2804,7 @@ export async function getMyWork(opts?: { limit?: number; offset?: number }) {
     items: WorkItem[];
     waiting: WorkItem[];
     notifications?: WatcherNotification[];
+    assigned?: AssignedItem[];
     pagination?: WorkPagination;
   }>(`/me/work${qs ? `?${qs}` : ""}`);
 }
@@ -3345,4 +3371,64 @@ export async function chatWithHootie(
     }
   }
   if (buffer.trim()) dispatch(buffer);
+}
+
+// ─── Boards (saved Board views) ─────────────────────────────────────────
+
+export interface SavedBoard {
+  id: string;
+  nest_id: string;
+  name: string;
+  private: boolean;
+  position: number;
+  created_by: string;
+  created_by_email: string | null;
+  /** BoardSettings plus filterTags and per-column ranks; see board-service.ts. */
+  config: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listBoards(nestId: string) {
+  return request<{ boards: SavedBoard[] }>(`/nests/${nestId}/boards`);
+}
+
+export async function createBoard(
+  nestId: string,
+  data: { name: string; private?: boolean; config?: Record<string, any> },
+) {
+  return request<{ board: SavedBoard }>(`/nests/${nestId}/boards`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateBoard(
+  nestId: string,
+  boardId: string,
+  data: { name?: string; private?: boolean; config?: Record<string, any>; position?: number },
+) {
+  return request<{ board: SavedBoard }>(`/nests/${nestId}/boards/${boardId}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+/** Set one column's card order (merged server-side, per column). */
+export async function rankBoardColumn(
+  nestId: string,
+  boardId: string,
+  key: string,
+  order: string[],
+) {
+  return request<{ board: SavedBoard }>(`/nests/${nestId}/boards/${boardId}/rank`, {
+    method: "POST",
+    body: JSON.stringify({ key, order }),
+  });
+}
+
+export async function deleteBoard(nestId: string, boardId: string) {
+  return request<{ deleted: boolean }>(`/nests/${nestId}/boards/${boardId}`, {
+    method: "DELETE",
+  });
 }

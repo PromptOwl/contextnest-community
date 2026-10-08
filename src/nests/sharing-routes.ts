@@ -159,7 +159,12 @@ sharingRoutes.get("/mentionable", async (c) => {
   // got access is not the mention picker's business. Gate above is on the
   // roster; the directory widening applies only after it.
   return c.json({
-    people: (await withDirectory(people)).map((p) => ({ email: p.email, name: p.name })),
+    // `member`: on the nest, not a directory suggestion — only they can be assigned.
+    people: (await withDirectory(people)).map((p) => ({
+      email: p.email,
+      name: p.name,
+      member: p.source !== "directory",
+    })),
   });
 });
 

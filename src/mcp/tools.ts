@@ -36,7 +36,10 @@ import {
   setThreadStatus,
   syncAnnotationsNode,
 } from "../annotations/service.js";
-import { notifyCommentMentions } from "../governance/mention-notify.js";
+import {
+  notifyCommentMentions,
+  notifyCommentReply,
+} from "../governance/mention-notify.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
@@ -1601,6 +1604,8 @@ async function runTool(
           : `Resolved the thread on "${label}", recorded against ${thread.resolvedBy}.`;
       }
 
+      // addComment reopens a resolved thread. Not echoed in the confirmation,
+      // for the reason below: it would report the thread's state.
       const thread = threadId
         ? await addComment(nestId, node.id, threadId, userEmail, body)
         : await createThread(nestId, node.id, { body, anchor: null }, userEmail);
@@ -1609,17 +1614,31 @@ async function runTool(
       // be allowed to READ (the approval gate applies to context_comments, not
       // here), so the reply should tell them what THEY did and nothing about
       // what is already in the thread.
-      await notifyCommentMentions({
-        nestId,
-        nodeId: node.id,
-        body,
-        actorEmail: userEmail,
-        // Without this the notification still reaches the person, but its
-        // "Open document" link falls back to PUBLIC_BASE_URL and comes out
-        // empty when that isn't configured — every other notifying tool in
-        // this file passes it, and the REST route passes requestBaseUrl.
-        baseUrl: ctx.baseUrl,
-      });
+      // A reply also notifies the thread's earlier participants, the same
+      // fan-out the REST reply route uses.
+      //
+      // baseUrl: without it the notification still reaches the person, but
+      // its "Open document" link falls back to PUBLIC_BASE_URL and comes out
+      // empty when that isn't configured — every other notifying tool in
+      // this file passes it, and the REST route passes requestBaseUrl.
+      if (threadId) {
+        await notifyCommentReply({
+          nestId,
+          nodeId: node.id,
+          thread,
+          body,
+          actorEmail: userEmail,
+          baseUrl: ctx.baseUrl,
+        });
+      } else {
+        await notifyCommentMentions({
+          nestId,
+          nodeId: node.id,
+          body,
+          actorEmail: userEmail,
+          baseUrl: ctx.baseUrl,
+        });
+      }
       await syncAnnotationsNode(nestId, node.id, userEmail);
       return threadId
         ? `Replied on "${label}", in thread ${thread.id}.`

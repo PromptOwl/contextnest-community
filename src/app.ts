@@ -6,6 +6,8 @@ import { mergeFrameAncestors } from "./shared/artifact-sandbox.js";
 import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
+import { boardRoutes } from "./nests/board-routes.js";
+import { listAssignedTo } from "./nodes/assigned-service.js";
 import { headlessRoutes } from "./nests/headless-routes.js";
 import { countPeople } from "./auth/headless.js";
 import { brandingRoutes } from "./nests/branding-routes.js";
@@ -68,7 +70,7 @@ import {
   markNotificationsRead,
 } from "./governance/notify-service.js";
 import { definitionRoutes } from "./definitions/routes.js";
-import { isDerivedAnnotationsNode } from "./nodes/service.js";
+import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import {
   pdfNodeRoutes,
@@ -601,6 +603,9 @@ export function createApp(): Hono<AuthEnv> {
       // API would refuse it — existing nodes of the type stay readable.
       type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
       type_table_enabled: config.TYPE_TABLE_ENABLED,
+      // Project-board tasks — on once the engine knows the type (see
+      // ACCEPTED_NODE_TYPES). Off → the board's "+ Add task" makes documents.
+      type_task_enabled: ACCEPTED_NODE_TYPES.has("task"),
       // Hootie in the nest (default OFF — admins opt in). Off → POST
       // /nests/:id/chat 404s and the UI hides the launcher. Whether it can
       // actually answer is runner_key_configured above — the UI shows the
@@ -817,6 +822,7 @@ export function createApp(): Hono<AuthEnv> {
     promptowl_teams_enabled: config.PROMPTOWL_TEAMS_ENABLED,
     type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
     type_table_enabled: config.TYPE_TABLE_ENABLED,
+    type_task_enabled: ACCEPTED_NODE_TYPES.has("task"),
     hootie_enabled: config.HOOTIE_ENABLED,
     // The model in use: the admin's pick, else the gateway's default (see hootieModel).
     hootie_model: hootieModel(resolveModelCredential()),
@@ -1974,10 +1980,17 @@ export function createApp(): Hono<AuthEnv> {
     const deletionsShown =
       items.filter((i) => i.type === "deletion").length +
       waiting.filter((i) => i.type === "deletion").length;
+    // Board cards assigned to me (open ones), across every nest I can see.
+    // Best-effort: a failure here must not take the reviews inbox down with it.
+    const assigned = await listAssignedTo(me, userId, nestName).catch((err) => {
+      console.error("[me/work] assigned list failed", err);
+      return [];
+    });
     return c.json({
       items,
       waiting,
       notifications,
+      assigned,
       pagination: {
         total: reviewTotal + deletionsShown,
         limit,
@@ -2941,6 +2954,7 @@ export function createApp(): Hono<AuthEnv> {
   // public links; the public render surface is the top-level /p route above.
   nestsApp.route("/:nestId/publications", publishRoutes);
   nestsApp.route("/:nestId/teams", nestTeamRoutes);
+  nestsApp.route("/:nestId/boards", boardRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);
