@@ -40,11 +40,6 @@ const HISTORICAL_MIGRATIONS = [
   "009_lowercase_emails",
   "010_sso_used_jti",
   "011_comments",
-  // 012 merges case-colliding SQLite user rows. Postgres can never have them:
-  // the NOCASE-unique idx_users_email_nocase (lower(email)) exists from table
-  // creation, so duplicates are rejected on insert and there's nothing to merge.
-  // Seed the id so bookkeeping matches SQLite and future incremental Postgres
-  // migrations gate correctly.
   "012_merge_case_colliding_users",
   "013_node_deletion_tombstones",
   "014_api_events",
@@ -85,6 +80,7 @@ const HISTORICAL_MIGRATIONS = [
   "049_license_cache_gateway",
   "051_boards",
   "052_nest_done_tags",
+  "053_license_cache_own_gateway",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -200,6 +196,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
     ALTER TABLE license_cache ADD COLUMN IF NOT EXISTS features_json TEXT;
     ALTER TABLE license_cache ADD COLUMN IF NOT EXISTS gateway_json TEXT;
+    ALTER TABLE license_cache ADD COLUMN IF NOT EXISTS own_gateway_json TEXT; -- own-provider key (migration 053)
 
     CREATE TABLE IF NOT EXISTS telemetry_events (
       id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

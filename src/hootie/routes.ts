@@ -26,7 +26,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AuthEnv } from "../auth/middleware.js";
 import { config } from "../config.js";
-import { resolveModelCredential, hootieModel, resolveGatewayModel } from "../shared/model-credential.js";
+import { resolveModelCredential, hootieModel, resolveGatewayModel, credentialLabel, ownModelRoute } from "../shared/model-credential.js";
 import { hasEntitlement } from "../auth/entitlements.js";
 import {
   resolveContext,
@@ -87,12 +87,12 @@ type MentionOutcome =
 
 hootieRoutes.post("/chat", async (c) => {
   if (!config.HOOTIE_ENABLED) return c.json({ error: "Not found" }, 404);
-  const credential = resolveModelCredential();
-  if (!credential) {
+  const baseCredential = resolveModelCredential();
+  if (!baseCredential) {
     return c.json(
       {
         error: hasEntitlement("byok")
-          ? "Hootie needs an Anthropic API key. A server admin can add one under Settings → General."
+          ? "Hootie needs a model key. A server admin can add one under Settings → Hootie → Model keys."
           : "Hootie runs on PromptOwl models, which arrive with this server's next licence check. If it persists, ask your administrator.",
         reason: "no_api_key",
       },
@@ -100,7 +100,13 @@ hootieRoutes.post("/chat", async (c) => {
     );
   }
   // Stored as a plain name; on PromptOwl's gateway the team prefix goes on here.
-  const callModel = await resolveGatewayModel(credential, hootieModel(credential));
+  const picked = hootieModel(baseCredential);
+  const gatewayModel = await resolveGatewayModel(baseCredential, picked);
+  // With byok, a provider the admin added their own key for runs on that key.
+  const own = ownModelRoute(gatewayModel);
+  const credential = own?.credential ?? baseCredential;
+  const callModel = own?.model ?? gatewayModel;
+  console.log(`[hootie] model=${picked} call=${callModel} ${credentialLabel(credential)}`);
 
   let body: ChatBody;
   try {

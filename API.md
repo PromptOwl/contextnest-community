@@ -1948,7 +1948,7 @@ Deterministic fact lookup against a **table** node (CSV body): fetch the exact r
 Same operation over MCP: `context_table_query`.
 
 ### POST `/nests/:nestId/chat`
-Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (**off by default** — off → `404`); needs a model credential (missing → `503` with `reason: "no_api_key"`): the server's own `ANTHROPIC_API_KEY` (and `ANTHROPIC_BASE_URL`, if set) when the licence carries the `byok` feature (Enterprise), otherwise the PromptOwl model gateway the licence check provides, metered in PromptOwl credits. Answers with `HOOTIE_MODEL`, a plain model name (on the PromptOwl gateway the server adds the instance prefix, e.g. `default-claude/`, per call) — unset, the gateway's default model or `claude-sonnet-5` on an own key; all editable in Settings → General. `GET /admin/models` (server admin) lists the models the current credential can reach, by plain name — `{ models, current, source }` — for the Settings picker; if the list can't be fetched it answers `models: []` with an `error`, and a name can still be typed. Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
+Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (**off by default** — off → `404`); needs a model credential (missing → `503` with `reason: "no_api_key"`): with the `byok` feature (Enterprise), the licence's own key for the model's provider (Settings → Hootie → Model keys, see below), otherwise the PromptOwl model gateway the licence check provides, metered in PromptOwl credits. Answers with `HOOTIE_MODEL`, a plain model name (on the PromptOwl gateway the server adds the instance prefix, e.g. `default-claude/`, per call) — unset, the gateway's default model or `claude-sonnet-5` on an own key; all editable in Settings → General. `GET /admin/models` (server admin) lists the models the current credential can reach, by plain name — `{ models, current, source, providers }`, where `providers` maps each name to its provider (`openai`, `claude`, `gemini`, `grok`, `groq`, `perplexity`, `other`) so the Settings picker can group them — if the list can't be fetched it answers `models: []` with an `error`, and a name can still be typed. Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
 
 Request:
 
@@ -2262,7 +2262,7 @@ Archived nests are skipped by the scheduler tick; restoring the nest resumes the
 - `PUT /nests/:nestId/env` (write+) — `{ key, value }` creates or replaces.
 - `DELETE /nests/:nestId/env/:key` (write+).
 
-Values ride to the runner inside the run bundle. `ANTHROPIC_API_KEY` here overrides the server-wide default from Settings.
+Values ride to the runner inside the run bundle. With `byok`, `ANTHROPIC_API_KEY` (and `ANTHROPIC_BASE_URL`) here are the nest's own key for agent runs; without one, runs use the PromptOwl model gateway on credits.
 
 ### Connectors — governance events out to a channel
 
@@ -2366,6 +2366,24 @@ Hootie fields: `hootie_enabled` (default `false`), `hootie_brand` — `{ name, l
 
 ### Hootie identity — `/admin/settings` fields (Enterprise)
 `hootie_name` (one line, ≤40 chars), `hootie_logo_url` (`https://` image: `.png`/`.jpg`/`.gif`/`.webp`), `hootie_accent_color` (hex, normalised to `#rrggbb`), `hootie_greeting` (one line, ≤200 chars). `""` resets a field to the default. GET returns the stored values plus `hootie_branding_available`. "Enterprise licence" here means the licence carries the `hootie_branding` feature (PromptOwl's licence check returns the licence's `features`; an Enterprise licence has it by default, and PromptOwl can grant or revoke it per licence). A PATCH that would **change** any of these without it is refused as a whole — `403 { code: "enterprise_required" }` (the code name is kept for wire compatibility; it means the licence lacks `hootie_branding`), nothing written, including the request's other fields. Sending back the stored values unchanged is allowed (they are ignored). Invalid values → `400` with `fieldErrors` keyed by field. `hootie_enabled` is written explicitly (`true`/`false`), so a UI choice beats the deploy env.
+
+### Own model providers — `/admin/settings` fields (Enterprise, `byok`)
+A server admin can add their own key for Anthropic (`claude`), OpenAI, Google Gemini, xAI Grok or Groq. The former `anthropic_api_key` and `anthropic_base_url` settings are gone: a stored Anthropic key is handed over to the gateway at boot. PATCH `provider_keys` with provider → key to set, or `null` to clear:
+
+```json
+{ "provider_keys": { "openai": "sk-…", "groq": null } }
+```
+
+Each key goes to PromptOwl, which checks it with the provider and keeps it in its LiteLLM model gateway under this licence; this server never stores it. GET returns only the tails, plus which key calls without an own-provider model use:
+
+```json
+{
+  "own_providers": { "openai": { "masked": "9876", "updatedAt": "2026-10-08T09:12:00.000Z" } },
+  "model_source": "promptowl"
+}
+```
+
+`model_source`: `own` (the server's Anthropic key), `promptowl` (PromptOwl's virtual key on the plan's credits) or `null` (no key at all). Setting a provider key without `byok` → `403 { code: "byok_required" }`. An unknown provider, or a key the provider refuses → `400` with `fieldErrors["provider_keys.<provider>"]`. Keys are sent one at a time, after the other settings in the request are saved, so a refused key never undoes them; when a later provider is refused, the earlier ones in the same request stay saved. Without `byok` nothing is sent (there is no own key to clear). With `byok`, `GET /admin/models` adds the licence's own-provider models (named `community-<licence>-<provider>/<model>`) to `models` and lists them in `own_models`. Hootie (`hootie_model`) runs on the own key for any model of a provider with an own key (picking `gpt-4o` from the PromptOwl list counts, since the own model is a provider wildcard); other models keep the key above.
 
 ### Superadmins — GET/POST `/admin/super-admins`, DELETE `/admin/super-admins/:email` (server-admin only)
 Grant and revoke **superadmins** (server-wide admins) from the API/UI instead of only via `access.yaml`. The effective superadmin set is the union of three sources, surfaced per row as `source`:

@@ -214,6 +214,9 @@ export function LicensePanel() {
             {lic.grace_ends_at && (
               <Row label="Keeps working until">{fmt(lic.grace_ends_at)}</Row>
             )}
+            <Row label="Own model keys or LLM gateway">
+              <span data-testid="license-byok">{lic.byok ? "On" : "Off"}</span>
+            </Row>
             <Row label="Status">
               {!lic.valid
                 ? "Read-only until the license is restored"

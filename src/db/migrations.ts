@@ -1766,6 +1766,18 @@ export function runMigrations(db: Database.Database): void {
     }
     recordMigration("052_nest_done_tags");
   }
+
+  // 053: license_cache.own_gateway_json — the licence's own-provider LiteLLM
+  //   key (byok) and its model list, encrypted like gateway_json.
+  if (!hasMigration("053_license_cache_own_gateway")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(license_cache)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("own_gateway_json")) {
+      db.exec("ALTER TABLE license_cache ADD COLUMN own_gateway_json TEXT");
+    }
+    recordMigration("053_license_cache_own_gateway");
+  }
 }
 
 /**

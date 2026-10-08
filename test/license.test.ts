@@ -724,4 +724,47 @@ describe("pricing entitlement", () => {
     expect(license.getCurrentLicense()?.valid).toBe(false);
     expect(license.getModelGateway()).toBeNull();
   });
+
+  it("keeps the own-provider gateway (byok) encrypted in the cache and drops it with the licence", async () => {
+    process.env.PROMPTOWL_KEY = "pk_own_1";
+    const own = {
+      baseUrl: "https://llm.promptowl.ai/",
+      key: "sk-own-secret",
+      models: ["community-abc-openai/gpt-5.6-sol", "bad model; rm"],
+      providers: { openai: { masked: "9876", updatedAt: "2026-10-08T00:00:00.000Z" }, "Bad!": { masked: "x" } },
+    };
+    mockFetch({ body: { valid: true, tier: "enterprise", own_gateway: own } });
+    const license = await loadLicense();
+    await license.validateLicense();
+    expect(license.getOwnGateway()).toEqual({
+      baseUrl: "https://llm.promptowl.ai",
+      key: "sk-own-secret",
+      models: ["community-abc-openai/gpt-5.6-sol"],
+      providers: { openai: { masked: "9876", updatedAt: "2026-10-08T00:00:00.000Z" } },
+    });
+
+    const { getDb } = await import("../src/db/client.js");
+    const row = (await getDb().get("SELECT own_gateway_json FROM license_cache WHERE key = ?", ["pk_own_1"])) as {
+      own_gateway_json: string;
+    };
+    expect(row.own_gateway_json.startsWith("enc.v1.")).toBe(true);
+    expect(row.own_gateway_json).not.toContain("sk-own-secret");
+
+    // A fresh process reads it back from the cache.
+    mockFetch({ reject: new Error("should not be called") });
+    const again = await loadLicense();
+    await again.validateLicense();
+    expect(again.getOwnGateway()?.models).toEqual(["community-abc-openai/gpt-5.6-sol"]);
+
+    // An answer without it (byok revoked) drops it; so does an invalid licence.
+    mockFetch({ body: { valid: true, tier: "enterprise" } });
+    await again.validateLicense({ forceFresh: true });
+    expect(again.getOwnGateway()).toBeNull();
+    mockFetch({ body: { valid: true, tier: "enterprise", own_gateway: own } });
+    await again.validateLicense({ forceFresh: true });
+    expect(again.getOwnGateway()).not.toBeNull();
+    mockFetch({ body: { valid: false, reason: "deactivated" } });
+    await again.validateLicense({ forceFresh: true, strict: true });
+    expect(again.getOwnGateway()).toBeNull();
+  });
 });

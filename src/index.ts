@@ -13,6 +13,7 @@ import {
   validateLicense,
   startLicenseSafetyPoll,
 } from "./auth/license.js";
+import { moveStoredAnthropicKey } from "./shared/model-credential.js";
 import { startTelemetryLoop, trackEvent } from "./telemetry/tracker.js";
 import {
   loadAccessConfig,
@@ -96,6 +97,8 @@ async function main() {
   // Ask PromptOwl at boot rather than trusting the 24h cache, so a restart
   // can't hide a suspension; unreachable falls back to the cache as before.
   const license = await validateLicense({ forceFresh: true });
+
+  await moveStoredAnthropicKey();
 
   if (!license.valid) {
     console.warn(`
@@ -206,6 +209,12 @@ ${config.AUTH_MODE === "key" ? `
   ⚠️  Running in open mode — no authentication.
      Anyone who can reach this port has full read/write + admin access.
      Bind to 127.0.0.1 only, or switch to AUTH_MODE=key before exposing.
+`);
+  }
+  if (config.HOOTIE_DEBUG_LOG) {
+    console.warn(`
+  ⚠️  HOOTIE_DEBUG_LOG is on — every Hootie prompt and answer, including the
+     nest documents behind it, is written to the logs. Testing only.
 `);
   }
 

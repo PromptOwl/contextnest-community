@@ -109,9 +109,9 @@ Hootie (the in-nest assistant) and workflow agent runs need an AI model. The ser
 Does the license include "byok" (Enterprise)?
 ├── yes → does the nest have its own model key?
 │         ├── yes → use the nest's key (and the nest's base URL, if it set one)
-│         └── no  → does the server have its own key (ANTHROPIC_API_KEY)?
-│                   ├── yes → use the server's key (and the server's base URL)
-│                   └── no  → use PromptOwl credits
+│         └── no  → Hootie: is there an own key for the model's provider?
+│                   ├── yes → use that key (kept in PromptOwl's model gateway)
+│                   └── no  → use PromptOwl credits (agent runs always do)
 └── no  → use PromptOwl credits (any own key is kept but ignored)
 ```
 
@@ -123,14 +123,14 @@ Does the license include "byok" (Enterprise)?
 
 ### Your own key (Enterprise only)
 
-- Set `ANTHROPIC_API_KEY`, and optionally `ANTHROPIC_BASE_URL` for your own gateway, in **Settings → General**. A single nest can also have its own key, in its env settings.
+- Add your keys for Anthropic, OpenAI, Google Gemini, xAI Grok or Groq in **Settings → Hootie → Model keys**. PromptOwl checks each key and keeps it in its model gateway; this server only shows the last 4 characters. A single nest can also have its own Anthropic key for agent runs, in its env settings.
 - Your own key is used for its provider. Calls with no own key still use PromptOwl credits.
-- A key and its base URL always come **as a pair from the same place**. If a nest sets only a base URL, the server's key is never sent there.
-- On other plans these fields are hidden, and the server refuses to save them (`403`). A key saved earlier is kept, not deleted, and is used again if the plan gains BYOK.
+- A nest's key and base URL always come **as a pair**. If a nest sets only a base URL, no key is sent there.
+- On other plans the Model keys card is hidden, and the server refuses to save a key (`403`).
 
 ### Choosing the model
 
-**Settings → General → Hootie model** lists the models your current key can reach. Pick by plain name, for example `claude-sonnet-5`. On PromptOwl credits, the server adds PromptOwl's internal prefix when it calls. With nothing picked, Hootie uses the gateway's default model, or `claude-sonnet-5` on your own key.
+**Settings → Hootie → Model** lists the models available, grouped by provider and searchable; a provider you have your own key for is marked "your key". Pick by plain name, for example `claude-sonnet-5`. On PromptOwl credits, the server adds PromptOwl's internal prefix when it calls. With nothing picked, Hootie uses the gateway's default model.
 
 ---
 
@@ -179,8 +179,8 @@ When the license stops being valid, the server goes **read-only**:
 |---|---|
 | See the plan, the counts and the limits | **Settings → License** |
 | Upgrade or change plan | **Settings → License → Manage plan**, or app.promptowl.ai → Community License |
-| Pick the Hootie model | **Settings → General** |
-| Set your own model key (Enterprise) | **Settings → General**, or a nest's env settings |
+| Pick the Hootie model | **Settings → Hootie** |
+| Set your own model key (Enterprise) | **Settings → Hootie → Model keys**, or a nest's env settings |
 | Read the same data from a script | `GET /admin/license` (server admin), `GET /license/status` (public, no counts) |
 
 ## Questions
