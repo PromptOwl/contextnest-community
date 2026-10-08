@@ -171,6 +171,8 @@ describe("/admin/models — the Hootie model picker", () => {
       models: ["claude-sonnet-5", "gpt-5.5"],
       current: "claude-sonnet-5",
       source: "promptowl",
+      // Read before the prefix comes off, so the picker can group by provider.
+      providers: { "claude-sonnet-5": "claude", "gpt-5.5": "openai" },
     });
     expect(spy).toHaveBeenCalled();
 
@@ -247,21 +249,28 @@ describe("own keys can't be stored without byok", () => {
 describe("the Hootie model picks the key (own providers, byok)", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("an own-provider model goes on the own key; any other model keeps today's key", async () => {
-    const { resolveModelCredential } = await boot({ features: ["byok"], gateway: GATEWAY, ownGateway: OWN_GW });
-    expect(resolveModelCredential({}, OWN_MODEL)).toEqual({
-      apiKey: OWN_GW.key, baseUrl: OWN_GW.baseUrl, source: "own", defaultModel: null,
-    });
-    expect(resolveModelCredential({}, "grok-4")?.source).toBe("promptowl");
-    expect(resolveModelCredential()?.source).toBe("promptowl");
-    process.env.ANTHROPIC_API_KEY = "sk-ant-own";
-    expect(resolveModelCredential({}, "claude-sonnet-5")?.apiKey).toBe("sk-ant-own");
-    expect(resolveModelCredential({}, OWN_MODEL)?.apiKey).toBe(OWN_GW.key);
+  async function routeFor(opts: Parameters<typeof boot>[0]) {
+    await boot(opts);
+    const { ownModelRoute } = await import("../src/shared/model-credential.js");
+    return ownModelRoute;
+  }
+  const OWN_CRED = { apiKey: OWN_GW.key, baseUrl: OWN_GW.baseUrl, source: "own", defaultModel: null };
+
+  it("any model of a provider with an own key goes on that key, renamed onto the own group", async () => {
+    const route = await routeFor({ features: ["byok"], gateway: GATEWAY, ownGateway: OWN_GW });
+    // Picked from PromptOwl's catalog: not one of the own catalog names, same provider.
+    expect(route("default-openai/gpt-4o")).toEqual({ credential: OWN_CRED, model: "community-lic1-openai/gpt-4o" });
+    // Picked as a "(your key)" name: already on the own group.
+    expect(route(OWN_MODEL)).toEqual({ credential: OWN_CRED, model: OWN_MODEL });
   });
 
-  it("without byok an own-provider model name gets no own key", async () => {
-    const { resolveModelCredential } = await boot({ gateway: GATEWAY, ownGateway: OWN_GW });
-    expect(resolveModelCredential({}, OWN_MODEL)?.source).toBe("promptowl");
+  it("everything else keeps today's key", async () => {
+    const route = await routeFor({ features: ["byok"], gateway: GATEWAY, ownGateway: OWN_GW });
+    expect(route("default-grok/grok-4")).toBeNull(); // no own Grok key
+    expect(route("default-claude/claude-sonnet-5")).toBeNull(); // Anthropic is its own setting
+    expect(route("claude-sonnet-5")).toBeNull(); // a bare name (direct Anthropic key)
+    expect(await routeFor({ gateway: GATEWAY, ownGateway: OWN_GW }).then((r) => r("default-openai/gpt-4o"))).toBeNull(); // no byok
+    expect(await routeFor({ features: ["byok"], gateway: GATEWAY }).then((r) => r("default-openai/gpt-4o"))).toBeNull(); // no own key
   });
 
   it("/admin/models adds the own-provider models and names them", async () => {
@@ -275,6 +284,7 @@ describe("the Hootie model picks the key (own providers, byok)", () => {
     const res = await jsonRequest(app, "GET", "/admin/models", undefined, owner.apiKey);
     expect(res.data.models).toEqual(["claude-sonnet-5", OWN_MODEL]);
     expect(res.data.own_models).toEqual([OWN_MODEL]);
+    expect(res.data.providers).toEqual({ "claude-sonnet-5": "claude", [OWN_MODEL]: "openai" });
     expect(res.data.source).toBe("promptowl");
   });
 });
@@ -315,6 +325,21 @@ describe("own-provider keys from Settings (byok)", () => {
     const res = await jsonRequest(app, "PATCH", "/admin/settings", { provider_keys: { openai: "sk-bad" } }, owner.apiKey);
     expect(res.status).toBe(400);
     expect(res.data.fieldErrors).toEqual({ "provider_keys.openai": "Incorrect API key" });
+  });
+
+  it("a sign-in redirect or a 200 page that isn't the route is never taken as saved", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY });
+    const sent = promptowl(() => new Response(null, { status: 307, headers: { location: "/login" } }));
+    const redirected = await jsonRequest(app, "PATCH", "/admin/settings", { provider_keys: { openai: "sk-x" } }, owner.apiKey);
+    expect(redirected.status).toBe(400);
+    expect(redirected.data.fieldErrors["provider_keys.openai"]).toMatch(/didn't accept/);
+    expect(sent).toHaveLength(1);
+
+    vi.restoreAllMocks();
+    promptowl(() => new Response("<html>Sign in</html>", { status: 200, headers: { "content-type": "text/html" } }));
+    const page = await jsonRequest(app, "PATCH", "/admin/settings", { provider_keys: { openai: "sk-x" } }, owner.apiKey);
+    expect(page.status).toBe(400);
+    expect(page.data.fieldErrors["provider_keys.openai"]).toMatch(/didn't accept/);
   });
 
   it("refuses without byok, and rejects unknown providers before calling PromptOwl", async () => {

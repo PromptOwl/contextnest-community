@@ -196,19 +196,30 @@ export async function setOwnProviderKey(provider: string, apiKey: string | null)
       headers: config.PROMPTOWL_FETCH_HEADERS,
       body: JSON.stringify({ key: config.PROMPTOWL_KEY, provider, api_key: apiKey }),
       signal: AbortSignal.timeout(30_000),
+      // A redirect (e.g. to a sign-in page) is never the route answering.
+      redirect: "manual",
     });
-    const data = (await res.json().catch(() => ({}))) as { error?: unknown };
-    if (res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: unknown; providers?: unknown };
+    // Saved only when the route itself answers: a 200 page from anything else is not.
+    if (res.ok && data.providers && typeof data.providers === "object") {
       console.log(`[license] own-provider ${provider}: ${what} → ok`);
       return null;
     }
-    const message = typeof data.error === "string" ? data.error : `PromptOwl answered ${res.status}`;
+    const message =
+      typeof data.error === "string" ? data.error : `PromptOwl didn't accept the key (unexpected answer ${res.status}).`;
     console.log(`[license] own-provider ${provider}: ${what} → refused: ${message}`);
     return message;
   } catch (err) {
-    console.warn(`[license] own-provider ${provider}: ${what} → failed:`, err instanceof Error ? err.message : err);
+    console.warn(`[license] own-provider ${provider}: ${what} → failed: ${fetchErrorText(err)}`);
     return "Could not reach PromptOwl to save the key. Try again in a moment.";
   }
+}
+
+/** "fetch failed" hides why; Node keeps the reason (ECONNREFUSED …) on `cause`. */
+function fetchErrorText(err: unknown): string {
+  const e = err as { message?: string; cause?: { code?: string; message?: string } };
+  const cause = e?.cause?.code || e?.cause?.message;
+  return `${e?.message ?? String(err)}${cause ? `: ${cause}` : ""}`;
 }
 
 /** Logged only when it changes, so the 60s licence poll stays quiet. */
@@ -871,7 +882,7 @@ async function _validateLicenseImpl(
   } catch (err: any) {
     if (cached) {
       console.warn(
-        `  PromptOwl validation failed (${err.message}), using cached license`,
+        `  PromptOwl validation failed (${fetchErrorText(err)}), using cached license`,
       );
       return fromCache(cached);
     }

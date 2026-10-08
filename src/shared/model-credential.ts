@@ -23,17 +23,11 @@ export const DIRECT_DEFAULT_MODEL = "claude-sonnet-5";
  * feature (Enterprise); otherwise PromptOwl's gateway, metered in credits.
  * A nest's own key beats the server's. Key and URL come as a pair from one
  * source, so a nest URL never receives the server's key. null = nothing to call with.
- * A `model` from the licence's own-provider list (Settings, byok) goes on that key.
  */
 export function resolveModelCredential(
   nestEnv: Record<string, string> = {},
-  model?: string,
 ): ModelCredential | null {
   if (hasEntitlement("byok")) {
-    const own = getOwnGateway();
-    if (model && own?.models.includes(model)) {
-      return { apiKey: own.key, baseUrl: own.baseUrl, source: "own", defaultModel: null };
-    }
     if (nestEnv.ANTHROPIC_API_KEY) {
       return { apiKey: nestEnv.ANTHROPIC_API_KEY, baseUrl: nestEnv.ANTHROPIC_BASE_URL || null, source: "own", defaultModel: null };
     }
@@ -45,6 +39,35 @@ export function resolveModelCredential(
   return gateway
     ? { apiKey: gateway.key, baseUrl: gateway.baseUrl, source: "promptowl", defaultModel: gateway.defaultModel }
     : null;
+}
+
+/** "default-openai/gpt-4o" → "openai": the provider is the group's last dash part. */
+const providerOf = (callModel: string): string | null => {
+  const slash = callModel.indexOf("/");
+  return slash > 0 ? callModel.slice(0, slash).split("-").pop() || null : null;
+};
+
+/** For the model picker's groups: a gateway id's provider, else a bare claude name's, else "other". */
+export const modelProvider = (id: string): string =>
+  providerOf(id) ?? (/^claude/i.test(id) ? "claude" : "other");
+
+/**
+ * With byok, a call whose provider has an own key (Settings → Other model
+ * providers) goes on that key, renamed onto the licence's own model group:
+ * "default-openai/gpt-4o" → "community-<licence>-openai/gpt-4o" (the own model
+ * is a provider wildcard, so any of its model names works). null = keep today's key.
+ */
+export function ownModelRoute(callModel: string): { credential: ModelCredential; model: string } | null {
+  if (!hasEntitlement("byok")) return null;
+  const own = getOwnGateway();
+  const provider = providerOf(callModel);
+  if (!own || !provider) return null;
+  const group = own.models.map((m) => m.slice(0, m.indexOf("/"))).find((g) => providerOf(`${g}/`) === provider);
+  if (!group) return null;
+  return {
+    credential: { apiKey: own.key, baseUrl: own.baseUrl, source: "own", defaultModel: null },
+    model: `${group}/${callModel.slice(callModel.indexOf("/") + 1)}`,
+  };
 }
 
 /** For logs: which key a call uses and why; the key only by its last 4 characters. */

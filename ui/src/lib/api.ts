@@ -442,6 +442,8 @@ export interface AdminLicense extends LicenseTerms {
   };
   pending_rejections: number;
   last_checked_at: string | null;
+  /** Own model keys / LLM gateway (licence feature byok) is on for this licence. */
+  byok?: boolean;
   /** free | trial | self_hosted | enterprise. */
   plan?: string;
   /** Editors in use and the cap (null = unlimited, 0 = needs a paid plan). */
@@ -457,7 +459,7 @@ export async function getAdminLicense() {
 
 /** Models this server's credential can reach (admin), and the one Hootie uses now. */
 export async function getAdminModels() {
-  return request<{ models: string[]; current: string; source: "own" | "promptowl" | null; own_models?: string[]; error?: string }>(
+  return request<{ models: string[]; current: string; source: "own" | "promptowl" | null; own_models?: string[]; providers?: Record<string, string>; error?: string }>(
     "/admin/models",
   );
 }

@@ -155,6 +155,7 @@ import {
   hootieModel,
   listCredentialModels,
   bareModelName,
+  modelProvider,
 } from "./shared/model-credential.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "./auth/license-copy.js";
 import { SERVICE_VERSION } from "./shared/version.js";
@@ -730,6 +731,8 @@ export function createApp(): Hono<AuthEnv> {
       // yet (3 drop the license) — the "we're checking your license" banner.
       pending_rejections: getPendingRejections(),
       last_checked_at: getLastLicenseCheck(),
+      // Own model keys / LLM gateway (licence feature byok), for the License tab.
+      byok: hasEntitlement("byok"),
       // PromptOwl's page for this key (plan, Upgrade); ?key= is the last 4 only.
       manage_url: config.PROMPTOWL_KEY
         ? `${config.PROMPTOWL_API_URL.replace(/\/$/, "")}/community-license?key=${config.PROMPTOWL_KEY.slice(-4)}`
@@ -829,7 +832,7 @@ export function createApp(): Hono<AuthEnv> {
     type_task_enabled: ACCEPTED_NODE_TYPES.has("task"),
     hootie_enabled: config.HOOTIE_ENABLED,
     // The model in use: the admin's pick, else the gateway's default (see hootieModel).
-    hootie_model: hootieModel(resolveModelCredential({}, config.HOOTIE_MODEL)),
+    hootie_model: hootieModel(resolveModelCredential()),
     // Custom identity (enterprise). The stored values are returned even when
     // the licence doesn't allow them, so a lapsed licence shows what would
     // come back on renewal; `hootie_branding_available` says whether they
@@ -907,17 +910,29 @@ export function createApp(): Hono<AuthEnv> {
     const credential = resolveModelCredential();
     const current = hootieModel(credential);
     const own = hasEntitlement("byok") ? getOwnGateway()?.models ?? [] : [];
-    const withOwn = (names: string[]) => [...new Set([...names, ...own])].sort();
-    const ownField = own.length ? { own_models: own } : {};
-    if (!credential) return c.json({ models: withOwn([]), current, source: null, ...ownField });
+    // `providers`: name → provider, read before PromptOwl's prefix comes off,
+    // so the picker can group the list (OpenAI, Anthropic, …).
+    const reply = (ids: string[], names: string[], extra: Record<string, unknown> = {}) => {
+      const providers: Record<string, string> = {};
+      names.forEach((n, i) => (providers[n] = modelProvider(ids[i])));
+      for (const m of own) providers[m] = modelProvider(m);
+      return c.json({
+        models: [...new Set([...names, ...own])].sort(),
+        current,
+        source: credential?.source ?? null,
+        providers,
+        ...(own.length ? { own_models: own } : {}),
+        ...extra,
+      });
+    };
+    if (!credential) return reply([], []);
     try {
       const ids = await listCredentialModels(credential);
       // People pick plain names; PromptOwl's instance prefix is added per call.
-      const names = credential.source === "promptowl" ? ids.map(bareModelName) : ids;
-      return c.json({ models: withOwn(names), current, source: credential.source, ...ownField });
+      return reply(ids, credential.source === "promptowl" ? ids.map(bareModelName) : ids);
     } catch (err) {
       console.warn("[admin/models] could not list models:", err instanceof Error ? err.message : err);
-      return c.json({ models: withOwn([]), current, source: credential.source, error: "Could not list models right now.", ...ownField });
+      return reply([], [], { error: "Could not list models right now." });
     }
   });
 

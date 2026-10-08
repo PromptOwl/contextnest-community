@@ -43,6 +43,8 @@ import { reads } from "../../../lib/queries";
 import { copyTextWithToast } from "../../../lib/clipboard";
 import { getAdminModels, getAdminSettings, updateAdminSettings } from "../../../lib/api";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { SearchableSelect } from "@/components/SearchableSelect";
+import { modelOptions } from "@/lib/model-options";
 import { useAuth } from "../../../auth/AuthContext";
 import { AgentConnectPanel } from "./AgentConnectPanel";
 import { LicensePanel } from "./LicensePanel";
@@ -224,11 +226,12 @@ const OWN_PROVIDERS = [
 ] as const;
 
 /**
- * Own-provider keys. Write-only like the Anthropic key: staged in the draft as
- * `provider_keys` (string = set, null = clear) and sent with the global Save;
- * PromptOwl checks and keeps them, this server only sees the masked tail.
+ * Own-provider key rows (inside the Model keys card). Write-only like the
+ * Anthropic key: staged in the draft as `provider_keys` (string = set, null =
+ * clear) and sent with the global Save; PromptOwl checks and keeps them in its
+ * model gateway, this server only sees the masked tail.
  */
-function ProviderKeysCard({
+function ProviderKeyFields({
   draft,
   current,
   fieldErrors,
@@ -247,18 +250,7 @@ function ProviderKeysCard({
     set(next);
   };
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">Other model providers</CardTitle>
-        <CardDescription>
-          Your own keys for these providers. Pick one of their models for Hootie
-          and it runs on your key; any other model keeps using the key above or
-          PromptOwl's virtual key on your plan's credits. Each key is checked
-          with the provider when you save and kept by PromptOwl's model gateway,
-          not on this server.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
+    <>
         {OWN_PROVIDERS.map(([p, label]) => (
           <div key={p} className="space-y-1.5" data-testid={`settings-provider-${p}`}>
             <Label htmlFor={`provider-key-${p}`}>{label}</Label>
@@ -289,18 +281,8 @@ function ProviderKeysCard({
             )}
           </div>
         ))}
-      </CardContent>
-    </Card>
+    </>
   );
-}
-
-/** "community-<licence>-openai/gpt-5.6-sol" → "gpt-5.6-sol · OpenAI (your key)". */
-function modelLabel(m: string, own: string[]): string {
-  if (!own.includes(m)) return m;
-  const slash = m.indexOf("/");
-  const provider = m.slice(0, slash).split("-").pop() ?? "";
-  const name = OWN_PROVIDERS.find(([p]) => p === provider)?.[1] ?? provider;
-  return `${m.slice(slash + 1)} · ${name} (your key)`;
 }
 
 function HootieModelField({
@@ -317,16 +299,20 @@ function HootieModelField({
 }) {
   const [models, setModels] = useState<string[] | null>(null);
   const [own, setOwn] = useState<string[]>([]);
+  const [providers, setProviders] = useState<Record<string, string>>({});
   useEffect(() => {
     getAdminModels()
       .then((r) => {
         setModels(r.models);
         setOwn(r.own_models ?? []);
+        setProviders(r.providers ?? {});
       })
       .catch(() => setModels([]));
   }, [reloadKey]);
-  // Keep the saved model selectable even if the key no longer lists it.
-  const options = models && value && !models.includes(value) ? [value, ...models] : (models ?? []);
+  const options = useMemo(
+    () => modelOptions(models ?? [], own, providers, value),
+    [models, own, providers, value],
+  );
   return (
     <div className="space-y-1.5">
       <Label htmlFor="hootie-model">Model</Label>
@@ -335,18 +321,16 @@ function HootieModelField({
           <Loader2 className="h-4 w-4 animate-spin" /> Loading models…
         </div>
       ) : models.length > 0 ? (
-        <Select value={value || undefined} onValueChange={onChange}>
-          <SelectTrigger id="hootie-model" data-testid="settings-hootie-model" aria-invalid={!!error}>
-            <SelectValue placeholder="Pick a model" />
-          </SelectTrigger>
-          <SelectContent>
-            {options.map((m) => (
-              <SelectItem key={m} value={m}>
-                {modelLabel(m, own)}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <SearchableSelect
+          id="hootie-model"
+          testId="settings-hootie-model"
+          value={value}
+          onChange={onChange}
+          options={options}
+          placeholder="Pick a model"
+          searchPlaceholder="Search models…"
+          emptyText="No model matches."
+        />
       ) : (
         <TextField
           error={error}
@@ -1844,14 +1828,15 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 `apiKeyDraft`. A nest's Tool environment can override it. */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Anthropic API key</CardTitle>
+                <CardTitle className="text-base">Model keys</CardTitle>
                 <CardDescription>
-                  The server-wide model key. Runners pick it up automatically
-                  (every nest, unless a nest overrides it in its Tool
-                  environment). Without one, Hootie and runs use PromptOwl's
-                  virtual key on your plan's credits. Checked against the
-                  provider when you save, so a bad key is refused here rather
-                  than failing later. Stored server-side; shown masked.
+                  Your own model keys. The Anthropic key is server-wide:
+                  runners pick it up automatically (every nest, unless a nest
+                  overrides it in its Tool environment). A Hootie model from a
+                  provider below runs on that provider's key. Without a key,
+                  Hootie and runs use PromptOwl's virtual key on your plan's
+                  credits. Each key is checked with the provider when you save,
+                  so a bad key is refused here rather than failing later.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -1875,8 +1860,10 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     {draft.anthropic_api_key === null && <p className="text-xs">Will be cleared when you save.</p>}
                   </div>
                 ) : (
-                <>
-                <div className="text-xs text-muted-foreground mb-2">
+                <div className="space-y-4">
+                <div className="space-y-1.5">
+                <Label htmlFor="anthropic-api-key">Anthropic</Label>
+                <div className="text-xs text-muted-foreground">
                   {draft.anthropic_api_key === null
                     ? "Will be cleared when you save."
                     : settings?.anthropic_api_key_masked
@@ -1886,6 +1873,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                         : "Not set — runs can't execute until a key exists here or in a nest's Tool environment."}
                 </div>
                 <TextField
+                  id="anthropic-api-key"
                   error={fieldErrors.anthropic_api_key}
                   type="password"
                   value={
@@ -1915,19 +1903,17 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     Keep current key
                   </button>
                 )}
-                </>
+                </div>
+                <ProviderKeyFields
+                  draft={draft.provider_keys ?? {}}
+                  current={settings?.own_providers ?? {}}
+                  fieldErrors={fieldErrors}
+                  set={(provider_keys) => set({ provider_keys })}
+                />
+                </div>
                 )}
               </CardContent>
             </Card>
-
-            {settings?.byok_available !== false && (
-              <ProviderKeysCard
-                draft={draft.provider_keys ?? {}}
-                current={settings?.own_providers ?? {}}
-                fieldErrors={fieldErrors}
-                set={(provider_keys) => set({ provider_keys })}
-              />
-            )}
 
             {/* Hootie in the nest — the assistant on every page. Sits under
                 the key it depends on: switching it on without a key gives

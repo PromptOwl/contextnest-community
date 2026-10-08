@@ -25,6 +25,8 @@ export interface SearchableOption {
   value: string;
   /** The line shown in the list and, truncated, in the closed control. */
   label: string;
+  /** Heading the option is listed under; options without one list ungrouped. */
+  group?: string;
 }
 
 export function SearchableSelect({
@@ -49,8 +51,24 @@ export function SearchableSelect({
   testId?: string;
 }) {
   const [open, setOpen] = useState(false);
+  // Open upward when the field sits too low for the list (search + 300px list).
+  const [up, setUp] = useState(false);
+  const toggle = () => {
+    if (!open && wrapRef.current) {
+      const r = wrapRef.current.getBoundingClientRect();
+      setUp(window.innerHeight - r.bottom < 360 && r.top > window.innerHeight - r.bottom);
+    }
+    setOpen((v) => !v);
+  };
   const wrapRef = useRef<HTMLDivElement>(null);
   const selected = options.find((o) => o.value === value);
+  // Groups in the order their first option appears; one unnamed group otherwise.
+  const groups: Array<[string | undefined, SearchableOption[]]> = [];
+  for (const o of options) {
+    const g = groups.find(([name]) => name === o.group);
+    if (g) g[1].push(o);
+    else groups.push([o.group, [o]]);
+  }
 
   // Close on an outside click or Escape — the two things a portalled popover
   // would have handled for us.
@@ -83,7 +101,7 @@ export function SearchableSelect({
         aria-expanded={open}
         disabled={disabled}
         data-testid={testId}
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggle}
         className="flex h-10 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
       >
         <span
@@ -95,7 +113,12 @@ export function SearchableSelect({
       </button>
 
       {open && (
-        <div className="absolute z-50 mt-1 w-full rounded-md border bg-popover text-popover-foreground shadow-md">
+        <div
+          className={cn(
+            "absolute z-50 w-full rounded-md border bg-popover text-popover-foreground shadow-md",
+            up ? "bottom-full mb-1" : "mt-1",
+          )}
+        >
           <Command
             // `value` is the id/path — searchable even though it is not shown,
             // so a remembered path still finds the document.
@@ -108,8 +131,9 @@ export function SearchableSelect({
             <CommandInput placeholder={searchPlaceholder} autoFocus />
             <CommandList>
               <CommandEmpty>{emptyText}</CommandEmpty>
-              <CommandGroup>
-                {options.map((o) => (
+              {groups.map(([heading, items]) => (
+              <CommandGroup key={heading ?? ""} heading={heading}>
+                {items.map((o) => (
                   <CommandItem
                     key={o.value}
                     value={o.value}
@@ -131,6 +155,7 @@ export function SearchableSelect({
                   </CommandItem>
                 ))}
               </CommandGroup>
+              ))}
             </CommandList>
           </Command>
         </div>
