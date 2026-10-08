@@ -14,6 +14,7 @@ import { trackEvent } from "../telemetry/tracker.js";
 import {
   resolveCallerEmail,
   filterAccessible,
+  readsWholeNest,
 } from "../governance/access-guard.js";
 import {
   resolveContext,
@@ -434,12 +435,15 @@ queryRoutes.get("/census", async (c) => {
 // The nest's folder tree on its own, for callers that need the SHAPE of the
 // vault (a navigable tree, a folder picker) and none of its content. Reads
 // directory entries only — no document is opened, so this stays cheap on a
-// vault where listing the documents would not be.
+// vault where listing the documents would not be. A caller who cannot read
+// the whole nest gets the tree of what they CAN read (see listNestFolders).
 queryRoutes.get("/folders", async (c) => {
   const q = c.req.query();
+  const userId = c.get("userId");
   const folders = await listNestFolders(c.req.param("nestId")!, {
     ...(q.folder !== undefined ? { folder: q.folder } : {}),
     ...(q.recursive === "0" || q.recursive === "false" ? { recursive: false } : {}),
+    caller: { userId, userEmail: await resolveCallerEmail(userId) },
   });
   return c.json({ folders });
 });
@@ -484,9 +488,30 @@ queryRoutes.post("/reindex", async (c) => {
 // GET /nests/:nestId/comment-counts
 // Per-node annotation (comment) counts for the whole nest, so the UI can sort
 // document lists by "most comments" in one call instead of N per-node fetches.
+// Keyed by node id, so it is narrowed to the documents the caller can read: an
+// unreadable draft's id — and the fact someone is discussing it — must not
+// reach a caller who would be refused opening it.
 queryRoutes.get("/comment-counts", async (c) => {
-  const counts = await countThreadsByNode(c.req.param("nestId")!);
-  return c.json({ counts });
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const userEmail = await resolveCallerEmail(userId);
+  const counts = await countThreadsByNode(nestId);
+  if (await readsWholeNest(nestId, userId, userEmail)) return c.json({ counts });
+  const readable = new Set(
+    (
+      await filterAccessible(
+        nestId,
+        userId,
+        userEmail,
+        Object.keys(counts).map((id) => ({ id })),
+      )
+    ).map((n) => n.id),
+  );
+  return c.json({
+    counts: Object.fromEntries(
+      Object.entries(counts).filter(([id]) => readable.has(id)),
+    ),
+  });
 });
 
 // GET /nests/:nestId/context

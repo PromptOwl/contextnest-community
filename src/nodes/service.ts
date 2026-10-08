@@ -56,6 +56,7 @@ import {
   resolveCallerEmail,
   filterAccessible,
   canReadNode,
+  readsWholeNest,
 } from "../governance/access-guard.js";
 import { isPublicReader } from "../shared/access.js";
 import {
@@ -1147,6 +1148,28 @@ async function vaultFolderPaths(
 }
 
 /**
+ * Direct document counts per folder over only the documents this caller can
+ * read — the narrowed counterpart of `indexedFolderCounts`. Same document set
+ * and exclusions as the census, so the two trees agree for every caller.
+ */
+async function readableFolderCounts(
+  nestId: string,
+  userId: string,
+  userEmail: string,
+): Promise<Array<{ path: string; count: number }>> {
+  const documents = (await readIndexedNodes(nestId)).filter(
+    (d) => !isDerivedAnnotationsNode(d.id),
+  );
+  const visible = await filterAccessible(nestId, userId, userEmail, documents);
+  const direct = new Map<string, number>();
+  for (const d of visible) {
+    const folder = folderOfId(d.id);
+    if (folder) direct.set(folder, (direct.get(folder) || 0) + 1);
+  }
+  return [...direct].map(([path, count]) => ({ path, count }));
+}
+
+/**
  * The nest's folders, from the DB mirror plus the vault's directory shape.
  *
  * Document counts come from the mirror, which stores each document's folder as
@@ -1158,21 +1181,37 @@ async function vaultFolderPaths(
  * `folder` is a community folder path ("" = nest root), NOT an id prefix; the
  * `nodes/` storage root is added here so callers keep speaking one dialect.
  *
- * No per-caller narrowing: this is a whole-nest view, and the nest middleware
- * already withholds those from a share grantee (same rule as /overview), so
- * everyone who reaches this handler may see the whole tree.
+ * Pass `caller` from any request path. A caller who reads every document gets
+ * the whole tree as above. A narrowed caller (a public reader of a governed
+ * nest, a tag- or document-scoped steward) gets only folders holding at least
+ * one document they can read, counted over those documents — the directory
+ * walk would otherwise name folders that hold nothing they may open, and the
+ * mirror's counts would include documents they cannot see.
  */
 export async function listNestFolders(
   nestId: string,
-  opts: { folder?: string; recursive?: boolean } = {},
+  opts: {
+    folder?: string;
+    recursive?: boolean;
+    caller?: { userId: string; userEmail: string };
+  } = {},
 ): Promise<FolderNode[]> {
   if (opts.folder !== undefined) assertSafeFolder(opts.folder);
   await ensureNodeIndex(nestId);
   const counts = new Map<string, number>();
+  const narrowed =
+    opts.caller !== undefined &&
+    !(await readsWholeNest(nestId, opts.caller.userId, opts.caller.userEmail));
+  const folderCounts = narrowed
+    ? await readableFolderCounts(nestId, opts.caller!.userId, opts.caller!.userEmail)
+    : await indexedFolderCounts(nestId);
   // Directories first, so a folder holding nothing is still a folder; the
-  // mirror's counts below win wherever it knows the folder.
-  for (const path of await vaultFolderPaths(nestId, opts)) counts.set(path, 0);
-  for (const { path, count } of await indexedFolderCounts(nestId)) {
+  // mirror's counts below win wherever it knows the folder. Not for a narrowed
+  // caller: an empty or wholly-restricted folder says nothing they may read.
+  if (!narrowed) {
+    for (const path of await vaultFolderPaths(nestId, opts)) counts.set(path, 0);
+  }
+  for (const { path, count } of folderCounts) {
     counts.set(path, count);
     // Ancestors with no document of their own still need a row — a level that
     // only holds subfolders still has to be expandable.
@@ -1268,12 +1307,16 @@ export async function nestCensus(
     const segs = folder.split("/");
     for (let i = 1; i <= segs.length; i++) paths.add(segs.slice(0, i).join("/"));
   }
-  // Folders holding no document — same vault walk listNestFolders merges, and
-  // like that endpoint the tree itself is the whole nest's shape: counts stay
-  // caller-scoped, but a folder is listed whether or not this caller can reach
-  // a document in it (the nest middleware already withholds both routes from a
-  // share grantee, so the audience is the same either way).
-  for (const path of await vaultFolderPaths(nestId)) paths.add(path);
+  // Folders holding no document — same vault walk listNestFolders merges —
+  // only for a caller who reads every document. For anyone narrowed (a public
+  // reader, a scoped steward) the walk would name folders that hold only what
+  // they cannot open, so their tree is the folders of `visible` alone; same
+  // rule as listNestFolders, and the same readsWholeNest predicate, so a
+  // narrowed caller who happens to reach every existing document still gets the
+  // same tree here as from /folders.
+  if (await readsWholeNest(nestId, userId, userEmail)) {
+    for (const path of await vaultFolderPaths(nestId)) paths.add(path);
+  }
   // Same roll-up the folders endpoint uses — the two describe the same tree
   // and must not drift.
   const folders = withSubtreeTotals(

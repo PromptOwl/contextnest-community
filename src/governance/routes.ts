@@ -9,6 +9,7 @@
 import { Hono } from "hono";
 import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
+import { isPublicReader } from "../shared/access.js";
 import { ValidationError, ConflictError } from "../shared/errors.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requestBaseUrl } from "../shared/base-url.js";
@@ -651,19 +652,33 @@ governanceNodeRoutes.get("/:nodeId{.+}/stewards", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
+  // Same node-level gate as /versions below: a document the caller cannot
+  // open must not hand out who stewards it (that names it, and its people).
+  const userId = c.get("userId");
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
+    return c.json(
+      { error: "Access denied — no steward assignment for this node" },
+      403,
+    );
+  }
+
   const { stewards: resolved, fallbackToOwner, ownerEmail } =
     await stewardship.resolveStewardsWithFallback(nestId, nodeId);
+  // Members see who reviews their work; a public reader is an outsider and
+  // gets the roles without anyone's email address.
+  const hideEmails = await isPublicReader(nestId, userId);
   return c.json({
     nodeId,
     stewards: resolved.map((r) => ({
-      email: r.steward.userEmail,
+      ...(hideEmails ? {} : { email: r.steward.userEmail }),
       role: r.steward.role,
       scope: r.steward.scope,
-      source: r.source,
+      ...(hideEmails ? {} : { source: r.source }),
       priority: r.priority,
     })),
     fallbackToOwner,
-    ownerEmail,
+    ownerEmail: hideEmails ? null : ownerEmail,
   });
 });
 

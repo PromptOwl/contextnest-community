@@ -252,29 +252,10 @@ nodeRoutes.post("/", async (c) => {
 // These must be registered BEFORE the /:nodeId{.+} catch-all.
 // Import governance services inline to avoid circular deps.
 
-// GET /nests/:nestId/nodes/:nodeId/stewards
-nodeRoutes.get("/:nodeId{.+}/stewards", async (c) => {
-  const nestId = c.req.param("nestId")!;
-  const nodeId = c.req.param("nodeId")!;
-
-  const { resolveStewardsWithFallback } = await import("../governance/stewardship-service.js");
-  const { stewards, fallbackToOwner, ownerEmail } = await resolveStewardsWithFallback(
-    nestId,
-    nodeId,
-  );
-  return c.json({
-    nodeId,
-    stewards: stewards.map((r: any) => ({
-      email: r.steward.userEmail,
-      role: r.steward.role,
-      scope: r.steward.scope,
-      source: r.source,
-      priority: r.priority,
-    })),
-    fallbackToOwner,
-    ownerEmail,
-  });
-});
+// NOTE: no `/:nodeId{.+}/stewards` handler here, for the same reason as
+// /versions below: governanceNodeRoutes serves that path first. The copy that
+// used to sit here was unreachable and ungated — a second, looser door onto
+// the same data if the mount order ever changed. The gated one lives there.
 
 // NOTE: no `/:nodeId{.+}/versions` handler here. governanceNodeRoutes is
 // mounted ahead of nodeRoutes (see app.ts) and registers the same path, so a
