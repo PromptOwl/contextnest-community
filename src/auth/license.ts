@@ -147,15 +147,51 @@ function parseGateway(raw: unknown): ModelGateway | null {
     : null;
 }
 
-async function gatewayFromCache(stored: string | null | undefined): Promise<ModelGateway | null> {
+async function gatewayFromCache<T>(
+  stored: string | null | undefined,
+  parse: (raw: unknown) => T | null,
+): Promise<T | null> {
   if (!stored) return null;
   const plain = await tryDecryptSecret(stored, "the license model gateway key");
   if (!plain) return null;
   try {
-    return parseGateway(JSON.parse(plain));
+    return parse(JSON.parse(plain));
   } catch {
     return null;
   }
+}
+
+/** The licence's own-provider key (byok): only the models it lists go through it. */
+export interface OwnGateway {
+  baseUrl: string;
+  key: string;
+  models: string[];
+  /** Masked key tail per provider, for the settings page. */
+  providers: Record<string, { masked: string; updatedAt: string | null }>;
+}
+
+let currentOwnGateway: OwnGateway | null = null;
+
+export function getOwnGateway(): OwnGateway | null {
+  return currentOwnGateway;
+}
+
+function parseOwnGateway(raw: unknown): OwnGateway | null {
+  const base = parseGateway(raw);
+  if (!base) return null;
+  const g = raw as { models?: unknown; providers?: unknown };
+  const models = Array.isArray(g.models)
+    ? g.models.filter((m): m is string => typeof m === "string" && /^[\w./:@-]{1,160}$/.test(m))
+    : [];
+  const providers: OwnGateway["providers"] = {};
+  if (g.providers && typeof g.providers === "object") {
+    for (const [p, v] of Object.entries(g.providers as Record<string, any>)) {
+      if (/^[a-z]{1,32}$/.test(p) && typeof v?.masked === "string") {
+        providers[p] = { masked: v.masked.slice(-4), updatedAt: typeof v.updatedAt === "string" ? v.updatedAt : null };
+      }
+    }
+  }
+  return { baseUrl: base.baseUrl, key: base.key, models, providers };
 }
 
 /**
@@ -493,6 +529,7 @@ type CachedLicenseRow = {
   owner_email: string | null;
   features_json?: string | null;
   gateway_json?: string | null;
+  own_gateway_json?: string | null;
 };
 
 /** Longest feature key accepted from PromptOwl; longer entries are dropped. */
@@ -529,7 +566,8 @@ function cachedFeatures(json: string | null | undefined): string[] | null {
 
 async function fromCache(cached: CachedLicenseRow): Promise<LicenseInfo> {
   if (cached.owner_email) lastOwnerEmail = cached.owner_email;
-  currentGateway = await gatewayFromCache(cached.gateway_json);
+  currentGateway = await gatewayFromCache(cached.gateway_json, parseGateway);
+  currentOwnGateway = await gatewayFromCache(cached.own_gateway_json, parseOwnGateway);
   return withMeta({
     valid: true,
     tier: cached.tier,
@@ -556,7 +594,10 @@ export async function validateLicense(
 ): Promise<LicenseInfo> {
   const info = await _validateLicenseImpl(!!opts.forceFresh, !!opts.strict);
   currentLicense = info;
-  if (!info.valid) currentGateway = null;
+  if (!info.valid) {
+    currentGateway = null;
+    currentOwnGateway = null;
+  }
   return info;
 }
 
@@ -626,6 +667,7 @@ async function _validateLicenseImpl(
       org?: string;
       limits?: LicenseInfo["limits"];
       gateway?: unknown;
+      own_gateway?: unknown;
       suspended?: boolean;
       suspended_reason?: string;
       owner_email?: string | null;
@@ -748,13 +790,17 @@ async function _validateLicenseImpl(
       const gatewayJson = currentGateway
         ? await encryptSecret(JSON.stringify(currentGateway))
         : null;
+      currentOwnGateway = parseOwnGateway(data.own_gateway);
+      const ownGatewayJson = currentOwnGateway
+        ? await encryptSecret(JSON.stringify(currentOwnGateway))
+        : null;
       await db.run(
         insertOrReplace(
           db,
-          `INSERT INTO license_cache (key, tier, org, limits_json, owner_email, features_json, gateway_json, validated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ${nowExpr(db)})`,
+          `INSERT INTO license_cache (key, tier, org, limits_json, owner_email, features_json, gateway_json, own_gateway_json, validated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ${nowExpr(db)})`,
           ["key"],
-          `tier = excluded.tier, org = excluded.org, limits_json = excluded.limits_json, owner_email = excluded.owner_email, features_json = excluded.features_json, gateway_json = excluded.gateway_json, validated_at = ${nowExpr(db)}`,
+          `tier = excluded.tier, org = excluded.org, limits_json = excluded.limits_json, owner_email = excluded.owner_email, features_json = excluded.features_json, gateway_json = excluded.gateway_json, own_gateway_json = excluded.own_gateway_json, validated_at = ${nowExpr(db)}`,
         ),
         [
           key,
@@ -764,6 +810,7 @@ async function _validateLicenseImpl(
           data.owner_email || null,
           features ? JSON.stringify(features) : null,
           gatewayJson,
+          ownGatewayJson,
         ],
       );
     }
