@@ -11,6 +11,13 @@ const GATEWAY = {
   key: "sk-litellm-licence",
   defaultModel: "default-claude/claude-sonnet-5",
 };
+const OWN_MODEL = "community-lic1-openai/gpt-5.6-sol";
+const OWN_GW = {
+  baseUrl: "https://llm.promptowl.ai",
+  key: "sk-litellm-own",
+  models: [OWN_MODEL],
+  providers: { openai: { masked: "9876", updatedAt: null } },
+};
 const OWNER = "owner@acme.com";
 
 let env: ReturnType<typeof setupTestEnv> | null = null;
@@ -21,7 +28,7 @@ afterEach(() => {
   delete process.env.FEATURE_WORKFLOW_PLANE;
 });
 
-async function boot(opts: { features?: string[]; gateway?: typeof GATEWAY | null }) {
+async function boot(opts: { features?: string[]; gateway?: typeof GATEWAY | null; ownGateway?: typeof OWN_GW | null }) {
   process.env.FEATURE_WORKFLOW_PLANE = "true";
   env = setupTestEnv();
   const app = await createTestApp("key", { ownerEmail: OWNER, ...opts });
@@ -234,5 +241,40 @@ describe("own keys can't be stored without byok", () => {
       app, "PUT", `/nests/${nestId}/env`, { key: "SLACK_TOKEN", value: "xoxb-1" }, owner.apiKey,
     );
     expect(other.status).toBe(201);
+  });
+});
+
+describe("the Hootie model picks the key (own providers, byok)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("an own-provider model goes on the own key; any other model keeps today's key", async () => {
+    const { resolveModelCredential } = await boot({ features: ["byok"], gateway: GATEWAY, ownGateway: OWN_GW });
+    expect(resolveModelCredential({}, OWN_MODEL)).toEqual({
+      apiKey: OWN_GW.key, baseUrl: OWN_GW.baseUrl, source: "own", defaultModel: null,
+    });
+    expect(resolveModelCredential({}, "grok-4")?.source).toBe("promptowl");
+    expect(resolveModelCredential()?.source).toBe("promptowl");
+    process.env.ANTHROPIC_API_KEY = "sk-ant-own";
+    expect(resolveModelCredential({}, "claude-sonnet-5")?.apiKey).toBe("sk-ant-own");
+    expect(resolveModelCredential({}, OWN_MODEL)?.apiKey).toBe(OWN_GW.key);
+  });
+
+  it("without byok an own-provider model name gets no own key", async () => {
+    const { resolveModelCredential } = await boot({ gateway: GATEWAY, ownGateway: OWN_GW });
+    expect(resolveModelCredential({}, OWN_MODEL)?.source).toBe("promptowl");
+  });
+
+  it("/admin/models adds the own-provider models and names them", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY, ownGateway: OWN_GW });
+    const realFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: any, init?: any) =>
+      String(url) === "https://llm.promptowl.ai/v1/models"
+        ? new Response(JSON.stringify({ data: [{ id: "default-claude/claude-sonnet-5" }] }))
+        : realFetch(url, init),
+    );
+    const res = await jsonRequest(app, "GET", "/admin/models", undefined, owner.apiKey);
+    expect(res.data.models).toEqual(["claude-sonnet-5", OWN_MODEL]);
+    expect(res.data.own_models).toEqual([OWN_MODEL]);
+    expect(res.data.source).toBe("promptowl");
   });
 });

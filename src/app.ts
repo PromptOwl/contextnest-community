@@ -141,6 +141,7 @@ import {
   getLicenseOwnerEmail,
   getPendingRejections,
   getEntitlement,
+  getOwnGateway,
   DEFAULT_LICENSE_CONTACT,
   type LicenseInfo,
 } from "./auth/license.js";
@@ -825,7 +826,7 @@ export function createApp(): Hono<AuthEnv> {
     type_task_enabled: ACCEPTED_NODE_TYPES.has("task"),
     hootie_enabled: config.HOOTIE_ENABLED,
     // The model in use: the admin's pick, else the gateway's default (see hootieModel).
-    hootie_model: hootieModel(resolveModelCredential()),
+    hootie_model: hootieModel(resolveModelCredential({}, config.HOOTIE_MODEL)),
     // Custom identity (enterprise). The stored values are returned even when
     // the licence doesn't allow them, so a lapsed licence shows what would
     // come back on renewal; `hootie_branding_available` says whether they
@@ -890,22 +891,26 @@ export function createApp(): Hono<AuthEnv> {
 
   // Models the current credential can reach — the Hootie model picker. On the
   // PromptOwl gateway that is PromptOwl's team catalog (team model names); on
-  // an own key (byok), whatever that key's provider/gateway lists.
+  // an own key (byok), whatever that key's provider/gateway lists. With byok,
+  // the licence's own-provider models are added and named in `own_models`.
   app.use("/admin/models", flexAuthMiddleware);
   app.get("/admin/models", async (c) => {
     if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
     const credential = resolveModelCredential();
     const current = hootieModel(credential);
-    if (!credential) return c.json({ models: [], current, source: null });
+    const own = hasEntitlement("byok") ? getOwnGateway()?.models ?? [] : [];
+    const withOwn = (names: string[]) => [...new Set([...names, ...own])].sort();
+    const ownField = own.length ? { own_models: own } : {};
+    if (!credential) return c.json({ models: withOwn([]), current, source: null, ...ownField });
     try {
       const ids = await listCredentialModels(credential);
       // People pick plain names; PromptOwl's instance prefix is added per call.
       const names = credential.source === "promptowl" ? ids.map(bareModelName) : ids;
-      return c.json({ models: [...new Set(names)].sort(), current, source: credential.source });
+      return c.json({ models: withOwn(names), current, source: credential.source, ...ownField });
     } catch (err) {
       console.warn("[admin/models] could not list models:", err instanceof Error ? err.message : err);
-      return c.json({ models: [], current, source: credential.source, error: "Could not list models right now." });
+      return c.json({ models: withOwn([]), current, source: credential.source, error: "Could not list models right now.", ...ownField });
     }
   });
 

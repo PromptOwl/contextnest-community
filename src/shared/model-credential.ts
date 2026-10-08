@@ -1,5 +1,5 @@
 import { config } from "../config.js";
-import { getModelGateway } from "../auth/license.js";
+import { getModelGateway, getOwnGateway } from "../auth/license.js";
 import { hasEntitlement } from "../auth/entitlements.js";
 
 /** Which key a model call uses, and where it goes. */
@@ -23,12 +23,17 @@ export const DIRECT_DEFAULT_MODEL = "claude-sonnet-5";
  * feature (Enterprise); otherwise PromptOwl's gateway, metered in credits.
  * A nest's own key beats the server's. Key and URL come as a pair from one
  * source, so a nest URL never receives the server's key. null = nothing to call with.
- * ponytail: Anthropic only; another provider = its env names + gateway route here.
+ * A `model` from the licence's own-provider list (Settings, byok) goes on that key.
  */
 export function resolveModelCredential(
   nestEnv: Record<string, string> = {},
+  model?: string,
 ): ModelCredential | null {
   if (hasEntitlement("byok")) {
+    const own = getOwnGateway();
+    if (model && own?.models.includes(model)) {
+      return { apiKey: own.key, baseUrl: own.baseUrl, source: "own", defaultModel: null };
+    }
     if (nestEnv.ANTHROPIC_API_KEY) {
       return { apiKey: nestEnv.ANTHROPIC_API_KEY, baseUrl: nestEnv.ANTHROPIC_BASE_URL || null, source: "own", defaultModel: null };
     }

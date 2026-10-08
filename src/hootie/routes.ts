@@ -87,7 +87,7 @@ type MentionOutcome =
 
 hootieRoutes.post("/chat", async (c) => {
   if (!config.HOOTIE_ENABLED) return c.json({ error: "Not found" }, 404);
-  const credential = resolveModelCredential();
+  const credential = resolveModelCredential({}, config.HOOTIE_MODEL);
   if (!credential) {
     return c.json(
       {
