@@ -40,11 +40,6 @@ const HISTORICAL_MIGRATIONS = [
   "009_lowercase_emails",
   "010_sso_used_jti",
   "011_comments",
-  // 012 merges case-colliding SQLite user rows. Postgres can never have them:
-  // the NOCASE-unique idx_users_email_nocase (lower(email)) exists from table
-  // creation, so duplicates are rejected on insert and there's nothing to merge.
-  // Seed the id so bookkeeping matches SQLite and future incremental Postgres
-  // migrations gate correctly.
   "012_merge_case_colliding_users",
   "013_node_deletion_tombstones",
   "014_api_events",
@@ -83,9 +78,12 @@ const HISTORICAL_MIGRATIONS = [
   "047_node_access_events",
   "048_license_cache_features",
   "049_license_cache_gateway",
+  "050_agent_read_log",
   "051_boards",
   "052_nest_done_tags",
-  "053_access_requests",
+  "053_license_cache_own_gateway",
+  "054_metacognition_agents",
+  "055_access_requests",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -201,6 +199,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
     ALTER TABLE license_cache ADD COLUMN IF NOT EXISTS features_json TEXT;
     ALTER TABLE license_cache ADD COLUMN IF NOT EXISTS gateway_json TEXT;
+    ALTER TABLE license_cache ADD COLUMN IF NOT EXISTS own_gateway_json TEXT; -- own-provider key (migration 053)
 
     CREATE TABLE IF NOT EXISTS telemetry_events (
       id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -682,6 +681,11 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_node_access_node ON node_access_events(nest_id, node_id, id);
     CREATE INDEX IF NOT EXISTS idx_node_access_nest ON node_access_events(nest_id, id);
     CREATE INDEX IF NOT EXISTS idx_node_access_ts ON node_access_events(ts);
+    -- migration 050: the version the read was served, and the agent that
+    -- made it (client.agent split out so per-agent queries are indexed).
+    ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS version INTEGER;
+    ALTER TABLE node_access_events ADD COLUMN IF NOT EXISTS agent TEXT;
+    CREATE INDEX IF NOT EXISTS idx_node_access_agent ON node_access_events(nest_id, agent, id);
 
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,
@@ -916,6 +920,12 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_headless_readers_nest ON headless_readers(nest_id);
   `);
 
+  // Migration 050 parity: read logging is on for every nest unless an owner
+  // turns it off.
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS access_log_enabled INTEGER NOT NULL DEFAULT 1;
+  `);
+
   // Migration 051 parity: saved Board views.
   await db.exec(`
     CREATE TABLE IF NOT EXISTS boards (
@@ -937,7 +947,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     "ALTER TABLE nests ADD COLUMN IF NOT EXISTS done_tags TEXT NOT NULL DEFAULT 'done'",
   );
 
-  // Migration 053 parity: access requests (see migrations.ts).
+  // Migration 055 parity: access requests (see migrations.ts).
   await db.exec(`
     CREATE TABLE IF NOT EXISTS access_requests (
       id TEXT PRIMARY KEY,
@@ -960,6 +970,24 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       WHERE status = 'pending';
     CREATE INDEX IF NOT EXISTS idx_access_requests_nest
       ON access_requests(nest_id, status);
+  `);
+
+  // Migration 054 parity: metacognition agents.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS metacognition_agents (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      persona_user_id TEXT NOT NULL,
+      config_json TEXT NOT NULL DEFAULT '{}',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      updated_at TEXT NOT NULL DEFAULT ${NOW},
+      PRIMARY KEY (nest_id, node_id)
+    );
+    -- One running server-executed run per agent, enforced atomically.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_server_run
+        ON runs(nest_id, agent_node) WHERE status = 'running' AND claimed_by = 'server:metacognition';
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

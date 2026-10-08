@@ -1,5 +1,5 @@
-import { config } from "../config.js";
-import { getModelGateway } from "../auth/license.js";
+import { getModelGateway, getOwnGateway, OWN_KEY_PROVIDERS, setOwnProviderKey, validateLicense } from "../auth/license.js";
+import { persistSetting } from "../db/settings.js";
 import { hasEntitlement } from "../auth/entitlements.js";
 
 /** Which key a model call uses, and where it goes. */
@@ -12,34 +12,86 @@ export interface ModelCredential {
   defaultModel: string | null;
 }
 
-/** Env names a server or nest stores its own Anthropic credential under. */
+/** Env names a nest stores its own Anthropic credential under (agent runs). */
 export const OWN_KEY_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"] as const;
 
 /** Model when the admin picked none and nothing else names one: Anthropic's id. */
 export const DIRECT_DEFAULT_MODEL = "claude-sonnet-5";
 
 /**
- * Pricing spec §6.1/§9.3: the server's own key only with the `byok` licence
+ * Pricing spec §6.1/§9.3: a nest's own key only with the `byok` licence
  * feature (Enterprise); otherwise PromptOwl's gateway, metered in credits.
- * A nest's own key beats the server's. Key and URL come as a pair from one
- * source, so a nest URL never receives the server's key. null = nothing to call with.
- * ponytail: Anthropic only; another provider = its env names + gateway route here.
+ * The server's own keys live in PromptOwl's gateway and are picked per model
+ * (ownModelRoute). Key and URL come as a pair. null = nothing to call with.
  */
 export function resolveModelCredential(
   nestEnv: Record<string, string> = {},
 ): ModelCredential | null {
-  if (hasEntitlement("byok")) {
-    if (nestEnv.ANTHROPIC_API_KEY) {
-      return { apiKey: nestEnv.ANTHROPIC_API_KEY, baseUrl: nestEnv.ANTHROPIC_BASE_URL || null, source: "own", defaultModel: null };
-    }
-    if (process.env.ANTHROPIC_API_KEY) {
-      return { apiKey: process.env.ANTHROPIC_API_KEY, baseUrl: config.ANTHROPIC_BASE_URL || null, source: "own", defaultModel: null };
-    }
+  if (hasEntitlement("byok") && nestEnv.ANTHROPIC_API_KEY) {
+    return { apiKey: nestEnv.ANTHROPIC_API_KEY, baseUrl: nestEnv.ANTHROPIC_BASE_URL || null, source: "own", defaultModel: null };
   }
   const gateway = getModelGateway();
   return gateway
     ? { apiKey: gateway.key, baseUrl: gateway.baseUrl, source: "promptowl", defaultModel: gateway.defaultModel }
     : null;
+}
+
+/**
+ * The server-wide Anthropic key moved into PromptOwl's model gateway (an
+ * own-provider key, like OpenAI). Boot hands a stored one over once, then
+ * drops it here. Without byok it stays put, unused, until the licence has it.
+ */
+export async function moveStoredAnthropicKey(): Promise<void> {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key || !hasEntitlement("byok")) return;
+  const refused = await setOwnProviderKey("claude", key);
+  if (refused) {
+    console.warn(`[license] could not move the stored Anthropic key to the model gateway: ${refused}`);
+    return;
+  }
+  await persistSetting("ANTHROPIC_API_KEY", null);
+  delete process.env.ANTHROPIC_API_KEY;
+  await validateLicense({ forceFresh: true });
+  console.log("[license] stored Anthropic key moved to the model gateway (Settings → Hootie → Model keys)");
+}
+
+/** "default-openai/gpt-4o" → "openai": the provider is the group's last dash part. */
+const providerOf = (callModel: string): string | null => {
+  const slash = callModel.indexOf("/");
+  return slash > 0 ? callModel.slice(0, slash).split("-").pop() || null : null;
+};
+
+/** For the model picker's groups: a gateway id's provider, else a bare claude name's, else "other". */
+export const modelProvider = (id: string): string =>
+  providerOf(id) ?? (/^claude/i.test(id) ? "claude" : "other");
+
+/**
+ * With byok, a call whose provider has an own key (Settings → Other model
+ * providers) goes on that key, renamed onto the licence's own model group:
+ * "default-openai/gpt-4o" → "community-<licence>-openai/gpt-4o" (the own model
+ * is a provider wildcard, so any of its model names works). null = keep today's key.
+ */
+export function ownModelRoute(callModel: string): { credential: ModelCredential; model: string } | null {
+  if (!hasEntitlement("byok")) return null;
+  const own = getOwnGateway();
+  const provider = providerOf(callModel);
+  // Only providers an admin can add a key for. ponytail: the provider is the
+  // group's last dash part (PromptOwl's groups are "<instance>-<provider>"), so a
+  // group like "team-azure-openai" would read as openai; match exact groups if one appears.
+  if (!own || !provider || !(OWN_KEY_PROVIDERS as readonly string[]).includes(provider)) return null;
+  const group = own.models.filter((m) => m.includes("/")).map((m) => m.slice(0, m.indexOf("/"))).find((g) => providerOf(`${g}/`) === provider);
+  if (!group) return null;
+  return {
+    credential: { apiKey: own.key, baseUrl: own.baseUrl, source: "own", defaultModel: null },
+    model: `${group}/${callModel.slice(callModel.indexOf("/") + 1)}`,
+  };
+}
+
+/** For logs: which key a call uses and why; the key only by its last 4 characters. */
+export function credentialLabel(c: ModelCredential): string {
+  const via =
+    c.source === "promptowl" ? "promptowl-credits" : getOwnGateway()?.key === c.apiKey ? "own-provider(LiteLLM)" : "nest-key";
+  return `key=${via} …${c.apiKey.slice(-4)} base=${c.baseUrl || "anthropic"}`;
 }
 
 /** "default-claude/claude-sonnet-5" → "claude-sonnet-5": PromptOwl's instance prefix off. */

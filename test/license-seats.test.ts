@@ -74,6 +74,8 @@ describe("seats are reported, never enforced", () => {
     expect(res.data.contact.url).toMatch(/^https:\/\//);
     expect(res.data).toHaveProperty("grace_ends_at");
     expect(res.data.pending_rejections).toBe(0);
+    // The License tab shows whether own model keys (byok) are on; this licence has no features.
+    expect(res.data.byok).toBe(false);
   });
 
   it("links to PromptOwl's page for this key by its last 4 characters only", async () => {

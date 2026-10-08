@@ -263,6 +263,7 @@ export function NestView({
   const [allowSelfApprove, setAllowSelfApprove] = useState(false);
   const [primeOnlyReview, setPrimeOnlyReview] = useState(false);
   const [creatorIsReviewer, setCreatorIsReviewer] = useState(false);
+  const [accessLogEnabled, setAccessLogEnabled] = useState(true);
   const [primeTags, setPrimeTags] = useState<string[]>([]);
   // Push Confirmation Gate (superadmin-set). Held-push count drives the badge.
   const [requirePushConfirmation, setRequirePushConfirmation] = useState(false);
@@ -594,6 +595,7 @@ export function NestView({
     setAllowSelfApprove(settingsData.allow_self_approve);
     setPrimeOnlyReview(!!settingsData.prime_only_review);
     setCreatorIsReviewer(!!settingsData.creator_is_reviewer);
+    setAccessLogEnabled((settingsData as Partial<api.NestSettings>).access_log_enabled ?? true);
     setPrimeTags(settingsData.prime_tags ?? []);
     setRequirePushConfirmation(!!(settingsData as any).require_push_confirmation);
     if (nestMeta?.nest?.visibility) {
@@ -2132,6 +2134,8 @@ export function NestView({
           requirePushConfirmation={requirePushConfirmation}
           isServerAdmin={isAdmin}
           creatorIsReviewer={creatorIsReviewer}
+          accessLogEnabled={accessLogEnabled}
+          canDisableAccessLog={isAdmin || isOwner || permission === "owner"}
           canManageStewardship={canManageGovernance}
           onClose={() => setShowSettings(false)}
           onChanged={(next) => {
@@ -2145,6 +2149,7 @@ export function NestView({
             setPrimeTags(next.primeTags);
             setRequirePushConfirmation(next.requirePushConfirmation);
             setCreatorIsReviewer(next.creatorIsReviewer);
+            setAccessLogEnabled(next.accessLogEnabled);
             fetchData();
           }}
         />

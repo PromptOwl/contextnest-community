@@ -335,7 +335,8 @@ Pins are per `(user, nest)` in the `nest_pins` table and cascade with the nest. 
   "prime_tags": ["prime-document"],
   "done_tags": ["done"],
   "require_push_confirmation": false,
-  "creator_is_reviewer": false
+  "creator_is_reviewer": false,
+  "access_log_enabled": true
 }
 ```
 
@@ -352,6 +353,7 @@ Every field is optional; only the ones present are changed.
 - `done_tags` — tags whose Board columns mean "done" (default `["done"]`). A **task** whose tags change to include one gets `metadata.completed_at`; removing it clears the stamp. Same input and normalization as `prime_tags`. An empty list turns completion off. Applies to future moves only — tasks already carrying the tag are not stamped.
 - `require_push_confirmation` — the **Push Confirmation Gate** (see below). **Superadmin-only to SET**: a PATCH carrying this field from anyone who is not a server superadmin is refused with a per-field `403` (`{ "error": ..., "field": "require_push_confirmation" }`) and no other field in the same body is applied. Readable by anyone who can read the nest. Off by default.
 - `creator_is_reviewer` — in a governed nest, whoever creates a document becomes its document-scope `reviewer` and v1 publishes immediately; later changes go through review as usual (the creator approves teammates' changes, another reviewer approves the creator's). Prime documents still draft. Future creates only. Off by default. See `STEWARDSHIP.md → Creators review their own documents`.
+- `access_log_enabled` — record reads, retrievals and exports of this nest's documents in the activity log (see `GET /nests/:nestId/activity-log`). **On by default.** Any nest admin may turn it on; turning it **off** is owner / server-admin only — anyone else gets a per-field `403` (`"field": "access_log_enabled"`) and nothing in the same body is applied. Takes effect for the next read; rows already recorded stay until the retention window prunes them.
 
 Turning stewardship **off** wipes stewards and pending reviews and is owner-only; the other fields are non-destructive and never change the state of anything already published.
 
@@ -1374,13 +1376,15 @@ Returns `{ ok, nodeId, undone, effect, version, status?, restoredVersion? }`. Er
 - `400` for a malformed body
 
 ### GET `/nests/:nestId/activity-log`
-Query: `?node=<nodeId>` **or** `?folder=<path>` (neither = the whole nest), `&type=<t>[,<t>…]`, `&actor=<email>`, `&limit=50` (max 200), `&offset=0`.
+Query: `?node=<nodeId>` **or** `?folder=<path>` (neither = the whole nest), `&type=<t>[,<t>…]`, `&actor=<email>`, `&agent=<name>`, `&limit=50` (max 200), `&offset=0`.
+
+`agent` answers "what did agent X read (and change)": a case-insensitive exact match on the caller's self-reported agent (`client.agent`, §9.4; over REST, the API key's label). Events with no agent — reviews, comments, deletions, a person's own reads in the web app — are left out when it is set. Max 200 characters.
 
 The **admin activity log** for one document, one folder, or the nest: who changed, reviewed, commented on, deleted, read, retrieved or exported it, newest first. Owner, nest admin, or server admin only (the same rule as `/trace`); everyone else gets `403`. `400` for `node` and `folder` together, a traversal id or folder, or an unknown `type`.
 
 It merges what the server records: versions (`created`, `edited`, `restored`, with the agent from the write's `client`), reviews (`review_requested`, `approved`, `rejected`, `review_cancelled`), comments (`commented`, `comment_resolved`), deletions (`deleted`), and document access, which leaves no version (`read`, `retrieved`, `exported`).
 
-Access is recorded when a document is opened (`GET …/nodes/:id`, MCP `context_get`), returned by a search, query or context call (`/search`, `/query`, `/context` incl. Hootie, MCP `context_query` / `context_search` / `context_resolve`), or exported. A whole-nest export is one row with `nodeId: null` and appears in the nest's and folders' logs, and in the log of every document that existed at the time (not documents created afterwards). `detail` names how a document was accessed (`search`, `context`, `context_get`, `markdown export (12 documents)`); **what the caller searched for or asked is never stored**. Access rows are **sampled, not exhaustive**: throttled to one per person, document, action, surface and agent per 10 minutes, capped at 50 documents per retrieval, and pruned on the activity-trace retention window (`TRACE_RETENTION_DAYS`). The throttle is per server process, so a multi-instance deployment records up to one row per instance per window. Deleting a document purges its version and access history (the `deleted` tombstone stays).
+Access is recorded when a document is opened (`GET …/nodes/:id`, a historical version via `GET …/nodes/:id/versions/:version`, MCP `context_get`), returned by a search, query, table query or context call (`/search`, `/query`, `/table-query`, `/context` incl. Hootie — attributed to agent `hootie` — MCP `context_query` / `context_search` / `context_table_query` / `context_resolve`), or exported. Read and retrieval rows carry `version` — **the version the caller was served** — wherever the surface returns one known version: under stewardship an agent is served (and the row records) the approved version, not a newer draft; otherwise the current version. With the versioned history (`GET …/versions/:version`) that is enough to rebuild exactly what an agent saw. Exports and REST `/search` / `/query` / `/context` rows carry no version. Recording is on by default and can be turned off per nest (`access_log_enabled`, owner only); only document ids and versions are stored, never content. A whole-nest export is one row with `nodeId: null` and appears in the nest's and folders' logs, and in the log of every document that existed at the time (not documents created afterwards). `detail` names how a document was accessed (`search`, `context`, `context_get`, `markdown export (12 documents)`); **what the caller searched for or asked is never stored**. Access rows are **sampled, not exhaustive**: throttled to one per person, document, action, surface, agent and version per 10 minutes (a new version is a new row), capped at 50 documents per retrieval, and pruned on the activity-trace retention window (`TRACE_RETENTION_DAYS`). The throttle is per server process, so a multi-instance deployment records up to one row per instance per window. Deleting a document purges its version and access history (the `deleted` tombstone stays).
 
 ```json
 {
@@ -1395,6 +1399,7 @@ Access is recorded when a document is opened (`GET …/nodes/:id`, MCP `context_
       "client": { "agent": "claude-code" },
       "at": "2026-09-29T12:00:00.000Z",
       "surface": "mcp",
+      "version": 4,
       "detail": "context_get"
     }
   ],
@@ -1703,6 +1708,7 @@ The comments above are flat per-node threads. **Annotations** are the highlight-
 - `POST /nests/:nestId/nodes/:nodeId/annotations` — open a thread. Body: `{ body, anchor?: { start, end, text }, snapshotVersion? }`. No `anchor` = a whole-document (or whole-artifact) thread.
 - `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/comments` — reply. Body: `{ body }`. A reply on a resolved thread reopens it (the MCP `context_comment` reply does the same). Everyone already in the thread (its opener and earlier repliers, minus the replier and anyone the reply @mentions) gets a `comment_reply` notification — an inbox row linking the document, plus an email when SMTP is configured.
 - `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/resolve` · `/reopen`.
+- `GET /nests/:nestId/nodes/:nodeId/hosted` — an artifact's HTML, served under the sandbox CSP (opaque origin, no network). `?v=N` pins a snapshot. `?embed=1` appends the in-app viewer's bridge, a script that tells the viewer which text is at the top of the frame, scrolls to text the viewer names, and paints the open threads' quotes (`postMessage` only; the viewer sends quotes keyed by throwaway ids, never thread ids or comment bodies — so the artifact's own scripts can tell which of its passages have open threads, and nothing more). Without `embed` the body is served as stored. Only `embed=1` turns it on. An artifact whose markup ends inside an unclosed `<script>`, `<!--`, `<textarea>` or `<plaintext>` swallows the bridge; its preview then works as before, without highlights or place-keeping.
 - `GET /nests/:nestId/comment-counts` — `{ "<nodeId>": <open thread count>, … }` for the whole nest in one call (the UI's "most commented" sort).
 
 ---
@@ -1992,7 +1998,7 @@ Deterministic fact lookup against a **table** node (CSV body): fetch the exact r
 Same operation over MCP: `context_table_query`.
 
 ### POST `/nests/:nestId/chat`
-Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (**off by default** — off → `404`); needs a model credential (missing → `503` with `reason: "no_api_key"`): the server's own `ANTHROPIC_API_KEY` (and `ANTHROPIC_BASE_URL`, if set) when the licence carries the `byok` feature (Enterprise), otherwise the PromptOwl model gateway the licence check provides, metered in PromptOwl credits. Answers with `HOOTIE_MODEL`, a plain model name (on the PromptOwl gateway the server adds the instance prefix, e.g. `default-claude/`, per call) — unset, the gateway's default model or `claude-sonnet-5` on an own key; all editable in Settings → General. `GET /admin/models` (server admin) lists the models the current credential can reach, by plain name — `{ models, current, source }` — for the Settings picker; if the list can't be fetched it answers `models: []` with an `error`, and a name can still be typed. Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
+Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (**off by default** — off → `404`); needs a model credential (missing → `503` with `reason: "no_api_key"`): with the `byok` feature (Enterprise), the licence's own key for the model's provider (Settings → Hootie → Model keys, see below), otherwise the PromptOwl model gateway the licence check provides, metered in PromptOwl credits. Answers with `HOOTIE_MODEL`, a plain model name (on the PromptOwl gateway the server adds the instance prefix, e.g. `default-claude/`, per call) — unset, the gateway's default model or `claude-sonnet-5` on an own key; all editable in Settings → General. `GET /admin/models` (server admin) lists the models the current credential can reach, by plain name — `{ models, current, source, providers }`, where `providers` maps each name to its provider (`openai`, `claude`, `gemini`, `grok`, `groq`, `perplexity`, `other`) so the Settings picker can group them — if the list can't be fetched it answers `models: []` with an `error`, and a name can still be typed. Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
 
 Request:
 
@@ -2293,6 +2299,18 @@ every route above with the same HTML notice, never a hint about which it was.
 
 Archived nests are skipped by the scheduler tick; restoring the nest resumes them.
 
+### Metacognition agents — the server runs these (`FEATURE_METACOGNITION`)
+
+Every route `404`s unless both `FEATURE_WORKFLOW_PLANE` and `FEATURE_METACOGNITION` are on. See [`WORKFLOW_PLANE.md`](./WORKFLOW_PLANE.md#the-one-exception-metacognition-agents).
+
+- `GET /nests/:nestId/metacognition` (write) — `{ agents: [{ node_id, enabled, persona{name,avatar,email}, scope{read[],propose[]}, caps{max_steps,max_tokens,max_seconds,max_proposals}, feeds[], mcp_servers[], model, configured_by, updated_at }] }`.
+- `GET /nests/:nestId/metacognition/:node` (write) — one agent.
+- `PUT /nests/:nestId/metacognition/:node` (owner/admin, else `403`) — make an **agent** document a metacognition agent, or update it. Body: `{ persona: { name, avatar? }, scope?: { read?: string[], propose?: string[] }, caps?: {…}, feeds?: [{ name, url }], mcp_servers?: [{ name, url, allowed_tools: string[], auth_env? }], model?, enabled? }`. Folders are under `nodes/`. `read`: empty = the whole nest. `propose`: empty = **no proposals** (fail closed), `["*"]` = anywhere it may read, otherwise folders inside `read`. Caps are clamped to server ceilings (turns ≤ 50, tokens ≤ 2M, seconds ≤ 1800, proposals ≤ 20). Tokens and seconds are **soft** caps: checked between turns (a turn's output is limited to what's left, but its input is only known afterwards), and the wall-clock cap aborts the model call and feed/MCP requests but lets a proposal already being written finish. Every turn re-sends the conversation, so re-read (cached) input counts toward the token cap too — long runs reach it sooner than their output alone suggests. Folder names are matched exactly, case included. Manual, `/run` and hook starts are limited to 30 per agent per hour (schedules are bounded by their interval). Feed and MCP URLs must be public `https` (`400` otherwise); an MCP server must list `allowed_tools`. `auth_env` names a nest env value sent as a bearer token; it must start `MCP_`, so a config can't send the model key or another secret out. The first save creates the persona — a service identity (`persona-…@agents.invalid`) that can't sign in and isn't listed as a person. The saver becomes `configured_by`: their access bounds the agent's.
+- `DELETE /nests/:nestId/metacognition/:node` (owner/admin) — stop treating the document as a metacognition agent. The document and the persona's history stay.
+- `POST /nests/:nestId/metacognition/:node/run` (write) — start a run now → `202 { run_id, executes: "server" }`; `409` while one is running. `POST /nests/:nestId/run/:node` does the same for a metacognition agent (no bundle is handed out), as do its schedules and inbound hooks.
+
+The run is an ordinary run (`GET /runs/:id`): `claimed_by: "server:metacognition"`, steps `read` (search/list/read), `write` (`detail.kind: "proposal"`, `"access_needed"`, `"withdrew_rejected_draft"`), `notify` (comment), `external` (feed/MCP), `branch` (`detail.kind: "reasoning"`). Its `trace` is `{ persona, model, billing: "promptowl_credits"|"own_key", usage{input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens}, est_cost_usd, proposals, stopped_by: end_turn|max_steps|max_tokens|max_seconds|refusal|turn_max_tokens, summary }`, or `{ persona, skipped }` (status `cancelled`) when it couldn't start. `POST /runs/:id/steps` on a metacognition run → `409`; `PATCH /runs/:id` accepts only `cancelled`.
+
 ### Inbound hooks — let the outside world trigger a run
 
 - `GET /nests/:nestId/hooks?agent=` (read) — list, tokens masked.
@@ -2306,7 +2324,7 @@ Archived nests are skipped by the scheduler tick; restoring the nest resumes the
 - `PUT /nests/:nestId/env` (write+) — `{ key, value }` creates or replaces.
 - `DELETE /nests/:nestId/env/:key` (write+).
 
-Values ride to the runner inside the run bundle. `ANTHROPIC_API_KEY` here overrides the server-wide default from Settings.
+Values ride to the runner inside the run bundle. With `byok`, `ANTHROPIC_API_KEY` (and `ANTHROPIC_BASE_URL`) here are the nest's own key for agent runs; without one, runs use the PromptOwl model gateway on credits.
 
 ### Connectors — governance events out to a channel
 
@@ -2410,6 +2428,24 @@ Hootie fields: `hootie_enabled` (default `false`), `hootie_brand` — `{ name, l
 
 ### Hootie identity — `/admin/settings` fields (Enterprise)
 `hootie_name` (one line, ≤40 chars), `hootie_logo_url` (`https://` image: `.png`/`.jpg`/`.gif`/`.webp`), `hootie_accent_color` (hex, normalised to `#rrggbb`), `hootie_greeting` (one line, ≤200 chars). `""` resets a field to the default. GET returns the stored values plus `hootie_branding_available`. "Enterprise licence" here means the licence carries the `hootie_branding` feature (PromptOwl's licence check returns the licence's `features`; an Enterprise licence has it by default, and PromptOwl can grant or revoke it per licence). A PATCH that would **change** any of these without it is refused as a whole — `403 { code: "enterprise_required" }` (the code name is kept for wire compatibility; it means the licence lacks `hootie_branding`), nothing written, including the request's other fields. Sending back the stored values unchanged is allowed (they are ignored). Invalid values → `400` with `fieldErrors` keyed by field. `hootie_enabled` is written explicitly (`true`/`false`), so a UI choice beats the deploy env.
+
+### Own model providers — `/admin/settings` fields (Enterprise, `byok`)
+A server admin can add their own key for Anthropic (`claude`), OpenAI, Google Gemini, xAI Grok or Groq. The former `anthropic_api_key` and `anthropic_base_url` settings are gone: a stored Anthropic key is handed over to the gateway at boot. PATCH `provider_keys` with provider → key to set, or `null` to clear:
+
+```json
+{ "provider_keys": { "openai": "sk-…", "groq": null } }
+```
+
+Each key goes to PromptOwl, which checks it with the provider and keeps it in its LiteLLM model gateway under this licence; this server never stores it. GET returns only the tails, plus which key calls without an own-provider model use:
+
+```json
+{
+  "own_providers": { "openai": { "masked": "9876", "updatedAt": "2026-10-08T09:12:00.000Z" } },
+  "model_source": "promptowl"
+}
+```
+
+`model_source`: `own` (the server's Anthropic key), `promptowl` (PromptOwl's virtual key on the plan's credits) or `null` (no key at all). Setting a provider key without `byok` → `403 { code: "byok_required" }`. An unknown provider, or a key the provider refuses → `400` with `fieldErrors["provider_keys.<provider>"]`. Keys are sent one at a time, after the other settings in the request are saved, so a refused key never undoes them; when a later provider is refused, the earlier ones in the same request stay saved. Without `byok` nothing is sent (there is no own key to clear). With `byok`, `GET /admin/models` adds the licence's own-provider models (named `community-<licence>-<provider>/<model>`) to `models` and lists them in `own_models`. Hootie (`hootie_model`) runs on the own key for any model of a provider with an own key (picking `gpt-4o` from the PromptOwl list counts, since the own model is a provider wildcard); other models keep the key above.
 
 ### Superadmins — GET/POST `/admin/super-admins`, DELETE `/admin/super-admins/:email` (server-admin only)
 Grant and revoke **superadmins** (server-wide admins) from the API/UI instead of only via `access.yaml`. The effective superadmin set is the union of three sources, surfaced per row as `source`:

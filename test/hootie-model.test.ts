@@ -145,3 +145,30 @@ describe("streamAnswer — model compatibility", () => {
     expect(calls).toHaveLength(1);
   });
 });
+
+describe("streamAnswer — logs", () => {
+  it("always logs a summary, and the nest content only with HOOTIE_DEBUG_LOG", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      delete process.env.HOOTIE_DEBUG_LOG;
+      let { streamAnswer } = await load();
+      await collect(streamAnswer({ ...base, model: "claude-opus-5", system: "SECRET-DOC" }));
+      let out = log.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(out).toContain("[hootie] → request model=claude-opus-5");
+      expect(out).toContain("[hootie] ← response");
+      expect(out).not.toContain("SECRET-DOC");
+      expect(out).not.toContain("sk-ant-test");
+
+      log.mockClear();
+      process.env.HOOTIE_DEBUG_LOG = "true";
+      ({ streamAnswer } = await load());
+      await collect(streamAnswer({ ...base, model: "claude-opus-5", system: "SECRET-DOC" }));
+      out = log.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(out).toContain("SECRET-DOC");
+      expect(out).not.toContain("sk-ant-test");
+    } finally {
+      delete process.env.HOOTIE_DEBUG_LOG;
+      log.mockRestore();
+    }
+  });
+});

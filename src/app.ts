@@ -43,7 +43,6 @@ import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { pushRoutes } from "./nests/push-routes.js";
 import { hootieRoutes } from "./hootie/routes.js";
-import { verifyModelKey } from "./hootie/model.js";
 import {
   HOOTIE_BRAND_FIELDS,
   changedHootieBrandFields,
@@ -61,6 +60,7 @@ import {
   runDetailRoutes,
 } from "./workflow/run-routes.js";
 import { scheduleRoutes } from "./workflow/schedule-routes.js";
+import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
 import { sendTestNotification } from "./notify/dispatch.js";
@@ -148,6 +148,10 @@ import {
   getLicenseOwnerEmail,
   getPendingRejections,
   getEntitlement,
+  getOwnGateway,
+  setOwnProviderKey,
+  validateLicense,
+  OWN_KEY_PROVIDERS,
   DEFAULT_LICENSE_CONTACT,
   type LicenseInfo,
 } from "./auth/license.js";
@@ -158,6 +162,7 @@ import {
   hootieModel,
   listCredentialModels,
   bareModelName,
+  modelProvider,
 } from "./shared/model-credential.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "./auth/license-copy.js";
 import { SERVICE_VERSION } from "./shared/version.js";
@@ -619,6 +624,9 @@ export function createApp(): Hono<AuthEnv> {
       // launcher whenever the feature is on and explains the missing key,
       // rather than hiding it.
       hootie_enabled: config.HOOTIE_ENABLED,
+      // Metacognition agents (default OFF; needs the workflow plane too). Off →
+      // /nests/:id/metacognition 404s and the Workflows view hides its tab.
+      metacognition_enabled: config.FEATURE_WORKFLOW_PLANE && config.FEATURE_METACOGNITION,
       // The identity every surface shows: the admin's custom name/logo/
       // colour/greeting on an enterprise licence, the default Hootie
       // otherwise (enforced here, not in the client). Public: the launcher
@@ -733,6 +741,8 @@ export function createApp(): Hono<AuthEnv> {
       // yet (3 drop the license) — the "we're checking your license" banner.
       pending_rejections: getPendingRejections(),
       last_checked_at: getLastLicenseCheck(),
+      // Own model keys / LLM gateway (licence feature byok), for the License tab.
+      byok: hasEntitlement("byok"),
       // PromptOwl's page for this key (plan, Upgrade); ?key= is the last 4 only.
       manage_url: config.PROMPTOWL_KEY
         ? `${config.PROMPTOWL_API_URL.replace(/\/$/, "")}/community-license?key=${config.PROMPTOWL_KEY.slice(-4)}`
@@ -839,15 +849,17 @@ export function createApp(): Hono<AuthEnv> {
     // are in effect and whether edits are accepted.
     ...storedHootieSettings(),
     hootie_branding_available: hootieBrandingAvailable(),
-    // Own key + gateway fields are in effect and editable only with byok.
+    // Own model keys are in effect and editable only with byok.
     byok_available: hasEntitlement("byok"),
-    anthropic_base_url: config.ANTHROPIC_BASE_URL,
+    // Own-provider keys PromptOwl holds for this licence (masked tails only).
+    own_providers: hasEntitlement("byok") ? getOwnGateway()?.providers ?? {} : {},
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
+    metacognition_enabled: config.FEATURE_METACOGNITION,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
     // OIDC SSO. The client secret is WRITE-ONLY: only its presence is
-    // reported, never the value (same discipline as the Anthropic key below).
+    // reported, never the value.
     oidc_enabled: config.OIDC_ENABLED,
     oidc_issuer: config.OIDC_ISSUER,
     oidc_client_id: config.OIDC_CLIENT_ID,
@@ -873,10 +885,6 @@ export function createApp(): Hono<AuthEnv> {
     // its own "enabled but not configured" warning from the unsaved draft
     // instead, so this is for API consumers (and tests) rather than that badge.
     oidc_ready: isOidcReady(),
-    // Server-wide runner default. NEVER the value — masked tail only.
-    anthropic_api_key_masked: process.env.ANTHROPIC_API_KEY
-      ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
-      : null,
     slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
     msteams_webhook_url: config.MSTEAMS_WEBHOOK_URL ?? "",
     email_provider: config.EMAIL_PROVIDER,
@@ -897,22 +905,38 @@ export function createApp(): Hono<AuthEnv> {
 
   // Models the current credential can reach — the Hootie model picker. On the
   // PromptOwl gateway that is PromptOwl's team catalog (team model names); on
-  // an own key (byok), whatever that key's provider/gateway lists.
+  // an own key (byok), whatever that key's provider/gateway lists. With byok,
+  // the licence's own-provider models are added and named in `own_models`.
   app.use("/admin/models", flexAuthMiddleware);
   app.get("/admin/models", async (c) => {
     if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
     const credential = resolveModelCredential();
     const current = hootieModel(credential);
-    if (!credential) return c.json({ models: [], current, source: null });
+    const own = hasEntitlement("byok") ? getOwnGateway()?.models ?? [] : [];
+    // `providers`: name → provider, read before PromptOwl's prefix comes off,
+    // so the picker can group the list (OpenAI, Anthropic, …).
+    const reply = (ids: string[], names: string[], extra: Record<string, unknown> = {}) => {
+      const providers: Record<string, string> = {};
+      names.forEach((n, i) => (providers[n] = modelProvider(ids[i])));
+      for (const m of own) providers[m] = modelProvider(m);
+      return c.json({
+        models: [...new Set([...names, ...own])].sort(),
+        current,
+        source: credential?.source ?? null,
+        providers,
+        ...(own.length ? { own_models: own } : {}),
+        ...extra,
+      });
+    };
+    if (!credential) return reply([], []);
     try {
       const ids = await listCredentialModels(credential);
       // People pick plain names; PromptOwl's instance prefix is added per call.
-      const names = credential.source === "promptowl" ? ids.map(bareModelName) : ids;
-      return c.json({ models: [...new Set(names)].sort(), current, source: credential.source });
+      return reply(ids, credential.source === "promptowl" ? ids.map(bareModelName) : ids);
     } catch (err) {
       console.warn("[admin/models] could not list models:", err instanceof Error ? err.message : err);
-      return c.json({ models: [], current, source: credential.source, error: "Could not list models right now." });
+      return reply([], [], { error: "Could not list models right now." });
     }
   });
 
@@ -975,13 +999,15 @@ export function createApp(): Hono<AuthEnv> {
       for (const k of Object.keys(HOOTIE_BRAND_FIELDS)) delete body[k];
     }
 
-    // Own model key / gateway: Enterprise only (pricing spec §9.3, licence
-    // feature byok). Setting one is refused whole; clearing is always allowed.
+    // Own model keys: Enterprise only (pricing spec §9.3, licence feature
+    // byok). Setting one is refused whole; clearing is always allowed.
+    const providerKeysIn =
+      body.provider_keys && typeof body.provider_keys === "object" && !Array.isArray(body.provider_keys)
+        ? (body.provider_keys as Record<string, unknown>)
+        : null;
     if (
       !hasEntitlement("byok") &&
-      (["anthropic_api_key", "anthropic_base_url"] as const).some(
-        (f) => f in body && String(body[f] ?? "").trim() !== "",
-      )
+      Object.values(providerKeysIn ?? {}).some((v) => String(v ?? "").trim() !== "")
     ) {
       return c.json(
         {
@@ -1095,48 +1121,20 @@ export function createApp(): Hono<AuthEnv> {
     }
     // Name, logo, accent colour, greeting (enterprise — gated above).
     pending.push(...validateHootieBrandFields(body, addError));
-    // Empty clears the row (direct Anthropic). Otherwise an http(s) origin
-    // (+ optional path) with no trailing slash, so the SDK joins /v1/messages
-    // onto it cleanly.
-    if ("anthropic_base_url" in body) {
-      const v = String(body.anthropic_base_url ?? "").trim().replace(/\/$/, "");
-      if (!v) pending.push({ name: "ANTHROPIC_BASE_URL", value: null });
-      else {
-        let ok = false;
-        try {
-          const u = new URL(v);
-          ok = (u.protocol === "http:" || u.protocol === "https:") && !!u.host;
-        } catch {
-          ok = false;
+    // Own-provider keys (byok): checked and stored by PromptOwl, in LiteLLM
+    // only — sent after every other field validates, never kept here.
+    const providerKeys: Array<[string, string | null]> = [];
+    if ("provider_keys" in body) {
+      if (!providerKeysIn) addError("provider_keys", "provider_keys must be an object of provider → key.");
+      else
+        for (const [p, v] of Object.entries(providerKeysIn)) {
+          const field = `provider_keys.${p}`;
+          if (!(OWN_KEY_PROVIDERS as readonly string[]).includes(p)) addError(field, `Unknown model provider "${p}".`);
+          else if (v === null || v === "") providerKeys.push([p, null]);
+          else if (typeof v !== "string" || !v.trim() || /\s/.test(v.trim()) || v.trim().length > 512)
+            addError(field, "Paste the provider's API key as one line.");
+          else providerKeys.push([p, v.trim()]);
         }
-        if (!ok)
-          addError(
-            "anthropic_base_url",
-            "Model gateway URL must be an http(s) URL, e.g. http://gateway:4000 — or empty to call Anthropic directly.",
-          );
-        else pending.push({ name: "ANTHROPIC_BASE_URL", value: v });
-      }
-    }
-    if ("anthropic_api_key" in body) {
-      const v = body.anthropic_api_key;
-      if (v === null || v === "") {
-        pending.push({ name: "ANTHROPIC_API_KEY", value: null });
-      } else if (typeof v !== "string" || !v.trim().startsWith("sk-")) {
-        addError("anthropic_api_key", 'Anthropic API key must start with "sk-" (or be empty to clear it).');
-      } else {
-        // Shape is not validity: a well-formed key that Anthropic rejects
-        // saves cleanly and then fails on the first question someone asks.
-        // One call settles it here, against the gateway THIS patch leaves in
-        // place (it may be setting one in the same request).
-        const key = v.trim();
-        const patchedBase = pending.find((p) => p.name === "ANTHROPIC_BASE_URL");
-        const baseUrl = patchedBase
-          ? patchedBase.value
-          : config.ANTHROPIC_BASE_URL || null;
-        const rejected = await verifyModelKey(key, baseUrl);
-        if (rejected) addError("anthropic_api_key", rejected);
-        else pending.push({ name: "ANTHROPIC_API_KEY", value: key });
-      }
     }
     if ("subagent_runs_enabled" in body) {
       // Depends on the plane: enabling recursion without the plane's run routes
@@ -1158,6 +1156,17 @@ export function createApp(): Hono<AuthEnv> {
           name: "FEATURE_SUBAGENT_RUNS",
           value: body.subagent_runs_enabled ? "true" : null,
         });
+      }
+    }
+    // Metacognition agents run on the plane's runs and schedules, so they
+    // need it on, same as sub-agent runs. Off clears the row (falls to env).
+    if ("metacognition_enabled" in body) {
+      const planeOn =
+        "workflow_plane_enabled" in body ? !!body.workflow_plane_enabled : config.FEATURE_WORKFLOW_PLANE;
+      if (body.metacognition_enabled && !planeOn) {
+        addError("metacognition_enabled", "Metacognition agents require the Workflow plane to be turned on.");
+      } else {
+        pending.push({ name: "FEATURE_METACOGNITION", value: body.metacognition_enabled ? "true" : null });
       }
     }
     // Sub-agent recursion caps. Same [min,max] the config getters clamp to, so
@@ -1592,6 +1601,26 @@ export function createApp(): Hono<AuthEnv> {
       if (value === null) delete process.env[name];
       else process.env[name] = value;
     }
+
+    // Own-provider keys go to PromptOwl, which tests each with the provider —
+    // after the settings above are saved, so a refused key never strands them.
+    // ponytail: one at a time, so a later refusal leaves earlier ones saved;
+    // the error names the provider that failed. Without byok there is no own
+    // key to clear (PromptOwl blocks it), so nothing is sent.
+    const toSend = hasEntitlement("byok") ? providerKeys : [];
+    let savedAny = false;
+    for (const [p, v] of toSend) {
+      const refused = await setOwnProviderKey(p, v);
+      if (refused) {
+        if (savedAny) await validateLicense({ forceFresh: true });
+        return c.json(
+          { error: refused, fieldErrors: { [`provider_keys.${p}`]: refused }, settings: currentServerSettings() },
+          400,
+        );
+      }
+      savedAny = true;
+    }
+    if (savedAny) await validateLicense({ forceFresh: true });
 
     return c.json({ settings: currentServerSettings() });
   });
@@ -2977,7 +3006,8 @@ export function createApp(): Hono<AuthEnv> {
   // GET /nests/:nestId/activity-log?node=<id> | ?folder=<path> — the admin
   // activity log for one document, one folder, or (neither) the whole nest:
   // who changed, reviewed, commented on, deleted, read, retrieved or exported
-  // it (CU-wdqcq03aw2). Same guard as /trace above — owner, nest admin, or
+  // it (CU-wdqcq03aw2). ?agent=<name> narrows it to one agent ("what did
+  // agent X read"); read rows carry the version served. Same guard as /trace above — owner, nest admin, or
   // server admin; everyone else 403. Registered before the sub-routers so it
   // matches first under the LinearRouter.
   nestsApp.get("/:nestId/activity-log", async (c) => {
@@ -3017,6 +3047,11 @@ export function createApp(): Hono<AuthEnv> {
       scope,
       types: types as ActivityType[] | undefined,
       actor: c.req.query("actor") || undefined,
+      agent: (() => {
+        const a = c.req.query("agent")?.trim();
+        if (a && a.length > 200) throw new ValidationError("agent must be at most 200 characters");
+        return a || undefined;
+      })(),
       limit: Number(c.req.query("limit") ?? 50),
       offset: Number(c.req.query("offset") ?? 0),
     });
@@ -3071,6 +3106,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/run", runTriggerRoutes);
   nestsApp.route("/:nestId/runs", runListRoutes);
   nestsApp.route("/:nestId/schedules", scheduleRoutes);
+  nestsApp.route("/:nestId/metacognition", metacognitionRoutes);
   nestsApp.route("/:nestId/env", envRoutes);
   nestsApp.route("/:nestId/connectors", connectorRoutes);
   nestsApp.route("/:nestId/hooks", hookNestRoutes);

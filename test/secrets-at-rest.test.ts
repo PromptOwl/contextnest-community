@@ -42,24 +42,13 @@ describe("server settings — secrets at rest", () => {
     env?.cleanup();
   });
 
-  it("stores the Anthropic key as ciphertext, and reads it back in the clear", async () => {
+  it("stores a legacy Anthropic key row as ciphertext, and reads it back in the clear", async () => {
+    // Settings no longer writes this key (it moves to PromptOwl's model
+    // gateway at boot), but a row saved before that must stay sealed.
     env = setupTestEnv();
-    vi.doMock("../src/hootie/model.js", () => ({
-      verifyModelKey: async () => null,
-      streamAnswer: async function* () {},
-      ModelRefusedError: class extends Error {},
-    }));
-    const app = await createTestApp("key", { ownerEmail: OWNER, features: ["byok"] });
-    const admin = await registerUser(app, OWNER);
-
-    const res = await jsonRequest(
-      app,
-      "PATCH",
-      "/admin/settings",
-      { anthropic_api_key: KEY_VALUE },
-      admin.apiKey,
-    );
-    expect(res.status).toBe(200);
+    await createTestApp("key", { ownerEmail: OWNER, features: ["byok"] });
+    const { persistSetting, loadServerSettings } = await import("../src/db/settings.js");
+    await persistSetting("ANTHROPIC_API_KEY", KEY_VALUE);
 
     // The row holds nothing a reader could use.
     const stored = await row("ANTHROPIC_API_KEY");
@@ -67,12 +56,10 @@ describe("server settings — secrets at rest", () => {
     expect(stored!.value).not.toContain(KEY_VALUE);
     expect(stored!.value!.startsWith("enc.v1.")).toBe(true);
 
-    // …while the server itself still has the real thing.
+    // …while the server itself reads the real thing back (for the hand-over).
+    delete process.env.ANTHROPIC_API_KEY;
+    await loadServerSettings();
     expect(process.env.ANTHROPIC_API_KEY).toBe(KEY_VALUE);
-    const after = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
-    expect(after.data.anthropic_api_key_masked).toBe("••••9876");
-
-    vi.doUnmock("../src/hootie/model.js");
   });
 
   it("encrypts the baseline column too — it holds the same secret", async () => {

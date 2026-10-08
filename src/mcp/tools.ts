@@ -44,7 +44,7 @@ import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
 } from "../nests/unsynced-service.js";
-import { isServerAdminUserId } from "../shared/access.js";
+import { isServerAdminUserId, isPublicReader } from "../shared/access.js";
 import { config } from "../config.js";
 import {
   createNode,
@@ -276,6 +276,13 @@ export interface McpToolContext {
    * A label, never an identity: no gate below may branch on it.
    */
   client?: ClientMetadata;
+  /**
+   * The version each document body was served at during this call, filled in
+   * by resolveLlmBody (the one place a body is chosen) and read back by the
+   * activity log so a read records exactly what the agent got. Set fresh per
+   * call by handleToolCall.
+   */
+  servedVersions?: Map<string, number>;
 }
 
 export const TOOL_DEFINITIONS = [
@@ -968,13 +975,20 @@ async function resolveLlmBody(
   const stewardship = gate
     ? gate.stewardshipEnabled
     : await isStewardshipEnabled(ctx.nestId);
-  if (!stewardship) return node.body || "";
+  if (!stewardship) {
+    // Ungoverned: the live body, which is the document's current version.
+    const live = Number(node.frontmatter?.version);
+    if (Number.isInteger(live) && live > 0) ctx.servedVersions?.set(node.id, live);
+    return node.body || "";
+  }
   const approved = gate
     ? (gate.approvedVersions?.get(node.id) ?? null)
     : await versions.getApprovedVersion(ctx.nestId, node.id);
   if (approved == null) return null;
   try {
-    return (await reconstructApproved(ctx.versionManager, ctx.nestId, node.id, approved)).raw;
+    const raw = (await reconstructApproved(ctx.versionManager, ctx.nestId, node.id, approved)).raw;
+    ctx.servedVersions?.set(node.id, approved);
+    return raw;
   } catch (err) {
     console.error("reconstructVersion failed", node.id, approved, err);
     return null;
@@ -993,12 +1007,20 @@ const ACCESS_BY_TOOL: Record<string, AccessAction> = {
 function recordToolAccess(toolName: string, result: ToolResult, ctx: McpToolContext): void {
   const action = ACCESS_BY_TOOL[toolName];
   if (!action || typeof result === "string" || result.isError || !ctx.nestId) return;
-  const data = result.data as { id?: unknown; documents?: Array<{ id?: unknown }> } | undefined;
+  // context_get names one document (`id`), context_query a list
+  // (`documents`), context_search its page (`results`). Missing `results`
+  // meant an agent's search — the most common read — was never recorded.
+  const data = result.data as
+    | { id?: unknown; documents?: Array<{ id?: unknown }>; results?: Array<{ id?: unknown }> }
+    | undefined;
+  const listed = (xs: unknown) =>
+    Array.isArray(xs)
+      ? xs.map((d) => (d as { id?: unknown })?.id).filter((id): id is string => typeof id === "string")
+      : [];
   const ids = [
     ...(typeof data?.id === "string" ? [data.id] : []),
-    ...(Array.isArray(data?.documents)
-      ? data.documents.map((d) => d?.id).filter((id): id is string => typeof id === "string")
-      : []),
+    ...listed(data?.documents),
+    ...listed(data?.results),
   ];
   if (!ids.length) return;
   recordNodeAccess({
@@ -1009,6 +1031,7 @@ function recordToolAccess(toolName: string, result: ToolResult, ctx: McpToolCont
     userId: ctx.userId,
     userEmail: ctx.userEmail,
     client: ctx.client,
+    ...(ctx.servedVersions?.size ? { versions: Object.fromEntries(ctx.servedVersions) } : {}),
     detail: toolName,
   });
 }
@@ -1046,7 +1069,7 @@ export async function handleToolCall(
     });
     return toolError((err as Error).message, "VALIDATION_FAILED");
   }
-  const attributed: McpToolContext = { ...ctx, client };
+  const attributed: McpToolContext = { ...ctx, client, servedVersions: new Map() };
   // Headless access keys (CU-wdqcq0314u) read and nothing else. Checked here,
   // the one seam both MCP surfaces share, so no tool — including one added
   // later — is reachable with an access key unless it is on the read list.
@@ -1302,12 +1325,36 @@ async function runTool(
     }
 
     case "context_table_query": {
+      // Same read as every other MCP body read (resolveLlmBody): gated by
+      // canReadNode, and approved rows only on a governed nest or for a
+      // public reader — never the unapproved working copy.
       const result = await queryTableNode(
         nestId,
         String(args.table ?? ""),
         String(args.query ?? ""),
         false,
+        {
+          userId: ctx.userId,
+          userEmail: ctx.userEmail,
+          approvedOnly:
+            (await isStewardshipEnabled(nestId)) ||
+            (await isPublicReader(nestId, ctx.userId)),
+        },
       );
+      // Admin activity log: the table the rows came from, at the version
+      // queried. Prose-only result, so it records here rather than through
+      // recordToolAccess.
+      recordNodeAccess({
+        nestId,
+        nodeIds: [result.table],
+        action: "retrieve",
+        surface: "mcp",
+        userId: ctx.userId,
+        userEmail: ctx.userEmail,
+        client: ctx.client,
+        ...(result.version ? { versions: { [result.table]: result.version } } : {}),
+        detail: "context_table_query",
+      });
       // Compact CSV back out — models read it fine and it round-trips.
       const lines = [
         result.columns.join(","),
@@ -1953,17 +2000,26 @@ async function runTool(
         const node = docs.find(
           (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
         );
-        const nodeId = node?.id || "";
+        // A title the caller cannot open resolves exactly like one that does
+        // not exist — otherwise its document-scoped stewards (and so the
+        // document itself) leak through the lookup.
+        const readable =
+          node !== undefined &&
+          (await canReadNode(ctx.nestId, node.id, ctx.userId, ctx.userEmail));
+        const nodeId = readable ? node.id : "";
         const resolved = await stewardship.resolveStewardsForNode(ctx.nestId, nodeId);
 
         if (resolved.length === 0) {
           return `No stewards configured for "${args.title}". Changes are auto-approved.`;
         }
 
+        // Members see who reviews their work; a public reader is an outsider
+        // and gets the roles without the people's email addresses.
+        const hideEmails = await isPublicReader(ctx.nestId, ctx.userId);
         const list = resolved
           .map(
             (r, i) =>
-              `${i + 1}. **${r.steward.userEmail}** — ${r.steward.role} (${r.source})${r.steward.role === "reviewer" ? " ✓ can approve" : ""}`,
+              `${i + 1}. **${hideEmails ? "a steward" : r.steward.userEmail}** — ${r.steward.role} (${hideEmails ? r.steward.scope : r.source})${r.steward.role === "reviewer" ? " ✓ can approve" : ""}`,
           )
           .join("\n");
         return `# Stewards for "${args.title}"\n\n${list}`;
@@ -2476,6 +2532,15 @@ async function runTool(
     case "context_versions": {
       const node = await resolveTargetNode(storage, args);
       if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
+      // Version history is a node read, gated like REST GET .../versions: a
+      // caller who cannot open the node does not get its editors, statuses and
+      // change notes either. Answered as a miss, so it is no existence oracle.
+      if (!(await canReadNode(ctx.nestId, node.id, ctx.userId, ctx.userEmail))) {
+        return toolError(
+          `Node not found: ${args.id ?? args.title}`,
+          "DOCUMENT_NOT_FOUND",
+        );
+      }
       // See context_update: an id wins over a title sent with it.
       const label = args.id ? node.frontmatter.title : args.title;
 

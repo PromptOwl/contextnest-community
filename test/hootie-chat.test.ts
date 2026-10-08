@@ -62,6 +62,7 @@ let lastModelCall: {
   turns: any[];
   model?: string;
   baseUrl?: string | null;
+  apiKey?: string;
 } | null = null;
 /** When set, the mock parks after its first chunk until the signal aborts
  *  (or this many ms pass) and records which — the disconnect test. */
@@ -108,6 +109,11 @@ function safeJson(text: string): any {
   }
 }
 
+/** The credential Hootie runs on in these tests: PromptOwl's gateway from the
+ *  licence (there is no server Anthropic key any more). The default model is
+ *  set, so a plain "claude-sonnet-5" needs no model-list call; nothing listens. */
+const TEST_GATEWAY = { baseUrl: "http://127.0.0.1:9", key: "sk-po-test", defaultModel: "default-claude/claude-sonnet-5" };
+
 // The model mock is file-wide: no describe in this file may reach the SDK.
 beforeAll(() => {
   vi.doMock("../src/hootie/model.js", () => ({
@@ -116,6 +122,7 @@ beforeAll(() => {
       turns: any[];
       model: string;
       baseUrl?: string | null;
+      apiKey?: string;
       signal?: AbortSignal;
     }) {
       lastModelCall = {
@@ -123,6 +130,7 @@ beforeAll(() => {
         turns: params.turns,
         model: params.model,
         baseUrl: params.baseUrl ?? null,
+        apiKey: params.apiKey,
       };
       if (scriptedError) throw scriptedError;
       // Two chunks, so the route's delta framing is exercised.
@@ -170,9 +178,8 @@ describe("POST /nests/:id/chat — Hootie in the nest", () => {
 
   beforeAll(async () => {
     setupTestEnv();
-    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
     process.env.HOOTIE_ENABLED = "true"; // off by default since CU-wdqcq03ewc
-    app = await createTestApp("key", { features: ["byok"] });
+    app = await createTestApp("key", { features: ["byok"], gateway: TEST_GATEWAY });
     owner = await registerUser(app, "owner@acme.com", "Owner");
     await resetAuthRateLimit();
     reader = await registerUser(app, "reader@acme.com", "Reader");
@@ -851,7 +858,7 @@ describe("POST /nests/:id/chat — gates", () => {
     delete process.env.HOOTIE_ENABLED;
   });
 
-  it("503s with a reason when the server has no Anthropic key, and never calls out", async () => {
+  it("503s with a reason when the server has no model key at all, and never calls out", async () => {
     setupTestEnv();
     delete process.env.ANTHROPIC_API_KEY;
     process.env.HOOTIE_ENABLED = "true"; // off by default since CU-wdqcq03ewc
@@ -866,9 +873,8 @@ describe("POST /nests/:id/chat — gates", () => {
 
   it("404s when Hootie is switched off, and /health says so", async () => {
     setupTestEnv();
-    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
     process.env.HOOTIE_ENABLED = "false";
-    const app = await createTestApp("open");
+    const app = await createTestApp("open", { gateway: TEST_GATEWAY });
     const health = await app.request("/health");
     expect((await health.json()).hootie_enabled).toBe(false);
     const { data } = await jsonRequest(app, "POST", "/nests", { name: "Off" });
@@ -878,9 +884,8 @@ describe("POST /nests/:id/chat — gates", () => {
 
   it("caps how many questions one person can ask in a window — a looping client hits 429", async () => {
     setupTestEnv();
-    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
     process.env.HOOTIE_ENABLED = "true"; // off by default since CU-wdqcq03ewc
-    const app = await createTestApp("key", { features: ["byok"] });
+    const app = await createTestApp("key", { features: ["byok"], gateway: TEST_GATEWAY });
     const user = await registerUser(app, "busy@acme.com");
     const { data } = await jsonRequest(app, "POST", "/nests", { name: "Busy" }, user.apiKey);
     const { CHAT_BUDGET } = await import("../src/hootie/routes.js");
@@ -943,82 +948,43 @@ describe("/admin/settings — hootie_enabled toggle", () => {
   });
 });
 
-describe("/admin/settings — Hootie model + gateway", () => {
+describe("/admin/settings — Hootie model", () => {
   const OWNER = "admin2@acme.com";
 
   afterAll(() => {
-    delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.ANTHROPIC_BASE_URL;
     delete process.env.HOOTIE_MODEL;
     delete process.env.HOOTIE_ENABLED;
   });
 
-  it("model and gateway URL round-trip, validate, and take effect on the next question — no restart", async () => {
+  it("the model round-trips, validates, and takes effect on the next question — no restart", async () => {
     setupTestEnv();
-    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
-    delete process.env.ANTHROPIC_BASE_URL;
     delete process.env.HOOTIE_MODEL;
     process.env.HOOTIE_ENABLED = "true"; // off by default since CU-wdqcq03ewc
-    const app = await createTestApp("key", { ownerEmail: OWNER, features: ["byok"] });
+    const app = await createTestApp("key", { ownerEmail: OWNER, features: ["byok"], gateway: TEST_GATEWAY });
     const admin = await registerUser(app, OWNER);
-    const nest = (await jsonRequest(app, "POST", "/nests", { name: "Gateway" }, admin.apiKey)).data.nest.id;
+    const nest = (await jsonRequest(app, "POST", "/nests", { name: "Model" }, admin.apiKey)).data.nest.id;
 
     const before = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
     expect(before.data.hootie_model).toBe("claude-sonnet-5");
-    expect(before.data.anthropic_base_url).toBe("");
+    expect(before.data).not.toHaveProperty("anthropic_base_url");
 
-    // Direct Anthropic by default.
-    scriptedAnswer = "direct";
+    // The default model, on PromptOwl's gateway with its prefix added.
+    scriptedAnswer = "default";
     await chat(app, nest, { message: "hi" }, admin.apiKey);
-    expect(lastModelCall!.model).toBe("claude-sonnet-5");
-    expect(lastModelCall!.baseUrl).toBeNull();
+    expect(lastModelCall!.model).toBe("default-claude/claude-sonnet-5");
+    expect(lastModelCall!.baseUrl).toBe(TEST_GATEWAY.baseUrl);
 
-    // A bad gateway URL is refused, field-keyed, and nothing is applied.
-    const bad = await jsonRequest(
-      app,
-      "PATCH",
-      "/admin/settings",
-      { anthropic_base_url: "not a url", hootie_model: "gpt-5" },
-      admin.apiKey,
-    );
-    expect(bad.status).toBe(400);
-    expect(bad.data.fieldErrors?.anthropic_base_url).toBeTruthy();
-    const still = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
-    expect(still.data.hootie_model).toBe("claude-sonnet-5");
-
-    // Empty model is refused too.
+    // An empty model is refused, field-keyed.
     const empty = await jsonRequest(app, "PATCH", "/admin/settings", { hootie_model: "   " }, admin.apiKey);
     expect(empty.status).toBe(400);
     expect(empty.data.fieldErrors?.hootie_model).toBeTruthy();
 
-    // Route through a gateway with a gateway-side model name.
-    const ok = await jsonRequest(
-      app,
-      "PATCH",
-      "/admin/settings",
-      { anthropic_base_url: "http://gateway:4000/", hootie_model: "ollama/llama3.2:3b" },
-      admin.apiKey,
-    );
+    // A new pick takes effect on the next question.
+    const ok = await jsonRequest(app, "PATCH", "/admin/settings", { hootie_model: "default-claude/claude-haiku-4-5" }, admin.apiKey);
     expect(ok.status).toBe(200);
-    expect(ok.data.settings.anthropic_base_url).toBe("http://gateway:4000");
-    expect(ok.data.settings.hootie_model).toBe("ollama/llama3.2:3b");
-
-    scriptedAnswer = "via gateway";
+    scriptedAnswer = "picked";
     await chat(app, nest, { message: "hi again" }, admin.apiKey);
-    expect(lastModelCall!.model).toBe("ollama/llama3.2:3b");
-    expect(lastModelCall!.baseUrl).toBe("http://gateway:4000");
-
-    // The runner floor carries the gateway too — one setting for both.
-    const { envValues } = await import("../src/workflow/env-routes.js");
-    const env = await envValues(nest);
-    expect(env.ANTHROPIC_BASE_URL).toBe("http://gateway:4000");
-    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-test");
-
-    // Clearing the URL goes back to direct.
-    await jsonRequest(app, "PATCH", "/admin/settings", { anthropic_base_url: "" }, admin.apiKey);
-    await chat(app, nest, { message: "and back" }, admin.apiKey);
-    expect(lastModelCall!.baseUrl).toBeNull();
-    expect((await envValues(nest)).ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(lastModelCall!.model).toBe("default-claude/claude-haiku-4-5");
   });
 });
 
@@ -1031,15 +997,15 @@ describe("POST /nests/:id/chat — the assistant's name (CU-wdqcq03ewc)", () => 
 
   async function systemPromptFor(tier: string): Promise<string> {
     setupTestEnv();
-    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
     process.env.HOOTIE_ENABLED = "true";
     process.env.HOOTIE_NAME = "Ava";
     lastModelCall = null;
     scriptedAnswer = "ok";
-    // Own key needs byok; an enterprise licence also gets branding by default.
+    // An enterprise licence also gets branding by default.
     const app = await createTestApp("open", {
       tier,
       features: tier === "enterprise" ? ["byok", "hootie_branding"] : ["byok"],
+      gateway: TEST_GATEWAY,
     });
     const { data } = await jsonRequest(app, "POST", "/nests", { name: "Named" });
     const { status } = await chatRaw(app, data.nest.id, { message: "hi" });
@@ -1056,5 +1022,42 @@ describe("POST /nests/:id/chat — the assistant's name (CU-wdqcq03ewc)", () => 
   it("stays Hootie without an enterprise licence, whatever is configured", async () => {
     const system = await systemPromptFor("community");
     expect(system).toMatch(/You are Hootie,/);
+  });
+});
+
+describe("POST /nests/:id/chat — the model's provider picks the key (byok)", () => {
+  afterAll(() => {
+    delete process.env.HOOTIE_MODEL;
+    delete process.env.HOOTIE_ENABLED;
+  });
+
+  async function askWith(model: string) {
+    setupTestEnv();
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env.HOOTIE_ENABLED = "true";
+    process.env.HOOTIE_MODEL = model;
+    const app = await createTestApp("key", {
+      features: ["byok"],
+      gateway: { baseUrl: "https://llm.promptowl.ai", key: "sk-po-credits", defaultModel: "default-openai/gpt-4o" },
+      ownGateway: {
+        baseUrl: "https://llm.promptowl.ai",
+        key: "sk-own-key",
+        models: ["community-lic1-openai/gpt-5.6-sol"],
+        providers: { openai: { masked: "9876", updatedAt: null } },
+      },
+    });
+    const user = await registerUser(app, "byok@acme.com");
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Keys" }, user.apiKey);
+    scriptedAnswer = "ok";
+    lastModelCall = null;
+    const { status } = await chatRaw(app, data.nest.id, { message: "hi" }, user.apiKey);
+    expect(status).toBe(200);
+    return lastModelCall!;
+  }
+
+  it("a PromptOwl OpenAI model runs on the own OpenAI key, renamed onto the own group", async () => {
+    const call = await askWith("gpt-4o");
+    expect(call.apiKey).toBe("sk-own-key");
+    expect(call.model).toBe("community-lic1-openai/gpt-4o");
   });
 });

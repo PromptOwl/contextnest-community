@@ -1732,6 +1732,45 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("049_license_cache_gateway");
   }
 
+  // 050: agent read log — which version a read was served, and which agent
+  //   made it. node_access_events.version is the version the caller actually
+  //   got (NULL where the surface hands back no single version); .agent is the
+  //   caller's self-reported agent (client.agent, §9.4), split out of
+  //   client_json so "what did agent X read" is an indexed filter. Existing
+  //   rows are backfilled from client_json. nests.access_log_enabled (default
+  //   ON) lets an owner turn read logging off for a nest.
+  if (!hasMigration("050_agent_read_log")) {
+    const accessCols = (
+      db.prepare("PRAGMA table_info(node_access_events)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    const nestCols050 = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    db.transaction(() => {
+      if (accessCols.length && !accessCols.includes("version")) {
+        db.exec("ALTER TABLE node_access_events ADD COLUMN version INTEGER");
+      }
+      if (accessCols.length && !accessCols.includes("agent")) {
+        db.exec("ALTER TABLE node_access_events ADD COLUMN agent TEXT");
+        db.exec(`
+          UPDATE node_access_events
+             SET agent = LOWER(json_extract(client_json, '$.agent'))
+           WHERE client_json IS NOT NULL AND json_valid(client_json)
+             AND json_type(client_json, '$.agent') = 'text'
+        `);
+      }
+      if (accessCols.length) {
+        db.exec(
+          "CREATE INDEX IF NOT EXISTS idx_node_access_agent ON node_access_events(nest_id, agent, id)",
+        );
+      }
+      if (!nestCols050.includes("access_log_enabled")) {
+        db.exec("ALTER TABLE nests ADD COLUMN access_log_enabled INTEGER NOT NULL DEFAULT 1");
+      }
+    })();
+    recordMigration("050_agent_read_log");
+  }
+
   // 051: saved Board views (CU-wdqcq03xn2). One row per named board on a nest;
   //   the view itself (dimension, columns, filter, per-column card rank) is a
   //   JSON blob the UI owns — board-routes.ts validates its shape. private=1
@@ -1767,13 +1806,13 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("052_nest_done_tags");
   }
 
-  // 053: access requests (CU-wdqcq041jn). Someone who can SEE a document,
+  // 055: access requests (CU-wdqcq041jn). Someone who can SEE a document,
   //   folder or nest but not change it asks for write access instead of hitting
   //   a dead-end 403; a nest owner/admin approves (which grants through the
   //   existing share/collaborator paths) or denies with a note. One pending row
   //   per (nest, requester, target); resolved rows stay as the record, and the
   //   latest one is what the next refusal shows ("pending" / "denied").
-  if (!hasMigration("053_access_requests")) {
+  if (!hasMigration("055_access_requests")) {
     db.transaction(() => {
       db.exec(`
         CREATE TABLE IF NOT EXISTS access_requests (
@@ -1799,7 +1838,44 @@ export function runMigrations(db: Database.Database): void {
           ON access_requests(nest_id, status);
       `);
     })();
-    recordMigration("053_access_requests");
+    recordMigration("055_access_requests");
+  }
+
+  // 053: license_cache.own_gateway_json — the licence's own-provider LiteLLM
+  //   key (byok) and its model list, encrypted like gateway_json.
+  if (!hasMigration("053_license_cache_own_gateway")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(license_cache)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("own_gateway_json")) {
+      db.exec("ALTER TABLE license_cache ADD COLUMN own_gateway_json TEXT");
+    }
+    recordMigration("053_license_cache_own_gateway");
+  }
+
+  // 054: metacognition agents (CU-wdqcq041jm). One row per agent node the
+  //   SERVER runs as a persona: the persona's service identity (users.is_service
+  //   = 1, no key, no password), and the run config (scope, caps, feeds, MCP
+  //   servers) as a JSON blob metacognition/config.ts validates. created_by is
+  //   the owner/admin whose access bounds what the persona may read and propose.
+  if (!hasMigration("054_metacognition_agents")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS metacognition_agents (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        persona_user_id TEXT NOT NULL,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (nest_id, node_id)
+      );
+      -- One running server-executed run per agent, enforced atomically.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_server_run
+        ON runs(nest_id, agent_node) WHERE status = 'running' AND claimed_by = 'server:metacognition';
+    `);
+    recordMigration("054_metacognition_agents");
   }
 }
 
