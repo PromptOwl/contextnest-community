@@ -106,14 +106,17 @@ export function sourceRangesForAnchors(
     const tail = foldText(t.anchor.before ?? "").folded.slice(-24);
     let at = -1;
     let first = -1;
+    let hits = 0;
     for (let i = f.folded.indexOf(q); i !== -1; i = f.folded.indexOf(q, i + 1)) {
       if (first < 0) first = i;
+      hits++;
       if (tail && f.folded.slice(Math.max(0, i - tail.length), i) === tail) {
         at = i;
         break;
       }
     }
-    if (at < 0) at = first;
+    // No context match: paint only an unambiguous quote, like the frame bridge.
+    if (at < 0 && hits === 1) at = first;
     if (at < 0) continue;
     out.push({ id: t.id, start: f.map[at], end: f.map[at + q.length - 1] + 1 });
   }

@@ -83,6 +83,17 @@ describe("sourceRangesForAnchors (highlights in the raw markdown)", () => {
     ).toEqual([]);
   });
 
+  it("skips a repeated quote whose `before` context matches neither spot (no guessing)", () => {
+    expect(
+      sourceRangesForAnchors(src, [{ id: "t5", anchor: { quote: "ship the beta", before: "stale context " } }]),
+    ).toEqual([]);
+  });
+
+  it("still paints a unique quote when its `before` context has gone stale", () => {
+    const [r] = sourceRangesForAnchors(src, [{ id: "t6", anchor: { quote: "again later", before: "stale " } }]);
+    expect(src.slice(r.start, r.end)).toBe("again later");
+  });
+
   it("skips whole-document threads", () => {
     expect(sourceRangesForAnchors(src, [{ id: "t4", anchor: null }])).toEqual([]);
   });

@@ -139,7 +139,7 @@ test.describe('Annotations keep your place', () => {
         return r ? pre.textContent.slice(r.startOffset, r.startOffset + 60) : '';
       });
       expect(atTop).toMatch(/\b30\b/);
-      expect(await page.evaluate(() => CSS.highlights.get('comment-anchor')?.size ?? 0)).toBe(1);
+      expect(await page.evaluate(() => CSS.highlights.get('artifact-anchor')?.size ?? 0)).toBe(1);
 
       // ── and back: scroll the text to Section 50, return to Preview ──
       await page.evaluate(() => {

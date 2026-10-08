@@ -565,8 +565,8 @@ export function ArtifactViewer({
     const pre = preRef.current;
     if (mode !== "annotate" || !pre || !extractedText) {
       anchorRangesRef.current = [];
-      clearHighlight("comment-anchor");
-      clearHighlight("comment-anchor-active");
+      clearHighlight("artifact-anchor");
+      clearHighlight("artifact-anchor-active");
       return;
     }
     const idx = buildTextIndex(pre);
@@ -576,15 +576,15 @@ export function ArtifactViewer({
       if (r) ranges.push({ id: t.id, range: r });
     }
     anchorRangesRef.current = ranges;
-    setHighlight("comment-anchor", ranges.map((r) => r.range));
+    setHighlight("artifact-anchor", ranges.map((r) => r.range));
     const hit = ranges.find((r) => r.id === activeThreadId);
-    setHighlight("comment-anchor-active", hit ? [hit.range] : []);
+    setHighlight("artifact-anchor-active", hit ? [hit.range] : []);
   }, [mode, extractedText, threads, activeThreadId]);
 
   useEffect(
     () => () => {
-      clearHighlight("comment-anchor");
-      clearHighlight("comment-anchor-active");
+      clearHighlight("artifact-anchor");
+      clearHighlight("artifact-anchor-active");
     },
     [],
   );
