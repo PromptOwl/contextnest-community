@@ -179,8 +179,8 @@ export function getOwnGateway(): OwnGateway | null {
 const ownGatewaySummary = (g: OwnGateway | null) =>
   g ? `on …${g.key.slice(-4)}, ${g.models.length} models (${Object.keys(g.providers).join(", ") || "no providers"})` : "off";
 
-/** Providers a server admin can add their own key for (Anthropic has its own setting). */
-export const OWN_KEY_PROVIDERS = ["openai", "gemini", "grok", "groq"] as const;
+/** Providers a server admin can add their own key for; all live in PromptOwl's model gateway. */
+export const OWN_KEY_PROVIDERS = ["claude", "openai", "gemini", "grok", "groq"] as const;
 
 /**
  * Set (apiKey) or clear (null) one own-provider key. The key goes to
@@ -239,8 +239,9 @@ function parseOwnGateway(raw: unknown): OwnGateway | null {
     : [];
   const providers: OwnGateway["providers"] = {};
   if (g.providers && typeof g.providers === "object") {
-    for (const [p, v] of Object.entries(g.providers as Record<string, any>)) {
-      if (/^[a-z]{1,32}$/.test(p) && typeof v?.masked === "string") {
+    for (const [p, raw] of Object.entries(g.providers as Record<string, unknown>)) {
+      const v = (raw && typeof raw === "object" ? raw : {}) as { masked?: unknown; updatedAt?: unknown };
+      if (/^[a-z]{1,32}$/.test(p) && typeof v.masked === "string") {
         providers[p] = { masked: v.masked.slice(-4), updatedAt: typeof v.updatedAt === "string" ? v.updatedAt : null };
       }
     }

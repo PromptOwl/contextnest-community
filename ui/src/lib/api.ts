@@ -303,9 +303,6 @@ export interface AdminSettings {
   /** Model Hootie answers with (default claude-sonnet-5; a gateway-side name
    *  such as `ollama/…` when routed through a gateway). */
   hootie_model: string;
-  /** Model gateway (LiteLLM / PromptOwl) for Hootie AND agent runs;
-   *  "" = Anthropic directly. */
-  anthropic_base_url: string;
   subagent_runs_enabled: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
@@ -343,7 +340,6 @@ export interface AdminSettings {
   ms_tenant_id: string;
   google_token_exchange_enabled: boolean;
   google_client_id: string;
-  anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   msteams_webhook_url: string;
   email_provider: "smtp" | "ses";
@@ -356,11 +352,8 @@ export interface AdminSettings {
   ses_secret_access_key?: string | null;
   notify_email_from: string;
   notify_email_to: string;
-  anthropic_api_key?: string | null;
   /** Own-provider keys PromptOwl holds for this licence (byok): masked tails only. */
   own_providers?: Record<string, { masked: string; updatedAt: string | null }>;
-  /** Key a call without an own-provider model uses: own Anthropic key, or PromptOwl credits. */
-  model_source?: "own" | "promptowl" | null;
   /** Write-only: provider → key to set, or null to clear. Sent to PromptOwl, never stored here. */
   provider_keys?: Record<string, string | null>;
 }
@@ -371,9 +364,7 @@ export async function getAdminSettings() {
 
 /** Admin: patch one or more server settings. Live + persisted server-side. */
 export async function updateAdminSettings(
-  patch: Partial<AdminSettings> & {
-    anthropic_api_key?: string | null;
-  },
+  patch: Partial<AdminSettings>,
 ) {
   return request<{ settings: AdminSettings }>("/admin/settings", {
     method: "PATCH",

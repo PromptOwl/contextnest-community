@@ -565,17 +565,16 @@ export const config = {
    * its POST /nests/:id/chat route. Default OFF (since 1.28, CU-wdqcq03ewc):
    * an admin opts in from Settings → General (hootie_enabled) or the deploy
    * sets HOOTIE_ENABLED=true. Off → the route 404s and the launcher is
-   * hidden. Answering additionally needs the server-wide ANTHROPIC_API_KEY;
-   * without one the route answers 503, not 404 — the feature is on, it just
-   * isn't configured yet. Its name/logo/colour/greeting are enterprise-only
+   * hidden. Answering additionally needs a model key (PromptOwl's gateway from
+   * the licence, or an own-provider key); without one the route answers 503,
+   * not 404 — the feature is on, it just isn't configured yet. Its name/logo/colour/greeting are enterprise-only
    * (src/hootie/brand.ts).
    */
   get HOOTIE_ENABLED(): boolean {
     return process.env.HOOTIE_ENABLED === "true";
   },
   /** Model Hootie answers with. Superadmin-editable at runtime via
-   *  /admin/settings (hootie_model). A gateway-side name (`ollama/…`,
-   *  `gpt-…`) is fine when ANTHROPIC_BASE_URL points at one. */
+   *  /admin/settings (hootie_model): a plain name from the model list. */
   get HOOTIE_MODEL(): string {
     return process.env.HOOTIE_MODEL || "claude-sonnet-5"; // efficient default (pricing spec §6.6)
   },
@@ -583,17 +582,6 @@ export const config = {
    *  Off by default; summaries (model, key tail, tokens) are always logged. */
   get HOOTIE_DEBUG_LOG(): boolean {
     return process.env.HOOTIE_DEBUG_LOG === "true";
-  },
-  /**
-   * Where the Anthropic-shaped model calls go. Empty = Anthropic directly.
-   * Set to a LiteLLM (or PromptOwl) gateway to route Hootie AND agent runs
-   * through it — one setting: the runner honours the same variable via the
-   * run bundle's env floor. Superadmin-editable (anthropic_base_url).
-   * Never a per-user vendor key: that is the shadow-AI hole the gateway
-   * exists to close.
-   */
-  get ANTHROPIC_BASE_URL(): string {
-    return (process.env.ANTHROPIC_BASE_URL || "").trim().replace(/\/$/, "");
   },
   /**
    * Sub-agent runs: lets a run spawn nested runs (an external runner calling

@@ -53,7 +53,7 @@ import { toast } from "sonner";
 interface SettingsPageProps {
   settings: AdminSettings | null;
   onUpdate: (
-    patch: Partial<AdminSettings> & { anthropic_api_key?: string | null },
+    patch: Partial<AdminSettings>,
   ) => void | Promise<void>;
 }
 
@@ -143,8 +143,6 @@ const TABS: {
     id: "hootie",
     label: "Hootie",
     keys: [
-      "anthropic_api_key",
-      "anthropic_base_url",
       "provider_keys",
       "hootie_enabled",
       "hootie_model",
@@ -214,11 +212,9 @@ const noAutofill = (type: string) =>
   }) as const;
 
 /** Controlled text input bound straight to the draft (no per-field Save). */
-/** Hootie's model: one of the models this server's key can reach (PromptOwl's
- *  team models on the gateway, the provider's on an own key). If the list
- *  can't be loaded, a name can still be typed. */
-/** Providers an Enterprise (byok) server can add its own key for; Anthropic has its own card. */
+/** Providers an Enterprise (byok) server can add its own key for. */
 const OWN_PROVIDERS = [
+  ["claude", "Anthropic"],
   ["openai", "OpenAI"],
   ["gemini", "Google Gemini"],
   ["grok", "xAI Grok"],
@@ -226,8 +222,8 @@ const OWN_PROVIDERS = [
 ] as const;
 
 /**
- * Own-provider key rows (inside the Model keys card). Write-only like the
- * Anthropic key: staged in the draft as `provider_keys` (string = set, null =
+ * Own-provider key rows (inside the Model keys card). Write-only like any
+ * secret: staged in the draft as `provider_keys` (string = set, null =
  * clear) and sent with the global Save; PromptOwl checks and keeps them in its
  * model gateway, this server only sees the masked tail.
  */
@@ -285,6 +281,9 @@ function ProviderKeyFields({
   );
 }
 
+/** Hootie's model: one of the models this server's key can reach (PromptOwl's
+ *  team models on the gateway, the provider's on an own key). If the list
+ *  can't be loaded, a name can still be typed. */
 function HootieModelField({
   value,
   error,
@@ -467,11 +466,9 @@ function NumField({
 
 function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   // Local editable copy. Re-synced whenever the server value changes (initial
-  // load, and after a successful save — which clears the dirty state). Extends
-  // AdminSettings with the write-only `anthropic_api_key`: the server returns it
-  // only masked, so it isn't part of AdminSettings, but it's edited through the
-  // exact same draft + `set()` + global Save as every other field. Absent =
-  // untouched, string = set to this, null = clear on save.
+  // load, and after a successful save — which clears the dirty state).
+  // Write-only fields (secrets, `provider_keys`) are edited through the same
+  // draft + `set()` + global Save: absent = untouched, string = set, null = clear.
   const [draft, setDraft] = useState<AdminSettings | null>(settings);
   const [saving, setSaving] = useState(false);
   const qc = useQueryClient();
@@ -606,7 +603,6 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
       // there's no value to diff against — "staged" means a non-empty string
       // (set) or null (clear). Everything else diffs by value like normal.
       if (
-        k === "anthropic_api_key" ||
         k === "oidc_client_secret" ||
         k === "mcp_signing_secret" ||
         k === "ses_secret_access_key"
@@ -1822,21 +1818,18 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
 
           {/* Hootie */}
           <TabsContent value="hootie" className="space-y-4">
-            {/* Anthropic API key — server-wide runner/LLM key. Write-only
-                (the server only returns it masked), so it isn't part of the
-                settings draft; its staged value rides the global Save via
-                `apiKeyDraft`. A nest's Tool environment can override it. */}
+            {/* Model keys — own provider keys (byok), kept by PromptOwl's model
+                gateway; write-only, staged as `provider_keys` on the global Save. */}
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">Model keys</CardTitle>
                 <CardDescription>
-                  Your own model keys. The Anthropic key is server-wide:
-                  runners pick it up automatically (every nest, unless a nest
-                  overrides it in its Tool environment). A Hootie model from a
-                  provider below runs on that provider's key. Without a key,
-                  Hootie and runs use PromptOwl's virtual key on your plan's
-                  credits. Each key is checked with the provider when you save,
-                  so a bad key is refused here rather than failing later.
+                  Your own model keys. A Hootie model from a provider below runs
+                  on that provider's key; any other model, and agent runs, use
+                  PromptOwl's virtual key on your plan's credits (a nest can set
+                  its own key for runs in its Tool environment). Each key is
+                  checked with the provider when you save and kept by
+                  PromptOwl's model gateway, not on this server.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -1848,62 +1841,14 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                       your plan's credits. Using your own model key or gateway
                       is an Enterprise feature.
                     </p>
-                    {settings.anthropic_api_key_masked && draft.anthropic_api_key !== null && (
-                      <button
-                        type="button"
-                        className="text-xs text-destructive hover:underline"
-                        onClick={() => set({ anthropic_api_key: null })}
-                      >
-                        A stored key ({settings.anthropic_api_key_masked}) is ignored on this plan — clear it
-                      </button>
-                    )}
-                    {draft.anthropic_api_key === null && <p className="text-xs">Will be cleared when you save.</p>}
                   </div>
                 ) : (
                 <div className="space-y-4">
-                <div className="space-y-1.5">
-                <Label htmlFor="anthropic-api-key">Anthropic</Label>
-                <div className="text-xs text-muted-foreground">
-                  {draft.anthropic_api_key === null
-                    ? "Will be cleared when you save."
-                    : settings?.anthropic_api_key_masked
-                      ? `Current: ${settings.anthropic_api_key_masked}`
-                      : settings?.model_source === "promptowl"
-                        ? "Not set — Hootie and runs use PromptOwl's virtual key on your plan's credits."
-                        : "Not set — runs can't execute until a key exists here or in a nest's Tool environment."}
-                </div>
-                <TextField
-                  id="anthropic-api-key"
-                  error={fieldErrors.anthropic_api_key}
-                  type="password"
-                  value={
-                    typeof draft.anthropic_api_key === "string"
-                      ? draft.anthropic_api_key
-                      : ""
-                  }
-                  placeholder="sk-ant-… (paste to set or replace)"
-                  onChange={(v) => set({ anthropic_api_key: v })}
-                />
-                {settings?.anthropic_api_key_masked &&
-                  draft.anthropic_api_key !== null && (
-                    <button
-                      type="button"
-                      className="mt-2 text-xs text-destructive hover:underline"
-                      onClick={() => set({ anthropic_api_key: null })}
-                    >
-                      Clear key
-                    </button>
-                  )}
-                {draft.anthropic_api_key === null && (
-                  <button
-                    type="button"
-                    className="mt-2 text-xs text-muted-foreground hover:underline"
-                    onClick={() => set({ anthropic_api_key: undefined })}
-                  >
-                    Keep current key
-                  </button>
+                {Object.keys(settings?.own_providers ?? {}).length === 0 && (
+                  <p className="text-xs text-muted-foreground" data-testid="settings-no-own-keys">
+                    No own keys set — Hootie and runs use PromptOwl's virtual key on your plan's credits.
+                  </p>
                 )}
-                </div>
                 <ProviderKeyFields
                   draft={draft.provider_keys ?? {}}
                   current={settings?.own_providers ?? {}}
@@ -1927,9 +1872,9 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   tab on the right edge. It answers from what the person asking
                   can read in the nest, cites the documents it used, and lets
                   them @tag a colleague — which posts the exchange as a comment
-                  and notifies them. Off until you turn it on. Runs on the
-                  model key above, or on PromptOwl models with your plan's
-                  credits; without either the panel says so.
+                  and notifies them. Off until you turn it on. Runs on your
+                  own key for the model's provider, or on PromptOwl models with
+                  your plan's credits; without either the panel says so.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -1954,23 +1899,6 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   onChange={(v) => set({ hootie_model: v })}
                   reloadKey={JSON.stringify(settings?.own_providers ?? {})}
                 />
-                {settings?.byok_available !== false && (
-                <div className="space-y-1.5">
-                  <Label htmlFor="anthropic-base-url">Model gateway URL</Label>
-                  <TextField
-                    id="anthropic-base-url"
-                    value={draft.anthropic_base_url ?? ""}
-                    placeholder="http://gateway:4000 — empty calls Anthropic directly"
-                    onChange={(v) => set({ anthropic_base_url: v })}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Route every model call — Hootie and agent runs — through a
-                    LiteLLM or PromptOwl gateway with the key above as its
-                    virtual key: budgets, spend logs, and any model the gateway
-                    fronts. Empty means Anthropic directly.
-                  </p>
-                </div>
-                )}
               </CardContent>
             </Card>
           </TabsContent>
@@ -2343,7 +2271,7 @@ export default function SettingsRoute() {
       .catch(() => {});
   }, [isAdmin]);
   const updateServerSettings = useCallback(async (
-    patch: Partial<AdminSettings> & { anthropic_api_key?: string | null },
+    patch: Partial<AdminSettings>,
   ) => {
     try {
       const res = await updateAdminSettings(patch);

@@ -92,7 +92,7 @@ hootieRoutes.post("/chat", async (c) => {
     return c.json(
       {
         error: hasEntitlement("byok")
-          ? "Hootie needs an Anthropic API key. A server admin can add one under Settings → General."
+          ? "Hootie needs a model key. A server admin can add one under Settings → Hootie → Model keys."
           : "Hootie runs on PromptOwl models, which arrive with this server's next licence check. If it persists, ask your administrator.",
         reason: "no_api_key",
       },
