@@ -3,7 +3,9 @@ import {
   GraphQueryEngine,
   VersionManager,
   DocumentNotFoundError,
+  parseDocument,
 } from "@promptowl/contextnest-engine";
+import { join } from "node:path";
 import { config } from "../config.js";
 import { createEngineApi } from "@promptowl/contextnest-engine/api";
 import type { OperationContext } from "@promptowl/contextnest-engine/api";
@@ -57,7 +59,12 @@ const isLive = (node: ContextNode) => node.frontmatter.status !== "rejected";
 function withDiscoveryCache<S extends NestStorage>(
   nestId: string,
   storage: S,
-): { storage: S; invalidate: () => void; desync: () => void } {
+): {
+  storage: S;
+  invalidate: () => void;
+  desync: () => void;
+  cachedDocument: (id: string) => ContextNode | null;
+} {
   const entries = new Map<string, { docs: ContextNode[]; ts: number }>();
   // The crawl in flight, if any. Cross-nest search fans out over every nest at
   // once and the palette fires a query per keystroke, so without this the same
@@ -176,7 +183,12 @@ function withDiscoveryCache<S extends NestStorage>(
    * Entry timestamps are left alone, so the TTL still bounds how stale a set
    * can get relative to another instance.
    */
-  const patch = async (id: string): Promise<void> => {
+  const patch = async (
+    id: string,
+    /** What a SUCCESSFUL write left on disk: its plaintext, or null for a
+     *  delete. Omitted when the write threw — then disk is the only truth. */
+    written?: string | null,
+  ): Promise<void> => {
     // A derived file is never in the set — nothing to fold in.
     if (isMetaFile(id)) return;
     // Same guard as invalidate(): a crawl already in flight predates this
@@ -186,7 +198,14 @@ function withDiscoveryCache<S extends NestStorage>(
     inflight = null;
     let node: ContextNode | null = null;
     try {
-      node = await readDoc(id);
+      // Parse what was just written instead of reading it back — the same
+      // bytes readDocument would decrypt and parse, minus a round trip.
+      node =
+        written === undefined
+          ? await readDoc(id)
+          : written === null
+            ? null
+            : parseDocument(join(storage.root, `${id}.md`), written, id);
     } catch (err) {
       // Only a MISSING document means it left the set. Any other failure —
       // a transient read on a network mount, right after the write — would
@@ -218,18 +237,21 @@ function withDiscoveryCache<S extends NestStorage>(
    *  back to dropping the cache rather than leaving a wrong set in place. */
   const wrap = (
     name: "writeDocument" | "deleteDocument" | "writeVaultFile" | "init",
-    after: (args: unknown[]) => void | Promise<void>,
+    after: (args: unknown[], ok: boolean) => void | Promise<void>,
   ) => {
     const write = (storage[name] as (...a: any[]) => Promise<unknown>).bind(storage);
     (storage as any)[name] = async (...args: unknown[]) => {
+      let ok = false;
       try {
-        return await write(...args);
+        const result = await write(...args);
+        ok = true;
+        return result;
       } finally {
         // After the write, not before: patching first leaves a window where a
         // concurrent read repopulates the entry with pre-write content.
         // `finally` so a write that threw part-way still reconciles the set.
         try {
-          await after(args);
+          await after(args, ok);
         } catch {
           await desync();
         }
@@ -237,8 +259,10 @@ function withDiscoveryCache<S extends NestStorage>(
     };
   };
 
-  wrap("writeDocument", (args) => patch(String(args[0])));
-  wrap("deleteDocument", (args) => patch(String(args[0])));
+  wrap("writeDocument", (args, ok) =>
+    patch(String(args[0]), ok && typeof args[1] === "string" ? args[1] : undefined),
+  );
+  wrap("deleteDocument", (args, ok) => patch(String(args[0]), ok ? null : undefined));
   wrap("init", () => desync());
   wrap("writeVaultFile", (args) => {
     // Derived files (INDEX.md, context.yaml, agent configs) are outside
@@ -251,7 +275,10 @@ function withDiscoveryCache<S extends NestStorage>(
   // rebuild of the DB mirror uses — it needs a fresh crawl but must not mark
   // the nest stale again, or it would undo the stamp it is about to write.
   // `desync` is for callers who mean "disk may have moved under us".
-  return { storage, invalidate, desync: () => void desync() };
+  /** The cached copy of one document, or null — never crawls or refreshes. */
+  const cachedDocument = (id: string): ContextNode | null =>
+    (entries.get("all") ?? entries.get("live"))?.docs.find((d) => d.id === id) ?? null;
+  return { storage, invalidate, desync: () => void desync(), cachedDocument };
 }
 
 type HistoryMap = Awaited<ReturnType<NestStorage["findAllHistories"]>>;
@@ -370,6 +397,12 @@ interface NestEngine {
    * rebuild is about to write.
    */
   dropDiscoveryCache: () => void;
+  /**
+   * This nest's cached copy of a document, without any I/O, or null. Only
+   * current for a document THIS process just wrote (writes fold in on the
+   * spot); another instance's write stays invisible until the cache expires.
+   */
+  cachedDocument: (id: string) => ContextNode | null;
 }
 
 class NestEngineCache {
@@ -381,7 +414,7 @@ class NestEngineCache {
       const nestPath = resolveNestPath(nestId);
       // Imported nests discover markdown anywhere in the copied folder;
       // default nests keep the engine's structured (nodes/) layout.
-      const { storage, invalidate, desync } = withDiscoveryCache(
+      const { storage, invalidate, desync, cachedDocument } = withDiscoveryCache(
         nestId,
         (await isImportedNest(nestId))
           ? new FlatNestStorage(nestPath)
@@ -400,6 +433,7 @@ class NestEngineCache {
           desync();
         },
         dropDiscoveryCache: invalidate,
+        cachedDocument,
       };
       this.cache.set(nestId, engine);
     }

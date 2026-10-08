@@ -199,18 +199,17 @@ governanceRoutes.get("/review-queue", async (c) => {
   // + separation-of-duties). The UI gates the Review button + queue off this
   // instead of re-deriving steward scope client-side, which diverged for
   // reviewer-stewards reaching the nest via public visibility (CU-wdqcpzudt3
-  // follow-up). Cached per node across rows.
+  // follow-up). Resolved for the whole page at once, not per row.
   const email = await getUserEmail(c);
-  const canReviewCache = new Map<string, boolean>();
-  const requests = [];
-  for (const r of result.requests) {
-    let canReview = canReviewCache.get(r.nodeId);
-    if (canReview === undefined) {
-      canReview = (await stewardship.canUserApprove(nestId, r.nodeId, email)).allowed;
-      canReviewCache.set(r.nodeId, canReview);
-    }
-    requests.push({ ...r, canReview });
-  }
+  const verdicts = await stewardship.canUserApproveMany(
+    nestId,
+    result.requests.map((r) => r.nodeId),
+    email,
+  );
+  const requests = result.requests.map((r) => ({
+    ...r,
+    canReview: verdicts.get(r.nodeId)?.allowed ?? false,
+  }));
 
   return c.json({ ...result, requests });
 });
@@ -265,20 +264,20 @@ governanceRoutes.post("/review-queue/bulk", async (c) => {
   // One batch is one call: validated once, recorded on the batch's trace row,
   // and carried onto every version the approvals seal (§9.4).
   const client = attributeRequest(c, body.client);
-  const results: Array<{ nodeId: string; ok: boolean; error?: string }> = [];
-  for (const nodeId of nodeIds) {
-    try {
-      if (body.action === "approve") {
-        await reviews.approve({
-          nestId,
-          nodeId,
-          approvedBy: userEmail,
-          note: body.note,
-          override: false,
-          baseUrl,
-          client,
-        });
-      } else {
+  let results: Array<{ nodeId: string; ok: boolean; error?: string }> = [];
+  if (body.action === "approve") {
+    // One engine publish for the whole batch — one checkpoint, one index rebuild.
+    results = await reviews.approveMany({
+      nestId,
+      nodeIds,
+      approvedBy: userEmail,
+      note: body.note,
+      baseUrl,
+      client,
+    });
+  } else {
+    for (const nodeId of nodeIds) {
+      try {
         await reviews.reject({
           nestId,
           nodeId,
@@ -286,10 +285,10 @@ governanceRoutes.post("/review-queue/bulk", async (c) => {
           note: body.note!,
           baseUrl,
         });
+        results.push({ nodeId, ok: true });
+      } catch (err: any) {
+        results.push({ nodeId, ok: false, error: err?.message || "Failed" });
       }
-      results.push({ nodeId, ok: true });
-    } catch (err: any) {
-      results.push({ nodeId, ok: false, error: err?.message || "Failed" });
     }
   }
   // No override path here: forcing past a refusal is a per-document decision.
@@ -529,7 +528,8 @@ governanceRoutes.post("/deletion-requests/:id/withdraw", async (c) => {
   return c.json({ withdrawn: true, request });
 });
 
-// GET /nests/:nestId/feed?filter=all|changes|comments&limit=&offset=
+// GET /nests/:nestId/feed?filter=all|changes|comments&limit=&offset=&resolved=include
+// Comment activity on resolved threads is left out unless resolved=include.
 // Activity feed: pending change submissions (the same rows the review queue
 // shows, every field intact) interleaved with annotation activity (new
 // comment threads + replies), newest first. ADDITIVE sibling of
@@ -562,6 +562,7 @@ governanceRoutes.get("/feed", async (c) => {
     filter,
     limit,
     offset,
+    includeResolved: c.req.query("resolved") === "include",
   });
   return c.json({ ...result, filter, limit, offset });
 });
