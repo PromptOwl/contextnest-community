@@ -13,7 +13,7 @@
  * a menu item would also open the document.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { CalendarDays, ListTree, UserRound, X } from "lucide-react";
+import { Ban, CalendarDays, ListTree, UserRound, X } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -329,6 +329,27 @@ export function AssigneeMenu({
         </DropdownMenuContent>
       </DropdownMenu>
     </Isolate>
+  );
+}
+
+// ── Blocked ─────────────────────────────────────────────────────────────────
+
+/**
+ * Linear's "Blocked" flag: shown while any `blocks` relation points at this
+ * task from something not yet done. Read-only — relations are edited on the
+ * task itself. The count only appears past one blocker.
+ */
+export function BlockedBadge({ count, className = "" }: { count: number; className?: string }) {
+  if (count <= 0) return null;
+  return (
+    <span
+      className={`inline-flex items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-[10px] font-medium bg-red-500/10 text-red-700 dark:text-red-300 ${className}`}
+      title={`Blocked by ${count} open task${count === 1 ? "" : "s"}`}
+      data-testid="blocked-badge"
+    >
+      <Ban className="h-3 w-3" />
+      Blocked{count > 1 ? ` · ${count}` : ""}
+    </span>
   );
 }
 

@@ -96,6 +96,7 @@ import {
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
 import { AuthorshipChips } from "./AuthorshipChips";
+import { TaskRelations } from "./board/TaskRelations";
 import { TableViewer, TableGrid } from "./TableViewer";
 import { tableDiffSides } from "../lib/csv-table";
 import { TableSourceEditor } from "./TableSourceEditor";
@@ -3066,6 +3067,19 @@ export function DocumentEditor({
                   </div>
                 )}
 
+                {/* Relations — tasks only: blocks / blocked by / related /
+              duplicates. Not content, so editable in view mode too; the
+              caller's edit access to the task gates it. */}
+                {!isNew && nodeType === "task" && (
+                  <TaskRelations
+                    nestId={nestId}
+                    nodeId={nodeId}
+                    canEdit={canEditContent && !isArchived}
+                    onOpen={(id, t) =>
+                      confirmLeave(`open "${t}"`, () => onNavigateDocument?.(nestId, id, title))
+                    }
+                  />
+                )}
 
                 {/* Type + Schedule share one row: Type (new-doc kind, icon segmented
               control) on the left, Schedule (runnable orchestrator hint) on the

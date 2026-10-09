@@ -75,7 +75,9 @@ import {
   assigneesOnBoard,
   localToday,
   matchesAssigneeFilter,
+  matchesBlockedFilter,
   moveNeedsReview,
+  openBlockers,
   subItemsByParent,
   timestampsTooltip,
   PRIORITY_LABELS,
@@ -86,6 +88,7 @@ import {
   AddCardComposer,
   AssigneeMenu,
   Avatar,
+  BlockedBadge,
   DueChip,
   DeleteBoardDialog,
   GovernedMoveDialog,
@@ -305,6 +308,7 @@ export function MaturityBoard({
           created_at: n.created_at,
           updated_at: n.updated_at,
           prime: n.prime,
+          open_blockers: n.open_blockers,
         })),
       );
     } catch (e: any) {
@@ -448,6 +452,12 @@ export function MaturityBoard({
     });
   }, []);
   const boardPeople = useMemo(() => assigneesOnBoard(nodes), [nodes]);
+  // "Hide blocked" — a glance, like the assignee filter, not a saved setting.
+  const [hideBlocked, setHideBlocked] = useState(false);
+  const blockedCount = useMemo(
+    () => nodes.filter((n) => openBlockers(n) > 0).length,
+    [nodes],
+  );
   const subItems = useMemo(() => subItemsByParent(nodes), [nodes]);
 
   const visibleNodes = useMemo(
@@ -458,6 +468,7 @@ export function MaturityBoard({
           // Tasks only would hide every card added here.
           (!config.tasksOnly || !typeTaskEnabled || n.type === "task") &&
           matchesAssigneeFilter(n, assigneeFilter) &&
+          matchesBlockedFilter(n, hideBlocked) &&
           // Linear's "completed issues: past week/month" display option.
           !(
             config.hideDoneAfterDays !== undefined &&
@@ -470,7 +481,7 @@ export function MaturityBoard({
             ),
           ),
       ),
-    [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, config.hideDoneAfterDays, assigneeFilter],
+    [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, config.hideDoneAfterDays, assigneeFilter, hideBlocked],
   );
 
   const { columns, byColumn } = useMemo(
@@ -1240,6 +1251,7 @@ export function MaturityBoard({
                     editable={canEditDocs}
                     onChange={(priority) => patchFields(n.id, { priority })}
                   />
+                  <BlockedBadge count={openBlockers(n)} />
                   {!completed && (
                     <DueChip
                       due={n.due}
@@ -1774,6 +1786,20 @@ export function MaturityBoard({
               </Button>
             )}
           </div>
+        )}
+        {(blockedCount > 0 || hideBlocked) && (
+          <Button
+            variant={hideBlocked ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 px-2 text-xs"
+            aria-pressed={hideBlocked}
+            title={hideBlocked ? "Show blocked tasks again" : "Hide tasks that have an open blocker"}
+            onClick={() => setHideBlocked((v) => !v)}
+            data-testid="board-hide-blocked"
+          >
+            Hide blocked
+            <span className="ml-1 tabular-nums text-muted-foreground">{blockedCount}</span>
+          </Button>
         )}
       </div>
 

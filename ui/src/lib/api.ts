@@ -2899,6 +2899,8 @@ export interface AssignedItem {
   due: string | null;
   priority: string | null;
   assigned_at: string | null;
+  /** Open blockers (task relations); absent when nothing open blocks it. */
+  open_blockers?: number;
 }
 
 export async function getMyWork(opts?: { limit?: number; offset?: number }) {
@@ -3137,6 +3139,56 @@ export async function updateSchedule(
 
 export async function deleteSchedule(nestId: string, id: string) {
   return request(`/nests/${nestId}/schedules/${id}`, { method: "DELETE" });
+}
+
+// Task relations — blocks / blocked by / relates to / duplicates.
+export type RelationKind =
+  | "blocks"
+  | "blocked_by"
+  | "relates_to"
+  | "duplicates"
+  | "duplicated_by";
+
+export interface TaskRelation {
+  id: string;
+  type: RelationKind;
+  node: { id: string; title: string; type: string; done: boolean };
+  created_by: string;
+  created_at: string;
+}
+
+export interface TaskRelations {
+  node_id: string;
+  relations: TaskRelation[];
+  /** Related documents the caller can't read, per kind — never named. */
+  hidden: Partial<Record<RelationKind, number>>;
+  hidden_count: number;
+  open_blockers: number;
+  blocked: boolean;
+}
+
+export async function listRelations(nestId: string, nodeId: string) {
+  return request<TaskRelations>(`/nests/${nestId}/nodes/${nodeId}/relations`);
+}
+
+export async function addRelation(
+  nestId: string,
+  nodeId: string,
+  type: RelationKind,
+  node: string,
+) {
+  const r = await request<{ relation: TaskRelation; relations: TaskRelations }>(
+    `/nests/${nestId}/nodes/${nodeId}/relations`,
+    { method: "POST", body: JSON.stringify({ type, node }) },
+  );
+  return r.relations;
+}
+
+export async function removeRelation(nestId: string, nodeId: string, relationId: string) {
+  return request<TaskRelations>(
+    `/nests/${nestId}/nodes/${nodeId}/relations/${encodeURIComponent(relationId)}`,
+    { method: "DELETE" },
+  );
 }
 
 // Watchers — tag a person to a node (usually an agent) for HITL notifications.

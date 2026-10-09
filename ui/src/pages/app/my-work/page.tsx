@@ -25,7 +25,7 @@ import { PageTitle } from "@/components/ui/page-title";
 import { APPROVE_BUTTON_CLASS, REJECT_BUTTON_CLASS } from "@/lib/review-actions-style";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ReasonDialog, ReviewActions } from "../../../components/governance";
-import { DueChip, PriorityIcon } from "../../../components/board/CardParts";
+import { BlockedBadge, DueChip, PriorityIcon } from "../../../components/board/CardParts";
 import { localToday } from "../../../lib/board-tasks";
 
 export default function MyWorkPage() {
@@ -341,6 +341,7 @@ export default function MyWorkPage() {
                     >
                       <PriorityIcon priority={a.priority ?? undefined} />
                       <span className="min-w-0 flex-1 truncate">{a.title}</span>
+                      <BlockedBadge count={a.open_blockers ?? 0} />
                       {a.due && (
                         <DueChip due={a.due} today={localToday()} editable={false} onChange={() => {}} />
                       )}

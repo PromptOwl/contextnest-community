@@ -97,6 +97,8 @@ export const keys = {
     [...keys.node(nestId, nodeId), "stewards"] as const,
   nodeWatchers: (nestId: string, nodeId: string) =>
     [...keys.node(nestId, nodeId), "watchers"] as const,
+  nodeRelations: (nestId: string, nodeId: string) =>
+    [...keys.node(nestId, nodeId), "relations"] as const,
   nodeAnnotations: (nestId: string, nodeId: string) =>
     [...keys.node(nestId, nodeId), "annotations"] as const,
   nodePendingEdit: (nestId: string, nodeId: string) =>
@@ -217,6 +219,12 @@ const NEST_WRITE_SCOPES: Array<{
       keys.commentCounts(n),
       [...keys.nest(n), "feed"],
     ],
+  },
+  // Task relations. Both ends' panels and every card's "Blocked" badge read
+  // them, so drop the whole listing (which holds every node key) and My Work.
+  {
+    match: /^\/nodes\/(.+)\/relations(?:\/|$)/,
+    affects: (n) => [keys.nodes(n), keys.me],
   },
   // Who gets notified about a document — nothing else reads it.
   {
@@ -690,6 +698,12 @@ export const reads = {
       queryKey: keys.nodeWatchers(nestId, nodeId),
       queryFn: () => api.listNodeWatchers(nestId, nodeId),
       staleTime: STALE.reference,
+    }),
+  nodeRelations: (nestId: string, nodeId: string) =>
+    queryOptions({
+      queryKey: keys.nodeRelations(nestId, nodeId),
+      queryFn: () => api.listRelations(nestId, nodeId),
+      staleTime: STALE.listing,
     }),
   nodeAnnotations: (nestId: string, nodeId: string) =>
     queryOptions({

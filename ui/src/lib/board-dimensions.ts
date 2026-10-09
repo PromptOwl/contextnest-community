@@ -34,6 +34,9 @@ export interface BoardNode {
   updated_at?: string;
   /** Document-scope prime flag; undefined = inherit from tags. */
   prime?: boolean;
+  /** Blocking relations from nodes not yet in a done column (server-counted,
+   *  including blockers this viewer can't read). */
+  open_blockers?: number;
 }
 
 export type DimensionKind = "folder" | "status" | "tag" | "assignee" | "priority";
