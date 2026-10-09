@@ -26,7 +26,7 @@ curl -H 'Authorization: Bearer cnst_<your-token>' http://your-server/nests
 No authentication required. Every request is attributed to the anonymous admin user (`00000000-...`). Everyone effectively owns every anon-created nest.
 
 **Use this only when:**
-- You're running locally for yourself (`bind 127.0.0.1`), or
+- You're running locally for yourself (`HOST=127.0.0.1`), or
 - You're on a trusted LAN and don't care about access controls, or
 - You're behind an upstream reverse proxy that already authenticates.
 
@@ -44,6 +44,11 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | Var | Default | Purpose |
 |---|---|---|
 | `PORT` | `3838` | HTTP port the server listens on. |
+| `HOST` | _(unset — every interface)_ | Interface to listen on. `127.0.0.1` accepts only local connections — use it when a reverse proxy on the same machine is the only thing that should reach the server, or for `AUTH_MODE=open`. |
+| `TRUSTED_PROXIES` | _(unset — trust every peer)_ | Who may set `X-Forwarded-For`, `X-Real-IP` and `X-Forwarded-Proto`: comma-separated IPs, CIDRs (`10.0.0.0/8`, `2001:db8::/32`) and/or the keywords `loopback` and `private`. When set, those headers are believed only from a matching TCP peer; the client IP is the nearest hop in the `X-Forwarded-For` chain that isn't a listed proxy. Unset keeps the old behaviour (believe any peer), which lets a client that reaches the server directly spoof its IP — dodging per-IP rate limits — and its scheme. Startup warns while it's unset (except on Cloud Run). A malformed value stops the server from starting. See [Reverse proxies](#reverse-proxies). |
+| `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | _(unset — direct egress)_ | Corporate egress proxy for outbound HTTP(S). Must be set in the **process environment** (not `.env`) and needs `NODE_USE_ENV_PROXY=1`. See [Corporate egress proxy](#corporate-egress-proxy). |
+| `NODE_USE_ENV_PROXY` | `1` in the Docker image, unset otherwise | Node's switch for honouring the proxy variables above (Node ≥ 22.21 or ≥ 24.5). A no-op when no proxy is set. Outside Docker, export it yourself or start with `node --use-env-proxy`. |
+| `NODE_EXTRA_CA_CERTS` | _(unset)_ | Path to a PEM bundle of extra root CAs — needed when a TLS-inspecting proxy re-signs outbound traffic with a corporate CA. Read by Node at process start only, so set it in the process environment. Startup logs the path, or warns if the file is missing or the value came from `.env`. |
 | `DATA_ROOT` | `./data` (relative to cwd) | Root directory for SQLite DB + nest filesystem vaults. Set to an absolute path in production so it's independent of where you `cd`'d from. |
 | `DATABASE_PATH` | `$DATA_ROOT/community.db` | Override the SQLite file location explicitly. (SQLite backend only.) |
 | `NEST_STORAGE_ROOT` | `$DATA_ROOT/nests` | Root directory for nest vault files (markdown + version history). Override to store nests separately from the DB — e.g. point it at a Cloud Storage (GCS) volume mount on Cloud Run (`/mnt/nests`) while the SQLite DB stays on `DATA_ROOT` off the mount. **Moving existing nests:** the app does not relocate files — copy `$DATA_ROOT/nests/*` to the new root (e.g. `gsutil rsync`) before switching, or existing nests will appear empty (DB rows present, files missing). On a GCS mount, also set `DRIFT_SCAN_INTERVAL_MS=0` to avoid constant FUSE scans, and run a single instance (GCS FUSE has no file locking — concurrent writers lose data). |
@@ -964,7 +969,62 @@ PROMPTOWL_KEY=pk_... \
 npm start
 ```
 
-Terminate TLS at the proxy, forward `X-Forwarded-For` and `X-Real-IP` headers (the rate limiter reads them), and bind the server to `127.0.0.1` so only the proxy can reach it.
+Terminate TLS at the proxy and set `HOST=127.0.0.1` and `TRUSTED_PROXIES=loopback` so only the proxy can reach the server and only its forwarded headers count. Details in [Reverse proxies](#reverse-proxies).
+
+### Reverse proxies
+
+The server reads three forwarded headers: `X-Forwarded-For` / `X-Real-IP` (the client IP that per-IP rate limits on sign-in are keyed on) and `X-Forwarded-Proto` (whether session cookies get `Secure`). A header is only as trustworthy as whoever set it, so tell the server which peers are proxies:
+
+| Topology | Settings |
+|---|---|
+| Proxy on the same host (nginx, Caddy, Traefik) | `HOST=127.0.0.1`, `TRUSTED_PROXIES=loopback` |
+| Proxy or load balancer elsewhere on a private network | `TRUSTED_PROXIES=10.0.0.0/8` (its subnet), or `private` for every RFC 1918 / CGNAT / link-local range |
+| Exposed directly, no proxy | `TRUSTED_PROXIES=loopback` — forwarded headers from the internet are then ignored |
+| Cloud Run | Leave unset. Google's front end sets the headers and its peer addresses aren't stable. |
+
+The proxy must **overwrite** the headers rather than pass client values through, and must forward `Host` unchanged or you must set `PUBLIC_BASE_URL` (see the env reference). nginx:
+
+```nginx
+location / {
+  proxy_pass http://127.0.0.1:3838;
+  proxy_set_header Host              $host;
+  proxy_set_header X-Forwarded-For   $remote_addr;
+  proxy_set_header X-Real-IP         $remote_addr;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_http_version 1.1;            # MCP streams over HTTP/1.1
+  proxy_buffering off;
+}
+```
+
+Caddy sets these headers itself: `reverse_proxy 127.0.0.1:3838`.
+
+With port forwarding (router or firewall NAT), forward the public `443` to the **proxy**, never the server's `3838` directly — `3838` speaks plain HTTP.
+
+### Corporate egress proxy
+
+When outbound traffic must go through a proxy, set in the process environment (Docker `-e`, a systemd `Environment=` line, or your shell — **not** `.env`, which loads after Node has configured networking):
+
+```bash
+HTTPS_PROXY=http://proxy.corp.example:3128
+HTTP_PROXY=http://proxy.corp.example:3128
+NO_PROXY=localhost,127.0.0.1,.corp.example
+NODE_USE_ENV_PROXY=1          # already set in the Docker image
+NODE_EXTRA_CA_CERTS=/etc/ssl/corp-root-ca.pem   # only if the proxy inspects TLS
+```
+
+Startup logs the proxy in use (credentials masked), or says why a configured proxy is not being used. Everything the server fetches over HTTP(S) goes through it. Two connections do **not**: SMTP (nodemailer opens its own TCP connection) and PostgreSQL; AWS SES goes through the AWS SDK's HTTP client, which this setting doesn't cover either. Give those direct egress or put them on a path the firewall allows.
+
+Outbound destinations to allow, through the proxy or the firewall:
+
+| Destination | Port | Used for | Configured by |
+|---|---|---|---|
+| `app.promptowl.ai` | 443 | License validation, PromptOwl sign-in (device flow), teams import, own-model keys, telemetry ingest | `PROMPTOWL_API_URL` |
+| The model gateway host sent with your license, else `api.anthropic.com` | 443 | Hootie and other model calls | License / nest model settings |
+| Your IdP (e.g. `login.microsoftonline.com`) | 443 | OIDC discovery, keys and token exchange | `OIDC_ISSUER` |
+| Your Slack / Teams webhook hosts | 443 | Notifications | Settings → Notifications |
+| `us.i.posthog.com` | 443 | Product analytics, when telemetry is on | `POSTHOG_HOST` |
+| Your SMTP server | 25 / 465 / 587 | Email notifications — **direct, not proxied** | `SMTP_URL` |
+| Your PostgreSQL server | 5432 | Database, when not SQLite — **direct, not proxied** | `DATABASE_URL` / `DB_HOST` |
 
 ### Hosted / commercial SaaS
 
