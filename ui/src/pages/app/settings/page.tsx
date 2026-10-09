@@ -1268,7 +1268,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     role="alert"
                     className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive"
                   >
-                    Blocked: set the public base URL on the General tab first.
+                    Blocked: set the public base URL on the Basic tab first.
                     The discovery documents have to name this server's exact
                     address, and a guessed one fails the client's check with no
                     useful error.
