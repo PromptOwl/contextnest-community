@@ -1877,6 +1877,75 @@ export function runMigrations(db: Database.Database): void {
     `);
     recordMigration("054_metacognition_agents");
   }
+
+  // 056: MCP OAuth (was 045, then 053 on its branch; both taken on development) (CU-wdqcq02p06). Three tables behind MCP_OAUTH_ENABLED —
+  // created unconditionally so turning the flag on needs no migration, but
+  // inert while it is off.
+  //
+  // Secrets are stored as SHA-256 hashes, never in the clear, the same
+  // discipline api_keys uses (src/auth/keys.ts): the values are 256 bits of
+  // randomBytes, so a plain fast hash is the right storage primitive and
+  // comparison is constant-time.
+  if (!hasMigration("056_mcp_oauth")) {
+    db.transaction(() => {
+      db.exec(`
+        -- A client is whatever registered with us: a CIMD https client_id, or
+        -- a row minted by dynamic registration. redirect_uris is a JSON array.
+        CREATE TABLE IF NOT EXISTS oauth_clients (
+          client_id TEXT PRIMARY KEY,
+          client_name TEXT NOT NULL,
+          redirect_uris TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('dcr', 'cimd')),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          last_seen_at TEXT
+        );
+
+        -- Authorization codes. Single use: consumed by setting used_at, which
+        -- is what makes replay detectable rather than merely unlikely.
+        -- code_challenge is PKCE S256 and is never optional here.
+        CREATE TABLE IF NOT EXISTS oauth_codes (
+          code_hash TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          redirect_uri TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          code_challenge TEXT NOT NULL,
+          resource TEXT,
+          expires_at TEXT NOT NULL,
+          used_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires
+          ON oauth_codes(expires_at);
+
+        -- One row per grant. The access token is short-lived; the refresh
+        -- token rotates on every use (OAuth 2.1 requires rotation for public
+        -- clients, which CIMD and DCR both make us).
+        CREATE TABLE IF NOT EXISTS oauth_tokens (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          client_id TEXT NOT NULL,
+          client_name TEXT NOT NULL,
+          access_token_hash TEXT NOT NULL UNIQUE,
+          refresh_token_hash TEXT UNIQUE,
+          scope TEXT NOT NULL,
+          resource TEXT,
+          expires_at TEXT NOT NULL,
+          refresh_expires_at TEXT,
+          revoked_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          last_used_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_user
+          ON oauth_tokens(user_id);
+        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_access
+          ON oauth_tokens(access_token_hash);
+        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_refresh
+          ON oauth_tokens(refresh_token_hash);
+      `);
+    })();
+    recordMigration("056_mcp_oauth");
+  }
 }
 
 /**
