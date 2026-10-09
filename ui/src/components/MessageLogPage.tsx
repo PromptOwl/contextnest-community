@@ -123,6 +123,22 @@ function SenderCell({ row }: { row: OutboundMessageRow }) {
   );
 }
 
+/**
+ * Inbox rows and webhook posts carry a machine label as their subject (the
+ * notification kind, or the connector that posted). Show it as words.
+ */
+function subjectText(r: OutboundMessageRow): string {
+  const s = r.subject ?? "";
+  if (r.channel === "inbox" && /^[a-z_]+$/.test(s)) {
+    const words = s.replace(/_/g, " ");
+    return `${words.charAt(0).toUpperCase()}${words.slice(1)} notification`;
+  }
+  if (s === "server-slack" || s === "slack") return "Server Slack channel";
+  if (s === "server-msteams" || s === "msteams") return "Server Teams channel";
+  if (s.startsWith("connector:")) return "Nest connector";
+  return s || "—";
+}
+
 function recipientsText(r: string[]): string {
   if (r.length === 0) return "—";
   return r.length === 1 ? r[0] : `${r[0]} +${r.length - 1}`;
@@ -153,7 +169,7 @@ function MessageDetail({ id, onClose }: { id: string | null; onClose: () => void
     <Dialog open={!!id} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle className="pr-6">{msg?.subject || "Message"}</DialogTitle>
+          <DialogTitle className="pr-6">{msg ? subjectText(msg) : "Message"}</DialogTitle>
           <DialogDescription>
             Secrets are redacted before a message is stored. Opening it is recorded in the access log.
           </DialogDescription>
@@ -365,7 +381,7 @@ function MessagesTab() {
                   {recipientsText(r.recipients)}
                 </td>
                 <td className="max-w-[320px] truncate" title={r.subject ?? ""}>
-                  {r.subject || "—"}
+                  {subjectText(r)}
                   {r.nest_name && <span className="text-muted-foreground"> · {r.nest_name}</span>}
                 </td>
                 <td>
