@@ -262,9 +262,9 @@ export function MetacognitionPanel({
             const last = runs.find((r) => r.agent_node === a.node_id);
             return (
               <div key={a.node_id} className="px-3 py-2.5 space-y-1" data-testid="metacognition-agent-row">
-                <div className="flex items-center gap-2 text-sm">
+                <div className="flex flex-wrap items-center gap-2 text-sm">
                   <Avatar avatar={a.persona.avatar} name={a.persona.name} />
-                  <span className="font-medium truncate">{a.persona.name}</span>
+                  <span className="font-medium truncate shrink-0 max-w-[16rem]">{a.persona.name}</span>
                   <span className="text-xs text-muted-foreground truncate" title={a.node_id}>
                     runs {titleOf(a.node_id)}
                   </span>

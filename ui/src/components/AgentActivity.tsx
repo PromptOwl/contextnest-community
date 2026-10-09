@@ -23,6 +23,8 @@ function fmtDuration(ms: number | null): string {
   const s = Math.round(ms / 1000);
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
 }
+/** A skipped or cancelled run never did work: its duration and tokens are noise. */
+const didRun = (o: AgentRunOutcome) => o !== "skipped" && o !== "cancelled";
 const trigger = (t: string) => (t.startsWith("schedule:") ? "Schedule" : "Manual");
 
 const OUTCOME_LABEL: Record<AgentRunOutcome, string> = {
@@ -57,7 +59,7 @@ function Tile({ label, value, sub }: { label: string; value: string; sub?: strin
     <div className="rounded-md border bg-card px-3 py-2.5 min-w-0">
       <div className="text-[11px] text-muted-foreground truncate">{label}</div>
       <div className="text-lg font-semibold tabular-nums leading-tight mt-0.5">{value}</div>
-      {sub && <div className="text-[11px] text-muted-foreground truncate mt-0.5">{sub}</div>}
+      {sub && <div className="text-[11px] text-muted-foreground line-clamp-2 mt-0.5">{sub}</div>}
     </div>
   );
 }
@@ -96,6 +98,9 @@ export function AgentActivity({
   }, [nestId, nodeId, days, refreshKey]);
 
   const finished = stats ? stats.runs.total - stats.runs.running : 0;
+  // Success is judged on runs that actually ran: a skip (no key, agent off) or
+  // a person's cancel is neither a success nor a failure of the agent.
+  const ran = stats ? stats.runs.succeeded + stats.runs.failed + stats.runs.timeout : 0;
   const decided = stats ? stats.proposals.approved + stats.proposals.rejected : 0;
 
   return (
@@ -141,8 +146,8 @@ export function AgentActivity({
             />
             <Tile
               label="Success rate"
-              value={finished ? fmtPct(stats.runs.succeeded / finished) : "—"}
-              sub={stats.runs.timeout ? `${stats.runs.timeout} hit the time cap` : "of finished runs"}
+              value={ran ? fmtPct(stats.runs.succeeded / ran) : "—"}
+              sub={stats.runs.timeout ? `${stats.runs.timeout} hit the time cap` : "of runs that ran"}
             />
             <Tile
               label="Proposals approved"
@@ -163,7 +168,7 @@ export function AgentActivity({
             <Tile
               label="Tokens"
               value={fmtTokens(stats.tokens)}
-              sub={finished ? `~${fmtTokens(Math.round(stats.tokens / finished))} per run` : undefined}
+              sub={ran ? `~${fmtTokens(Math.round(stats.tokens / ran))} per run` : undefined}
             />
             <Tile label="Estimated cost" value={fmtCost(stats.est_cost_usd)} sub={`last ${stats.window_days} days`} />
           </div>
@@ -197,10 +202,10 @@ export function AgentActivity({
                   <tr className="text-left">
                     <th className="font-medium px-3 py-1.5">Started</th>
                     <th className="font-medium px-3 py-1.5">Outcome</th>
-                    <th className="font-medium px-3 py-1.5">Trigger</th>
+                    <th className="font-medium px-3 py-1.5 hidden lg:table-cell">Trigger</th>
                     <th className="font-medium px-3 py-1.5 text-right">Duration</th>
                     <th className="font-medium px-3 py-1.5 text-right">Tokens</th>
-                    <th className="font-medium px-3 py-1.5 text-right">Cost</th>
+                    <th className="font-medium px-3 py-1.5 text-right hidden lg:table-cell">Cost</th>
                     <th className="font-medium px-3 py-1.5">Proposals</th>
                     <th className="px-3 py-1.5">
                       <span className="sr-only">Trace</span>
@@ -214,10 +219,10 @@ export function AgentActivity({
                       <td className="px-3 py-1.5" title={h.error ?? undefined}>
                         <OutcomeBadge outcome={h.outcome} />
                       </td>
-                      <td className="px-3 py-1.5 text-muted-foreground">{trigger(h.triggered_by)}</td>
-                      <td className="px-3 py-1.5 text-right tabular-nums">{fmtDuration(h.duration_ms)}</td>
-                      <td className="px-3 py-1.5 text-right tabular-nums">{fmtTokens(h.tokens)}</td>
-                      <td className="px-3 py-1.5 text-right tabular-nums">{fmtCost(h.est_cost_usd)}</td>
+                      <td className="px-3 py-1.5 text-muted-foreground hidden lg:table-cell">{trigger(h.triggered_by)}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">{didRun(h.outcome) ? fmtDuration(h.duration_ms) : "—"}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">{didRun(h.outcome) ? fmtTokens(h.tokens) : "—"}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums hidden lg:table-cell">{fmtCost(h.est_cost_usd)}</td>
                       <td className="px-3 py-1.5 whitespace-nowrap">
                         {h.proposals === 0 ? (
                           <span className="text-muted-foreground">—</span>
