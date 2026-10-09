@@ -334,7 +334,7 @@ p.dest{font-size:13px;margin:0 0 10px;padding:9px 11px;border:1px solid var(--li
 </style></head><body><div class="card">${inner}</div></body></html>`;
 }
 
-oauthRoutes.get("/authorize", async (c) => {
+oauthRoutes.get("/authorize", async (c, next) => {
   const parsed = await parseAuthz(c);
   if (!parsed.ok) {
     if ("redirect" in parsed) return c.redirect(parsed.redirect, 302);
@@ -350,6 +350,22 @@ oauthRoutes.get("/authorize", async (c) => {
 
   const sessionId = getSessionIdFromRequest(c);
   const userId = sessionId ? await resolveSession(sessionId) : null;
+  // Open mode has no accounts to sign in to, and the app there counts as
+  // signed in — sending the user to log in would bounce straight back here.
+  if (!userId && config.AUTH_MODE === "open")
+    return c.html(
+      page(
+        "Can't continue",
+        `<h1>Can't continue</h1><p class="sub">Agent sign-in needs user accounts. Ask an administrator to set AUTH_MODE=key.</p>`,
+      ),
+      400,
+    );
+  if (!userId) {
+    // Show the app's own login page right here, URL and params intact: the
+    // SPA catch-all serves the shell to a browser navigation, and the UI
+    // reloads this URL once the user has signed in (ui/src/lib/oauth-return.ts).
+    return next();
+  }
 
   const scopeList = params.scope
     .split(" ")
@@ -365,58 +381,13 @@ oauthRoutes.get("/authorize", async (c) => {
     state: params.state,
     code_challenge: params.codeChallenge,
     resource: params.resource ?? "",
-    csrf: sessionId ? consentCsrf(sessionId) : "",
+    csrf: consentCsrf(sessionId!),
   })
     .map(
       ([k, v]) =>
         `<input type="hidden" name="${k}" value="${esc(String(v))}">`,
     )
     .join("");
-
-  if (!userId) {
-    // Service identities (headless access keys) can't sign in, so they don't
-    // count as "an account exists".
-    const user = (await getDb().get(
-      "SELECT 1 AS ok FROM users WHERE is_service = 0 LIMIT 1",
-    )) as
-      | { ok?: number }
-      | undefined;
-    const hint = user?.ok
-      ? "Sign in to continue."
-      : "No account exists on this server yet.";
-    return c.html(
-      page(
-        "Sign in",
-        `<h1>Sign in</h1>
-<p class="sub">${esc(hint)} <strong>${esc(client.client_name)}</strong> is waiting to connect.</p>
-<form id="f">
-  <label for="e">Email</label><input id="e" type="email" autocomplete="username" required>
-  <label for="p">Password</label><input id="p" type="password" autocomplete="current-password" required>
-  <div class="row"><button class="primary" type="submit">Sign in</button></div>
-  <div class="err" id="err"></div>
-</form>
-<script>
-document.getElementById('f').addEventListener('submit', async (ev) => {
-  ev.preventDefault();
-  const err = document.getElementById('err');
-  err.textContent = '';
-  const res = await fetch('/auth/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'same-origin',
-    body: JSON.stringify({
-      email: document.getElementById('e').value,
-      password: document.getElementById('p').value,
-    }),
-  });
-  if (res.ok) { location.reload(); return; }
-  const b = await res.json().catch(() => ({}));
-  err.textContent = b.error || 'Sign-in failed.';
-});
-</script>`,
-      ),
-    );
-  }
 
   // Registration is open (RFC 7591), so `client_name` is whatever the
   // registering party typed — "Claude" is not evidence of anything. The

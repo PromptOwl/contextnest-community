@@ -429,7 +429,7 @@ describe("MCP OAuth — refusals", () => {
     expect(loc.searchParams.get("code")).toBeNull();
   });
 
-  it("shows a sign-in page rather than leaking that a client is valid", async () => {
+  it("answers a signed-out browser with the app shell, URL unchanged", async () => {
     enable();
     const app = await createTestApp("key");
     await registerUser(app, "alice@example.com");
@@ -439,9 +439,29 @@ describe("MCP OAuth — refusals", () => {
       `/oauth/authorize?response_type=code&client_id=${clientId}` +
         `&redirect_uri=${encodeURIComponent(REDIRECT)}` +
         `&code_challenge=${challenge}&code_challenge_method=S256`,
+      { headers: { "Sec-Fetch-Mode": "navigate", Accept: "text/html" } },
     );
-    expect(res.status).toBe(200);
-    expect(await res.text()).toContain("Sign in");
+    // No redirect: the login page renders at this URL. (The shell itself is
+    // only there when the UI is built, so assert on what never changes.)
+    expect(res.headers.get("location")).toBeNull();
+    expect(await res.text()).not.toContain("Connect Claude?");
+  });
+});
+
+describe("MCP OAuth — open mode", () => {
+  it("explains instead of looping through the login page", async () => {
+    enable();
+    const app = await createTestApp("open");
+    const clientId = await register(app);
+    const { challenge } = pkce();
+    const res = await app.request(
+      `/oauth/authorize?response_type=code&client_id=${clientId}` +
+        `&redirect_uri=${encodeURIComponent(REDIRECT)}` +
+        `&code_challenge=${challenge}&code_challenge_method=S256`,
+    );
+    expect(res.status).toBe(400);
+    expect(res.headers.get("location")).toBeNull();
+    expect(await res.text()).toContain("AUTH_MODE=key");
   });
 });
 

@@ -1,5 +1,6 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { lazyChunk } from "./lib/lazy-chunk";
+import { isOAuthPath } from "./lib/oauth-return";
 import type React from "react";
 import { Login } from "./components/Login";
 // Page-sized components load on first use — one chunk each — so the shell
@@ -607,6 +608,9 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (deepLinkProbe.status === "loading") return;
+    // The OAuth authorize page shows the login form at its own URL; rewriting
+    // it would drop the params the reload after sign-in needs.
+    if (isOAuthPath(window.location.pathname)) return;
     // An unresolved ?nest is dropped from the address bar as soon as its error
     // screen goes up (CU-wdqcq01e70): leaving it there made every refresh — and
     // any link copied off that screen — land back on the same dead end. The id
