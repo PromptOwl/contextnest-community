@@ -68,6 +68,12 @@ import { isDerivedAnnotationsNode } from "../nodes/service.js";
 import type { Nest } from "../shared/types.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "../auth/license-copy.js";
 import { HEADLESS_READER_SERVER_TOOLS, isServiceUser } from "../auth/headless.js";
+import {
+  MESSAGE_LOG_DENIED,
+  getMessageLogEntry,
+  isMessageLogViewer,
+  searchMessageLog,
+} from "../notify/message-log.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
 // suspend/license middleware (unlike the per-nest access guard), so the
@@ -326,7 +332,44 @@ export const SERVER_TOOL_DEFINITIONS = [
     if (!tool) throw new Error(`server-level tool ${name} has no per-nest definition`);
     return withNestArg(tool);
   }),
+  // Superadmin message log (see notify/message-log.ts). Listed only to a
+  // superadmin caller — createServerMcp filters them out for everyone else —
+  // and re-checked on every call. Every call is audited.
+  {
+    name: "message_log_search",
+    description:
+      "SUPERADMIN ONLY. Search every message this server sent — email, Slack/Teams/webhooks, inbox notifications, agent comments — across all nests, newest first. Bodies are redacted and not included here; open one with message_log_get. Every call is recorded in the message-log access audit.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        channel: { type: "string", description: "email | slack | msteams | webhook | inbox | comment" },
+        sender_kind: { type: "string", description: "human | persona (agents) | system" },
+        status: { type: "string", description: "sent | failed | skipped" },
+        sender: { type: "string", description: "Sender email substring" },
+        nest: { type: "string", description: "Nest id" },
+        run: { type: "string", description: "Agent run id that caused the message" },
+        q: { type: "string", description: "Subject or recipient substring" },
+        from: { type: "string", description: "ISO timestamp lower bound" },
+        to: { type: "string", description: "ISO timestamp upper bound" },
+        limit: { type: "number", description: "1–200, default 50" },
+        offset: { type: "number", description: "Pagination offset" },
+      },
+    },
+  },
+  {
+    name: "message_log_get",
+    description:
+      "SUPERADMIN ONLY. One message from the message log, with its redacted body. Recorded in the message-log access audit.",
+    inputSchema: {
+      type: "object" as const,
+      properties: { id: { type: "string", description: "Message id from message_log_search" } },
+      required: ["id"],
+    },
+  },
 ];
+
+/** Server tools only a superadmin sees or may call. */
+export const MESSAGE_LOG_TOOLS = new Set(["message_log_search", "message_log_get"]);
 
 /**
  * The tools an OAuth grant may call with only `nests:read`.
@@ -388,6 +431,34 @@ async function handleServerToolCall(
   if (headless && !HEADLESS_READER_SERVER_TOOLS.has(toolName)) {
     return headlessToolError(toolName);
   }
+  if (MESSAGE_LOG_TOOLS.has(toolName)) {
+    // Same rule as REST /admin/messages: superadmin, never open mode, never
+    // a nest-scoped key. Checked here even though the tool is unlisted for
+    // everyone else — a client can always name a tool it wasn't shown.
+    if (!(await isMessageLogViewer(userId, nestScope))) {
+      return { text: MESSAGE_LOG_DENIED, data: null, isError: true };
+    }
+    if (toolName === "message_log_get") {
+      const message = await getMessageLogEntry(userId, String(args.id ?? ""), "mcp");
+      if (!message) return "No message with that id.";
+      return { text: JSON.stringify(message, null, 2), data: { message } };
+    }
+    const result = await searchMessageLog(
+      userId,
+      args,
+      { limit: args.limit, offset: args.offset },
+      "mcp",
+    );
+    const lines = result.messages.map(
+      (m) =>
+        `${m.created_at}  ${m.channel}  ${m.status}  ${m.sender ?? "system"}${m.sender_kind === "persona" ? " (agent)" : ""} → ${m.recipients.join(", ")}  ${m.subject ?? ""}  [${m.id}]`,
+    );
+    const text =
+      `${result.total} message(s); showing ${result.offset + 1}–${result.offset + result.messages.length}.\n` +
+      (lines.length ? lines.join("\n") : "No messages match.");
+    return { text, data: result };
+  }
+
   if (toolName === "nest_index") {
     const nests = await buildNestIndex(userId, nestScope);
     // `data` is what `ctx vault list` reads to list each nest as `<alias>/<nest>`.
@@ -576,15 +647,18 @@ function createServerMcp(
   apiKeyLabel: string | null,
   c: Context<AuthEnv>,
   headless = false,
+  messageLogViewer = false,
 ): McpServer {
   const server = new McpServer(
     { name: "contextnest-server", version: "1.0.0" },
     { capabilities: { tools: {} } },
   );
 
-  const toolDefs = headless
-    ? SERVER_TOOL_DEFINITIONS.filter((t) => HEADLESS_READER_SERVER_TOOLS.has(t.name))
-    : SERVER_TOOL_DEFINITIONS;
+  const toolDefs = (
+    headless
+      ? SERVER_TOOL_DEFINITIONS.filter((t) => HEADLESS_READER_SERVER_TOOLS.has(t.name))
+      : SERVER_TOOL_DEFINITIONS
+  ).filter((t) => messageLogViewer || !MESSAGE_LOG_TOOLS.has(t.name));
   for (const tool of toolDefs) {
     const props = (tool.inputSchema as any).properties || {};
     const required = (tool.inputSchema as any).required || [];
@@ -649,6 +723,7 @@ serverMcpRoutes.all("/", async (c) => {
     c.get("apiKeyLabel") ?? null,
     c,
     await isServiceUser(userId),
+    await isMessageLogViewer(userId, c.get("nestScope") ?? null),
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({

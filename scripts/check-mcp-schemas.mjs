@@ -87,7 +87,13 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // server-level `context_request_access` derives from the per-nest definition (no new
 // literal). Promotion is tracked upstream in PromptOwl/ContextNest#167 — adopt the
 // descriptors and lower this by 3 if it lands there.
-const BASELINE = 48;
+//
+// Raised 48 -> 50 for the superadmin message-log tools (`message_log_search`,
+// `message_log_get`) on server-level /mcp. Same reason as context_my_drafts: not an engine
+// operation at all — the outbound message log is this server's own operational record of
+// what it sent (email, webhooks, inbox, agent comments), with no document semantics, so there
+// is no upstream descriptor to import. They mirror REST GET /admin/messages[/:id] 1:1.
+const BASELINE = 50;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 
