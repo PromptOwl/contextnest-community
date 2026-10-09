@@ -333,13 +333,19 @@ The `/admin/settings` API names for the same fields are `oidc_enabled`,
 4. **Collect the IDs.** On the app's *Overview* page, copy the **Application
    (client) ID** and the **Directory (tenant) ID**.
 5. **Fill in ContextNest.** On **Admin → Server settings → Single sign-on**,
-   click **Microsoft Entra ID** and paste the tenant ID when asked. The issuer
-   becomes `https://login.microsoftonline.com/<tenant-id>/v2.0`. Paste the
+   click **Microsoft Entra ID** and paste the tenant ID into **Directory
+   (tenant) ID**. The issuer becomes
+   `https://login.microsoftonline.com/<tenant-id>/v2.0`. Paste the
    client ID and the secret value. You can also set **Allowed email domains**
    to your organization's domains. Turn the switch **On** and **Save**. The
    switch and the fields can go in the same save.
-6. **Test.** Open the login page in a private window. A **Sign in with
-   Microsoft** button should appear and take you through Entra.
+6. **Test.** On **Server settings → Network & status**, click **Test
+   discovery** to confirm this server can reach Entra. Then open the login
+   page in a private window. A **Sign in with Microsoft** button should appear
+   and take you through Entra.
+
+The same steps, with copy buttons for every value Entra asks for, are on
+**Server settings → Network & status → Microsoft Entra ID sign-in**.
 
 Entra-specific notes:
 
@@ -965,7 +971,7 @@ PROMPTOWL_KEY=pk_... \
 npm start
 ```
 
-Terminate TLS at the proxy, forward `X-Forwarded-For` and `X-Real-IP` headers (the rate limiter reads them), and bind the server to `127.0.0.1` so only the proxy can reach it.
+Terminate TLS at the proxy, forward `X-Forwarded-Proto` and an overwritten `X-Forwarded-For` (the rate limiter reads it), and keep the app's port reachable only from the proxy. See [Firewalls, VPNs and tunnels](#firewalls-vpns-and-tunnels) for proxy configs.
 
 ### Hosted / commercial SaaS
 
@@ -973,6 +979,121 @@ Same as team, plus:
 - Run N instances behind a load balancer. SQLite + a shared filesystem is not a great long-term story for the metadata DB when scaling beyond one box — switch to the **PostgreSQL / Cloud SQL** backend (see [Database backends](#database-backends)) so all instances share one consistent database. The on-disk nest vault under `$DATA_ROOT/nests/` still needs durable shared storage.
 - Set `TELEMETRY_ENABLED=true` and a valid `PROMPTOWL_KEY` so usage rolls up to PromptOwl.
 - Rotate keys regularly via `DELETE /auth/keys/:id` + `POST /auth/keys`.
+
+## Firewalls, VPNs and tunnels
+
+**Server settings → Network & status** runs these checks for you and shows the
+values for your server. It has a status checklist (database, disk, license,
+public address, email, SSO, scheduler), an inbound check of the public
+address, an outbound test of every host the server calls, and the deployment
+recipes below.
+
+### Who connects to whom
+
+| Direction | Who | Needs |
+|---|---|---|
+| Inbound | People's browsers, Claude Code, Claude Desktop (local config), the `ctx` CLI | Reach the server from their machine. A VPN works. |
+| Inbound | Hosted connectors: claude.ai, ChatGPT, Claude Desktop/Cowork *connectors* | A **public** DNS name with a **publicly trusted** certificate. They connect from the vendor's servers, not your VPN. |
+| Outbound | This server | HTTPS to PromptOwl (`PROMPTOWL_API_URL`, licensing and PromptOwl sign-in), the license's model gateway, your OIDC issuer, Slack/Teams webhooks, PostHog when telemetry is on; SMTP or SES for email; your Postgres host. The exact list for your settings is on the Network & status tab (**Copy allowlist**). |
+
+### Public with HTTPS
+
+Point a DNS name at the server, terminate TLS in front of it with a publicly
+trusted certificate, open only 443 inbound, and set `PUBLIC_BASE_URL` (or
+**Settings → Basic → Public base URL**) to `https://<name>`. Don't expose the
+app's own port (`PORT`, default 3838) to the internet.
+
+### Behind a reverse proxy
+
+The app decides whether a request was HTTPS from `X-Forwarded-Proto` (this
+controls the `Secure` flag on cookies) and rate-limits by the first
+`X-Forwarded-For` address. Make the proxy overwrite `X-Forwarded-For` rather
+than append to it, and keep the app reachable only from the proxy.
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name nest.example.com;
+    ssl_certificate     /etc/letsencrypt/live/nest.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/nest.example.com/privkey.pem;
+    client_max_body_size 100m;
+
+    location / {
+        proxy_pass http://127.0.0.1:3838;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_buffering off;       # MCP streams responses
+        proxy_read_timeout 300s;
+    }
+}
+```
+
+```caddyfile
+nest.example.com {
+    reverse_proxy 127.0.0.1:3838 {
+        flush_interval -1
+    }
+}
+```
+
+Caddy obtains the certificate, sets `X-Forwarded-Proto`, and replaces any
+client-supplied `X-Forwarded-For` by default.
+
+### VPN-only
+
+Browsers, Claude Code, local Desktop configs and the CLI work over the VPN.
+Hosted connectors don't: they can't reach a private address. To support them
+anyway, either publish only `/mcp`, `/.well-known/*` and `/oauth/*` on a public
+name and allow inbound traffic only from
+[Anthropic's published IP ranges](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp),
+or use a tunnel scoped to those paths (below). The Connect dialog warns users
+when the server's address is private.
+
+### NAT and port forwarding
+
+Give the server a fixed LAN address, forward TCP 443 (and 80 if your proxy
+gets certificates over HTTP-01) to the reverse proxy on that machine, and use
+dynamic DNS if your public IP changes. Never forward straight to the app's
+port: it has no TLS of its own. If the inbound check fails from inside your
+network but the address works from outside (for example a phone on mobile
+data), the router doesn't support hairpin NAT — use split DNS internally.
+
+### Tunnels
+
+A tunnel agent (Cloudflare Tunnel, ngrok, Tailscale Funnel) connects out, so no
+inbound port is opened. Expose only what you need — for hosted connectors,
+`/mcp`, `/.well-known/*`, `/oauth/*` and `/health` — then set `PUBLIC_BASE_URL`
+to the tunnel's address.
+
+```yaml
+# cloudflared config.yml
+tunnel: <tunnel-id>
+credentials-file: /etc/cloudflared/<tunnel-id>.json
+ingress:
+  - hostname: nest.example.com
+    path: ^/(mcp|\.well-known/|oauth/|health$)
+    service: http://localhost:3838
+  - service: http_status:404
+```
+
+`ngrok http 3838 --url=<your-domain>` and `tailscale funnel --bg 3838` expose
+the whole app; add path rules in front if only the connector paths should be
+public.
+
+### Corporate egress proxy
+
+Set `HTTPS_PROXY` (and `NO_PROXY` for internal hosts) in the server's
+environment, together with `NODE_USE_ENV_PROXY=1` — Node's built-in `fetch`
+only honours the proxy variables with it (Node 22.21 or later). If the proxy
+inspects TLS, mount its CA certificate and set `NODE_EXTRA_CA_CERTS` to the PEM
+file. Node reads all of these at startup, so set them in the container or
+service environment, not in `.env` or Settings. Email over
+SMTP and Postgres connect directly and need their own firewall rules. Then run
+**Test connections** on the Network & status tab: with a proxy set, HTTPS
+targets are tested through it.
 
 ---
 

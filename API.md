@@ -2590,6 +2590,33 @@ Authorization mirrors the grants / steward-roster rule (`canManageStewards`): th
 
 Surfaced in the UI from the nest view's overflow menu → **Activity trace** (owner/nest-admin only), which renders `ActivityTracePage` in nest-scoped mode (nest column hidden).
 
+### GET `/admin/status` (server admin)
+Health and network report behind **Settings → Network & status**. Server admin only (license admin or superadmin; anyone in open mode) — `401` without credentials, `403` otherwise. Never returns a secret: connection strings lose their userinfo, webhooks and SMTP are reported as host and port only.
+
+```json
+{
+  "generatedAt": "2026-10-08T09:12:00.000Z",
+  "version": "1.28.0",
+  "build": null,
+  "listenPort": 3838,
+  "checks": [
+    { "id": "db", "group": "data", "label": "Database", "state": "green", "detail": "SQLite at /data/community.db — answered in 1 ms" },
+    { "id": "base-url", "group": "network", "label": "Public address", "state": "amber", "detail": "Not set — …", "fix": "Set the public base URL in Settings → Basic …" }
+  ],
+  "address": { "effectiveBaseUrl": "https://nest.example.com", "pinned": true, "requestOrigin": "https://nest.example.com", "forwarded": { "proto": "https", "host": null, "for": "present" }, "privateHost": false },
+  "egress": [ { "id": "promptowl", "purpose": "License checks, PromptOwl sign-in, team import", "host": "app.promptowl.ai", "port": 443, "protocol": "https", "configuredBy": "PROMPTOWL_API_URL", "required": true } ]
+}
+```
+
+`state` is `green`, `amber`, `red` or `off` (feature not in use); every `amber`/`red` check carries a `fix`. Check ids: `db`, `migrations`, `db-size` (SQLite), `disk`, `storage`, `license`, `base-url`, `email`, `oidc`, `scheduler`, `version`. `build` is `GIT_SHA` / `BUILD_SHA` from the environment when set. `egress` lists every host the current configuration calls — the firewall/proxy allowlist.
+
+### POST `/admin/status/egress`, `/admin/status/inbound`, `/admin/status/oidc-discovery` (server admin)
+Active probes. They take **no input**: targets come from server configuration only, so a request can't aim them anywhere. 5-second timeouts, redirects never followed, at most 10 probe calls per admin per minute (`429` beyond).
+
+- **egress** — dials each `egress` target: DNS → TCP → TLS (certificate must verify) → one `GET /` on the origin (any HTTP status counts as reachable; webhook paths are never requested). SMTP is checked with the transport's own verify; Postgres stops at TCP. With `HTTPS_PROXY` set, HTTPS targets are fetched through the proxy instead (one `http` stage). Returns `{ ranAt, proxy, results: [{ id, host, port, ok, stages: [{ stage, ok, ms, detail }], hint? }], clockSkewSeconds }`; `clockSkewSeconds` comes from PromptOwl's `Date` header.
+- **inbound** — resolves the saved `PUBLIC_BASE_URL` and fetches its `/health` with certificate verification, checking the answer is this server and version. Returns `{ ranAt, url, ok, stages, privateAddresses, note, hint? }`. Runs **from this server**, so it can't prove the internet can reach it.
+- **oidc-discovery** — fetches `<OIDC_ISSUER>/.well-known/openid-configuration` and checks the document names the same issuer. Returns `{ ranAt, issuer, ok, ms, detail, endpointHosts, hint? }`.
+
 ---
 
 ## Permission middleware quick-ref

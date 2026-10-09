@@ -66,10 +66,19 @@ export interface NetIO {
   proxy(): string | null;
 }
 
-/** HTTPS_PROXY / https_proxy, with any userinfo removed. */
-export function configuredProxy(env: NodeJS.ProcessEnv = process.env): string | null {
+/**
+ * The proxy Node's fetch actually uses (credentials stripped), or null. Node
+ * only honours HTTPS_PROXY when env-proxy support is on — NODE_USE_ENV_PROXY=1
+ * or --use-env-proxy (Node ≥ 22.21) — so a proxy set without it doesn't count:
+ * the server's own traffic goes direct, and so should the probe.
+ */
+export function configuredProxy(
+  env: NodeJS.ProcessEnv = process.env,
+  execArgv: string[] = process.execArgv,
+): string | null {
   const raw = env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy;
   if (!raw) return null;
+  if (env.NODE_USE_ENV_PROXY !== "1" && !execArgv.includes("--use-env-proxy")) return null;
   try {
     const u = new URL(raw);
     u.username = "";

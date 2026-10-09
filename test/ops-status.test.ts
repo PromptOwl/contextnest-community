@@ -157,7 +157,10 @@ describe("probes", () => {
   it("behind an egress proxy, probes HTTPS through it instead of dialling direct", async () => {
     process.env.SMTP_URL = SECRETS.SMTP_URL;
     const { runEgressChecks, configuredProxy } = await import("../src/ops/egress.js");
-    expect(configuredProxy({ HTTPS_PROXY: "http://user:pw@proxy.corp:3128" })).toBe("http://proxy.corp:3128");
+    expect(configuredProxy({ HTTPS_PROXY: "http://user:pw@proxy.corp:3128", NODE_USE_ENV_PROXY: "1" }, [])).toBe("http://proxy.corp:3128");
+    // Without env-proxy support Node's fetch ignores HTTPS_PROXY, so the probe must too.
+    expect(configuredProxy({ HTTPS_PROXY: "http://proxy.corp:3128" }, [])).toBeNull();
+    expect(configuredProxy({ HTTPS_PROXY: "http://proxy.corp:3128" }, ["--use-env-proxy"])).toBe("http://proxy.corp:3128");
     const { io, touched } = fakeIO({ proxy: () => "http://proxy.corp:3128" });
     const rep = await runEgressChecks(io);
     expect(rep.proxy).toBe("http://proxy.corp:3128");

@@ -409,6 +409,96 @@ export async function sendTestNotification(channel: "slack" | "teams") {
   });
 }
 
+// ─── Network & status (admin) ──────────────────────────────────────────
+// Mirrors src/ops/status.ts and src/ops/egress.ts.
+
+export type CheckState = "green" | "amber" | "red" | "off";
+
+export interface StatusCheck {
+  id: string;
+  group: "data" | "license" | "network" | "services" | "runtime";
+  label: string;
+  state: CheckState;
+  detail: string;
+  fix?: string;
+}
+
+export interface EgressTarget {
+  id: string;
+  purpose: string;
+  host: string;
+  port: number;
+  protocol: "https" | "smtp" | "postgres";
+  configuredBy: string;
+  required: boolean;
+}
+
+export interface StatusReport {
+  generatedAt: string;
+  version: string;
+  build: string | null;
+  listenPort: number;
+  checks: StatusCheck[];
+  address: {
+    effectiveBaseUrl: string;
+    pinned: boolean;
+    requestOrigin: string;
+    forwarded: { proto: string | null; host: string | null; for: string | null };
+    privateHost: boolean;
+  };
+  egress: EgressTarget[];
+}
+
+export interface ProbeStage {
+  stage: "dns" | "tcp" | "tls" | "http" | "smtp";
+  ok: boolean;
+  ms: number;
+  detail: string;
+}
+
+export interface EgressReport {
+  ranAt: string;
+  proxy: string | null;
+  results: { id: string; purpose: string; host: string; port: number; ok: boolean; stages: ProbeStage[]; hint?: string }[];
+  clockSkewSeconds: number | null;
+}
+
+export interface InboundReport {
+  ranAt: string;
+  url: string | null;
+  ok: boolean;
+  stages: ProbeStage[];
+  privateAddresses: boolean;
+  note: string;
+  hint?: string;
+}
+
+export interface DiscoveryReport {
+  ranAt: string;
+  issuer: string | null;
+  ok: boolean;
+  ms: number;
+  detail: string;
+  endpointHosts: string[];
+  hint?: string;
+}
+
+export async function getServerStatus() {
+  return request<StatusReport>("/admin/status");
+}
+
+export async function runEgressCheck() {
+  return request<EgressReport>("/admin/status/egress", { method: "POST", body: "{}" });
+}
+
+export async function runInboundCheck() {
+  return request<InboundReport>("/admin/status/inbound", { method: "POST", body: "{}" });
+}
+
+export async function runOidcDiscoveryCheck() {
+  return request<DiscoveryReport>("/admin/status/oidc-discovery", { method: "POST", body: "{}" });
+}
+
 // ─── License ───────────────────────────────────────────────────────────
 
 export interface LicenseContact {
