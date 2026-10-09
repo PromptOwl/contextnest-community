@@ -139,6 +139,7 @@ import {
 import type { PendingChange } from "../lib/api";
 import { findBacklinks, inboundLinkWarning, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { displayNameFor } from "../lib/person-name";
+import { TaskActivityTimeline } from "./TaskActivityTimeline";
 import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
@@ -3064,6 +3065,11 @@ export function DocumentEditor({
                       </span>
                     )}
                   </div>
+                )}
+
+                {/* What agents and people logged on this task (context_task_log). */}
+                {!isNew && nodeType === "task" && nodeId && (
+                  <TaskActivityTimeline nestId={nestId} nodeId={nodeId} people={roster?.people} />
                 )}
 
 
