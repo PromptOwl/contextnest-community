@@ -223,6 +223,20 @@ d("PostgresAdapter conformance", () => {
       assertNoDuplicateEdge(adapter, "n-edge", "a", "b", type, "e-1"),
     ).resolves.toBeUndefined();
   });
+
+  it("adds the run claim columns to a runs table that predates them", async () => {
+    // Prod's runs table was created before claimed_by existed; boot crashed
+    // building the metacognition index on it (42703).
+    await adapter.exec("ALTER TABLE runs DROP COLUMN claimed_by, DROP COLUMN claimed_at");
+    const { runPostgresMigrations } = await import("../src/db/migrations.postgres.js");
+    await runPostgresMigrations(adapter);
+    const cols = await adapter.all<{ column_name: string }>(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'runs'",
+    );
+    expect(cols.map((c) => c.column_name)).toEqual(
+      expect.arrayContaining(["claimed_by", "claimed_at"]),
+    );
+  });
 });
 
 function hashStr(s: string): number {
