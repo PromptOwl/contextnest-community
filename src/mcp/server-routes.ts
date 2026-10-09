@@ -82,6 +82,7 @@ const SERVER_WRITE_TOOLS = new Set([
   "context_move",
   "context_submit_review",
   "context_request_access",
+  "context_bulk_update",
 ]);
 
 // Read tools that support fan-out when `nest` is omitted — search/list/query/overview
@@ -283,6 +284,9 @@ const SERVER_NEST_TOOLS = [
   "context_move",
   "context_submit_review",
   "context_request_access",
+  "context_boards",
+  "context_board_items",
+  "context_bulk_update",
 ];
 
 function withNestArg(tool: (typeof TOOL_DEFINITIONS)[number]) {
@@ -349,6 +353,8 @@ const READ_ONLY_SERVER_TOOLS = new Set([
   "context_resolve",
   "context_comments",
   "context_versions",
+  "context_boards",
+  "context_board_items",
 ]);
 
 /** Exported so a test can assert every defined tool is classified. */
@@ -799,14 +805,17 @@ Streamable HTTP, stateless. Two endpoints:
   Tools: \`nest_index\` (call first), then:
   - Fan-out reads (omit \`nest\` to search/list ALL nests): \`context_search\`,
     \`context_list\`, \`context_query\`, \`context_overview\`
-  - Targeted reads (\`nest\` required): \`context_get\`, \`context_resolve\`, \`context_comments\`, \`context_versions\`
+  - Targeted reads (\`nest\` required): \`context_get\`, \`context_resolve\`, \`context_comments\`, \`context_versions\`,
+    \`context_boards\`, \`context_board_items\`
   - Writes (\`nest\` required): \`nest_create\`, \`context_create\`, \`context_update\`,
     \`context_delete\`, \`context_move\`, \`context_submit_review\`,
-    \`context_request_access\` (ask for write access when a write is refused)
+    \`context_request_access\` (ask for write access when a write is refused),
+    \`context_bulk_update\` (one change over up to 100 nodes)
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, the full toolset. Same names as the
   server-level tools without the \`nest\` argument, plus:
   - read: \`context_init\` (operating instructions — call first), \`context_export\`, \`context_table_query\`, \`context_versions\`
-  - write: \`context_update\`, \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`
+  - write: \`context_update\`, \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`, \`context_bulk_update\`
+  - boards: \`context_boards\`, \`context_board_items\` (a board as a sortable, grouped list)
   - review: \`context_submit_review\`, \`context_approve\`, \`context_reject\`, \`context_review_queue\`, \`context_my_drafts\`
   - comments: \`context_comment\`, \`context_resolve_comment\`
   - people: \`context_stewards\`, \`context_assign_steward\`, \`context_share_nest\`, \`context_grant\`

@@ -195,6 +195,11 @@ export async function listBoards(nestId: string, userId: string): Promise<Board[
   return rows.map(toBoard);
 }
 
+/** One board the caller can see (404 for someone else's private board). */
+export async function getBoard(nestId: string, boardId: string, userId: string): Promise<Board> {
+  return getVisible(nestId, boardId, userId);
+}
+
 async function getVisible(nestId: string, boardId: string, userId: string): Promise<Board> {
   const row = (await getDb().get(`${SELECT} WHERE b.id = ? AND b.nest_id = ?`, [
     boardId,

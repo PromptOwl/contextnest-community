@@ -87,7 +87,14 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // server-level `context_request_access` derives from the per-nest definition (no new
 // literal). Promotion is tracked upstream in PromptOwl/ContextNest#167 — adopt the
 // descriptors and lower this by 3 if it lands there.
-const BASELINE = 48;
+//
+// Raised 48 -> 51 for `context_boards`, `context_board_items` and `context_bulk_update`
+// (board List view + bulk edit). Same reason as the access-request trio: saved boards are
+// this repo's own table and a bulk edit is a loop over the existing governed update — none
+// is an engine operation, so there is no upstream descriptor to import. They mirror REST
+// GET /boards, GET /boards/:id/items and POST /nodes/bulk-update 1:1; the server-level
+// variants derive from these definitions (no new literal).
+const BASELINE = 51;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

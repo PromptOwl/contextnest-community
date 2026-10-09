@@ -24,7 +24,16 @@ import {
   permissionLevel,
 } from "../shared/access.js";
 import { isStewardshipEnabled } from "../nests/service.js";
-import { VaultBusyError, isVaultLockTimeout } from "../shared/errors.js";
+import {
+  ForbiddenError,
+  NotFoundError,
+  ValidationError,
+  VaultBusyError,
+  isVaultLockTimeout,
+} from "../shared/errors.js";
+import { listBoards } from "../nests/board-service.js";
+import { listBoardItems } from "../nests/board-items.js";
+import { bulkUpdateNodes } from "../nodes/bulk-update.js";
 import { engineApi, opContext } from "../nodes/engine.js";
 import { addCollaborator } from "../nests/sharing-service.js";
 import { holdWriteIfGated } from "../nests/push-confirmation-service.js";
@@ -603,6 +612,80 @@ export const TOOL_DEFINITIONS = [
         },
       },
       required: ["folder"],
+    },
+  },
+
+  // ─── Boards & bulk edit ─────────────────────────────────────────────
+  // NOT engine operations: saved boards and their list view are this repo's
+  // tables (src/nests/board-service.ts), and a bulk edit is a loop over the
+  // existing governed update, so there is no upstream descriptor to import.
+  // They mirror REST GET /boards, GET /boards/:id/items and
+  // POST /nodes/bulk-update 1:1.
+
+  {
+    name: "context_boards",
+    description:
+      "List this nest's saved boards (shared ones plus your private ones): id, name, what the columns are (folder, status, tag, assignee or priority), swimlanes and the board's filters. Use an id with context_board_items or context_bulk_update.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+    },
+  },
+  {
+    name: "context_board_items",
+    description:
+      "A saved board as a list — the same rows the board shows (its tasks-only, tag and completed filters), grouped into the board's columns in board order. Each row has title, column(s), status, assignee, priority, due, parent, tags and timestamps. Sortable and paged.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        board: { type: "string", description: "Board id or name (see context_boards)" },
+        sort: {
+          type: "string",
+          description:
+            "rank (board order, default) | title | status | assignee | priority | due | parent | updated | created",
+        },
+        dir: { type: "string", description: "asc (default) | desc" },
+        assignee: {
+          type: "array",
+          items: { type: "string" },
+          description: 'Only rows assigned to these emails; "unassigned" for nobody',
+        },
+        q: { type: "string", description: "Only rows whose title contains this" },
+        limit: { type: "number", description: "Rows per page (default 100, max 500)" },
+        offset: { type: "number", description: "Rows to skip" },
+      },
+      required: ["board"],
+    },
+  },
+  {
+    name: "context_bulk_update",
+    description:
+      "Apply one change to up to 100 nodes: move them into a board column (a done column completes tasks), add or remove tags, set priority, assignee or due date. Each node is its own governed edit with its own version. A node whose change would need review (prime, or governed without a bypass) or that you can't edit is skipped and reported, never saved as a draft. Returns a result per node.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        ids: { type: "array", items: { type: "string" }, description: "Node ids to update" },
+        selector: {
+          type: "string",
+          description: "Instead of ids: a selector like #sprint-12 or type:task — every node it resolves to",
+        },
+        patch: {
+          type: "object",
+          description:
+            "What to change. board_id + column: move into that board column. add_tags / remove_tags: tag lists. priority: urgent|high|medium|low|null. assignee: email|null. due: YYYY-MM-DD|null. change_note: recorded in each version.",
+          properties: {
+            board_id: { type: "string" },
+            column: { type: "string" },
+            add_tags: { type: "array", items: { type: "string" } },
+            remove_tags: { type: "array", items: { type: "string" } },
+            priority: { type: ["string", "null"] },
+            assignee: { type: ["string", "null"] },
+            due: { type: ["string", "null"] },
+            change_note: { type: "string" },
+          },
+        },
+      },
+      required: ["patch"],
     },
   },
 
@@ -1989,6 +2072,106 @@ async function runTool(
         return { text: `**${moved.frontmatter.title}** is already at \`${moved.id}\` — nothing to move.`, data };
       }
       return { text: `Moved **${moved.frontmatter.title}**: \`${previousId}\` → \`${moved.id}\``, data };
+    }
+
+    // ─── Boards & bulk edit ────────────────────────────────────────────
+
+    case "context_boards": {
+      const boards = await listBoards(nestId, userId);
+      const data = boards.map((b) => ({
+        id: b.id,
+        name: b.name,
+        private: b.private,
+        dimension: b.config.dimension,
+        tag_namespace: b.config.tagNamespace || undefined,
+        swimlane: b.config.swimlane,
+        tasks_only: b.config.tasksOnly === true,
+        filter_tags: b.config.filterTags ?? [],
+        hide_done_after_days: b.config.hideDoneAfterDays,
+      }));
+      if (data.length === 0) {
+        return { text: "No saved boards in this nest yet.", data: { boards: [] } };
+      }
+      const list = data
+        .map(
+          (b, i) =>
+            `${i + 1}. **${b.name}** (\`${b.id}\`) — columns by ${b.dimension}${b.tag_namespace ? ` \`${b.tag_namespace}:\`` : ""}${b.private ? ", private" : ""}${b.filter_tags.length ? `, filtered to ${b.filter_tags.map((t) => `#${t}`).join(" ")}` : ""}`,
+        )
+        .join("\n");
+      return { text: `# Boards\n\n${list}`, data: { boards: data } };
+    }
+
+    case "context_board_items": {
+      const ref = String(args.board ?? "").trim();
+      if (!ref) return toolError("board is required — an id or name from context_boards.", "VALIDATION_FAILED");
+      const boards = await listBoards(nestId, userId);
+      const board =
+        boards.find((b) => b.id === ref) ??
+        boards.find((b) => b.name.toLowerCase() === ref.toLowerCase());
+      if (!board) return toolError(`Board not found: ${ref}`, "DOCUMENT_NOT_FOUND");
+      try {
+        const res = await listBoardItems(nestId, board.id, userId, {
+          sort: args.sort ?? undefined,
+          dir: args.dir ?? undefined,
+          limit: args.limit ?? undefined,
+          offset: args.offset ?? undefined,
+          q: args.q ?? undefined,
+          assignee: Array.isArray(args.assignee) ? args.assignee.join(",") : args.assignee,
+        });
+        const label = new Map(res.groups.map((g) => [g.key, g.label]));
+        let lastGroup: string | null = null;
+        const lines: string[] = [];
+        for (const r of res.items) {
+          if (r.group !== lastGroup) {
+            lastGroup = r.group;
+            const g = res.groups.find((x) => x.key === r.group)!;
+            lines.push(`\n## ${label.get(r.group)} (${g.count})`);
+          }
+          const bits = [
+            r.priority,
+            r.assignee,
+            r.due ? `due ${r.due}` : null,
+            r.completed_at ? "done" : null,
+          ].filter(Boolean);
+          lines.push(`- **${r.title}** \`${r.id}\`${bits.length ? ` — ${bits.join(", ")}` : ""}`);
+        }
+        const more =
+          res.offset + res.items.length < res.total
+            ? `\n\n_Rows ${res.offset + 1}–${res.offset + res.items.length} of ${res.total}; pass offset=${res.offset + res.items.length} for more._`
+            : "";
+        return {
+          text: `# ${board.name} — ${res.total} row(s)${lines.join("\n")}${more}`,
+          data: res,
+        };
+      } catch (err) {
+        if (err instanceof ValidationError) return toolError(err.message, "VALIDATION_FAILED");
+        throw err;
+      }
+    }
+
+    case "context_bulk_update": {
+      try {
+        const res = await bulkUpdateNodes(
+          nestId,
+          { userId, userEmail },
+          { ids: args.ids ?? undefined, selector: args.selector ?? undefined, patch: args.patch },
+          { client: ctx.client },
+        );
+        const notDone = res.results
+          .filter((r) => r.outcome === "skipped" || r.outcome === "failed")
+          .map((r) => `- ${r.title ?? r.id}: ${r.outcome} (${r.code}) — ${r.reason}`);
+        const text =
+          `Bulk update: ${res.updated} updated, ${res.unchanged} unchanged, ${res.skipped} skipped, ${res.failed} failed.` +
+          (notDone.length ? `\n\n${notDone.join("\n")}` : "");
+        return { text, data: res };
+      } catch (err) {
+        if (err instanceof ForbiddenError) {
+          return writeRefusal(ctx, err.message, { type: "nest", id: nestId });
+        }
+        if (err instanceof ValidationError) return toolError(err.message, "VALIDATION_FAILED");
+        if (err instanceof NotFoundError) return toolError(err.message, "DOCUMENT_NOT_FOUND");
+        throw err;
+      }
     }
 
     // ─── Governance Tool Handlers ──────────────────────────────────────
