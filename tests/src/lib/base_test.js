@@ -26,9 +26,13 @@ import logger from '../helper/logger/logger.js';
 import LoginPage from '../page_factory/auth/login_page.js';
 import AppShellPage from '../page_factory/app/app_shell_page.js';
 import NestsPage from '../page_factory/app/nests_page.js';
+import MyWorkPage from '../page_factory/app/my_work_page.js';
 
 // REST helper used to arrange dashboard preconditions (nests, pins, sharing)
 import DashboardApi from './dashboard_api.js';
+
+// REST helper used to arrange My Work preconditions (reviews, requests)
+import MyWorkApi from './my_work_api.js';
 
 /**
  * Global fixtures available to all tests
@@ -196,6 +200,19 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
        */
       get dashboardApi() {
         return new DashboardApi(this.page);
+      },
+
+      // My Work inbox
+      get myWorkPage() {
+        return new MyWorkPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the My Work suite — documents, reviews and deletion
+       * requests raised as this role.
+       */
+      get myWorkApi() {
+        return new MyWorkApi(this.page);
       },
 
       /**

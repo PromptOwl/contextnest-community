@@ -41,26 +41,38 @@ function pointAt(idx: TextIndex, offset: number): { node: Text; offset: number }
   return { node: idx.segs[0].node, offset: 0 };
 }
 
-/** Locate a quote in the flattened text, disambiguating with `before` tail. */
-function locate(idx: TextIndex, anchor: AnnotationAnchor): { start: number; end: number } | null {
+/**
+ * Locate a quote in flattened document text, disambiguating with the `before`
+ * tail. Null when the quote is no longer in the text — the thread is about
+ * words the current version doesn't have. Pure (no DOM), so it is the one
+ * place both highlighting and the "text changed" label decide that.
+ */
+export function locateInText(
+  text: string,
+  anchor: AnnotationAnchor,
+): { start: number; end: number } | null {
   const q = anchor.quote;
   if (!q) return null;
   const offsets: number[] = [];
-  let i = idx.text.indexOf(q);
+  let i = text.indexOf(q);
   while (i !== -1) {
     offsets.push(i);
-    i = idx.text.indexOf(q, i + 1);
+    i = text.indexOf(q, i + 1);
   }
   if (!offsets.length) return null;
   let chosen = offsets[0];
   if (offsets.length > 1 && anchor.before) {
     const tail = anchor.before.slice(-24);
     const better = offsets.find((c) =>
-      idx.text.slice(Math.max(0, c - tail.length), c).endsWith(tail),
+      text.slice(Math.max(0, c - tail.length), c).endsWith(tail),
     );
     if (better !== undefined) chosen = better;
   }
   return { start: chosen, end: chosen + q.length };
+}
+
+function locate(idx: TextIndex, anchor: AnnotationAnchor): { start: number; end: number } | null {
+  return locateInText(idx.text, anchor);
 }
 
 /** Build a DOM Range for an anchor against the rendered container. */

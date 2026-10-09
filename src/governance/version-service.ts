@@ -164,6 +164,24 @@ export async function getVersion(
   return row ? rowToVersion(row) : null;
 }
 
+/** getCurrentVersion for many nodes of one nest, in one query. Missing → 0. */
+export async function getCurrentVersions(
+  nestId: string,
+  nodeIds: string[],
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>(nodeIds.map((id) => [id, 0]));
+  if (nodeIds.length === 0) return out;
+  const rows = (await getDb().all(
+    `SELECT node_id, MAX(version) as v FROM node_versions
+        WHERE nest_id = ? AND node_id IN (${nodeIds.map(() => "?").join(",")})
+          AND author NOT LIKE ?
+        GROUP BY node_id`,
+    [nestId, ...nodeIds, `${SYSTEM_AUTHOR_PREFIX}%`],
+  )) as Array<{ node_id: string; v: number | null }>;
+  for (const r of rows) out.set(r.node_id, r.v || 0);
+  return out;
+}
+
 export async function getCurrentVersion(
   nestId: string,
   nodeId: string,

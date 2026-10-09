@@ -44,6 +44,9 @@ export function ActivityLogPanel({
   const [filter, setFilter] = useState("all");
   const [actor, setActor] = useState("");
   const [debouncedActor, setDebouncedActor] = useState("");
+  // "What did agent X read" — the caller's self-reported agent name.
+  const [agent, setAgent] = useState("");
+  const [debouncedAgent, setDebouncedAgent] = useState("");
   const reqSeq = useRef(0);
   const scopeKey = JSON.stringify(scope);
 
@@ -51,6 +54,11 @@ export function ActivityLogPanel({
     const t = setTimeout(() => setDebouncedActor(actor.trim()), 300);
     return () => clearTimeout(t);
   }, [actor]);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedAgent(agent.trim()), 300);
+    return () => clearTimeout(t);
+  }, [agent]);
 
   const load = useCallback(
     async (offset: number) => {
@@ -62,6 +70,7 @@ export function ActivityLogPanel({
         const page = await api.getActivityLog(nestId, scope, {
           types,
           actor: debouncedActor || undefined,
+          agent: debouncedAgent || undefined,
           limit: PAGE_SIZE,
           offset,
         });
@@ -76,7 +85,7 @@ export function ActivityLogPanel({
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [nestId, scopeKey, filter, debouncedActor],
+    [nestId, scopeKey, filter, debouncedActor, debouncedAgent],
   );
 
   useEffect(() => {
@@ -137,6 +146,14 @@ export function ActivityLogPanel({
             data-testid="activity-log-actor"
           />
         </div>
+        <Input
+          className="h-8 w-28"
+          placeholder="Agent"
+          aria-label="Filter by agent"
+          value={agent}
+          onChange={(e) => setAgent(e.target.value)}
+          data-testid="activity-log-agent"
+        />
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-2">

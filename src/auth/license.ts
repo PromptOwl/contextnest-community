@@ -147,15 +147,106 @@ function parseGateway(raw: unknown): ModelGateway | null {
     : null;
 }
 
-async function gatewayFromCache(stored: string | null | undefined): Promise<ModelGateway | null> {
+async function gatewayFromCache<T>(
+  stored: string | null | undefined,
+  parse: (raw: unknown) => T | null,
+): Promise<T | null> {
   if (!stored) return null;
   const plain = await tryDecryptSecret(stored, "the license model gateway key");
   if (!plain) return null;
   try {
-    return parseGateway(JSON.parse(plain));
+    return parse(JSON.parse(plain));
   } catch {
     return null;
   }
+}
+
+/** The licence's own-provider key (byok): only the models it lists go through it. */
+export interface OwnGateway {
+  baseUrl: string;
+  key: string;
+  models: string[];
+  /** Masked key tail per provider, for the settings page. */
+  providers: Record<string, { masked: string; updatedAt: string | null }>;
+}
+
+let currentOwnGateway: OwnGateway | null = null;
+
+export function getOwnGateway(): OwnGateway | null {
+  return currentOwnGateway;
+}
+
+const ownGatewaySummary = (g: OwnGateway | null) =>
+  g ? `on …${g.key.slice(-4)}, ${g.models.length} models (${Object.keys(g.providers).join(", ") || "no providers"})` : "off";
+
+/** Providers a server admin can add their own key for; all live in PromptOwl's model gateway. */
+export const OWN_KEY_PROVIDERS = ["claude", "openai", "gemini", "grok", "groq"] as const;
+
+/**
+ * Set (apiKey) or clear (null) one own-provider key. The key goes to
+ * PromptOwl, which keeps it in LiteLLM only; this server never stores it.
+ * Refresh the licence afterwards to pick up the new key and models.
+ * @returns null when saved, else the message to show.
+ */
+export async function setOwnProviderKey(provider: string, apiKey: string | null): Promise<string | null> {
+  const what = apiKey ? `set …${apiKey.slice(-4)}` : "clear";
+  try {
+    const res = await fetch(`${config.PROMPTOWL_API_URL.replace(/\/$/, "")}/api/license/own-models`, {
+      method: "POST",
+      headers: config.PROMPTOWL_FETCH_HEADERS,
+      body: JSON.stringify({ key: config.PROMPTOWL_KEY, provider, api_key: apiKey }),
+      signal: AbortSignal.timeout(30_000),
+      // A redirect (e.g. to a sign-in page) is never the route answering.
+      redirect: "manual",
+    });
+    const data = (await res.json().catch(() => ({}))) as { error?: unknown; providers?: unknown };
+    // Saved only when the route itself answers: a 200 page from anything else is not.
+    if (res.ok && data.providers && typeof data.providers === "object") {
+      console.log(`[license] own-provider ${provider}: ${what} → ok`);
+      return null;
+    }
+    const message =
+      typeof data.error === "string" ? data.error : `PromptOwl didn't accept the key (unexpected answer ${res.status}).`;
+    console.log(`[license] own-provider ${provider}: ${what} → refused: ${message}`);
+    return message;
+  } catch (err) {
+    console.warn(`[license] own-provider ${provider}: ${what} → failed: ${fetchErrorText(err)}`);
+    return "Could not reach PromptOwl to save the key. Try again in a moment.";
+  }
+}
+
+/** "fetch failed" hides why; Node keeps the reason (ECONNREFUSED …) on `cause`. */
+function fetchErrorText(err: unknown): string {
+  const e = err as { message?: string; cause?: { code?: string; message?: string } };
+  const cause = e?.cause?.code || e?.cause?.message;
+  return `${e?.message ?? String(err)}${cause ? `: ${cause}` : ""}`;
+}
+
+/** Logged only when it changes, so the 60s licence poll stays quiet. */
+function setOwnGateway(next: OwnGateway | null): void {
+  const before = ownGatewaySummary(currentOwnGateway);
+  const after = ownGatewaySummary(next);
+  if (before !== after) console.log(`[license] own-provider key: ${after}`);
+  currentOwnGateway = next;
+}
+
+function parseOwnGateway(raw: unknown): OwnGateway | null {
+  const base = parseGateway(raw);
+  if (!base) return null;
+  const g = raw as { models?: unknown; providers?: unknown };
+  const models = Array.isArray(g.models)
+    ? g.models.filter((m): m is string => typeof m === "string" && /^[\w./:@-]{1,160}$/.test(m))
+    : [];
+  const providers: OwnGateway["providers"] = {};
+  if (g.providers && typeof g.providers === "object") {
+    for (const [p, raw] of Object.entries(g.providers as Record<string, unknown>)) {
+      const v = (raw && typeof raw === "object" ? raw : {}) as { masked?: unknown; updatedAt?: unknown };
+      if (/^[a-z]{1,32}$/.test(p) && typeof v.masked === "string") {
+        providers[p] = { masked: v.masked.slice(-4), updatedAt: typeof v.updatedAt === "string" ? v.updatedAt : null };
+      }
+    }
+  }
+  return { baseUrl: base.baseUrl, key: base.key, models, providers };
 }
 
 /**
@@ -493,6 +584,7 @@ type CachedLicenseRow = {
   owner_email: string | null;
   features_json?: string | null;
   gateway_json?: string | null;
+  own_gateway_json?: string | null;
 };
 
 /** Longest feature key accepted from PromptOwl; longer entries are dropped. */
@@ -529,7 +621,8 @@ function cachedFeatures(json: string | null | undefined): string[] | null {
 
 async function fromCache(cached: CachedLicenseRow): Promise<LicenseInfo> {
   if (cached.owner_email) lastOwnerEmail = cached.owner_email;
-  currentGateway = await gatewayFromCache(cached.gateway_json);
+  currentGateway = await gatewayFromCache(cached.gateway_json, parseGateway);
+  setOwnGateway(await gatewayFromCache(cached.own_gateway_json, parseOwnGateway));
   return withMeta({
     valid: true,
     tier: cached.tier,
@@ -556,7 +649,10 @@ export async function validateLicense(
 ): Promise<LicenseInfo> {
   const info = await _validateLicenseImpl(!!opts.forceFresh, !!opts.strict);
   currentLicense = info;
-  if (!info.valid) currentGateway = null;
+  if (!info.valid) {
+    currentGateway = null;
+    setOwnGateway(null);
+  }
   return info;
 }
 
@@ -626,6 +722,7 @@ async function _validateLicenseImpl(
       org?: string;
       limits?: LicenseInfo["limits"];
       gateway?: unknown;
+      own_gateway?: unknown;
       suspended?: boolean;
       suspended_reason?: string;
       owner_email?: string | null;
@@ -748,13 +845,17 @@ async function _validateLicenseImpl(
       const gatewayJson = currentGateway
         ? await encryptSecret(JSON.stringify(currentGateway))
         : null;
+      setOwnGateway(parseOwnGateway(data.own_gateway));
+      const ownGatewayJson = currentOwnGateway
+        ? await encryptSecret(JSON.stringify(currentOwnGateway))
+        : null;
       await db.run(
         insertOrReplace(
           db,
-          `INSERT INTO license_cache (key, tier, org, limits_json, owner_email, features_json, gateway_json, validated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ${nowExpr(db)})`,
+          `INSERT INTO license_cache (key, tier, org, limits_json, owner_email, features_json, gateway_json, own_gateway_json, validated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ${nowExpr(db)})`,
           ["key"],
-          `tier = excluded.tier, org = excluded.org, limits_json = excluded.limits_json, owner_email = excluded.owner_email, features_json = excluded.features_json, gateway_json = excluded.gateway_json, validated_at = ${nowExpr(db)}`,
+          `tier = excluded.tier, org = excluded.org, limits_json = excluded.limits_json, owner_email = excluded.owner_email, features_json = excluded.features_json, gateway_json = excluded.gateway_json, own_gateway_json = excluded.own_gateway_json, validated_at = ${nowExpr(db)}`,
         ),
         [
           key,
@@ -764,6 +865,7 @@ async function _validateLicenseImpl(
           data.owner_email || null,
           features ? JSON.stringify(features) : null,
           gatewayJson,
+          ownGatewayJson,
         ],
       );
     }
@@ -781,7 +883,7 @@ async function _validateLicenseImpl(
   } catch (err: any) {
     if (cached) {
       console.warn(
-        `  PromptOwl validation failed (${err.message}), using cached license`,
+        `  PromptOwl validation failed (${fetchErrorText(err)}), using cached license`,
       );
       return fromCache(cached);
     }

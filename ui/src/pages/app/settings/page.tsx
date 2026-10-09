@@ -43,6 +43,8 @@ import { reads } from "../../../lib/queries";
 import { copyTextWithToast } from "../../../lib/clipboard";
 import { getAdminModels, getAdminSettings, updateAdminSettings } from "../../../lib/api";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { SearchableSelect } from "@/components/SearchableSelect";
+import { modelOptions } from "@/lib/model-options";
 import { useAuth } from "../../../auth/AuthContext";
 import { AgentConnectPanel } from "./AgentConnectPanel";
 import { LicensePanel } from "./LicensePanel";
@@ -51,7 +53,7 @@ import { toast } from "sonner";
 interface SettingsPageProps {
   settings: AdminSettings | null;
   onUpdate: (
-    patch: Partial<AdminSettings> & { anthropic_api_key?: string | null },
+    patch: Partial<AdminSettings>,
   ) => void | Promise<void>;
 }
 
@@ -103,6 +105,7 @@ const TABS: {
     keys: [
       "workflow_plane_enabled",
       "subagent_runs_enabled",
+      "metacognition_enabled",
       "subagent_max_depth",
       "subagent_max_children",
       "promptowl_teams_enabled",
@@ -142,8 +145,7 @@ const TABS: {
     id: "hootie",
     label: "Hootie",
     keys: [
-      "anthropic_api_key",
-      "anthropic_base_url",
+      "provider_keys",
       "hootie_enabled",
       "hootie_model",
       "hootie_name",
@@ -212,6 +214,75 @@ const noAutofill = (type: string) =>
   }) as const;
 
 /** Controlled text input bound straight to the draft (no per-field Save). */
+/** Providers an Enterprise (byok) server can add its own key for. */
+const OWN_PROVIDERS = [
+  ["claude", "Anthropic"],
+  ["openai", "OpenAI"],
+  ["gemini", "Google Gemini"],
+  ["grok", "xAI Grok"],
+  ["groq", "Groq"],
+] as const;
+
+/**
+ * Own-provider key rows (inside the Model keys card). Write-only like any
+ * secret: staged in the draft as `provider_keys` (string = set, null =
+ * clear) and sent with the global Save; PromptOwl checks and keeps them in its
+ * model gateway, this server only sees the masked tail.
+ */
+function ProviderKeyFields({
+  draft,
+  current,
+  fieldErrors,
+  set,
+}: {
+  draft: Record<string, string | null>;
+  current: Record<string, { masked: string }>;
+  fieldErrors: Record<string, string>;
+  set: (next: Record<string, string | null>) => void;
+}) {
+  const stage = (p: string, v: string | null | undefined) => {
+    const next = { ...draft };
+    // Typing then deleting must not read as "clear": empty = untouched.
+    if (v === undefined || v === "") delete next[p];
+    else next[p] = v;
+    set(next);
+  };
+  return (
+    <>
+        {OWN_PROVIDERS.map(([p, label]) => (
+          <div key={p} className="space-y-1.5" data-testid={`settings-provider-${p}`}>
+            <Label htmlFor={`provider-key-${p}`}>{label}</Label>
+            <div className="text-xs text-muted-foreground">
+              {draft[p] === null
+                ? "Will be cleared when you save."
+                : current[p]
+                  ? `Current: ••••${current[p].masked}`
+                  : "Not set."}
+            </div>
+            <TextField
+              id={`provider-key-${p}`}
+              type="password"
+              error={fieldErrors[`provider_keys.${p}`]}
+              value={typeof draft[p] === "string" ? (draft[p] as string) : ""}
+              placeholder="Paste to set or replace"
+              onChange={(v) => stage(p, v)}
+            />
+            {current[p] && draft[p] !== null && (
+              <button type="button" className="text-xs text-destructive hover:underline" onClick={() => stage(p, null)}>
+                Clear key
+              </button>
+            )}
+            {draft[p] === null && (
+              <button type="button" className="text-xs text-muted-foreground hover:underline" onClick={() => stage(p, undefined)}>
+                Keep current key
+              </button>
+            )}
+          </div>
+        ))}
+    </>
+  );
+}
+
 /** Hootie's model: one of the models this server's key can reach (PromptOwl's
  *  team models on the gateway, the provider's on an own key). If the list
  *  can't be loaded, a name can still be typed. */
@@ -219,19 +290,30 @@ function HootieModelField({
   value,
   error,
   onChange,
+  reloadKey,
 }: {
   value: string;
   error?: string;
   onChange: (v: string) => void;
+  /** Changes when the own-provider keys change, so the list is fetched again. */
+  reloadKey?: string;
 }) {
   const [models, setModels] = useState<string[] | null>(null);
+  const [own, setOwn] = useState<string[]>([]);
+  const [providers, setProviders] = useState<Record<string, string>>({});
   useEffect(() => {
     getAdminModels()
-      .then((r) => setModels(r.models))
+      .then((r) => {
+        setModels(r.models);
+        setOwn(r.own_models ?? []);
+        setProviders(r.providers ?? {});
+      })
       .catch(() => setModels([]));
-  }, []);
-  // Keep the saved model selectable even if the key no longer lists it.
-  const options = models && value && !models.includes(value) ? [value, ...models] : (models ?? []);
+  }, [reloadKey]);
+  const options = useMemo(
+    () => modelOptions(models ?? [], own, providers, value),
+    [models, own, providers, value],
+  );
   return (
     <div className="space-y-1.5">
       <Label htmlFor="hootie-model">Model</Label>
@@ -240,18 +322,16 @@ function HootieModelField({
           <Loader2 className="h-4 w-4 animate-spin" /> Loading models…
         </div>
       ) : models.length > 0 ? (
-        <Select value={value || undefined} onValueChange={onChange}>
-          <SelectTrigger id="hootie-model" data-testid="settings-hootie-model" aria-invalid={!!error}>
-            <SelectValue placeholder="Pick a model" />
-          </SelectTrigger>
-          <SelectContent>
-            {options.map((m) => (
-              <SelectItem key={m} value={m}>
-                {m}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <SearchableSelect
+          id="hootie-model"
+          testId="settings-hootie-model"
+          value={value}
+          onChange={onChange}
+          options={options}
+          placeholder="Pick a model"
+          searchPlaceholder="Search models…"
+          emptyText="No model matches."
+        />
       ) : (
         <TextField
           error={error}
@@ -388,11 +468,9 @@ function NumField({
 
 function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   // Local editable copy. Re-synced whenever the server value changes (initial
-  // load, and after a successful save — which clears the dirty state). Extends
-  // AdminSettings with the write-only `anthropic_api_key`: the server returns it
-  // only masked, so it isn't part of AdminSettings, but it's edited through the
-  // exact same draft + `set()` + global Save as every other field. Absent =
-  // untouched, string = set to this, null = clear on save.
+  // load, and after a successful save — which clears the dirty state).
+  // Write-only fields (secrets, `provider_keys`) are edited through the same
+  // draft + `set()` + global Save: absent = untouched, string = set, null = clear.
   const [draft, setDraft] = useState<AdminSettings | null>(settings);
   const [saving, setSaving] = useState(false);
   const qc = useQueryClient();
@@ -527,7 +605,6 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
       // there's no value to diff against — "staged" means a non-empty string
       // (set) or null (clear). Everything else diffs by value like normal.
       if (
-        k === "anthropic_api_key" ||
         k === "oidc_client_secret" ||
         k === "mcp_signing_secret" ||
         k === "ses_secret_access_key"
@@ -535,6 +612,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
         const v = draft[k];
         return (typeof v === "string" && v.trim() !== "") || v === null;
       }
+      if (k === "provider_keys") return Object.keys(draft.provider_keys ?? {}).length > 0;
       return (
         ((draft as unknown as Record<string, unknown>)[k] ?? "") !==
         (base[k] ?? "")
@@ -566,7 +644,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
       setFieldErrors(errs);
       const badFields = Object.keys(errs);
       const owns = (t: (typeof TABS)[number]) =>
-        badFields.some((f) => (t.keys as string[]).includes(f));
+        // "provider_keys.openai" belongs to the tab holding "provider_keys".
+        badFields.some((f) => (t.keys as string[]).includes(f.split(".")[0]));
       const offending = badFields.length
         ? TABS.find(owns)
         : TABS.find((t) => t.keys.some((k) => dirtyKeys.includes(k)));
@@ -940,9 +1019,41 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                         // Turning the plane off makes sub-agent runs inert; keep
                         // the two consistent so the server never sees the
                         // dependent-flag-without-parent state.
-                        ...(v ? {} : { subagent_runs_enabled: false }),
+                        ...(v ? {} : { subagent_runs_enabled: false, metacognition_enabled: false }),
                       })
                     }
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Metacognition agents — server-run, so they need the plane */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Metacognition agents</CardTitle>
+                <CardDescription>
+                  Agent documents this server runs itself, as a named persona,
+                  on the nest's model key. They read the folders they are given
+                  and only ever file proposals for review — they never publish.
+                  Runs use PromptOwl credits, or your own key. Requires the
+                  workflow plane.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.metacognition_enabled ? "On" : "Off"}
+                    {!draft.workflow_plane_enabled && (
+                      <span className="text-muted-foreground">
+                        {" "}
+                        · enable the workflow plane first
+                      </span>
+                    )}
+                  </span>
+                  <Switch
+                    checked={draft.metacognition_enabled}
+                    disabled={!draft.workflow_plane_enabled}
+                    onCheckedChange={(v) => set({ metacognition_enabled: v })}
                   />
                 </div>
               </CardContent>
@@ -1788,19 +1899,18 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
 
           {/* Hootie */}
           <TabsContent value="hootie" className="space-y-4">
-            {/* Anthropic API key — server-wide runner/LLM key. Write-only
-                (the server only returns it masked), so it isn't part of the
-                settings draft; its staged value rides the global Save via
-                `apiKeyDraft`. A nest's Tool environment can override it. */}
+            {/* Model keys — own provider keys (byok), kept by PromptOwl's model
+                gateway; write-only, staged as `provider_keys` on the global Save. */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Anthropic API key</CardTitle>
+                <CardTitle className="text-base">Model keys</CardTitle>
                 <CardDescription>
-                  The server-wide model key. Runners pick it up automatically
-                  (every nest, unless a nest overrides it in its Tool
-                  environment). No key, no LLM calls. Checked against the
-                  provider when you save, so a bad key is refused here rather
-                  than failing later. Stored server-side; shown masked.
+                  Your own model keys. A Hootie model from a provider below runs
+                  on that provider's key; any other model, and agent runs, use
+                  PromptOwl's virtual key on your plan's credits (a nest can set
+                  its own key for runs in its Tool environment). Each key is
+                  checked with the provider when you save and kept by
+                  PromptOwl's model gateway, not on this server.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -1812,57 +1922,21 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                       your plan's credits. Using your own model key or gateway
                       is an Enterprise feature.
                     </p>
-                    {settings.anthropic_api_key_masked && draft.anthropic_api_key !== null && (
-                      <button
-                        type="button"
-                        className="text-xs text-destructive hover:underline"
-                        onClick={() => set({ anthropic_api_key: null })}
-                      >
-                        A stored key ({settings.anthropic_api_key_masked}) is ignored on this plan — clear it
-                      </button>
-                    )}
-                    {draft.anthropic_api_key === null && <p className="text-xs">Will be cleared when you save.</p>}
                   </div>
                 ) : (
-                <>
-                <div className="text-xs text-muted-foreground mb-2">
-                  {draft.anthropic_api_key === null
-                    ? "Will be cleared when you save."
-                    : settings?.anthropic_api_key_masked
-                      ? `Current: ${settings.anthropic_api_key_masked}`
-                      : "Not set — runs can't execute until a key exists here or in a nest's Tool environment."}
-                </div>
-                <TextField
-                  error={fieldErrors.anthropic_api_key}
-                  type="password"
-                  value={
-                    typeof draft.anthropic_api_key === "string"
-                      ? draft.anthropic_api_key
-                      : ""
-                  }
-                  placeholder="sk-ant-… (paste to set or replace)"
-                  onChange={(v) => set({ anthropic_api_key: v })}
-                />
-                {settings?.anthropic_api_key_masked &&
-                  draft.anthropic_api_key !== null && (
-                    <button
-                      type="button"
-                      className="mt-2 text-xs text-destructive hover:underline"
-                      onClick={() => set({ anthropic_api_key: null })}
-                    >
-                      Clear key
-                    </button>
-                  )}
-                {draft.anthropic_api_key === null && (
-                  <button
-                    type="button"
-                    className="mt-2 text-xs text-muted-foreground hover:underline"
-                    onClick={() => set({ anthropic_api_key: undefined })}
-                  >
-                    Keep current key
-                  </button>
+                <div className="space-y-4">
+                {Object.keys(settings?.own_providers ?? {}).length === 0 && (
+                  <p className="text-xs text-muted-foreground" data-testid="settings-no-own-keys">
+                    No own keys set — Hootie and runs use PromptOwl's virtual key on your plan's credits.
+                  </p>
                 )}
-                </>
+                <ProviderKeyFields
+                  draft={draft.provider_keys ?? {}}
+                  current={settings?.own_providers ?? {}}
+                  fieldErrors={fieldErrors}
+                  set={(provider_keys) => set({ provider_keys })}
+                />
+                </div>
                 )}
               </CardContent>
             </Card>
@@ -1879,9 +1953,9 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   tab on the right edge. It answers from what the person asking
                   can read in the nest, cites the documents it used, and lets
                   them @tag a colleague — which posts the exchange as a comment
-                  and notifies them. Off until you turn it on. Runs on the
-                  model key above, or on PromptOwl models with your plan's
-                  credits; without either the panel says so.
+                  and notifies them. Off until you turn it on. Runs on your
+                  own key for the model's provider, or on PromptOwl models with
+                  your plan's credits; without either the panel says so.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -1904,24 +1978,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   value={draft.hootie_model ?? ""}
                   error={fieldErrors.hootie_model}
                   onChange={(v) => set({ hootie_model: v })}
+                  reloadKey={JSON.stringify(settings?.own_providers ?? {})}
                 />
-                {settings?.byok_available !== false && (
-                <div className="space-y-1.5">
-                  <Label htmlFor="anthropic-base-url">Model gateway URL</Label>
-                  <TextField
-                    id="anthropic-base-url"
-                    value={draft.anthropic_base_url ?? ""}
-                    placeholder="http://gateway:4000 — empty calls Anthropic directly"
-                    onChange={(v) => set({ anthropic_base_url: v })}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Route every model call — Hootie and agent runs — through a
-                    LiteLLM or PromptOwl gateway with the key above as its
-                    virtual key: budgets, spend logs, and any model the gateway
-                    fronts. Empty means Anthropic directly.
-                  </p>
-                </div>
-                )}
               </CardContent>
             </Card>
           </TabsContent>
@@ -2294,7 +2352,7 @@ export default function SettingsRoute() {
       .catch(() => {});
   }, [isAdmin]);
   const updateServerSettings = useCallback(async (
-    patch: Partial<AdminSettings> & { anthropic_api_key?: string | null },
+    patch: Partial<AdminSettings>,
   ) => {
     try {
       const res = await updateAdminSettings(patch);

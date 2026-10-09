@@ -8,6 +8,8 @@ import { mergeFrameAncestors } from "./shared/artifact-sandbox.js";
 import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
+import { boardRoutes } from "./nests/board-routes.js";
+import { listAssignedTo } from "./nodes/assigned-service.js";
 import { headlessRoutes } from "./nests/headless-routes.js";
 import { countPeople } from "./auth/headless.js";
 import { brandingRoutes } from "./nests/branding-routes.js";
@@ -43,7 +45,6 @@ import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { pushRoutes } from "./nests/push-routes.js";
 import { hootieRoutes } from "./hootie/routes.js";
-import { verifyModelKey } from "./hootie/model.js";
 import {
   HOOTIE_BRAND_FIELDS,
   changedHootieBrandFields,
@@ -61,6 +62,7 @@ import {
   runDetailRoutes,
 } from "./workflow/run-routes.js";
 import { scheduleRoutes } from "./workflow/schedule-routes.js";
+import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
 import { sendTestNotification } from "./notify/dispatch.js";
@@ -70,7 +72,7 @@ import {
   markNotificationsRead,
 } from "./governance/notify-service.js";
 import { definitionRoutes } from "./definitions/routes.js";
-import { isDerivedAnnotationsNode } from "./nodes/service.js";
+import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import {
   pdfNodeRoutes,
@@ -100,6 +102,13 @@ import {
   serverMcpRoutes,
 } from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
+import { accessRequestRoutes } from "./governance/access-request-routes.js";
+import {
+  accessRequestHint,
+  canDecideAccessRequests,
+  listAccessRequests,
+  writeTargetForPath,
+} from "./governance/access-request-service.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
 import { nestScopedKeyGuard } from "./auth/nest-scope-guard.js";
 import {
@@ -141,6 +150,10 @@ import {
   getLicenseOwnerEmail,
   getPendingRejections,
   getEntitlement,
+  getOwnGateway,
+  setOwnProviderKey,
+  validateLicense,
+  OWN_KEY_PROVIDERS,
   DEFAULT_LICENSE_CONTACT,
   type LicenseInfo,
 } from "./auth/license.js";
@@ -151,6 +164,7 @@ import {
   hootieModel,
   listCredentialModels,
   bareModelName,
+  modelProvider,
 } from "./shared/model-credential.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "./auth/license-copy.js";
 import { SERVICE_VERSION } from "./shared/version.js";
@@ -690,12 +704,18 @@ export function createApp(): Hono<AuthEnv> {
       // API would refuse it — existing nodes of the type stay readable.
       type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
       type_table_enabled: config.TYPE_TABLE_ENABLED,
+      // Project-board tasks — on once the engine knows the type (see
+      // ACCEPTED_NODE_TYPES). Off → the board's "+ Add task" makes documents.
+      type_task_enabled: ACCEPTED_NODE_TYPES.has("task"),
       // Hootie in the nest (default OFF — admins opt in). Off → POST
       // /nests/:id/chat 404s and the UI hides the launcher. Whether it can
       // actually answer is runner_key_configured above — the UI shows the
       // launcher whenever the feature is on and explains the missing key,
       // rather than hiding it.
       hootie_enabled: config.HOOTIE_ENABLED,
+      // Metacognition agents (default OFF; needs the workflow plane too). Off →
+      // /nests/:id/metacognition 404s and the Workflows view hides its tab.
+      metacognition_enabled: config.FEATURE_WORKFLOW_PLANE && config.FEATURE_METACOGNITION,
       // The identity every surface shows: the admin's custom name/logo/
       // colour/greeting on an enterprise licence, the default Hootie
       // otherwise (enforced here, not in the client). Public: the launcher
@@ -810,6 +830,8 @@ export function createApp(): Hono<AuthEnv> {
       // yet (3 drop the license) — the "we're checking your license" banner.
       pending_rejections: getPendingRejections(),
       last_checked_at: getLastLicenseCheck(),
+      // Own model keys / LLM gateway (licence feature byok), for the License tab.
+      byok: hasEntitlement("byok"),
       // PromptOwl's page for this key (plan, Upgrade); ?key= is the last 4 only.
       manage_url: config.PROMPTOWL_KEY
         ? `${config.PROMPTOWL_API_URL.replace(/\/$/, "")}/community-license?key=${config.PROMPTOWL_KEY.slice(-4)}`
@@ -906,6 +928,7 @@ export function createApp(): Hono<AuthEnv> {
     promptowl_teams_enabled: config.PROMPTOWL_TEAMS_ENABLED,
     type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
     type_table_enabled: config.TYPE_TABLE_ENABLED,
+    type_task_enabled: ACCEPTED_NODE_TYPES.has("task"),
     hootie_enabled: config.HOOTIE_ENABLED,
     // The model in use: the admin's pick, else the gateway's default (see hootieModel).
     hootie_model: hootieModel(resolveModelCredential()),
@@ -915,15 +938,17 @@ export function createApp(): Hono<AuthEnv> {
     // are in effect and whether edits are accepted.
     ...storedHootieSettings(),
     hootie_branding_available: hootieBrandingAvailable(),
-    // Own key + gateway fields are in effect and editable only with byok.
+    // Own model keys are in effect and editable only with byok.
     byok_available: hasEntitlement("byok"),
-    anthropic_base_url: config.ANTHROPIC_BASE_URL,
+    // Own-provider keys PromptOwl holds for this licence (masked tails only).
+    own_providers: hasEntitlement("byok") ? getOwnGateway()?.providers ?? {} : {},
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
+    metacognition_enabled: config.FEATURE_METACOGNITION,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
     // OIDC SSO. The client secret is WRITE-ONLY: only its presence is
-    // reported, never the value (same discipline as the Anthropic key below).
+    // reported, never the value.
     oidc_enabled: config.OIDC_ENABLED,
     oidc_issuer: config.OIDC_ISSUER,
     oidc_client_id: config.OIDC_CLIENT_ID,
@@ -950,10 +975,6 @@ export function createApp(): Hono<AuthEnv> {
     // its own "enabled but not configured" warning from the unsaved draft
     // instead, so this is for API consumers (and tests) rather than that badge.
     oidc_ready: isOidcReady(),
-    // Server-wide runner default. NEVER the value — masked tail only.
-    anthropic_api_key_masked: process.env.ANTHROPIC_API_KEY
-      ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
-      : null,
     slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
     msteams_webhook_url: config.MSTEAMS_WEBHOOK_URL ?? "",
     email_provider: config.EMAIL_PROVIDER,
@@ -974,22 +995,38 @@ export function createApp(): Hono<AuthEnv> {
 
   // Models the current credential can reach — the Hootie model picker. On the
   // PromptOwl gateway that is PromptOwl's team catalog (team model names); on
-  // an own key (byok), whatever that key's provider/gateway lists.
+  // an own key (byok), whatever that key's provider/gateway lists. With byok,
+  // the licence's own-provider models are added and named in `own_models`.
   app.use("/admin/models", flexAuthMiddleware);
   app.get("/admin/models", async (c) => {
     if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
     const credential = resolveModelCredential();
     const current = hootieModel(credential);
-    if (!credential) return c.json({ models: [], current, source: null });
+    const own = hasEntitlement("byok") ? getOwnGateway()?.models ?? [] : [];
+    // `providers`: name → provider, read before PromptOwl's prefix comes off,
+    // so the picker can group the list (OpenAI, Anthropic, …).
+    const reply = (ids: string[], names: string[], extra: Record<string, unknown> = {}) => {
+      const providers: Record<string, string> = {};
+      names.forEach((n, i) => (providers[n] = modelProvider(ids[i])));
+      for (const m of own) providers[m] = modelProvider(m);
+      return c.json({
+        models: [...new Set([...names, ...own])].sort(),
+        current,
+        source: credential?.source ?? null,
+        providers,
+        ...(own.length ? { own_models: own } : {}),
+        ...extra,
+      });
+    };
+    if (!credential) return reply([], []);
     try {
       const ids = await listCredentialModels(credential);
       // People pick plain names; PromptOwl's instance prefix is added per call.
-      const names = credential.source === "promptowl" ? ids.map(bareModelName) : ids;
-      return c.json({ models: [...new Set(names)].sort(), current, source: credential.source });
+      return reply(ids, credential.source === "promptowl" ? ids.map(bareModelName) : ids);
     } catch (err) {
       console.warn("[admin/models] could not list models:", err instanceof Error ? err.message : err);
-      return c.json({ models: [], current, source: credential.source, error: "Could not list models right now." });
+      return reply([], [], { error: "Could not list models right now." });
     }
   });
 
@@ -1052,13 +1089,15 @@ export function createApp(): Hono<AuthEnv> {
       for (const k of Object.keys(HOOTIE_BRAND_FIELDS)) delete body[k];
     }
 
-    // Own model key / gateway: Enterprise only (pricing spec §9.3, licence
-    // feature byok). Setting one is refused whole; clearing is always allowed.
+    // Own model keys: Enterprise only (pricing spec §9.3, licence feature
+    // byok). Setting one is refused whole; clearing is always allowed.
+    const providerKeysIn =
+      body.provider_keys && typeof body.provider_keys === "object" && !Array.isArray(body.provider_keys)
+        ? (body.provider_keys as Record<string, unknown>)
+        : null;
     if (
       !hasEntitlement("byok") &&
-      (["anthropic_api_key", "anthropic_base_url"] as const).some(
-        (f) => f in body && String(body[f] ?? "").trim() !== "",
-      )
+      Object.values(providerKeysIn ?? {}).some((v) => String(v ?? "").trim() !== "")
     ) {
       return c.json(
         {
@@ -1172,48 +1211,20 @@ export function createApp(): Hono<AuthEnv> {
     }
     // Name, logo, accent colour, greeting (enterprise — gated above).
     pending.push(...validateHootieBrandFields(body, addError));
-    // Empty clears the row (direct Anthropic). Otherwise an http(s) origin
-    // (+ optional path) with no trailing slash, so the SDK joins /v1/messages
-    // onto it cleanly.
-    if ("anthropic_base_url" in body) {
-      const v = String(body.anthropic_base_url ?? "").trim().replace(/\/$/, "");
-      if (!v) pending.push({ name: "ANTHROPIC_BASE_URL", value: null });
-      else {
-        let ok = false;
-        try {
-          const u = new URL(v);
-          ok = (u.protocol === "http:" || u.protocol === "https:") && !!u.host;
-        } catch {
-          ok = false;
+    // Own-provider keys (byok): checked and stored by PromptOwl, in LiteLLM
+    // only — sent after every other field validates, never kept here.
+    const providerKeys: Array<[string, string | null]> = [];
+    if ("provider_keys" in body) {
+      if (!providerKeysIn) addError("provider_keys", "provider_keys must be an object of provider → key.");
+      else
+        for (const [p, v] of Object.entries(providerKeysIn)) {
+          const field = `provider_keys.${p}`;
+          if (!(OWN_KEY_PROVIDERS as readonly string[]).includes(p)) addError(field, `Unknown model provider "${p}".`);
+          else if (v === null || v === "") providerKeys.push([p, null]);
+          else if (typeof v !== "string" || !v.trim() || /\s/.test(v.trim()) || v.trim().length > 512)
+            addError(field, "Paste the provider's API key as one line.");
+          else providerKeys.push([p, v.trim()]);
         }
-        if (!ok)
-          addError(
-            "anthropic_base_url",
-            "Model gateway URL must be an http(s) URL, e.g. http://gateway:4000 — or empty to call Anthropic directly.",
-          );
-        else pending.push({ name: "ANTHROPIC_BASE_URL", value: v });
-      }
-    }
-    if ("anthropic_api_key" in body) {
-      const v = body.anthropic_api_key;
-      if (v === null || v === "") {
-        pending.push({ name: "ANTHROPIC_API_KEY", value: null });
-      } else if (typeof v !== "string" || !v.trim().startsWith("sk-")) {
-        addError("anthropic_api_key", 'Anthropic API key must start with "sk-" (or be empty to clear it).');
-      } else {
-        // Shape is not validity: a well-formed key that Anthropic rejects
-        // saves cleanly and then fails on the first question someone asks.
-        // One call settles it here, against the gateway THIS patch leaves in
-        // place (it may be setting one in the same request).
-        const key = v.trim();
-        const patchedBase = pending.find((p) => p.name === "ANTHROPIC_BASE_URL");
-        const baseUrl = patchedBase
-          ? patchedBase.value
-          : config.ANTHROPIC_BASE_URL || null;
-        const rejected = await verifyModelKey(key, baseUrl);
-        if (rejected) addError("anthropic_api_key", rejected);
-        else pending.push({ name: "ANTHROPIC_API_KEY", value: key });
-      }
     }
     if ("subagent_runs_enabled" in body) {
       // Depends on the plane: enabling recursion without the plane's run routes
@@ -1235,6 +1246,17 @@ export function createApp(): Hono<AuthEnv> {
           name: "FEATURE_SUBAGENT_RUNS",
           value: body.subagent_runs_enabled ? "true" : null,
         });
+      }
+    }
+    // Metacognition agents run on the plane's runs and schedules, so they
+    // need it on, same as sub-agent runs. Off clears the row (falls to env).
+    if ("metacognition_enabled" in body) {
+      const planeOn =
+        "workflow_plane_enabled" in body ? !!body.workflow_plane_enabled : config.FEATURE_WORKFLOW_PLANE;
+      if (body.metacognition_enabled && !planeOn) {
+        addError("metacognition_enabled", "Metacognition agents require the Workflow plane to be turned on.");
+      } else {
+        pending.push({ name: "FEATURE_METACOGNITION", value: body.metacognition_enabled ? "true" : null });
       }
     }
     // Sub-agent recursion caps. Same [min,max] the config getters clamp to, so
@@ -1693,6 +1715,26 @@ export function createApp(): Hono<AuthEnv> {
       else process.env[name] = value;
     }
 
+    // Own-provider keys go to PromptOwl, which tests each with the provider —
+    // after the settings above are saved, so a refused key never strands them.
+    // ponytail: one at a time, so a later refusal leaves earlier ones saved;
+    // the error names the provider that failed. Without byok there is no own
+    // key to clear (PromptOwl blocks it), so nothing is sent.
+    const toSend = hasEntitlement("byok") ? providerKeys : [];
+    let savedAny = false;
+    for (const [p, v] of toSend) {
+      const refused = await setOwnProviderKey(p, v);
+      if (refused) {
+        if (savedAny) await validateLicense({ forceFresh: true });
+        return c.json(
+          { error: refused, fieldErrors: { [`provider_keys.${p}`]: refused }, settings: currentServerSettings() },
+          400,
+        );
+      }
+      savedAny = true;
+    }
+    if (savedAny) await validateLicense({ forceFresh: true });
+
     return c.json({ settings: currentServerSettings() });
   });
 
@@ -1983,9 +2025,47 @@ export function createApp(): Hono<AuthEnv> {
       // must not treat it as a document to open.
       target_type: r.targetType,
     });
+    // Access requests (CU-wdqcq041jn) are a third item type: someone asked to
+    // edit something they can only read. node_id is the document for a node
+    // target, else the folder path / nest id — target_type says which.
+    // Capped (500, newest first), not paginated: a person can have at most
+    // MAX_PENDING_PER_NEST waiting per nest, so the pending set stays small;
+    // the count below reflects what is shown.
+    // Decider nests first, so only rows this caller can act on (or filed) load.
+    const deciderNestIds = (
+      await Promise.all(
+        [...nestName.keys()].map(async (id) =>
+          (await canDecideAccessRequests(id, userId)) ? id : null,
+        ),
+      )
+    ).filter((id): id is string => id !== null);
+    const [decidable, myAccessAsks] = await Promise.all([
+      listAccessRequests({ nestIds: deciderNestIds, status: "pending", limit: 500 }),
+      listAccessRequests({
+        nestIds: [...nestName.keys()],
+        requesterId: userId,
+        status: "pending",
+        limit: 500,
+      }),
+    ]);
+    const toAccessItem = (r: (typeof decidable)[number]) => ({
+      type: "access" as const,
+      nest_id: r.nest_id,
+      nest_name: nestName.get(r.nest_id)!,
+      node_id: r.target_id,
+      title: r.title || r.target_id,
+      requested_by: r.requested_by,
+      requested_at: r.created_at,
+      priority: "normal" as const,
+      reason: r.note ?? "",
+      request_id: r.id,
+      target_type: r.target_type,
+      level: r.level,
+    });
     type WorkItem =
       | ReturnType<typeof toItem>
-      | ReturnType<typeof toDeletionItem>;
+      | ReturnType<typeof toDeletionItem>
+      | ReturnType<typeof toAccessItem>;
     const byNewest = (a: { requested_at: string }, b: { requested_at: string }) =>
       a.requested_at < b.requested_at ? 1 : -1;
     // items = waiting on ME (someone else asked); waiting = I asked, waiting on them.
@@ -2043,9 +2123,14 @@ export function createApp(): Hono<AuthEnv> {
         .filter((r) => nestManage.get(r.nestId))
         .map(toDeletionItem),
     );
+    // Waiting on me: asks I can decide. Waiting on others: the ones I filed.
+    items.push(
+      ...decidable.filter((r) => r.requester_id !== userId).map(toAccessItem),
+    );
     items.sort(byNewest);
     waiting.push(
       ...deletions.filter((r) => r.requestedBy === me).map(toDeletionItem),
+      ...myAccessAsks.map(toAccessItem),
     );
     waiting.sort(byNewest);
     // Watcher notifications (HITL tags) ride along so the inbox is one call.
@@ -2080,19 +2165,26 @@ export function createApp(): Hono<AuthEnv> {
         }),
       ]);
     const reviewTotal = approvableReviewTotal + myReviewsElsewhereTotal;
-    // Deletion flags ride the same two buckets (above) but aren't paginated
-    // (listDeletionRequests always fetches every pending one), so folding in
+    // Deletion flags and access requests ride the same two buckets (above)
+    // but aren't paginated (both lists fetch every pending one), so folding in
     // however many are actually shown keeps the total exact regardless of
     // which review page this call fetched.
-    const deletionsShown =
-      items.filter((i) => i.type === "deletion").length +
-      waiting.filter((i) => i.type === "deletion").length;
+    const requestsShown =
+      items.filter((i) => i.type === "deletion" || i.type === "access").length +
+      waiting.filter((i) => i.type === "deletion" || i.type === "access").length;
+    // Board cards assigned to me (open ones), across every nest I can see.
+    // Best-effort: a failure here must not take the reviews inbox down with it.
+    const assigned = await listAssignedTo(me, userId, nestName).catch((err) => {
+      console.error("[me/work] assigned list failed", err);
+      return [];
+    });
     return c.json({
       items,
       waiting,
       notifications,
+      assigned,
       pagination: {
-        total: reviewTotal + deletionsShown,
+        total: reviewTotal + requestsShown,
         limit,
         offset,
         has_more: offset + requests.length < total,
@@ -2632,6 +2724,17 @@ export function createApp(): Hono<AuthEnv> {
         // handler's filterAccessible scopes every result to their grants, so
         // they can never read past what they were shared (same as the list).
         grantNestVisible = access.hasGrant;
+      } else if (
+        parts[1] === "access-requests" &&
+        ((parts.length === 2 && c.req.method === "POST") ||
+          (parts.length === 3 && parts[2] === "mine" && c.req.method === "GET"))
+      ) {
+        // Asking for more access (CU-wdqcq041jn), for someone who reaches this
+        // nest only through a document or folder share — the person a refused
+        // write most often stops. Filing and reading back their OWN request is
+        // all this opens; the service 404s a target they can't see, and
+        // deciding stays owner/admin-only in the handler.
+        grantNestVisible = access.hasGrant;
       } else if (isPinAction) {
         // Pinning, for someone who reaches this nest only through a document or
         // folder grant. They see the nest on their dashboard, so they see its
@@ -2662,6 +2765,27 @@ export function createApp(): Hono<AuthEnv> {
             "The nest id may be wrong, or these credentials have no access to it. Ask the nest owner to share the nest with you, then reconnect.",
         });
       }
+    }
+
+    // A nest VIEWER can hold a write share on one document or folder (an
+    // approved access request is exactly that). The share has to count on that
+    // node's write routes too, or the grant would read as access and refuse
+    // every edit. Reads don't need it — the viewer already reads the nest.
+    if (
+      permission === "read" &&
+      !grantRole &&
+      access.hasGrant &&
+      parts[1] === "nodes" &&
+      parts.length >= 3 &&
+      c.req.method !== "GET"
+    ) {
+      let targetTail = parts.slice(2).join("/");
+      try {
+        targetTail = decodeURIComponent(targetTail);
+      } catch {
+        /* malformed escape — resolve as-is */
+      }
+      grantRole = await resolveNodeGrant(nestId, userId, targetTail);
     }
 
     let required: NestPermission = "read";
@@ -2723,6 +2847,11 @@ export function createApp(): Hono<AuthEnv> {
     const isDeletionRequestAction =
       /\/request-deletion$/.test(path) ||
       /\/deletion-requests\/[^/]+\/withdraw$/.test(path);
+    // Asking for access is what a viewer does (CU-wdqcq041jn), so the whole
+    // /access-requests surface sits at read tier. Approve/deny are refused in
+    // the handler for anyone but the owner, a nest admin or the server admin.
+    // Exact resource segment, so a node slugged "access-requests" stays a node.
+    const isAccessRequestAction = parts[1] === "access-requests";
     // isNestLifecycleAction (archive/restore) is defined above, next to
     // isMcpTransport — the open-mode branch needs it too, and that branch runs
     // before this point.
@@ -2808,6 +2937,7 @@ export function createApp(): Hono<AuthEnv> {
       !isPushDecisionPath &&
       !isCommentAction &&
       !isDeletionRequestAction &&
+      !isAccessRequestAction &&
       !isNestLifecycleAction &&
       !isPinAction &&
       !isAnnotationAction &&
@@ -2900,21 +3030,43 @@ export function createApp(): Hono<AuthEnv> {
           { archived: true },
         );
       }
+      // Someone who can see the target but not change it may ask for the
+      // access instead of stopping here (CU-wdqcq041jn). Writes only: a GET
+      // held at write tier (the collaborator roster, hooks) is a read the UI
+      // makes on its own, not something the person tried to change, and
+      // admin-tier routes (visibility, roles) aren't something to request.
+      const hint =
+        required === "write" &&
+        c.req.method !== "GET" &&
+        effectiveLevel >= permissionLevel("read")
+          ? await accessRequestHint({
+              nestId,
+              userId,
+              target: writeTargetForPath(nestId, parts, c.req.method),
+            })
+          : null;
       return deny(
         403,
-        `You don't have access to perform this action on this nest. Required permission: '${required}', your permission: '${permission}'. Ask the nest owner or a server admin to grant you ${required} access.`,
+        hint
+          ? `You don't have edit access here. Your permission: '${permission}'. You can request write access from the nest owner or an admin (POST /nests/${nestId}/access-requests).`
+          : `You don't have access to perform this action on this nest. Required permission: '${required}', your permission: '${permission}'. Ask the nest owner or a server admin to grant you ${required} access.`,
         {
           required_permission: required,
           your_permission: permission,
+          ...hint,
         },
       );
     }
 
-    // Downstream sees the grant role when the caller is acting purely via a
-    // grant (nest permission "none") — so node handlers treat them correctly.
+    // Downstream sees the grant role when it outranks the nest permission — a
+    // caller acting purely via a grant (nest permission "none"), or a viewer
+    // holding a write share on this node — so node handlers treat them
+    // correctly.
     c.set(
       "nestPermission",
-      permission === "none" && grantRole ? grantRole : permission,
+      grantRole && permissionLevel(grantRole) > permissionLevel(permission)
+        ? grantRole
+        : permission,
     );
     return next();
   });
@@ -2971,7 +3123,8 @@ export function createApp(): Hono<AuthEnv> {
   // GET /nests/:nestId/activity-log?node=<id> | ?folder=<path> — the admin
   // activity log for one document, one folder, or (neither) the whole nest:
   // who changed, reviewed, commented on, deleted, read, retrieved or exported
-  // it (CU-wdqcq03aw2). Same guard as /trace above — owner, nest admin, or
+  // it (CU-wdqcq03aw2). ?agent=<name> narrows it to one agent ("what did
+  // agent X read"); read rows carry the version served. Same guard as /trace above — owner, nest admin, or
   // server admin; everyone else 403. Registered before the sub-routers so it
   // matches first under the LinearRouter.
   nestsApp.get("/:nestId/activity-log", async (c) => {
@@ -3011,6 +3164,11 @@ export function createApp(): Hono<AuthEnv> {
       scope,
       types: types as ActivityType[] | undefined,
       actor: c.req.query("actor") || undefined,
+      agent: (() => {
+        const a = c.req.query("agent")?.trim();
+        if (a && a.length > 200) throw new ValidationError("agent must be at most 200 characters");
+        return a || undefined;
+      })(),
       limit: Number(c.req.query("limit") ?? 50),
       offset: Number(c.req.query("offset") ?? 0),
     });
@@ -3022,6 +3180,7 @@ export function createApp(): Hono<AuthEnv> {
 
   // Nest-scoped sub-routes
   // Governance nest-level routes (stewards, review-queue)
+  nestsApp.route("/:nestId", accessRequestRoutes);
   nestsApp.route("/:nestId", governanceRoutes);
   // Node-level sub-routers all share the /:nestId/nodes base and rely on a
   // greedy /:nodeId{.+} param (node ids are multi-segment paths). Under the
@@ -3058,11 +3217,13 @@ export function createApp(): Hono<AuthEnv> {
   // public links; the public render surface is the top-level /p route above.
   nestsApp.route("/:nestId/publications", publishRoutes);
   nestsApp.route("/:nestId/teams", nestTeamRoutes);
+  nestsApp.route("/:nestId/boards", boardRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);
   nestsApp.route("/:nestId/runs", runListRoutes);
   nestsApp.route("/:nestId/schedules", scheduleRoutes);
+  nestsApp.route("/:nestId/metacognition", metacognitionRoutes);
   nestsApp.route("/:nestId/env", envRoutes);
   nestsApp.route("/:nestId/connectors", connectorRoutes);
   nestsApp.route("/:nestId/hooks", hookNestRoutes);

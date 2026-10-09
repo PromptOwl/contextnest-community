@@ -18,6 +18,7 @@ import { LicenseBanner } from "./components/LicenseNotice";
 import { getLicenseStatus, type LicenseStatus } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
+import { RequestAccessHost } from "./components/RequestAccessDialog";
 import { HootiePanel, type HootieScope } from "./components/HootiePanel";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
@@ -1099,6 +1100,8 @@ export default function App() {
       {showShortcuts && (
         <ShortcutsDialog onClose={() => setShowShortcuts(false)} />
       )}
+      {/* A refused write anywhere offers "Request access?" (CU-wdqcq041jn). */}
+      <RequestAccessHost />
     </>
   );
 

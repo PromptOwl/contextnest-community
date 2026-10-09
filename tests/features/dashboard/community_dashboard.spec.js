@@ -533,22 +533,30 @@ test.describe('Community Dashboard', () => {
   // Filtering, scoping, sorting and paging
   // ══════════════════════════════════════════════════════════════════════════
   test.describe('Filter, scope and sort', () => {
-    test('CN-DASH-023: the filter bar appears only when there are more than 5 nests', async ({
+    test('CN-DASH-023: the filter bar is shown whatever the nest count', async ({
       primary_user,
     }) => {
-      // Forced counts: the live account's nest count moves as the suite runs,
-      // and the rule under test is a boundary at exactly five.
+      // Forced counts: the live account's nest count moves as the suite runs.
+      // The bar used to wait for a sixth nest; 5868288 dropped that gate, so a
+      // single nest and the old boundary either side both get it.
       const { page, nestsPage } = await openDashboard(primary_user);
       await stubNoNotifications(page);
-      const setNests = await stubNestList(page, stubGrid(5));
+      const setNests = await stubNestList(page, stubGrid(1));
 
       await nestsPage.goto();
-      await expect(nestsPage.nestCardHeadings).toHaveCount(5);
-      await expect(nestsPage.filterInput).not.toBeVisible();
-      await expect(nestsPage.scopeSelect).not.toBeVisible();
-      await expect(nestsPage.sortSelect).not.toBeVisible();
+      await expect(nestsPage.nestCardHeadings).toHaveCount(1);
+      await expect(nestsPage.filterInput).toBeVisible();
+      await expect(nestsPage.scopeSelect).toBeVisible();
+      await expect(nestsPage.sortSelect).toBeVisible();
+      await expect(nestsPage.filterSummary).toHaveText('1 of 1');
       // The Archived switch is always there — it is the only way to reach them.
       await expect(nestsPage.archivedSwitch).toBeVisible();
+
+      setNests(stubGrid(5));
+      await nestsPage.reload();
+      await expect(nestsPage.nestCardHeadings).toHaveCount(5);
+      await expect(nestsPage.filterInput).toBeVisible();
+      await expect(nestsPage.filterSummary).toHaveText('5 of 5');
 
       setNests(stubGrid(6));
       await nestsPage.reload();
@@ -1087,19 +1095,20 @@ test.describe('Community Dashboard', () => {
       await expect(nestsPage.nestCard(live.name)).toBeVisible();
     });
 
-    test('CN-DASH-047: the archived list gets its own filter and sort past 5 entries', async ({
+    test('CN-DASH-047: the archived list gets its own filter and sort, whatever its length', async ({
       primary_user,
     }) => {
-      // Forced counts: archiving six real nests per run to test a boundary at
-      // five is a lot of lifecycle churn for a client-side rule.
+      // Forced counts: archiving real nests per run is a lot of lifecycle churn
+      // for a client-side rule. Like the grid's, the archived filter no longer
+      // waits for a sixth entry (5868288).
       const { page, nestsPage } = await openDashboard(primary_user);
-      const five = stubGrid(5).map((n) => ({ ...n, archived_at: '2026-01-02 09:00:00' }));
-      await stubArchivedList(page, five);
+      const one = stubGrid(1).map((n) => ({ ...n, archived_at: '2026-01-02 09:00:00' }));
+      await stubArchivedList(page, one);
 
       await nestsPage.goto();
       await nestsPage.toggleArchived(true);
-      await expect(nestsPage.archivedFilterInput).not.toBeVisible();
-      await expect(nestsPage.archivedSortSelect).not.toBeVisible();
+      await expect(nestsPage.archivedFilterInput).toBeVisible();
+      await expect(nestsPage.archivedSortSelect).toBeVisible();
 
       // Re-stubbing wins: Playwright matches the most recently added handler first.
       const six = stubGrid(6).map((n, i) => ({
@@ -1315,7 +1324,15 @@ test.describe('Community Dashboard', () => {
 
       await nestsPage.goto();
 
-      // Said plainly, not as "hidden by the current filter".
+      // With nothing of their own, the page opens on All nests so the
+      // reachable ones are in view straight away (5868288).
+      await expect(nestsPage.scopeSelect).toHaveValue('all');
+      await expect(nestsPage.nestCard('Stub Discovered One')).toBeVisible();
+      await expect(nestsPage.nestCard('Stub Discovered Two')).toBeVisible();
+
+      // Back on My nests, the empty state is said plainly, not as "hidden by
+      // the current filter".
+      await nestsPage.selectScope('mine');
       await expect(nestsPage.discoveredState).toBeVisible();
       await expect(
         nestsPage.page.getByText(/2 nests others have opened up on this server/)

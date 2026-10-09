@@ -11,6 +11,13 @@ const GATEWAY = {
   key: "sk-litellm-licence",
   defaultModel: "default-claude/claude-sonnet-5",
 };
+const OWN_MODEL = "community-lic1-openai/gpt-5.6-sol";
+const OWN_GW = {
+  baseUrl: "https://llm.promptowl.ai",
+  key: "sk-litellm-own",
+  models: [OWN_MODEL],
+  providers: { openai: { masked: "9876", updatedAt: null } },
+};
 const OWNER = "owner@acme.com";
 
 let env: ReturnType<typeof setupTestEnv> | null = null;
@@ -21,7 +28,7 @@ afterEach(() => {
   delete process.env.FEATURE_WORKFLOW_PLANE;
 });
 
-async function boot(opts: { features?: string[]; gateway?: typeof GATEWAY | null }) {
+async function boot(opts: { features?: string[]; gateway?: typeof GATEWAY | null; ownGateway?: typeof OWN_GW | null }) {
   process.env.FEATURE_WORKFLOW_PLANE = "true";
   env = setupTestEnv();
   const app = await createTestApp("key", { ownerEmail: OWNER, ...opts });
@@ -41,20 +48,20 @@ describe("resolveModelCredential", () => {
     expect(resolveModelCredential({ ANTHROPIC_API_KEY: "sk-ant-nest" })?.source).toBe("promptowl");
   });
 
-  it("with byok, a nest key beats the server key, and the server key beats the gateway", async () => {
+  it("with byok, a nest key beats the gateway; a server-wide Anthropic key is no longer read", async () => {
     const { resolveModelCredential } = await boot({ features: ["byok"], gateway: GATEWAY });
+    // Own server keys live in PromptOwl's gateway now (ownModelRoute), not in env.
     process.env.ANTHROPIC_API_KEY = "sk-ant-own";
-    expect(resolveModelCredential()).toEqual({ apiKey: "sk-ant-own", baseUrl: null, source: "own", defaultModel: null });
+    expect(resolveModelCredential()?.source).toBe("promptowl");
     expect(
       resolveModelCredential({ ANTHROPIC_API_KEY: "sk-ant-nest", ANTHROPIC_BASE_URL: "http://gw:4000" }),
     ).toEqual({ apiKey: "sk-ant-nest", baseUrl: "http://gw:4000", source: "own", defaultModel: null });
   });
 
-  it("a nest URL without a nest key never receives the server's key", async () => {
+  it("a nest URL without a nest key never receives a key", async () => {
     const { resolveModelCredential } = await boot({ features: ["byok"], gateway: GATEWAY });
-    process.env.ANTHROPIC_API_KEY = "sk-ant-own";
     expect(resolveModelCredential({ ANTHROPIC_BASE_URL: "https://evil.example" })).toEqual({
-      apiKey: "sk-ant-own", baseUrl: null, source: "own", defaultModel: null,
+      apiKey: GATEWAY.key, baseUrl: GATEWAY.baseUrl, source: "promptowl", defaultModel: GATEWAY.defaultModel,
     });
   });
 
@@ -164,6 +171,8 @@ describe("/admin/models — the Hootie model picker", () => {
       models: ["claude-sonnet-5", "gpt-5.5"],
       current: "claude-sonnet-5",
       source: "promptowl",
+      // Read before the prefix comes off, so the picker can group by provider.
+      providers: { "claude-sonnet-5": "claude", "gpt-5.5": "openai" },
     });
     expect(spy).toHaveBeenCalled();
 
@@ -211,14 +220,12 @@ describe("the UI is told whether own keys are allowed", () => {
 });
 
 describe("own keys can't be stored without byok", () => {
-  it("Settings refuses setting a key or gateway (403 byok_required) but allows clearing", async () => {
+  it("Settings refuses setting a provider key (403 byok_required) but allows clearing", async () => {
     const { app, owner } = await boot({ gateway: GATEWAY });
-    for (const body of [{ anthropic_api_key: "sk-ant-x" }, { anthropic_base_url: "http://gw:4000" }]) {
-      const res = await jsonRequest(app, "PATCH", "/admin/settings", body, owner.apiKey);
-      expect(res.status).toBe(403);
-      expect(res.data.code).toBe("byok_required");
-    }
-    const clear = await jsonRequest(app, "PATCH", "/admin/settings", { anthropic_api_key: "" }, owner.apiKey);
+    const res = await jsonRequest(app, "PATCH", "/admin/settings", { provider_keys: { claude: "sk-ant-x" } }, owner.apiKey);
+    expect(res.status).toBe(403);
+    expect(res.data.code).toBe("byok_required");
+    const clear = await jsonRequest(app, "PATCH", "/admin/settings", { provider_keys: { claude: null } }, owner.apiKey);
     expect(clear.status).toBe(200);
   });
 
@@ -234,5 +241,228 @@ describe("own keys can't be stored without byok", () => {
       app, "PUT", `/nests/${nestId}/env`, { key: "SLACK_TOKEN", value: "xoxb-1" }, owner.apiKey,
     );
     expect(other.status).toBe(201);
+  });
+});
+
+describe("the Hootie model picks the key (own providers, byok)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  async function routeFor(opts: Parameters<typeof boot>[0]) {
+    await boot(opts);
+    const { ownModelRoute } = await import("../src/shared/model-credential.js");
+    return ownModelRoute;
+  }
+  const OWN_CRED = { apiKey: OWN_GW.key, baseUrl: OWN_GW.baseUrl, source: "own", defaultModel: null };
+
+  it("any model of a provider with an own key goes on that key, renamed onto the own group", async () => {
+    const route = await routeFor({ features: ["byok"], gateway: GATEWAY, ownGateway: OWN_GW });
+    // Picked from PromptOwl's catalog: not one of the own catalog names, same provider.
+    expect(route("default-openai/gpt-4o")).toEqual({ credential: OWN_CRED, model: "community-lic1-openai/gpt-4o" });
+    // Picked as a "(your key)" name: already on the own group.
+    expect(route(OWN_MODEL)).toEqual({ credential: OWN_CRED, model: OWN_MODEL });
+  });
+
+  it("a PromptOwl Claude model runs on the own Anthropic key (the server key moved to the gateway)", async () => {
+    const route = await routeFor({
+      features: ["byok"],
+      gateway: GATEWAY,
+      ownGateway: { ...OWN_GW, models: [...OWN_GW.models, "community-lic1-claude/claude-sonnet-5"] },
+    });
+    expect(route("default-claude/claude-sonnet-5")).toEqual({
+      credential: OWN_CRED,
+      model: "community-lic1-claude/claude-sonnet-5",
+    });
+  });
+
+  it("an own model name with no group is skipped, not cut into a wrong one", async () => {
+    const route = await routeFor({
+      features: ["byok"],
+      gateway: GATEWAY,
+      // Cut by one character, "zz-openaiX" would read as group "zz-openai".
+      ownGateway: { ...OWN_GW, models: ["zz-openaiX", OWN_MODEL] },
+    });
+    expect(route("default-openai/gpt-4o")?.model).toBe("community-lic1-openai/gpt-4o");
+  });
+
+  it("everything else keeps today's key", async () => {
+    const route = await routeFor({ features: ["byok"], gateway: GATEWAY, ownGateway: OWN_GW });
+    expect(route("default-grok/grok-4")).toBeNull(); // no own Grok key
+    expect(route("default-claude/claude-sonnet-5")).toBeNull(); // no own Claude key on this licence
+    expect(route("claude-sonnet-5")).toBeNull(); // a bare name (direct Anthropic key)
+    expect(await routeFor({ gateway: GATEWAY, ownGateway: OWN_GW }).then((r) => r("default-openai/gpt-4o"))).toBeNull(); // no byok
+    expect(await routeFor({ features: ["byok"], gateway: GATEWAY }).then((r) => r("default-openai/gpt-4o"))).toBeNull(); // no own key
+  });
+
+  it("/admin/models adds the own-provider models and names them", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY, ownGateway: OWN_GW });
+    const realFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: any, init?: any) =>
+      String(url) === "https://llm.promptowl.ai/v1/models"
+        ? new Response(JSON.stringify({ data: [{ id: "default-claude/claude-sonnet-5" }] }))
+        : realFetch(url, init),
+    );
+    const res = await jsonRequest(app, "GET", "/admin/models", undefined, owner.apiKey);
+    expect(res.data.models).toEqual(["claude-sonnet-5", OWN_MODEL]);
+    expect(res.data.own_models).toEqual([OWN_MODEL]);
+    expect(res.data.providers).toEqual({ "claude-sonnet-5": "claude", [OWN_MODEL]: "openai" });
+    expect(res.data.source).toBe("promptowl");
+  });
+});
+
+describe("own-provider keys from Settings (byok)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function promptowl(answer: (body: any) => Response) {
+    const realFetch = globalThis.fetch;
+    const sent: any[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: any, init?: any) => {
+      if (!String(url).endsWith("/api/license/own-models")) return realFetch(url, init);
+      const body = JSON.parse(init.body);
+      sent.push(body);
+      return answer(body);
+    });
+    return sent;
+  }
+
+  it("forwards each key to PromptOwl and never stores it on this server", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY, ownGateway: OWN_GW });
+    const sent = promptowl(() => new Response(JSON.stringify({ providers: {} })));
+    const res = await jsonRequest(
+      app, "PATCH", "/admin/settings", { provider_keys: { openai: " sk-openai-1234 ", gemini: null } }, owner.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(sent.map((b) => [b.provider, b.api_key])).toEqual([["openai", "sk-openai-1234"], ["gemini", null]]);
+    expect(JSON.stringify(res.data)).not.toContain("sk-openai-1234");
+    expect(res.data.settings.own_providers).toEqual(OWN_GW.providers);
+    const { getDb } = await import("../src/db/client.js");
+    const rows = JSON.stringify(await getDb().all("SELECT * FROM server_settings"));
+    expect(rows).not.toContain("sk-openai-1234");
+  });
+
+  it("a key the provider refuses comes back as that provider's field error", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY });
+    promptowl(() => new Response(JSON.stringify({ error: "Incorrect API key" }), { status: 400 }));
+    const res = await jsonRequest(app, "PATCH", "/admin/settings", { provider_keys: { openai: "sk-bad" } }, owner.apiKey);
+    expect(res.status).toBe(400);
+    expect(res.data.fieldErrors).toEqual({ "provider_keys.openai": "Incorrect API key" });
+  });
+
+  it("saves the other settings first; a later refusal names that provider and keeps earlier keys", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY });
+    const sent = promptowl((b) =>
+      b.provider === "gemini"
+        ? new Response(JSON.stringify({ error: "API key not valid" }), { status: 400 })
+        : new Response(JSON.stringify({ providers: {} })),
+    );
+    const res = await jsonRequest(
+      app, "PATCH", "/admin/settings",
+      { community_name: "Acme Nest", provider_keys: { openai: "sk-good", gemini: "AIza-bad" } },
+      owner.apiKey,
+    );
+    expect(res.status).toBe(400);
+    expect(res.data.fieldErrors).toEqual({ "provider_keys.gemini": "API key not valid" });
+    expect(sent.map((b) => b.provider)).toEqual(["openai", "gemini"]);
+    // The rest of the PATCH was saved before any key went out.
+    expect(res.data.settings.community_name).toBe("Acme Nest");
+  });
+
+  it("a key with spaces or over 512 characters is refused before anything is sent", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY });
+    const sent = promptowl(() => new Response(JSON.stringify({ providers: {} })));
+    const res = await jsonRequest(
+      app, "PATCH", "/admin/settings", { provider_keys: { openai: "sk two words", groq: "g".repeat(513) } }, owner.apiKey,
+    );
+    expect(res.status).toBe(400);
+    expect(Object.keys(res.data.fieldErrors).sort()).toEqual(["provider_keys.groq", "provider_keys.openai"]);
+    expect(sent).toEqual([]);
+  });
+
+  it("without byok, clearing a key sends nothing to PromptOwl", async () => {
+    const { app, owner } = await boot({ gateway: GATEWAY });
+    const sent = promptowl(() => new Response(JSON.stringify({ providers: {} })));
+    const res = await jsonRequest(app, "PATCH", "/admin/settings", { provider_keys: { openai: null } }, owner.apiKey);
+    expect(res.status).toBe(200);
+    expect(sent).toEqual([]);
+  });
+
+  it("a sign-in redirect or a 200 page that isn't the route is never taken as saved", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY });
+    const sent = promptowl(() => new Response(null, { status: 307, headers: { location: "/login" } }));
+    const redirected = await jsonRequest(app, "PATCH", "/admin/settings", { provider_keys: { openai: "sk-x" } }, owner.apiKey);
+    expect(redirected.status).toBe(400);
+    expect(redirected.data.fieldErrors["provider_keys.openai"]).toMatch(/didn't accept/);
+    expect(sent).toHaveLength(1);
+
+    vi.restoreAllMocks();
+    promptowl(() => new Response("<html>Sign in</html>", { status: 200, headers: { "content-type": "text/html" } }));
+    const page = await jsonRequest(app, "PATCH", "/admin/settings", { provider_keys: { openai: "sk-x" } }, owner.apiKey);
+    expect(page.status).toBe(400);
+    expect(page.data.fieldErrors["provider_keys.openai"]).toMatch(/didn't accept/);
+  });
+
+  it("refuses without byok, and rejects unknown providers before calling PromptOwl", async () => {
+    const { app, owner } = await boot({ gateway: GATEWAY });
+    const sent = promptowl(() => new Response("{}"));
+    const noByok = await jsonRequest(app, "PATCH", "/admin/settings", { provider_keys: { openai: "sk-x" } }, owner.apiKey);
+    expect(noByok.status).toBe(403);
+    expect(noByok.data.code).toBe("byok_required");
+
+    const byok = await boot({ features: ["byok"], gateway: GATEWAY });
+    const unknown = await jsonRequest(byok.app, "PATCH", "/admin/settings", { provider_keys: { mistral: "k" } }, byok.owner.apiKey);
+    expect(unknown.status).toBe(400);
+    expect(unknown.data.fieldErrors["provider_keys.mistral"]).toMatch(/Unknown/);
+    expect(sent).toEqual([]);
+  });
+
+  it("Settings lists no own providers until a key is added, and no server Anthropic key fields", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY });
+    const res = await jsonRequest(app, "GET", "/admin/settings", undefined, owner.apiKey);
+    expect(res.data.own_providers).toEqual({});
+    expect(res.data).not.toHaveProperty("anthropic_api_key_masked");
+    expect(res.data).not.toHaveProperty("anthropic_base_url");
+  });
+});
+
+describe("a stored server Anthropic key moves to the model gateway at boot", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  async function stored() {
+    const { getDb } = await import("../src/db/client.js");
+    return getDb().get("SELECT value FROM server_settings WHERE key = ?", ["ANTHROPIC_API_KEY"]);
+  }
+
+  async function bootWithStoredKey(opts: Parameters<typeof boot>[0], answer: Response) {
+    await boot(opts);
+    const { persistSetting } = await import("../src/db/settings.js");
+    await persistSetting("ANTHROPIC_API_KEY", "sk-ant-stored-1234");
+    process.env.ANTHROPIC_API_KEY = "sk-ant-stored-1234";
+    const sent: any[] = [];
+    const realFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: any, init?: any) => {
+      if (!String(url).endsWith("/api/license/own-models")) return realFetch(url, init);
+      sent.push(JSON.parse(init.body));
+      return answer;
+    });
+    const { moveStoredAnthropicKey } = await import("../src/shared/model-credential.js");
+    await moveStoredAnthropicKey();
+    return sent;
+  }
+
+  it("hands it over as the claude provider, then drops it here", async () => {
+    const sent = await bootWithStoredKey({ features: ["byok"], gateway: GATEWAY }, new Response(JSON.stringify({ providers: {} })));
+    expect(sent.map((b) => [b.provider, b.api_key])).toEqual([["claude", "sk-ant-stored-1234"]]);
+    expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
+    // A null row records "cleared", so a deploy-env copy doesn't come back on restart.
+    expect((await stored())?.value ?? null).toBeNull();
+  });
+
+  it("keeps it when PromptOwl refuses, or when the licence has no byok", async () => {
+    await bootWithStoredKey({ features: ["byok"], gateway: GATEWAY }, new Response(JSON.stringify({ error: "invalid x-api-key" }), { status: 400 }));
+    expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-stored-1234");
+    expect((await stored())?.value).toBeTruthy();
+
+    const sent = await bootWithStoredKey({ gateway: GATEWAY }, new Response(JSON.stringify({ providers: {} })));
+    expect(sent).toEqual([]);
+    expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-stored-1234");
   });
 });

@@ -14,13 +14,13 @@
  *   1. pending review_requests, newest first, LIMIT offset+limit
  *   2. distinct commented node ids (small), access-filtered in memory
  *   3. comment rows JOIN threads over the accessible ids, LIMIT offset+limit
- * plus one title map per nest and one canUserApprove per distinct pending
- * node — then a merge-sort in memory and a slice for the page.
+ * plus one title map per nest and one batched canUserApproveMany over the pending
+ * nodes — then a merge-sort in memory and a slice for the page.
  */
 
 import { getDb } from "../db/client.js";
 import { filterAccessible } from "./access-guard.js";
-import { canUserApprove } from "./stewardship-service.js";
+import { canUserApproveMany } from "./stewardship-service.js";
 import { buildTitleMap } from "./title-resolver.js";
 import {
   expirePendingPushes,
@@ -104,6 +104,10 @@ export async function getNestFeed(params: {
   filter?: FeedFilter;
   limit?: number;
   offset?: number;
+  /** Include activity on RESOLVED threads. Off by default: a resolved thread
+   *  is done, and the feed reads as an inbox — resolving is how a comment
+   *  leaves it. Item shape is unchanged either way (`resolved` stays). */
+  includeResolved?: boolean;
 }): Promise<NestFeed> {
   const db = getDb();
   const filter = params.filter ?? "all";
@@ -144,22 +148,15 @@ export async function getNestFeed(params: {
         [params.nestId, fetchWindow],
       )) as any[];
 
-      // One authoritative approve-check per distinct node (mirrors the
-      // queue route), not per row — resolved in parallel across nodes.
-      const distinctNodeIds = [
-        ...new Set(rows.map((r) => r.node_id as string)),
-      ];
+      // The authoritative approve-check for every node at once (mirrors the
+      // queue route), not one per node.
+      const verdicts = await canUserApproveMany(
+        params.nestId,
+        rows.map((r) => r.node_id as string),
+        params.userEmail,
+      );
       const canReviewByNode = new Map<string, boolean>(
-        await Promise.all(
-          distinctNodeIds.map(
-            async (nodeId): Promise<[string, boolean]> => [
-              nodeId,
-              (
-                await canUserApprove(params.nestId, nodeId, params.userEmail)
-              ).allowed,
-            ],
-          ),
-        ),
+        [...verdicts].map(([nodeId, v]) => [nodeId, v.allowed]),
       );
 
       changes = rows.map((row) => ({
@@ -203,13 +200,14 @@ export async function getNestFeed(params: {
     if (accessible.length > 0) {
       const placeholders = accessible.map(() => "?").join(",");
       const ids = accessible.map((n) => n.id);
+      const statusClause = params.includeResolved ? "" : " AND t.status = 'open'";
       commentsTotal = Number(
         (
           (await db.get(
             `SELECT COUNT(*) AS c
                FROM annotation_comments c
                JOIN annotation_threads t ON t.id = c.thread_id
-              WHERE t.nest_id = ? AND t.node_id IN (${placeholders})`,
+              WHERE t.nest_id = ? AND t.node_id IN (${placeholders})${statusClause}`,
             [params.nestId, ...ids],
           )) as { c: number | string }
         ).c,
@@ -226,7 +224,7 @@ export async function getNestFeed(params: {
                   ) THEN 0 ELSE 1 END AS is_reply
              FROM annotation_comments c
              JOIN annotation_threads t ON t.id = c.thread_id
-            WHERE t.nest_id = ? AND t.node_id IN (${placeholders})
+            WHERE t.nest_id = ? AND t.node_id IN (${placeholders})${statusClause}
             ORDER BY c.created_at DESC, c.id DESC
             LIMIT ?`,
           [params.nestId, ...ids, fetchWindow],

@@ -34,3 +34,13 @@ export function withNodeWriteLock<T>(
     });
   return run;
 }
+
+/**
+ * Hold several node locks at once (a bulk review). Taken in sorted key order,
+ * so two multi-lock holders can never wait on each other in a cycle.
+ */
+export function withNodeWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
+  return [...new Set(keys)]
+    .sort()
+    .reduceRight<() => Promise<T>>((inner, key) => () => withNodeWriteLock(key, inner), fn)();
+}

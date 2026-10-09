@@ -330,12 +330,23 @@ async function sendMailWithRetry(
   }
 }
 
+/**
+ * Recipients mail can actually reach. Service identities — access keys and
+ * metacognition personas — have `.invalid` addresses (RFC 2606) that no
+ * mailbox answers; sending to one only earns the server a bounce. A verdict on
+ * a persona's proposal is the common case: reject() emails its requester.
+ */
+export function deliverableRecipients(to: string | string[]): string[] {
+  return (Array.isArray(to) ? to : [to]).filter((a) => !!a && !/\.invalid$/i.test(a.trim()));
+}
+
 export async function sendEmailToRecipient(
-  to: string | string[],
+  rawTo: string | string[],
   details: EmailEventDetails,
 ): Promise<void> {
   const from = config.NOTIFY_EMAIL_FROM;
-  const hasRecipient = Array.isArray(to) ? to.length > 0 : !!to;
+  const to = deliverableRecipients(rawTo);
+  const hasRecipient = to.length > 0;
   if (!transportSettings() || !from || !hasRecipient) return;
   try {
     const transporter = await getTransporter();

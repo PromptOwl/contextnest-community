@@ -36,12 +36,15 @@ import {
   setThreadStatus,
   syncAnnotationsNode,
 } from "../annotations/service.js";
-import { notifyCommentMentions } from "../governance/mention-notify.js";
+import {
+  notifyCommentMentions,
+  notifyCommentReply,
+} from "../governance/mention-notify.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
 } from "../nests/unsynced-service.js";
-import { isServerAdminUserId } from "../shared/access.js";
+import { isServerAdminUserId, isPublicReader } from "../shared/access.js";
 import { config } from "../config.js";
 import {
   createNode,
@@ -67,6 +70,15 @@ import {
 } from "../shared/client-metadata.js";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 import { HEADLESS_READER_TOOLS, headlessToolRefusal, isServiceUser } from "../auth/headless.js";
+import {
+  accessRequestHint,
+  accessTargetTitle,
+  canDecideAccessRequests,
+  createAccessRequest,
+  decideAccessRequest,
+  listAccessRequests,
+  type AccessTarget,
+} from "../governance/access-request-service.js";
 
 /** Upper bound on caller-set traversal depth — real graphs terminate long
  *  before this; the cap just fences a misbehaving client from a runaway query. */
@@ -135,8 +147,43 @@ function toolError(
     | "VAULT_BUSY"
     | "PENDING_CONFIRMATION"
     | "INTERNAL",
+  /** Extra machine-readable fields beside {code, message} — e.g. the access
+   *  request hint a refused write carries. */
+  extra?: Record<string, unknown>,
 ): ToolResult {
-  return { text, isError: true, data: { code, message: text } };
+  return { text, isError: true, data: { ...extra, code, message: text } };
+}
+
+/**
+ * A refused write the caller could ask about instead (CU-wdqcq041jn). The
+ * prose names context_request_access (or says the ask is already waiting),
+ * and `data` carries the same fields the REST 403 does — can_request_access,
+ * target, level, and the caller's pending/denied request — so an agent can
+ * file the ask without parsing the sentence. Falls back to the plain refusal
+ * for callers who can't ask (no account, read-only access keys) and for a
+ * document the caller can't read: naming it would say it exists.
+ */
+async function writeRefusal(
+  ctx: McpToolContext,
+  text: string,
+  target: AccessTarget,
+): Promise<ToolResult> {
+  if (
+    target.type === "node" &&
+    !(await canReadNode(ctx.nestId, target.id, ctx.userId, ctx.userEmail))
+  ) {
+    return toolError(text, "UNAUTHORIZED_ACTION");
+  }
+  const hint = await accessRequestHint({ nestId: ctx.nestId, userId: ctx.userId, target });
+  if (!hint) return toolError(text, "UNAUTHORIZED_ACTION");
+  // The REST hint's `code: "forbidden"` would shadow the engine error code.
+  const { code: _restCode, ...fields } = hint;
+  const pending = (fields.access_request as { status?: string; id?: string } | undefined);
+  const next =
+    pending?.status === "pending"
+      ? `You already asked for this access (request ${pending.id}); it is waiting on a nest owner or admin.`
+      : `Use context_request_access to ask a nest owner or admin for write access${target.type === "node" ? " to it" : ""} — say why in \`note\`.`;
+  return toolError(`${text}\n\n${next}`, "UNAUTHORIZED_ACTION", fields);
 }
 
 /** What a headless access key gets for a tool it may not call (CU-wdqcq0314u)
@@ -229,6 +276,13 @@ export interface McpToolContext {
    * A label, never an identity: no gate below may branch on it.
    */
   client?: ClientMetadata;
+  /**
+   * The version each document body was served at during this call, filled in
+   * by resolveLlmBody (the one place a body is chosen) and read back by the
+   * activity log so a read records exactly what the agent got. Set fresh per
+   * call by handleToolCall.
+   */
+  servedVersions?: Map<string, number>;
 }
 
 export const TOOL_DEFINITIONS = [
@@ -645,6 +699,64 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    // Access requests (CU-wdqcq041jn), mirroring the REST surface 1:1. Like
+    // the deletion trio, not an engine operation: the rows live in this repo's
+    // governance tables, so there is no upstream descriptor to import.
+    name: "context_request_access",
+    description:
+      "Ask a nest owner/admin for write access when a write was refused — to one document, a folder, or the whole nest. Nothing changes until someone approves it; you're told the verdict. Use this when context_update / context_create / context_delete / context_move return a permission error that mentions it. Asking twice for the same thing returns the pending request instead of a second one.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the document you need to edit" },
+        id: {
+          type: "string",
+          description: 'Document id (e.g. "nodes/gtm/pricing"). Use instead of title when two documents share a title.',
+        },
+        folder: {
+          type: "string",
+          description: 'Ask for a whole folder instead of one document, e.g. "gtm/deals".',
+        },
+        nest: {
+          type: "boolean",
+          description: "Ask for write access to the entire nest (needed to create documents).",
+        },
+        note: {
+          type: "string",
+          description: "Why you need it — this is what the owner/admin judges.",
+        },
+      },
+    },
+  },
+  {
+    name: "context_access_requests",
+    description:
+      "Show access requests. A nest owner/admin sees everyone's (who wants what, and why); anyone else sees only their own.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        status: {
+          type: "string",
+          description: '"pending" (default), "approved", "denied" or "all"',
+        },
+      },
+    },
+  },
+  {
+    name: "context_resolve_access_request",
+    description:
+      "Approve or deny an access request. Owner/admin only. Approving grants the access (a write share on the document or folder, or nest write) and tells the requester; denying tells them why.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        request_id: { type: "string", description: "Request id from context_access_requests" },
+        decision: { type: "string", description: '"approve" or "deny"' },
+        note: { type: "string", description: "Optional note sent to the requester" },
+      },
+      required: ["request_id", "decision"],
+    },
+  },
+  {
     name: "context_review_queue",
     description:
       "Show documents pending review. These need a steward to approve or reject them before they become available to AI.",
@@ -863,13 +975,20 @@ async function resolveLlmBody(
   const stewardship = gate
     ? gate.stewardshipEnabled
     : await isStewardshipEnabled(ctx.nestId);
-  if (!stewardship) return node.body || "";
+  if (!stewardship) {
+    // Ungoverned: the live body, which is the document's current version.
+    const live = Number(node.frontmatter?.version);
+    if (Number.isInteger(live) && live > 0) ctx.servedVersions?.set(node.id, live);
+    return node.body || "";
+  }
   const approved = gate
     ? (gate.approvedVersions?.get(node.id) ?? null)
     : await versions.getApprovedVersion(ctx.nestId, node.id);
   if (approved == null) return null;
   try {
-    return (await reconstructApproved(ctx.versionManager, ctx.nestId, node.id, approved)).raw;
+    const raw = (await reconstructApproved(ctx.versionManager, ctx.nestId, node.id, approved)).raw;
+    ctx.servedVersions?.set(node.id, approved);
+    return raw;
   } catch (err) {
     console.error("reconstructVersion failed", node.id, approved, err);
     return null;
@@ -888,12 +1007,20 @@ const ACCESS_BY_TOOL: Record<string, AccessAction> = {
 function recordToolAccess(toolName: string, result: ToolResult, ctx: McpToolContext): void {
   const action = ACCESS_BY_TOOL[toolName];
   if (!action || typeof result === "string" || result.isError || !ctx.nestId) return;
-  const data = result.data as { id?: unknown; documents?: Array<{ id?: unknown }> } | undefined;
+  // context_get names one document (`id`), context_query a list
+  // (`documents`), context_search its page (`results`). Missing `results`
+  // meant an agent's search — the most common read — was never recorded.
+  const data = result.data as
+    | { id?: unknown; documents?: Array<{ id?: unknown }>; results?: Array<{ id?: unknown }> }
+    | undefined;
+  const listed = (xs: unknown) =>
+    Array.isArray(xs)
+      ? xs.map((d) => (d as { id?: unknown })?.id).filter((id): id is string => typeof id === "string")
+      : [];
   const ids = [
     ...(typeof data?.id === "string" ? [data.id] : []),
-    ...(Array.isArray(data?.documents)
-      ? data.documents.map((d) => d?.id).filter((id): id is string => typeof id === "string")
-      : []),
+    ...listed(data?.documents),
+    ...listed(data?.results),
   ];
   if (!ids.length) return;
   recordNodeAccess({
@@ -904,6 +1031,7 @@ function recordToolAccess(toolName: string, result: ToolResult, ctx: McpToolCont
     userId: ctx.userId,
     userEmail: ctx.userEmail,
     client: ctx.client,
+    ...(ctx.servedVersions?.size ? { versions: Object.fromEntries(ctx.servedVersions) } : {}),
     detail: toolName,
   });
 }
@@ -941,7 +1069,7 @@ export async function handleToolCall(
     });
     return toolError((err as Error).message, "VALIDATION_FAILED");
   }
-  const attributed: McpToolContext = { ...ctx, client };
+  const attributed: McpToolContext = { ...ctx, client, servedVersions: new Map() };
   // Headless access keys (CU-wdqcq0314u) read and nothing else. Checked here,
   // the one seam both MCP surfaces share, so no tool — including one added
   // later — is reachable with an access key unless it is on the read list.
@@ -1197,12 +1325,36 @@ async function runTool(
     }
 
     case "context_table_query": {
+      // Same read as every other MCP body read (resolveLlmBody): gated by
+      // canReadNode, and approved rows only on a governed nest or for a
+      // public reader — never the unapproved working copy.
       const result = await queryTableNode(
         nestId,
         String(args.table ?? ""),
         String(args.query ?? ""),
         false,
+        {
+          userId: ctx.userId,
+          userEmail: ctx.userEmail,
+          approvedOnly:
+            (await isStewardshipEnabled(nestId)) ||
+            (await isPublicReader(nestId, ctx.userId)),
+        },
       );
+      // Admin activity log: the table the rows came from, at the version
+      // queried. Prose-only result, so it records here rather than through
+      // recordToolAccess.
+      recordNodeAccess({
+        nestId,
+        nodeIds: [result.table],
+        action: "retrieve",
+        surface: "mcp",
+        userId: ctx.userId,
+        userEmail: ctx.userEmail,
+        client: ctx.client,
+        ...(result.version ? { versions: { [result.table]: result.version } } : {}),
+        detail: "context_table_query",
+      });
       // Compact CSV back out — models read it fine and it round-trips.
       const lines = [
         result.columns.join(","),
@@ -1591,6 +1743,8 @@ async function runTool(
           : `Resolved the thread on "${label}", recorded against ${thread.resolvedBy}.`;
       }
 
+      // addComment reopens a resolved thread. Not echoed in the confirmation,
+      // for the reason below: it would report the thread's state.
       const thread = threadId
         ? await addComment(nestId, node.id, threadId, userEmail, body)
         : await createThread(nestId, node.id, { body, anchor: null }, userEmail);
@@ -1599,17 +1753,31 @@ async function runTool(
       // be allowed to READ (the approval gate applies to context_comments, not
       // here), so the reply should tell them what THEY did and nothing about
       // what is already in the thread.
-      await notifyCommentMentions({
-        nestId,
-        nodeId: node.id,
-        body,
-        actorEmail: userEmail,
-        // Without this the notification still reaches the person, but its
-        // "Open document" link falls back to PUBLIC_BASE_URL and comes out
-        // empty when that isn't configured — every other notifying tool in
-        // this file passes it, and the REST route passes requestBaseUrl.
-        baseUrl: ctx.baseUrl,
-      });
+      // A reply also notifies the thread's earlier participants, the same
+      // fan-out the REST reply route uses.
+      //
+      // baseUrl: without it the notification still reaches the person, but
+      // its "Open document" link falls back to PUBLIC_BASE_URL and comes out
+      // empty when that isn't configured — every other notifying tool in
+      // this file passes it, and the REST route passes requestBaseUrl.
+      if (threadId) {
+        await notifyCommentReply({
+          nestId,
+          nodeId: node.id,
+          thread,
+          body,
+          actorEmail: userEmail,
+          baseUrl: ctx.baseUrl,
+        });
+      } else {
+        await notifyCommentMentions({
+          nestId,
+          nodeId: node.id,
+          body,
+          actorEmail: userEmail,
+          baseUrl: ctx.baseUrl,
+        });
+      }
       await syncAnnotationsNode(nestId, node.id, userEmail);
       return threadId
         ? `Replied on "${label}", in thread ${thread.id}.`
@@ -1621,9 +1789,10 @@ async function runTool(
       // (the MCP transport is always POST), so this per-tool check is what
       // keeps creation locked to write+ collaborators and nest-scope editors.
       if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
-        return toolError(
+        return writeRefusal(
+          ctx,
           "You don't have permission to create documents in this nest.",
-          "UNAUTHORIZED_ACTION",
+          { type: "nest", id: nestId },
         );
       }
       // Refuse a title already used ANYWHERE in the vault, not just in the
@@ -1731,9 +1900,10 @@ async function runTool(
       // and this gate runs on the resolved node, not on how it was named.
       const editCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
       if (!editCheck.allowed) {
-        return toolError(
+        return writeRefusal(
+          ctx,
           `You don't have permission to edit "${label}": ${editCheck.reason}`,
-          "UNAUTHORIZED_ACTION",
+          { type: "node", id: node.id },
         );
       }
       // Tags REPLACE, per the engine catalog's context_update. This used to
@@ -1773,9 +1943,10 @@ async function runTool(
       const deleteCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
       if (!deleteCheck.allowed) {
         // Dead end otherwise — point at the request path the UI offers here.
-        return toolError(
+        return writeRefusal(
+          ctx,
           `You don't have permission to delete "${node.frontmatter.title}": ${deleteCheck.reason}\n\nUse context_request_deletion to ask a nest owner/admin to delete it, with a reason.`,
-          "UNAUTHORIZED_ACTION",
+          { type: "node", id: node.id },
         );
       }
       await deleteNode(nestId, node.id, userEmail, { client: ctx.client });
@@ -1800,7 +1971,11 @@ async function runTool(
       // privileged as an edit.
       const moveCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
       if (!moveCheck.allowed) {
-        return `You don't have permission to move "${node.frontmatter.title}": ${moveCheck.reason}`;
+        return writeRefusal(
+          ctx,
+          `You don't have permission to move "${node.frontmatter.title}": ${moveCheck.reason}`,
+          { type: "node", id: node.id },
+        );
       }
       const { node: moved, previousId } = await moveNode(
         nestId,
@@ -1825,17 +2000,26 @@ async function runTool(
         const node = docs.find(
           (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
         );
-        const nodeId = node?.id || "";
+        // A title the caller cannot open resolves exactly like one that does
+        // not exist — otherwise its document-scoped stewards (and so the
+        // document itself) leak through the lookup.
+        const readable =
+          node !== undefined &&
+          (await canReadNode(ctx.nestId, node.id, ctx.userId, ctx.userEmail));
+        const nodeId = readable ? node.id : "";
         const resolved = await stewardship.resolveStewardsForNode(ctx.nestId, nodeId);
 
         if (resolved.length === 0) {
           return `No stewards configured for "${args.title}". Changes are auto-approved.`;
         }
 
+        // Members see who reviews their work; a public reader is an outsider
+        // and gets the roles without the people's email addresses.
+        const hideEmails = await isPublicReader(ctx.nestId, ctx.userId);
         const list = resolved
           .map(
             (r, i) =>
-              `${i + 1}. **${r.steward.userEmail}** — ${r.steward.role} (${r.source})${r.steward.role === "reviewer" ? " ✓ can approve" : ""}`,
+              `${i + 1}. **${hideEmails ? "a steward" : r.steward.userEmail}** — ${r.steward.role} (${hideEmails ? r.steward.scope : r.source})${r.steward.role === "reviewer" ? " ✓ can approve" : ""}`,
           )
           .join("\n");
         return `# Stewards for "${args.title}"\n\n${list}`;
@@ -2044,6 +2228,135 @@ async function runTool(
         : `Deleted **${label}** — ${request.requestedBy}'s request was honoured. Irreversible.`;
     }
 
+    case "context_request_access": {
+      let targetType: "node" | "folder" | "nest";
+      let targetId: string | undefined;
+      if (args.nest === true) {
+        targetType = "nest";
+      } else if (typeof args.folder === "string" && args.folder.trim()) {
+        targetType = "folder";
+        targetId = args.folder;
+      } else {
+        const node = await resolveTargetNode(storage, args);
+        if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
+        targetType = "node";
+        targetId = node.id;
+      }
+      try {
+        const { request, created } = await createAccessRequest({
+          nestId,
+          requesterId: userId,
+          requesterEmail: userEmail,
+          targetType,
+          targetId,
+          level: "write",
+          note: args.note,
+          baseUrl: ctx.baseUrl,
+        });
+        const label = await accessTargetTitle(nestId, {
+          type: request.target_type,
+          id: request.target_id,
+        });
+        return {
+          text: created
+            ? `Asked for write access to **${label}**. A nest owner or admin will approve or deny it; you'll be notified.\nRequest id: \`${request.id}\``
+            : `You already asked for write access to **${label}** — it is still waiting on a nest owner or admin.\nRequest id: \`${request.id}\``,
+          data: { ...request, title: label, created },
+        };
+      } catch (err) {
+        const e = err as { statusCode?: number; message?: string };
+        if (e.statusCode === 404) return toolError(e.message ?? "Not found", "DOCUMENT_NOT_FOUND");
+        // 400: already held / archived / not signed in; 429: denied recently.
+        if (e.statusCode === 400 || e.statusCode === 429) {
+          return toolError(e.message ?? "Invalid request", "VALIDATION_FAILED");
+        }
+        throw err;
+      }
+    }
+
+    case "context_access_requests": {
+      const status = ["pending", "approved", "denied", "all"].includes(args.status)
+        ? args.status
+        : "pending";
+      const decider = await canDecideAccessRequests(nestId, userId);
+      const requests = await listAccessRequests({
+        nestId,
+        status,
+        ...(decider ? {} : { requesterId: userId }),
+      });
+      if (requests.length === 0) {
+        return status === "pending" ? "No access requests waiting." : `No ${status} access requests.`;
+      }
+      const list = requests
+        .map((r, i) => {
+          const kind = r.target_type === "node" ? "" : `${r.target_type}: `;
+          const why = r.note ? `: "${r.note}"` : "";
+          const verdict =
+            r.status === "pending"
+              ? ""
+              : `\n   ${r.status === "approved" ? "Approved" : "Denied"} by ${r.resolved_by}${r.resolution_note ? `: "${r.resolution_note}"` : ""}`;
+          return `${i + 1}. **${kind}${r.title || r.target_id}** — ${r.level}\n   Asked by ${r.requested_by}${why}\n   Request id: \`${r.id}\`${verdict}`;
+        })
+        .join("\n\n");
+      return {
+        text: `# Access requests (${status})\n**${requests.length} item(s)**\n\n${list}`,
+        data: { requests },
+      };
+    }
+
+    case "context_resolve_access_request": {
+      const requestId = typeof args.request_id === "string" ? args.request_id : "";
+      const decision =
+        args.decision === "approve" ? "approve" : args.decision === "deny" ? "deny" : null;
+      if (!requestId || !decision) {
+        return toolError(
+          'request_id and decision are required — decision is "approve" or "deny". Use context_access_requests to list request ids.',
+          "VALIDATION_FAILED",
+        );
+      }
+      // The /mcp transport admits read-tier callers, so this is the gate.
+      if (!(await canDecideAccessRequests(nestId, userId))) {
+        return toolError(
+          "Only the nest owner, a nest admin, or the server admin can decide access requests.",
+          "UNAUTHORIZED_ACTION",
+        );
+      }
+      let decided;
+      try {
+        decided = await decideAccessRequest({
+          nestId,
+          id: requestId,
+          decision,
+          decidedById: userId,
+          decidedByEmail: userEmail,
+          note: typeof args.note === "string" ? args.note : undefined,
+          baseUrl: ctx.baseUrl,
+        });
+      } catch (err) {
+        // Archived nest (400) or a plan with no seat for it (402): the request
+        // stays pending and the decider is told why.
+        const e = err as { statusCode?: number; message?: string };
+        if (e.statusCode === 400 || e.statusCode === 402) {
+          return toolError(e.message ?? "Couldn't grant the access", "VALIDATION_FAILED");
+        }
+        throw err;
+      }
+      if (!decided) {
+        return toolError(`No pending access request with id ${requestId}.`, "DOCUMENT_NOT_FOUND");
+      }
+      const label = await accessTargetTitle(nestId, {
+        type: decided.target_type,
+        id: decided.target_id,
+      });
+      return {
+        text:
+          decision === "approve"
+            ? `Approved — ${decided.requested_by} now has ${decided.level} access to **${label}**, and has been told.`
+            : `Denied ${decided.requested_by}'s request for **${label}**. They have been told${decided.resolution_note ? " why" : ""}.`,
+        data: decided,
+      };
+    }
+
     case "context_review_queue": {
       const status = args.status || "pending";
       const result = await reviews.getReviewQueue({
@@ -2219,6 +2532,15 @@ async function runTool(
     case "context_versions": {
       const node = await resolveTargetNode(storage, args);
       if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
+      // Version history is a node read, gated like REST GET .../versions: a
+      // caller who cannot open the node does not get its editors, statuses and
+      // change notes either. Answered as a miss, so it is no existence oracle.
+      if (!(await canReadNode(ctx.nestId, node.id, ctx.userId, ctx.userEmail))) {
+        return toolError(
+          `Node not found: ${args.id ?? args.title}`,
+          "DOCUMENT_NOT_FOUND",
+        );
+      }
       // See context_update: an id wins over a title sent with it.
       const label = args.id ? node.frontmatter.title : args.title;
 

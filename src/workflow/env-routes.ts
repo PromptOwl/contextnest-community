@@ -111,6 +111,23 @@ envRoutes.delete("/:key", requireWorkflowPlane, async (c) => {
  *  model credential is the one Hootie uses (resolveModelCredential): the
  *  nest's or server's own key with byok, else PromptOwl's gateway. */
 export async function envValues(nestId: string): Promise<Record<string, string>> {
+  const env = await storedEnvValues(nestId);
+  const credential = resolveModelCredential(env);
+  for (const k of OWN_KEY_ENV) delete env[k];
+  if (credential) {
+    env.ANTHROPIC_API_KEY = credential.apiKey;
+    if (credential.baseUrl) env.ANTHROPIC_BASE_URL = credential.baseUrl;
+  }
+  return env;
+}
+
+/**
+ * The nest's env store exactly as saved (decrypted), with no credential
+ * resolved into it. What resolveModelCredential must read: envValues puts the
+ * RESOLVED key — possibly PromptOwl's gateway key — under ANTHROPIC_API_KEY,
+ * and resolving again from that would take the gateway key for an own key.
+ */
+export async function storedEnvValues(nestId: string): Promise<Record<string, string>> {
   const rows = (await getDb().all(
     "SELECT key, value FROM nest_env WHERE nest_id = ?",
     [nestId],
@@ -128,12 +145,5 @@ export async function envValues(nestId: string): Promise<Record<string, string>>
       ),
     )
   ).filter((e): e is readonly [string, string] => e[1] !== null);
-  const env: Record<string, string> = Object.fromEntries(stored);
-  const credential = resolveModelCredential(env);
-  for (const k of OWN_KEY_ENV) delete env[k];
-  if (credential) {
-    env.ANTHROPIC_API_KEY = credential.apiKey;
-    if (credential.baseUrl) env.ANTHROPIC_BASE_URL = credential.baseUrl;
-  }
-  return env;
+  return Object.fromEntries(stored);
 }
