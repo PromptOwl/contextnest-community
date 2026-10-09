@@ -717,6 +717,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_run_steps ON run_steps(run_id, seq);
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS parent_run_id TEXT;
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS depth INTEGER NOT NULL DEFAULT 0;
+    -- migration 025 parity: runs tables created before the claim columns.
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS claimed_by TEXT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS claimed_at TEXT;
     CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id);
 
     -- server_settings (migration 020): durable store for runtime-mutable server
