@@ -33,6 +33,7 @@ import {
 } from "../shared/errors.js";
 import {
   addRelation,
+  callerCanRead,
   listRelations,
   relationsProse,
   removeRelation,
@@ -1707,16 +1708,13 @@ async function runTool(
     case "context_add_relation":
     case "context_remove_relation": {
       const target = await resolveTargetNode(storage, args);
-      if (
-        typeof target === "string" ||
-        !(await canReadNode(nestId, target.id, ctx.userId, userEmail))
-      ) {
+      const caller = { nestId, userId: ctx.userId, userEmail };
+      if (typeof target === "string" || !(await callerCanRead(caller, target.id))) {
         return toolError(
           typeof target === "string" ? target : `Node not found: ${args.id || args.title}`,
           "DOCUMENT_NOT_FOUND",
         );
       }
-      const caller = { nestId, userId: ctx.userId, userEmail };
       if (toolName !== "context_relations") {
         const editCheck = await stewardship.canUserEdit(nestId, target.id, userEmail);
         if (!editCheck.allowed) {

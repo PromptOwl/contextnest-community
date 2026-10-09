@@ -268,16 +268,32 @@ export interface RelationCaller {
   userEmail: string;
 }
 
+/**
+ * Can the caller read this node? Through filterAccessible rather than
+ * canReadNode: the listing gate also narrows a share-grant-only caller to the
+ * documents their grants cover, where canReadNode (which trusts the route
+ * middleware to have done that) answers "open read" on an ungoverned nest.
+ */
+export async function callerCanRead(
+  caller: RelationCaller,
+  nodeId: string,
+): Promise<boolean> {
+  if (!(await canReadNode(caller.nestId, nodeId, caller.userId, caller.userEmail))) {
+    return false;
+  }
+  const visible = await filterAccessible(caller.nestId, caller.userId, caller.userEmail, [
+    { id: nodeId },
+  ]);
+  return visible.length === 1;
+}
+
 /** The task must exist and be readable; a miss and a denial look the same. */
 async function assertReadableNode(
   caller: RelationCaller,
   nodeId: string,
 ): Promise<void> {
   const meta = await indexedMeta(caller.nestId, [nodeId]);
-  if (
-    !meta.has(nodeId) ||
-    !(await canReadNode(caller.nestId, nodeId, caller.userId, caller.userEmail))
-  ) {
+  if (!meta.has(nodeId) || !(await callerCanRead(caller, nodeId))) {
     throw new NotFoundError(`Node not found: ${nodeId}`);
   }
 }
