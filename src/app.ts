@@ -858,6 +858,7 @@ export function createApp(): Hono<AuthEnv> {
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
+    run_retention_days: config.RUN_RETENTION_DAYS,
     // OIDC SSO. The client secret is WRITE-ONLY: only its presence is
     // reported, never the value.
     oidc_enabled: config.OIDC_ENABLED,
@@ -1205,6 +1206,19 @@ export function createApp(): Hono<AuthEnv> {
         if (!Number.isInteger(n) || n < 0 || n > 3650)
           addError("trace_retention_days", "Trace retention must be a whole number of days between 0 and 3650 (0 keeps activity forever).");
         else pending.push({ name: "TRACE_RETENTION_DAYS", value: String(n) });
+      }
+    }
+    // Agent-run retention in days. Same [0, 3650] range as the config getter.
+    // 0 = keep every run (the default). null clears → default (0).
+    if ("run_retention_days" in body) {
+      const v = body.run_retention_days;
+      if (v === null || v === "") {
+        pending.push({ name: "RUN_RETENTION_DAYS", value: null });
+      } else {
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 0 || n > 3650)
+          addError("run_retention_days", "Run retention must be a whole number of days between 0 and 3650 (0 keeps every run).");
+        else pending.push({ name: "RUN_RETENTION_DAYS", value: String(n) });
       }
     }
     // ── OIDC SSO ──
@@ -1890,6 +1904,8 @@ export function createApp(): Hono<AuthEnv> {
       requested_by: r.requestedBy,
       requested_at: r.requestedAt,
       priority: r.priority,
+      // Filed by an agent run (migration 060): the inbox links to its trace.
+      run_id: r.runId ?? null,
     });
     // Deletion flags ride the same inbox, as a second item type: `reason` and
     // `request_id` are the extra fields resolving one needs.
@@ -1948,6 +1964,7 @@ export function createApp(): Hono<AuthEnv> {
       request_id: r.id,
       target_type: r.target_type,
       level: r.level,
+      run_id: r.run_id ?? null,
     });
     type WorkItem =
       | ReturnType<typeof toItem>

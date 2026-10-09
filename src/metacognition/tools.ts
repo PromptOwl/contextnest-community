@@ -35,7 +35,7 @@ import { submitForReview, getPendingReview } from "../governance/review-service.
 import { hasUnsealedDraft, getCurrentVersion } from "../governance/version-service.js";
 import { ConflictError, LockedError, ValidationError } from "../shared/errors.js";
 import { createThread, syncAnnotationsNode } from "../annotations/service.js";
-import { appendRunStep } from "../workflow/run-service.js";
+import { appendRunStep, linkRunArtifacts } from "../workflow/run-service.js";
 import { inFolders, mayProposeIn, urlAllowed, type McpServerConfig } from "./config.js";
 import type { MetacognitionAgent } from "./store.js";
 import { McpPool, MAX_RESULT_CHARS } from "./mcp-client.js";
@@ -196,6 +196,8 @@ type Step = { action: "read" | "write" | "branch" | "notify" | "external"; node_
 
 async function step(ctx: ToolContext, s: Step): Promise<void> {
   await appendRunStep(ctx.runId, s);
+  // The proposal / comment / access request this step made links back here.
+  await linkRunArtifacts(ctx.runId, s.detail);
 }
 
 /** Recorded so a person can see what the agent wanted and grant it. */

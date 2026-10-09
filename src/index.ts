@@ -22,6 +22,7 @@ import {
 import { loadActiveCommunitySites } from "./auth/community-sites.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
 import { startScheduler } from "./workflow/scheduler.js";
+import { startRunRetention } from "./workflow/run-retention.js";
 import { sweepStale } from "./shared/rate-limit.js";
 import { bannerHeading } from "./shared/startup-banner.js";
 
@@ -223,6 +224,7 @@ ${config.AUTH_MODE === "key" ? `
 
   // Workflow-plane interval schedules → run rows (no-op unless the flag is on).
   startScheduler();
+  startRunRetention();
 
   // Metacognition runs execute in this process; any still "running" from a
   // previous process lost their loop. Close them so the agents aren't stuck.

@@ -84,6 +84,7 @@ const HISTORICAL_MIGRATIONS = [
   "053_license_cache_own_gateway",
   "054_metacognition_agents",
   "055_access_requests",
+  "060_run_links",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -988,6 +989,16 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- One running server-executed run per agent, enforced atomically.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_server_run
         ON runs(nest_id, agent_node) WHERE status = 'running' AND claimed_by = 'server:metacognition';
+  `);
+
+  // Migration 060 parity: run back-links (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS run_id TEXT;
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS run_id TEXT;
+    ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS run_id TEXT;
+    CREATE INDEX IF NOT EXISTS idx_reviews_run ON review_requests(run_id) WHERE run_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_annot_comments_run ON annotation_comments(run_id) WHERE run_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_access_requests_run ON access_requests(run_id) WHERE run_id IS NOT NULL;
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

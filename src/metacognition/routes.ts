@@ -18,6 +18,7 @@ import { engineCache } from "../nodes/engine.js";
 import { parseConfig } from "./config.js";
 import { listAgents, getAgent, upsertAgent, deleteAgent, type MetacognitionAgent } from "./store.js";
 import { startMetacognitionRun } from "./service.js";
+import { agentStats } from "./stats.js";
 
 export const requireMetacognition = async (c: any, next: any) => {
   if (!config.FEATURE_WORKFLOW_PLANE || !config.FEATURE_METACOGNITION) {
@@ -80,6 +81,24 @@ metacognitionRoutes.post("/:nodeId{.+}/run", requireMetacognition, async (c) => 
     inputs: body.inputs,
   });
   return c.json({ run_id: runId, executes: "server" }, 202);
+});
+
+// What the agent did over a window: run outcomes, tokens and cost, how its
+// proposals were judged, and its recent runs. Same access as viewing the agent.
+// Registered before GET /:nodeId so the catch-all doesn't swallow "/stats".
+metacognitionRoutes.get("/:nodeId{.+}/stats", requireMetacognition, async (c) => {
+  requireTier(c, "write");
+  const nestId = c.req.param("nestId")!;
+  const nodeId = assertSafeNodeId(c.req.param("nodeId")!);
+  if (!(await getAgent(nestId, nodeId))) throw new NotFoundError(`${nodeId} is not a metacognition agent`);
+  const num = (k: string) => {
+    const raw = c.req.query(k);
+    if (raw === undefined || raw === "") return undefined;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 1) throw new ValidationError(`${k} must be a positive whole number`);
+    return n;
+  };
+  return c.json({ stats: await agentStats(nestId, nodeId, { days: num("days"), limit: num("limit") }) });
 });
 
 metacognitionRoutes.get("/:nodeId{.+}", requireMetacognition, async (c) => {
