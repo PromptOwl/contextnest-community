@@ -52,23 +52,23 @@ Discovery:
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/.well-known/oauth-protected-resource/mcp` | RFC 9728. `resource` equals the MCP URL exactly; `authorization_servers[0]` is this server. |
-| GET | `/.well-known/oauth-authorization-server` | RFC 8414. Advertises `S256` PKCE, CIMD support, and `none` token-endpoint auth. |
+| GET | `/.well-known/oauth-authorization-server` | RFC 8414. Advertises `S256` PKCE, `none` token-endpoint auth, and `client_id_metadata_document_supported: false` (clients register through `/oauth/register`). |
 
 Flow:
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/oauth/register` | RFC 7591 dynamic client registration. Public client — no secret is issued. Redirect URIs must be `https`, or loopback for a native client. |
-| GET | `/oauth/authorize` | `response_type=code`, `code_challenge_method=S256` required. Renders sign-in, then consent. An unregistered `redirect_uri` is shown to the user, never redirected to. |
-| POST | `/oauth/authorize/decision` | The consent form target. Re-validates the client and redirect from scratch. |
-| POST | `/oauth/token` | `application/x-www-form-urlencoded`. Grants: `authorization_code`, `refresh_token`. Refresh tokens rotate; the replaced one is revoked in the same step. A replayed code revokes the whole grant. |
+| POST | `/oauth/register` | RFC 7591 dynamic client registration. Public client — no secret is issued. Up to 10 redirect URIs of at most 2048 characters, each `https` or `http(s)` loopback. Control and bidi characters are removed from `client_name`. Rate-limited per IP. Clients with no codes or tokens are purged 30 days after registering. |
+| GET | `/oauth/authorize` | `response_type=code`, `code_challenge_method=S256` and a 43-character `code_challenge` required. `resource`, when sent, must be `<PUBLIC_BASE_URL>/mcp` (else `invalid_target`). A signed-out browser gets the app's login page at the same URL; after sign-in, the consent page. An unregistered `redirect_uri` is shown to the user, never redirected to. Sent with `frame-ancestors 'none'`. |
+| POST | `/oauth/authorize/decision` | The consent form target. Re-validates the client and redirect, and requires a CSRF token that binds the client, redirect, scope, state, challenge and resource the page showed — a changed field is refused with `403`. |
+| POST | `/oauth/token` | `application/x-www-form-urlencoded`. Grants: `authorization_code`, `refresh_token`. Client, redirect and PKCE verifier (43–128 characters) are checked before a code is spent. A code redeemed twice by a presenter with the right verifier revokes the whole grant. Refresh tokens rotate; presenting a replaced one revokes the grant. Responses carry `Cache-Control: no-store`. Rate-limited per IP. |
 | POST | `/oauth/revoke` | RFC 7009. Always `200`, including for an unknown token, so it is not an oracle. |
 
-An unauthenticated request to `/mcp` is answered with `401` and `WWW-Authenticate: Bearer resource_metadata="..." scope="nests:read"`, which is what starts the flow. A caller that presented *some* credential gets the ordinary rejection instead, so a client holding a stale token fails rather than looping through consent.
+An unauthenticated request to `/mcp` is answered with `401` and `WWW-Authenticate: Bearer resource_metadata="..." scope="nests:read"`, which is what starts the flow. An expired or revoked OAuth access token on `/mcp` or `/index` gets `401` with `WWW-Authenticate: Bearer error="invalid_token" resource_metadata="..."`, so the client refreshes or re-authorizes. Other bad credentials get the ordinary rejection.
 
 Scopes: `nests:read`, `nests:write`, `offline_access` (ask for the last to receive a refresh token).
 
-Access tokens are accepted on `/mcp` and `/index` alongside `cnst_` keys and MCP tickets. A grant is never scoped to one nest — it reads across every nest that person can see.
+Access tokens are accepted on `/mcp` and `/index` alongside `cnst_` keys and MCP tickets. A grant is never scoped to one nest — it reads across every nest that person can see. `/index` and the read tools need `nests:read` (or `nests:write`, which implies it); a grant without either gets `403 insufficient_scope`. A password change, an admin password reset or removing the user revokes every grant they hold.
 
 ## Caller attribution (`client`)
 

@@ -17,8 +17,9 @@
  * router. Sign-in reuses POST /auth/login over fetch, so no credential logic
  * is duplicated here.
  */
-import { Hono } from "hono";
-import { createHash, randomBytes, timingSafeEqual } from "crypto";
+import { Hono, type Context } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
 import { config } from "../config.js";
 import { getDb } from "../db/client.js";
 import { resolveSession, getSessionIdFromRequest } from "./sessions.js";
@@ -33,11 +34,11 @@ import {
   upsertClient,
   getClient,
   issueCode,
-  consumeCode,
+  redeemCode,
+  revokeIfReplayed,
   issueTokens,
   rotateRefreshToken,
   revokeByToken,
-  revokeGrant,
   ACCESS_TTL_SECONDS,
   type OAuthClient,
 } from "./oauth-store.js";
@@ -51,6 +52,19 @@ const GRANTABLE = new Set([SCOPE_READ, SCOPE_WRITE, SCOPE_OFFLINE]);
 const REGISTER_LIMIT = { max: 60, windowMs: 10 * 60_000 };
 const MAX_REDIRECT_URIS = 10;
 const MAX_REDIRECT_URI_LENGTH = 2048;
+// The secrets are 256-bit, so these only bound cheap request floods.
+const TOKEN_LIMIT = { max: 120, windowMs: 60_000 };
+const REVOKE_LIMIT = { max: 60, windowMs: 60_000 };
+
+/** RFC 7636: an S256 challenge is BASE64URL(SHA256(...)) — exactly 43 chars. */
+const S256_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
+/** RFC 7636 §4.1: 43–128 unreserved characters. */
+const PKCE_VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
+
+/** This server's one resource (RFC 8707), as the metadata advertises it. */
+function mcpResource(): string {
+  return `${config.PUBLIC_BASE_URL.replace(/\/+$/, "")}/mcp`;
+}
 
 /** Loopback for a native client means http(s) on localhost — no custom schemes. */
 function isLoopbackUri(u: URL): boolean {
@@ -60,24 +74,50 @@ function isLoopbackUri(u: URL): boolean {
   );
 }
 
-/**
- * The consent form's CSRF token. Derived from the session id, which is in an
- * httpOnly cookie, so a page on another origin can neither read nor forge it.
- */
-function consentCsrf(sessionId: string): string {
-  return createHash("sha256").update(`oauth-consent:${sessionId}`).digest("hex");
+/** The request values the consent page showed, which the approval must match. */
+interface ConsentFields {
+  client_id: string;
+  redirect_uri: string;
+  scope: string;
+  state: string;
+  code_challenge: string;
+  resource: string;
 }
 
-function csrfMatches(sessionId: string, presented: string): boolean {
-  const a = Buffer.from(consentCsrf(sessionId));
+/**
+ * The consent form's CSRF token: an HMAC over the exact request shown, keyed
+ * by the session id. The session id sits in an httpOnly cookie, so another
+ * origin can neither read nor forge the token; binding the fields means the
+ * POST cannot widen scope, or swap the challenge, state or redirect, without
+ * failing the check. (Anyone holding the session id already holds the
+ * session, so a separate server key would protect nothing more.)
+ */
+function consentCsrf(sessionId: string, f: ConsentFields): string {
+  return createHmac("sha256", sessionId)
+    .update(
+      JSON.stringify([
+        "oauth-consent",
+        f.client_id,
+        f.redirect_uri,
+        f.scope,
+        f.state,
+        f.code_challenge,
+        f.resource,
+      ]),
+    )
+    .digest("hex");
+}
+
+function csrfMatches(sessionId: string, f: ConsentFields, presented: string): boolean {
+  const a = Buffer.from(consentCsrf(sessionId, f));
   const b = Buffer.from(presented);
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
 /** Every response from this router is JSON unless it is the consent page. */
 function oauthError(
-  c: any,
-  status: number,
+  c: Context,
+  status: ContentfulStatusCode,
   error: string,
   description?: string,
 ) {
@@ -97,7 +137,15 @@ oauthRoutes.use("*", async (c, next) => {
       "server_error",
       "PUBLIC_BASE_URL must be set to run the authorization server.",
     );
-  return next();
+  await next();
+  // Tokens (RFC 6749 §5.1), the consent page (email, CSRF token) and the
+  // login shell must never sit in a browser or proxy cache.
+  c.header("Cache-Control", "no-store");
+  c.header("Pragma", "no-cache");
+  // The consent page must not be framed, whatever FRAME_ANCESTORS allows for
+  // the rest of the app: a framed "Connect" button is a clickjacking target.
+  // The app-wide header middleware keeps a frame-ancestors a handler set.
+  c.header("Content-Security-Policy", "frame-ancestors 'none'");
 });
 
 // ─── Dynamic client registration (RFC 7591) ───────────────────────────────
@@ -180,10 +228,13 @@ oauthRoutes.post("/register", async (c) => {
   }
 
   const clientId = `cnc_${randomBytes(16).toString("hex")}`;
-  const name =
-    typeof body.client_name === "string" && body.client_name.trim()
-      ? body.client_name.trim().slice(0, 120)
-      : "Unnamed client";
+  // Strip control and format characters (bidi overrides, zero-width): they
+  // let a name display as something else on the consent page.
+  const cleaned =
+    typeof body.client_name === "string"
+      ? body.client_name.replace(/[\p{Cc}\p{Cf}]/gu, "").trim().slice(0, 120)
+      : "";
+  const name = cleaned || "Unnamed client";
   await upsertClient({
     client_id: clientId,
     client_name: name,
@@ -225,7 +276,7 @@ interface AuthzParams {
  * Everything else redirects the error back to the (now trusted) client.
  */
 async function parseAuthz(
-  c: any,
+  c: Context,
 ): Promise<
   | { ok: true; params: AuthzParams; client: OAuthClient }
   | { ok: false; showUser: string }
@@ -261,8 +312,14 @@ async function parseAuthz(
   if (String(q.code_challenge_method ?? "") !== "S256")
     return fail("invalid_request", "code_challenge_method must be S256.");
   const codeChallenge = String(q.code_challenge ?? "");
-  if (!codeChallenge)
-    return fail("invalid_request", "code_challenge is required.");
+  if (!S256_CHALLENGE.test(codeChallenge))
+    return fail("invalid_request", "code_challenge must be a 43-character S256 value.");
+
+  // RFC 8707: this server is one resource. Anything else is a token request
+  // for somewhere we are not, so refuse it rather than mint an ambiguous grant.
+  const resource = q.resource ? String(q.resource).replace(/\/+$/, "") : null;
+  if (resource && resource !== mcpResource())
+    return fail("invalid_target", `resource must be ${mcpResource()}.`);
 
   const requested = String(q.scope ?? "")
     .split(/\s+/)
@@ -287,11 +344,9 @@ async function parseAuthz(
       scope: scopes.join(" "),
       state,
       codeChallenge,
-      // RFC 8707. Recorded, but NOT yet enforced: nothing compares it against
-      // the resource being accessed, because this server is its own single
-      // resource. Kept so the binding can be added without a migration — do
-      // not read its presence as audience protection today.
-      resource: q.resource ? String(q.resource) : null,
+      // Validated above; recorded on the grant. Tokens are only accepted on
+      // /mcp and /index, so there is no second audience to confuse it with.
+      resource,
     },
     client,
   };
@@ -305,7 +360,8 @@ function esc(s: string): string {
 
 const SCOPE_TEXT: Record<string, string> = {
   [SCOPE_READ]: "Read the nests you have access to",
-  [SCOPE_WRITE]: "Create and edit documents in those nests",
+  [SCOPE_WRITE]:
+    "Create, edit, move and delete documents in those nests, submit them for review, and create nests",
   [SCOPE_OFFLINE]: "Stay connected without asking you again",
 };
 
@@ -374,15 +430,15 @@ oauthRoutes.get("/authorize", async (c, next) => {
 
   // Round-trips the exact validated request back to the decision endpoint, so
   // the POST cannot widen scope or change the redirect.
-  const hidden = Object.entries({
+  const fields: ConsentFields = {
     client_id: params.clientId,
     redirect_uri: params.redirectUri,
     scope: params.scope,
     state: params.state,
     code_challenge: params.codeChallenge,
     resource: params.resource ?? "",
-    csrf: consentCsrf(sessionId!),
-  })
+  };
+  const hidden = Object.entries({ ...fields, csrf: consentCsrf(sessionId!, fields) })
     .map(
       ([k, v]) =>
         `<input type="hidden" name="${k}" value="${esc(String(v))}">`,
@@ -458,7 +514,16 @@ oauthRoutes.post("/authorize/decision", async (c) => {
     return c.redirect(out.toString(), 302);
   }
   // Only an approval needs this: it is the one decision that issues a code.
-  if (!csrfMatches(sessionId!, String(form.csrf ?? "")))
+  // The token covers every field below, so none can differ from the page.
+  const fields: ConsentFields = {
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    scope: String(form.scope ?? ""),
+    state,
+    code_challenge: String(form.code_challenge ?? ""),
+    resource: String(form.resource ?? ""),
+  };
+  if (!csrfMatches(sessionId!, fields, String(form.csrf ?? "")))
     return c.html(
       page(
         "Can't continue",
@@ -467,27 +532,14 @@ oauthRoutes.post("/authorize/decision", async (c) => {
       403,
     );
 
-  const granted = String(form.scope ?? SCOPE_READ)
-    .split(/\s+/)
-    .filter((s) => GRANTABLE.has(s));
-  // Same implication as the authorize step, so a hand-crafted POST cannot
-  // produce a write grant that skips read and lands somewhere inconsistent.
-  if (granted.includes(SCOPE_WRITE) && !granted.includes(SCOPE_READ))
-    granted.unshift(SCOPE_READ);
-  const scope = granted.join(" ");
-  const codeChallenge = String(form.code_challenge ?? "");
-  if (!scope || !codeChallenge) {
-    out.searchParams.set("error", "invalid_request");
-    return c.redirect(out.toString(), 302);
-  }
-
+  // The CSRF check proved these are the values /authorize validated and showed.
   const code = await issueCode({
     clientId,
     userId,
     redirectUri,
-    scope,
-    codeChallenge,
-    resource: form.resource ? String(form.resource) || null : null,
+    scope: fields.scope,
+    codeChallenge: fields.code_challenge,
+    resource: fields.resource || null,
   });
   out.searchParams.set("code", code);
   return c.redirect(out.toString(), 302);
@@ -504,6 +556,8 @@ function pkceMatches(verifier: string, challenge: string): boolean {
 }
 
 oauthRoutes.post("/token", async (c) => {
+  if (!tryConsume(`oauth-token:ip:${clientIp(c)}`, TOKEN_LIMIT))
+    return oauthError(c, 429, "slow_down", "Too many token requests. Try again later.");
   // RFC 6749 §4.1.3 — form-urlencoded, not JSON. Frameworks that default to
   // JSON-only body parsing answer 415 here and break every client.
   const form = await c.req.parseBody().catch(() => ({}) as Record<string, unknown>);
@@ -538,34 +592,25 @@ oauthRoutes.post("/token", async (c) => {
       "Supported: authorization_code, refresh_token.",
     );
 
-  const consumed = await consumeCode(String(form.code ?? ""));
-  if (!consumed.ok) {
-    if (consumed.reason === "replayed") {
-      // A code presented twice has leaked. OAuth 2.1 says to treat that as a
-      // compromise of the grant it produced, so everything descended from it
-      // goes — refusing only the second exchange would leave the attacker's
-      // tokens (or the victim's) live.
-      const row = (await getDb().get(
-        "SELECT user_id, client_id FROM oauth_codes WHERE code_hash = ?",
-        [createHash("sha256").update(String(form.code ?? "")).digest("hex")],
-      )) as { user_id?: string; client_id?: string } | undefined;
-      if (row?.user_id && row?.client_id)
-        await revokeGrant(row.user_id, row.client_id);
-    }
-    return oauthError(c, 400, "invalid_grant", "Authorization code is not valid.");
-  }
-  const code = consumed.code;
-
-  // The code was issued to one client, for one redirect. Both must match or
-  // an attacker who intercepted the code can redeem it as someone else.
-  if (code.clientId !== clientId)
-    return oauthError(c, 400, "invalid_grant", "Code was issued to another client.");
-  if (String(form.redirect_uri ?? "") !== code.redirectUri)
-    return oauthError(c, 400, "invalid_grant", "redirect_uri does not match.");
-
+  // Client, redirect and PKCE are checked BEFORE the code is spent (see
+  // redeemCode): a presenter who only saw the code cannot burn it, nor make
+  // the real exchange read as a replay and revoke the user's grant.
+  const presented = String(form.code ?? "");
+  const redirectUri = String(form.redirect_uri ?? "");
   const verifier = String(form.code_verifier ?? "");
-  if (!verifier || !pkceMatches(verifier, code.codeChallenge))
-    return oauthError(c, 400, "invalid_grant", "PKCE verification failed.");
+  const redeemed = await redeemCode(
+    presented,
+    (row) =>
+      row.clientId === clientId &&
+      row.redirectUri === redirectUri &&
+      PKCE_VERIFIER.test(verifier) &&
+      pkceMatches(verifier, row.codeChallenge),
+  );
+  // One answer for every failure: which check failed is not the caller's to
+  // learn. A replay has already revoked the grant inside redeemCode.
+  if (!redeemed.ok)
+    return oauthError(c, 400, "invalid_grant", "Authorization code is not valid.");
+  const code = redeemed.code;
 
   const client = await getClient(clientId);
   const tokens = await issueTokens({
@@ -576,6 +621,7 @@ oauthRoutes.post("/token", async (c) => {
     resource: code.resource,
     withRefresh: code.scope.split(" ").includes(SCOPE_OFFLINE),
   });
+  await revokeIfReplayed(presented, code);
 
   return c.json({
     access_token: tokens.accessToken,
@@ -589,6 +635,8 @@ oauthRoutes.post("/token", async (c) => {
 // ─── Revocation (RFC 7009) ────────────────────────────────────────────────
 
 oauthRoutes.post("/revoke", async (c) => {
+  if (!tryConsume(`oauth-revoke:ip:${clientIp(c)}`, REVOKE_LIMIT))
+    return oauthError(c, 429, "slow_down", "Too many requests. Try again later.");
   const form = await c.req.parseBody().catch(() => ({}) as Record<string, unknown>);
   const token = String(form.token ?? "");
   if (token) await revokeByToken(token);

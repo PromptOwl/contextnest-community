@@ -545,4 +545,16 @@ describe("isPrivateHost", () => {
       expect(isPrivateHost(u), u).toBe(false);
     }
   });
+  it("sees through address encodings URL normalizes", () => {
+    for (const u of [
+      "http://[::ffff:10.0.0.1]:3838", // IPv4-mapped IPv6 → ::ffff:a00:1
+      "http://[::ffff:192.168.1.5]/",
+      "http://167772161/", // decimal 10.0.0.1
+      "http://012.0.0.1/", // octal 10.0.0.1
+      "http://0xa.0.0.1/", // hex 10.0.0.1
+    ])
+      expect(isPrivateHost(u), u).toBe(true);
+    for (const u of ["http://172.32.0.1/", "http://172.15.255.255/", "http://[::ffff:8.8.8.8]/"])
+      expect(isPrivateHost(u), u).toBe(false);
+  });
 });

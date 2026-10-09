@@ -348,6 +348,7 @@ const READ_ONLY_SERVER_TOOLS = new Set([
   "context_get",
   "context_resolve",
   "context_comments",
+  "context_versions",
 ]);
 
 /** Exported so a test can assert every defined tool is classified. */
@@ -668,6 +669,14 @@ serverMcpRoutes.all("/", async (c) => {
 export const nestIndexRoutes = new Hono<AuthEnv>();
 
 nestIndexRoutes.get("/", async (c) => {
+  // Same gate as the nest_index tool: an OAuth grant needs read scope (or
+  // write, which implies it). Absent = a key or ticket, which carry no scope.
+  const granted = c.get("oauthScope");
+  if (granted && !scopeAllows(granted, "nest_index"))
+    return c.json(
+      { error: "This connection wasn't authorized to read nests — reconnect and approve nests:read.", code: "insufficient_scope" },
+      403,
+    );
   const userId = c.get("userId");
   const nests = await buildNestIndex(userId, c.get("nestScope"));
   if (c.req.query("format") === "json") {

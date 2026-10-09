@@ -286,6 +286,15 @@ function isPublicReadEligiblePath(method: string, path: string): boolean {
 }
 
 /**
+ * Presence of a session cookie, not its value. Kept in one place so the two
+ * middlewares that ask cannot drift; extracting the id is
+ * getSessionIdFromRequest's job.
+ */
+function hasSessionCookie(c: Context<AuthEnv>): boolean {
+  return !!getSessionIdFromRequest(c);
+}
+
+/**
  * The OAuth challenge on /mcp. Runs ahead of every other auth path.
  *
  * An MCP client's first request carries no credential on purpose: it expects a
@@ -295,22 +304,14 @@ function isPublicReadEligiblePath(method: string, path: string): boolean {
  * error, so the status and the header have to be exactly this.
  *
  * Deliberately narrow:
- * - Only when a credential is entirely absent. A caller presenting a bad or
- *   expired token gets the ordinary rejection, so a client holding a stale
- *   token fails instead of looping back through consent.
+ * - Only when a credential is entirely absent. A stale OAuth access token is
+ *   answered by mcpOAuthBearer with `error="invalid_token"`, which tells the
+ *   client to refresh or re-authorize; other bad credentials get the
+ *   ordinary rejection.
  * - Never in open mode, where there is no credential to ask for.
  * - Never while MCP_OAUTH_ENABLED is off, so the flag-off behaviour of this
  *   endpoint is byte-identical to before.
  */
-/**
- * Presence of a session cookie, not its value. Kept in one place so the two
- * middlewares that ask cannot drift; extracting the id is
- * getSessionIdFromRequest's job.
- */
-function hasSessionCookie(c: Context<AuthEnv>): boolean {
-  return !!getSessionIdFromRequest(c);
-}
-
 const mcpOAuthChallenge = createMiddleware<AuthEnv>(async (c, next) => {
   if (!config.MCP_OAUTH_ENABLED || config.AUTH_MODE === "open")
     return next();
@@ -330,10 +331,10 @@ const mcpOAuthChallenge = createMiddleware<AuthEnv>(async (c, next) => {
 /**
  * Accept an access token this server issued, and resolve it to its user.
  *
- * Runs after the challenge and before the ticket path. A token we don't
- * recognise is passed through untouched rather than rejected, so `cnst_` keys
- * and MCP tickets keep working exactly as before — this middleware only ever
- * adds a way in.
+ * Runs after the challenge and before the ticket path. A credential that is
+ * not 64 hex is passed through untouched, so `cnst_` keys and MCP tickets keep
+ * working exactly as before. A 64-hex token that does not resolve is one of
+ * ours gone stale, and gets a 401 with `error="invalid_token"`.
  *
  * The user id set here is what `buildNestIndex` gates on, which is the whole
  * point: the caller now arrives as a person rather than as whoever owns a
@@ -350,9 +351,17 @@ const mcpOAuthBearer = createMiddleware<AuthEnv>(async (c, next) => {
   if (!/^[0-9a-f]{64}$/.test(token)) return fallThrough();
 
   const grant = await resolveAccessToken(token);
-  // Not one of ours — could be a key or a ticket. Hand it on untouched; this
-  // middleware only ever ADDS a way in.
-  if (!grant) return fallThrough();
+  // Expired, revoked, or its user removed. Nothing else is 64 hex, so this is
+  // a stale token of ours: answer with the challenge so the client refreshes
+  // or re-authorizes (MCP authorization spec; RFC 6750 §3.1).
+  if (!grant) {
+    if (config.PUBLIC_BASE_URL)
+      c.header("WWW-Authenticate", mcpChallenge(config.PUBLIC_BASE_URL, "invalid_token"));
+    return c.json(
+      { error: "This connection has expired or was revoked — reconnect to continue.", code: "invalid_token" },
+      401,
+    );
+  }
 
   c.set("userId", grant.userId);
   // OAuth grants are never narrowed to one nest: the whole point is that one

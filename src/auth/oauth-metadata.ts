@@ -132,10 +132,11 @@ export function authorizationServerMetadata(
  * The `resource_metadata` pointer saves the client from probing well-known
  * paths, and works even when the metadata is hosted off-origin.
  */
-export function mcpChallenge(baseUrl: string): string {
+export function mcpChallenge(baseUrl: string, error?: "invalid_token"): string {
   const base = canonical(baseUrl);
   return [
     "Bearer",
+    ...(error ? [`error="${error}"`] : []),
     `resource_metadata="${base}${PRM_PATH}"`,
     `scope="${CHALLENGE_SCOPE}"`,
   ].join(" ");
