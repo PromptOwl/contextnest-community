@@ -416,6 +416,51 @@ describe("access gate", () => {
   });
 });
 
+describe("edges", () => {
+  it("parks a review at the top, notifying nobody, when nobody is left who can open it", async () => {
+    for (const u of [tara, nate, owner]) cantOpen.add(u.email.toLowerCase());
+    dispatchEvent.mockClear();
+    try {
+      const t1 = await submit("Orphan"); // no tags, no document steward
+      const mine = async (at: number) =>
+        (await tick(at)).filter((o) => o.level > 0);
+      expect(await mine(t1 + 25 * H)).toEqual([]);
+      const [review] = await reviewsOf("nodes/orphan");
+      expect(review.escalationLevel).toBe(3);
+      expect(escalatedEvents()).toEqual([]);
+      // Parked: access granted later doesn't restart the ladder.
+      cantOpen.clear();
+      expect(await mine(t1 + 200 * H)).toEqual([]);
+    } finally {
+      cantOpen.clear();
+    }
+  });
+
+  it("a failed notification keeps the rung claimed and is not retried", async () => {
+    const t1 = await submit("Fragile");
+    dispatchEvent.mockImplementationOnce(() => {
+      throw new Error("connector down");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const first = await tick(t1 + 25 * H);
+      expect(first.map((o) => o.level)).toEqual([2]); // no tags → nest reviewers
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("was claimed but its notification failed"),
+        expect.any(Error),
+      );
+      const [review] = await reviewsOf("nodes/fragile");
+      expect(review.escalationLevel).toBe(2);
+      // Same window: nothing repeats.
+      expect(await tick(t1 + 30 * H)).toEqual([]);
+      // Walk it to the top so later ticks in this file stay quiet.
+      expect((await tick(t1 + 50 * H)).map((o) => o.level)).toEqual([3]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
 describe("nextRung", () => {
   it("skips the submitter and anyone already on a lower rung", async () => {
     const { nextRung } = await import("../src/governance/review-sla.js");

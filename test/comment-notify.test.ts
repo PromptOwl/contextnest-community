@@ -171,6 +171,43 @@ describe("comment-create notification", () => {
     expect(commentEmails()).not.toContain(mo.email);
   });
 
+  it("a watcher who is also a reviewer steward gets exactly one row", async () => {
+    await watch(rita.email);
+    const before = (await inbox(rita, "comment")).length;
+    const r = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${DOC}/annotations`,
+      { body: "one more question" },
+      alice.apiKey,
+    );
+    expect(r.status).toBe(201);
+    expect(await inbox(rita, "comment")).toHaveLength(before + 1);
+  });
+
+  it("a thread participant who also follows hears a reply once — as a reply", async () => {
+    // rita (reviewer + watcher) opens the thread; wally replies.
+    const { data } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${DOC}/annotations`,
+      { body: "thread for the dates" },
+      rita.apiKey,
+    );
+    const comments = (await inbox(rita, "comment")).length;
+    const replies = (await inbox(rita, "comment_reply")).length;
+    const reply = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${DOC}/annotations/${data.thread.id}/comments`,
+      { body: "dates look right" },
+      wally.apiKey,
+    );
+    expect(reply.status).toBe(200);
+    expect(await inbox(rita, "comment_reply")).toHaveLength(replies + 1);
+    expect(await inbox(rita, "comment")).toHaveLength(comments);
+  });
+
   it("a reply notifies the same followers", async () => {
     const { data } = await jsonRequest(
       app,

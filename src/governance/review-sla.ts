@@ -275,7 +275,11 @@ export async function reviewSlaTick(
       try {
         await notifyEscalation(r, next.level, next.recipients, hoursWaiting);
       } catch (err) {
-        console.error("[review-sla] escalation notify failed", r.id, err);
+        // The rung stays claimed (at-most-once): this ping is lost, not retried.
+        console.warn(
+          `[review-sla] review ${r.id}: rung ${next.level} was claimed but its notification failed — not retried`,
+          err,
+        );
       }
       escalated.push({ reviewId: r.id, level: next.level, recipients: next.recipients });
     } catch (err) {
@@ -286,6 +290,9 @@ export async function reviewSlaTick(
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
+/** A tick still running when the next interval fires is not doubled up. The
+ *  claim already keeps an overlap correct; this just skips the repeat work. */
+let ticking = false;
 
 /**
  * Start the escalation loop (60s). Always on: with no nest setting an SLA the
@@ -295,9 +302,13 @@ let timer: ReturnType<typeof setInterval> | null = null;
 export function startReviewSlaLoop(intervalMs = 60_000): void {
   if (timer) return;
   timer = setInterval(() => {
-    void reviewSlaTick().catch((err) =>
-      console.error("[review-sla] tick failed", err),
-    );
+    if (ticking) return;
+    ticking = true;
+    void reviewSlaTick()
+      .catch((err) => console.error("[review-sla] tick failed", err))
+      .finally(() => {
+        ticking = false;
+      });
   }, intervalMs);
   timer.unref?.();
 }
