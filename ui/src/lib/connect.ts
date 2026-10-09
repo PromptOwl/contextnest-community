@@ -361,6 +361,9 @@ export function mcpHttpConfig(
  * machine, so a VPN on the laptop doesn't help. A public name that merely
  * resolves to a private address behind a VPN can't be detected here — the
  * Connect panel says so in words for that case.
+ *
+ * Must match src/shared/private-host.ts on the server (the Network & status
+ * checks use that copy); test/private-host.test.ts compares the two.
  */
 export function isPrivateHost(serverUrl: string): boolean {
   let host: string;

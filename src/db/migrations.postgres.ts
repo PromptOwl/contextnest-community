@@ -29,7 +29,7 @@ const NOW = "to_char((now() AT TIME ZONE 'utc'), 'YYYY-MM-DD HH24:MI:SS')";
 // Historical SQLite migration ids — seeded as already-applied so any FUTURE
 // incremental Postgres migration can reuse the same hasMigration/recordMigration
 // gating without re-running schema that's already baked into the DDL below.
-const HISTORICAL_MIGRATIONS = [
+export const HISTORICAL_MIGRATIONS = [
   "002_steward_parity",
   "003_sessions_and_single_api_key",
   "004_license_cache_owner_email",
