@@ -7,6 +7,7 @@
 
 import { createHash } from "crypto";
 import { getDb } from "../db/client.js";
+import type { Querier } from "../db/adapter.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { buildTitleMap } from "./title-resolver.js";
 import {
@@ -164,6 +165,24 @@ export async function getVersion(
   return row ? rowToVersion(row) : null;
 }
 
+/** getCurrentVersion for many nodes of one nest, in one query. Missing → 0. */
+export async function getCurrentVersions(
+  nestId: string,
+  nodeIds: string[],
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>(nodeIds.map((id) => [id, 0]));
+  if (nodeIds.length === 0) return out;
+  const rows = (await getDb().all(
+    `SELECT node_id, MAX(version) as v FROM node_versions
+        WHERE nest_id = ? AND node_id IN (${nodeIds.map(() => "?").join(",")})
+          AND author NOT LIKE ?
+        GROUP BY node_id`,
+    [nestId, ...nodeIds, `${SYSTEM_AUTHOR_PREFIX}%`],
+  )) as Array<{ node_id: string; v: number | null }>;
+  for (const r of rows) out.set(r.node_id, r.v || 0);
+  return out;
+}
+
 export async function getCurrentVersion(
   nestId: string,
   nodeId: string,
@@ -246,6 +265,55 @@ export async function setApprovedVersion(
     `approved_version = excluded.approved_version, approved_by = excluded.approved_by, approved_at = ${nowExpr(db)}`,
   );
   await db.run(sql, [nestId, nodeId, version, approvedBy]);
+}
+
+/** Rows per multi-row INSERT — well under SQLite's and Postgres's parameter limits. */
+const BATCH_ROWS = 200;
+
+/** `createVersion` for many rows of one nest: one INSERT per chunk, not per row. */
+export async function createVersions(
+  rows: Array<Parameters<typeof createVersion>[0]>,
+  q: Querier = getDb(),
+): Promise<void> {
+  for (let i = 0; i < rows.length; i += BATCH_ROWS) {
+    const chunk = rows.slice(i, i + BATCH_ROWS);
+    await q.run(
+      `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status, change_note, tags_json, client_json)
+       VALUES ${chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ")}`,
+      chunk.flatMap((p) => [
+        p.nestId,
+        p.nodeId,
+        p.version,
+        hashContent(p.content),
+        p.author,
+        p.status,
+        p.changeNote || null,
+        p.tags ? JSON.stringify(p.tags) : null,
+        serializeClient(p.client),
+      ]),
+    );
+  }
+}
+
+/** `setApprovedVersion` for many nodes of one nest, one upsert per chunk. */
+export async function setApprovedVersions(
+  nestId: string,
+  rows: Array<{ nodeId: string; version: number }>,
+  approvedBy: string,
+  q: Querier = getDb(),
+): Promise<void> {
+  const db = getDb();
+  for (let i = 0; i < rows.length; i += BATCH_ROWS) {
+    const chunk = rows.slice(i, i + BATCH_ROWS);
+    const sql = insertOrReplace(
+      db,
+      `INSERT INTO approved_versions (nest_id, node_id, approved_version, approved_by)
+       VALUES ${chunk.map(() => "(?, ?, ?, ?)").join(", ")}`,
+      ["nest_id", "node_id"],
+      `approved_version = excluded.approved_version, approved_by = excluded.approved_by, approved_at = ${nowExpr(db)}`,
+    );
+    await q.run(sql, chunk.flatMap((r) => [nestId, r.nodeId, r.version, approvedBy]));
+  }
 }
 
 /** approved_by for a pin the server moved itself — never a reviewer's name. */

@@ -20,6 +20,35 @@ import { sendEmailToRecipient } from "../notify/email.js";
 import { nestName, docLink } from "./title-resolver.js";
 import { notifyNestInvite } from "./notify-service.js";
 import { teamRoleToPermission } from "./roles.js";
+import { assertCanGrant, permissionClass } from "../auth/seats.js";
+
+/** Plan-limit check for team roles. A team only bills once it is shared onto
+ *  a nest, so an unshared team's roster changes nothing. */
+async function assertTeamRolesFit(
+  teamId: string,
+  members: Array<{ userId?: string | null; email?: string | null; role: string }>,
+  force = false,
+): Promise<void> {
+  if (!force) {
+    const shared = await getDb().get(
+      "SELECT 1 AS x FROM nests WHERE shared_teams LIKE ? LIMIT 1",
+      [`%${teamId}%`],
+    );
+    if (!shared) return;
+  }
+  const changes = [];
+  for (const m of members) {
+    let userId = m.userId ?? null;
+    if (!userId && m.email) {
+      const u = (await getDb().get("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", [
+        m.email,
+      ])) as { id: string } | undefined;
+      userId = u?.id ?? null;
+    }
+    changes.push({ userId, next: permissionClass(teamRoleToPermission(m.role)) });
+  }
+  await assertCanGrant(changes);
+}
 import {
   ValidationError,
   NotFoundError,
@@ -288,6 +317,7 @@ export async function addMember(params: {
   if (!params.userId && params.email && !isEmailish(params.email)) {
     throw new ValidationError("Enter a valid email address.");
   }
+  await assertTeamRolesFit(params.teamId, [params]);
   const { userId: resolvedId, email: resolvedEmail } =
     await resolveMemberIdentity(params);
   await mutateMembers(params.teamId, (members) => {
@@ -368,6 +398,7 @@ export async function replaceTeamRoster(params: {
       "Only a team admin or the owner can replace this team's roster.",
     );
   }
+  await assertTeamRolesFit(params.teamId, params.members);
   await mutateMembers(params.teamId, () =>
     params.members.map((m) => ({
       userId: m.userId,
@@ -394,6 +425,7 @@ export async function updateMemberRole(params: {
   if (rank < OWNER_RANK && ROLE_RANK[params.role] > rank) {
     throw new ForbiddenError("You can't set a role higher than your own.");
   }
+  await assertTeamRolesFit(params.teamId, [{ userId: params.userId, role: params.role }]);
   await mutateMembers(params.teamId, (members) => {
     const member = members.find((m) => m.userId === params.userId);
     if (!member) throw new NotFoundError("Team member not found");
@@ -528,6 +560,12 @@ export async function shareTeamWithNest(params: {
   const db = getDb();
   let sharedMembers: TeamMember[] = [];
   let sharedTeamName = "";
+  // Sharing projects every member onto the nest at their team role. Checked
+  // outside the transaction: the plan count reads through the shared client.
+  const roster = (await db.get("SELECT members FROM teams WHERE id = ?", [params.teamId])) as
+    | { members?: string }
+    | undefined;
+  if (roster) await assertTeamRolesFit(params.teamId, parseMembers(roster.members), true);
   const refs = await db.transaction(async (tx) => {
     const team = (await tx.get(
       "SELECT id, name, owner_id, members FROM teams WHERE id = ?",

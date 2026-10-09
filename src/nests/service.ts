@@ -10,7 +10,9 @@ import { revokeAllHeadlessKeys } from "../auth/headless.js";
 import { isServerAdminUserId } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { ValidationError, ForbiddenError } from "../shared/errors.js";
+import { assertCanGrant } from "../auth/seats.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
+import { forgetAccessLogSetting, readAccessLogSetting } from "../governance/access-log.js";
 import { rm } from "fs/promises";
 import type { Nest } from "../shared/types.js";
 
@@ -280,6 +282,30 @@ export async function setCreatorIsReviewer(
 }
 
 /**
+ * Whether reads, retrievals and exports of this nest's documents are recorded
+ * in the activity log (governance/access-log.ts). On by default (migration
+ * 050): the record of what each person and agent read is the point of a
+ * governed nest, so it is opt-out, not opt-in.
+ */
+export async function nestAccessLogEnabled(nestId: string): Promise<boolean> {
+  return readAccessLogSetting(nestId);
+}
+
+/** Turn read logging on or off for a nest. Takes effect for the next read;
+ *  rows already recorded are kept until the retention window prunes them. */
+export async function setAccessLogEnabled(
+  nestId: string,
+  enabled: boolean,
+): Promise<void> {
+  const db = getDb();
+  await db.run("UPDATE nests SET access_log_enabled = ? WHERE id = ?", [
+    enabled ? 1 : 0,
+    nestId,
+  ]);
+  forgetAccessLogSetting(nestId);
+}
+
+/**
  * Tags that mark a document prime, normalized and deduped. Stored as a comma
  * list on the nest; an empty/blank value means "no tag marks a doc prime"
  * (document-level flags still apply).
@@ -305,6 +331,24 @@ export async function setPrimeTags(
 ): Promise<void> {
   const db = getDb();
   await db.run("UPDATE nests SET prime_tags = ? WHERE id = ?", [
+    parsePrimeTags(tags.join(",")).join(","),
+    nestId,
+  ]);
+}
+
+/**
+ * Tags whose board column means "completed" for a task (default "done").
+ * Same storage and normalisation as prime tags.
+ */
+export async function nestDoneTags(nestId: string): Promise<string[]> {
+  const row = (await getDb().get("SELECT done_tags FROM nests WHERE id = ?", [
+    nestId,
+  ])) as { done_tags: string | null } | undefined;
+  return parsePrimeTags(row?.done_tags);
+}
+
+export async function setDoneTags(nestId: string, tags: string[]): Promise<void> {
+  await getDb().run("UPDATE nests SET done_tags = ? WHERE id = ?", [
     parsePrimeTags(tags.join(",")).join(","),
     nestId,
   ]);
@@ -421,8 +465,11 @@ export async function assertCanCreateNest(userId: string): Promise<void> {
     config.AUTH_MODE === "open" ||
     config.NEST_CREATION === "everyone" ||
     (await isServerAdminUserId(userId))
-  )
+  ) {
+    // A nest owner bills as a user (pricing §3.3). The anon commons doesn't.
+    if (userId !== ANON_USER_ID) await assertCanGrant([{ userId, next: "user" }]);
     return;
+  }
   throw new ForbiddenError(
     "Only a server admin can create nests on this server. Ask your admin to share a nest with you.",
   );

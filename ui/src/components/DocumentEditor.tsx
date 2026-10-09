@@ -12,7 +12,8 @@ import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invalidateForPath, keys, reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
-import { setNavGuard, bypassNavGuard } from "../lib/nav-guard";
+import { saveOutcome } from "../lib/save-outcome";
+import { setNavGuard, bypassNavGuard, dropParkedEntries } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { nestPath } from "../lib/nest-url";
 import { useBreadcrumb } from "../lib/breadcrumb";
@@ -62,6 +63,7 @@ import {
   Zap,
   Wrench,
   Table2,
+  ListTodo,
   Pencil,
   Users,
   Share2,
@@ -111,6 +113,9 @@ import {
   clearHighlight,
   caretAt,
 } from "../lib/anchor-highlight";
+import { outdatedThreadIds, paintableThreads } from "../lib/comment-threads";
+import { sourceRangesForAnchors, useKeepPlace } from "../lib/view-place";
+import { HighlightedTextarea } from "./HighlightedTextarea";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -143,6 +148,8 @@ import { resolveWikiTarget, previewSnippet, decideWikiLinkAction } from "../lib/
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import { useAuth } from "../auth/AuthContext";
 import type { BreadcrumbEntry } from "../App";
+import { RequestAccessDialog } from "./RequestAccessDialog";
+import type { AccessOffer } from "../lib/access-requests";
 import { Fragment } from "react";
 
 /** HTML if it starts with a tag; else markdown. */
@@ -245,7 +252,7 @@ export function DocumentEditor({
   const isNew = nodeId === "new";
   // Type picker: one tab stop, arrows between the choices (see the radiogroup).
   const typeRoving = useRovingFocus<HTMLDivElement>();
-  const { adminStatus, isAdmin, workflowPlaneEnabled, typeArtifactEnabled, typeTableEnabled } = useAuth();
+  const { adminStatus, isAdmin, workflowPlaneEnabled, typeArtifactEnabled, typeTableEnabled, typeTaskEnabled } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   // Inline sharing from the document view — "add folks to a context where
   // you're reading it" instead of bouncing back to the nest. Same dialog
@@ -426,6 +433,8 @@ export function DocumentEditor({
       myStewards.some((s) => s.role === "editor" && s.scope === "nest"));
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDeletionModal, setShowDeletionModal] = useState(false);
+  // "Request edit access" for a viewer (CU-wdqcq041jn) — in place of Edit.
+  const [accessOffer, setAccessOffer] = useState<AccessOffer | null>(null);
   // Latest deletion flag on this doc. Pending hides the request button (a
   // second one would 409); declined stays visible with the note so the person
   // who asked sees the verdict instead of the flag just vanishing.
@@ -513,6 +522,8 @@ export function DocumentEditor({
   // Anchor snapshotted at mouseup (selection is live then); consumed on click.
   const stagedAnchorRef = useRef<api.AnnotationAnchor | null>(null);
   const docViewRef = useRef<HTMLDivElement | null>(null);
+  // The rich editor's wrapper; its .ProseMirror is where highlights paint.
+  const editorSurfaceRef = useRef<HTMLDivElement | null>(null);
   // The body wrapper, whichever control is inside it (rich editor, raw
   // markdown, source, artifact HTML) — Enter from the title lands here.
   const bodyRef = useRef<HTMLDivElement | null>(null);
@@ -534,6 +545,10 @@ export function DocumentEditor({
     return () => document.removeEventListener("pointerdown", onDown);
   }, [pageActive]);
   const [anchoredThreads, setAnchoredThreads] = useState<api.AnnotationThread[]>([]);
+  // Threads whose quoted text isn't in the current document text — the rail
+  // labels them "text changed". Computed with the highlights, in the
+  // rendered view; kept from the last render while editing.
+  const [outdatedIds, setOutdatedIds] = useState<Set<string>>(() => new Set());
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   // The comments rail starts closed — an empty panel beside every document
   // was a third of the width spent on nothing — and remembers the last
@@ -664,33 +679,73 @@ export function DocumentEditor({
     window.getSelection()?.removeAllRanges();
   }, []);
 
+  const activeThreadIdRef = useRef(activeThreadId);
+  activeThreadIdRef.current = activeThreadId;
   // Rebuild the painted comment highlights whenever the doc text or the set
-  // of anchored threads changes (and only in the rendered, non-diff view).
+  // of anchored threads changes — in the rendered view and in the rich
+  // editor (the raw markdown paints its own, see HighlightedTextarea).
   useEffect(() => {
-    const container = docViewRef.current;
-    const inRenderedView =
+    const inRenderedView = (commentMode || mode === "view") && !rawMode;
+    const inEditor = !commentMode && mode === "edit" && !rawMode;
+    const paints =
       !isNew &&
-      (commentMode || mode === "view") &&
-      !rawMode &&
+      (inRenderedView || inEditor) &&
       compareVersion == null &&
       !looksLikeHtml(content);
-    if (!container || !inRenderedView) {
+    const findContainer = () =>
+      inRenderedView
+        ? docViewRef.current
+        : (editorSurfaceRef.current?.querySelector<HTMLElement>(".ProseMirror") ?? null);
+    if (!paints || (inRenderedView && !docViewRef.current)) {
       anchorRangesRef.current = [];
       clearHighlight("comment-anchor");
       clearHighlight("comment-anchor-active");
       return;
     }
-    // Defer one frame so react-markdown has committed its DOM.
-    const id = requestAnimationFrame(() => {
+    // Defer a frame so react-markdown has committed its DOM; TipTap mounts
+    // its .ProseMirror a few frames after the wrapper, so wait for it.
+    let tries = 0;
+    let id = 0;
+    let observer: MutationObserver | null = null;
+    let repaintTimer: ReturnType<typeof setTimeout> | undefined;
+    const paint = () => {
+      const container = findContainer();
+      if (!container) {
+        if (++tries < 60) id = requestAnimationFrame(paint);
+        return;
+      }
+      // The editor can rebuild its DOM without `content` changing (initial
+      // setContent, node views), which strands the ranges — repaint then.
+      // Debounced: while typing, every keystroke mutates the DOM, and a
+      // repaint per frame would rebuild the text index on each one.
+      if (inEditor && !observer) {
+        observer = new MutationObserver(() => {
+          clearTimeout(repaintTimer);
+          repaintTimer = setTimeout(() => {
+            cancelAnimationFrame(id);
+            id = requestAnimationFrame(paint);
+          }, 200);
+        });
+        observer.observe(container, { childList: true, subtree: true, characterData: true });
+      }
       const idx = buildTextIndex(container);
       const ranges: { id: string; range: Range }[] = [];
-      for (const t of anchoredThreads) {
-        if (!t.anchor?.quote) continue;
-        const r = rangeForAnchor(container, idx, t.anchor);
+      // Only open threads paint (and hit-test): a resolved thread is done,
+      // and its highlight staying put is what made resolving feel broken.
+      for (const t of paintableThreads(anchoredThreads)) {
+        const r = rangeForAnchor(container, idx, t.anchor!);
         if (r) ranges.push({ id: t.id, range: r });
       }
+      const outdated = outdatedThreadIds(anchoredThreads, idx.text);
+      setOutdatedIds((prev) =>
+        prev.size === outdated.size && [...outdated].every((id) => prev.has(id))
+          ? prev
+          : outdated,
+      );
       anchorRangesRef.current = ranges;
       setHighlight("comment-anchor", ranges.map((r) => r.range));
+      const active = ranges.find((r) => r.id === activeThreadIdRef.current);
+      setHighlight("comment-anchor-active", active ? [active.range] : []);
       // Deferred focus: a comment was clicked from edit mode; now that the
       // rendered view exists and ranges are built, scroll to + emphasize it.
       if (pendingFocusRef.current) {
@@ -704,8 +759,21 @@ export function DocumentEditor({
         }
         pendingFocusRef.current = null;
       }
-    });
-    return () => cancelAnimationFrame(id);
+    };
+    // In the editor `content` changes on every keystroke, re-running this
+    // effect; the delay (reset by each re-run) makes that a debounce.
+    if (inEditor) {
+      repaintTimer = setTimeout(() => {
+        id = requestAnimationFrame(paint);
+      }, 200);
+    } else {
+      id = requestAnimationFrame(paint);
+    }
+    return () => {
+      cancelAnimationFrame(id);
+      clearTimeout(repaintTimer);
+      observer?.disconnect();
+    };
   }, [anchoredThreads, content, mode, rawMode, compareVersion, isNew, commentMode]);
 
   // Paint the active thread's range brighter (doc ⇄ rail emphasis).
@@ -721,12 +789,24 @@ export function DocumentEditor({
         (t) => t.anchor?.quote === anchor.quote && t.anchor?.before === anchor.before,
       );
       if (hit) setActiveThreadId(hit.id);
+      // A resolved thread has no painted range by design — selecting it in
+      // the rail is the whole action, not a "text isn't here" miss.
+      if (hit?.status === "resolved") return;
       const range = anchorRangesRef.current.find((r) => r.id === hit?.id)?.range;
       if (range) {
         range.startContainer.parentElement?.scrollIntoView({
           behavior: "smooth",
           block: "center",
         });
+        return;
+      }
+      // Raw markdown paints its spans as <mark>s in the textarea's mirror.
+      if (rawMode) {
+        const mark = hit
+          ? bodyRef.current?.querySelector(`mark[data-thread-id="${CSS.escape(hit.id)}"]`)
+          : null;
+        if (mark) mark.scrollIntoView({ behavior: "smooth", block: "center" });
+        else toast.message("That highlighted text isn't in the current version.");
         return;
       }
       // Not rendered yet (we're in the editor) — drop into comment mode and let
@@ -740,7 +820,7 @@ export function DocumentEditor({
       }
       toast.message("That highlighted text isn't in the current version.");
     },
-    [anchoredThreads, commentMode, mode, content],
+    [anchoredThreads, commentMode, mode, content, rawMode],
   );
 
   // Map a click inside the rendered doc onto an anchored thread (if the click
@@ -927,6 +1007,9 @@ export function DocumentEditor({
       ...(typeTableEnabled
         ? [{ value: "table", label: "Table", Icon: Table2, expects: "CSV — one header row, then data rows." }]
         : []),
+      ...(typeTaskEnabled
+        ? [{ value: "task", label: "Task", Icon: ListTodo, expects: "Markdown notes for a unit of work. Tasks skip review and carry an assignee, due date and priority on the board." }]
+        : []),
       ...(workflowPlaneEnabled
         ? [
           { value: "agent", label: "Agent", Icon: Bot, expects: "Markdown instructions an orchestrator runs; can carry a schedule." },
@@ -936,7 +1019,7 @@ export function DocumentEditor({
         : []),
     ];
     return all.filter((o) => o.value !== (nodeType ?? "document"));
-  }, [typeArtifactEnabled, typeTableEnabled, workflowPlaneEnabled, nodeType]);
+  }, [typeArtifactEnabled, typeTableEnabled, typeTaskEnabled, workflowPlaneEnabled, nodeType]);
   const handleTurnInto = async () => {
     if (!turnInto || isNew) return;
     setTurningInto(true);
@@ -1203,6 +1286,36 @@ export function DocumentEditor({
   // dblclick opts in (drafts only — a locked doc can't enter edit).
   const fieldsDisabled = isLocked || mode !== "edit";
 
+  // Which surface shows the body. Each switch remounts it, so the place the
+  // reader was at is carried across (lib/view-place.ts).
+  const surfaceKey = loading
+    ? "loading"
+    : compareVersion != null
+      ? "diff"
+      : isSourceOnly && mode === "edit" && !commentMode
+        ? "source"
+        : rawMode
+          ? "raw"
+          : isArtifactDraft
+            ? "artifact-draft"
+            : (commentMode || mode === "view") && (isSourceOnly || !looksLikeHtml(content))
+              ? "view"
+              : "editor";
+  useKeepPlace({
+    surfaceKey,
+    resetKey: `${nestId}/${nodeId}`,
+    getSurface: () => {
+      const el = bodyRef.current?.querySelector<HTMLElement>("[data-place-surface]");
+      // The editor's toolbar is sticky at the top — read the text, not it.
+      return el?.querySelector<HTMLElement>(".ProseMirror") ?? el ?? null;
+    },
+  });
+  // Comment highlights in the raw markdown, mapped from rendered-text quotes.
+  const rawRanges = useMemo(
+    () => (rawMode ? sourceRangesForAnchors(content, paintableThreads(anchoredThreads)) : []),
+    [rawMode, content, anchoredThreads],
+  );
+
   // Declared before isDirty so the save gate below can read it.
   const hasSaveableFields = useMemo(
     () => title.trim().length > 0 && content.trim().length > 0 && !saving,
@@ -1301,12 +1414,8 @@ export function DocumentEditor({
       window.removeEventListener("popstate", onPop);
       // Left by some other route (saved, discarded, navigated in-app): drop the
       // spare entries so Back still means Back.
-      if (
-        !leavingRef.current &&
-        parkedRef.current > 0 &&
-        (window.history.state as any)?.cnLeaveGuard
-      ) {
-        window.history.go(-parkedRef.current);
+      if (!leavingRef.current && parkedRef.current > 0) {
+        dropParkedEntries(parkedRef.current);
       }
     };
   }, [isDirty, isReviewerOnly]);
@@ -1432,6 +1541,10 @@ export function DocumentEditor({
       const nextVersion =
         (res as any)?.version ?? (res as any)?.node?.version;
       if (typeof nextVersion === "number") setBaseVersion(nextVersion);
+      // A save can move the status (a published prime doc lands as a draft), and
+      // Submit/Discard key off it. Own-pending edits keep the open review's status.
+      const nextStatus = (res as any)?.node?.status;
+      if (outcome !== "pending" && typeof nextStatus === "string") setStatus(nextStatus);
       // The top bar's "Edited …" reads this; the save just moved it.
       setUpdatedAt((res as any)?.node?.updated_at ?? new Date().toISOString());
       savedId = nodeId;
@@ -1484,8 +1597,13 @@ export function DocumentEditor({
             ? `"${title.trim() || "Untitled"}" published — it's now live and available for use.`
             : `"${title.trim() || "Untitled"}" saved as a draft.`,
         );
-      } else if (!isNew && !noop) {
-        toast.success(`"${title.trim() || "Untitled"}" saved.`);
+      } else if (!isNew && !noop && outcome !== "pending") {
+        // Pending edits auto-save; the action bar says so instead of a toast each time.
+        toast.success(
+          outcome === "publish"
+            ? `"${title.trim() || "Untitled"}" published — it's live now.`
+            : `"${title.trim() || "Untitled"}" saved as a draft — submit it for review when ready.`,
+        );
       }
       // The document is clean now, but React has not re-rendered yet: the
       // app-level nav guard registered by the effect below still closes over
@@ -1575,8 +1693,12 @@ export function DocumentEditor({
 
   const handleSubmitForReview = async (note: string, priority: string) => {
     if (isNew) return;
+    // Submit what's on screen, not the last save.
+    const saveFirst = isDirty;
+    if (saveFirst) await persistCurrent();
     await api.submitForReview(nestId, nodeId, note, priority);
     setShowSubmitModal(false);
+    toast.success(saveFirst ? "Saved and submitted for review." : "Submitted for review.");
     // Reload → status flips to pending_review, button hides.
     await loadNode();
   };
@@ -1686,9 +1808,36 @@ export function DocumentEditor({
     if (isLocked && mode === "edit") setMode("view");
   }, [isLocked, mode]);
 
-  // Submit-for-Review only on existing drafts with stewardship enabled.
+  // What Save will do — publish, draft, or update the author's own open review.
+  const outcome = saveOutcome({
+    isNew,
+    isOwnPendingReview,
+    stewardshipEnabled,
+    prime: effectivePrime,
+    primeOnlyReview: !!nestSettings.data?.prime_only_review,
+    creatorIsReviewer: !!nestSettings.data?.creator_is_reviewer,
+    allowSelfApprove,
+    ownerOrAdmin: canFlagPrime,
+    // The stored type — mirrors the server, which gates on the type a node
+    // had before the edit, so turning a document into a task still reviews.
+    isTask: nodeType === "task",
+  });
+
+  // Submit saves unsaved edits first, so offer it only where that save drafts —
+  // a save that publishes would put the doc live before the submit ran.
   const canSubmitForReview =
-    !isNew && stewardshipEnabled && status === "draft" && !isReviewerOnly;
+    !isNew &&
+    stewardshipEnabled &&
+    !isReviewerOnly &&
+    (isDirty ? outcome === "draft" : status === "draft");
+
+  // Own pending submission: edits save themselves to it once typing pauses.
+  useEffect(() => {
+    if (outcome !== "pending" || mode !== "edit" || !canSave) return;
+    const t = setTimeout(() => void runSave(() => {}), 3000);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [outcome, mode, canSave, title, content, tags, schedule]);
 
   const handleDocLinkInsert = (node: { id: string; title: string }) => {
     editorRef.current?.insertWikiLink(node.id, node.title);
@@ -1862,6 +2011,9 @@ export function DocumentEditor({
   // behind it is a dead button.
   const moreActionDialogs = (
     <>
+      {accessOffer && (
+        <RequestAccessDialog offer={accessOffer} onClose={() => setAccessOffer(null)} />
+      )}
       {!isNew && (
         <ReasonDialog
           open={showDeletionModal}
@@ -2385,6 +2537,29 @@ export function DocumentEditor({
                 >
                   <Pencil className="h-4 w-4 mr-1.5" />
                   Edit
+                </Button>
+              )}
+              {/* A viewer gets the way to ask instead of no Edit at all. Not on
+                  an archived nest (nobody edits it) or for a signed-out reader
+                  (nobody to grant it to). */}
+              {isViewOnly && !isArchived && !isNew && !isPdfNode && !!adminStatus?.me && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() =>
+                    setAccessOffer({
+                      nestId,
+                      target: { type: "node", id: nodeId },
+                      level: "write",
+                      label: title.trim() || undefined,
+                    })
+                  }
+                  data-testid="document-editor-request-access"
+                  title="Ask the nest owner or an admin for edit access to this document"
+                >
+                  <Pencil className="h-4 w-4 mr-1.5" />
+                  Request edit access
                 </Button>
               )}
             </>
@@ -2943,6 +3118,14 @@ export function DocumentEditor({
                                   },
                                 ]
                                 : []),
+                              ...(typeTaskEnabled
+                                ? [
+                                  {
+                                    value: "task", label: "Task", Icon: ListTodo,
+                                    on: "bg-indigo-500/15 text-indigo-700 dark:text-indigo-300"
+                                  },
+                                ]
+                                : []),
                               ...(workflowPlaneEnabled
                                 ? [
                                   {
@@ -3348,8 +3531,11 @@ export function DocumentEditor({
                               Rich editor
                             </Button>
                           </div>
-                          <textarea
+                          <HighlightedTextarea
                             value={content}
+                            ranges={rawRanges}
+                            activeId={activeThreadId}
+                            onRangeClick={setActiveThreadId}
                             onChange={(e) => {
                               if (fieldsDisabled) return;
                               setContent(e.target.value);
@@ -3359,7 +3545,6 @@ export function DocumentEditor({
                             readOnly={fieldsDisabled}
                             spellCheck={false}
                             placeholder="# Raw markdown"
-                            className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
                             data-testid="document-editor-raw-markdown"
                           />
                         </div>
@@ -3409,6 +3594,7 @@ export function DocumentEditor({
                           onMouseMove={isNew ? undefined : onDocMouseMove}
                           className="min-h-[300px] cursor-text"
                           data-testid="document-view-surface"
+                          data-place-surface
                         >
                           {effectiveType === "table" && !isNew ? (
                             <div className="p-4">
@@ -3429,54 +3615,58 @@ export function DocumentEditor({
                           )}
                         </div>
                       ) : (
-                        <MarkdownEditor
-                          ref={editorRef}
-                          content={content}
-                          onChange={(next) => {
-                            setContent(next);
-                            // TipTap onUpdate fires only on real user input here.
-                            setTouched(true);
-                          }}
-                          onSave={handleSave}
-                          onBlur={saveOnBlur}
-                          nestId={nestId}
-                          currentNodeId={isNew ? undefined : nodeId}
-                          editable={!fieldsDisabled}
-                          onRequestDocLink={() => setShowDocPicker(true)}
-                          onUploadImage={async (file) => {
-                            const { url } = await api.uploadAsset(nestId, file);
-                            return url;
-                          }}
-                          onWikiLinkClick={handleWikiLinkClick}
-                          placeholder="Start writing, or select text to format it…"
-                          // Nobody gets the caret on open: a new document focuses
-                          // Title (see the effect below), an existing one reads as
-                          // a page until you click into it — "end" would also
-                          // scroll a long document to its last line on arrival.
-                          autofocus={false}
-                          variant="page"
-                          toolbarHidden={!pageActive}
-                          toolbarEnd={
-                            <>
-                              {/* Rich ↔ raw markdown at the editor's own right end, where the
-                                  writer already is (it used to hide in ⋮). */}
-                              {!isSourceOnly && compareVersion == null && !isArtifactDraft && (
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-7 px-2 text-xs"
-                                  onClick={() => setRawMode(true)}
-                                  title="Edit the raw markdown"
-                                  data-testid="document-editor-markdown-toggle"
-                                >
-                                  <Code2 className="h-3.5 w-3.5 sm:mr-1.5" />
-                                  <span className="hidden sm:inline">Markdown</span>
-                                </Button>
-                              )}
-                            </>
-                          }
-                        />
+                        // Clicking a painted quote while editing selects its
+                        // thread (the click still places the caret).
+                        <div ref={editorSurfaceRef} data-place-surface onClick={onDocClick}>
+                          <MarkdownEditor
+                            ref={editorRef}
+                            content={content}
+                            onChange={(next) => {
+                              setContent(next);
+                              // TipTap onUpdate fires only on real user input here.
+                              setTouched(true);
+                            }}
+                            onSave={handleSave}
+                            onBlur={saveOnBlur}
+                            nestId={nestId}
+                            currentNodeId={isNew ? undefined : nodeId}
+                            editable={!fieldsDisabled}
+                            onRequestDocLink={() => setShowDocPicker(true)}
+                            onUploadImage={async (file) => {
+                              const { url } = await api.uploadAsset(nestId, file);
+                              return url;
+                            }}
+                            onWikiLinkClick={handleWikiLinkClick}
+                            placeholder="Start writing, or select text to format it…"
+                            // Nobody gets the caret on open: a new document focuses
+                            // Title (see the effect below), an existing one reads as
+                            // a page until you click into it — "end" would also
+                            // scroll a long document to its last line on arrival.
+                            autofocus={false}
+                            variant="page"
+                            toolbarHidden={!pageActive}
+                            toolbarEnd={
+                              <>
+                                {/* Rich ↔ raw markdown at the editor's own right end, where the
+                                    writer already is (it used to hide in ⋮). */}
+                                {!isSourceOnly && compareVersion == null && !isArtifactDraft && (
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 px-2 text-xs"
+                                    onClick={() => setRawMode(true)}
+                                    title="Edit the raw markdown"
+                                    data-testid="document-editor-markdown-toggle"
+                                  >
+                                    <Code2 className="h-3.5 w-3.5 sm:mr-1.5" />
+                                    <span className="hidden sm:inline">Markdown</span>
+                                  </Button>
+                                )}
+                              </>
+                            }
+                          />
+                        </div>
                       )}
                     </div>
                   </div>
@@ -3632,19 +3822,45 @@ export function DocumentEditor({
                       )}
                     {showSubmit && (
                       <Button
-                        variant="outline"
+                        variant={outcome === "draft" ? "default" : "outline"}
                         size="sm"
                         className="h-8"
                         onClick={() => setShowSubmitModal(true)}
                         data-testid="document-editor-submit"
-                        title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
+                        title="Saves your changes and sends them to a steward for approval."
                       >
                         <Send className="h-4 w-4 sm:mr-1.5" />
                         <span className="hidden sm:inline">Submit for review</span>
                       </Button>
                     )}
-                    {canWrite && (
+                    {/* Own pending submission auto-saves — a status line, not a Save button. */}
+                    {canWrite && outcome === "pending" && (
+                      <span className="text-xs text-muted-foreground" data-testid="document-editor-autosave">
+                        {saving
+                          ? "Saving…"
+                          : isDirty
+                            ? "Unsaved changes"
+                            : justSaved
+                              ? "Changes saved to your pending submission"
+                              : "Edits save to your pending submission"}
+                      </span>
+                    )}
+                    {canWrite && outcome !== "pending" && (
+                      // Tooltip on a wrapper: a disabled Button takes no pointer events.
+                      <span
+                        className="inline-flex"
+                        title={
+                          !canSave
+                            ? isDirty || isNew
+                              ? "Add a title and content first."
+                              : "No unsaved changes."
+                            : outcome === "publish"
+                              ? "Saves and publishes — it goes live now."
+                              : "Saves your changes as a draft. Doesn't publish or submit for review."
+                        }
+                      >
                       <Button
+                        variant={showSubmit && outcome === "draft" ? "outline" : "default"}
                         size="sm"
                         className="h-8"
                         // Keep focus in the editor field so clicking Save doesn't
@@ -3665,11 +3881,12 @@ export function DocumentEditor({
                         {saving
                           ? "Saving…"
                           : justSaved && !isDirty
-                            ? "Saved"
-                            : isNew
-                              ? "Create"
-                              : "Save"}
+                            ? outcome === "publish" ? "Published" : "Saved"
+                            : outcome === "publish"
+                              ? "Publish"
+                              : "Save draft"}
                       </Button>
+                      </span>
                     )}
                   </>
                 );
@@ -3721,6 +3938,7 @@ export function DocumentEditor({
               onClearAnchor={() => setPendingAnchor(null)}
               onFocusAnchor={focusAnchor}
               onThreadsChange={setAnchoredThreads}
+              outdatedThreadIds={outdatedIds}
               activeThreadId={activeThreadId}
               commentMode={commentMode}
               onSetCommentMode={(on) => {

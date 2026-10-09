@@ -54,12 +54,16 @@
   border-radius: 2px;
 }
 
-/* Painted comment-anchor highlights (CSS Custom Highlight API). */
-::highlight(comment-anchor) {
+/* Painted comment-anchor highlights (CSS Custom Highlight API). The artifact
+   viewer has its own names: it renders inside DocumentEditor, which clears
+   comment-anchor whenever it isn't painting. */
+::highlight(comment-anchor),
+::highlight(artifact-anchor) {
   background-color: rgb(251 191 36 / 0.30);
   border-radius: 2px;
 }
-::highlight(comment-anchor-active) {
+::highlight(comment-anchor-active),
+::highlight(artifact-anchor-active) {
   background-color: rgb(251 191 36 / 0.65);
 }
 

@@ -22,9 +22,36 @@ export interface BoardNode {
   type: string;
   tags: string[];
   status: string;
+  /** Board fields + timestamps, from the node listing (src/nodes/task-fields.ts). */
+  assignee?: string;
+  assigned_at?: string;
+  due?: string;
+  priority?: string;
+  parent?: string;
+  moved_at?: string;
+  completed_at?: string;
+  created_at?: string;
+  updated_at?: string;
+  /** Document-scope prime flag; undefined = inherit from tags. */
+  prime?: boolean;
 }
 
-export type DimensionKind = "folder" | "status" | "tag";
+export type DimensionKind = "folder" | "status" | "tag" | "assignee" | "priority";
+
+/** Field-valued dimensions: a column is a value of a board field, and a drag
+ *  between columns sets that field (Linear's group-by-assignee/priority). */
+export function isFieldDimension(d: DimensionKind): d is "assignee" | "priority" {
+  return d === "assignee" || d === "priority";
+}
+
+/** Linear's order, most urgent first. */
+export const PRIORITY_ORDER = ["urgent", "high", "medium", "low"];
+const PRIORITY_COLUMN_LABELS: Record<string, string> = {
+  urgent: "Urgent",
+  high: "High",
+  medium: "Medium",
+  low: "Low",
+};
 
 /**
  * The lifecycle states the server actually produces, in left→right order.
@@ -176,6 +203,16 @@ export interface BoardSettings {
   dimension: DimensionKind;
   tagNamespace?: string;
   layouts: Record<string, ColumnLayout>;
+  /** Show only `task` nodes — a project board rather than a nest map. */
+  tasksOnly?: boolean;
+  /** Show only cards carrying every one of these tags (bare, no "#"). */
+  filterTags?: string[];
+  /** Saved boards only: per-column card order, keyed by board-rank's rankKey. */
+  ranks?: Record<string, string[]>;
+  /** Sub-group columns into lanes. */
+  swimlane?: SwimlaneKind;
+  /** Hide cards completed more than this many days ago. */
+  hideDoneAfterDays?: number;
 }
 
 /**
@@ -219,7 +256,11 @@ export function resolveConfig(s: BoardSettings): BoardConfig {
     // Status defaults to the lifecycle order until the user reorders it.
     columnOrder:
       layout.columnOrder ??
-      (s.dimension === "status" ? STATUS_ORDER : undefined),
+      (s.dimension === "status"
+        ? STATUS_ORDER
+        : s.dimension === "priority"
+          ? PRIORITY_ORDER
+          : undefined),
     hiddenColumns: layout.hiddenColumns,
     // The tag board is user-curatable, but starts auto-populated: every
     // present tag is a column, exactly like folder/status, until the user
@@ -242,6 +283,10 @@ export function cardColumnKeys(node: BoardNode, config: BoardConfig): string[] {
       return [folderOf(node.id)];
     case "status":
       return [node.status || UNCATEGORIZED];
+    case "assignee":
+      return [node.assignee ? node.assignee.toLowerCase() : UNCATEGORIZED];
+    case "priority":
+      return [node.priority || UNCATEGORIZED];
     case "tag": {
       const ns = namespaceOf(config);
       const tags = node.tags.map(stripHash);
@@ -289,8 +334,16 @@ function shownKeys(
   return keys.length > 0 ? keys : [UNCATEGORIZED];
 }
 
+/** The catch-all column's name, which on a field board is a real value. */
+function uncategorizedLabel(d: DimensionKind): string {
+  if (d === "assignee") return "Unassigned";
+  if (d === "priority") return "No priority";
+  return "Uncategorized";
+}
+
 function labelFor(key: string, config: BoardConfig): string {
-  if (key === UNCATEGORIZED) return "Uncategorized";
+  if (key === UNCATEGORIZED) return uncategorizedLabel(config.dimension);
+  if (config.dimension === "priority") return PRIORITY_COLUMN_LABELS[key] ?? key;
   if (key === "" && config.dimension === "folder") return "(root)";
   // A status the server grew but this map hasn't: spaces beat raw snake_case,
   // since the heading is rendered with CSS `capitalize`.
@@ -308,11 +361,12 @@ function labelFor(key: string, config: BoardConfig): string {
  * have no such chip to match, so they keep the capitalize styling.
  */
 export function capitalizeColumnHeader(dimension: DimensionKind): boolean {
-  return dimension !== "tag";
+  // Assignee columns are email addresses — capitalizing them misspells them.
+  return dimension !== "tag" && dimension !== "assignee";
 }
 
 function titleFor(key: string, config: BoardConfig): string {
-  if (key === UNCATEGORIZED) return "Uncategorized";
+  if (key === UNCATEGORIZED) return uncategorizedLabel(config.dimension);
   if (key === "" && config.dimension === "folder") return "(root)";
   return key;
 }
@@ -347,7 +401,9 @@ export function buildColumns(
   for (const n of nodes) {
     for (const key of shownKeys(n, config, hidden)) present.add(key);
   }
-  const needUncat = present.has(UNCATEGORIZED);
+  // On a field board "Unassigned"/"No priority" is a value you drag TO, so it
+  // stays as a drop target even when nothing is in it.
+  const needUncat = present.has(UNCATEGORIZED) || isFieldDimension(config.dimension);
   present.delete(UNCATEGORIZED);
 
   const ordered: string[] = [];
@@ -394,6 +450,7 @@ export function groupByColumn(
 export type MovePlan =
   | { kind: "move-folder"; folder: string }
   | { kind: "retag"; tags: string[] }
+  | { kind: "set-fields"; fields: { assignee?: string | null; priority?: string | null } }
   | { kind: "unsupported"; reason: string };
 
 /**
@@ -452,5 +509,98 @@ export function planMove(
         reason:
           "Status changes go through the review workflow, not the board — open the doc and submit for review.",
       };
+    case "assignee":
+    case "priority": {
+      if (cardColumnKey(node, config) === targetKey) {
+        return { kind: "unsupported", reason: "Already in this column." };
+      }
+      const value = targetKey === UNCATEGORIZED ? null : targetKey;
+      return { kind: "set-fields", fields: { [config.dimension]: value } };
+    }
   }
+}
+
+/**
+ * Where a card created from a column's "+ Add task" lands, so it shows up in
+ * the column it was added from: the column's tag (tag board) or folder
+ * (folder board). Null on the status board — a new node's status is decided
+ * by governance, not by which column you clicked.
+ */
+export function newCardPlacement(
+  columnKey: string,
+  config: BoardConfig,
+): {
+  tags?: string[];
+  folder?: string;
+  assignee?: string;
+  priority?: string;
+} | null {
+  switch (config.dimension) {
+    case "assignee":
+      return columnKey === UNCATEGORIZED ? {} : { assignee: columnKey };
+    case "priority":
+      return columnKey === UNCATEGORIZED ? {} : { priority: columnKey };
+    case "folder":
+      return columnKey === UNCATEGORIZED ? {} : { folder: columnKey };
+    case "tag": {
+      if (columnKey === UNCATEGORIZED) return { tags: [] };
+      const ns = namespaceOf(config);
+      return { tags: [withHash(ns ? `${ns}:${columnKey}` : columnKey)] };
+    }
+    case "status":
+      return null;
+  }
+}
+
+// ── Swimlanes ───────────────────────────────────────────────────────────────
+
+export type SwimlaneKind = "assignee" | "priority" | "parent";
+
+/** The lane a card rides in. */
+export function laneKeyOf(node: BoardNode, lane: SwimlaneKind): string {
+  if (lane === "assignee") return node.assignee ? node.assignee.toLowerCase() : UNCATEGORIZED;
+  if (lane === "priority") return node.priority || UNCATEGORIZED;
+  return node.parent || UNCATEGORIZED;
+}
+
+export interface Lane {
+  key: string;
+  label: string;
+  nodes: BoardNode[];
+}
+
+/**
+ * Cards split into lanes, in a stable order: priority lanes most urgent first;
+ * assignee and parent lanes by label; the "none" lane always last. Empty lanes
+ * are dropped — a lane exists because something is in it.
+ */
+export function buildLanes(
+  nodes: BoardNode[],
+  lane: SwimlaneKind,
+  labelOf: (key: string) => string,
+): Lane[] {
+  const groups = new Map<string, BoardNode[]>();
+  for (const n of nodes) {
+    const k = laneKeyOf(n, lane);
+    const list = groups.get(k) ?? [];
+    list.push(n);
+    groups.set(k, list);
+  }
+  const keys = [...groups.keys()].filter((k) => k !== UNCATEGORIZED);
+  if (lane === "priority") {
+    keys.sort((a, b) => PRIORITY_ORDER.indexOf(a) - PRIORITY_ORDER.indexOf(b));
+  } else {
+    keys.sort((a, b) => labelOf(a).localeCompare(labelOf(b)));
+  }
+  if (groups.has(UNCATEGORIZED)) keys.push(UNCATEGORIZED);
+  return keys.map((k) => ({ key: k, label: labelOf(k), nodes: groups.get(k)! }));
+}
+
+/** The field write that moves a card into a lane. */
+export function laneFields(
+  lane: SwimlaneKind,
+  laneKey: string,
+): { assignee?: string | null; priority?: string | null; parent?: string | null } {
+  const v = laneKey === UNCATEGORIZED ? null : laneKey;
+  return { [lane]: v };
 }
