@@ -984,3 +984,91 @@ describe("MCP OAuth — hardening", () => {
     expect(left.map((r) => r.client_id)).not.toContain(idle);
   });
 });
+
+// ─── Connected apps ───────────────────────────────────────────────────────
+
+describe("MCP OAuth — connected apps", () => {
+  async function grantFor(app: any, email: string, scope = "nests:read offline_access") {
+    const user = await registerUser(app, email);
+    const clientId = await register(app);
+    const cookie = await signIn(app, email, "testpass");
+    const p = pkce();
+    const code = await getCode(app, clientId, cookie, p.challenge, scope);
+    const tok = await (await exchange(app, clientId, code, p.verifier)).json();
+    return { user, clientId, cookie, tok };
+  }
+  const list = async (app: any, cookie: string) =>
+    (await (await app.request("/oauth/connected", { headers: { Cookie: cookie } })).json()).apps;
+  const disconnect = (app: any, cookie: string, clientId: string) =>
+    app.request(`/oauth/connected/${clientId}`, { method: "DELETE", headers: { Cookie: cookie } });
+
+  it("lists your apps, and disconnecting one kills its tokens at once", async () => {
+    enable();
+    const app = await createTestApp("key");
+    const { clientId, cookie, tok } = await grantFor(app, "alice@example.com");
+    const apps = await list(app, cookie);
+    expect(apps).toHaveLength(1);
+    expect(apps[0]).toMatchObject({
+      clientId,
+      clientName: "Claude",
+      scopes: ["nests:read", "offline_access"],
+      redirectOrigin: "https://claude.ai",
+    });
+
+    expect((await disconnect(app, cookie, clientId)).status).toBe(200);
+    expect(await list(app, cookie)).toEqual([]);
+    const idx = await app.request("/index", { headers: { Authorization: `Bearer ${tok.access_token}` } });
+    expect(idx.status).toBe(401);
+    const refresh = await app.request("/oauth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form({ grant_type: "refresh_token", client_id: clientId, refresh_token: tok.refresh_token }),
+    });
+    expect(refresh.status).toBe(400);
+  });
+
+  it("only ever shows or disconnects your own apps", async () => {
+    enable();
+    const app = await createTestApp("key");
+    const alice = await grantFor(app, "alice@example.com");
+    const bobCookie = await (async () => {
+      await registerUser(app, "bob@example.com");
+      return signIn(app, "bob@example.com", "testpass");
+    })();
+    expect(await list(app, bobCookie)).toEqual([]);
+    // Bob naming Alice's client revokes nothing.
+    expect((await disconnect(app, bobCookie, alice.clientId)).status).toBe(404);
+    const idx = await app.request("/index", { headers: { Authorization: `Bearer ${alice.tok.access_token}` } });
+    expect(idx.status).toBe(200);
+  });
+
+  it("needs a session or user-level key, and refuses nest-scoped keys and OAuth tokens", async () => {
+    enable();
+    const app = await createTestApp("key");
+    const { user, tok } = await grantFor(app, "alice@example.com");
+    expect((await app.request("/oauth/connected")).status).toBe(401);
+    // An OAuth token cannot manage connected apps.
+    expect(
+      (await app.request("/oauth/connected", { headers: { Authorization: `Bearer ${tok.access_token}` } })).status,
+    ).toBe(401);
+    // A user-level key can.
+    expect((await app.request("/oauth/connected", { headers: { Authorization: `Bearer ${user.apiKey}` } })).status).toBe(200);
+    // A key scoped to one nest cannot.
+    const { data: nest } = await jsonRequest(app, "POST", "/nests", { name: "N" }, user.apiKey);
+    const { data: scoped } = await jsonRequest(app, "POST", "/auth/keys", { label: "scoped", nest_id: nest.nest.id }, user.apiKey);
+    expect(scoped.api_key).toBeTruthy();
+    expect(
+      (await app.request("/oauth/connected", { headers: { Authorization: `Bearer ${scoped.api_key}` } })).status,
+    ).toBe(403);
+  });
+
+  it("leaves dead grants off the list", async () => {
+    enable();
+    const app = await createTestApp("key");
+    const { cookie } = await grantFor(app, "alice@example.com", "nests:read");
+    expect(await list(app, cookie)).toHaveLength(1);
+    const { getDb } = await import("../src/db/client.js");
+    await getDb().run("UPDATE oauth_tokens SET expires_at = '2000-01-01T00:00:00.000Z'");
+    expect(await list(app, cookie)).toEqual([]);
+  });
+});

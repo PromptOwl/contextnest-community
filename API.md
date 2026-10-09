@@ -63,6 +63,8 @@ Flow:
 | POST | `/oauth/authorize/decision` | The consent form target. Re-validates the client and redirect, and requires a CSRF token that binds the client, redirect, scope, state, challenge and resource the page showed — a changed field is refused with `403`. |
 | POST | `/oauth/token` | `application/x-www-form-urlencoded`. Grants: `authorization_code`, `refresh_token`. Client, redirect and PKCE verifier (43–128 characters) are checked before a code is spent. A code redeemed twice by a presenter with the right verifier revokes the whole grant. Refresh tokens rotate; presenting a replaced one revokes the grant. Responses carry `Cache-Control: no-store`. Rate-limited per IP. |
 | POST | `/oauth/revoke` | RFC 7009. Always `200`, including for an unknown token, so it is not an oracle. |
+| GET | `/oauth/connected` | Your connected apps: one entry per client with a usable token — `clientId`, `clientName`, `scopes`, `redirectOrigin`, `connectedAt`, `lastUsedAt`. Session or user-level key; a nest-scoped key gets `403`. |
+| DELETE | `/oauth/connected/:clientId` | Disconnect one app: revokes every token it holds for you, at once. `404` when you have no live grant for that client. Same auth as above. |
 
 An unauthenticated request to `/mcp` is answered with `401` and `WWW-Authenticate: Bearer resource_metadata="..." scope="nests:read"`, which is what starts the flow. An expired or revoked OAuth access token on `/mcp` or `/index` gets `401` with `WWW-Authenticate: Bearer error="invalid_token" resource_metadata="..."`, so the client refreshes or re-authorizes. Other bad credentials get the ordinary rejection.
 

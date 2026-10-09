@@ -244,6 +244,7 @@ export default function App() {
     isAdmin,
     workflowPlaneEnabled,
     subagentRunsEnabled,
+    mcpOauthEnabled,
     loading,
     error,
     logout,
@@ -797,7 +798,7 @@ export default function App() {
   const crumbs = useMemo<Crumb[]>(() => {
     const home: Crumb = { label: "Home", go: () => setView({ page: "dashboard" }) };
     if (view.page === "dashboard") {
-      const page = visibleAppPage(view.tab, { isAdmin });
+      const page = visibleAppPage(view.tab, { isAdmin, mcpOauthEnabled });
       if (pageTail.length) return [home, ...pageTail];
       return page.id === DEFAULT_PAGE_ID ? [{ label: page.label }] : [home, { label: page.label }];
     }
@@ -825,7 +826,7 @@ export default function App() {
     }
     if (view.page === "docs") return [home, { label: "Docs" }];
     return pageTail.length ? [home, ...pageTail] : [];
-  }, [view, setView, pageTail]);
+  }, [view, setView, pageTail, isAdmin, mcpOauthEnabled]);
 
   // What a dashboard page can do to the app. Pages read it with useAppNav()
   // instead of props, so App renders every page the same way.
@@ -1214,7 +1215,7 @@ export default function App() {
                       : setDocSidebarCollapsed(true)
                   }
                   onOpenDashboard={() => setView({ page: "dashboard" })}
-                  dashboardTab={cur.page === "dashboard" ? visibleAppPage(cur.tab, { isAdmin }).id : null}
+                  dashboardTab={cur.page === "dashboard" ? visibleAppPage(cur.tab, { isAdmin, mcpOauthEnabled }).id : null}
                   onOpenDashboardTab={(tab) => setView({ page: "dashboard", tab })}
                   onOpenNest={(t) =>
                     setView({
@@ -1574,7 +1575,7 @@ export default function App() {
         {view.page === "dashboard" && (() => {
           // A gated page (admin-only) reached by URL falls back to the default
           // page — the server would refuse it anyway; this keeps the shell whole.
-          const Page = visibleAppPage(view.tab, { isAdmin }).Component;
+          const Page = visibleAppPage(view.tab, { isAdmin, mcpOauthEnabled }).Component;
           return (
             <AppNavProvider value={appNav}>
               <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>

@@ -17,7 +17,7 @@ describe("dashboard page registry", () => {
     const ids = appPages.map((p) => p.id);
     expect(ids).toEqual([
       "nests", "my-work", "my-drafts",
-      "teams", "api-keys",
+      "teams", "api-keys", "connected-apps",
       "teammates", "settings", "trace",
       "guide", "account",
     ]);
@@ -69,5 +69,16 @@ describe("dashboard rail groups", () => {
     expect(visibleAppPage("settings", { isAdmin: true }).id).toBe("settings");
     expect(visibleAppPage("settings", { isAdmin: false }).id).toBe(DEFAULT_PAGE_ID);
     expect(visibleAppPage("teams", { isAdmin: false }).id).toBe("teams");
+  });
+
+  it("lists Connected apps only while MCP agent sign-in is on", () => {
+    const ids = (caps: Parameters<typeof appRail>[0]) =>
+      appRail(caps).groups.flatMap((g) => g.pages).map((p) => p.id);
+    expect(ids({ isAdmin: false })).not.toContain("connected-apps");
+    expect(ids({ isAdmin: false, mcpOauthEnabled: true })).toContain("connected-apps");
+    expect(visibleAppPage("connected-apps", { isAdmin: false }).id).toBe(DEFAULT_PAGE_ID);
+    expect(visibleAppPage("connected-apps", { isAdmin: false, mcpOauthEnabled: true }).id).toBe(
+      "connected-apps",
+    );
   });
 });

@@ -762,6 +762,27 @@ export async function deleteApiKey(keyId: string) {
   });
 }
 
+// ─── Connected apps (MCP OAuth grants) ─────────────────────────────────
+
+export interface ConnectedApp {
+  clientId: string;
+  clientName: string;
+  scopes: string[];
+  redirectOrigin: string | null;
+  connectedAt: string;
+  lastUsedAt: string | null;
+}
+
+export async function listConnectedApps() {
+  return request<{ apps: ConnectedApp[] }>("/oauth/connected");
+}
+
+export async function disconnectApp(clientId: string) {
+  return request<{ revoked: boolean }>(`/oauth/connected/${encodeURIComponent(clientId)}`, {
+    method: "DELETE",
+  });
+}
+
 // ─── Nest settings ─────────────────────────────────────────────────────
 
 export interface NestSettings {

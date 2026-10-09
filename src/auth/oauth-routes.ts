@@ -23,6 +23,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
 import { config } from "../config.js";
 import { getDb } from "../db/client.js";
 import { resolveSession, getSessionIdFromRequest } from "./sessions.js";
+import { authMiddleware, type AuthEnv } from "./middleware.js";
 import { tryConsume } from "../shared/rate-limit.js";
 import { clientIp } from "../shared/request-ip.js";
 import {
@@ -39,11 +40,13 @@ import {
   issueTokens,
   rotateRefreshToken,
   revokeByToken,
+  revokeGrant,
+  listConnectedApps,
   ACCESS_TTL_SECONDS,
   type OAuthClient,
 } from "./oauth-store.js";
 
-export const oauthRoutes = new Hono();
+export const oauthRoutes = new Hono<AuthEnv>();
 
 const GRANTABLE = new Set([SCOPE_READ, SCOPE_WRITE, SCOPE_OFFLINE]);
 
@@ -466,7 +469,7 @@ oauthRoutes.get("/authorize", async (c, next) => {
 <p class="sub">Signed in as ${esc(email?.email ?? "you")}. It will be able to:</p>
 <ul>${scopeList}</ul>
 <p class="dest">Your approval will be sent to <strong>${esc(destOrigin)}</strong>.</p>
-<p class="sub">Anyone can register a client under any name, so check that address is the app you meant. It sees exactly what you can see — nothing more, and you can disconnect it at any time.</p>
+<p class="sub">Anyone can register a client under any name, so check that address is the app you meant. It sees exactly what you can see — nothing more. Disconnect it at any time under <strong>Connected apps</strong>.</p>
 <form method="POST" action="/oauth/authorize/decision">
   ${hidden}
   <div class="row">
@@ -643,4 +646,37 @@ oauthRoutes.post("/revoke", async (c) => {
   // RFC 7009: always 200, even for an unknown token — the endpoint must not
   // become an oracle for which tokens exist.
   return c.json({});
+});
+
+// ─── Connected apps (a person's own grants) ───────────────────────────────
+
+/**
+ * The Connected apps page: list your agents, and disconnect one. Signed-in
+ * session or a user-level key only. A key scoped to one nest is refused, the
+ * same as for API keys: it is narrower than the account it would manage.
+ * An OAuth access token never reaches here — authMiddleware does not accept
+ * one — so a connected app cannot list or disconnect its siblings.
+ */
+function refuseNestScoped(c: Context<AuthEnv>) {
+  if (!c.get("nestScope")) return null;
+  return c.json(
+    { error: "This API key is scoped to one nest and can't manage connected apps. Use the web app." },
+    403,
+  );
+}
+
+oauthRoutes.get("/connected", authMiddleware, async (c) => {
+  const refused = refuseNestScoped(c);
+  if (refused) return refused;
+  return c.json({ apps: await listConnectedApps(c.get("userId")) });
+});
+
+oauthRoutes.delete("/connected/:clientId", authMiddleware, async (c) => {
+  const refused = refuseNestScoped(c);
+  if (refused) return refused;
+  // Scoped to the caller's own tokens: someone else's client id revokes
+  // nothing and reads as not found.
+  const revoked = await revokeGrant(c.get("userId"), c.req.param("clientId"));
+  if (!revoked) return c.json({ error: "No connected app with that id." }, 404);
+  return c.json({ revoked: true });
 });

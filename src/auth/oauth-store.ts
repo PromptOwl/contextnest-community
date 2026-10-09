@@ -414,17 +414,21 @@ export async function revokeByToken(token: string): Promise<void> {
   );
 }
 
-/** Revoke every live grant a user holds for one client — the "disconnect" action. */
+/**
+ * Revoke every live grant a user holds for one client — the "disconnect"
+ * action. Returns how many tokens it revoked (0: nothing of theirs to revoke).
+ */
 export async function revokeGrant(
   userId: string,
   clientId: string,
-): Promise<void> {
+): Promise<number> {
   const db = getDb();
-  await db.run(
+  const res = await db.run(
     `UPDATE oauth_tokens SET revoked_at = ${nowExpr(db)}
       WHERE user_id = ? AND client_id = ? AND revoked_at IS NULL`,
     [userId, clientId],
   );
+  return res.changes;
 }
 
 /**
@@ -465,36 +469,68 @@ export async function revokeAllForUser(userId: string): Promise<void> {
 export interface ConnectedApp {
   clientId: string;
   clientName: string;
-  scope: string;
-  createdAt: string;
+  /** Union of the scopes across this client's live tokens. */
+  scopes: string[];
+  /** Where the client registered its approvals to go, so two apps with the
+   *  same self-chosen name can be told apart. */
+  redirectOrigin: string | null;
+  connectedAt: string;
   lastUsedAt: string | null;
 }
 
-/** What the user sees under "connected apps". Live grants only. */
+/**
+ * What the user sees under "Connected apps": one row per client with a token
+ * that can still be used — an unexpired access token, or a refresh token that
+ * can mint one.
+ */
 export async function listConnectedApps(
   userId: string,
 ): Promise<ConnectedApp[]> {
   const rows = (await getDb().all(
-    `SELECT client_id, client_name, scope,
-            MIN(created_at) AS created_at,
-            MAX(last_used_at) AS last_used_at
-       FROM oauth_tokens
-      WHERE user_id = ? AND revoked_at IS NULL
-      GROUP BY client_id, client_name, scope
-      ORDER BY created_at DESC`,
-    [userId],
+    `SELECT t.client_id, t.client_name, t.scope, t.created_at, t.last_used_at, c.redirect_uris
+       FROM oauth_tokens t LEFT JOIN oauth_clients c ON c.client_id = t.client_id
+      WHERE t.user_id = ? AND t.revoked_at IS NULL
+        AND COALESCE(t.refresh_expires_at, t.expires_at) > ?`,
+    [userId, iso(0)],
   )) as Array<{
     client_id: string;
     client_name: string;
     scope: string;
     created_at: string;
     last_used_at: string | null;
+    redirect_uris: string | null;
   }>;
-  return rows.map((r) => ({
-    clientId: r.client_id,
-    clientName: r.client_name,
-    scope: r.scope,
-    createdAt: r.created_at,
-    lastUsedAt: r.last_used_at,
-  }));
+  // Grouped here rather than in SQL: the scope union has no portable
+  // aggregate across SQLite and Postgres.
+  const apps = new Map<string, ConnectedApp>();
+  for (const r of rows) {
+    let app = apps.get(r.client_id);
+    if (!app) {
+      app = {
+        clientId: r.client_id,
+        clientName: r.client_name,
+        scopes: [],
+        redirectOrigin: firstOrigin(r.redirect_uris),
+        connectedAt: r.created_at,
+        lastUsedAt: null,
+      };
+      apps.set(r.client_id, app);
+    }
+    for (const s of r.scope.split(" ").filter(Boolean))
+      if (!app.scopes.includes(s)) app.scopes.push(s);
+    if (r.created_at < app.connectedAt) app.connectedAt = r.created_at;
+    if (r.last_used_at && (!app.lastUsedAt || r.last_used_at > app.lastUsedAt))
+      app.lastUsedAt = r.last_used_at;
+  }
+  return [...apps.values()].sort((a, b) => b.connectedAt.localeCompare(a.connectedAt));
+}
+
+function firstOrigin(redirectUris: string | null): string | null {
+  try {
+    const first = (JSON.parse(redirectUris ?? "[]") as unknown[])[0];
+    return typeof first === "string" ? new URL(first).origin : null;
+  } catch {
+    // A client row we can't read still lists — just without a destination.
+    return null;
+  }
 }

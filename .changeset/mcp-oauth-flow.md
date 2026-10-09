@@ -15,6 +15,7 @@ Security properties, each covered by a test:
 - The consent page shows where the approval goes, cannot be framed, and is not cached. Its CSRF token binds the client, redirect, scope, state, challenge and resource it showed, so an approval cannot differ from the page. Control and bidi characters are removed from client names.
 - Scopes are a real boundary. `nests:read` is refused every write tool, `/index` and the read tools need read scope, and `nests:write` implies read and says so on the consent page. Read-only tools are an allow-list, so a new tool requires write by default.
 - An expired or revoked token gets `401` with `error="invalid_token"`, so clients refresh or re-authorize. A password change, an admin password reset or removing the user revokes every grant.
+- A **Connected apps** page (Workspace → Connected apps, shown while the flag is on) lists the agents you connected, with their scopes, destination and last use. **Disconnect** revokes that app's tokens at once (`GET /oauth/connected`, `DELETE /oauth/connected/:clientId`).
 - Every credential is stored as a SHA-256 hash. Token responses carry `Cache-Control: no-store`. Registration, token and revocation are rate-limited per IP, and idle clients, expired codes and dead tokens are purged hourly.
 
 Existing API keys and MCP tickets are untouched and keep working exactly as before; this only adds a way in. An OAuth grant is never narrowed to a single nest, so one connection reads across every nest that person can see.
