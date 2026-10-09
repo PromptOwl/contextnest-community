@@ -42,6 +42,9 @@ export interface MetacognitionConfig {
     max_seconds: number;
     /** Proposals (edits + new documents) per run. */
     max_proposals: number;
+    /** Comments per run. A comment needs no reviewer, so it is the cheap way
+     *  to be noisy; it gets its own budget. */
+    max_comments: number;
   };
   feeds: FeedConfig[];
   mcp_servers: McpServerConfig[];
@@ -55,6 +58,7 @@ export const CAPS = {
   max_tokens: { default: 300_000, min: 10_000, max: 2_000_000 },
   max_seconds: { default: 300, min: 10, max: 1_800 },
   max_proposals: { default: 5, min: 0, max: 20 },
+  max_comments: { default: 5, min: 0, max: 20 },
 } as const;
 
 const NAME_RE = /^[A-Za-z0-9][\w .'-]{0,59}$/;
@@ -187,6 +191,7 @@ export function parseConfig(input: unknown): MetacognitionConfig {
       max_tokens: clamp(caps.max_tokens, CAPS.max_tokens, "caps.max_tokens"),
       max_seconds: clamp(caps.max_seconds, CAPS.max_seconds, "caps.max_seconds"),
       max_proposals: clamp(caps.max_proposals, CAPS.max_proposals, "caps.max_proposals"),
+      max_comments: clamp(caps.max_comments, CAPS.max_comments, "caps.max_comments"),
     },
     feeds,
     mcp_servers,

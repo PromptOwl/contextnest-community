@@ -32,12 +32,14 @@ import {
   listNodesForCaller,
   createNode,
   updateNode,
+  derivedNodeId,
 } from "../nodes/service.js";
 import { resolveExportBody } from "../nodes/readable-body.js";
 import { engineCache } from "../nodes/engine.js";
 import { canReadNode } from "../governance/access-guard.js";
 import { resolveNodeGrant } from "../governance/grants-service.js";
 import { createAccessRequest, TooSoonError } from "../governance/access-request-service.js";
+import { getDb } from "../db/client.js";
 import { canUserEdit } from "../governance/stewardship-service.js";
 import { submitForReview, getPendingReview } from "../governance/review-service.js";
 import { hasUnsealedDraft, getCurrentVersion } from "../governance/version-service.js";
@@ -79,6 +81,9 @@ export interface ToolContext {
 const MAX_BODY_CHARS = 30_000;
 /** Access requests per run: each one lands in every admin's inbox. */
 export const MAX_ACCESS_REQUESTS_PER_RUN = 3;
+/** How long a rejected proposal holds: the persona may not propose the same
+ *  document (or the same new title) again inside this window. */
+export const REJECTED_HOLD_MS = 7 * 24 * 3600_000;
 const MAX_FEED_BYTES = 200_000;
 
 export const TOOLS: Anthropic.Tool[] = [
@@ -299,6 +304,27 @@ async function mayPropose(ctx: ToolContext, nodeId: string): Promise<string | nu
   return null;
 }
 
+/**
+ * Has the persona already proposed this, so a second proposal would only be
+ * noise? A pending one is still waiting; a rejected one holds for
+ * REJECTED_HOLD_MS (the reviewer said no — the answer is a comment, not the
+ * same change again).
+ */
+async function alreadyProposed(ctx: ToolContext, nodeId: string): Promise<string | null> {
+  // review_requests stamps 'YYYY-MM-DD HH:MM:SS' UTC (nowExpr); compare in that form.
+  const since = new Date(Date.now() - REJECTED_HOLD_MS).toISOString().slice(0, 19).replace("T", " ");
+  const row = (await getDb().get(
+    `SELECT status, resolution_note FROM review_requests
+      WHERE nest_id = ? AND node_id = ? AND LOWER(requested_by) = LOWER(?)
+        AND (status = 'pending' OR (status = 'rejected' AND resolved_at >= ?))
+      ORDER BY requested_at DESC LIMIT 1`,
+    [ctx.nestId, nodeId, ctx.agent.persona.email, since],
+  )) as { status: string; resolution_note: string | null } | undefined;
+  if (!row) return null;
+  if (row.status === "pending") return `You already proposed a change to ${nodeId}; it is still waiting for review.`;
+  return `A reviewer rejected your proposal for ${nodeId} recently${row.resolution_note ? ` ("${row.resolution_note.slice(0, 200)}")` : ""}. Don't propose it again this week; if you have new information, comment instead.`;
+}
+
 export async function runTool(ctx: ToolContext, name: string, input: Record<string, unknown>): Promise<ToolOutcome> {
   // One nest, the persona's own. Every tool reads ctx.nestId; this keeps a
   // future caller from handing it a different one.
@@ -416,6 +442,8 @@ async function proposeEdit(ctx: ToolContext, input: Record<string, unknown>): Pr
   if (spent) return spent;
   const denied = (await mayRead(ctx, id)) ?? (await mayPropose(ctx, id));
   if (denied) return accessNeeded(ctx, "propose_edit", id, "propose", denied);
+  const repeat = await alreadyProposed(ctx, id);
+  if (repeat) return { isError: true, content: repeat };
 
   // Only a document whose working copy IS its approved text: a pending review
   // or someone's unsaved draft is a person's work in progress, and a proposal
@@ -475,6 +503,14 @@ async function proposeNew(ctx: ToolContext, input: Record<string, unknown>): Pro
   const probe = folder ? `nodes/${folder}/new` : "nodes/new";
   const denied = await mayPropose(ctx, probe);
   if (denied) return accessNeeded(ctx, "propose_new", folder ? `nodes/${folder}` : "nodes", "propose", denied);
+  // The id createNode will give it: a new document it proposed before (and
+  // got rejected, or is still waiting on) is the same proposal again.
+  const derived = derivedNodeId(title);
+  if (derived) {
+    const candidate = folder ? derived.replace(/^nodes\//, `nodes/${folder}/`) : derived;
+    const repeat = await alreadyProposed(ctx, candidate);
+    if (repeat) return { isError: true, content: repeat };
+  }
   const tags = Array.isArray(input.tags)
     ? input.tags.filter((t): t is string => typeof t === "string" && t.length <= 60).slice(0, 10)
     : undefined;
@@ -517,6 +553,12 @@ async function comment(ctx: ToolContext, input: Record<string, unknown>): Promis
   const id = nodeIdOf(input.id);
   const body = str(input.body, 5000);
   if (!id || !body) return { isError: true, content: "id and body are required" };
+  if (ctx.comments.made >= ctx.agent.config.caps.max_comments) {
+    return {
+      isError: true,
+      content: `You have used this run's ${ctx.agent.config.caps.max_comments} comments. Put anything else in your summary.`,
+    };
+  }
   const denied = await mayRead(ctx, id);
   if (denied) return accessNeeded(ctx, "comment", id, "read", denied);
   const persona = ctx.agent.persona.email;
@@ -524,6 +566,7 @@ async function comment(ctx: ToolContext, input: Record<string, unknown>): Promis
   // document — must not page a colleague. Same rule as Hootie's comments.
   const thread = await createThread(ctx.nestId, id, { body, anchor: null, snapshotVersion: null }, persona);
   await syncAnnotationsNode(ctx.nestId, id, persona);
+  ctx.comments.made++;
   await step(ctx, { action: "notify", node_id: id, detail: { tool: "comment", thread_id: thread.id } });
   return { content: `Commented on ${id}.` };
 }

@@ -38,6 +38,7 @@ interface Draft {
   propose: string;
   max_steps: number;
   max_proposals: number;
+  max_comments: number;
   max_seconds: number;
   max_tokens: number;
   feeds: string;
@@ -54,6 +55,7 @@ const EMPTY: Draft = {
   propose: "",
   max_steps: 12,
   max_proposals: 5,
+  max_comments: 5,
   max_seconds: 300,
   max_tokens: 300_000,
   feeds: "",
@@ -77,6 +79,7 @@ function toDraft(a: MetacognitionAgent): Draft {
     propose: a.scope.propose.join(", "),
     max_steps: a.caps.max_steps,
     max_proposals: a.caps.max_proposals,
+    max_comments: a.caps.max_comments ?? 5,
     max_seconds: a.caps.max_seconds,
     max_tokens: a.caps.max_tokens,
     feeds: a.feeds.map((f) => `${f.name} ${f.url}`).join("\n"),
@@ -97,6 +100,7 @@ function toConfig(d: Draft): MetacognitionAgentConfig & { enabled: boolean } {
     caps: {
       max_steps: d.max_steps,
       max_proposals: d.max_proposals,
+      max_comments: d.max_comments,
       max_seconds: d.max_seconds,
       max_tokens: d.max_tokens,
     },
@@ -396,6 +400,10 @@ export function MetacognitionPanel({ nestId, canConfigure }: { nestId: string; c
             <div className="space-y-1">
               <Label>Proposals per run</Label>
               <Input type="number" min={0} max={20} value={draft.max_proposals} onChange={num("max_proposals")} />
+            </div>
+            <div className="space-y-1">
+              <Label>Comments per run</Label>
+              <Input type="number" min={0} max={20} value={draft.max_comments} onChange={num("max_comments")} />
             </div>
             <div className="space-y-1">
               <Label>Seconds per run</Label>

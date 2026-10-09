@@ -3516,7 +3516,7 @@ export async function deleteBoard(nestId: string, boardId: string) {
 export interface MetacognitionAgentConfig {
   persona: { name: string; avatar: string | null };
   scope: { read: string[]; propose: string[] };
-  caps: { max_steps: number; max_tokens: number; max_seconds: number; max_proposals: number };
+  caps: { max_steps: number; max_tokens: number; max_seconds: number; max_proposals: number; max_comments?: number };
   feeds: Array<{ name: string; url: string }>;
   mcp_servers: Array<{ name: string; url: string; allowed_tools: string[]; auth_env?: string }>;
   model: string | null;
