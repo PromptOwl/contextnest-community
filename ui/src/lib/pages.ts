@@ -33,6 +33,8 @@ export type PageGroupId = (typeof PAGE_GROUPS)[number]["id"];
 
 export interface PageCaps {
   isAdmin: boolean;
+  /** MCP agent sign-in (OAuth) is on for this server. */
+  mcpOauthEnabled?: boolean;
 }
 
 export interface PageMeta {

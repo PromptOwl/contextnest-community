@@ -84,6 +84,7 @@ const HISTORICAL_MIGRATIONS = [
   "053_license_cache_own_gateway",
   "054_metacognition_agents",
   "055_access_requests",
+  "056_mcp_oauth",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -717,6 +718,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_run_steps ON run_steps(run_id, seq);
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS parent_run_id TEXT;
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS depth INTEGER NOT NULL DEFAULT 0;
+    -- migration 025 parity: runs tables created before the claim columns.
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS claimed_by TEXT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS claimed_at TEXT;
     CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id);
 
     -- server_settings (migration 020): durable store for runtime-mutable server
@@ -988,6 +992,58 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- One running server-executed run per agent, enforced atomically.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_server_run
         ON runs(nest_id, agent_node) WHERE status = 'running' AND claimed_by = 'server:metacognition';
+  `);
+
+  // Migration 056 parity: MCP OAuth (CU-wdqcq02p06). Kept in lockstep with
+  // migrations.ts — same columns, same constraints. Created unconditionally
+  // so turning MCP_OAUTH_ENABLED on needs no migration, inert while it is off.
+  // Every credential is stored as a SHA-256 hash, never in the clear.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS oauth_clients (
+      client_id TEXT PRIMARY KEY,
+      client_name TEXT NOT NULL,
+      redirect_uris TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('dcr', 'cimd')),
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      last_seen_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS oauth_codes (
+      code_hash TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      redirect_uri TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      code_challenge TEXT NOT NULL,
+      resource TEXT,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires
+      ON oauth_codes(expires_at);
+
+    CREATE TABLE IF NOT EXISTS oauth_tokens (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      client_id TEXT NOT NULL,
+      client_name TEXT NOT NULL,
+      access_token_hash TEXT NOT NULL UNIQUE,
+      refresh_token_hash TEXT UNIQUE,
+      scope TEXT NOT NULL,
+      resource TEXT,
+      expires_at TEXT NOT NULL,
+      refresh_expires_at TEXT,
+      revoked_at TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      last_used_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_oauth_tokens_user
+      ON oauth_tokens(user_id);
+    CREATE INDEX IF NOT EXISTS idx_oauth_tokens_access
+      ON oauth_tokens(access_token_hash);
+    CREATE INDEX IF NOT EXISTS idx_oauth_tokens_refresh
+      ON oauth_tokens(refresh_token_hash);
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

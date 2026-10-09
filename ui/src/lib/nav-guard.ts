@@ -61,3 +61,18 @@ export function historyWriteMode(
     ? "push"
     : "replace";
 }
+
+/**
+ * Drop the leave guard's spare history entries once the commit that cleared
+ * them has settled. If App navigated in that same commit, its URL sync already
+ * reused the spare entry, and going back would reopen the page just left
+ * (CU-wdqcq042m3) — so only an entry that is still parked gets dropped.
+ */
+export function dropParkedEntries(
+  count: number,
+  history: Pick<History, "state" | "go"> = window.history,
+): void {
+  setTimeout(() => {
+    if ((history.state as any)?.cnLeaveGuard) history.go(-count);
+  });
+}

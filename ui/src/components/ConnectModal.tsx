@@ -64,6 +64,8 @@ import {
   mcpHttpConfig,
   slugify,
   KEY_PLACEHOLDER,
+  isPrivateHost,
+  serverMcpUrl,
 } from "../lib/connect";
 import { useAuth } from "../auth/AuthContext";
 
@@ -84,7 +86,7 @@ export function ConnectModal({
   nestName,
   onManageKeys,
 }: ConnectModalProps) {
-  const { authenticated, authMode } = useAuth();
+  const { authenticated, authMode, mcpOauthEnabled } = useAuth();
   const serverUrl =
     typeof window !== "undefined"
       ? window.location.origin
@@ -453,7 +455,77 @@ export function ConnectModal({
 
               {/* Claude */}
               <TabsContent value="claude" className="space-y-4 pt-4">
-                <div>
+                {/* Hosted connector (claude.ai, Claude Desktop/Cowork
+                    "Connectors"). Two facts people trip on: it connects from
+                    Anthropic's servers, so a VPN-only nest is unreachable; and
+                    it can't carry our API key, so it needs OAuth sign-in —
+                    which is also what makes it read as each person. */}
+                <div className="space-y-2">
+                  <p className="text-sm">
+                    <strong>Claude connector</strong> (claude.ai, Claude Desktop
+                    or Cowork): <em>Settings → Connectors → Add custom
+                    connector</em>, and paste this URL.
+                  </p>
+                  <Snippet label="Connector URL" value={serverMcpUrl(serverUrl)} />
+                  {mcpOauthEnabled ? (
+                    <p className="text-xs text-muted-foreground">
+                      Claude sends you here to sign in, then reads as{" "}
+                      <strong>you</strong> — every nest you can see, this one
+                      included, with your permissions. No key to paste or
+                      share: everyone who adds it signs in as themselves.
+                    </p>
+                  ) : (
+                    <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+                      <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                      <span>
+                        Connectors sign each person in, and that's off on this
+                        server. An admin turns it on in{" "}
+                        <strong>Server settings → Single sign-on → Agent OAuth</strong>.
+                        Until then, use Claude Code or the Desktop config below.
+                      </span>
+                    </div>
+                  )}
+                  <div
+                    className={
+                      isPrivateHost(serverUrl)
+                        ? "flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900"
+                        : "flex items-start gap-2 text-xs text-muted-foreground"
+                    }
+                  >
+                    <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                    <span>
+                      {isPrivateHost(serverUrl) ? (
+                        <>
+                          <strong>This server is on a private network</strong>, so a
+                          connector can't reach it: connectors connect from
+                          Anthropic's servers, not your computer, and your VPN
+                          doesn't apply to them.{" "}
+                        </>
+                      ) : (
+                        <>
+                          Behind a VPN or firewall? A connector connects from
+                          Anthropic's servers, not your computer, so it can't
+                          reach a server only your VPN can.{" "}
+                        </>
+                      )}
+                      Use <strong>Claude Code</strong> or the{" "}
+                      <strong>Desktop config</strong> below — they run on your
+                      machine and go through your VPN — or ask your admin to
+                      allowlist{" "}
+                      <a
+                        href="https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline"
+                      >
+                        Anthropic's IP ranges
+                      </a>{" "}
+                      for this server's <code className="text-[10px]">/mcp</code>{" "}
+                      and sign-in endpoints.
+                    </span>
+                  </div>
+                </div>
+                <div className="border-t pt-3">
                   <p className="text-sm mb-3">
                     <strong>Claude Code</strong> (the CLI) registers a server with
                     one command — it persists the config itself, no file to find

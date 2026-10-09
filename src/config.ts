@@ -429,6 +429,24 @@ export const config = {
     return process.env.SHARED_DEPLOYMENT === "true";
   },
   /**
+   * MCP OAuth authorization server. Default OFF, and off means the surface
+   * does not exist: `/.well-known/*` keeps 404ing and `/mcp` answers
+   * unauthenticated callers exactly as it did before.
+   *
+   * On, this server advertises itself as an OAuth 2.1 authorization server so
+   * a vendor-hosted agent (Claude, ChatGPT, Grok, Cursor) can sign its user in
+   * and be issued a token scoped to THAT person — which is the only way the
+   * per-user nest visibility `canRead()` already enforces can be reached from
+   * those surfaces. A shared API key makes every caller the same user.
+   *
+   * Requires PUBLIC_BASE_URL: the metadata's `resource` and the token audience
+   * are built from it, and a guessed value fails the client's exact-match
+   * check. Superadmin-togglable at runtime via /admin/settings.
+   */
+  get MCP_OAUTH_ENABLED(): boolean {
+    return process.env.MCP_OAUTH_ENABLED === "true";
+  },
+  /**
    * Path to the .env file the server reads its config from and the license
    * install flow persists PROMPTOWL_KEY into. Defaults UNDER DATA_ROOT (not
    * $cwd) so it lands on the writable, volume-mounted, restart-surviving path

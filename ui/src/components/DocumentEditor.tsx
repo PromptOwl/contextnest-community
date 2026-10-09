@@ -13,7 +13,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invalidateForPath, keys, reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { saveOutcome } from "../lib/save-outcome";
-import { setNavGuard, bypassNavGuard } from "../lib/nav-guard";
+import { setNavGuard, bypassNavGuard, dropParkedEntries } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { nestPath } from "../lib/nest-url";
 import { useBreadcrumb } from "../lib/breadcrumb";
@@ -1414,12 +1414,8 @@ export function DocumentEditor({
       window.removeEventListener("popstate", onPop);
       // Left by some other route (saved, discarded, navigated in-app): drop the
       // spare entries so Back still means Back.
-      if (
-        !leavingRef.current &&
-        parkedRef.current > 0 &&
-        (window.history.state as any)?.cnLeaveGuard
-      ) {
-        window.history.go(-parkedRef.current);
+      if (!leavingRef.current && parkedRef.current > 0) {
+        dropParkedEntries(parkedRef.current);
       }
     };
   }, [isDirty, isReviewerOnly]);

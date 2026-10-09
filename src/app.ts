@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
+import { getSessionIdFromRequest } from "./auth/sessions.js";
 import { LinearRouter } from "hono/router/linear-router";
 import { createMiddleware } from "hono/factory";
 import { cors } from "hono/cors";
@@ -169,6 +171,13 @@ import { SERVICE_VERSION } from "./shared/version.js";
 import { persistSetting } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
 import { publicBaseUrlError } from "./shared/public-base-url.js";
+import {
+  protectedResourceMetadata,
+  authorizationServerMetadata,
+  mcpChallenge,
+} from "./auth/oauth-metadata.js";
+import { oauthRoutes } from "./auth/oauth-routes.js";
+import { resolveAccessToken } from "./auth/oauth-store.js";
 import { isOidcReady } from "./auth/oidc.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
@@ -276,10 +285,97 @@ function isPublicReadEligiblePath(method: string, path: string): boolean {
   return !/\/(collaborators|visibility|settings|mcp)/.test(path);
 }
 
+/**
+ * Presence of a session cookie, not its value. Kept in one place so the two
+ * middlewares that ask cannot drift; extracting the id is
+ * getSessionIdFromRequest's job.
+ */
+function hasSessionCookie(c: Context<AuthEnv>): boolean {
+  return !!getSessionIdFromRequest(c);
+}
+
+/**
+ * The OAuth challenge on /mcp. Runs ahead of every other auth path.
+ *
+ * An MCP client's first request carries no credential on purpose: it expects a
+ * 401 whose WWW-Authenticate header points at the protected-resource metadata,
+ * and that is the ONLY thing that starts the authorization flow. Claude does
+ * not honour the header on a 200 and treats a tool-level error as a tool
+ * error, so the status and the header have to be exactly this.
+ *
+ * Deliberately narrow:
+ * - Only when a credential is entirely absent. A stale OAuth access token is
+ *   answered by mcpOAuthBearer with `error="invalid_token"`, which tells the
+ *   client to refresh or re-authorize; other bad credentials get the
+ *   ordinary rejection.
+ * - Never in open mode, where there is no credential to ask for.
+ * - Never while MCP_OAUTH_ENABLED is off, so the flag-off behaviour of this
+ *   endpoint is byte-identical to before.
+ */
+const mcpOAuthChallenge = createMiddleware<AuthEnv>(async (c, next) => {
+  if (!config.MCP_OAUTH_ENABLED || config.AUTH_MODE === "open")
+    return next();
+  if (!config.PUBLIC_BASE_URL) return next();
+  const hasAuth = !!c.req.header("Authorization");
+  if (hasAuth || hasSessionCookie(c)) return next();
+  c.header("WWW-Authenticate", mcpChallenge(config.PUBLIC_BASE_URL));
+  return c.json(
+    {
+      error: "Authentication required — authorize this client to continue.",
+      code: "missing_credentials",
+    },
+    401,
+  );
+});
+
+/**
+ * Accept an access token this server issued, and resolve it to its user.
+ *
+ * Runs after the challenge and before the ticket path. A credential that is
+ * not 64 hex is passed through untouched, so `cnst_` keys and MCP tickets keep
+ * working exactly as before. A 64-hex token that does not resolve is one of
+ * ours gone stale, and gets a 401 with `error="invalid_token"`.
+ *
+ * The user id set here is what `buildNestIndex` gates on, which is the whole
+ * point: the caller now arrives as a person rather than as whoever owns a
+ * pasted key.
+ */
+const mcpOAuthBearer = createMiddleware<AuthEnv>(async (c, next) => {
+  const fallThrough = () => flexAuthWithPromptowlTicket(c, next);
+  if (!config.MCP_OAUTH_ENABLED) return fallThrough();
+  const header = c.req.header("Authorization") || "";
+  if (!header.startsWith("Bearer ")) return fallThrough();
+  const token = header.slice("Bearer ".length);
+  // Our access tokens are 64 hex chars and share no prefix with cnst_ keys or
+  // the dotted JWT tickets, so this check costs one lookup at most.
+  if (!/^[0-9a-f]{64}$/.test(token)) return fallThrough();
+
+  const grant = await resolveAccessToken(token);
+  // Expired, revoked, or its user removed. Nothing else is 64 hex, so this is
+  // a stale token of ours: answer with the challenge so the client refreshes
+  // or re-authorizes (MCP authorization spec; RFC 6750 §3.1).
+  if (!grant) {
+    if (config.PUBLIC_BASE_URL)
+      c.header("WWW-Authenticate", mcpChallenge(config.PUBLIC_BASE_URL, "invalid_token"));
+    return c.json(
+      { error: "This connection has expired or was revoked — reconnect to continue.", code: "invalid_token" },
+      401,
+    );
+  }
+
+  c.set("userId", grant.userId);
+  // OAuth grants are never narrowed to one nest: the whole point is that one
+  // connection reads across everything the person can see.
+  c.set("nestScope", null);
+  // What the person actually consented to. Enforced at tool dispatch — a
+  // consent screen that says "read" while write tools still work is a lie.
+  c.set("oauthScope", grant.scope.split(" ").filter(Boolean));
+  return next();
+});
+
 const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   const hasBearer = c.req.header("Authorization")?.startsWith("Bearer cnst_");
-  const hasCookie = !!c.req.header("Cookie")?.includes("cnst_session=");
-  if (hasBearer || hasCookie) {
+  if (hasBearer || hasSessionCookie(c)) {
     return authMiddleware(c, next);
   }
 
@@ -570,6 +666,8 @@ export function createApp(): Hono<AuthEnv> {
       service: "contextnest-community",
       version: SERVICE_VERSION,
       auth_mode: config.AUTH_MODE,
+      // Lets a client know this server can run the OAuth flow before it tries.
+      mcp_oauth_enabled: config.MCP_OAUTH_ENABLED,
       logo_url: config.LOGO_URL,
       // Presence only, never the value: lets the UI stop prompting for a
       // runner key once runs have a credential (own key or PromptOwl's).
@@ -870,6 +968,7 @@ export function createApp(): Hono<AuthEnv> {
     nest_creation: config.NEST_CREATION,
     people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
     shared_deployment: config.SHARED_DEPLOYMENT,
+    mcp_oauth_enabled: config.MCP_OAUTH_ENABLED,
     // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
     // presence is reported, never the value (same discipline as the OIDC secret).
     sso_token_exchange_enabled: config.SSO_TOKEN_EXCHANGE_ENABLED,
@@ -1298,6 +1397,29 @@ export function createApp(): Hono<AuthEnv> {
         name: "SHARED_DEPLOYMENT",
         value: body.shared_deployment ? "true" : null,
       });
+    }
+    // MCP OAuth authorization server. Turning it on without a canonical base
+    // URL produces metadata that cannot be correct — `resource` has to equal
+    // the URL the user types into their client — so the feature would be on
+    // and silently broken. Refuse the combination with a reason instead of
+    // letting an admin discover it through a failing connector. The base URL
+    // may be set in this same PATCH, so read the pending value first.
+    if ("mcp_oauth_enabled" in body) {
+      const turningOn = !!body.mcp_oauth_enabled;
+      const pendingBase = pending.find((p) => p.name === "PUBLIC_BASE_URL");
+      const baseAfter =
+        pendingBase !== undefined ? pendingBase.value : config.PUBLIC_BASE_URL;
+      if (turningOn && !baseAfter) {
+        addError(
+          "mcp_oauth_enabled",
+          "Set the public base URL first — OAuth metadata must name this server's canonical address, and a guessed one silently fails the client's check.",
+        );
+      } else {
+        pending.push({
+          name: "MCP_OAUTH_ENABLED",
+          value: turningOn ? "true" : null,
+        });
+      }
     }
     // ── Agent SSO / token-exchange (POST /auth/token-exchange) ────────────
     // Default-off toggles persist "false" as null (unset already = off). The
@@ -2280,9 +2402,13 @@ export function createApp(): Hono<AuthEnv> {
   // OUTSIDE the /nests auth chain so /p/<slug> is reachable with no account
   // (public mode) or behind its own gate (email/code/invite).
   app.route("/p", publishRenderRoutes);
-  app.use("/index", flexAuthWithPromptowlTicket);
+  // Same three-way auth as /mcp: an OAuth access token, an MCP ticket, or a
+  // cnst_ key. /index is the grounded nest list the MCP tools read from, so a
+  // token that works on one must work on the other.
+  app.use("/index", mcpOAuthBearer);
   app.route("/index", nestIndexRoutes);
-  app.use("/mcp", flexAuthWithPromptowlTicket);
+  app.use("/mcp", mcpOAuthChallenge);
+  app.use("/mcp", mcpOAuthBearer);
   app.route("/mcp", serverMcpRoutes);
 
   // === All /nests routes ===
@@ -3122,6 +3248,36 @@ export function createApp(): Hono<AuthEnv> {
   // `Unexpected token '<', "<!DOCTYPE "...` instead of falling back cleanly.
   // This server authenticates with Bearer cnst_ keys, not OAuth — no metadata
   // to serve, so 404 is the correct answer.
+  // OAuth discovery, served ONLY when the MCP authorization server is turned
+  // on. Registered ahead of the blanket 404 below so that with the flag off
+  // this whole surface is indistinguishable from before.
+  //
+  // PUBLIC_BASE_URL is required rather than guessed: `resource` has to equal
+  // the URL the user typed into their client, and a value derived from the
+  // request Host is both spoofable and wrong behind a proxy. 503 (not 404)
+  // because the feature is configured-but-unusable, which is an operator
+  // problem worth surfacing, not a missing endpoint.
+  app.get("/.well-known/oauth-protected-resource/mcp", (c) => {
+    if (!config.MCP_OAUTH_ENABLED) return c.json({ error: "Not found" }, 404);
+    if (!config.PUBLIC_BASE_URL)
+      return c.json(
+        { error: "PUBLIC_BASE_URL must be set to serve OAuth metadata" },
+        503,
+      );
+    return c.json(protectedResourceMetadata(config.PUBLIC_BASE_URL));
+  });
+  app.get("/.well-known/oauth-authorization-server", (c) => {
+    if (!config.MCP_OAUTH_ENABLED) return c.json({ error: "Not found" }, 404);
+    if (!config.PUBLIC_BASE_URL)
+      return c.json(
+        { error: "PUBLIC_BASE_URL must be set to serve OAuth metadata" },
+        503,
+      );
+    return c.json(authorizationServerMetadata(config.PUBLIC_BASE_URL));
+  });
+
+  app.route("/oauth", oauthRoutes);
+
   app.all("/.well-known/*", (c) => c.json({ error: "Not found" }, 404));
 
   // ─── Dashboard UI (static files served from the bundled dist/web3 dir) ──

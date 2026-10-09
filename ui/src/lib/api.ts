@@ -222,6 +222,8 @@ export async function getHealth() {
     status: string;
     version?: string;
     auth_mode: string;
+    /** The server runs an OAuth authorization server for MCP clients. */
+    mcp_oauth_enabled?: boolean;
     logo_url?: string | null;
     promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
     manual_sign_in?: "open" | "invite-only" | "disabled";
@@ -298,6 +300,11 @@ export interface AdminSettings {
   posthog_key: string;
   posthog_host: string;
   public_base_url: string;
+  /**
+   * Serve OAuth discovery and challenge MCP clients, so an agent signs its
+   * user in instead of carrying a shared API key. Requires public_base_url.
+   */
+  mcp_oauth_enabled: boolean;
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
   /** Import teams from PromptOwl (default OFF). Off → /teams/promptowl 404s
@@ -751,6 +758,27 @@ export async function rotateApiKey(opts?: {
 
 export async function deleteApiKey(keyId: string) {
   return request<{ deleted: boolean }>(`/auth/keys/${encodeURIComponent(keyId)}`, {
+    method: "DELETE",
+  });
+}
+
+// ─── Connected apps (MCP OAuth grants) ─────────────────────────────────
+
+export interface ConnectedApp {
+  clientId: string;
+  clientName: string;
+  scopes: string[];
+  redirectOrigin: string | null;
+  connectedAt: string;
+  lastUsedAt: string | null;
+}
+
+export async function listConnectedApps() {
+  return request<{ apps: ConnectedApp[] }>("/oauth/connected");
+}
+
+export async function disconnectApp(clientId: string) {
+  return request<{ revoked: boolean }>(`/oauth/connected/${encodeURIComponent(clientId)}`, {
     method: "DELETE",
   });
 }
