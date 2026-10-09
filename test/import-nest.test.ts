@@ -559,6 +559,30 @@ describe("imported vault: discovery + registration", () => {
     expect(raw).toMatch(/^status: pending_review$/m);
   });
 
+  it("records every row when the batch crosses a 200-row chunk", async () => {
+    const n = 201;
+    const files = Array.from({ length: n }, (_, i) =>
+      mdFile(`many/d${i}.md`, `title: D${i}\nstatus: published\ntags: ['#t${i % 2}']`, `b${i}`),
+    );
+    const { data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Chunk Boundary", files },
+      alice.apiKey,
+    );
+    const { getDb } = await import("../src/db/client.js");
+    const count = async (table: string) =>
+      Number(
+        ((await getDb().get(`SELECT COUNT(*) AS c FROM ${table} WHERE nest_id = ?`, [
+          data.nest.id,
+        ])) as any).c,
+      );
+    expect(await count("node_versions")).toBe(n);
+    expect(await count("approved_versions")).toBe(n);
+    expect(await count("node_tag_index")).toBe(n);
+  });
+
   it("edits an imported draft without a version collision (publish-in-place upsert)", async () => {
     // Import a doc that stays a draft — registration seeds a node_versions row
     // at its version.

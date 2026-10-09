@@ -7,6 +7,7 @@
  */
 
 import { getDb } from "../db/client.js";
+import type { Querier } from "../db/adapter.js";
 import { insertOrIgnore } from "../db/sql.js";
 import { engineCache } from "../nodes/engine.js";
 
@@ -52,36 +53,34 @@ export async function syncNodeTags(
   });
 }
 
-/** `syncNodeTags` for many nodes of one nest in one transaction, multi-row. */
+/** `syncNodeTags` for many nodes of one nest, multi-row. Pass the caller's
+ *  transaction: the delete and inserts must land together. */
 export async function syncNodeTagsMany(
   nestId: string,
   entries: Array<{ nodeId: string; tags: string[] }>,
+  tx: Querier,
 ): Promise<void> {
-  if (!entries.length) return;
-  const db = getDb();
   const rows = entries.flatMap(({ nodeId, tags }) =>
     normalizeTagSet(tags).map((tag) => [nestId, nodeId, tag]),
   );
   const CHUNK = 200;
-  await db.transaction(async (tx) => {
-    for (let i = 0; i < entries.length; i += CHUNK) {
-      const ids = entries.slice(i, i + CHUNK).map((e) => e.nodeId);
-      await tx.run(
-        `DELETE FROM node_tag_index WHERE nest_id = ? AND node_id IN (${ids.map(() => "?").join(", ")})`,
-        [nestId, ...ids],
-      );
-    }
-    for (let i = 0; i < rows.length; i += CHUNK) {
-      const chunk = rows.slice(i, i + CHUNK);
-      await tx.run(
-        insertOrIgnore(
-          db,
-          `INSERT INTO node_tag_index (nest_id, node_id, tag_name) VALUES ${chunk.map(() => "(?, ?, ?)").join(", ")}`,
-        ),
-        chunk.flat(),
-      );
-    }
-  });
+  for (let i = 0; i < entries.length; i += CHUNK) {
+    const ids = entries.slice(i, i + CHUNK).map((e) => e.nodeId);
+    await tx.run(
+      `DELETE FROM node_tag_index WHERE nest_id = ? AND node_id IN (${ids.map(() => "?").join(", ")})`,
+      [nestId, ...ids],
+    );
+  }
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const chunk = rows.slice(i, i + CHUNK);
+    await tx.run(
+      insertOrIgnore(
+        getDb(),
+        `INSERT INTO node_tag_index (nest_id, node_id, tag_name) VALUES ${chunk.map(() => "(?, ?, ?)").join(", ")}`,
+      ),
+      chunk.flat(),
+    );
+  }
 }
 
 export async function getTagsForNode(

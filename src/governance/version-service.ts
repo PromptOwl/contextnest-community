@@ -7,6 +7,7 @@
 
 import { createHash } from "crypto";
 import { getDb } from "../db/client.js";
+import type { Querier } from "../db/adapter.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { buildTitleMap } from "./title-resolver.js";
 import {
@@ -272,11 +273,11 @@ const BATCH_ROWS = 200;
 /** `createVersion` for many rows of one nest: one INSERT per chunk, not per row. */
 export async function createVersions(
   rows: Array<Parameters<typeof createVersion>[0]>,
+  q: Querier = getDb(),
 ): Promise<void> {
-  const db = getDb();
   for (let i = 0; i < rows.length; i += BATCH_ROWS) {
     const chunk = rows.slice(i, i + BATCH_ROWS);
-    await db.run(
+    await q.run(
       `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status, change_note, tags_json, client_json)
        VALUES ${chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ")}`,
       chunk.flatMap((p) => [
@@ -299,6 +300,7 @@ export async function setApprovedVersions(
   nestId: string,
   rows: Array<{ nodeId: string; version: number }>,
   approvedBy: string,
+  q: Querier = getDb(),
 ): Promise<void> {
   const db = getDb();
   for (let i = 0; i < rows.length; i += BATCH_ROWS) {
@@ -310,7 +312,7 @@ export async function setApprovedVersions(
       ["nest_id", "node_id"],
       `approved_version = excluded.approved_version, approved_by = excluded.approved_by, approved_at = ${nowExpr(db)}`,
     );
-    await db.run(sql, chunk.flatMap((r) => [nestId, r.nodeId, r.version, approvedBy]));
+    await q.run(sql, chunk.flatMap((r) => [nestId, r.nodeId, r.version, approvedBy]));
   }
 }
 

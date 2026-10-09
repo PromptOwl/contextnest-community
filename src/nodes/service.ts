@@ -2107,29 +2107,35 @@ export async function registerImportedDocuments(
   // longer reconstructs) still registers — as a draft, at its own version, with
   // its history left untouched on disk. Losing the doc would be the worse loss.
   // Batched: one multi-row statement per table, not a few queries per document.
+  // One transaction: a retry skips docs that already have a version row, so a
+  // half-written batch would leave them unapproved for good.
   const tagged = docs.map((d) => ({ d, tags: d.tags.map((t) => storedTag(String(t))) }));
-  await versions.createVersions(
-    tagged.map(({ d, tags }) => ({
+  await getDb().transaction(async (tx) => {
+    await versions.createVersions(
+      tagged.map(({ d, tags }) => ({
+        nestId,
+        nodeId: d.id,
+        version: d.version,
+        content: d.content,
+        author: userEmail,
+        status: d.status,
+        changeNote:
+          d.status === "published"
+            ? "Imported from existing folder"
+            : "Imported from existing folder — could not be published, kept as a draft",
+        tags,
+        client,
+      })),
+      tx
+    );
+    await versions.setApprovedVersions(
       nestId,
-      nodeId: d.id,
-      version: d.version,
-      content: d.content,
-      author: userEmail,
-      status: d.status,
-      changeNote:
-        d.status === "published"
-          ? "Imported from existing folder"
-          : "Imported from existing folder — could not be published, kept as a draft",
-      tags,
-      client,
-    }))
-  );
-  await versions.setApprovedVersions(
-    nestId,
-    docs.filter((d) => d.status === "published").map((d) => ({ nodeId: d.id, version: d.version })),
-    userEmail
-  );
-  await syncNodeTagsMany(nestId, tagged.map(({ d, tags }) => ({ nodeId: d.id, tags })));
+      docs.filter((d) => d.status === "published").map((d) => ({ nodeId: d.id, version: d.version })),
+      userEmail,
+      tx
+    );
+    await syncNodeTagsMany(nestId, tagged.map(({ d, tags }) => ({ nodeId: d.id, tags })), tx);
+  });
   // Only a failed publish can leave `published` on disk; the engine already
   // stamped every held document, so checking those too cost a read each.
   const failedIds = new Set(result.failed.map((f) => f.id));
