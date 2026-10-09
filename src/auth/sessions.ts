@@ -21,6 +21,7 @@ import type { Context } from "hono";
 import { getDb } from "../db/client.js";
 import { nowExpr } from "../db/sql.js";
 import { ForbiddenError } from "../shared/errors.js";
+import { forwardedTrust } from "../shared/trusted-proxies.js";
 
 export const SESSION_COOKIE = "cnst_session";
 const SESSION_TTL_DAYS = 30;
@@ -270,7 +271,9 @@ export function buildOidcMarkerCookie(
  * so cookies can flip `Secure` automatically.
  */
 export function isSecureRequest(c: Context): boolean {
-  const proto = c.req.header("x-forwarded-proto");
+  // X-Forwarded-Proto counts only from a trusted proxy (or with TRUSTED_PROXIES
+  // unset, the legacy trust-everyone default) — see shared/trusted-proxies.ts.
+  const proto = forwardedTrust(c) === "untrusted" ? undefined : c.req.header("x-forwarded-proto");
   if (proto) return proto.split(",")[0].trim() === "https";
   try {
     return new URL(c.req.url).protocol === "https:";

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// First: snapshot the env Node's networking reads at start, before config.ts loads .env.
+import "./shared/boot-env.js";
 import { serve } from "@hono/node-server";
 import { config } from "./config.js";
 import { createApp } from "./app.js";
@@ -24,8 +26,13 @@ import { startDriftScanner } from "./governance/external-edit-service.js";
 import { startScheduler } from "./workflow/scheduler.js";
 import { sweepStale } from "./shared/rate-limit.js";
 import { bannerHeading } from "./shared/startup-banner.js";
+import { currentEgressProxyStatus, currentExtraCaStatus, networkStartupLines } from "./shared/egress-proxy.js";
+import { parseTrustedProxies } from "./shared/trusted-proxies.js";
 
 async function main() {
+  // Refuse to boot on a malformed TRUSTED_PROXIES rather than guess who to trust.
+  parseTrustedProxies(config.TRUSTED_PROXIES);
+
   // Initialize the database backend (SQLite by default, or Postgres/Cloud SQL
   // when configured) and run migrations before anything touches the DB.
   const db = await initDb();
@@ -170,7 +177,7 @@ async function main() {
   console.log(`
   ${bannerHeading()}
   ────────────────────────────────────
-  Port:      ${config.PORT}
+  Port:      ${config.PORT}${config.HOST ? ` (listening on ${config.HOST} only)` : ""}
   Data:      ${config.DATA_ROOT}
   Database:  ${dbDesc}
   License:   ${license.valid ? `${license.tier}${license.org ? ` (${license.org})` : ""}` : "unlicensed (register at promptowl.ai)"}
@@ -209,8 +216,21 @@ ${config.AUTH_MODE === "key" ? `
     console.warn(`
   ⚠️  Running in open mode — no authentication.
      Anyone who can reach this port has full read/write + admin access.
-     Bind to 127.0.0.1 only, or switch to AUTH_MODE=key before exposing.
+     Set HOST=127.0.0.1 to listen locally only, or switch to AUTH_MODE=key before exposing.
 `);
+  }
+
+  const net = networkStartupLines(currentEgressProxyStatus(), currentExtraCaStatus());
+  for (const line of net.info) console.log(line);
+  for (const line of net.warn) console.warn(line);
+  // Cloud Run (K_SERVICE) always fronts the server with Google's proxy, so the
+  // legacy trust-all default is right there; elsewhere, nudge once.
+  if (!config.TRUSTED_PROXIES && !process.env.K_SERVICE) {
+    console.warn(
+      "  ⚠️  X-Forwarded-For / X-Forwarded-Proto are trusted from any client. Behind a reverse proxy, set\n" +
+        "     TRUSTED_PROXIES (e.g. loopback or 10.0.0.0/8). If this server is exposed directly, set it to\n" +
+        "     loopback so clients can't spoof their IP or scheme. See CONFIGURATION.md → Reverse proxies.",
+    );
   }
   if (config.HOOTIE_DEBUG_LOG) {
     console.warn(`
@@ -219,7 +239,7 @@ ${config.AUTH_MODE === "key" ? `
 `);
   }
 
-  serve({ fetch: app.fetch, port: config.PORT });
+  serve({ fetch: app.fetch, port: config.PORT, ...(config.HOST ? { hostname: config.HOST } : {}) });
 
   // Workflow-plane interval schedules → run rows (no-op unless the flag is on).
   startScheduler();

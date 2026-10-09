@@ -84,6 +84,21 @@ export const config = {
   get PORT() {
     return parseInt(process.env.PORT || "3838", 10);
   },
+  /**
+   * Interface to listen on, e.g. `127.0.0.1` to accept only local / reverse-
+   * proxy traffic. Unset = every interface (Node's default, unchanged).
+   */
+  get HOST(): string | undefined {
+    return process.env.HOST?.trim() || undefined;
+  },
+  /**
+   * Peers whose X-Forwarded-For / X-Real-IP / X-Forwarded-Proto are believed:
+   * comma-separated IPs, CIDRs, or the keywords `loopback` / `private`.
+   * Unset = legacy behaviour, every peer is trusted (see shared/trusted-proxies.ts).
+   */
+  get TRUSTED_PROXIES(): string {
+    return process.env.TRUSTED_PROXIES?.trim() || "";
+  },
   get DATA_ROOT() {
     return dataRoot();
   },
