@@ -452,7 +452,36 @@ export async function closeRun(
     throw new ConflictError("Run already terminal — status can't be changed");
   }
   if (status === "cancelled") await cancelDescendants(runId);
+  if (status === "failed") {
+    const run = await loadRun(runId);
+    if (run) announceRunFailed(run, input.trace);
+  }
   return { status };
+}
+
+/**
+ * Tell the nest's channels a run failed. Every way a run can fail goes
+ * through here — a runner's PATCH, the MCP close tool, and runs the server
+ * executes itself (metacognition), which used to fail silently.
+ * Fire-and-forget: an outage in a channel never fails the close.
+ */
+export function announceRunFailed(
+  run: { id: string; nest_id: string; agent_node: string; triggered_by: string },
+  trace: unknown,
+): void {
+  const err =
+    trace && typeof trace === "object" ? String((trace as { error?: unknown }).error ?? "").slice(0, 200) : "";
+  void import("../notify/dispatch.js")
+    .then(({ dispatchEvent }) =>
+      dispatchEvent({
+        kind: "run_failed",
+        nestId: run.nest_id,
+        subjectId: run.id,
+        actor: run.triggered_by,
+        message: `Run of *${run.agent_node}* failed${err ? ` — ${err}` : ""}`,
+      }),
+    )
+    .catch((e) => console.warn("[runs] run_failed notification failed", (e as Error)?.message));
 }
 
 /**

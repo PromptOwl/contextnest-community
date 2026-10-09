@@ -67,12 +67,37 @@ export async function recoverOrphanedRuns(opts: { olderThanMs?: number; nodeId?:
     if (executing.has(r.id)) continue;
     if (opts.olderThanMs !== undefined && Date.now() - Date.parse(r.started_at) < opts.olderThanMs) continue;
     await finish(r.id, "failed", {
+      ...(await usageFromSteps(r.id)),
+      stopped_by: "crashed",
       error: "The server stopped while this run was in progress (a restart or crash). Nothing it did after its last step was kept.",
     });
     closed++;
   }
   return closed;
 }
+/**
+ * What a run spent, rebuilt from its per-turn `usage` steps — the record that
+ * survives when the loop doesn't get to write its own trace (a crash).
+ */
+export async function usageFromSteps(runId: string): Promise<{ usage: Usage; est_cost_usd: number | null; model?: string }> {
+  const rows = (await getDb().all(
+    "SELECT detail FROM run_steps WHERE run_id = ? AND action = 'branch' ORDER BY seq",
+    [runId],
+  )) as Array<{ detail: string | null }>;
+  const usage: Usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  let model: string | undefined;
+  for (const r of rows) {
+    const d = safeJson(r.detail) as { kind?: string; usage?: Partial<Usage>; model?: string } | null;
+    if (d?.kind !== "turn" || !d.usage) continue;
+    usage.input_tokens += Number(d.usage.input_tokens) || 0;
+    usage.output_tokens += Number(d.usage.output_tokens) || 0;
+    usage.cache_read_input_tokens += Number(d.usage.cache_read_input_tokens) || 0;
+    usage.cache_creation_input_tokens += Number(d.usage.cache_creation_input_tokens) || 0;
+    model = d.model ?? model;
+  }
+  return { usage, est_cost_usd: model ? estimateCostUsd(model, usage) : null, ...(model ? { model } : {}) };
+}
+
 export async function waitForMetacognitionRuns(): Promise<void> {
   await Promise.allSettled([...inFlight]);
 }
@@ -366,6 +391,18 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
         .map((b) => String(b.text))
         .join("\n")
         .trim();
+      // What this turn cost, written as it happens: if the process dies
+      // mid-run the trace is never written, and this is what's left to bill.
+      const turnUsage = {
+        input_tokens: res.usage?.input_tokens ?? 0,
+        output_tokens: res.usage?.output_tokens ?? 0,
+        cache_read_input_tokens: res.usage?.cache_read_input_tokens ?? 0,
+        cache_creation_input_tokens: res.usage?.cache_creation_input_tokens ?? 0,
+      };
+      await note(runId, {
+        action: "branch",
+        detail: { kind: "turn", turn: turns, model, usage: turnUsage, est_cost_usd: estimateCostUsd(model, turnUsage) },
+      });
       if (text) {
         summary = text;
         await note(runId, { action: "branch", detail: { kind: "reasoning", text: text.slice(0, 2000) } });
@@ -417,8 +454,13 @@ async function executeRun(runId: string, credentialOverride?: ModelCredential | 
     await finish(runId, "succeeded", traceOf());
   } catch (err) {
     if (ac.signal.aborted && !cancelled) {
-      stoppedBy = "max_seconds";
-      await finish(runId, "succeeded", traceOf());
+      // Cut off mid-turn by its own clock: whatever it was doing was not
+      // finished, so this is a failure to look at, not a success.
+      stoppedBy = "timeout";
+      await finish(runId, "failed", {
+        ...traceOf(),
+        error: `Stopped at its ${caps.max_seconds}s limit before it finished. Raise caps.max_seconds or narrow its instructions.`,
+      });
     } else if (cancelled || (err instanceof ConflictError && (await closedUnderUs(runId)))) {
       // Cancelled by a person mid-run: the row is already terminal, but the
       // tokens it spent still belong in the trace.
