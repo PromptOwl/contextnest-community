@@ -12,6 +12,7 @@ import {
   claudeCodeCommand,
   mcpHttpConfig,
   KEY_PLACEHOLDER,
+  isPrivateHost,
 } from "./connect";
 
 // Regression tests written before the implementation (dev-loop: fail-before-build).
@@ -511,5 +512,49 @@ describe("ctxCliConnectSnippet", () => {
     const s = ctxCliConnectSnippet("https://x.ai", "gtm", "GTM Strategy 2026!");
     expect(s).toContain("ctx vault add gtm-strategy-2026 --url");
     expect(s).toContain("--vault gtm-strategy-2026");
+  });
+});
+
+
+describe("isPrivateHost", () => {
+  it("flags hosts a hosted connector can't reach", () => {
+    for (const u of [
+      "http://localhost:3838",
+      "http://127.0.0.1:3838",
+      "https://10.2.3.4",
+      "https://172.20.0.5",
+      "https://192.168.1.10",
+      "https://100.101.102.103",
+      "https://nest.internal",
+      "https://nest.corp",
+      "https://contextnest",
+      "http://[::1]:3838",
+      "http://[fd12:3456::1]",
+    ]) {
+      expect(isPrivateHost(u), u).toBe(true);
+    }
+  });
+  it("leaves public names and addresses alone", () => {
+    for (const u of [
+      "https://community.promptowl.ai",
+      "https://8.8.8.8",
+      "https://172.32.0.1",
+      "https://nest.acme.com",
+      "not a url",
+    ]) {
+      expect(isPrivateHost(u), u).toBe(false);
+    }
+  });
+  it("sees through address encodings URL normalizes", () => {
+    for (const u of [
+      "http://[::ffff:10.0.0.1]:3838", // IPv4-mapped IPv6 → ::ffff:a00:1
+      "http://[::ffff:192.168.1.5]/",
+      "http://167772161/", // decimal 10.0.0.1
+      "http://012.0.0.1/", // octal 10.0.0.1
+      "http://0xa.0.0.1/", // hex 10.0.0.1
+    ])
+      expect(isPrivateHost(u), u).toBe(true);
+    for (const u of ["http://172.32.0.1/", "http://172.15.255.255/", "http://[::ffff:8.8.8.8]/"])
+      expect(isPrivateHost(u), u).toBe(false);
   });
 });
