@@ -124,11 +124,11 @@ export async function notifyMsTeamsForNest(
 ): Promise<void> {
   if (!config.MSTEAMS_WEBHOOK_URL) return;
   const nestName = await resolveNestName(nestId);
-  return notifyMsTeams(nestName, message);
+  return notifyMsTeams(nestName, message, nestId);
 }
 
-async function notifyMsTeams(title: string, message: string): Promise<void> {
+async function notifyMsTeams(title: string, message: string, nestId?: string): Promise<void> {
   const url = config.MSTEAMS_WEBHOOK_URL;
   if (!url) return;
-  await postWebhook(url, msTeamsPayload(title, message), "msteams");
+  await postWebhook(url, msTeamsPayload(title, message), "msteams", { nestId });
 }

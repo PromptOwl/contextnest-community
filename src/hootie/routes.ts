@@ -48,6 +48,7 @@ import {
 } from "./model.js";
 import { effectiveHootieBrand } from "./brand.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
+import { recordOutbound } from "../notify/outbound-log.js";
 
 export const hootieRoutes = new Hono<AuthEnv>();
 
@@ -465,6 +466,19 @@ async function deliverMentions(params: {
       userEmail,
     );
     threadId = thread.id;
+    // Hootie writes under the asker's identity, but the words are the model's:
+    // log it as a persona message so the superadmin log can tell them apart.
+    await recordOutbound({
+      channel: "comment",
+      senderKind: "persona",
+      senderId: `${name} (for ${userEmail})`,
+      recipients: [`document:${anchor.id}`],
+      subject: `${name} answer on ${anchor.id}`,
+      body,
+      status: "sent",
+      nestId,
+      nodeId: anchor.id,
+    });
   } catch (err) {
     console.error("[hootie] mention comment failed", nestId, anchor.id, err);
     return { status: "undeliverable", reason: "post_failed" };

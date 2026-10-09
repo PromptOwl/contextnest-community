@@ -84,6 +84,7 @@ const HISTORICAL_MIGRATIONS = [
   "053_license_cache_own_gateway",
   "054_metacognition_agents",
   "055_access_requests",
+  "061_outbound_messages",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -970,6 +971,43 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       WHERE status = 'pending';
     CREATE INDEX IF NOT EXISTS idx_access_requests_nest
       ON access_requests(nest_id, status);
+  `);
+
+  // Migration 061 parity: superadmin message log (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS outbound_messages (
+      id TEXT PRIMARY KEY,
+      channel TEXT NOT NULL,
+      sender_kind TEXT NOT NULL DEFAULT 'system'
+        CHECK(sender_kind IN ('human', 'persona', 'system')),
+      sender_id TEXT,
+      recipients_json TEXT NOT NULL DEFAULT '[]',
+      subject TEXT,
+      body_redacted TEXT,
+      status TEXT NOT NULL DEFAULT 'sent'
+        CHECK(status IN ('sent', 'failed', 'skipped')),
+      provider_id TEXT,
+      error TEXT,
+      nest_id TEXT,
+      node_id TEXT,
+      run_id TEXT,
+      via_proxy INTEGER,
+      created_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE INDEX IF NOT EXISTS idx_outbound_messages_created ON outbound_messages(created_at);
+    CREATE INDEX IF NOT EXISTS idx_outbound_messages_channel ON outbound_messages(channel, created_at);
+    CREATE INDEX IF NOT EXISTS idx_outbound_messages_status ON outbound_messages(status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_outbound_messages_sender ON outbound_messages(sender_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_outbound_messages_nest ON outbound_messages(nest_id, created_at);
+    CREATE TABLE IF NOT EXISTS message_log_views (
+      id TEXT PRIMARY KEY,
+      viewer_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      filters_json TEXT,
+      message_id TEXT,
+      at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_log_views_at ON message_log_views(at);
   `);
 
   // Migration 054 parity: metacognition agents.

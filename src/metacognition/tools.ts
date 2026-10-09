@@ -40,6 +40,7 @@ import { inFolders, mayProposeIn, urlAllowed, type McpServerConfig } from "./con
 import type { MetacognitionAgent } from "./store.js";
 import { McpPool, MAX_RESULT_CHARS } from "./mcp-client.js";
 import { guardedFetch, readCapped, OutboundTooLargeError, OutboundBlockedError } from "./net.js";
+import { recordOutbound } from "../notify/outbound-log.js";
 
 type FeedFetch = (url: string, init: RequestInit) => Promise<Response>;
 const realFeedFetch: FeedFetch = guardedFetch({ maxBytes: 2_000_000, timeoutMs: 20_000 });
@@ -472,6 +473,18 @@ async function comment(ctx: ToolContext, input: Record<string, unknown>): Promis
   // No mention fan-out: a name the model wrote — echoed from a feed or a
   // document — must not page a colleague. Same rule as Hootie's comments.
   const thread = await createThread(ctx.nestId, id, { body, anchor: null, snapshotVersion: null }, persona);
+  await recordOutbound({
+    channel: "comment",
+    senderKind: "persona",
+    senderId: persona,
+    recipients: [`document:${id}`],
+    subject: `Comment on ${id}`,
+    body,
+    status: "sent",
+    nestId: ctx.nestId,
+    nodeId: id,
+    runId: ctx.runId,
+  });
   await syncAnnotationsNode(ctx.nestId, id, persona);
   await step(ctx, { action: "notify", node_id: id, detail: { tool: "comment", thread_id: thread.id } });
   return { content: `Commented on ${id}.` };

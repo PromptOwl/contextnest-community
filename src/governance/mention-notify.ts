@@ -31,6 +31,7 @@ import { resolveNodeGrant } from "./grants-service.js";
 import { dispatchEvent, hasAnyConnector } from "../notify/dispatch.js";
 import { isEmailConfigured, sendEmailToRecipient } from "../notify/email.js";
 import { tryConsume } from "../shared/rate-limit.js";
+import { insertNotification } from "../notify/inbox.js";
 
 /**
  * Can this person open this document at all?
@@ -154,23 +155,22 @@ async function insertInboxRows(params: {
   message: string;
   /** 'mention' (named in the text) or 'comment_reply' (a thread you're in). */
   kind?: "mention" | "comment_reply";
+  /** Who wrote the text — the sender in the message log. */
+  actorEmail?: string;
 }): Promise<number> {
-  const db = getDb();
   const now = new Date().toISOString();
   let created = 0;
   for (const r of params.recipients) {
-    await db.run(
-      `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        uuid(),
-        params.nestId,
-        r.email.toLowerCase(),
-        params.kind ?? "mention",
-        params.nodeId,
-        params.message,
-        now,
-      ],
+    await insertNotification(
+      {
+        nestId: params.nestId,
+        userEmail: r.email,
+        kind: params.kind ?? "mention",
+        subjectId: params.nodeId,
+        message: params.message,
+        createdAt: now,
+      },
+      { from: params.actorEmail, nodeId: params.nodeId },
     );
     created++;
   }
@@ -344,7 +344,7 @@ export async function notifyMentions(params: {
 
     const ctx = await buildDocContext(nestId, nodeId, baseUrl);
     const message = `${actorEmail} mentioned you in "${ctx.label}"`;
-    const created = await insertInboxRows({ nestId, nodeId, recipients, message });
+    const created = await insertInboxRows({ nestId, nodeId, recipients, message, actorEmail });
     await deliverMentionMessages({
       nestId,
       nodeId,
@@ -401,7 +401,7 @@ async function commentMentionFanOut(params: {
     const ctx = await buildDocContext(nestId, nodeId, baseUrl);
     const excerpt = excerptOf(body);
     const message = `${actorEmail} mentioned you in a comment on "${ctx.label}"`;
-    await insertInboxRows({ nestId, nodeId, recipients, message });
+    await insertInboxRows({ nestId, nodeId, recipients, message, actorEmail });
     await deliverMentionMessages({
       nestId,
       nodeId,
@@ -503,6 +503,7 @@ export async function notifyCommentReply(params: {
       recipients,
       message,
       kind: "comment_reply",
+      actorEmail,
     });
     let throttled = 0;
     for (const r of isEmailConfigured() ? recipients : []) {
