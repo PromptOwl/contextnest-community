@@ -26,6 +26,7 @@ import { nodeTrail } from "./flow-graph.js";
 import {
   requireWorkflowPlane,
   seedDefaultEdgeTypes,
+  assertNotRelationType,
   type EdgeTypeRow,
 } from "./edge-type-routes.js";
 
@@ -277,6 +278,9 @@ edgeRoutes.post("/", requireWorkflowPlane, async (c) => {
       `unknown edge type "${typeRef}" — define it in the registry first`,
     );
   }
+  // Task relations carry their own rules (read access to both ends, the
+  // blocking-loop guard) — they're written only through the relations API.
+  assertNotRelationType(type);
 
   // Both endpoints must be real documents in this nest.
   const { storage } = await engineCache.get(nestId);
@@ -338,6 +342,8 @@ edgeRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
     "SELECT * FROM edge_types WHERE id = ?",
     [row.type_id],
   )) as EdgeTypeRow;
+  // Retyping into or out of a task relation would skip the relation rules.
+  assertNotRelationType(type);
   const wasFlow = !!type.is_flow;
   let retype: EdgeTypeRow | null = null;
   if (typeof body.type === "string" && body.type.trim()) {
@@ -350,6 +356,7 @@ edgeRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
         `unknown edge type "${body.type}" — define it in the registry first`,
       );
     }
+    assertNotRelationType(next);
     // Checked below, inside the tx that carries the UPDATE — two concurrent
     // retypes onto the same (from, to, type) would otherwise both pass against
     // the pre-request graph and land the duplicate this guard exists to stop.

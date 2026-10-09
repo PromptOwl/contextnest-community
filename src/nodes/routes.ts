@@ -59,6 +59,12 @@ import {
   toNodeResponse,
   bodyOnly,
 } from "./service.js";
+import {
+  addRelation,
+  listRelations,
+  openBlockerCounts,
+  removeRelation,
+} from "./relations.js";
 
 /** Board fields off a request body, keeping "absent" (leave alone) distinct
  *  from null (clear). Anything that isn't a string or null is refused rather
@@ -391,6 +397,41 @@ nodeRoutes.delete("/:nodeId{.+}/watchers", async (c) => {
   return c.json({ watchers: await listWatchers(nestId, nodeId) });
 });
 
+// Relations — blocks / blocked_by / relates_to / duplicates (src/nodes/
+// relations.ts). Not behind FEATURE_WORKFLOW_PLANE: relations are core task
+// UX. Reads are read-tier; POST/DELETE are write-tier via the nest
+// middleware, the same tier as editing the task.
+
+// GET /nests/:nestId/nodes/:nodeId/relations
+nodeRoutes.get("/:nodeId{.+}/relations", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const caller = { nestId, userId, userEmail: await resolveCallerEmail(userId) };
+  return c.json(await listRelations(caller, c.req.param("nodeId")!));
+});
+
+// POST /nests/:nestId/nodes/:nodeId/relations { type, node }
+nodeRoutes.post("/:nodeId{.+}/relations", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const body = await c.req
+    .json<Record<string, unknown>>()
+    .catch(() => ({}) as Record<string, unknown>);
+  const caller = { nestId, userId, userEmail: await resolveCallerEmail(userId) };
+  const out = await addRelation(caller, c.req.param("nodeId")!, body.type, body.node);
+  return c.json(out, 201);
+});
+
+// DELETE /nests/:nestId/nodes/:nodeId/relations/:relationId
+nodeRoutes.delete("/:nodeId{.+}/relations/:relationId", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const caller = { nestId, userId, userEmail: await resolveCallerEmail(userId) };
+  return c.json(
+    await removeRelation(caller, c.req.param("nodeId")!, c.req.param("relationId")),
+  );
+});
+
 // GET /nests/:nestId/nodes/:nodeId — the greedy catch-all. Safe ONLY because
 // createApp pins LinearRouter: it matches in registration order with
 // per-route backtracking, so the suffix action routes above (and the
@@ -442,6 +483,9 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     }
   }
   const response = toNodeResponse(node);
+  // Open blockers (task relations) — the "Blocked" badge's source.
+  const blockers = (await openBlockerCounts(nestId, [node.id])).get(node.id);
+  if (blockers) response.open_blockers = blockers;
   // The read got past every gate — record it for the admin activity log
   // (fire-and-forget, throttled; never slows or fails the read).
   recordNodeAccess({

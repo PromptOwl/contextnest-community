@@ -87,7 +87,16 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // server-level `context_request_access` derives from the per-nest definition (no new
 // literal). Promotion is tracked upstream in PromptOwl/ContextNest#167 — adopt the
 // descriptors and lower this by 3 if it lands there.
-const BASELINE = 48;
+//
+// Raised 48 -> 51 for the task-relation trio (`context_relations`,
+// `context_add_relation`, `context_remove_relation`). Same reason as comments and access
+// requests: relations are not an engine operation — they are rows in this repo's `edges`
+// table (the workflow plane's typed edges, reused with reserved `task:*` types), outside the
+// engine's version/hash chain. The upstream catalog (PromptOwl/ContextNest, engine
+// packages/engine) was checked and has no relation/edge-write operation to import; its
+// `RelationshipEdge` is the read-side wikilink graph. They mirror REST
+// /nodes/:nodeId/relations 1:1; the server-level variants derive from these (no new literal).
+const BASELINE = 51;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

@@ -91,6 +91,7 @@ import {
   type TaskFields,
   type TaskFieldsPatch,
 } from "./task-fields.js";
+import { openBlockerCounts } from "./relations.js";
 
 /** Reverse-lookup the auth userId from a registered email. Anonymous email → ANON. */
 async function userIdFromEmail(email: string): Promise<string> {
@@ -407,6 +408,9 @@ export interface NodeResponse extends TaskFields {
   /** The `pdf:` block of a pdf node (sidecar path, sha256, size, pages,
    *  text_layer, extractor) — absent on every other type. */
   pdf?: PdfMeta;
+  /** Blocking relations from nodes that aren't done yet (src/nodes/
+   *  relations.ts). Absent when nothing open blocks this node. */
+  open_blockers?: number;
 }
 
 /** Node types an orchestrator can fetch and run; only these carry schedule. */
@@ -1058,6 +1062,19 @@ export async function listNodesForCaller(
       return r;
     })
   );
+
+  // Task relations: stamp how many open blockers each listed node has, so the
+  // board can badge blocked cards. One edges query for the nest (none when the
+  // nest has no blocking relations at all).
+  if (enriched.length) {
+    const blockers = await openBlockerCounts(nestId, enriched.map((r) => r.id));
+    if (blockers.size) {
+      for (const r of enriched) {
+        const n = blockers.get(r.id);
+        if (n) r.open_blockers = n;
+      }
+    }
+  }
 
   return enriched;
 }
