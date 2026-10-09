@@ -22,6 +22,8 @@ import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { config } from "../config.js";
 import { getDb } from "../db/client.js";
 import { resolveSession, getSessionIdFromRequest } from "./sessions.js";
+import { tryConsume } from "../shared/rate-limit.js";
+import { clientIp } from "../shared/request-ip.js";
 import {
   SCOPE_READ,
   SCOPE_WRITE,
@@ -43,6 +45,34 @@ import {
 export const oauthRoutes = new Hono();
 
 const GRANTABLE = new Set([SCOPE_READ, SCOPE_WRITE, SCOPE_OFFLINE]);
+
+// Registration is open and unauthenticated, so cap it. Generous per IP:
+// hosted connectors (claude.ai) register from a few shared vendor addresses.
+const REGISTER_LIMIT = { max: 60, windowMs: 10 * 60_000 };
+const MAX_REDIRECT_URIS = 10;
+const MAX_REDIRECT_URI_LENGTH = 2048;
+
+/** Loopback for a native client means http(s) on localhost — no custom schemes. */
+function isLoopbackUri(u: URL): boolean {
+  return (
+    (u.protocol === "http:" || u.protocol === "https:") &&
+    (u.hostname === "localhost" || u.hostname === "127.0.0.1")
+  );
+}
+
+/**
+ * The consent form's CSRF token. Derived from the session id, which is in an
+ * httpOnly cookie, so a page on another origin can neither read nor forge it.
+ */
+function consentCsrf(sessionId: string): string {
+  return createHash("sha256").update(`oauth-consent:${sessionId}`).digest("hex");
+}
+
+function csrfMatches(sessionId: string, presented: string): boolean {
+  const a = Buffer.from(consentCsrf(sessionId));
+  const b = Buffer.from(presented);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 /** Every response from this router is JSON unless it is the consent page. */
 function oauthError(
@@ -86,7 +116,7 @@ function redirectUriAllowed(registered: string[], presented: string): boolean {
     return false;
   }
   // Anything not loopback must match exactly, and must be https.
-  const isLoopback = p.hostname === "localhost" || p.hostname === "127.0.0.1";
+  const isLoopback = isLoopbackUri(p);
   if (!isLoopback && p.protocol !== "https:") return false;
 
   return registered.some((r) => {
@@ -107,6 +137,8 @@ function redirectUriAllowed(registered: string[], presented: string): boolean {
 }
 
 oauthRoutes.post("/register", async (c) => {
+  if (!tryConsume(`oauth-register:ip:${clientIp(c)}`, REGISTER_LIMIT))
+    return oauthError(c, 429, "slow_down", "Too many registrations. Try again later.");
   const body = await c.req.json().catch(() => null);
   if (!body || typeof body !== "object")
     return oauthError(c, 400, "invalid_client_metadata", "Body must be JSON.");
@@ -121,6 +153,16 @@ oauthRoutes.post("/register", async (c) => {
       "invalid_redirect_uri",
       "At least one redirect_uri is required.",
     );
+  if (
+    uris.length > MAX_REDIRECT_URIS ||
+    uris.some((u: string) => u.length > MAX_REDIRECT_URI_LENGTH)
+  )
+    return oauthError(
+      c,
+      400,
+      "invalid_redirect_uri",
+      `At most ${MAX_REDIRECT_URIS} redirect_uris, each at most ${MAX_REDIRECT_URI_LENGTH} characters.`,
+    );
   for (const u of uris) {
     let parsed: URL;
     try {
@@ -128,9 +170,7 @@ oauthRoutes.post("/register", async (c) => {
     } catch {
       return oauthError(c, 400, "invalid_redirect_uri", `Not a URL: ${u}`);
     }
-    const loopback =
-      parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
-    if (parsed.protocol !== "https:" && !loopback)
+    if (parsed.protocol !== "https:" && !isLoopbackUri(parsed))
       return oauthError(
         c,
         400,
@@ -325,6 +365,7 @@ oauthRoutes.get("/authorize", async (c) => {
     state: params.state,
     code_challenge: params.codeChallenge,
     resource: params.resource ?? "",
+    csrf: sessionId ? consentCsrf(sessionId) : "",
   })
     .map(
       ([k, v]) =>
@@ -411,7 +452,9 @@ document.getElementById('f').addEventListener('submit', async (ev) => {
 });
 
 oauthRoutes.post("/authorize/decision", async (c) => {
-  const form = await c.req.parseBody();
+  const form = await c.req
+    .parseBody()
+    .catch(() => ({}) as Record<string, unknown>);
   const clientId = String(form.client_id ?? "");
   const redirectUri = String(form.redirect_uri ?? "");
   const state = String(form.state ?? "");
@@ -443,6 +486,15 @@ oauthRoutes.post("/authorize/decision", async (c) => {
     out.searchParams.set("error_description", "Session expired before approval.");
     return c.redirect(out.toString(), 302);
   }
+  // Only an approval needs this: it is the one decision that issues a code.
+  if (!csrfMatches(sessionId!, String(form.csrf ?? "")))
+    return c.html(
+      page(
+        "Can't continue",
+        `<h1>Can't continue</h1><p class="sub">This approval did not come from the consent page. Try connecting again.</p>`,
+      ),
+      403,
+    );
 
   const granted = String(form.scope ?? SCOPE_READ)
     .split(/\s+/)

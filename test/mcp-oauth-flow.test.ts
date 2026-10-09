@@ -73,7 +73,10 @@ async function getCode(
     { headers: { Cookie: cookie } },
   );
   expect(authz.status).toBe(200);
-  expect(await authz.text()).toContain("Connect Claude?");
+  const html = await authz.text();
+  expect(html).toContain("Connect Claude?");
+  const csrf = html.match(/name="csrf" value="([0-9a-f]{64})"/)?.[1];
+  expect(csrf).toBeTruthy();
 
   const decision = await app.request("/oauth/authorize/decision", {
     method: "POST",
@@ -88,6 +91,7 @@ async function getCode(
       state: "xyz",
       code_challenge: challenge,
       resource: `${BASE}/mcp`,
+      csrf: csrf!,
       decision: "allow",
     }),
   });
@@ -302,6 +306,63 @@ describe("MCP OAuth — refusals", () => {
       }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it("refuses an approval without the consent page's CSRF token", async () => {
+    enable();
+    const app = await createTestApp("key");
+    await registerUser(app, "alice@example.com");
+    const clientId = await register(app);
+    const cookie = await signIn(app, "alice@example.com", "testpass");
+    const { challenge } = pkce();
+
+    for (const csrf of [undefined, "0".repeat(64)]) {
+      const res = await app.request("/oauth/authorize/decision", {
+        method: "POST",
+        headers: {
+          Cookie: cookie,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: form({
+          client_id: clientId,
+          redirect_uri: REDIRECT,
+          scope: "nests:read",
+          code_challenge: challenge,
+          decision: "allow",
+          ...(csrf ? { csrf } : {}),
+        }),
+      });
+      expect(res.status).toBe(403);
+      expect(res.headers.get("location")).toBeNull();
+    }
+  });
+
+  it("rejects loopback redirect URIs with a non-http scheme", async () => {
+    enable();
+    const app = await createTestApp("key");
+    for (const uri of ["javascript://localhost/%0aalert(1)", "myapp://127.0.0.1/cb"]) {
+      const res = await app.request("/oauth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ redirect_uris: [uri] }),
+      });
+      expect(res.status).toBe(400);
+    }
+  });
+
+  it("caps the redirect_uris a registration may carry", async () => {
+    enable();
+    const app = await createTestApp("key");
+    const tooMany = Array.from({ length: 11 }, (_, i) => `https://a.example/${i}`);
+    const tooLong = [`https://a.example/${"x".repeat(2048)}`];
+    for (const uris of [tooMany, tooLong]) {
+      const res = await app.request("/oauth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ redirect_uris: uris }),
+      });
+      expect(res.status).toBe(400);
+    }
   });
 
   it("requires S256 PKCE, redirecting the error to the client", async () => {
@@ -637,5 +698,27 @@ describe("MCP OAuth — read scope is enforced too", () => {
     expect(scopeAllows(["nests:write"], "nest_index")).toBe(true);
     expect(scopeAllows(["nests:read"], "nest_create")).toBe(false);
     expect(scopeAllows(["nests:write"], "nest_create")).toBe(true);
+  });
+});
+
+describe("MCP OAuth — purge", () => {
+  it("deletes dead tokens and keeps live ones", async () => {
+    const app = await createTestApp("key");
+    const alice = await registerUser(app, "alice@example.com");
+    // After createTestApp: it resets modules, and the store must share its db.
+    const { issueTokens, purgeExpired, resolveAccessToken } = await import("../src/auth/oauth-store.js");
+    const { getDb } = await import("../src/db/client.js");
+    const grant = (withRefresh: boolean) =>
+      issueTokens({ userId: alice.userId, clientId: "c", clientName: "C", scope: "nests:read", resource: null, withRefresh });
+    const live = await grant(true);
+    const dead = await grant(false);
+    await getDb().run(
+      "UPDATE oauth_tokens SET expires_at = '2000-01-01T00:00:00.000Z' WHERE refresh_token_hash IS NULL",
+    );
+    await purgeExpired();
+    const rows = (await getDb().all("SELECT refresh_token_hash FROM oauth_tokens")) as unknown[];
+    expect(rows).toHaveLength(1);
+    expect(await resolveAccessToken(live.accessToken)).not.toBeNull();
+    expect(await resolveAccessToken(dead.accessToken)).toBeNull();
   });
 });

@@ -15,6 +15,7 @@
  */
 import { randomBytes, createHash } from "crypto";
 import { getDb } from "../db/client.js";
+import { nowExpr } from "../db/sql.js";
 
 /** Access tokens are short by design; a leaked one should expire quickly. */
 export const ACCESS_TTL_SECONDS = 60 * 60; // 1 hour
@@ -37,6 +38,11 @@ function iso(secondsFromNow: number): string {
   return new Date(Date.now() + secondsFromNow * 1000).toISOString();
 }
 
+/** The `YYYY-MM-DD HH:MM:SS` UTC text nowExpr writes, offset from now. */
+function sqlTime(secondsFromNow: number): string {
+  return iso(secondsFromNow).slice(0, 19).replace("T", " ");
+}
+
 function expired(at: string | null | undefined): boolean {
   return !at || Date.parse(at) <= Date.now();
 }
@@ -54,11 +60,11 @@ export async function upsertClient(c: OAuthClient): Promise<void> {
   const db = getDb();
   await db.run(
     `INSERT INTO oauth_clients (client_id, client_name, redirect_uris, kind, last_seen_at)
-     VALUES (?, ?, ?, ?, datetime('now'))
+     VALUES (?, ?, ?, ?, ${nowExpr(db)})
      ON CONFLICT(client_id) DO UPDATE SET
        client_name = excluded.client_name,
        redirect_uris = excluded.redirect_uris,
-       last_seen_at = datetime('now')`,
+       last_seen_at = ${nowExpr(db)}`,
     [c.client_id, c.client_name, JSON.stringify(c.redirect_uris), c.kind],
   );
 }
@@ -152,7 +158,7 @@ export async function consumeCode(code: string): Promise<CodeConsumeResult> {
   // requests run on separate connections, not merely a theoretical one.
   // `changes` is what tells the loser it lost.
   const claim = await db.run(
-    "UPDATE oauth_codes SET used_at = datetime('now') WHERE code_hash = ? AND used_at IS NULL",
+    `UPDATE oauth_codes SET used_at = ${nowExpr(db)} WHERE code_hash = ? AND used_at IS NULL`,
     [h],
   );
 
@@ -275,16 +281,15 @@ export async function resolveAccessToken(
       }
     | undefined;
   if (!row || row.revoked_at || expired(row.expires_at)) return null;
+  const db = getDb();
   // last_used_at is for the connected-apps list, not accounting, so it does
   // not need to be exact. Writing it on every resolution would put a write on
   // the hot path of every tool call in a chatty MCP session; once every few
   // minutes carries the same information.
-  await getDb().run(
-    `UPDATE oauth_tokens SET last_used_at = datetime('now')
-      WHERE id = ?
-        AND (last_used_at IS NULL
-             OR last_used_at < datetime('now', '-${LAST_USED_THROTTLE_MINUTES} minutes'))`,
-    [row.id],
+  await db.run(
+    `UPDATE oauth_tokens SET last_used_at = ${nowExpr(db)}
+      WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)`,
+    [row.id, sqlTime(-LAST_USED_THROTTLE_MINUTES * 60)],
   );
   return {
     id: row.id,
@@ -320,7 +325,7 @@ export async function rotateRefreshToken(
   // served. The client_id is part of the claim so another client cannot
   // redeem a token that was not issued to it.
   const claim = await db.run(
-    `UPDATE oauth_tokens SET revoked_at = datetime('now')
+    `UPDATE oauth_tokens SET revoked_at = ${nowExpr(db)}
       WHERE refresh_token_hash = ? AND revoked_at IS NULL AND client_id = ?`,
     [h, clientId],
   );
@@ -358,8 +363,9 @@ export async function rotateRefreshToken(
 
 /** Revoke by either token value. Idempotent, and silent about what it found. */
 export async function revokeByToken(token: string): Promise<void> {
-  await getDb().run(
-    `UPDATE oauth_tokens SET revoked_at = datetime('now')
+  const db = getDb();
+  await db.run(
+    `UPDATE oauth_tokens SET revoked_at = ${nowExpr(db)}
       WHERE revoked_at IS NULL
         AND (access_token_hash = ? OR refresh_token_hash = ?)`,
     [hash(token), hash(token)],
@@ -371,10 +377,27 @@ export async function revokeGrant(
   userId: string,
   clientId: string,
 ): Promise<void> {
-  await getDb().run(
-    `UPDATE oauth_tokens SET revoked_at = datetime('now')
+  const db = getDb();
+  await db.run(
+    `UPDATE oauth_tokens SET revoked_at = ${nowExpr(db)}
       WHERE user_id = ? AND client_id = ? AND revoked_at IS NULL`,
     [userId, clientId],
+  );
+}
+
+/**
+ * Delete codes and tokens that can never be used again. Used codes are kept a
+ * day past expiry so a late replay is still detected and revokes the grant.
+ */
+export async function purgeExpired(): Promise<void> {
+  const db = getDb();
+  const now = iso(0);
+  await db.run("DELETE FROM oauth_codes WHERE expires_at < ?", [iso(-86400)]);
+  await db.run(
+    `DELETE FROM oauth_tokens
+      WHERE COALESCE(refresh_expires_at, expires_at) < ?
+         OR (revoked_at IS NOT NULL AND revoked_at < ?)`,
+    [now, sqlTime(-86400)],
   );
 }
 
