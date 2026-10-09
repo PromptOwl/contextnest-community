@@ -74,7 +74,8 @@ function toDraft(a: MetacognitionAgent): Draft {
     node_id: a.node_id,
     enabled: a.enabled,
     name: a.persona.name,
-    avatar: a.persona.avatar ?? "",
+    // A URL avatar saved before glyph-only avatars is dropped on the next save.
+    avatar: a.persona.avatar && !a.persona.avatar.includes("://") ? a.persona.avatar : "",
     read: a.scope.read.join(", "),
     propose: a.scope.propose.join(", "),
     max_steps: a.caps.max_steps,
@@ -116,13 +117,13 @@ function toConfig(d: Draft): MetacognitionAgentConfig & { enabled: boolean } {
   };
 }
 
+/** A glyph, never an image: a remote image URL would be fetched by every
+ *  reviewer's browser that shows the persona. */
 function Avatar({ avatar, name }: { avatar: string | null; name: string }) {
-  if (avatar && /^https:\/\//.test(avatar)) {
-    return <img src={avatar} alt="" className="h-7 w-7 rounded-full object-cover shrink-0" />;
-  }
+  const glyph = avatar && !avatar.includes("://") ? avatar : null;
   return (
     <span className="h-7 w-7 rounded-full bg-violet-100 dark:bg-violet-950 text-violet-700 dark:text-violet-300 flex items-center justify-center text-sm shrink-0">
-      {avatar || name.slice(0, 1).toUpperCase()}
+      {glyph || name.slice(0, 1).toUpperCase()}
     </span>
   );
 }
@@ -380,7 +381,7 @@ export function MetacognitionPanel({ nestId, canConfigure }: { nestId: string; c
               <Input value={draft.name} onChange={text("name")} placeholder="Archivist" data-testid="metacognition-name" />
             </div>
             <div className="space-y-1">
-              <Label>Avatar (an emoji or an https image URL)</Label>
+              <Label>Avatar (an emoji or up to 4 letters)</Label>
               <Input value={draft.avatar} onChange={text("avatar")} placeholder="🦉" />
             </div>
             <div className="space-y-1">

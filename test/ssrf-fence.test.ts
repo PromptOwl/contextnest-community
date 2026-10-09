@@ -53,3 +53,17 @@ describe("agent address fence", () => {
     expect(isPrivateAddress("93.184.216.34")).toBe(false);
   });
 });
+
+describe("prompt caching", () => {
+  it("puts a cache breakpoint on the run's memory message without changing the caller's array", async () => {
+    const { withMemoryBreakpoint } = await import("../src/metacognition/model.js");
+    const messages: any[] = [
+      { role: "user", content: "memory" },
+      { role: "assistant", content: [{ type: "text", text: "hi" }] },
+    ];
+    const out = withMemoryBreakpoint(messages);
+    expect(out[0]).toEqual({ role: "user", content: [{ type: "text", text: "memory", cache_control: { type: "ephemeral" } }] });
+    expect(out[1]).toBe(messages[1]);
+    expect(messages[0].content).toBe("memory");
+  });
+});

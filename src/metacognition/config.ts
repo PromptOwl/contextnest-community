@@ -87,6 +87,20 @@ function folders(v: unknown, field: string): string[] {
   ];
 }
 
+/**
+ * An avatar is a glyph — an emoji or a couple of letters — never a URL. A URL
+ * would be fetched by every reviewer's browser that renders the persona: a
+ * tracking pixel that reports who read the agent's proposals, and when.
+ */
+function avatarGlyph(v: unknown): string {
+  const s = str(v, "persona.avatar", 32);
+  const glyphs = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(s)].length;
+  if (glyphs > 4 || /[<>"'`\\/:]/.test(s) || /\s/.test(s)) {
+    throw new ValidationError("persona.avatar is an emoji or up to 4 letters (no URLs)");
+  }
+  return s;
+}
+
 function clamp(v: unknown, cap: { default: number; min: number; max: number }, field: string): number {
   if (v === undefined || v === null) return cap.default;
   const n = Number(v);
@@ -122,7 +136,7 @@ export function parseConfig(input: unknown): MetacognitionConfig {
   const avatar =
     persona.avatar === undefined || persona.avatar === null || persona.avatar === ""
       ? null
-      : str(persona.avatar, "persona.avatar", 500);
+      : avatarGlyph(persona.avatar);
 
   const read = folders(b.scope?.read, "scope.read");
   // "*" = anywhere it may read. Empty = proposals off: an agent that may
