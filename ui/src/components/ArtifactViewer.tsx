@@ -177,6 +177,8 @@ export function ArtifactViewer({
     content: string;
     version?: number;
     status: string | null;
+    /** Who submitted the open review — they may keep editing (server repoints). */
+    pendingReviewBy?: string | null;
   } | null>(null);
   const [nodeLoading, setNodeLoading] = useState(false);
   const [editDraft, setEditDraft] = useState("");
@@ -186,7 +188,15 @@ export function ArtifactViewer({
   const canEdit = !viewOnly && !reviewerOnly;
   // Pending review locks writes server-side (423) — mirror DocumentEditor
   // and disable the affordances instead of letting the user hit the error.
-  const isLocked = nodeMeta?.status === "pending_review";
+  // Like DocumentEditor's isOwnPendingReview, the submitter is exempt: the
+  // server accepts their edit and repoints the open review onto it.
+  const isPendingReview = nodeMeta?.status === "pending_review";
+  const isOwnPendingReview =
+    isPendingReview &&
+    !!currentEmail &&
+    !!nodeMeta?.pendingReviewBy &&
+    nodeMeta.pendingReviewBy.toLowerCase() === currentEmail.toLowerCase();
+  const isLocked = isPendingReview && !isOwnPendingReview;
   const editDirty = nodeMeta != null && editDraft !== nodeMeta.content;
   // Restore also writes a new version, so the same pending_review lock
   // applies — the banner's "Restore this version" must gate like the history
@@ -195,7 +205,7 @@ export function ArtifactViewer({
   // current row — always present when a version is pinned, since pinning
   // goes through the history modal.
   const restoreLocked =
-    isLocked ||
+    isPendingReview ||
     (versionData != null &&
       versionData.versions.find(
         (v) => v.version === versionData.currentVersion,
@@ -355,6 +365,7 @@ export function ArtifactViewer({
         content,
         version: node?.version,
         status: node?.status ?? null,
+        pendingReviewBy: (node as any)?.pendingReviewBy ?? null,
       });
       setEditDraft(content);
     } catch (e: any) {
@@ -382,6 +393,7 @@ export function ArtifactViewer({
         content: editDraft,
         version: typeof nextVersion === "number" ? nextVersion : nodeMeta.version,
         status: res?.node?.status ?? nodeMeta.status,
+        pendingReviewBy: nodeMeta.pendingReviewBy,
       });
       // Refresh the render + drop the stale extracted text; the served
       // snapshot may lag behind under stewardship (until approved) — that is
