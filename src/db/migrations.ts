@@ -1946,6 +1946,37 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("056_mcp_oauth");
   }
+
+  // 062: nest-level custom field definitions (056–061 are reserved by open
+  //   branches). One row per field a nest admin or steward defines; the VALUES
+  //   live on each node, in frontmatter `metadata.fields`, so they are
+  //   versioned and hash-chained with the document (src/nodes/custom-fields.ts).
+  //   options/default/applies_to are JSON. applies_to '["task"]' is the default;
+  //   '["*"]' means every node type.
+  if (!hasMigration("062_field_definitions")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS field_definitions (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        field_key TEXT NOT NULL,
+        label TEXT NOT NULL,
+        type TEXT NOT NULL,
+        options_json TEXT NOT NULL DEFAULT '[]',
+        required INTEGER NOT NULL DEFAULT 0,
+        default_json TEXT,
+        applies_to_json TEXT NOT NULL DEFAULT '["task"]',
+        unit TEXT,
+        preset TEXT,
+        position INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_key
+        ON field_definitions(nest_id, field_key);
+    `);
+    recordMigration("062_field_definitions");
+  }
 }
 
 /**

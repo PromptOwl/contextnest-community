@@ -85,6 +85,7 @@ const HISTORICAL_MIGRATIONS = [
   "054_metacognition_agents",
   "055_access_requests",
   "056_mcp_oauth",
+  "062_field_definitions",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -992,6 +993,30 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- One running server-executed run per agent, enforced atomically.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_server_run
         ON runs(nest_id, agent_node) WHERE status = 'running' AND claimed_by = 'server:metacognition';
+  `);
+
+  // Migration 062 parity: nest-level custom field definitions (see
+  // migrations.ts). Values live on the nodes, not here.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS field_definitions (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      field_key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      type TEXT NOT NULL,
+      options_json TEXT NOT NULL DEFAULT '[]',
+      required INTEGER NOT NULL DEFAULT 0,
+      default_json TEXT,
+      applies_to_json TEXT NOT NULL DEFAULT '["task"]',
+      unit TEXT,
+      preset TEXT,
+      position INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      updated_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_key
+      ON field_definitions(nest_id, field_key);
   `);
 
   // Migration 056 parity: MCP OAuth (CU-wdqcq02p06). Kept in lockstep with
