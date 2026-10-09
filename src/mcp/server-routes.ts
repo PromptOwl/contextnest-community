@@ -82,6 +82,7 @@ const SERVER_WRITE_TOOLS = new Set([
   "context_move",
   "context_submit_review",
   "context_request_access",
+  "context_task_log",
 ]);
 
 // Read tools that support fan-out when `nest` is omitted — search/list/query/overview
@@ -283,6 +284,7 @@ const SERVER_NEST_TOOLS = [
   "context_move",
   "context_submit_review",
   "context_request_access",
+  "context_task_log",
 ];
 
 function withNestArg(tool: (typeof TOOL_DEFINITIONS)[number]) {
@@ -802,11 +804,12 @@ Streamable HTTP, stateless. Two endpoints:
   - Targeted reads (\`nest\` required): \`context_get\`, \`context_resolve\`, \`context_comments\`, \`context_versions\`
   - Writes (\`nest\` required): \`nest_create\`, \`context_create\`, \`context_update\`,
     \`context_delete\`, \`context_move\`, \`context_submit_review\`,
-    \`context_request_access\` (ask for write access when a write is refused)
+    \`context_request_access\` (ask for write access when a write is refused),
+    \`context_task_log\` (log what you did on a task: working / done / blocked)
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, the full toolset. Same names as the
   server-level tools without the \`nest\` argument, plus:
   - read: \`context_init\` (operating instructions — call first), \`context_export\`, \`context_table_query\`, \`context_versions\`
-  - write: \`context_update\`, \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`
+  - write: \`context_update\`, \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`, \`context_task_log\`
   - review: \`context_submit_review\`, \`context_approve\`, \`context_reject\`, \`context_review_queue\`, \`context_my_drafts\`
   - comments: \`context_comment\`, \`context_resolve_comment\`
   - people: \`context_stewards\`, \`context_assign_steward\`, \`context_share_nest\`, \`context_grant\`

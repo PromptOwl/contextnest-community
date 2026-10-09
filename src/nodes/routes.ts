@@ -1,5 +1,5 @@
 import { recordNodeAccess } from "../governance/access-log.js";
-import type { TaskFieldsPatch } from "./task-fields.js";
+import { parseTaskFieldsFilter, taskFieldsFromInput } from "./task-fields.js";
 import { Hono } from "hono";
 import { parseDocument } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
@@ -59,22 +59,6 @@ import {
   toNodeResponse,
   bodyOnly,
 } from "./service.js";
-
-/** Board fields off a request body, keeping "absent" (leave alone) distinct
- *  from null (clear). Anything that isn't a string or null is refused rather
- *  than coerced — a number for a due date is a client bug worth surfacing. */
-function taskFieldsFromBody(body: Record<string, unknown>): TaskFieldsPatch {
-  const out: TaskFieldsPatch = {};
-  for (const k of ["assignee", "due", "priority", "parent"] as const) {
-    const v = body[k];
-    if (v === undefined) continue;
-    if (v !== null && typeof v !== "string") {
-      throw new ValidationError(`${k} must be a string or null`);
-    }
-    out[k] = v;
-  }
-  return out;
-}
 
 export const nodeRoutes = new Hono<AuthEnv>();
 
@@ -149,6 +133,12 @@ nodeRoutes.get("/", async (c) => {
     // holds metadata only. Opt back in and the listing crawls the vault for
     // them; kept for any client that was reading `content` off this route.
     ...(q.content === "1" || q.content === "true" ? { withContent: true } : {}),
+    // Board-field filters — same parser MCP's context_list uses.
+    task: parseTaskFieldsFilter({
+      assignee: q.assignee,
+      priority: q.priority,
+      due_before: q.due_before,
+    }),
   });
   // The nest-wide shape is NOT bundled here: it describes the whole nest
   // whatever level was asked for, so bundling recomputed it on every folder
@@ -228,7 +218,7 @@ nodeRoutes.post("/", async (c) => {
       folder: body.folder,
       prime: body.prime,
       client: attributeRequest(c, body.client),
-      ...taskFieldsFromBody(body),
+      ...taskFieldsFromInput(body),
     },
     authorEmail,
   );
@@ -630,7 +620,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       prime: body.prime,
       client: attributeRequest(c, body.client),
       type: body.type,
-      ...taskFieldsFromBody(body),
+      ...taskFieldsFromInput(body),
     },
     authorEmail,
   );

@@ -32,6 +32,8 @@ import {
   vaultFolderExists,
 } from "../nodes/service.js";
 import * as agentActivity from "./agent-activity-service.js";
+import { logTaskInteraction } from "../nodes/task-log.js";
+import { listTaskActivity } from "../nodes/task-activity.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
 import {
@@ -944,6 +946,43 @@ governanceNodeRoutes.get("/:nodeId{.+}/activity", async (c) => {
   const limit = parseLimit(c.req.query("limit"));
   const activity = await comments.getActivity({ nestId, nodeId, limit });
   return c.json({ activity });
+});
+
+// POST /nests/:nestId/nodes/:nodeId/task-log
+// Register an interaction on a task — body { note, status?, claim?, client? }.
+// Attributed to the caller; an API-key call also records the key (see
+// src/nodes/task-activity.ts). Same core as MCP context_task_log.
+governanceNodeRoutes.post("/:nodeId{.+}/task-log", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = assertSafeNodeId(c.req.param("nodeId")!);
+  const body = await c.req
+    .json<{ note?: unknown; status?: unknown; claim?: unknown; client?: unknown }>()
+    .catch(() => ({}) as Record<string, unknown>);
+  if (body.claim !== undefined && typeof body.claim !== "boolean") {
+    throw new ValidationError("claim must be a boolean");
+  }
+  const result = await logTaskInteraction({
+    nestId,
+    nodeId,
+    userEmail: await getUserEmail(c),
+    userId: c.get("userId"),
+    note: body.note,
+    status: body.status,
+    claim: body.claim === true,
+    surface: "api",
+    apiKeyId: c.get("apiKeyId") ?? null,
+    client: attributeRequest(c, body.client),
+  });
+  return c.json(result, 201);
+});
+
+// GET /nests/:nestId/nodes/:nodeId/task-log — the logged interactions alone,
+// newest first. The full timeline (edits, reviews, comments too) is /activity.
+governanceNodeRoutes.get("/:nodeId{.+}/task-log", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const limit = parseLimit(c.req.query("limit"));
+  return c.json({ entries: await listTaskActivity({ nestId, nodeId, limit }) });
 });
 
 // POST /nests/:nestId/nodes/:nodeId/submit-review

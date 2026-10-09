@@ -87,7 +87,14 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // server-level `context_request_access` derives from the per-nest definition (no new
 // literal). Promotion is tracked upstream in PromptOwl/ContextNest#167 — adopt the
 // descriptors and lower this by 3 if it lands there.
-const BASELINE = 48;
+//
+// Raised 48 -> 49 for `context_task_log` (agent interaction log on tasks). Same reason as
+// the comment tools: a logged interaction is collaboration metadata kept OUTSIDE the
+// engine's version/hash chain (src/nodes/task-activity.ts), so there is no upstream
+// operation to import. It mirrors REST POST /nests/:id/nodes/:nodeId/task-log 1:1. The
+// task FIELDS added to context_create / context_update / context_list are properties on
+// existing literals (TASK_FIELD_PROPERTIES), not new schemas.
+const BASELINE = 49;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

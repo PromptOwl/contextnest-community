@@ -139,7 +139,8 @@ export type ActivityType =
   | "edit" // a committed node version
   | "edit_proposed" // a pending external-edit suggestion ("proposed an edit")
   | "review_requested"
-  | "review_resolved";
+  | "review_resolved"
+  | "task_activity"; // an interaction logged on a task (context_task_log)
 
 export interface ActivityEntry {
   type: ActivityType;
@@ -148,6 +149,14 @@ export interface ActivityEntry {
   at: string; // ISO-ish timestamp
   detail?: string; // e.g. "approved v4", change note, comment excerpt
   refId?: string; // id of the source row (comment id, review id, version no.)
+  /** task_activity only: working | done | blocked. */
+  status?: string;
+  /** task_activity only: the §9.4 agent name the caller reported. */
+  agent?: string;
+  /** task_activity only: the API key the call came in on. */
+  key?: { label?: string; prefix?: string; scoped: boolean };
+  /** task_activity only: the full one-line description. */
+  summary?: string;
 }
 
 // User reference

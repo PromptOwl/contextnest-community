@@ -85,6 +85,7 @@ const HISTORICAL_MIGRATIONS = [
   "054_metacognition_agents",
   "055_access_requests",
   "056_mcp_oauth",
+  "064_task_activity",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1044,6 +1045,28 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       ON oauth_tokens(access_token_hash);
     CREATE INDEX IF NOT EXISTS idx_oauth_tokens_refresh
       ON oauth_tokens(refresh_token_hash);
+  `);
+
+  // Migration 064 parity: task activity log (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS task_activity (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      user_id TEXT,
+      status TEXT CHECK(status IS NULL OR status IN ('working', 'done', 'blocked')),
+      note TEXT NOT NULL,
+      surface TEXT NOT NULL,
+      api_key_id TEXT,
+      api_key_label TEXT,
+      api_key_prefix TEXT,
+      key_scoped INTEGER NOT NULL DEFAULT 0,
+      client_json TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_activity_node
+      ON task_activity(nest_id, node_id, created_at);
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

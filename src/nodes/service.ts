@@ -86,7 +86,10 @@ import { notifyAssigned } from "../governance/assign-notify.js";
 import {
   TASK_NODE_TYPE,
   applyTaskFields,
+  hasTaskFieldsFilter,
   hasTaskFieldsPatch,
+  matchesTaskFieldsFilter,
+  type TaskFieldsFilter,
   taskFieldsOf,
   type TaskFields,
   type TaskFieldsPatch,
@@ -728,6 +731,9 @@ export interface ListNodesFilters {
    * to crawling the vault, which is the honest price.
    */
   withContent?: boolean;
+  /** Board-field filters (assignee / priority / due_before), applied before
+   *  the access gate and `limit` so a filtered page is a full page. */
+  task?: TaskFieldsFilter;
 }
 
 /**
@@ -917,7 +923,10 @@ export async function listNodesForCaller(
     filters.folder === undefined
       ? documents
       : documents.filter((d) => folderOfId(d.id) === filters.folder);
-  const nodes: ContextNode[] = scoped.map((d) => ({
+  const taskFiltered = hasTaskFieldsFilter(filters.task)
+    ? scoped.filter((d) => matchesTaskFieldsFilter(d.frontmatter.metadata, filters.task!))
+    : scoped;
+  const nodes: ContextNode[] = taskFiltered.map((d) => ({
     id: d.id,
     filePath: "",
     rawContent: "",
@@ -2704,6 +2713,8 @@ export const NODE_KEYED_TABLES = [
   // A metacognition agent's config (CU-wdqcq041jm): it runs the agent node, so
   // a delete must stop it and a move must take it along.
   ["metacognition_agents", "node_id"],
+  // Agent/person interactions logged on a task (migration 064).
+  ["task_activity", "node_id"],
 ] as const;
 
 /** Drop every row keyed to a node id. Caller supplies the transaction. */

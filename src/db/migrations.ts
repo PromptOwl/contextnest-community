@@ -1946,6 +1946,42 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("056_mcp_oauth");
   }
+
+  // 064: task activity log. One row per interaction an agent (or a person)
+  //   registers on a task — "working on it", "done", "blocked: …" — through
+  //   MCP `context_task_log`, REST POST …/task-log or `ctx task log`. Attributed
+  //   to the authenticated user; a call on an API key also records which key
+  //   (id, label, prefix, whether it was nest-scoped), and the caller's §9.4
+  //   `client` block rides in client_json like it does on node_versions.
+  //   Outside the engine's hash chain on purpose — like comments, it is
+  //   collaboration metadata, not document content.
+  //
+  //   Numbered 064: 056–061 are taken or reserved by open branches.
+  if (!hasMigration("064_task_activity")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS task_activity (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          actor TEXT NOT NULL,             -- email of the authenticated user
+          user_id TEXT,
+          status TEXT CHECK(status IS NULL OR status IN ('working', 'done', 'blocked')),
+          note TEXT NOT NULL,
+          surface TEXT NOT NULL,           -- mcp | api
+          api_key_id TEXT,
+          api_key_label TEXT,
+          api_key_prefix TEXT,
+          key_scoped INTEGER NOT NULL DEFAULT 0,
+          client_json TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_activity_node
+          ON task_activity(nest_id, node_id, created_at);
+      `);
+    })();
+    recordMigration("064_task_activity");
+  }
 }
 
 /**

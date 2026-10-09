@@ -2584,7 +2584,8 @@ export function createApp(): Hono<AuthEnv> {
       const isCommentPath =
         /\/comments$/.test(path) ||
         /\/comments\/[^/]+\/resolve$/.test(path);
-      const isActivityPath = /\/activity$/.test(path);
+      // The task log is a slice of the same timeline.
+      const isActivityPath = /\/(activity|task-log)$/.test(path);
       // The activity feed serves the review queue's rows under another URL
       // (/nests/:id/feed?filter=changes), so it must sit behind the same
       // license gate as /review-queue. Match the exact nest-scoped route
