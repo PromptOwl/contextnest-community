@@ -2479,6 +2479,41 @@ An email present in several sources shows its least-revocable origin (`license` 
 
 Grants persist in the database and are loaded into the in-memory resolution cache at startup and after every grant/revoke, so they survive restarts. Surfaced in the UI on **Teammates → Superadmins** with per-source badges, add-by-email, and confirm-to-revoke.
 
+### Message log — GET `/admin/messages`, `/admin/messages/:id`, `/admin/messages/views` (superadmin only)
+Every message the server sends, in one place: email (SMTP/SES), Slack, Microsoft Teams and per-nest connector webhooks, in-app inbox notifications, and comments posted by agents (metacognition personas, Hootie). Each is recorded once at its send path into `outbound_messages`.
+
+**Access is stricter than the other `/admin/*` routes.** Only an effective superadmin (license admin ∪ access.yaml ∪ granted) may call these. **Open mode is always refused**, because every caller is admin there. Nest owners and nest admins are refused too (`403 { "error": "Only a superadmin can view the message log." }`). Every successful call first writes a row to `message_log_views` (viewer, action, filters, message id). If that audit write fails, the read fails.
+
+- `GET /admin/messages` — newest first. Query: `channel` (`email`|`slack`|`msteams`|`webhook`|`inbox`|`comment`), `sender_kind` (`human`|`persona`|`system`), `status` (`sent`|`failed`|`skipped`), `sender` (substring), `nest`, `run`, `q` (subject or recipient substring), `from`/`to` (ISO timestamps), `limit` (1–200, default 50), `offset`.
+  - Response: `{ total, limit, offset, retention_days, store_bodies, messages: [...] }`.
+  - List rows carry `has_body`, never the body.
+- `GET /admin/messages/:id` — one message: `{ message: { …, body } }`. `body` is the **redacted** text, or `null` when bodies aren't stored. `404` if unknown.
+- `GET /admin/messages/views` — the access audit: `{ total, limit, offset, views: [{ viewer, action: "list"|"detail"|"views", filters, message_id, at }] }`. Reading it is audited too.
+
+Row fields:
+- **Identity and routing:** `id`, `channel`, `sender_kind`, `sender` (email; `null` for system), `recipients` (emails; webhooks as `host#sha256-prefix`), `subject`.
+- **Delivery:** `status`, `provider_id` (the SMTP/SES message id), `error`.
+- **Context:** `nest_id`, `nest_name`, `node_id`, `run_id` (the agent run that caused it, when known), `created_at`.
+- **`via_proxy`** (webhooks): whether the request left through the egress proxy. It follows `HTTPS_PROXY`/`NO_PROXY`, and is `null` where it doesn't apply.
+
+**Redaction happens at write time**, so a secret never reaches the table. It covers:
+- invite temporary passwords;
+- credential query params (`token`, `code`, `key`, `secret`, `sig`, …), which includes magic sign-in links;
+- `hk_…` hook tokens and `cnst_…` keys;
+- `Bearer …` tokens;
+- common provider key shapes (`sk-…`, `xox?-…`);
+- incoming-webhook URLs (Slack, Teams/Office, Azure Logic Apps, Discord), reduced to host plus hash.
+
+Bodies are capped at 4 KB.
+
+Retention and storage settings:
+- `MESSAGE_LOG_RETENTION_DAYS` (default 30) sets message retention.
+- Access-audit rows are kept 365 days.
+- `MESSAGE_LOG_STORE_BODIES=false` keeps metadata only.
+- Both are editable from **Settings → Basic → Message log**.
+
+Surfaced in the UI at **Admin → Message log**, which is shown only to signed-in superadmins.
+
 ### Community sites — GET/POST `/admin/community-sites`, PATCH/DELETE `/admin/community-sites/:id` (server-admin only)
 Manage the **official community sites** trusted for one-click SSO auto-login (`GET /auth/sso` — see above). Each row is a `{ name, url, secret, is_active }` connection; `url` is a display/uniqueness field, not used for audience binding. `GET /auth/sso` tries an incoming ticket's signature against every *active* site's secret, and validates the ticket's `aud` claim against this deployment's own `PUBLIC_BASE_URL` (the same value for every candidate). Replaces the single `OFFICIAL_COMMUNITY_SSO_SECRET`/`PUBLIC_BASE_URL` env-var pair with a DB-backed list for the *secret* side — the env-var pair still works as an implicit extra "legacy" entry, so existing single-site deployments are unaffected. Surfaced in the UI at **Settings → Community sites**.
 
