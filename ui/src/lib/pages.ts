@@ -33,6 +33,9 @@ export type PageGroupId = (typeof PAGE_GROUPS)[number]["id"];
 
 export interface PageCaps {
   isAdmin: boolean;
+  /** A signed-in server superadmin. Never true in open mode, where everyone
+   *  is "admin" — superadmin-only pages (the message log) stay hidden there. */
+  isSuperadmin?: boolean;
 }
 
 export interface PageMeta {

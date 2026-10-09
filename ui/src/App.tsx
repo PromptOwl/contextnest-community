@@ -247,6 +247,8 @@ export default function App() {
     error,
     logout,
   } = useAuth();
+  // What gates an app page (meta.visible). Superadmin is never open mode.
+  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open" };
   const [view, setViewNow] = useState<View>(() => ({
     page: "dashboard",
     // /my-work, /teammates, … open straight onto their page.
@@ -793,7 +795,7 @@ export default function App() {
   const crumbs = useMemo<Crumb[]>(() => {
     const home: Crumb = { label: "Home", go: () => setView({ page: "dashboard" }) };
     if (view.page === "dashboard") {
-      const page = visibleAppPage(view.tab, { isAdmin });
+      const page = visibleAppPage(view.tab, pageCaps);
       if (pageTail.length) return [home, ...pageTail];
       return page.id === DEFAULT_PAGE_ID ? [{ label: page.label }] : [home, { label: page.label }];
     }
@@ -1210,7 +1212,7 @@ export default function App() {
                       : setDocSidebarCollapsed(true)
                   }
                   onOpenDashboard={() => setView({ page: "dashboard" })}
-                  dashboardTab={cur.page === "dashboard" ? visibleAppPage(cur.tab, { isAdmin }).id : null}
+                  dashboardTab={cur.page === "dashboard" ? visibleAppPage(cur.tab, pageCaps).id : null}
                   onOpenDashboardTab={(tab) => setView({ page: "dashboard", tab })}
                   onOpenNest={(t) =>
                     setView({
@@ -1570,7 +1572,7 @@ export default function App() {
         {view.page === "dashboard" && (() => {
           // A gated page (admin-only) reached by URL falls back to the default
           // page — the server would refuse it anyway; this keeps the shell whole.
-          const Page = visibleAppPage(view.tab, { isAdmin }).Component;
+          const Page = visibleAppPage(view.tab, pageCaps).Component;
           return (
             <AppNavProvider value={appNav}>
               <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>

@@ -95,6 +95,8 @@ const TABS: {
       "posthog_host",
       "max_body_bytes",
       "trace_retention_days",
+      "message_log_retention_days",
+      "message_log_store_bodies",
     ],
   },
   {
@@ -985,6 +987,51 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   <p className="text-xs text-muted-foreground mt-1">
                     0–3650 — 0 disables pruning entirely.
                   </p>
+                </CardContent>
+              </Card>
+
+              {/* Superadmin message log (outbound_messages) */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Message log</CardTitle>
+                  <CardDescription>
+                    Every email, Slack and Teams post, webhook, inbox
+                    notification and agent comment this server sends is logged
+                    for superadmins (Admin → Message log). Passwords, sign-in
+                    links, keys and webhook URLs are redacted before storage.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <NumField
+                        value={draft.message_log_retention_days}
+                        min={0}
+                        max={3650}
+                        onChange={(n) => set({ message_log_retention_days: n })}
+                      />
+                      <span className="text-sm text-muted-foreground shrink-0">
+                        days
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      How long to keep messages. 0 keeps them forever. Who
+                      viewed the log is kept for a year regardless.
+                    </p>
+                  </div>
+                  <div className="flex items-start justify-between gap-4 pt-4 border-t">
+                    <div className="pr-4">
+                      <div className="text-sm font-medium">Store message bodies</div>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        Off keeps only who, when, where and whether it was
+                        delivered — no second copy of what people wrote.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={draft.message_log_store_bodies}
+                      onCheckedChange={(v) => set({ message_log_store_bodies: v })}
+                    />
+                  </div>
                 </CardContent>
               </Card>
             </div>

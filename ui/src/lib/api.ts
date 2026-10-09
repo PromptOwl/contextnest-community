@@ -328,6 +328,9 @@ export interface AdminSettings {
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
+  /** Superadmin message log: retention in days (0 = forever) and whether redacted bodies are kept. */
+  message_log_retention_days: number;
+  message_log_store_bodies: boolean;
   /** OIDC SSO. The client secret is write-only — only its presence comes back. */
   oidc_enabled: boolean;
   oidc_issuer: string;
@@ -649,6 +652,89 @@ export async function getAdminTrace(params: {
     offset: number;
     events: any[];
   }>(`/admin/trace${suffix}`);
+}
+
+// ─── Superadmin message log ────────────────────────────────────────────────
+
+export type MessageChannel = "email" | "slack" | "msteams" | "webhook" | "inbox" | "comment";
+export type MessageSenderKind = "human" | "persona" | "system";
+export type MessageStatus = "sent" | "failed" | "skipped";
+
+export interface OutboundMessageRow {
+  id: string;
+  channel: MessageChannel;
+  sender_kind: MessageSenderKind;
+  sender: string | null;
+  recipients: string[];
+  subject: string | null;
+  status: MessageStatus;
+  provider_id: string | null;
+  error: string | null;
+  nest_id: string | null;
+  nest_name: string | null;
+  node_id: string | null;
+  run_id: string | null;
+  /** Left through the egress proxy (HTTPS_PROXY); null when not applicable. */
+  via_proxy: boolean | null;
+  created_at: string;
+  has_body?: boolean;
+  /** Detail view only: the redacted body (null when bodies aren't stored). */
+  body?: string | null;
+}
+
+export interface MessageLogFilters {
+  channel?: MessageChannel;
+  sender_kind?: MessageSenderKind;
+  status?: MessageStatus;
+  sender?: string;
+  nest?: string;
+  run?: string;
+  q?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+}
+
+// Superadmin only — the server refuses everyone else, including open mode.
+// Every call is recorded in the access log.
+export async function getMessageLog(params: MessageLogFilters = {}) {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== "") qs.set(k, String(v));
+  }
+  const suffix = qs.toString() ? `?${qs}` : "";
+  return request<{
+    total: number;
+    limit: number;
+    offset: number;
+    retention_days: number;
+    store_bodies: boolean;
+    messages: OutboundMessageRow[];
+  }>(`/admin/messages${suffix}`);
+}
+
+export async function getMessageLogEntry(id: string) {
+  return request<{ message: OutboundMessageRow }>(`/admin/messages/${encodeURIComponent(id)}`);
+}
+
+export interface MessageLogView {
+  id: string;
+  viewer: string | null;
+  action: "list" | "detail" | "views";
+  filters: Record<string, string> | null;
+  message_id: string | null;
+  at: string;
+}
+
+export async function getMessageLogViews(params: { limit?: number; offset?: number } = {}) {
+  const qs = new URLSearchParams();
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  if (params.offset != null) qs.set("offset", String(params.offset));
+  const suffix = qs.toString() ? `?${qs}` : "";
+  return request<{ total: number; limit: number; offset: number; views: MessageLogView[] }>(
+    `/admin/messages/views${suffix}`,
+  );
 }
 
 // Per-nest activity trace — same rows/shape as getAdminTrace but always
