@@ -97,6 +97,8 @@ describe("MCP tools", () => {
       owner: { userId: "o", email: "o@x.com" },
       baseUrl: "",
       proposals: { made: 0 },
+      comments: { made: 0 },
+      accessRequests: { made: 0 },
       mcp: new McpPool(() => null),
       signal: new AbortController().signal,
     };
