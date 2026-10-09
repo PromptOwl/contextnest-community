@@ -18,14 +18,16 @@
  * Nothing is posted when nobody is named.
  *
  * Read-tier (see isReadQuery in app.ts): if you can read the nest you can
- * ask about it. The feature gate is HOOTIE_ENABLED; the credential is the
- * server-wide ANTHROPIC_API_KEY. Off → 404 (the route doesn't exist);
- * no key → 503 with a reason the UI can explain.
+ * ask about it. The feature gate is HOOTIE_ENABLED; the credential comes from
+ * resolveModelCredential (own key with the byok feature, else PromptOwl's
+ * gateway). Off → 404 (the route doesn't exist); none → 503 with a reason.
  */
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AuthEnv } from "../auth/middleware.js";
 import { config } from "../config.js";
+import { resolveModelCredential, hootieModel, resolveGatewayModel, credentialLabel, ownModelRoute } from "../shared/model-credential.js";
+import { hasEntitlement } from "../auth/entitlements.js";
 import {
   resolveContext,
   type ContextNodeSummary,
@@ -45,6 +47,7 @@ import {
   ModelRefusedError,
 } from "./model.js";
 import { effectiveHootieBrand } from "./brand.js";
+import type { ClientMetadata } from "../shared/client-metadata.js";
 
 export const hootieRoutes = new Hono<AuthEnv>();
 
@@ -57,6 +60,8 @@ const MAX_HISTORY_CHARS = 8000;
 const MAX_HISTORY_RAW = MAX_HISTORY_TURNS * 4;
 /** Retrieval budget per source (anchor document, question) — tokens. */
 const CONTEXT_BUDGET = 6000;
+/** How Hootie's own retrievals are attributed in the activity log. */
+const HOOTIE_CLIENT: ClientMetadata = { agent: "hootie" };
 /**
  * Chats one person may start per window, across ALL nests — the budget
  * guards one server-wide key, so it is keyed per user, not per nest. Each
@@ -85,17 +90,26 @@ type MentionOutcome =
 
 hootieRoutes.post("/chat", async (c) => {
   if (!config.HOOTIE_ENABLED) return c.json({ error: "Not found" }, 404);
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
+  const baseCredential = resolveModelCredential();
+  if (!baseCredential) {
     return c.json(
       {
-        error:
-          "Hootie needs an Anthropic API key. A server admin can add one under Settings → General.",
+        error: hasEntitlement("byok")
+          ? "Hootie needs a model key. A server admin can add one under Settings → Hootie → Model keys."
+          : "Hootie runs on PromptOwl models, which arrive with this server's next licence check. If it persists, ask your administrator.",
         reason: "no_api_key",
       },
       503,
     );
   }
+  // Stored as a plain name; on PromptOwl's gateway the team prefix goes on here.
+  const picked = hootieModel(baseCredential);
+  const gatewayModel = await resolveGatewayModel(baseCredential, picked);
+  // With byok, a provider the admin added their own key for runs on that key.
+  const own = ownModelRoute(gatewayModel);
+  const credential = own?.credential ?? baseCredential;
+  const callModel = own?.model ?? gatewayModel;
+  console.log(`[hootie] model=${picked} call=${callModel} ${credentialLabel(credential)}`);
 
   let body: ChatBody;
   try {
@@ -174,6 +188,10 @@ hootieRoutes.post("/chat", async (c) => {
       nestId,
       userId,
       baseUrl,
+      // Hootie pulls these on the person's behalf: record it as Hootie's
+      // read, so the activity log tells it apart from the person opening
+      // the document themselves.
+      client: HOOTIE_CLIENT,
       body: {
         selector: `[[${nodeId}]]`,
         hops: 1,
@@ -197,6 +215,10 @@ hootieRoutes.post("/chat", async (c) => {
       nestId,
       userId,
       baseUrl,
+      // Hootie pulls these on the person's behalf: record it as Hootie's
+      // read, so the activity log tells it apart from the person opening
+      // the document themselves.
+      client: HOOTIE_CLIENT,
       body: { prompt: question, max_tokens: CONTEXT_BUDGET },
     });
     take(r);
@@ -237,9 +259,9 @@ hootieRoutes.post("/chat", async (c) => {
     let answer = "";
     try {
       for await (const chunk of streamAnswer({
-        apiKey,
-        model: config.HOOTIE_MODEL,
-        baseUrl: config.ANTHROPIC_BASE_URL || null,
+        apiKey: credential.apiKey,
+        model: callModel,
+        baseUrl: credential.baseUrl,
         system,
         turns,
         signal: cancel.signal,
@@ -253,7 +275,9 @@ hootieRoutes.post("/chat", async (c) => {
       // to report, and nobody to report it to.
       if (cancel.signal.aborted) return;
       const text =
-        err instanceof ModelRefusedError ? err.message : describeModelError(err);
+        err instanceof ModelRefusedError
+          ? err.message
+          : describeModelError(err, { model: hootieModel(credential), gateway: !!credential.baseUrl });
       console.error("[hootie] model call failed", nestId, err);
       await stream.writeSSE({ event: "error", data: JSON.stringify({ error: text }) });
       return;

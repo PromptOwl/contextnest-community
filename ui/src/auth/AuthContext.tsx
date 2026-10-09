@@ -61,10 +61,15 @@ export interface AuthContextValue {
    *  existing nodes of the type stay readable. */
   typeArtifactEnabled: boolean;
   typeTableEnabled: boolean;
+  /** The server accepts `task` nodes — the board's "+ Add task" makes tasks
+   *  (which skip review) rather than documents. */
+  typeTaskEnabled: boolean;
   /** Public feature flag from /health — Hootie in the nest (default OFF;
    *  admins opt in). Off → the launcher is hidden exactly when
    *  POST /nests/:id/chat would 404. */
   hootieEnabled: boolean;
+  /** Metacognition agents (FEATURE_METACOGNITION + the workflow plane). */
+  metacognitionEnabled: boolean;
   /** The assistant's name/logo/colour/greeting from /health — the admin's
    *  custom identity on an enterprise licence, the default Hootie otherwise. */
   hootieBrand: HootieBrand;
@@ -108,9 +113,11 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [typeArtifactEnabled, setTypeArtifactEnabled] = useState(true);
   const [sharedDeployment, setSharedDeployment] = useState(false);
   const [typeTableEnabled, setTypeTableEnabled] = useState(true);
+  const [typeTaskEnabled, setTypeTaskEnabled] = useState(false);
   // Default OFF (mirrors config.ts: only an explicit "true" enables), so the
   // launcher never flashes on a server that has it off while /health loads.
   const [hootieEnabled, setHootieEnabled] = useState(false);
+  const [metacognitionEnabled, setMetacognitionEnabled] = useState(false);
   const [hootieBrand, setHootieBrand] = useState<HootieBrand>(DEFAULT_HOOTIE_BRAND);
   const [runnerKeyConfigured, setRunnerKeyConfigured] = useState(false);
   const [subagentRunsEnabled, setSubagentRunsEnabled] = useState(false);
@@ -144,7 +151,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
       setTypeArtifactEnabled(h.type_artifact_enabled !== false);
       setTypeTableEnabled(h.type_table_enabled !== false);
+      setTypeTaskEnabled(h.type_task_enabled === true);
       setHootieEnabled(h.hootie_enabled === true);
+      setMetacognitionEnabled(h.metacognition_enabled === true);
       setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
       setRunnerKeyConfigured(!!h.runner_key_configured);
       setSharedDeployment(!!h.shared_deployment);
@@ -188,7 +197,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
         setTypeArtifactEnabled(h.type_artifact_enabled !== false);
         setTypeTableEnabled(h.type_table_enabled !== false);
+        setTypeTaskEnabled(h.type_task_enabled === true);
         setHootieEnabled(h.hootie_enabled === true);
+        setMetacognitionEnabled(h.metacognition_enabled === true);
         setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
         setRunnerKeyConfigured(!!h.runner_key_configured);
         setSharedDeployment(!!h.shared_deployment);
@@ -361,7 +372,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
         promptowlTeamsEnabled,
         typeArtifactEnabled,
         typeTableEnabled,
+        typeTaskEnabled,
         hootieEnabled,
+        metacognitionEnabled,
         hootieBrand,
         runnerKeyConfigured,
         sharedDeployment,

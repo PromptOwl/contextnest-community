@@ -21,6 +21,7 @@ import { createHmac, timingSafeEqual, randomUUID } from "node:crypto";
 import type { AuthEnv } from "../auth/middleware.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
+import { getAgent } from "../metacognition/store.js";
 import { engineCache } from "../nodes/engine.js";
 import { ValidationError, NotFoundError, ConflictError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
@@ -281,6 +282,23 @@ hookFireRoutes.post("/:token", async (c) => {
   } else {
     inputs = Object.keys(payload).length ? payload : null;
     ack = (runId) => c.json({ ok: true, run_id: runId }, 201);
+  }
+
+  // A metacognition agent is executed by this server (claimed at creation);
+  // the hook's message reaches it as untrusted trigger input.
+  if (config.FEATURE_METACOGNITION && (await getAgent(hook.nest_id, hook.agent_node))?.enabled) {
+    const { startMetacognitionRun } = await import("../metacognition/service.js");
+    const metaRun = await startMetacognitionRun({
+      nestId: hook.nest_id,
+      nodeId: hook.agent_node,
+      triggeredBy: `hook:${hook.preset}:${hook.created_by}`,
+      inputs: inputs ?? undefined,
+    });
+    await db.run(
+      "UPDATE trigger_hooks SET fire_count = fire_count + 1, last_fired_at = ? WHERE id = ?",
+      [new Date().toISOString(), hook.id],
+    );
+    return ack(metaRun);
   }
 
   // Same flood cap as manual triggers and the scheduler.

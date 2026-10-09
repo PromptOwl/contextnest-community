@@ -314,6 +314,9 @@ interface MarkdownEditorProps {
   /** Rendered at the toolbar's right end — the document page puts its
    *  document-level switches (source view, Turn into) there. */
   toolbarEnd?: React.ReactNode;
+  /** Keep the toolbar's space but hide it — the page reads clean until the
+   *  user starts working in it. Space is kept so the body doesn't jump. */
+  toolbarHidden?: boolean;
 }
 
 export const MarkdownEditor = forwardRef<
@@ -337,6 +340,7 @@ export const MarkdownEditor = forwardRef<
     autofocus = "end",
     variant = "boxed",
     toolbarEnd,
+    toolbarHidden = false,
   }: MarkdownEditorProps,
   ref: ForwardedRef<MarkdownEditorHandle>,
 ) {
@@ -1440,7 +1444,9 @@ export const MarkdownEditor = forwardRef<
             isPage
               ? "top-14 -mx-2 mb-3 rounded-md border shadow-sm"
               : "top-0 border-b",
+            toolbarHidden && "invisible",
           )}
+          aria-hidden={toolbarHidden || undefined}
           data-testid="markdown-editor-toolbar"
         >
           <Toolbar

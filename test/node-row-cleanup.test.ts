@@ -94,6 +94,7 @@ describe("node row cleanup", () => {
       // Handled beside the loop in both helpers.
       ["stewards.node_pattern", "document-scoped only"],
       ["grants.target", "document grants only; folder grants cover a prefix"],
+      ["access_requests.target_id", "node-targeted requests only; folder/nest targets aren't node ids"],
     ]);
     const NODE_ID_COLUMNS = new Set([
       "node_id",
@@ -102,6 +103,7 @@ describe("node row cleanup", () => {
       "from_node",
       "to_node",
       "target",
+      "target_id",
     ]);
 
     const db = getDb();

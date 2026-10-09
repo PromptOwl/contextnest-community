@@ -41,15 +41,19 @@ import {
 } from "../../../lib/api";
 import { reads } from "../../../lib/queries";
 import { copyTextWithToast } from "../../../lib/clipboard";
-import { getAdminSettings, updateAdminSettings } from "../../../lib/api";
+import { getAdminModels, getAdminSettings, updateAdminSettings } from "../../../lib/api";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { SearchableSelect } from "@/components/SearchableSelect";
+import { modelOptions } from "@/lib/model-options";
 import { useAuth } from "../../../auth/AuthContext";
 import { AgentConnectPanel } from "./AgentConnectPanel";
+import { LicensePanel } from "./LicensePanel";
 import { toast } from "sonner";
 
 interface SettingsPageProps {
   settings: AdminSettings | null;
   onUpdate: (
-    patch: Partial<AdminSettings> & { anthropic_api_key?: string | null },
+    patch: Partial<AdminSettings>,
   ) => void | Promise<void>;
 }
 
@@ -75,40 +79,57 @@ const TABS: {
   id: string;
   label: string;
   keys: (keyof AdminSettings)[];
+  /** Hide the tab unless this holds for the draft. */
+  visible?: (d: AdminSettings) => boolean;
 }[] = [
   {
-    id: "general",
-    label: "General",
+    id: "basic",
+    label: "Basic",
     keys: [
-      "promptowl_sign_in_gate",
-      "manual_sign_in",
+      "community_name",
       "public_base_url",
       "logo_url",
-      "anthropic_api_key",
-      "anthropic_base_url",
-      "hootie_enabled",
-      "hootie_model",
-      "hootie_name",
-      "hootie_logo_url",
-      "hootie_accent_color",
-      "hootie_greeting",
+      "manual_sign_in",
+      "promptowl_sign_in_gate",
+      "posthog_key",
+      "posthog_host",
+      "max_body_bytes",
+      "trace_retention_days",
+    ],
+  },
+  {
+    // Every on/off feature switch. Switches with their own config (SSO)
+    // open a dedicated tab while on.
+    id: "features",
+    label: "Features",
+    keys: [
+      "workflow_plane_enabled",
+      "subagent_runs_enabled",
+      "metacognition_enabled",
+      "subagent_max_depth",
+      "subagent_max_children",
+      "promptowl_teams_enabled",
+      "type_artifact_enabled",
+      "type_table_enabled",
+      "telemetry_enabled",
       "nest_creation",
       "people_suggest_all_users",
       "shared_deployment",
+      "oidc_enabled",
+      "sso_token_exchange_enabled",
     ],
   },
   {
     id: "sso",
     label: "Single sign-on",
+    visible: (d) => d.oidc_enabled || d.sso_token_exchange_enabled,
     keys: [
-      "oidc_enabled",
       "oidc_issuer",
       "oidc_client_id",
       "oidc_client_secret",
       "oidc_allowed_domains",
       "oidc_auto_provision",
       "oidc_department_tagging",
-      "sso_token_exchange_enabled",
       "mcp_signing_secret",
       "mcp_token_ttl_seconds",
       "ms_token_exchange_enabled",
@@ -116,6 +137,20 @@ const TABS: {
       "ms_tenant_id",
       "google_token_exchange_enabled",
       "google_client_id",
+    ],
+  },
+  {
+    // The in-app chatbot, with the model key it depends on.
+    id: "hootie",
+    label: "Hootie",
+    keys: [
+      "provider_keys",
+      "hootie_enabled",
+      "hootie_model",
+      "hootie_name",
+      "hootie_logo_url",
+      "hootie_accent_color",
+      "hootie_greeting",
     ],
   },
   {
@@ -148,22 +183,9 @@ const TABS: {
     keys: [],
   },
   {
-    id: "advanced",
-    label: "Advanced",
-    keys: [
-      "telemetry_enabled",
-      "posthog_key",
-      "posthog_host",
-      "max_body_bytes",
-      "trace_retention_days",
-      "type_artifact_enabled",
-      "type_table_enabled",
-      "workflow_plane_enabled",
-      "promptowl_teams_enabled",
-      "subagent_runs_enabled",
-      "subagent_max_depth",
-      "subagent_max_children",
-    ],
+    id: "license",
+    label: "License",
+    keys: [],
   },
 ];
 
@@ -191,6 +213,143 @@ const noAutofill = (type: string) =>
   }) as const;
 
 /** Controlled text input bound straight to the draft (no per-field Save). */
+/** Providers an Enterprise (byok) server can add its own key for. */
+const OWN_PROVIDERS = [
+  ["claude", "Anthropic"],
+  ["openai", "OpenAI"],
+  ["gemini", "Google Gemini"],
+  ["grok", "xAI Grok"],
+  ["groq", "Groq"],
+] as const;
+
+/**
+ * Own-provider key rows (inside the Model keys card). Write-only like any
+ * secret: staged in the draft as `provider_keys` (string = set, null =
+ * clear) and sent with the global Save; PromptOwl checks and keeps them in its
+ * model gateway, this server only sees the masked tail.
+ */
+function ProviderKeyFields({
+  draft,
+  current,
+  fieldErrors,
+  set,
+}: {
+  draft: Record<string, string | null>;
+  current: Record<string, { masked: string }>;
+  fieldErrors: Record<string, string>;
+  set: (next: Record<string, string | null>) => void;
+}) {
+  const stage = (p: string, v: string | null | undefined) => {
+    const next = { ...draft };
+    // Typing then deleting must not read as "clear": empty = untouched.
+    if (v === undefined || v === "") delete next[p];
+    else next[p] = v;
+    set(next);
+  };
+  return (
+    <>
+        {OWN_PROVIDERS.map(([p, label]) => (
+          <div key={p} className="space-y-1.5" data-testid={`settings-provider-${p}`}>
+            <Label htmlFor={`provider-key-${p}`}>{label}</Label>
+            <div className="text-xs text-muted-foreground">
+              {draft[p] === null
+                ? "Will be cleared when you save."
+                : current[p]
+                  ? `Current: ••••${current[p].masked}`
+                  : "Not set."}
+            </div>
+            <TextField
+              id={`provider-key-${p}`}
+              type="password"
+              error={fieldErrors[`provider_keys.${p}`]}
+              value={typeof draft[p] === "string" ? (draft[p] as string) : ""}
+              placeholder="Paste to set or replace"
+              onChange={(v) => stage(p, v)}
+            />
+            {current[p] && draft[p] !== null && (
+              <button type="button" className="text-xs text-destructive hover:underline" onClick={() => stage(p, null)}>
+                Clear key
+              </button>
+            )}
+            {draft[p] === null && (
+              <button type="button" className="text-xs text-muted-foreground hover:underline" onClick={() => stage(p, undefined)}>
+                Keep current key
+              </button>
+            )}
+          </div>
+        ))}
+    </>
+  );
+}
+
+/** Hootie's model: one of the models this server's key can reach (PromptOwl's
+ *  team models on the gateway, the provider's on an own key). If the list
+ *  can't be loaded, a name can still be typed. */
+function HootieModelField({
+  value,
+  error,
+  onChange,
+  reloadKey,
+}: {
+  value: string;
+  error?: string;
+  onChange: (v: string) => void;
+  /** Changes when the own-provider keys change, so the list is fetched again. */
+  reloadKey?: string;
+}) {
+  const [models, setModels] = useState<string[] | null>(null);
+  const [own, setOwn] = useState<string[]>([]);
+  const [providers, setProviders] = useState<Record<string, string>>({});
+  useEffect(() => {
+    getAdminModels()
+      .then((r) => {
+        setModels(r.models);
+        setOwn(r.own_models ?? []);
+        setProviders(r.providers ?? {});
+      })
+      .catch(() => setModels([]));
+  }, [reloadKey]);
+  const options = useMemo(
+    () => modelOptions(models ?? [], own, providers, value),
+    [models, own, providers, value],
+  );
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor="hootie-model">Model</Label>
+      {models === null ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground h-9">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading models…
+        </div>
+      ) : models.length > 0 ? (
+        <SearchableSelect
+          id="hootie-model"
+          testId="settings-hootie-model"
+          value={value}
+          onChange={onChange}
+          options={options}
+          placeholder="Pick a model"
+          searchPlaceholder="Search models…"
+          emptyText="No model matches."
+        />
+      ) : (
+        <TextField
+          error={error}
+          id="hootie-model"
+          value={value}
+          placeholder="claude-sonnet-5"
+          onChange={onChange}
+        />
+      )}
+      {error && models && models.length > 0 && <p className="text-xs text-destructive">{error}</p>}
+      <p className="text-xs text-muted-foreground">
+        {models && models.length > 0
+          ? `The model Hootie answers with — ${models.length} available on this server.`
+          : "The model Hootie answers with. The list of available models couldn't be loaded, so type its name (through a gateway, the gateway's name for it)."}
+      </p>
+    </div>
+  );
+}
+
 function TextField({
   id,
   value,
@@ -308,11 +467,9 @@ function NumField({
 
 function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   // Local editable copy. Re-synced whenever the server value changes (initial
-  // load, and after a successful save — which clears the dirty state). Extends
-  // AdminSettings with the write-only `anthropic_api_key`: the server returns it
-  // only masked, so it isn't part of AdminSettings, but it's edited through the
-  // exact same draft + `set()` + global Save as every other field. Absent =
-  // untouched, string = set to this, null = clear on save.
+  // load, and after a successful save — which clears the dirty state).
+  // Write-only fields (secrets, `provider_keys`) are edited through the same
+  // draft + `set()` + global Save: absent = untouched, string = set, null = clear.
   const [draft, setDraft] = useState<AdminSettings | null>(settings);
   const [saving, setSaving] = useState(false);
   const qc = useQueryClient();
@@ -330,7 +487,10 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   // Controlled tab so a failed save can jump the admin to the tab holding the
   // rejected field — otherwise the error banner points at fields on a tab
   // they've navigated away from.
-  const [activeTab, setActiveTab] = useState<string>("general");
+  const [activeTab, setActiveTab] = useState<string>("basic");
+  // Switching SSO off while on its tab hides that tab — fall back to Features.
+  const visibleTabs = TABS.filter((t) => !t.visible || (draft && t.visible(draft)));
+  const currentTab = visibleTabs.some((t) => t.id === activeTab) ? activeTab : "features";
   const [copiedRedirect, setCopiedRedirect] = useState(false);
   useEffect(() => {
     if (settings) setDraft(settings);
@@ -444,7 +604,6 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
       // there's no value to diff against — "staged" means a non-empty string
       // (set) or null (clear). Everything else diffs by value like normal.
       if (
-        k === "anthropic_api_key" ||
         k === "oidc_client_secret" ||
         k === "mcp_signing_secret" ||
         k === "ses_secret_access_key"
@@ -452,6 +611,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
         const v = draft[k];
         return (typeof v === "string" && v.trim() !== "") || v === null;
       }
+      if (k === "provider_keys") return Object.keys(draft.provider_keys ?? {}).length > 0;
       return (
         ((draft as unknown as Record<string, unknown>)[k] ?? "") !==
         (base[k] ?? "")
@@ -483,7 +643,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
       setFieldErrors(errs);
       const badFields = Object.keys(errs);
       const owns = (t: (typeof TABS)[number]) =>
-        badFields.some((f) => (t.keys as string[]).includes(f));
+        // "provider_keys.openai" belongs to the tab holding "provider_keys".
+        badFields.some((f) => (t.keys as string[]).includes(f.split(".")[0]));
       const offending = badFields.length
         ? TABS.find(owns)
         : TABS.find((t) => t.keys.some((k) => dirtyKeys.includes(k)));
@@ -588,9 +749,9 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
           <Loader2 className="h-4 w-4 animate-spin" /> Loading settings…
         </div>
       ) : (
-        <Tabs value={activeTab} onValueChange={setActiveTab}>
+        <Tabs value={currentTab} onValueChange={setActiveTab}>
           <TabsList>
-            {TABS.map((t) => (
+            {visibleTabs.map((t) => (
               <TabsTrigger key={t.id} value={t.id} className="gap-1.5">
                 {t.label}
                 {dirtyInTab(t.keys) && (
@@ -603,53 +764,55 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
             ))}
           </TabsList>
 
-          {/* General */}
-          <TabsContent value="general" className="space-y-4">
+          {/* Basic */}
+          <TabsContent value="basic" className="space-y-4">
             <Card>
               <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <Shield className="h-4 w-4 text-muted-foreground" />
-                  PromptOwl sign-in
-                </CardTitle>
+                <CardTitle className="text-base">Community</CardTitle>
                 <CardDescription>
-                  Who can sign in to this server using their PromptOwl account.
+                  How this server names and presents itself.
                 </CardDescription>
               </CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                  {GATE_OPTIONS.map((opt) => {
-                    const active = draft.promptowl_sign_in_gate === opt.value;
-                    // Can't pick "Off" while manual sign-in is also off (lockout —
-                    // the server rejects it); disable that one option.
-                    const locked =
-                      opt.value === "disabled" &&
-                      draft.manual_sign_in === "disabled";
-                    return (
-                      <button
-                        key={opt.value}
-                        type="button"
-                        disabled={locked}
-                        onClick={() =>
-                          !active &&
-                          !locked &&
-                          set({ promptowl_sign_in_gate: opt.value })
-                        }
-                        className={`text-left rounded-lg border p-3 transition-colors ${
-                          active
-                            ? "border-primary bg-primary/5 ring-1 ring-primary"
-                            : locked
-                              ? "opacity-50 cursor-not-allowed"
-                              : "hover:bg-muted/50"
-                        }`}
-                        aria-pressed={active}
-                      >
-                        <div className="text-sm font-medium">{opt.label}</div>
-                        <div className="text-xs text-muted-foreground mt-0.5">
-                          {opt.hint}
-                        </div>
-                      </button>
-                    );
-                  })}
+              <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <Label htmlFor="community-name">Community name</Label>
+                  <TextField
+                    id="community-name"
+                    error={fieldErrors.community_name}
+                    value={draft.community_name ?? ""}
+                    placeholder="Acme Community"
+                    onChange={(v) => set({ community_name: v })}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    The name of this community. Leave empty if unsure.
+                  </p>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="public-base-url">Public base URL</Label>
+                  <TextField
+                    id="public-base-url"
+                    error={fieldErrors.public_base_url}
+                    value={draft.public_base_url ?? ""}
+                    placeholder="https://nest.yourcompany.com"
+                    onChange={(v) => set({ public_base_url: v })}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    This server's public address — used for share links and
+                    SSO redirects. Leave empty if unsure.
+                  </p>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="logo-url">Logo</Label>
+                  <TextField
+                    id="logo-url"
+                    value={draft.logo_url ?? ""}
+                    placeholder="https://example.com/logo.svg"
+                    onChange={(v) => set({ logo_url: v })}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    URL of the logo shown in the header. Leave empty for the
+                    default.
+                  </p>
                 </div>
               </CardContent>
             </Card>
@@ -706,156 +869,395 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
 
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Public base URL</CardTitle>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Shield className="h-4 w-4 text-muted-foreground" />
+                  PromptOwl sign-in
+                </CardTitle>
                 <CardDescription>
-                  This server's public address — used for share links and SSO
-                  redirects. Leave empty if unsure.
+                  Who can sign in to this server using their PromptOwl account.
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <TextField
-                  error={fieldErrors.public_base_url}
-                  value={draft.public_base_url ?? ""}
-                  placeholder="https://nest.yourcompany.com"
-                  onChange={(v) => set({ public_base_url: v })}
-                />
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Logo</CardTitle>
-                <CardDescription>
-                  URL of the logo shown in the header. Leave empty for the
-                  default.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <TextField
-                  value={draft.logo_url ?? ""}
-                  placeholder="https://example.com/logo.svg"
-                  onChange={(v) => set({ logo_url: v })}
-                />
-              </CardContent>
-            </Card>
-
-            {/* Anthropic API key — server-wide runner/LLM key. Write-only
-                (the server only returns it masked), so it isn't part of the
-                settings draft; its staged value rides the global Save via
-                `apiKeyDraft`. A nest's Tool environment can override it. */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Anthropic API key</CardTitle>
-                <CardDescription>
-                  The server-wide model key. Runners pick it up automatically
-                  (every nest, unless a nest overrides it in its Tool
-                  environment). No key, no LLM calls. Checked against the
-                  provider when you save, so a bad key is refused here rather
-                  than failing later. Stored server-side; shown masked.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="text-xs text-muted-foreground mb-2">
-                  {draft.anthropic_api_key === null
-                    ? "Will be cleared when you save."
-                    : settings?.anthropic_api_key_masked
-                      ? `Current: ${settings.anthropic_api_key_masked}`
-                      : "Not set — runs can't execute until a key exists here or in a nest's Tool environment."}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {GATE_OPTIONS.map((opt) => {
+                    const active = draft.promptowl_sign_in_gate === opt.value;
+                    // Can't pick "Off" while manual sign-in is also off (lockout —
+                    // the server rejects it); disable that one option.
+                    const locked =
+                      opt.value === "disabled" &&
+                      draft.manual_sign_in === "disabled";
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        disabled={locked}
+                        onClick={() =>
+                          !active &&
+                          !locked &&
+                          set({ promptowl_sign_in_gate: opt.value })
+                        }
+                        className={`text-left rounded-lg border p-3 transition-colors ${
+                          active
+                            ? "border-primary bg-primary/5 ring-1 ring-primary"
+                            : locked
+                              ? "opacity-50 cursor-not-allowed"
+                              : "hover:bg-muted/50"
+                        }`}
+                        aria-pressed={active}
+                      >
+                        <div className="text-sm font-medium">{opt.label}</div>
+                        <div className="text-xs text-muted-foreground mt-0.5">
+                          {opt.hint}
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Product analytics</CardTitle>
+                <CardDescription>
+                  Send usage events to your own PostHog project. Leave the key
+                  empty to keep analytics off. Also off whenever usage telemetry
+                  (Features tab) is off.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <TextField
-                  error={fieldErrors.anthropic_api_key}
-                  type="password"
-                  value={
-                    typeof draft.anthropic_api_key === "string"
-                      ? draft.anthropic_api_key
-                      : ""
-                  }
-                  placeholder="sk-ant-… (paste to set or replace)"
-                  onChange={(v) => set({ anthropic_api_key: v })}
+                  error={fieldErrors.posthog_key}
+                  value={draft.posthog_key ?? ""}
+                  placeholder="Project API key — phc_..."
+                  onChange={(v) => set({ posthog_key: v })}
                 />
-                {settings?.anthropic_api_key_masked &&
-                  draft.anthropic_api_key !== null && (
-                    <button
-                      type="button"
-                      className="mt-2 text-xs text-destructive hover:underline"
-                      onClick={() => set({ anthropic_api_key: null })}
-                    >
-                      Clear key
-                    </button>
-                  )}
-                {draft.anthropic_api_key === null && (
-                  <button
-                    type="button"
-                    className="mt-2 text-xs text-muted-foreground hover:underline"
-                    onClick={() => set({ anthropic_api_key: undefined })}
-                  >
-                    Keep current key
-                  </button>
+                <TextField
+                  error={fieldErrors.posthog_host}
+                  value={draft.posthog_host ?? ""}
+                  placeholder="Host — https://us.i.posthog.com"
+                  onChange={(v) => set({ posthog_host: v })}
+                />
+              </CardContent>
+            </Card>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Max upload size</CardTitle>
+                  <CardDescription>
+                    Largest request/file accepted, in megabytes. Raise this if big
+                    HTML artifacts (decks, dashboards) get rejected.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <MbField
+                    bytes={draft.max_body_bytes}
+                    onChange={(bytes) => set({ max_body_bytes: bytes })}
+                  />
+                </CardContent>
+              </Card>
+
+              {/* Activity-trace retention (api_events rolling window) */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">
+                    Activity trace retention
+                  </CardTitle>
+                  <CardDescription>
+                    How many days of activity-trace rows (API requests and MCP
+                    tool calls) to keep. Older rows are pruned opportunistically.
+                    Set 0 to keep activity forever.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex items-center gap-2">
+                    <NumField
+                      value={draft.trace_retention_days}
+                      min={0}
+                      max={3650}
+                      onChange={(n) => set({ trace_retention_days: n })}
+                    />
+                    <span className="text-sm text-muted-foreground shrink-0">
+                      days
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    0–3650 — 0 disables pruning entirely.
+                  </p>
+                </CardContent>
+              </Card>
+            </div>
+          </TabsContent>
+
+          {/* Features */}
+          <TabsContent value="features" className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* Workflow plane ("turing" track) */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  Workflow plane <BetaBadge className="ml-1 align-middle" />
+                </CardTitle>
+                <CardDescription>
+                  Typed edges, an edge-type registry, and governed runs — the
+                  automation layer. Optional; off by default. Turning it on adds
+                  API surface and UI views but changes nothing until someone
+                  creates an edge.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.workflow_plane_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.workflow_plane_enabled}
+                    onCheckedChange={(v) =>
+                      set({
+                        workflow_plane_enabled: v,
+                        // Turning the plane off makes sub-agent runs inert; keep
+                        // the two consistent so the server never sees the
+                        // dependent-flag-without-parent state.
+                        ...(v ? {} : { subagent_runs_enabled: false, metacognition_enabled: false }),
+                      })
+                    }
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Metacognition agents — server-run, so they need the plane */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Metacognition agents</CardTitle>
+                <CardDescription>
+                  Agent documents this server runs itself, as a named persona,
+                  on the nest's model key. They read the folders they are given
+                  and only ever file proposals for review — they never publish.
+                  Runs use PromptOwl credits, or your own key. Requires the
+                  workflow plane.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.metacognition_enabled ? "On" : "Off"}
+                    {!draft.workflow_plane_enabled && (
+                      <span className="text-muted-foreground">
+                        {" "}
+                        · enable the workflow plane first
+                      </span>
+                    )}
+                  </span>
+                  <Switch
+                    checked={draft.metacognition_enabled}
+                    disabled={!draft.workflow_plane_enabled}
+                    onCheckedChange={(v) => set({ metacognition_enabled: v })}
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Import teams from PromptOwl */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  Import teams from PromptOwl
+                </CardTitle>
+                <CardDescription>
+                  Lets users who signed in with PromptOwl pull their PromptOwl
+                  teams in as local teams. Off by default. When off, the
+                  PromptOwl Teams panel is hidden and the import API is
+                  unavailable.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.promptowl_teams_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.promptowl_teams_enabled}
+                    onCheckedChange={(v) => set({ promptowl_teams_enabled: v })}
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Sub-agent runs (recursion) — gated separately from the plane */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  Sub-agent runs (recursion)
+                </CardTitle>
+                <CardDescription>
+                  Lets a run spawn nested sub-agent runs (a call tree). Bounded
+                  by depth, fan-out and re-entrancy caps so the tree stays
+                  finite. This opens a recursion surface — enable it only after
+                  reviewing the caps for your deployment. Requires the workflow
+                  plane.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.subagent_runs_enabled ? "On" : "Off"}
+                    {!draft.workflow_plane_enabled && (
+                      <span className="text-muted-foreground">
+                        {" "}
+                        · enable the workflow plane first
+                      </span>
+                    )}
+                  </span>
+                  <Switch
+                    checked={draft.subagent_runs_enabled}
+                    disabled={!draft.workflow_plane_enabled}
+                    onCheckedChange={(v) => set({ subagent_runs_enabled: v })}
+                  />
+                </div>
+
+                {/* Recursion caps — the numbers the Runs picker validates
+                    against. Editable here so an admin doesn't need env access;
+                    same [min,max] the server clamps to. */}
+                {draft.subagent_runs_enabled && (
+                  <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <div className="text-sm font-medium mb-1">Max depth</div>
+                      <NumField
+                        value={draft.subagent_max_depth}
+                        min={1}
+                        max={32}
+                        onChange={(n) => set({ subagent_max_depth: n })}
+                      />
+                      <p className="text-xs text-muted-foreground mt-1">
+                        1–32 — how deep the sub-agent call tree may nest.
+                      </p>
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium mb-1">
+                        Max sub-agents per run
+                      </div>
+                      <NumField
+                        value={draft.subagent_max_children}
+                        min={1}
+                        max={128}
+                        onChange={(n) => set({ subagent_max_children: n })}
+                      />
+                      <p className="text-xs text-muted-foreground mt-1">
+                        1–128 — fan-out a single run may spawn.
+                      </p>
+                    </div>
+                  </div>
                 )}
               </CardContent>
             </Card>
 
-            {/* Hootie in the nest — the assistant on every page. Sits under
-                the key it depends on: switching it on without a key gives
-                everyone a panel that explains what's missing, not a broken
-                one, so the two settings read together. */}
+            {/* Content types — per-type creation toggles (default on).
+                Soft-disable: turning one off refuses NEW nodes of the type;
+                existing nodes still read/render/version. */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Hootie</CardTitle>
+                <CardTitle className="text-base">Content types</CardTitle>
                 <CardDescription>
-                  The assistant in a side panel on every page, opened from a
-                  tab on the right edge. It answers from what the person asking
-                  can read in the nest, cites the documents it used, and lets
-                  them @tag a colleague — which posts the exchange as a comment
-                  and notifies them. Off until you turn it on. Uses the
-                  Anthropic API key above; without one the panel says so.
+                  Which node types can be created on this server. Turning one
+                  off hides it from the editor and refuses new creations —
+                  existing nodes of that type stay readable and versioned.
+                  Runnable types (agent, skill, tool) are governed by the
+                  workflow plane.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    Artifacts (hosted HTML) —{" "}
+                    {draft.type_artifact_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.type_artifact_enabled}
+                    onCheckedChange={(v) => set({ type_artifact_enabled: v })}
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    Tables (CSV fact stores) —{" "}
+                    {draft.type_table_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.type_table_enabled}
+                    onCheckedChange={(v) => set({ type_table_enabled: v })}
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Usage telemetry</CardTitle>
+                <CardDescription>
+                  Send anonymous usage counts to PromptOwl. Turn off to keep all
+                  usage data on this server.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.telemetry_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.telemetry_enabled}
+                    onCheckedChange={(v) => set({ telemetry_enabled: v })}
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <KeyRound className="h-4 w-4 text-muted-foreground" />
+                  Single sign-on (OIDC)
+                </CardTitle>
+                <CardDescription>
+                  Let teammates sign in with your identity provider — Microsoft
+                  Entra ID, Google, or any OpenID Connect issuer. Turn it on,
+                  then configure it on the Single sign-on tab.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex items-center justify-between">
                   <span className="text-sm">
-                    Hootie in the nest — {draft.hootie_enabled ? "On" : "Off"}
+                    {draft.oidc_enabled ? "On" : "Off"}
                   </span>
                   <Switch
-                    checked={draft.hootie_enabled}
-                    onCheckedChange={(v) => set({ hootie_enabled: v })}
-                    data-testid="settings-hootie-enabled"
+                    checked={draft.oidc_enabled}
+                    onCheckedChange={(v) => set({ oidc_enabled: v })}
                   />
                 </div>
-                <HootieBrandingFields
-                  draft={draft}
-                  fieldErrors={fieldErrors}
-                  set={set}
-                />
-                <div className="space-y-1.5">
-                  <Label htmlFor="hootie-model">Model</Label>
-                  <TextField
-                    error={fieldErrors.hootie_model}
-                    id="hootie-model"
-                    value={draft.hootie_model ?? ""}
-                    placeholder="claude-opus-5"
-                    onChange={(v) => set({ hootie_model: v })}
+              </CardContent>
+            </Card>
+
+            {/* Agent SSO — token exchange. Security-critical, OFF by default. */}
+            <Card>
+              <CardHeader>
+                <CardTitle>Agent SSO — token exchange</CardTitle>
+                <CardDescription>
+                  Let an external agent, acting for a user your IdP already
+                  authenticated (Microsoft Entra / Google), exchange that IdP's
+                  ID token for a short-lived MCP bearer — no second login.
+                  Configure it on the Single sign-on tab.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.sso_token_exchange_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.sso_token_exchange_enabled}
+                    onCheckedChange={(v) =>
+                      set({ sso_token_exchange_enabled: v })
+                    }
                   />
-                  <p className="text-xs text-muted-foreground">
-                    The model Hootie answers with. Through a gateway this is the
-                    gateway's name for it (<code>ollama/llama3.2</code>,{" "}
-                    <code>gpt-5</code>, …).
-                  </p>
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="anthropic-base-url">Model gateway URL</Label>
-                  <TextField
-                    id="anthropic-base-url"
-                    value={draft.anthropic_base_url ?? ""}
-                    placeholder="http://gateway:4000 — empty calls Anthropic directly"
-                    onChange={(v) => set({ anthropic_base_url: v })}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Route every model call — Hootie and agent runs — through a
-                    LiteLLM or PromptOwl gateway with the key above as its
-                    virtual key: budgets, spend logs, and any model the gateway
-                    fronts. Empty means Anthropic directly.
-                  </p>
                 </div>
               </CardContent>
             </Card>
@@ -952,239 +1354,232 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
             </Card>
           </TabsContent>
 
-          {/* Single sign-on (OIDC) */}
+          {/* Single sign-on — config for the two SSO switches on Features.
+              The tab only shows while one of them is on. */}
           <TabsContent value="sso" className="space-y-4">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <KeyRound className="h-4 w-4 text-muted-foreground" />
-                  Single sign-on (OIDC)
-                </CardTitle>
-                <CardDescription>
-                  Let teammates sign in with your identity provider — Microsoft
-                  Entra ID, Google, or any OpenID Connect issuer. Fill in the
-                  issuer and app credentials below, then turn it on.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm">
-                    {draft.oidc_enabled ? "On" : "Off"}
-                    {!draft.oidc_enabled &&
-                      !(draft.oidc_issuer && draft.oidc_client_id) && (
-                        <span className="text-muted-foreground">
-                          {" "}
-                          · configure the issuer and app credentials first
-                        </span>
-                      )}
-                  </span>
-                  <Switch
-                    checked={draft.oidc_enabled}
-                    onCheckedChange={(v) => set({ oidc_enabled: v })}
-                  />
-                </div>
-
-                {/* "On with a dead flow" is legal server state (e.g. the
-                    secret was cleared while enabled stayed true) — the login
-                    button simply hides. Make that legible instead of silent.
-                    Mirrors the server's readiness rule (isOidcReady) against
-                    the DRAFT rather than reading the saved `oidc_ready`, so it
-                    warns live while the admin is staging the change. */}
-                {(() => {
-                  const secretPresent =
-                    draft.oidc_client_secret === null
-                      ? false
-                      : typeof draft.oidc_client_secret === "string" &&
-                          draft.oidc_client_secret.trim() !== ""
-                        ? true
-                        : !!settings?.oidc_client_secret_set;
-                  const ready =
-                    draft.oidc_enabled &&
-                    !!draft.oidc_issuer?.trim() &&
-                    !!draft.oidc_client_id?.trim() &&
-                    secretPresent;
-                  if (!draft.oidc_enabled || ready) return null;
-                  return (
-                    <div
-                      role="alert"
-                      className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
-                    >
-                      Enabled but not configured — the SSO sign-in button stays
-                      hidden until the issuer, client ID, and client secret are
-                      all set.
-                    </div>
-                  );
-                })()}
-
-                {/* Presets — prefill the issuer for the two common IdPs, and
-                    reflect which one the current issuer matches so the buttons
-                    read as a selector rather than two identical actions. The
-                    match is derived from draft.oidc_issuer, so it also lights
-                    up when the issuer was typed/pasted by hand or loaded from
-                    the server. Anything else (a custom IdP, or blank) leaves
-                    both unselected. */}
-                {(() => {
-                  const issuer = draft.oidc_issuer?.trim() ?? "";
-                  const preset: "entra" | "google" | null =
-                    /^https:\/\/login\.microsoftonline\.com\/[^/]+\/v2\.0$/.test(
-                      issuer,
-                    )
-                      ? "entra"
-                      : issuer === "https://accounts.google.com"
-                        ? "google"
-                        : null;
-                  return (
-                    <div>
-                      <div className="text-sm font-medium mb-1">Issuer URL</div>
-                      <div
-                        className="flex gap-2 mb-2"
-                        role="group"
-                        aria-label="Identity provider preset"
-                      >
-                        <Button
-                          type="button"
-                          variant={preset === "entra" ? "default" : "outline"}
-                          size="sm"
-                          aria-pressed={preset === "entra"}
-                          onClick={() => {
-                            const tenant = window.prompt(
-                              "Microsoft Entra tenant ID (Directory ID) — find it on your app registration's Overview page:",
-                            );
-                            if (tenant && tenant.trim())
-                              set({
-                                oidc_issuer: `https://login.microsoftonline.com/${tenant.trim()}/v2.0`,
-                              });
-                          }}
-                        >
-                          Microsoft Entra ID
-                        </Button>
-                        <Button
-                          type="button"
-                          variant={preset === "google" ? "default" : "outline"}
-                          size="sm"
-                          aria-pressed={preset === "google"}
-                          onClick={() =>
-                            set({ oidc_issuer: "https://accounts.google.com" })
-                          }
-                        >
-                          Google
-                        </Button>
-                        {preset === null && issuer !== "" && (
-                          <span className="self-center text-xs text-muted-foreground">
-                            Custom issuer
-                          </span>
-                        )}
-                      </div>
-                      <TextField
-                        error={fieldErrors.oidc_issuer}
-                        value={draft.oidc_issuer ?? ""}
-                        placeholder="https://login.microsoftonline.com/{tenant}/v2.0"
-                        onChange={(v) => set({ oidc_issuer: v })}
-                      />
-                      <p className="text-xs text-muted-foreground mt-1">
-                        https:// only. Must serve
-                        /.well-known/openid-configuration.
-                      </p>
-                    </div>
-                  );
-                })()}
-
-                <div>
-                  <div className="text-sm font-medium mb-1">Client ID</div>
-                  <TextField
-                    value={draft.oidc_client_id ?? ""}
-                    placeholder="Application (client) ID from your IdP app registration"
-                    onChange={(v) => set({ oidc_client_id: v })}
-                  />
-                </div>
-
-                {/* Client secret — write-only, same pattern as the Anthropic
-                    key: the server only reports presence, never the value. */}
-                <div>
-                  <div className="text-sm font-medium mb-1">Client secret</div>
-                  <div className="text-xs text-muted-foreground mb-2">
-                    {draft.oidc_client_secret === null
-                      ? "Will be cleared when you save."
-                      : settings?.oidc_client_secret_set
-                        ? "A client secret is set. Paste a new one to replace it."
-                        : "Not set."}
-                  </div>
-                  <TextField
-                    error={fieldErrors.oidc_client_secret}
-                    type="password"
-                    value={
-                      typeof draft.oidc_client_secret === "string"
-                        ? draft.oidc_client_secret
-                        : ""
-                    }
-                    placeholder="Paste to set or replace"
-                    onChange={(v) => set({ oidc_client_secret: v })}
-                  />
-                  {settings?.oidc_client_secret_set &&
-                    draft.oidc_client_secret !== null && (
-                      <button
-                        type="button"
-                        className="mt-2 text-xs text-destructive hover:underline"
-                        onClick={() => set({ oidc_client_secret: null })}
-                      >
-                        Clear secret
-                      </button>
-                    )}
-                  {draft.oidc_client_secret === null && (
-                    <button
-                      type="button"
-                      className="mt-2 text-xs text-muted-foreground hover:underline"
-                      onClick={() => set({ oidc_client_secret: undefined })}
-                    >
-                      Keep current secret
-                    </button>
-                  )}
-                </div>
-
-                {/* Redirect URI — read-only; the admin pastes this into the
-                    IdP's app registration. Derived from the public base URL
-                    when set, else this browser's origin. */}
-                <div>
-                  <div className="text-sm font-medium mb-1">Redirect URI</div>
+            {draft.oidc_enabled && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <KeyRound className="h-4 w-4 text-muted-foreground" />
+                    Single sign-on (OIDC)
+                  </CardTitle>
+                  <CardDescription>Your identity provider's issuer and app credentials.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {/* "On with a dead flow" is legal server state (e.g. the
+                      secret was cleared while enabled stayed true) — the login
+                      button simply hides. Make that legible instead of silent.
+                      Mirrors the server's readiness rule (isOidcReady) against
+                      the DRAFT rather than reading the saved `oidc_ready`, so it
+                      warns live while the admin is staging the change. */}
                   {(() => {
-                    const base = (
-                      draft.public_base_url || window.location.origin
-                    ).replace(/\/$/, "");
-                    const redirectUri = `${base}/auth/oidc/callback`;
+                    const secretPresent =
+                      draft.oidc_client_secret === null
+                        ? false
+                        : typeof draft.oidc_client_secret === "string" &&
+                            draft.oidc_client_secret.trim() !== ""
+                          ? true
+                          : !!settings?.oidc_client_secret_set;
+                    const ready =
+                      draft.oidc_enabled &&
+                      !!draft.oidc_issuer?.trim() &&
+                      !!draft.oidc_client_id?.trim() &&
+                      secretPresent;
+                    if (!draft.oidc_enabled || ready) return null;
                     return (
-                      <div className="flex items-center gap-2">
-                        <code className="flex-1 bg-muted/40 border rounded px-2 py-1.5 text-xs font-mono break-all">
-                          {redirectUri}
-                        </code>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={async () => {
-                            if (!(await copyTextWithToast(redirectUri))) return;
-                            setCopiedRedirect(true);
-                            setTimeout(() => setCopiedRedirect(false), 1500);
-                          }}
-                        >
-                          {copiedRedirect ? (
-                            <Check className="h-3.5 w-3.5" />
-                          ) : (
-                            <Copy className="h-3.5 w-3.5" />
-                          )}
-                          <span className="ml-1.5">
-                            {copiedRedirect ? "Copied" : "Copy"}
-                          </span>
-                        </Button>
+                      <div
+                        role="alert"
+                        className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+                      >
+                        Enabled but not configured — the SSO sign-in button stays
+                        hidden until the issuer, client ID, and client secret are
+                        all set.
                       </div>
                     );
                   })()}
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Register this exact URI in your IdP's app registration
-                    (Entra: Authentication → Web redirect URIs; Google:
-                    Authorized redirect URIs).
-                  </p>
-                </div>
 
+                  {/* Presets — prefill the issuer for the two common IdPs, and
+                      reflect which one the current issuer matches so the buttons
+                      read as a selector rather than two identical actions. The
+                      match is derived from draft.oidc_issuer, so it also lights
+                      up when the issuer was typed/pasted by hand or loaded from
+                      the server. Anything else (a custom IdP, or blank) leaves
+                      both unselected. */}
+                  {(() => {
+                    const issuer = draft.oidc_issuer?.trim() ?? "";
+                    const preset: "entra" | "google" | null =
+                      /^https:\/\/login\.microsoftonline\.com\/[^/]+\/v2\.0$/.test(
+                        issuer,
+                      )
+                        ? "entra"
+                        : issuer === "https://accounts.google.com"
+                          ? "google"
+                          : null;
+                    return (
+                      <div>
+                        <div className="text-sm font-medium mb-1">Issuer URL</div>
+                        <div
+                          className="flex gap-2 mb-2"
+                          role="group"
+                          aria-label="Identity provider preset"
+                        >
+                          <Button
+                            type="button"
+                            variant={preset === "entra" ? "default" : "outline"}
+                            size="sm"
+                            aria-pressed={preset === "entra"}
+                            onClick={() => {
+                              const tenant = window.prompt(
+                                "Microsoft Entra tenant ID (Directory ID) — find it on your app registration's Overview page:",
+                              );
+                              if (tenant && tenant.trim())
+                                set({
+                                  oidc_issuer: `https://login.microsoftonline.com/${tenant.trim()}/v2.0`,
+                                });
+                            }}
+                          >
+                            Microsoft Entra ID
+                          </Button>
+                          <Button
+                            type="button"
+                            variant={preset === "google" ? "default" : "outline"}
+                            size="sm"
+                            aria-pressed={preset === "google"}
+                            onClick={() =>
+                              set({ oidc_issuer: "https://accounts.google.com" })
+                            }
+                          >
+                            Google
+                          </Button>
+                          {preset === null && issuer !== "" && (
+                            <span className="self-center text-xs text-muted-foreground">
+                              Custom issuer
+                            </span>
+                          )}
+                        </div>
+                        <TextField
+                          error={fieldErrors.oidc_issuer}
+                          value={draft.oidc_issuer ?? ""}
+                          placeholder="https://login.microsoftonline.com/{tenant}/v2.0"
+                          onChange={(v) => set({ oidc_issuer: v })}
+                        />
+                        <p className="text-xs text-muted-foreground mt-1">
+                          https:// only. Must serve
+                          /.well-known/openid-configuration.
+                        </p>
+                      </div>
+                    );
+                  })()}
+
+                  <div>
+                    <div className="text-sm font-medium mb-1">Client ID</div>
+                    <TextField
+                      value={draft.oidc_client_id ?? ""}
+                      placeholder="Application (client) ID from your IdP app registration"
+                      onChange={(v) => set({ oidc_client_id: v })}
+                    />
+                  </div>
+
+                  {/* Client secret — write-only, same pattern as the Anthropic
+                      key: the server only reports presence, never the value. */}
+                  <div>
+                    <div className="text-sm font-medium mb-1">Client secret</div>
+                    <div className="text-xs text-muted-foreground mb-2">
+                      {draft.oidc_client_secret === null
+                        ? "Will be cleared when you save."
+                        : settings?.oidc_client_secret_set
+                          ? "A client secret is set. Paste a new one to replace it."
+                          : "Not set."}
+                    </div>
+                    <TextField
+                      error={fieldErrors.oidc_client_secret}
+                      type="password"
+                      value={
+                        typeof draft.oidc_client_secret === "string"
+                          ? draft.oidc_client_secret
+                          : ""
+                      }
+                      placeholder="Paste to set or replace"
+                      onChange={(v) => set({ oidc_client_secret: v })}
+                    />
+                    {settings?.oidc_client_secret_set &&
+                      draft.oidc_client_secret !== null && (
+                        <button
+                          type="button"
+                          className="mt-2 text-xs text-destructive hover:underline"
+                          onClick={() => set({ oidc_client_secret: null })}
+                        >
+                          Clear secret
+                        </button>
+                      )}
+                    {draft.oidc_client_secret === null && (
+                      <button
+                        type="button"
+                        className="mt-2 text-xs text-muted-foreground hover:underline"
+                        onClick={() => set({ oidc_client_secret: undefined })}
+                      >
+                        Keep current secret
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Redirect URI — read-only; the admin pastes this into the
+                      IdP's app registration. Derived from the public base URL
+                      when set, else this browser's origin. */}
+                  <div>
+                    <div className="text-sm font-medium mb-1">Redirect URI</div>
+                    {(() => {
+                      const base = (
+                        draft.public_base_url || window.location.origin
+                      ).replace(/\/$/, "");
+                      const redirectUri = `${base}/auth/oidc/callback`;
+                      return (
+                        <div className="flex items-center gap-2">
+                          <code className="flex-1 bg-muted/40 border rounded px-2 py-1.5 text-xs font-mono break-all">
+                            {redirectUri}
+                          </code>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={async () => {
+                              if (!(await copyTextWithToast(redirectUri))) return;
+                              setCopiedRedirect(true);
+                              setTimeout(() => setCopiedRedirect(false), 1500);
+                            }}
+                          >
+                            {copiedRedirect ? (
+                              <Check className="h-3.5 w-3.5" />
+                            ) : (
+                              <Copy className="h-3.5 w-3.5" />
+                            )}
+                            <span className="ml-1.5">
+                              {copiedRedirect ? "Copied" : "Copy"}
+                            </span>
+                          </Button>
+                        </div>
+                      );
+                    })()}
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Register this exact URI in your IdP's app registration
+                      (Entra: Authentication → Web redirect URIs; Google:
+                      Authorized redirect URIs).
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  Sign-up rules
+                </CardTitle>
+                <CardDescription>
+                  Who may sign in or be exchanged a token. Shared by single sign-on and agent SSO.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
                 <div>
                   <div className="text-sm font-medium mb-1">
                     Allowed email domains
@@ -1256,215 +1651,287 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   )}
               </CardContent>
             </Card>
+            {draft.sso_token_exchange_enabled && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    Agent SSO — token exchange
+                  </CardTitle>
+                  <CardDescription>
+                    Signing secret, token lifetime and the identity providers agents may exchange from.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {/* The server REFUSES this combination on save (and refuses to
+                      mint on it), so say why here instead of leaving the admin a
+                      field error. */}
+                  {(draft.ms_token_exchange_enabled ||
+                    draft.google_token_exchange_enabled) &&
+                    draft.oidc_auto_provision &&
+                    !draft.oidc_allowed_domains?.trim() && (
+                      <div
+                        role="alert"
+                        className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+                      >
+                        Blocked: with auto-provision on and no allowed email
+                        domains, anyone with an account at that provider could
+                        sign themselves up and mint a token. Set allowed email
+                        domains above, or turn auto-provision off.
+                      </div>
+                    )}
 
-            {/* Agent SSO — token exchange. Reuses the domain allowlist +
-                auto-provision above; adds a self-hosted signing secret + the
-                two providers. Security-critical, OFF by default. */}
+                  {(() => {
+                    const secretPresent =
+                      draft.mcp_signing_secret === null
+                        ? false
+                        : typeof draft.mcp_signing_secret === "string" &&
+                            draft.mcp_signing_secret.trim() !== ""
+                          ? true
+                          : !!settings?.mcp_signing_secret_set;
+                    // A provider counts as ready only with the ids its verifier
+                    // needs — the toggle alone leaves the backend answering
+                    // provider_misconfigured on every request, and this banner is
+                    // the only signal the admin gets.
+                    const msReady =
+                      draft.ms_token_exchange_enabled &&
+                      !!draft.ms_client_id?.trim() &&
+                      !!draft.ms_tenant_id?.trim();
+                    const googleReady =
+                      draft.google_token_exchange_enabled &&
+                      !!draft.google_client_id?.trim();
+                    if (
+                      !draft.sso_token_exchange_enabled ||
+                      (secretPresent && (msReady || googleReady))
+                    )
+                      return null;
+                    return (
+                      <div
+                        role="alert"
+                        className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+                      >
+                        Enabled but not ready — the endpoint needs a signing
+                        secret and at least one provider turned on with its client
+                        ID filled in (plus the tenant ID for Microsoft).
+                      </div>
+                    );
+                  })()}
+
+                  <div>
+                    <div className="text-sm font-medium mb-1">
+                      MCP signing secret
+                    </div>
+                    <div className="text-xs text-muted-foreground mb-2">
+                      {draft.mcp_signing_secret === null
+                        ? "Will be cleared when you save."
+                        : settings?.mcp_signing_secret_set
+                          ? "A signing secret is set. Paste a new one to replace it."
+                          : "Not set. Use a long random string — this signs the MCP tokens the exchange mints."}
+                    </div>
+                    <TextField
+                      error={fieldErrors.mcp_signing_secret}
+                      type="password"
+                      value={
+                        typeof draft.mcp_signing_secret === "string"
+                          ? draft.mcp_signing_secret
+                          : ""
+                      }
+                      placeholder="Paste to set or replace (16+ characters)"
+                      onChange={(v) => set({ mcp_signing_secret: v })}
+                    />
+                    {settings?.mcp_signing_secret_set &&
+                      draft.mcp_signing_secret !== null && (
+                        <button
+                          type="button"
+                          className="mt-2 text-xs text-destructive hover:underline"
+                          onClick={() => set({ mcp_signing_secret: null })}
+                        >
+                          Clear secret
+                        </button>
+                      )}
+                    {draft.mcp_signing_secret === null && (
+                      <button
+                        type="button"
+                        className="mt-2 text-xs text-muted-foreground hover:underline"
+                        onClick={() => set({ mcp_signing_secret: undefined })}
+                      >
+                        Keep current secret
+                      </button>
+                    )}
+                  </div>
+
+                  <div>
+                    <div className="text-sm font-medium mb-1">
+                      Token lifetime (seconds)
+                    </div>
+                    <TextField
+                      error={fieldErrors.mcp_token_ttl_seconds}
+                      type="number"
+                      value={String(draft.mcp_token_ttl_seconds ?? 300)}
+                      placeholder="300"
+                      onChange={(v) =>
+                        // Clearing the box means "default", not 0 — 0 would fail
+                        // the 30–3600 check and block the whole save.
+                        set({
+                          mcp_token_ttl_seconds: v.trim() === "" ? 300 : Number(v),
+                        })
+                      }
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      30–3600. Short by design — a minted token expires quickly.
+                    </p>
+                  </div>
+
+                  <div className="border-t pt-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">Microsoft Entra</span>
+                      <Switch
+                        checked={draft.ms_token_exchange_enabled}
+                        onCheckedChange={(v) =>
+                          set({ ms_token_exchange_enabled: v })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium mb-1">
+                        Client (application) ID
+                      </div>
+                      <TextField
+                        value={draft.ms_client_id ?? ""}
+                        placeholder="Entra app (client) ID — the token audience"
+                        onChange={(v) => set({ ms_client_id: v })}
+                      />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium mb-1">Tenant ID</div>
+                      <TextField
+                        value={draft.ms_tenant_id ?? ""}
+                        placeholder="Directory (tenant) ID — builds the issuer"
+                        onChange={(v) => set({ ms_tenant_id: v })}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="border-t pt-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">Google</span>
+                      <Switch
+                        checked={draft.google_token_exchange_enabled}
+                        onCheckedChange={(v) =>
+                          set({ google_token_exchange_enabled: v })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium mb-1">
+                        OAuth client ID
+                      </div>
+                      <TextField
+                        value={draft.google_client_id ?? ""}
+                        placeholder="Google OAuth client ID — the token audience"
+                        onChange={(v) => set({ google_client_id: v })}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                    Your agent calls{" "}
+                    <code className="text-[11px]">POST /auth/token-exchange</code>{" "}
+                    with the IdP ID token and receives a short-lived MCP bearer for{" "}
+                    <code className="text-[11px]">/mcp</code> and{" "}
+                    <code className="text-[11px]">/index</code>. The token is
+                    verified by signature, issuer, audience (the client id above)
+                    and expiry. Security-critical — keep it off until reviewed.
+                    For a public IdP like Google, set the allowed email domains
+                    above so only your organization can exchange.
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </TabsContent>
+
+          {/* Hootie */}
+          <TabsContent value="hootie" className="space-y-4">
+            {/* Model keys — own provider keys (byok), kept by PromptOwl's model
+                gateway; write-only, staged as `provider_keys` on the global Save. */}
             <Card>
               <CardHeader>
-                <CardTitle>Agent SSO — token exchange</CardTitle>
+                <CardTitle className="text-base">Model keys</CardTitle>
                 <CardDescription>
-                  Let an external agent, acting for a user your IdP already
-                  authenticated (Microsoft Entra / Google), exchange that IdP's
-                  ID token for a short-lived MCP bearer — no second login. Uses
-                  the domain allowlist and auto-provision settings above.
+                  Your own model keys. A Hootie model from a provider below runs
+                  on that provider's key; any other model, and agent runs, use
+                  PromptOwl's virtual key on your plan's credits (a nest can set
+                  its own key for runs in its Tool environment). Each key is
+                  checked with the provider when you save and kept by
+                  PromptOwl's model gateway, not on this server.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {settings?.byok_available === false ? (
+                  // Pricing spec §9.3: own key only with the byok licence feature.
+                  <div className="text-sm text-muted-foreground space-y-2" data-testid="settings-models-by-promptowl">
+                    <p>
+                      Models on this server are supplied by PromptOwl and use
+                      your plan's credits. Using your own model key or gateway
+                      is an Enterprise feature.
+                    </p>
+                  </div>
+                ) : (
+                <div className="space-y-4">
+                {Object.keys(settings?.own_providers ?? {}).length === 0 && (
+                  <p className="text-xs text-muted-foreground" data-testid="settings-no-own-keys">
+                    No own keys set — Hootie and runs use PromptOwl's virtual key on your plan's credits.
+                  </p>
+                )}
+                <ProviderKeyFields
+                  draft={draft.provider_keys ?? {}}
+                  current={settings?.own_providers ?? {}}
+                  fieldErrors={fieldErrors}
+                  set={(provider_keys) => set({ provider_keys })}
+                />
+                </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Hootie in the nest — the assistant on every page. Sits under
+                the key it depends on: switching it on without a key gives
+                everyone a panel that explains what's missing, not a broken
+                one, so the two settings read together. */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Hootie</CardTitle>
+                <CardDescription>
+                  The assistant in a side panel on every page, opened from a
+                  tab on the right edge. It answers from what the person asking
+                  can read in the nest, cites the documents it used, and lets
+                  them @tag a colleague — which posts the exchange as a comment
+                  and notifies them. Off until you turn it on. Runs on your
+                  own key for the model's provider, or on PromptOwl models with
+                  your plan's credits; without either the panel says so.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex items-center justify-between">
                   <span className="text-sm">
-                    {draft.sso_token_exchange_enabled ? "On" : "Off"}
+                    Hootie in the nest — {draft.hootie_enabled ? "On" : "Off"}
                   </span>
                   <Switch
-                    checked={draft.sso_token_exchange_enabled}
-                    onCheckedChange={(v) =>
-                      set({ sso_token_exchange_enabled: v })
-                    }
+                    checked={draft.hootie_enabled}
+                    onCheckedChange={(v) => set({ hootie_enabled: v })}
+                    data-testid="settings-hootie-enabled"
                   />
                 </div>
-
-                {/* The server REFUSES this combination on save (and refuses to
-                    mint on it), so say why here instead of leaving the admin a
-                    field error. */}
-                {(draft.ms_token_exchange_enabled ||
-                  draft.google_token_exchange_enabled) &&
-                  draft.oidc_auto_provision &&
-                  !draft.oidc_allowed_domains?.trim() && (
-                    <div
-                      role="alert"
-                      className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive"
-                    >
-                      Blocked: with auto-provision on and no allowed email
-                      domains, anyone with an account at that provider could
-                      sign themselves up and mint a token. Set allowed email
-                      domains above, or turn auto-provision off.
-                    </div>
-                  )}
-
-                {(() => {
-                  const secretPresent =
-                    draft.mcp_signing_secret === null
-                      ? false
-                      : typeof draft.mcp_signing_secret === "string" &&
-                          draft.mcp_signing_secret.trim() !== ""
-                        ? true
-                        : !!settings?.mcp_signing_secret_set;
-                  // A provider counts as ready only with the ids its verifier
-                  // needs — the toggle alone leaves the backend answering
-                  // provider_misconfigured on every request, and this banner is
-                  // the only signal the admin gets.
-                  const msReady =
-                    draft.ms_token_exchange_enabled &&
-                    !!draft.ms_client_id?.trim() &&
-                    !!draft.ms_tenant_id?.trim();
-                  const googleReady =
-                    draft.google_token_exchange_enabled &&
-                    !!draft.google_client_id?.trim();
-                  if (
-                    !draft.sso_token_exchange_enabled ||
-                    (secretPresent && (msReady || googleReady))
-                  )
-                    return null;
-                  return (
-                    <div
-                      role="alert"
-                      className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
-                    >
-                      Enabled but not ready — the endpoint needs a signing
-                      secret and at least one provider turned on with its client
-                      ID filled in (plus the tenant ID for Microsoft).
-                    </div>
-                  );
-                })()}
-
-                <div>
-                  <div className="text-sm font-medium mb-1">
-                    MCP signing secret
-                  </div>
-                  <div className="text-xs text-muted-foreground mb-2">
-                    {draft.mcp_signing_secret === null
-                      ? "Will be cleared when you save."
-                      : settings?.mcp_signing_secret_set
-                        ? "A signing secret is set. Paste a new one to replace it."
-                        : "Not set. Use a long random string — this signs the MCP tokens the exchange mints."}
-                  </div>
-                  <TextField
-                    error={fieldErrors.mcp_signing_secret}
-                    type="password"
-                    value={
-                      typeof draft.mcp_signing_secret === "string"
-                        ? draft.mcp_signing_secret
-                        : ""
-                    }
-                    placeholder="Paste to set or replace (16+ characters)"
-                    onChange={(v) => set({ mcp_signing_secret: v })}
-                  />
-                  {settings?.mcp_signing_secret_set &&
-                    draft.mcp_signing_secret !== null && (
-                      <button
-                        type="button"
-                        className="mt-2 text-xs text-destructive hover:underline"
-                        onClick={() => set({ mcp_signing_secret: null })}
-                      >
-                        Clear secret
-                      </button>
-                    )}
-                  {draft.mcp_signing_secret === null && (
-                    <button
-                      type="button"
-                      className="mt-2 text-xs text-muted-foreground hover:underline"
-                      onClick={() => set({ mcp_signing_secret: undefined })}
-                    >
-                      Keep current secret
-                    </button>
-                  )}
-                </div>
-
-                <div>
-                  <div className="text-sm font-medium mb-1">
-                    Token lifetime (seconds)
-                  </div>
-                  <TextField
-                    error={fieldErrors.mcp_token_ttl_seconds}
-                    type="number"
-                    value={String(draft.mcp_token_ttl_seconds ?? 300)}
-                    placeholder="300"
-                    onChange={(v) =>
-                      // Clearing the box means "default", not 0 — 0 would fail
-                      // the 30–3600 check and block the whole save.
-                      set({
-                        mcp_token_ttl_seconds: v.trim() === "" ? 300 : Number(v),
-                      })
-                    }
-                  />
-                  <p className="text-xs text-muted-foreground mt-1">
-                    30–3600. Short by design — a minted token expires quickly.
-                  </p>
-                </div>
-
-                <div className="border-t pt-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">Microsoft Entra</span>
-                    <Switch
-                      checked={draft.ms_token_exchange_enabled}
-                      onCheckedChange={(v) =>
-                        set({ ms_token_exchange_enabled: v })
-                      }
-                    />
-                  </div>
-                  <div>
-                    <div className="text-sm font-medium mb-1">
-                      Client (application) ID
-                    </div>
-                    <TextField
-                      value={draft.ms_client_id ?? ""}
-                      placeholder="Entra app (client) ID — the token audience"
-                      onChange={(v) => set({ ms_client_id: v })}
-                    />
-                  </div>
-                  <div>
-                    <div className="text-sm font-medium mb-1">Tenant ID</div>
-                    <TextField
-                      value={draft.ms_tenant_id ?? ""}
-                      placeholder="Directory (tenant) ID — builds the issuer"
-                      onChange={(v) => set({ ms_tenant_id: v })}
-                    />
-                  </div>
-                </div>
-
-                <div className="border-t pt-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">Google</span>
-                    <Switch
-                      checked={draft.google_token_exchange_enabled}
-                      onCheckedChange={(v) =>
-                        set({ google_token_exchange_enabled: v })
-                      }
-                    />
-                  </div>
-                  <div>
-                    <div className="text-sm font-medium mb-1">
-                      OAuth client ID
-                    </div>
-                    <TextField
-                      value={draft.google_client_id ?? ""}
-                      placeholder="Google OAuth client ID — the token audience"
-                      onChange={(v) => set({ google_client_id: v })}
-                    />
-                  </div>
-                </div>
-
-                <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-                  Your agent calls{" "}
-                  <code className="text-[11px]">POST /auth/token-exchange</code>{" "}
-                  with the IdP ID token and receives a short-lived MCP bearer for{" "}
-                  <code className="text-[11px]">/mcp</code> and{" "}
-                  <code className="text-[11px]">/index</code>. The token is
-                  verified by signature, issuer, audience (the client id above)
-                  and expiry. Security-critical — keep it off until reviewed.
-                  For a public IdP like Google, set the allowed email domains
-                  above so only your organization can exchange.
-                </div>
+                <HootieBrandingFields
+                  draft={draft}
+                  fieldErrors={fieldErrors}
+                  set={set}
+                />
+                <HootieModelField
+                  value={draft.hootie_model ?? ""}
+                  error={fieldErrors.hootie_model}
+                  onChange={(v) => set({ hootie_model: v })}
+                  reloadKey={JSON.stringify(settings?.own_providers ?? {})}
+                />
               </CardContent>
             </Card>
           </TabsContent>
@@ -1615,267 +2082,6 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
             </Card>
           </TabsContent>
 
-          {/* Advanced */}
-          <TabsContent value="advanced" className="space-y-4">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Usage telemetry</CardTitle>
-                <CardDescription>
-                  Send anonymous usage counts to PromptOwl. Turn off to keep all
-                  usage data on this server.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm">
-                    {draft.telemetry_enabled ? "On" : "Off"}
-                  </span>
-                  <Switch
-                    checked={draft.telemetry_enabled}
-                    onCheckedChange={(v) => set({ telemetry_enabled: v })}
-                  />
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Product analytics</CardTitle>
-                <CardDescription>
-                  Send usage events to your own PostHog project. Leave the key
-                  empty to keep analytics off. Also off whenever usage telemetry
-                  above is off.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <TextField
-                  error={fieldErrors.posthog_key}
-                  value={draft.posthog_key ?? ""}
-                  placeholder="Project API key — phc_..."
-                  onChange={(v) => set({ posthog_key: v })}
-                />
-                <TextField
-                  error={fieldErrors.posthog_host}
-                  value={draft.posthog_host ?? ""}
-                  placeholder="Host — https://us.i.posthog.com"
-                  onChange={(v) => set({ posthog_host: v })}
-                />
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Max upload size</CardTitle>
-                <CardDescription>
-                  Largest request/file accepted, in megabytes. Raise this if big
-                  HTML artifacts (decks, dashboards) get rejected.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <MbField
-                  bytes={draft.max_body_bytes}
-                  onChange={(bytes) => set({ max_body_bytes: bytes })}
-                />
-              </CardContent>
-            </Card>
-
-            {/* Activity-trace retention (api_events rolling window) */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">
-                  Activity trace retention
-                </CardTitle>
-                <CardDescription>
-                  How many days of activity-trace rows (API requests and MCP
-                  tool calls) to keep. Older rows are pruned opportunistically.
-                  Set 0 to keep activity forever.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center gap-2">
-                  <NumField
-                    value={draft.trace_retention_days}
-                    min={0}
-                    max={3650}
-                    onChange={(n) => set({ trace_retention_days: n })}
-                  />
-                  <span className="text-sm text-muted-foreground shrink-0">
-                    days
-                  </span>
-                </div>
-                <p className="text-xs text-muted-foreground mt-1">
-                  0–3650 — 0 disables pruning entirely.
-                </p>
-              </CardContent>
-            </Card>
-
-            {/* Content types — per-type creation toggles (default on).
-                Soft-disable: turning one off refuses NEW nodes of the type;
-                existing nodes still read/render/version. */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Content types</CardTitle>
-                <CardDescription>
-                  Which node types can be created on this server. Turning one
-                  off hides it from the editor and refuses new creations —
-                  existing nodes of that type stay readable and versioned.
-                  Runnable types (agent, skill, tool) are governed by the
-                  workflow plane below.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm">
-                    Artifacts (hosted HTML) —{" "}
-                    {draft.type_artifact_enabled ? "On" : "Off"}
-                  </span>
-                  <Switch
-                    checked={draft.type_artifact_enabled}
-                    onCheckedChange={(v) => set({ type_artifact_enabled: v })}
-                  />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm">
-                    Tables (CSV fact stores) —{" "}
-                    {draft.type_table_enabled ? "On" : "Off"}
-                  </span>
-                  <Switch
-                    checked={draft.type_table_enabled}
-                    onCheckedChange={(v) => set({ type_table_enabled: v })}
-                  />
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Workflow plane ("turing" track) */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">
-                  Workflow plane <BetaBadge className="ml-1 align-middle" />
-                </CardTitle>
-                <CardDescription>
-                  Typed edges, an edge-type registry, and governed runs — the
-                  automation layer. Optional; off by default. Turning it on adds
-                  API surface and UI views but changes nothing until someone
-                  creates an edge.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm">
-                    {draft.workflow_plane_enabled ? "On" : "Off"}
-                  </span>
-                  <Switch
-                    checked={draft.workflow_plane_enabled}
-                    onCheckedChange={(v) =>
-                      set({
-                        workflow_plane_enabled: v,
-                        // Turning the plane off makes sub-agent runs inert; keep
-                        // the two consistent so the server never sees the
-                        // dependent-flag-without-parent state.
-                        ...(v ? {} : { subagent_runs_enabled: false }),
-                      })
-                    }
-                  />
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Import teams from PromptOwl */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">
-                  Import teams from PromptOwl
-                </CardTitle>
-                <CardDescription>
-                  Lets users who signed in with PromptOwl pull their PromptOwl
-                  teams in as local teams. Off by default. When off, the
-                  PromptOwl Teams panel is hidden and the import API is
-                  unavailable.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm">
-                    {draft.promptowl_teams_enabled ? "On" : "Off"}
-                  </span>
-                  <Switch
-                    checked={draft.promptowl_teams_enabled}
-                    onCheckedChange={(v) => set({ promptowl_teams_enabled: v })}
-                  />
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Sub-agent runs (recursion) — gated separately from the plane */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">
-                  Sub-agent runs (recursion)
-                </CardTitle>
-                <CardDescription>
-                  Lets a run spawn nested sub-agent runs (a call tree). Bounded
-                  by depth, fan-out and re-entrancy caps so the tree stays
-                  finite. This opens a recursion surface — enable it only after
-                  reviewing the caps for your deployment. Requires the workflow
-                  plane.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm">
-                    {draft.subagent_runs_enabled ? "On" : "Off"}
-                    {!draft.workflow_plane_enabled && (
-                      <span className="text-muted-foreground">
-                        {" "}
-                        · enable the workflow plane first
-                      </span>
-                    )}
-                  </span>
-                  <Switch
-                    checked={draft.subagent_runs_enabled}
-                    disabled={!draft.workflow_plane_enabled}
-                    onCheckedChange={(v) => set({ subagent_runs_enabled: v })}
-                  />
-                </div>
-
-                {/* Recursion caps — the numbers the Runs picker validates
-                    against. Editable here so an admin doesn't need env access;
-                    same [min,max] the server clamps to. */}
-                {draft.subagent_runs_enabled && (
-                  <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <div className="text-sm font-medium mb-1">Max depth</div>
-                      <NumField
-                        value={draft.subagent_max_depth}
-                        min={1}
-                        max={32}
-                        onChange={(n) => set({ subagent_max_depth: n })}
-                      />
-                      <p className="text-xs text-muted-foreground mt-1">
-                        1–32 — how deep the sub-agent call tree may nest.
-                      </p>
-                    </div>
-                    <div>
-                      <div className="text-sm font-medium mb-1">
-                        Max sub-agents per run
-                      </div>
-                      <NumField
-                        value={draft.subagent_max_children}
-                        min={1}
-                        max={128}
-                        onChange={(n) => set({ subagent_max_children: n })}
-                      />
-                      <p className="text-xs text-muted-foreground mt-1">
-                        1–128 — fan-out a single run may spawn.
-                      </p>
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </TabsContent>
-
           {/* Community sites */}
           <TabsContent value="community-sites" className="space-y-4">
             <Card>
@@ -1982,6 +2188,10 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               publicBaseUrl={draft.public_base_url}
               openMode={authMode === "open"}
             />
+          </TabsContent>
+
+          <TabsContent value="license" className="space-y-4">
+            {activeTab === "license" && <LicensePanel />}
           </TabsContent>
         </Tabs>
       )}
@@ -2094,7 +2304,7 @@ export default function SettingsRoute() {
       .catch(() => {});
   }, [isAdmin]);
   const updateServerSettings = useCallback(async (
-    patch: Partial<AdminSettings> & { anthropic_api_key?: string | null },
+    patch: Partial<AdminSettings>,
   ) => {
     try {
       const res = await updateAdminSettings(patch);

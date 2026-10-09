@@ -206,4 +206,25 @@ describe("Hootie branding — enterprise only", () => {
     expect((await health(lapsed)).hootie_brand.name).toBe("Hootie");
     expect(process.env.HOOTIE_NAME).toBe("Ava");
   });
+
+  it("a community licence granted hootie_branding by PromptOwl can customise the identity", async () => {
+    const owner = "admin-granted@acme.com";
+    setupTestEnv();
+    const app = await createTestApp("key", { ownerEmail: owner, tier: "community", features: ["hootie_branding"] });
+    const admin = await registerUser(app, owner);
+    const res = await jsonRequest(app, "PATCH", "/admin/settings", { hootie_name: "Ava" }, admin.apiKey);
+    expect(res.status).toBe(200);
+    expect((await health(app)).hootie_brand.name).toBe("Ava");
+  });
+
+  it("an enterprise licence with hootie_branding revoked keeps the default identity and refuses edits", async () => {
+    const owner = "admin-revoked@acme.com";
+    setupTestEnv();
+    const app = await createTestApp("key", { ownerEmail: owner, tier: "enterprise", features: [] });
+    const admin = await registerUser(app, owner);
+    const res = await jsonRequest(app, "PATCH", "/admin/settings", { hootie_name: "Ava" }, admin.apiKey);
+    expect(res.status).toBe(403);
+    expect(res.data.code).toBe("enterprise_required");
+    expect((await health(app)).hootie_brand.name).toBe("Hootie");
+  });
 });

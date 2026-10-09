@@ -19,13 +19,17 @@ import { dispatchEvent } from "../notify/dispatch.js";
 import { notifyNestEvent } from "../notify/notify.js";
 import { sendEmailToRecipient } from "../notify/email.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
-import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
+import { withNodeWriteLock, withNodeWriteLocks, nodeWriteKey } from "../shared/node-write-lock.js";
 import { engineCache, engineApi, opContext } from "../nodes/engine.js";
-import { resolveStewardsForNode, canUserApprove } from "./stewardship-service.js";
+import {
+  resolveStewardsForNode,
+  canUserApprove,
+  canUserApproveMany,
+  stewardRowsForNodes,
+} from "./stewardship-service.js";
 import * as versions from "./version-service.js";
 import {
   buildTitleMap,
-  describeNode,
   titleForNode,
   buildDocContext,
   nestName,
@@ -131,6 +135,8 @@ export async function submitForReview(params: {
           await versionManager.createVersion(node, params.requestedBy, {
             note: params.note || "Submitted for review",
             ...(params.client ? { client: params.client } : {}),
+            // Read just above under the node lock — no second read.
+            knownHistory: history,
           });
         }
       } catch (err) {
@@ -284,7 +290,7 @@ export async function approve(params: {
   // approval could otherwise interleave — resolving the review against a stale
   // version and orphaning the freshly-drafted edit. The version to approve is
   // read INSIDE the lock so it reflects the author's latest committed edit.
-  return withNodeWriteLock(nodeWriteKey(params.nestId, params.nodeId), async () => {
+  const { pending, version } = await withNodeWriteLock(nodeWriteKey(params.nestId, params.nodeId), async () => {
     const db = getDb();
     const version = await versions.getCurrentVersion(params.nestId, params.nodeId);
 
@@ -304,153 +310,329 @@ export async function approve(params: {
         params.nestId,
         params.nodeId,
         params.approvedBy,
+        { requestedBy: pending.requested_by },
       );
       if (!check.allowed) {
         throw new Error(check.reason);
       }
     }
 
-    // Resolve the review
-    await db.run(
-      `UPDATE review_requests
-     SET status = 'approved', resolved_by = ?, resolved_at = ${nowExpr(db)},
-         resolution_note = ?, is_override = ?
-     WHERE id = ?`,
-      [params.approvedBy, params.note || null, params.override ? 1 : 0, pending.id],
-    );
-    // The request (and any SLA escalation of it) is answered.
-    await markReviewNotificationsRead(pending.id);
-
-    void dispatchEvent({
-      kind: "review_approved",
-      nestId: params.nestId,
-      subjectId: params.nodeId,
-      actor: params.approvedBy,
-      message: `*${await describeNode(params.nestId, params.nodeId)}* v${version} approved by ${params.approvedBy}`,
-    });
-
-    // Verdict fan-out: submitter + watchers hear the approval. Best-effort.
-    await notifyReviewResolved({
-      nestId: params.nestId,
-      nodeId: params.nodeId,
-      status: "approved",
-      resolvedBy: params.approvedBy,
-      requestedBy: pending.requested_by,
-      reviewId: pending.id,
-    });
-
-    // Update version status. We write 'published' (not 'approved') so the DB
-    // mirrors the engine's terminal status — history.yaml/frontmatter record
-    // the post-approve state as published, and divergence between the two
-    // breaks drift detection and display-status resolution.
-    //
-    // No `client_json` here on purpose: this row was sealed by the AUTHOR's
-    // write and already carries the author's attribution. Overwriting it with
-    // the approver's would rewrite history — the approver's block belongs on
-    // the version the engine's publish bumps to, written further down.
-    await db.run(
-      "UPDATE node_versions SET status = 'published' WHERE nest_id = ? AND node_id = ? AND version = ?",
-      [params.nestId, params.nodeId, version],
-    );
-
-    // Pin this as the approved version (for AI queries)
-    await db.run(
-      insertOrReplace(
-        db,
-        `INSERT INTO approved_versions (nest_id, node_id, approved_version, approved_by)
-       VALUES (?, ?, ?, ?)`,
-        ["nest_id", "node_id"],
-        `approved_version = excluded.approved_version, approved_by = excluded.approved_by, approved_at = ${nowExpr(db)}`,
-      ),
-      [params.nestId, params.nodeId, version, params.approvedBy],
-    );
-
-    // Run engine publish so the on-disk file gets frontmatter.checksum +
-    // status:published. Without this, drift detection silently no-ops on
-    // subsequent local edits (see integrity.ts:133 — no checksum = drifted:false).
-    //
-    // Engine bumps the on-disk version (N → N+1) and appends an entry to
-    // history.yaml. Mirror that entry into node_versions so the DB's view
-    // of "latest version" stays in lockstep with the file. Without this
-    // mirror, the next GET returns frontmatter.version = N+1, the UI sends
-    // X-Base-Version: N+1, and checkConflict (which reads node_versions)
-    // sees the DB stuck at N and 409s on every save.
+    // Publish FIRST, then record: a document the engine will not publish must
+    // not be recorded as approved (same as bulk approve). The engine publish
+    // gives the file frontmatter.checksum + status:published, without which
+    // drift detection silently no-ops on later local edits.
+    const note = params.note || `Approved review request ${pending.id}`;
+    let engineVersion: number;
     try {
-      const { storage } = await engineCache.get(params.nestId);
-      const note = params.note || `Approved review request ${pending.id}`;
       // Publish through the engine's canonical operation, so an approval seals
       // its version and checkpoint exactly the way every other surface does —
       // and regenerates the index, which a bare publish call does not.
-      const { version: engineVersion } = await engineApi.run<{ version: number }>(
+      ({ version: engineVersion } = await engineApi.run<{ version: number }>(
         "context_publish",
         { id: params.nodeId, note },
         await opContext(params.nestId, params.approvedBy),
-      );
-      if (engineVersion !== version) {
-        // The operation reports the version, not the document — re-read for the
-        // body and tags the governance row mirrors.
-        const node = await storage.readDocument(params.nodeId);
-        const tags = (node.frontmatter.tags || []) as string[];
-        await versions.createVersion({
-          nestId: params.nestId,
-          nodeId: params.nodeId,
-          version: engineVersion,
-          content: node.body || "",
-          author: params.approvedBy,
-          status: "published",
-          tags,
-          changeNote: note,
-          client: params.client,
-        });
-        // Re-pin to the engine-bumped version so getDisplayStatus() resolves
-        // the latest row (N+1) as "approved" rather than falling through to
-        // "draft" because approved_version still pointed at N.
-        await versions.setApprovedVersion(
-          params.nestId,
-          params.nodeId,
-          engineVersion,
-          params.approvedBy,
-        );
-      }
+      ));
+    } catch (err: any) {
+      throw new Error(`Couldn't publish this document: ${err?.message ?? err}`);
+    }
+
+    await markApproved({
+      nestId: params.nestId,
+      nodeId: params.nodeId,
+      approvedBy: params.approvedBy,
+      note: params.note,
+      override: params.override,
+      reviewId: pending.id,
+      version,
+    });
+
+    try {
+      await mirrorPublished({
+        nestId: params.nestId,
+        nodeId: params.nodeId,
+        version,
+        engineVersion,
+        approvedBy: params.approvedBy,
+        note,
+        client: params.client,
+      });
     } catch (err) {
+      // Published and recorded; only the DB's copy of the new version failed.
       console.error(
-        `publishDocument failed for ${params.nestId}/${params.nodeId} on approve:`,
+        `version mirror failed for ${params.nestId}/${params.nodeId} on approve:`,
         err,
       );
     }
 
-    const approveCtx = await buildDocContext(params.nestId, params.nodeId, params.baseUrl);
-    void notifyNestEvent(
-      params.nestId,
-      `:white_check_mark: *${approveCtx.label}* v${version} approved by ${params.approvedBy}`,
-      {
-        status: "approved",
-        docTitle: approveCtx.docTitle,
-        path: approveCtx.path,
-        link: approveCtx.link,
-        actor: params.approvedBy,
-        version: version,
-      },
-      // The verdict emails the submitter directly (below), not the shared
-      // NOTIFY_EMAIL_TO team inbox — skip the team-channel email; Slack/Teams fire.
-      { skipEmail: true },
-    );
-
-    // Email the submitter their verdict, unless they approved it themselves.
-    if (pending.requested_by?.toLowerCase() !== params.approvedBy.toLowerCase()) {
-      void sendEmailToRecipient(pending.requested_by, {
-        status: "approved",
-        docTitle: approveCtx.docTitle,
-        path: approveCtx.path,
-        link: approveCtx.link,
-        actor: params.approvedBy,
-        version: version,
-        note: params.note || null,
-      });
-    }
-
-    return (await getReviewRequest(pending.id))!;
+    return { pending, version };
   });
+
+  // Notifications run OUTSIDE the lock, as in submitForReview: the approval is
+  // committed, and the author's next save shouldn't wait on the fan-out.
+  await notifyApproved({
+    nestId: params.nestId,
+    nodeId: params.nodeId,
+    approvedBy: params.approvedBy,
+    note: params.note,
+    baseUrl: params.baseUrl,
+    pending,
+    version,
+  });
+
+  return (await getReviewRequest(pending.id))!;
+}
+
+/**
+ * Approve many documents of one nest with ONE engine publish: every document
+ * is published in parallel and sealed by a single checkpoint and one index
+ * rebuild, instead of a full publish per document. Per document it records the
+ * same rows and sends the same notifications as `approve`. A document that is
+ * not pending, not approvable by the caller, or not published by the engine is
+ * reported as failed and left untouched — its review stays pending.
+ */
+export async function approveMany(params: {
+  nestId: string;
+  nodeIds: string[];
+  approvedBy: string;
+  note?: string;
+  baseUrl?: string;
+  client?: ClientMetadata;
+}): Promise<Array<{ nodeId: string; ok: boolean; error?: string }>> {
+  const ids = [...new Set(params.nodeIds)];
+  const outcome = new Map<string, string | null>(); // null = approved
+  const approved: Array<{ nodeId: string; pending: any; version: number }> = [];
+
+  // Every selected node is held for the whole check → publish → record span,
+  // so an author save cannot land between the check and the publish.
+  await withNodeWriteLocks(
+    ids.map((id) => nodeWriteKey(params.nestId, id)),
+    async () => {
+      const db = getDb();
+      const [pendingRows, currentVersions, verdicts] = await Promise.all([
+        db.all(
+          `SELECT * FROM review_requests
+             WHERE nest_id = ? AND status = 'pending' AND node_id IN (${ids.map(() => "?").join(",")})
+             ORDER BY requested_at DESC`,
+          [params.nestId, ...ids],
+        ) as Promise<any[]>,
+        versions.getCurrentVersions(params.nestId, ids),
+        canUserApproveMany(params.nestId, ids, params.approvedBy),
+      ]);
+      // Newest first, so the first row per node is its latest pending review.
+      const pendingByNode = new Map<string, any>();
+      for (const r of pendingRows) if (!pendingByNode.has(r.node_id)) pendingByNode.set(r.node_id, r);
+
+      const eligible: string[] = [];
+      for (const id of ids) {
+        const verdict = verdicts.get(id);
+        if (!pendingByNode.has(id)) outcome.set(id, "No pending review for this node");
+        else if (!verdict?.allowed) outcome.set(id, verdict?.reason ?? "Not allowed");
+        else eligible.push(id);
+      }
+      if (eligible.length === 0) return;
+
+      const note = params.note || "Approved in bulk review";
+      let result: { published: Array<{ id: string; version: number }>; failed: Array<{ id?: string; error: string }> };
+      try {
+        result = await engineApi.run("context_import", {
+          ids: eligible,
+          note,
+          ...(params.client ? { client: params.client } : {}),
+        }, await opContext(params.nestId, params.approvedBy));
+      } catch (err: any) {
+        for (const id of eligible) outcome.set(id, err?.message || "Publish failed");
+        return;
+      }
+      for (const f of result.failed) if (f.id) outcome.set(f.id, f.error);
+
+      for (const { id, version: engineVersion } of result.published) {
+        const pending = pendingByNode.get(id);
+        const version = currentVersions.get(id) ?? 0;
+        await markApproved({
+          nestId: params.nestId,
+          nodeId: id,
+          approvedBy: params.approvedBy,
+          note: params.note,
+          reviewId: pending.id,
+          version,
+        });
+        await mirrorPublished({
+          nestId: params.nestId,
+          nodeId: id,
+          version,
+          engineVersion,
+          approvedBy: params.approvedBy,
+          note,
+          client: params.client,
+        });
+        outcome.set(id, null);
+        approved.push({ nodeId: id, pending, version });
+      }
+    },
+  );
+
+  for (const a of approved) {
+    await notifyApproved({
+      nestId: params.nestId,
+      nodeId: a.nodeId,
+      approvedBy: params.approvedBy,
+      note: params.note,
+      baseUrl: params.baseUrl,
+      pending: a.pending,
+      version: a.version,
+    });
+  }
+
+  return ids.map((nodeId) => {
+    const error = outcome.get(nodeId);
+    return error === null ? { nodeId, ok: true } : { nodeId, ok: false, error: error ?? "Not published" };
+  });
+}
+
+/** Resolve the review, mark the reviewed version published, and pin it as approved. */
+async function markApproved(p: {
+  nestId: string;
+  nodeId: string;
+  approvedBy: string;
+  note?: string;
+  override?: boolean;
+  reviewId: string;
+  version: number;
+}): Promise<void> {
+  const db = getDb();
+  await db.run(
+    `UPDATE review_requests
+     SET status = 'approved', resolved_by = ?, resolved_at = ${nowExpr(db)},
+         resolution_note = ?, is_override = ?
+     WHERE id = ?`,
+    [p.approvedBy, p.note || null, p.override ? 1 : 0, p.reviewId],
+  );
+  // The request (and any SLA escalation of it) is answered — single and bulk
+  // approve both land here.
+  await markReviewNotificationsRead(p.reviewId);
+
+  // Update version status. We write 'published' (not 'approved') so the DB
+  // mirrors the engine's terminal status — history.yaml/frontmatter record
+  // the post-approve state as published, and divergence between the two
+  // breaks drift detection and display-status resolution.
+  //
+  // No `client_json` here on purpose: this row was sealed by the AUTHOR's
+  // write and already carries the author's attribution. Overwriting it with
+  // the approver's would rewrite history — the approver's block belongs on
+  // the version the engine's publish bumps to (mirrorPublished).
+  await db.run(
+    "UPDATE node_versions SET status = 'published' WHERE nest_id = ? AND node_id = ? AND version = ?",
+    [p.nestId, p.nodeId, p.version],
+  );
+
+  // Pin this as the approved version (for AI queries)
+  await db.run(
+    insertOrReplace(
+      db,
+      `INSERT INTO approved_versions (nest_id, node_id, approved_version, approved_by)
+       VALUES (?, ?, ?, ?)`,
+      ["nest_id", "node_id"],
+      `approved_version = excluded.approved_version, approved_by = excluded.approved_by, approved_at = ${nowExpr(db)}`,
+    ),
+    [p.nestId, p.nodeId, p.version, p.approvedBy],
+  );
+}
+
+/**
+ * The engine's publish bumps the on-disk version (N → N+1) and appends it to
+ * history.yaml. Mirror that into node_versions and re-pin it, so the DB's
+ * "latest version" stays in lockstep with the file — otherwise the next save
+ * sends X-Base-Version N+1 against a DB stuck at N and 409s. No-op when the
+ * engine did not bump.
+ */
+async function mirrorPublished(p: {
+  nestId: string;
+  nodeId: string;
+  version: number;
+  engineVersion: number;
+  approvedBy: string;
+  note: string;
+  client?: ClientMetadata;
+}): Promise<void> {
+  if (p.engineVersion === p.version) return;
+  // The publish just wrote the document through this process, so the cache
+  // holds exactly those bytes; read disk only if the cache has no entry.
+  const { storage, cachedDocument } = await engineCache.get(p.nestId);
+  const node = cachedDocument(p.nodeId) ?? (await storage.readDocument(p.nodeId));
+  await versions.createVersion({
+    nestId: p.nestId,
+    nodeId: p.nodeId,
+    version: p.engineVersion,
+    content: node.body || "",
+    author: p.approvedBy,
+    status: "published",
+    tags: (node.frontmatter.tags || []) as string[],
+    changeNote: p.note,
+    client: p.client,
+  });
+  // Re-pin to the engine-bumped version so getDisplayStatus() resolves the
+  // latest row (N+1) as "approved" rather than falling through to "draft".
+  await versions.setApprovedVersion(p.nestId, p.nodeId, p.engineVersion, p.approvedBy);
+}
+
+/** The verdict fan-out for one approval. Runs outside any lock. */
+async function notifyApproved(p: {
+  nestId: string;
+  nodeId: string;
+  approvedBy: string;
+  note?: string;
+  baseUrl?: string;
+  pending: { id: string; requested_by: string };
+  version: number;
+}): Promise<void> {
+  const ctx = await buildDocContext(p.nestId, p.nodeId, p.baseUrl);
+  void dispatchEvent({
+    kind: "review_approved",
+    nestId: p.nestId,
+    subjectId: p.nodeId,
+    actor: p.approvedBy,
+    message: `*${ctx.label}* v${p.version} approved by ${p.approvedBy}`,
+  });
+
+  // Verdict fan-out: submitter + watchers hear the approval. Best-effort.
+  await notifyReviewResolved({
+    nestId: p.nestId,
+    nodeId: p.nodeId,
+    status: "approved",
+    resolvedBy: p.approvedBy,
+    requestedBy: p.pending.requested_by,
+    reviewId: p.pending.id,
+    label: ctx.label,
+  });
+
+  void notifyNestEvent(
+    p.nestId,
+    `:white_check_mark: *${ctx.label}* v${p.version} approved by ${p.approvedBy}`,
+    {
+      status: "approved",
+      docTitle: ctx.docTitle,
+      path: ctx.path,
+      link: ctx.link,
+      actor: p.approvedBy,
+      version: p.version,
+    },
+    // The verdict emails the submitter directly (below), not the shared
+    // NOTIFY_EMAIL_TO team inbox — skip the team-channel email; Slack/Teams fire.
+    { skipEmail: true },
+  );
+
+  // Email the submitter their verdict, unless they approved it themselves.
+  if (p.pending.requested_by?.toLowerCase() !== p.approvedBy.toLowerCase()) {
+    void sendEmailToRecipient(p.pending.requested_by, {
+      status: "approved",
+      docTitle: ctx.docTitle,
+      path: ctx.path,
+      link: ctx.link,
+      actor: p.approvedBy,
+      version: p.version,
+      note: p.note || null,
+    });
+  }
 }
 
 // ─── Reject ─────────────────────────────────────────────────────────────
@@ -466,7 +648,7 @@ export async function reject(params: {
 }): Promise<ReviewRequest> {
   // Same lock as approve: serialize against a concurrent author edit so the
   // rejected version reflects the author's latest committed edit.
-  return withNodeWriteLock(nodeWriteKey(params.nestId, params.nodeId), async () => {
+  const { pending, version } = await withNodeWriteLock(nodeWriteKey(params.nestId, params.nodeId), async () => {
     const db = getDb();
     const version = await versions.getCurrentVersion(params.nestId, params.nodeId);
 
@@ -483,6 +665,7 @@ export async function reject(params: {
       params.nestId,
       params.nodeId,
       params.rejectedBy,
+      { requestedBy: pending.requested_by },
     );
     if (!check.allowed) {
       throw new Error(check.reason);
@@ -501,55 +684,59 @@ export async function reject(params: {
       [params.nestId, params.nodeId, version],
     );
 
-    const rejectCtx = await buildDocContext(params.nestId, params.nodeId, params.baseUrl);
-    void dispatchEvent({
-      kind: "review_rejected",
-      nestId: params.nestId,
-      subjectId: params.nodeId,
-      actor: params.rejectedBy,
-      message: `*${rejectCtx.label}* v${version} rejected by ${params.rejectedBy}${params.note ? ` — "${params.note}"` : ""}`,
-    });
-    void notifyNestEvent(
-      params.nestId,
-      `:x: *${rejectCtx.label}* v${version} rejected by ${params.rejectedBy} — "${params.note}"`,
-      {
-        status: "rejected",
-        docTitle: rejectCtx.docTitle,
-        path: rejectCtx.path,
-        link: rejectCtx.link,
-        actor: params.rejectedBy,
-        version: version,
-        note: params.note || null,
-      },
-      // Verdict emails the submitter directly (below), not the team inbox.
-      { skipEmail: true },
-    );
-
-    // Email the submitter their verdict, unless they rejected it themselves.
-    if (pending.requested_by?.toLowerCase() !== params.rejectedBy.toLowerCase()) {
-      void sendEmailToRecipient(pending.requested_by, {
-        status: "rejected",
-        docTitle: rejectCtx.docTitle,
-        path: rejectCtx.path,
-        link: rejectCtx.link,
-        actor: params.rejectedBy,
-        version: version,
-        note: params.note || null,
-      });
-    }
-
-    // Verdict fan-out: submitter + watchers hear the rejection. Best-effort.
-    await notifyReviewResolved({
-      nestId: params.nestId,
-      nodeId: params.nodeId,
-      status: "rejected",
-      resolvedBy: params.rejectedBy,
-      requestedBy: pending.requested_by,
-      reviewId: pending.id,
-    });
-
-    return (await getReviewRequest(pending.id))!;
+    return { pending, version };
   });
+
+  // Notifications run outside the lock, same as approve.
+  const rejectCtx = await buildDocContext(params.nestId, params.nodeId, params.baseUrl);
+  void dispatchEvent({
+    kind: "review_rejected",
+    nestId: params.nestId,
+    subjectId: params.nodeId,
+    actor: params.rejectedBy,
+    message: `*${rejectCtx.label}* v${version} rejected by ${params.rejectedBy}${params.note ? ` — "${params.note}"` : ""}`,
+  });
+  void notifyNestEvent(
+    params.nestId,
+    `:x: *${rejectCtx.label}* v${version} rejected by ${params.rejectedBy} — "${params.note}"`,
+    {
+      status: "rejected",
+      docTitle: rejectCtx.docTitle,
+      path: rejectCtx.path,
+      link: rejectCtx.link,
+      actor: params.rejectedBy,
+      version: version,
+      note: params.note || null,
+    },
+    // Verdict emails the submitter directly (below), not the team inbox.
+    { skipEmail: true },
+  );
+
+  // Email the submitter their verdict, unless they rejected it themselves.
+  if (pending.requested_by?.toLowerCase() !== params.rejectedBy.toLowerCase()) {
+    void sendEmailToRecipient(pending.requested_by, {
+      status: "rejected",
+      docTitle: rejectCtx.docTitle,
+      path: rejectCtx.path,
+      link: rejectCtx.link,
+      actor: params.rejectedBy,
+      version: version,
+      note: params.note || null,
+    });
+  }
+
+  // Verdict fan-out: submitter + watchers hear the rejection. Best-effort.
+  await notifyReviewResolved({
+    nestId: params.nestId,
+    nodeId: params.nodeId,
+    status: "rejected",
+    resolvedBy: params.rejectedBy,
+    requestedBy: pending.requested_by,
+    reviewId: pending.id,
+    label: rejectCtx.label,
+  });
+
+  return (await getReviewRequest(pending.id))!;
 }
 
 // ─── Cancel ─────────────────────────────────────────────────────────────
@@ -581,6 +768,7 @@ export async function cancelReview(params: {
         params.nestId,
         params.nodeId,
         params.cancelledBy,
+        { requestedBy: pending.requested_by },
       );
       if (!verdict.allowed) {
         throw new Error(
@@ -688,14 +876,19 @@ export async function getReviewQueue(params: {
   // Resolver reads node_tag_index directly — no tags argument needed.
   let requests = rows.map(rowToReviewRequest);
   if (params.stewardEmail) {
-    const filtered: ReviewRequest[] = [];
-    for (const r of requests) {
-      const stewards = await resolveStewardsForNode(r.nestId, r.nodeId);
-      if (stewards.some((s) => s.steward.userEmail === params.stewardEmail)) {
-        filtered.push(r);
-      }
-    }
-    requests = filtered;
+    // One steward query per nest on the page, not one per request.
+    const byNest = new Map<string, string[]>();
+    for (const r of requests) byNest.set(r.nestId, [...(byNest.get(r.nestId) ?? []), r.nodeId]);
+    const stewardsByNest = new Map(
+      await Promise.all(
+        [...byNest].map(async ([nid, ids]) => [nid, await stewardRowsForNodes(nid, ids)] as const),
+      ),
+    );
+    requests = requests.filter((r) =>
+      (stewardsByNest.get(r.nestId)?.get(r.nodeId) ?? []).some(
+        (s) => s.userEmail === params.stewardEmail,
+      ),
+    );
   }
 
   // Resolve human-facing document titles. The governance DB only stores
@@ -800,7 +993,7 @@ export async function deletionTargetTitle(
 /** Emails of the people who can action a deletion: the nest owner plus
  *  owner/admin collaborators. Mirrors the UI's `canManage` — the tier that
  *  sees the Delete affordance is the tier that gets told about a request. */
-async function nestAdminEmails(nestId: string): Promise<string[]> {
+export async function nestAdminEmails(nestId: string): Promise<string[]> {
   const db = getDb();
   const rows = (await db.all(
     `SELECT u.email FROM nests n JOIN users u ON u.id = n.user_id WHERE n.id = ?
@@ -814,7 +1007,7 @@ async function nestAdminEmails(nestId: string): Promise<string[]> {
 
 /** Inbox rows for /me/work. Best-effort by contract, like every other
  *  notification path here — a delivery failure must never fail the action. */
-async function inboxInsert(
+export async function inboxInsert(
   nestId: string,
   recipients: string[],
   kind: string,
@@ -831,7 +1024,7 @@ async function inboxInsert(
         [uuid(), nestId, email.toLowerCase(), kind, subjectId, message, now],
       );
     } catch (err) {
-      console.error("[notify] deletion inbox insert failed", nestId, email, err);
+      console.error(`[notify] ${kind} inbox insert failed`, nestId, email, err);
     }
   }
 }

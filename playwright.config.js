@@ -67,6 +67,41 @@ const testRun = [
     enabled: true,
     independent: true, // Arranges its own nests; depends only on the orphan sweep
   },
+  {
+    // My Work (CN-WORK-001 … CN-WORK-020). Serial on purpose: the cases share
+    // one inbox and one seeded nest, so a parallel run would have them
+    // approving, selecting and counting each other's reviews.
+    file: 'my-work/my_work.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest, reviews and requests
+  },
+  {
+    // Request access on a denied write (CN-ACCESS-001 … CN-ACCESS-004).
+    // Serial: the cases share one seeded nest and build on each other's
+    // requests (ask → approve → deny → refused save).
+    file: 'access-requests/access_requests.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest; needs secondary_user
+  },
+  {
+    // Metacognition agents (CN-META-001 … CN-META-003). Skips unless the
+    // server has FEATURE_METACOGNITION on. Serial: one seeded nest.
+    file: 'metacognition/metacognition_agents.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest
+  },
+  {
+    // Annotations keep your place + highlights in every view (CN-ANNO-001 …
+    // CN-ANNO-004). Serial: the cases share one seeded nest. Skips itself on
+    // a server that doesn't serve the viewer bridge yet.
+    file: 'annotations/annotate_keep_place.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest, artifact, doc and comments
+  },
   // ── Add new suites here (governance, documents, …) ────────────────────────
   // ── Teardown (always runs last, even on failure) ───────────────────────────
   {
@@ -150,7 +185,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'access-requests'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -213,15 +248,15 @@ export default defineConfig({
     // Playwright-managed download is unavailable (e.g. sandboxed CI).
     ...(process.env.PLAYWRIGHT_SLOW_MO || process.env.PLAYWRIGHT_CHROMIUM_PATH
       ? {
-          launchOptions: {
-            ...(process.env.PLAYWRIGHT_SLOW_MO
-              ? { slowMo: parseInt(process.env.PLAYWRIGHT_SLOW_MO) }
-              : {}),
-            ...(process.env.PLAYWRIGHT_CHROMIUM_PATH
-              ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }
-              : {}),
-          },
-        }
+        launchOptions: {
+          ...(process.env.PLAYWRIGHT_SLOW_MO
+            ? { slowMo: parseInt(process.env.PLAYWRIGHT_SLOW_MO) }
+            : {}),
+          ...(process.env.PLAYWRIGHT_CHROMIUM_PATH
+            ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }
+            : {}),
+        },
+      }
       : {}),
   },
 
@@ -268,29 +303,51 @@ export default defineConfig({
     // duplicate test runs when running the full suite.
     ...(includeStandalone
       ? [
-          {
-            name: 'auth',
-            dependencies: ['setup-auth'],
-            testMatch: 'tests/features/auth/**/*.spec.js',
-            fullyParallel: false,
-            use: {
-              ...devices['Desktop Chrome'],
-              screenshot: 'only-on-failure',
-              trace: 'retain-on-failure',
-            },
+        {
+          name: 'auth',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/auth/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
           },
-          {
-            name: 'dashboard',
-            dependencies: ['setup-auth'],
-            testMatch: 'tests/features/dashboard/**/*.spec.js',
-            fullyParallel: false,
-            use: {
-              ...devices['Desktop Chrome'],
-              screenshot: 'only-on-failure',
-              trace: 'retain-on-failure',
-            },
+        },
+        {
+          name: 'dashboard',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/dashboard/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
           },
-        ]
+        },
+        {
+          name: 'my-work',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/my-work/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'access-requests',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/access-requests/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+      ]
       : []),
   ],
 });

@@ -45,6 +45,7 @@ export interface EmailEventDetails {
   status:
     | "approved"
     | "mention"
+    | "comment_reply"
     | "rejected"
     | "pending_review"
     | "shared"
@@ -56,7 +57,10 @@ export interface EmailEventDetails {
     | "deletion_deleted"
     | "deletion_archived"
     | "review_overdue"
-    | "comment";
+    | "comment"
+    | "access_requested"
+    | "access_approved"
+    | "access_denied";
   /** Document title (or nest name for a share event). */
   docTitle: string;
   /** Location: "Nest name" or "Nest name / Subfolder". */
@@ -86,6 +90,7 @@ const STATUS_META: Record<
 > = {
   approved: { subjectWord: "approved", label: "Approved", color: "#16a34a" },
   mention: { subjectWord: "mentioned you", label: "Mention", color: "#7c3aed" },
+  comment_reply: { subjectWord: "replied", label: "Reply", color: "#7c3aed" },
   rejected: { subjectWord: "rejected", label: "Rejected", color: "#dc2626" },
   pending_review: {
     subjectWord: "awaiting review",
@@ -128,6 +133,23 @@ const STATUS_META: Record<
   },
   // A comment on a document the recipient watches or reviews.
   comment: { subjectWord: "has a new comment", label: "Comment", color: "#7c3aed" },
+  // Access requests (CU-wdqcq041jn): someone who could only read asked to
+  // change it; the verdict goes back to them.
+  access_requested: {
+    subjectWord: "access requested",
+    label: "Access requested",
+    color: "#d97706",
+  },
+  access_approved: {
+    subjectWord: "access approved",
+    label: "Access granted",
+    color: "#16a34a",
+  },
+  access_denied: {
+    subjectWord: "access denied",
+    label: "Access denied",
+    color: "#dc2626",
+  },
 };
 
 /** First-letter capitalize for tidy detail values (role/scope). */
@@ -214,6 +236,19 @@ const TEMPLATES: Record<EmailEventDetails["status"], EmailTemplate> = {
     linkLabel: "Open document",
     lineT: (x) => `You were mentioned in ${x.title}${x.byT}${x.noteT}.`,
     lineH: (x) => `You were mentioned in ${x.doc}${x.byH}${x.noteH}.`,
+    rows: (x) => [plainRow("Nest", x.d.path)],
+  },
+  // A reply on a comment thread the recipient took part in. Addressed to
+  // "you" like a mention; `note` carries the reply's own words.
+  comment_reply: {
+    heading: (x) =>
+      `${x.d.actor || "Someone"} replied to a comment on ${x.title}`,
+    detailsHeader: "Document details",
+    linkLabel: "Open document",
+    lineT: (x) =>
+      `There's a new reply in a comment thread you're part of on ${x.title}${x.byT}${x.noteT}.`,
+    lineH: (x) =>
+      `There's a new reply in a comment thread you're part of on ${x.doc}${x.byH}${x.noteH}.`,
     rows: (x) => [plainRow("Nest", x.d.path)],
   },
   rejected: {
@@ -344,6 +379,38 @@ const TEMPLATES: Record<EmailEventDetails["status"], EmailTemplate> = {
     lineT: (x) => `New comment on ${x.title}${x.byT}${x.noteT}.`,
     lineH: (x) => `New comment on ${x.doc}${x.byH}${x.noteH}.`,
     rows: (x) => [plainRow("Nest", x.d.path)],
+  },
+  // `permission` carries the level asked for ("write"), `note` the asker's
+  // reason or the decider's note.
+  access_requested: {
+    heading: (x) => `${x.d.actor || "Someone"} asked for ${shareRole(x.d.permission)} access to ${x.title}`,
+    detailsHeader: "Request details",
+    linkLabel: "Review the request",
+    lineT: (x) =>
+      `${x.d.actor || "Someone"} asked for ${shareRole(x.d.permission)} access to ${x.title}${x.noteT}. Approve or deny it from My Work.`,
+    lineH: (x) =>
+      `${escapeHtml(x.d.actor || "Someone")} asked for <strong>${escapeHtml(shareRole(x.d.permission))}</strong> access to ${x.doc}${x.noteH}. Approve or deny it from My Work.`,
+    rows: (x) => [plainRow("Nest", x.d.path), { label: "Status", text: x.meta.label, html: x.statusBadge }],
+  },
+  access_approved: {
+    heading: (x) => `You have ${shareRole(x.d.permission)} access to ${x.title}`,
+    detailsHeader: "Details",
+    linkLabel: "Open",
+    lineT: (x) =>
+      `Your request for ${shareRole(x.d.permission)} access to ${x.title} was approved${x.byT}${x.noteT}. You can make your change now.`,
+    lineH: (x) =>
+      `Your request for <strong>${escapeHtml(shareRole(x.d.permission))}</strong> access to ${x.doc} was approved${x.byH}${x.noteH}. You can make your change now.`,
+    rows: (x) => [plainRow("Nest", x.d.path), { label: "Status", text: x.meta.label, html: x.statusBadge }],
+  },
+  access_denied: {
+    heading: (x) => `Your access request for ${x.title} was denied`,
+    detailsHeader: "Details",
+    linkLabel: "Open",
+    lineT: (x) =>
+      `Your request for ${shareRole(x.d.permission)} access to ${x.title} was denied${x.byT}${x.noteT}. You can ask again later.`,
+    lineH: (x) =>
+      `Your request for <strong>${escapeHtml(shareRole(x.d.permission))}</strong> access to ${x.doc} was denied${x.byH}${x.noteH}. You can ask again later.`,
+    rows: (x) => [plainRow("Nest", x.d.path), { label: "Status", text: x.meta.label, html: x.statusBadge }],
   },
   steward: {
     heading: (x) => `You're now a steward of ${x.title}`,

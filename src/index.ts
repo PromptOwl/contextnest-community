@@ -13,6 +13,7 @@ import {
   validateLicense,
   startLicenseSafetyPoll,
 } from "./auth/license.js";
+import { moveStoredAnthropicKey } from "./shared/model-credential.js";
 import { startTelemetryLoop, trackEvent } from "./telemetry/tracker.js";
 import {
   loadAccessConfig,
@@ -23,6 +24,7 @@ import { startDriftScanner } from "./governance/external-edit-service.js";
 import { startScheduler } from "./workflow/scheduler.js";
 import { startReviewSlaLoop } from "./governance/review-sla.js";
 import { sweepStale } from "./shared/rate-limit.js";
+import { bannerHeading } from "./shared/startup-banner.js";
 
 async function main() {
   // Initialize the database backend (SQLite by default, or Postgres/Cloud SQL
@@ -93,8 +95,12 @@ async function main() {
     console.error("[sso] failed to load community sites:", err);
   }
 
-  // Validate PromptOwl license key (non-blocking — server runs either way)
-  const license = await validateLicense();
+  // Validate PromptOwl license key (non-blocking — server runs either way).
+  // Ask PromptOwl at boot rather than trusting the 24h cache, so a restart
+  // can't hide a suspension; unreachable falls back to the cache as before.
+  const license = await validateLicense({ forceFresh: true });
+
+  await moveStoredAnthropicKey();
 
   if (!license.valid) {
     console.warn(`
@@ -163,7 +169,7 @@ async function main() {
       : `sqlite (${config.DATABASE_PATH})`;
 
   console.log(`
-  ContextNest Community Server v0.1.0
+  ${bannerHeading()}
   ────────────────────────────────────
   Port:      ${config.PORT}
   Data:      ${config.DATA_ROOT}
@@ -207,6 +213,12 @@ ${config.AUTH_MODE === "key" ? `
      Bind to 127.0.0.1 only, or switch to AUTH_MODE=key before exposing.
 `);
   }
+  if (config.HOOTIE_DEBUG_LOG) {
+    console.warn(`
+  ⚠️  HOOTIE_DEBUG_LOG is on — every Hootie prompt and answer, including the
+     nest documents behind it, is written to the logs. Testing only.
+`);
+  }
 
   serve({ fetch: app.fetch, port: config.PORT });
 
@@ -217,6 +229,15 @@ ${config.AUTH_MODE === "key" ? `
   // workflow plane — that loop above is a no-op unless its flag is on, and
   // review governance isn't. Inert while no nest sets an SLA.
   startReviewSlaLoop();
+
+  // Metacognition runs execute in this process; any still "running" from a
+  // previous process lost their loop. Close them so the agents aren't stuck.
+  if (config.FEATURE_METACOGNITION) {
+    void import("./metacognition/service.js")
+      .then((m) => m.recoverOrphanedRuns())
+      .then((n) => n && console.log(`[metacognition] closed ${n} run(s) left running by a previous process`))
+      .catch((err) => console.error("[metacognition] orphan sweep failed", err));
+  }
 
   // Rate-limit bucket GC — bounded keys can still accumulate across a long
   // uptime; sweep expired buckets every 10 minutes.

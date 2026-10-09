@@ -1625,6 +1625,39 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("044_client_attribution");
   }
 
+  // 045: headless publishing (CU-wdqcq0314u). `nests.headless` is the owner's
+  // "API-only" switch; `users.is_service` marks the identity behind an access
+  // key (no password, never listed as a person); `headless_readers` ties each
+  // such identity to the one nest its key reads.
+  if (!hasMigration("045_headless_publish")) {
+    db.transaction(() => {
+      const nestCols = (
+        db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!nestCols.includes("headless")) {
+        db.exec("ALTER TABLE nests ADD COLUMN headless INTEGER NOT NULL DEFAULT 0");
+      }
+      const userCols = (
+        db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!userCols.includes("is_service")) {
+        db.exec("ALTER TABLE users ADD COLUMN is_service INTEGER NOT NULL DEFAULT 0");
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS headless_readers (
+          user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          key_id TEXT NOT NULL,
+          label TEXT NOT NULL,
+          created_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_headless_readers_nest ON headless_readers(nest_id);
+      `);
+    })();
+    recordMigration("045_headless_publish");
+  }
+
   // 046: attribute deletions (CU-wdqcq0314v). A delete purges every row tied
   //   to the node, so its tombstone is the only record left — which makes it
   //   where "which agent deleted this" has to live for the agent-activity
@@ -1671,48 +1704,190 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("047_node_access_events");
   }
 
-  // 045: headless publishing (CU-wdqcq0314u). `nests.headless` is the owner's
-  // "API-only" switch; `users.is_service` marks the identity behind an access
-  // key (no password, never listed as a person); `headless_readers` ties each
-  // such identity to the one nest its key reads.
-  if (!hasMigration("045_headless_publish")) {
-    db.transaction(() => {
-      const nestCols = (
-        db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
-      ).map((c) => c.name);
-      if (!nestCols.includes("headless")) {
-        db.exec("ALTER TABLE nests ADD COLUMN headless INTEGER NOT NULL DEFAULT 0");
-      }
-      const userCols = (
-        db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>
-      ).map((c) => c.name);
-      if (!userCols.includes("is_service")) {
-        db.exec("ALTER TABLE users ADD COLUMN is_service INTEGER NOT NULL DEFAULT 0");
-      }
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS headless_readers (
-          user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-          key_id TEXT NOT NULL,
-          label TEXT NOT NULL,
-          created_by TEXT,
-          created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_headless_readers_nest ON headless_readers(nest_id);
-      `);
-    })();
-    recordMigration("045_headless_publish");
+  // 048: license_cache.features_json — the named licence features PromptOwl
+  // returns (CU-wdqcq03f2z), cached with the rest of the licence so an
+  // outage keeps the same entitlements. NULL = PromptOwl sent none (tier
+  // defaults apply). Numbered 048: 045 (MCP OAuth), 046 (#342) and 047 (#345)
+  // are taken on in-flight branches, and ids match by string.
+  if (!hasMigration("048_license_cache_features")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(license_cache)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (cols.length && !cols.includes("features_json")) {
+      db.exec("ALTER TABLE license_cache ADD COLUMN features_json TEXT");
+    }
+    recordMigration("048_license_cache_features");
   }
 
-  // 050: review SLA escalation. `nests.review_sla_hours` is the per-nest SLA
+  // 049: license_cache.gateway_json — the license's LiteLLM key, encrypted.
+  //   Was 046; renumbered after other branches merged 045-048, so numbers
+  //   stay unique and in order.
+  if (!hasMigration("049_license_cache_gateway")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(license_cache)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("gateway_json")) {
+      db.exec("ALTER TABLE license_cache ADD COLUMN gateway_json TEXT");
+    }
+    recordMigration("049_license_cache_gateway");
+  }
+
+  // 050: agent read log — which version a read was served, and which agent
+  //   made it. node_access_events.version is the version the caller actually
+  //   got (NULL where the surface hands back no single version); .agent is the
+  //   caller's self-reported agent (client.agent, §9.4), split out of
+  //   client_json so "what did agent X read" is an indexed filter. Existing
+  //   rows are backfilled from client_json. nests.access_log_enabled (default
+  //   ON) lets an owner turn read logging off for a nest.
+  if (!hasMigration("050_agent_read_log")) {
+    const accessCols = (
+      db.prepare("PRAGMA table_info(node_access_events)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    const nestCols050 = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    db.transaction(() => {
+      if (accessCols.length && !accessCols.includes("version")) {
+        db.exec("ALTER TABLE node_access_events ADD COLUMN version INTEGER");
+      }
+      if (accessCols.length && !accessCols.includes("agent")) {
+        db.exec("ALTER TABLE node_access_events ADD COLUMN agent TEXT");
+        db.exec(`
+          UPDATE node_access_events
+             SET agent = LOWER(json_extract(client_json, '$.agent'))
+           WHERE client_json IS NOT NULL AND json_valid(client_json)
+             AND json_type(client_json, '$.agent') = 'text'
+        `);
+      }
+      if (accessCols.length) {
+        db.exec(
+          "CREATE INDEX IF NOT EXISTS idx_node_access_agent ON node_access_events(nest_id, agent, id)",
+        );
+      }
+      if (!nestCols050.includes("access_log_enabled")) {
+        db.exec("ALTER TABLE nests ADD COLUMN access_log_enabled INTEGER NOT NULL DEFAULT 1");
+      }
+    })();
+    recordMigration("050_agent_read_log");
+  }
+
+  // 051: saved Board views (CU-wdqcq03xn2). One row per named board on a nest;
+  //   the view itself (dimension, columns, filter, per-column card rank) is a
+  //   JSON blob the UI owns — board-routes.ts validates its shape. private=1
+  //   boards are visible only to created_by. 050 is taken on another branch.
+  if (!hasMigration("051_boards")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS boards (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        private INTEGER NOT NULL DEFAULT 0,
+        position INTEGER NOT NULL DEFAULT 0,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_boards_nest ON boards(nest_id, position);
+    `);
+    recordMigration("051_boards");
+  }
+
+  // 052: nests.done_tags — which board column tags mean "completed" for a
+  //   task (CU-wdqcq03xn2). Moving a task into one stamps completed_at; out of
+  //   one clears it. Comma list like prime_tags; defaults to "done".
+  if (!hasMigration("052_nest_done_tags")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("done_tags")) {
+      db.exec("ALTER TABLE nests ADD COLUMN done_tags TEXT NOT NULL DEFAULT 'done'");
+    }
+    recordMigration("052_nest_done_tags");
+  }
+
+  // 055: access requests (CU-wdqcq041jn). Someone who can SEE a document,
+  //   folder or nest but not change it asks for write access instead of hitting
+  //   a dead-end 403; a nest owner/admin approves (which grants through the
+  //   existing share/collaborator paths) or denies with a note. One pending row
+  //   per (nest, requester, target); resolved rows stay as the record, and the
+  //   latest one is what the next refusal shows ("pending" / "denied").
+  if (!hasMigration("055_access_requests")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS access_requests (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          requester_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          requested_by TEXT NOT NULL,      -- email, for display and inbox rows
+          target_type TEXT NOT NULL CHECK(target_type IN ('node', 'folder', 'nest')),
+          target_id TEXT NOT NULL,         -- node id, folder path, or the nest id
+          level TEXT NOT NULL DEFAULT 'write' CHECK(level IN ('read', 'write')),
+          note TEXT,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending', 'approved', 'denied')),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          resolved_by TEXT,                -- email
+          resolved_at TEXT,
+          resolution_note TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_access_requests_pending
+          ON access_requests(nest_id, requester_id, target_type, target_id)
+          WHERE status = 'pending';
+        CREATE INDEX IF NOT EXISTS idx_access_requests_nest
+          ON access_requests(nest_id, status);
+      `);
+    })();
+    recordMigration("055_access_requests");
+  }
+
+  // 053: license_cache.own_gateway_json — the licence's own-provider LiteLLM
+  //   key (byok) and its model list, encrypted like gateway_json.
+  if (!hasMigration("053_license_cache_own_gateway")) {
+    const cols = (
+      db.prepare("PRAGMA table_info(license_cache)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("own_gateway_json")) {
+      db.exec("ALTER TABLE license_cache ADD COLUMN own_gateway_json TEXT");
+    }
+    recordMigration("053_license_cache_own_gateway");
+  }
+
+  // 054: metacognition agents (CU-wdqcq041jm). One row per agent node the
+  //   SERVER runs as a persona: the persona's service identity (users.is_service
+  //   = 1, no key, no password), and the run config (scope, caps, feeds, MCP
+  //   servers) as a JSON blob metacognition/config.ts validates. created_by is
+  //   the owner/admin whose access bounds what the persona may read and propose.
+  if (!hasMigration("054_metacognition_agents")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS metacognition_agents (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        persona_user_id TEXT NOT NULL,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (nest_id, node_id)
+      );
+      -- One running server-executed run per agent, enforced atomically.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_server_run
+        ON runs(nest_id, agent_node) WHERE status = 'running' AND claimed_by = 'server:metacognition';
+    `);
+    recordMigration("054_metacognition_agents");
+  }
+
+  // 057: review SLA escalation (056 is reserved for the MCP OAuth branch).
+  //   `nests.review_sla_hours` is the per-nest SLA
   //   (NULL = off, the default — the escalation tick never looks at the nest).
   //   `review_requests.escalation_level` is the last rung a pending review was
   //   escalated to (0 = none yet; 1 tag reviewers, 2 nest reviewers, 3 nest
   //   owner) and `escalated_at` when that happened. Persisted on the request
   //   row so a restart never re-notifies a rung, and a resubmission (a new
   //   row) starts the ladder over. Plain ADD COLUMNs — no CHECK changes, so no
-  //   table rebuild. (048/049 are taken on other branches.)
-  if (!hasMigration("050_review_sla_escalation")) {
+  //   table rebuild.
+  if (!hasMigration("057_review_sla_escalation")) {
     db.transaction(() => {
       const nestCols = (
         db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
@@ -1732,7 +1907,7 @@ export function runMigrations(db: Database.Database): void {
         db.exec("ALTER TABLE review_requests ADD COLUMN escalated_at TEXT");
       }
     })();
-    recordMigration("050_review_sla_escalation");
+    recordMigration("057_review_sla_escalation");
   }
 }
 

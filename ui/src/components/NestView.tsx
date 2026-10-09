@@ -18,7 +18,10 @@ import {
   Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
   FileStack, FolderPlus, X,
   Activity, BookOpen, Archive, Eye, Palette, History,
+  KeyRound,
 } from "lucide-react";
+import { RequestAccessDialog } from "./RequestAccessDialog";
+import type { AccessOffer } from "../lib/access-requests";
 import { ConnectModal } from "./ConnectModal";
 import { prettyFolderPath } from "./FolderTree";
 
@@ -31,6 +34,7 @@ import { groupNodesByFolder } from "@/lib/nest-overview";
 import { useMediaQuery } from "@/lib/use-media-query";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { PushConfirmationModal } from "./PushConfirmationModal";
+import { untilTime } from "../lib/dates";
 import { ReaderView } from "./ReaderView";
 import { ReaderBrandingDialog } from "./ReaderBrandingDialog";
 import { isBranded, type NestBranding } from "../lib/branding";
@@ -166,6 +170,8 @@ export function NestView({
   // Local mirror of the nest name so inline rename feels instant while the
   // backend autosave lands. Resets if the parent passes a different nest.
   const [editableName, setEditableName] = useState(nestName);
+  // "Request edit access" for a viewer of the nest (CU-wdqcq041jn).
+  const [accessOffer, setAccessOffer] = useState<AccessOffer | null>(null);
   const lastSavedName = useRef(nestName);
   useEffect(() => {
     setEditableName(nestName);
@@ -258,6 +264,7 @@ export function NestView({
   const [primeOnlyReview, setPrimeOnlyReview] = useState(false);
   const [creatorIsReviewer, setCreatorIsReviewer] = useState(false);
   const [reviewSlaHours, setReviewSlaHours] = useState<number | null>(null);
+  const [accessLogEnabled, setAccessLogEnabled] = useState(true);
   const [primeTags, setPrimeTags] = useState<string[]>([]);
   // Push Confirmation Gate (superadmin-set). Held-push count drives the badge.
   const [requirePushConfirmation, setRequirePushConfirmation] = useState(false);
@@ -415,6 +422,10 @@ export function NestView({
     setActiveTabState(tab);
     onTabChange?.(tab);
   };
+  // Follow tab changes made outside the tab strip (sidebar, breadcrumb, back/forward).
+  useEffect(() => {
+    if (initialTab) setActiveTabState(initialTab);
+  }, [initialTab]);
   // Expanded folders, not collapsed ones: a folder's documents are fetched on
   // first expand, so the default has to be closed.
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
@@ -586,6 +597,7 @@ export function NestView({
     setPrimeOnlyReview(!!settingsData.prime_only_review);
     setCreatorIsReviewer(!!settingsData.creator_is_reviewer);
     setReviewSlaHours((settingsData as api.NestSettings).review_sla_hours ?? null);
+    setAccessLogEnabled((settingsData as Partial<api.NestSettings>).access_log_enabled ?? true);
     setPrimeTags(settingsData.prime_tags ?? []);
     setRequirePushConfirmation(!!(settingsData as any).require_push_confirmation);
     if (nestMeta?.nest?.visibility) {
@@ -866,6 +878,8 @@ export function NestView({
     try {
       await api.approveNode(nestId, reviewNode.id, note);
       toast.success("Approved");
+      // Drop the row now; fetchData below reconciles in the background.
+      setReviewQueue((q) => q.filter((r) => r.nodeId !== reviewNode.id));
       setReviewNode(null);
       fetchData();
     } catch (err: any) {
@@ -879,6 +893,7 @@ export function NestView({
     try {
       await api.rejectNode(nestId, reviewNode.id, note);
       toast.success("Rejected");
+      setReviewQueue((q) => q.filter((r) => r.nodeId !== reviewNode.id));
       setReviewNode(null);
       fetchData();
     } catch (err: any) {
@@ -1251,7 +1266,10 @@ export function NestView({
                   {p.submitter_label || p.submitter_email || "an API key"}
                 </span>
                 <span className="text-xs text-muted-foreground shrink-0">
-                  Review →
+                  {untilTime(p.expires_at) === "expired"
+                    ? "Expired"
+                    : `Expires ${untilTime(p.expires_at)}`}{" "}
+                  · Review →
                 </span>
               </button>
             ))}
@@ -1486,6 +1504,28 @@ export function NestView({
           <Button variant="outline" size="sm" onClick={() => setShowGenerate(true)}>
             <Sparkles className="h-3.5 w-3.5 mr-1.5" />
             Add with AI
+          </Button>
+        )}
+        {/* Someone who can read this nest but not add to it can ask for that
+            instead of finding no way in (CU-wdqcq041jn). Signed-in only —
+            there's no one to grant a signed-out reader anything. */}
+        {!canEditDocs && !nestArchived && !previewReader && !!adminStatus?.me && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              setAccessOffer({
+                nestId,
+                target: { type: "nest", id: nestId },
+                level: "write",
+                label: editableName || nestName,
+              })
+            }
+            data-testid="nest-request-access"
+            title="Ask the nest owner or an admin for edit access to this nest"
+          >
+            <KeyRound className="h-3.5 w-3.5 mr-1.5" />
+            Request edit access
           </Button>
         )}
         {canManage && !isPhone && (
@@ -2067,6 +2107,9 @@ export function NestView({
         />
       )}
 
+      {accessOffer && (
+        <RequestAccessDialog offer={accessOffer} onClose={() => setAccessOffer(null)} />
+      )}
       {showGenerate && (
         <GenerateContextModal
           isOpen={showGenerate}
@@ -2094,6 +2137,8 @@ export function NestView({
           isServerAdmin={isAdmin}
           creatorIsReviewer={creatorIsReviewer}
           reviewSlaHours={reviewSlaHours}
+          accessLogEnabled={accessLogEnabled}
+          canDisableAccessLog={isAdmin || isOwner || permission === "owner"}
           canManageStewardship={canManageGovernance}
           onClose={() => setShowSettings(false)}
           onChanged={(next) => {
@@ -2108,6 +2153,7 @@ export function NestView({
             setRequirePushConfirmation(next.requirePushConfirmation);
             setCreatorIsReviewer(next.creatorIsReviewer);
             setReviewSlaHours(next.reviewSlaHours);
+            setAccessLogEnabled(next.accessLogEnabled);
             fetchData();
           }}
         />

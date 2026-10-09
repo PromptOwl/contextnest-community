@@ -44,6 +44,18 @@ export class PayloadTooLargeError extends AppError {
   }
 }
 
+/** A role change would take the server past its pricing plan (402). */
+export class PlanLimitError extends AppError {
+  constructor(
+    public limit: "users" | "subscribers" | "account_owners",
+    public max: number,
+    message: string,
+  ) {
+    super(402, message);
+    this.name = "PlanLimitError";
+  }
+}
+
 export class ConflictError extends AppError {
   constructor(message: string) {
     super(409, message);

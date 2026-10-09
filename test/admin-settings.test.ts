@@ -35,6 +35,7 @@ const SETTING_ENV = [
   "PROMPTOWL_SIGN_IN_GATE",
   "MANUAL_SIGN_IN",
   "LOGO_URL",
+  "COMMUNITY_NAME",
   "PUBLIC_BASE_URL",
   "MAX_BODY_BYTES",
   "FEATURE_WORKFLOW_PLANE",
@@ -140,6 +141,25 @@ describe("/admin/settings — validation", () => {
     expect(res.status).toBe(400);
     expect(res.data.error).toMatch(/PromptOwl sign-in/i);
     expect(res.data.fieldErrors).toHaveProperty("promptowl_sign_in_gate");
+  });
+
+  it("saves a trimmed community name, clears it with an empty string, rejects multi-line", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    const patch = (community_name: string) =>
+      jsonRequest(app, "PATCH", "/admin/settings", { community_name }, admin.apiKey);
+
+    const ok = await patch("  Acme Community ");
+    expect(ok.status).toBe(200);
+    expect(ok.data.settings.community_name).toBe("Acme Community");
+    expect(await persistedSetting("COMMUNITY_NAME")).toBe("Acme Community");
+
+    const bad = await patch("Acme\nEvil");
+    expect(bad.status).toBe(400);
+    expect(bad.data.fieldErrors).toHaveProperty("community_name");
+
+    const cleared = await patch("");
+    expect(cleared.data.settings.community_name).toBeNull();
   });
 
   it("saves a PostHog key, rejects a junk key and a non-URL host", async () => {
@@ -262,6 +282,33 @@ describe("/admin/settings — validation", () => {
     expect(off.status).toBe(200);
     expect(off.data.settings.subagent_runs_enabled).toBe(false);
     expect(await persistedSetting("FEATURE_SUBAGENT_RUNS")).toBeNull();
+  });
+
+  it("metacognition agents: refused without the plane, toggled on and off with it", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const refused = await jsonRequest(app, "PATCH", "/admin/settings", { metacognition_enabled: true }, admin.apiKey);
+    expect(refused.status).toBe(400);
+    expect(refused.data.fieldErrors).toHaveProperty("metacognition_enabled");
+    expect(await persistedSetting("FEATURE_METACOGNITION")).toBeUndefined();
+
+    const on = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { workflow_plane_enabled: true, metacognition_enabled: true },
+      admin.apiKey,
+    );
+    expect(on.status).toBe(200);
+    expect(on.data.settings.metacognition_enabled).toBe(true);
+    expect(await persistedSetting("FEATURE_METACOGNITION")).toBe("true");
+    const health = await jsonRequest(app, "GET", "/health");
+    expect(health.data.metacognition_enabled).toBe(true);
+
+    const off = await jsonRequest(app, "PATCH", "/admin/settings", { metacognition_enabled: false }, admin.apiKey);
+    expect(off.data.settings.metacognition_enabled).toBe(false);
+    expect(await persistedSetting("FEATURE_METACOGNITION")).toBeNull();
   });
 
   it("applies NOTHING when one field of a multi-field PATCH is invalid", async () => {
@@ -525,83 +572,3 @@ describe("/admin/settings — public_base_url", () => {
   });
 });
 
-/**
- * Saving an Anthropic key checks it. A key with the right shape but no
- * standing behind it used to save cleanly and then surface as "Hootie
- * couldn't reach the model" on the first question — the admin had no way to
- * tell a bad key from a bad day.
- */
-describe("/admin/settings — Anthropic key verification", () => {
-  /** Build an app whose key check answers however the test wants. */
-  async function appWithKeyCheck(rejectWith: string | null) {
-    vi.doMock("../src/hootie/model.js", () => ({
-      verifyModelKey: async () => rejectWith,
-      streamAnswer: async function* () {},
-      ModelRefusedError: class extends Error {},
-    }));
-    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
-    const admin = await registerUser(app, OWNER_EMAIL);
-    return { app, admin };
-  }
-
-  afterEach(() => {
-    vi.doUnmock("../src/hootie/model.js");
-    delete process.env.ANTHROPIC_API_KEY;
-  });
-
-  it("400s a key the provider rejects, and saves nothing", async () => {
-    const { app, admin } = await appWithKeyCheck("Anthropic rejected that key.");
-    const res = await jsonRequest(
-      app,
-      "PATCH",
-      "/admin/settings",
-      { anthropic_api_key: "sk-ant-not-a-real-key" },
-      admin.apiKey,
-    );
-    expect(res.status).toBe(400);
-    expect(res.data.fieldErrors).toHaveProperty("anthropic_api_key");
-    expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
-    expect(await persistedSetting("ANTHROPIC_API_KEY")).toBeUndefined();
-    const after = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
-    expect(after.data.anthropic_api_key_masked).toBeNull();
-  });
-
-  it("saves a key the provider accepts", async () => {
-    const { app, admin } = await appWithKeyCheck(null);
-    const res = await jsonRequest(
-      app,
-      "PATCH",
-      "/admin/settings",
-      { anthropic_api_key: "sk-ant-good-key-1234" },
-      admin.apiKey,
-    );
-    expect(res.status).toBe(200);
-    expect(res.data.settings.anthropic_api_key_masked).toBe("••••1234");
-    expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-good-key-1234");
-  });
-
-  it("clearing the key never calls the provider", async () => {
-    let called = false;
-    vi.doMock("../src/hootie/model.js", () => ({
-      verifyModelKey: async () => {
-        called = true;
-        return "should not be asked";
-      },
-      streamAnswer: async function* () {},
-      ModelRefusedError: class extends Error {},
-    }));
-    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
-    const admin = await registerUser(app, OWNER_EMAIL);
-    process.env.ANTHROPIC_API_KEY = "sk-ant-old";
-    const res = await jsonRequest(
-      app,
-      "PATCH",
-      "/admin/settings",
-      { anthropic_api_key: "" },
-      admin.apiKey,
-    );
-    expect(res.status).toBe(200);
-    expect(called).toBe(false);
-    expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
-  });
-});

@@ -56,6 +56,7 @@ import {
   resolveCallerEmail,
   filterAccessible,
   canReadNode,
+  readsWholeNest,
 } from "../governance/access-guard.js";
 import { isPublicReader } from "../shared/access.js";
 import {
@@ -75,6 +76,17 @@ import {
   nodesWithSuggestions,
 } from "./node-index.js";
 import { config } from "../config.js";
+import { listNestPeople } from "../nests/people-service.js";
+import { nestDoneTags } from "../nests/service.js";
+import { notifyAssigned } from "../governance/assign-notify.js";
+import {
+  TASK_NODE_TYPE,
+  applyTaskFields,
+  hasTaskFieldsPatch,
+  taskFieldsOf,
+  type TaskFields,
+  type TaskFieldsPatch,
+} from "./task-fields.js";
 
 /** Reverse-lookup the auth userId from a registered email. Anonymous email → ANON. */
 async function userIdFromEmail(email: string): Promise<string> {
@@ -363,7 +375,7 @@ export function bodyOnly(nodeId: string, raw: string): string {
   }
 }
 
-export interface NodeResponse {
+export interface NodeResponse extends TaskFields {
   id: string;
   title: string;
   type: string;
@@ -412,6 +424,13 @@ export const ACCEPTED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
   "artifact",
   "table",
   "pdf",
+  // Board work item (see task-fields.ts). Only once the engine knows the type:
+  // the engine validates frontmatter.type against its own NODE_TYPES on every
+  // write, so offering it ahead of that engine would turn every task create
+  // into a 500. Board fields themselves work on any type regardless.
+  ...((NODE_TYPES as readonly string[]).includes(TASK_NODE_TYPE)
+    ? [TASK_NODE_TYPE]
+    : []),
 ]);
 
 /** A pdf node's body is the text extracted from its binary (engine §1.11). */
@@ -540,6 +559,7 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
         : undefined,
     prime: documentPrimeFlag(fm.metadata),
     ...(fm.type === "pdf" && fm.pdf ? { pdf: fm.pdf } : {}),
+    ...taskFieldsOf(fm.metadata),
   };
 }
 
@@ -1128,6 +1148,28 @@ async function vaultFolderPaths(
 }
 
 /**
+ * Direct document counts per folder over only the documents this caller can
+ * read — the narrowed counterpart of `indexedFolderCounts`. Same document set
+ * and exclusions as the census, so the two trees agree for every caller.
+ */
+async function readableFolderCounts(
+  nestId: string,
+  userId: string,
+  userEmail: string,
+): Promise<Array<{ path: string; count: number }>> {
+  const documents = (await readIndexedNodes(nestId)).filter(
+    (d) => !isDerivedAnnotationsNode(d.id),
+  );
+  const visible = await filterAccessible(nestId, userId, userEmail, documents);
+  const direct = new Map<string, number>();
+  for (const d of visible) {
+    const folder = folderOfId(d.id);
+    if (folder) direct.set(folder, (direct.get(folder) || 0) + 1);
+  }
+  return [...direct].map(([path, count]) => ({ path, count }));
+}
+
+/**
  * The nest's folders, from the DB mirror plus the vault's directory shape.
  *
  * Document counts come from the mirror, which stores each document's folder as
@@ -1139,21 +1181,37 @@ async function vaultFolderPaths(
  * `folder` is a community folder path ("" = nest root), NOT an id prefix; the
  * `nodes/` storage root is added here so callers keep speaking one dialect.
  *
- * No per-caller narrowing: this is a whole-nest view, and the nest middleware
- * already withholds those from a share grantee (same rule as /overview), so
- * everyone who reaches this handler may see the whole tree.
+ * Pass `caller` from any request path. A caller who reads every document gets
+ * the whole tree as above. A narrowed caller (a public reader of a governed
+ * nest, a tag- or document-scoped steward) gets only folders holding at least
+ * one document they can read, counted over those documents — the directory
+ * walk would otherwise name folders that hold nothing they may open, and the
+ * mirror's counts would include documents they cannot see.
  */
 export async function listNestFolders(
   nestId: string,
-  opts: { folder?: string; recursive?: boolean } = {},
+  opts: {
+    folder?: string;
+    recursive?: boolean;
+    caller?: { userId: string; userEmail: string };
+  } = {},
 ): Promise<FolderNode[]> {
   if (opts.folder !== undefined) assertSafeFolder(opts.folder);
   await ensureNodeIndex(nestId);
   const counts = new Map<string, number>();
+  const narrowed =
+    opts.caller !== undefined &&
+    !(await readsWholeNest(nestId, opts.caller.userId, opts.caller.userEmail));
+  const folderCounts = narrowed
+    ? await readableFolderCounts(nestId, opts.caller!.userId, opts.caller!.userEmail)
+    : await indexedFolderCounts(nestId);
   // Directories first, so a folder holding nothing is still a folder; the
-  // mirror's counts below win wherever it knows the folder.
-  for (const path of await vaultFolderPaths(nestId, opts)) counts.set(path, 0);
-  for (const { path, count } of await indexedFolderCounts(nestId)) {
+  // mirror's counts below win wherever it knows the folder. Not for a narrowed
+  // caller: an empty or wholly-restricted folder says nothing they may read.
+  if (!narrowed) {
+    for (const path of await vaultFolderPaths(nestId, opts)) counts.set(path, 0);
+  }
+  for (const { path, count } of folderCounts) {
     counts.set(path, count);
     // Ancestors with no document of their own still need a row — a level that
     // only holds subfolders still has to be expandable.
@@ -1249,12 +1307,16 @@ export async function nestCensus(
     const segs = folder.split("/");
     for (let i = 1; i <= segs.length; i++) paths.add(segs.slice(0, i).join("/"));
   }
-  // Folders holding no document — same vault walk listNestFolders merges, and
-  // like that endpoint the tree itself is the whole nest's shape: counts stay
-  // caller-scoped, but a folder is listed whether or not this caller can reach
-  // a document in it (the nest middleware already withholds both routes from a
-  // share grantee, so the audience is the same either way).
-  for (const path of await vaultFolderPaths(nestId)) paths.add(path);
+  // Folders holding no document — same vault walk listNestFolders merges —
+  // only for a caller who reads every document. For anyone narrowed (a public
+  // reader, a scoped steward) the walk would name folders that hold only what
+  // they cannot open, so their tree is the folders of `visible` alone; same
+  // rule as listNestFolders, and the same readsWholeNest predicate, so a
+  // narrowed caller who happens to reach every existing document still gets the
+  // same tree here as from /folders.
+  if (await readsWholeNest(nestId, userId, userEmail)) {
+    for (const path of await vaultFolderPaths(nestId)) paths.add(path);
+  }
   // Same roll-up the folders endpoint uses — the two describe the same tree
   // and must not drift.
   const folders = withSubtreeTotals(
@@ -1323,7 +1385,7 @@ export async function listNodesForCallerByEmail(
   });
 }
 
-export interface CreateNodeInput {
+export interface CreateNodeInput extends TaskFieldsPatch {
   title: string;
   content: string;
   type?: string;
@@ -1354,7 +1416,7 @@ export interface CreateNodeInput {
   pdf?: PdfUpload;
 }
 
-export interface UpdateNodePatch {
+export interface UpdateNodePatch extends TaskFieldsPatch {
   content?: string;
   append?: string;
   tags?: string[];
@@ -1403,6 +1465,13 @@ export interface WriteOptions {
    * uses it: its "nothing changed since" check has to hold at write time.
    */
   expectHead?: number;
+  /**
+   * Never publish this write, whatever the nest's posture (ungoverned,
+   * prime-only, self-approve, creator-reviews): it lands as a draft for a
+   * reviewer. A metacognition agent's proposals use it — an agent's change is
+   * a proposal by definition, so no bypass that exists for people applies.
+   */
+  alwaysDraft?: boolean;
 }
 
 /** Refuse the write if the node's head moved past what the caller saw.
@@ -1474,7 +1543,7 @@ async function assertMayFlagPrime(
 async function autoPublishReason(
   nestId: string,
   userEmail: string,
-  doc: { tags?: readonly unknown[]; metadata?: unknown },
+  doc: { tags?: readonly unknown[]; metadata?: unknown; type?: string },
   opts: { creatorReviews?: boolean; governed?: boolean } = {},
 ): Promise<string | null> {
   // Ungoverned nest: nothing to review, nobody to review it. A caller that
@@ -1482,6 +1551,10 @@ async function autoPublishReason(
   const governed = opts.governed ?? (await isStewardshipEnabled(nestId));
   if (!governed) return "no stewards configured";
   if (await isPrimeDocument(nestId, doc.tags, doc.metadata)) return null;
+  // Board work moves column many times a day; gating every drag behind a
+  // reviewer would make a project board unusable. Prime still wins (above):
+  // a steward who flags a task prime has asked for review on purpose.
+  if (doc.type === TASK_NODE_TYPE) return "task — board work skips review";
   // Creator-reviews (a create, in a nest with the posture on): the author is
   // this document's reviewer, so v1 is theirs to publish. Only v1 — every
   // later edit, theirs included, is a change to a reviewed document and goes
@@ -1494,6 +1567,36 @@ async function autoPublishReason(
   return (await actorAutoPublishes(nestId, userEmail))
     ? "owner/admin self-approve"
     : null;
+}
+
+/** Roster / parent lookups applyTaskFields needs, bound to one nest. */
+function taskFieldsContext(
+  nestId: string,
+  storage: NestStorage,
+  nodeId: string | null,
+) {
+  return {
+    nodeId,
+    now: new Date().toISOString(),
+    roster: async () =>
+      new Set((await listNestPeople(nestId)).map((p) => p.email.toLowerCase())),
+    nodeExists: async (id: string) => {
+      try {
+        await storage.readDocument(id);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    parentOf: async (id: string) => {
+      try {
+        const n = await storage.readDocument(id);
+        return taskFieldsOf(n.frontmatter.metadata).parent ?? null;
+      } catch {
+        return null;
+      }
+    },
+  };
 }
 
 /**
@@ -1635,12 +1738,27 @@ async function createNodeOnce(
     }
 
     if (input.prime !== undefined) await assertMayFlagPrime(nestId, userEmail);
-    const metadata = {
+    const metadata: Record<string, unknown> = {
       owners: ["*"],
       scope: input.scope || "team",
       ...(input.schedule ? { schedule: input.schedule } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
     };
+    if (input.type === TASK_NODE_TYPE) {
+      const done = new Set(await nestDoneTags(nestId));
+      if (tags.some((t) => done.has(String(t).toLowerCase().replace(/^#/, "")))) {
+        metadata.completed_at = new Date().toISOString();
+      }
+    }
+    if (hasTaskFieldsPatch(input)) {
+      const { metadata: withFields } = await applyTaskFields(
+        metadata,
+        input,
+        taskFieldsContext(nestId, storage, null),
+      );
+      // Nulls on a create mean "not set" — nothing to clear yet.
+      Object.assign(metadata, withFields);
+    }
     // Creator-reviews: steward the author BEFORE deciding to publish, since v1
     // publishes on the strength of that row. A failure here fails the create
     // with nothing written — never a document published on a false premise.
@@ -1662,12 +1780,14 @@ async function createNodeOnce(
     let published = false;
     let publishNote: string | undefined;
     try {
-      const publishReason = await autoPublishReason(
-        nestId,
-        userEmail,
-        { tags, metadata },
-        { creatorReviews: creatorSteward?.canApprove === true, governed },
-      );
+      const publishReason = opts.alwaysDraft
+        ? null
+        : await autoPublishReason(
+            nestId,
+            userEmail,
+            { tags, metadata, type: input.type },
+            { creatorReviews: creatorSteward?.canApprove === true, governed },
+          );
       // Same note in the engine history and the governance row: the version
       // history an admin reads in the UI comes from node_versions, so leaving
       // the reason only in history.yaml hides it from the audit that matters.
@@ -1797,6 +1917,17 @@ async function createNodeOnce(
     }
 
     await trackEvent("node.create", { nestId, nodeId: id });
+    const createdAssignee = taskFieldsOf(node.frontmatter.metadata).assignee;
+    // A draft's assignment isn't real until a reviewer approves it.
+    if (createdAssignee && published) {
+      await notifyAssigned({
+        nestId,
+        nodeId: id,
+        title: input.title,
+        assignee: createdAssignee,
+        actorEmail: userEmail,
+      });
+    }
     // Everything a new document mentions is new.
     if (opts.notifyMentions !== false) {
       await notifyMentions({
@@ -2147,6 +2278,9 @@ export async function updateNode(
       // Kept for the mention fan-out at the end: only names this save ADDS
       // notify, so the same @name surviving many saves is one event.
       const previousBody = node.body || "";
+      // For the board's moved_at stamp: a tag change is a column change.
+      const priorTags = [...((node.frontmatter.tags || []) as string[])];
+      const priorAssignee = taskFieldsOf(node.frontmatter.metadata).assignee ?? null;
 
       // Assemble the op's input alongside a local projection of the patched
       // node. The projection is what governance reads (auto-publish gate, tag
@@ -2258,15 +2392,49 @@ export async function updateNode(
         node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
         opInput.metadata = { ...(opInput.metadata as object), prime: patch.prime };
       }
+      if (hasTaskFieldsPatch(patch)) {
+        const { metadata, opMetadata } = await applyTaskFields(
+          { ...((node.frontmatter.metadata as Record<string, unknown>) ?? {}) },
+          patch,
+          taskFieldsContext(nestId, storage, nodeId),
+        );
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata: metadata as any } };
+        opInput.metadata = { ...(opInput.metadata as object), ...opMetadata };
+      }
+      // A task whose tag set changed moved column on a board. Compared as
+      // sets: the editor resends the same tags on every save, which isn't a
+      // move.
+      if (patch.tags && node.frontmatter.type === TASK_NODE_TYPE) {
+        const norm = (t: unknown) => String(t).toLowerCase().replace(/^#/, "");
+        const before = new Set(priorTags.map(norm));
+        const after = ((node.frontmatter.tags || []) as string[]).map(norm);
+        if (before.size !== after.length || after.some((t) => !before.has(t))) {
+          const movedAt = new Date().toISOString();
+          // Entering a "done" column completes the task; leaving one reopens it.
+          const done = new Set(await nestDoneTags(nestId));
+          const wasDone = [...before].some((t) => done.has(t));
+          const isDone = after.some((t) => done.has(t));
+          const stamps: Record<string, unknown> = { moved_at: movedAt };
+          if (isDone && !wasDone) stamps.completed_at = movedAt;
+          if (!isDone && wasDone) stamps.completed_at = null;
+          const metadata = { ...(node.frontmatter.metadata as any), ...stamps };
+          if (stamps.completed_at === null) delete metadata.completed_at;
+          node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+          opInput.metadata = { ...(opInput.metadata as object), ...stamps };
+        }
+      }
 
       const hasStewards = await isStewardshipEnabled(nestId);
       const currentTags = (node.frontmatter.tags || []) as string[];
       // Resolved from the POST-patch tags and metadata — so an edit that adds
       // a prime tag gates itself, and one that clears the doc flag can't
       // un-gate a prime-tagged doc.
-      const publishReason = await autoPublishReason(nestId, userEmail, {
+      const publishReason = opts.alwaysDraft ? null : await autoPublishReason(nestId, userEmail, {
         tags: currentTags,
         metadata: node.frontmatter.metadata,
+        // A task only if it is one before AND after this edit: converting a
+        // document into a task, or a task into anything else, is reviewed.
+        type: patch.type === undefined || patch.type === storedType ? storedType : undefined,
       });
 
       // Stewardship lock: a node with an open review request is frozen for
@@ -2409,6 +2577,19 @@ export async function updateNode(
         responseVersion = publishedVersion;
       }
 
+      const nextAssignee = taskFieldsOf(node.frontmatter.metadata).assignee ?? null;
+      // Only a published edit notifies: a drafted assignment may be rejected.
+      // Approving that draft later doesn't notify either (known gap).
+      const savedAsDraft = publishReason === null || isAuthorEditingOwnReview;
+      if (nextAssignee && nextAssignee !== priorAssignee && !savedAsDraft) {
+        await notifyAssigned({
+          nestId,
+          nodeId,
+          title: String(node.frontmatter.title || nodeId),
+          assignee: nextAssignee,
+          actorEmail: userEmail,
+        });
+      }
       // Awaited, like the other inbox fan-outs: it swallows its own failures,
       // and a local insert is cheaper than a save that returns before it lands.
       if (opts.notifyMentions !== false) {
@@ -2497,6 +2678,9 @@ export const NODE_KEYED_TABLES = [
   // document at the same id never inherits someone else's reads. The
   // deletion tombstone and whole-nest export rows (node_id NULL) survive.
   ["node_access_events", "node_id"],
+  // A metacognition agent's config (CU-wdqcq041jm): it runs the agent node, so
+  // a delete must stop it and a move must take it along.
+  ["metacognition_agents", "node_id"],
 ] as const;
 
 /** Drop every row keyed to a node id. Caller supplies the transaction. */
@@ -2524,6 +2708,13 @@ async function purgeNodeKeyedRows(
      WHERE nest_id = ? AND target_type = 'document' AND target = ?`,
     [nestId, nodeId],
   );
+  // A request for access to this document asks about something that no longer
+  // exists; a later document at the same id must not inherit it.
+  await tx.run(
+    `DELETE FROM access_requests
+     WHERE nest_id = ? AND target_type = 'node' AND target_id = ?`,
+    [nestId, nodeId],
+  );
 }
 
 /** Repoint every row keyed to `oldId` at `newId`. Caller supplies the transaction. */
@@ -2547,6 +2738,11 @@ async function rewriteNodeKeyedRows(
   await tx.run(
     `UPDATE grants SET target = ?
      WHERE nest_id = ? AND target_type = 'document' AND target = ?`,
+    [newId, nestId, oldId],
+  );
+  await tx.run(
+    `UPDATE access_requests SET target_id = ?
+     WHERE nest_id = ? AND target_type = 'node' AND target_id = ?`,
     [newId, nestId, oldId],
   );
 }

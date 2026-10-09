@@ -6,7 +6,7 @@
  * picker. The backend rejects a scope+target the same user already holds.
  */
 import React, { useEffect, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../../lib/queries";
 import { isEmailish } from "../../lib/utils";
 import {
@@ -98,6 +98,8 @@ export function StewardModal({
   const [tags, setTags] = useState<string[] | null>(null);
   const [optionsLoading, setOptionsLoading] = useState(false);
   const qc = useQueryClient();
+  const ownerEmail = useQuery({ ...reads.stewards(nestId), enabled: isOpen }).data?.ownerEmail;
+  const isOwnerEmail = !!ownerEmail && email.trim().toLowerCase() === ownerEmail.toLowerCase();
 
   // Seed fields from the steward (edit) or reset to defaults (assign).
   useEffect(() => {
@@ -236,7 +238,14 @@ export function StewardModal({
           {/* Email — editable when assigning, fixed when editing. */}
           {!isEdit && (
             <div className="space-y-2">
-              <Label htmlFor="email">Steward Email</Label>
+              <div className="flex items-center justify-between gap-2">
+                <Label htmlFor="email">Steward Email</Label>
+                {ownerEmail && (
+                  <span className="text-[11px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 truncate">
+                    Owner: {ownerEmail} (Master Steward)
+                  </span>
+                )}
+              </div>
               {/* Autocompletes people you already work with, and still takes
                   an address that has no account yet — a steward can be invited
                   by email before they sign up. */}
@@ -248,6 +257,13 @@ export function StewardModal({
                 disabled={loading}
                 testId="steward-email-input"
               />
+              {isOwnerEmail && (
+                <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 p-2.5 rounded-md leading-relaxed">
+                  <strong>{ownerEmail}</strong> is the nest owner and already holds full
+                  stewardship authority over all documents, tags and settings. You do not
+                  need to assign them as a steward.
+                </p>
+              )}
             </div>
           )}
 
@@ -359,9 +375,9 @@ export function StewardModal({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value="viewer">Viewer — read-only access</SelectItem>
                 <SelectItem value="editor">Editor — can edit but not approve</SelectItem>
                 <SelectItem value="reviewer">Reviewer — can approve/reject</SelectItem>
-                <SelectItem value="viewer">Viewer — read-only access</SelectItem>
               </SelectContent>
             </Select>
           </div>

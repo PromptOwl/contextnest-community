@@ -22,6 +22,7 @@ import { resolveNodeUrl } from "../governance/title-resolver.js";
 import { resolveReadableBody } from "./readable-body.js";
 import { extractContextTargets, extractWikiTargets } from "./graph-service.js";
 import { recordNodeAccess } from "../governance/access-log.js";
+import type { ClientMetadata } from "../shared/client-metadata.js";
 
 export interface ContextRequest {
   prompt?: string;
@@ -94,8 +95,11 @@ export async function resolveContext(params: {
   /** For the per-node `url` in the manifest and in each context block. */
   baseUrl: string;
   body: ContextRequest;
+  /** Caller attribution (§9.4) for the activity log — which agent pulled
+   *  these documents. A label, never a gate. */
+  client?: ClientMetadata;
 }): Promise<ContextResult> {
-  const { nestId, userId, baseUrl, body } = params;
+  const { nestId, userId, baseUrl, body, client } = params;
   if (!body.prompt && !body.selector) {
     throw new ValidationError("prompt or selector is required");
   }
@@ -361,6 +365,7 @@ export async function resolveContext(params: {
     surface: "api",
     userId,
     userEmail,
+    client,
     detail: "context",
   });
 

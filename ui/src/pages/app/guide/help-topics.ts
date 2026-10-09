@@ -22,11 +22,11 @@ export const ADMIN_HELP_TOPICS: HelpTopic[] = [
     summary:
       "Let people sign in with your identity provider: Microsoft Entra ID, Google, Okta, Keycloak or any OpenID Connect issuer. It is one setup for the whole server, and only a server admin can change it.",
     steps: [
-      "Set Public base URL (Server settings → General) to the https address people use, e.g. https://nest.acme.com. The redirect URI is built from it: <Public base URL>/auth/oidc/callback. The Single sign-on tab shows it with a Copy button.",
+      "Set Public base URL (Server settings → Basic) to the https address people use, e.g. https://nest.acme.com. The redirect URI is built from it: <Public base URL>/auth/oidc/callback. The Single sign-on tab shows it with a Copy button.",
       "At your identity provider, register a web app (confidential client) with that exact redirect URI. Copy its client ID and client secret.",
-      "On the Single sign-on tab, pick Microsoft Entra ID or Google, or paste your issuer URL. Then paste the client ID and secret.",
+      "Under Features, turn Single sign-on on — a Single sign-on tab appears. There, pick Microsoft Entra ID or Google, or paste your issuer URL. Then paste the client ID and secret.",
       "Optional: list your allowed email domains, and turn Auto-provision off if only invited people should get in.",
-      "Turn it on, Save, then test in a private window. The login page shows a Sign in with Microsoft / Google / SSO button.",
+      "Save, then test in a private window. The login page shows a Sign in with Microsoft / Google / SSO button.",
     ],
     notes: [
       "People are matched by email. Someone who already has a password account with the same email signs into that account, and their password still works.",

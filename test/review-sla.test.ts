@@ -20,11 +20,26 @@ import {
   resetAuthRateLimit,
 } from "./helpers.js";
 
-const { dispatchEvent, sendEmailToRecipient, notifyNestEvent } = vi.hoisted(() => ({
+const { dispatchEvent, sendEmailToRecipient, notifyNestEvent, cantOpen } = vi.hoisted(() => ({
   dispatchEvent: vi.fn(async () => {}),
   sendEmailToRecipient: vi.fn(async () => {}),
   notifyNestEvent: vi.fn(async () => {}),
+  /** Emails canOpenNode refuses, on top of the real check. */
+  cantOpen: new Set<string>(),
 }));
+// A matched reviewer steward normally can open the document (the steward row
+// grants it), so the access gate is defence in depth — exercised by refusing
+// chosen people here while everyone else goes through the real check.
+vi.mock("../src/governance/mention-notify.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/governance/mention-notify.js")>(
+    "../src/governance/mention-notify.js",
+  );
+  return {
+    ...actual,
+    canOpenNode: async (...a: Parameters<typeof actual.canOpenNode>) =>
+      cantOpen.has(a[3].toLowerCase()) ? false : actual.canOpenNode(...a),
+  };
+});
 // The server-wide Slack/Teams digest — the channel path review requests take.
 // End-to-end delivery is covered in review-sla-channels.test.ts.
 vi.mock("../src/notify/notify.js", async () => {
@@ -375,6 +390,29 @@ describe("escalation ladder", () => {
     );
     expect(approve.status).toBe(200);
     expect(await tick(t0 + 1000 * H)).toEqual([]);
+  });
+});
+
+describe("access gate", () => {
+  it("never escalates to someone who can't open the document; their rung is skipped", async () => {
+    cantOpen.add(tara.email.toLowerCase());
+    sendEmailToRecipient.mockClear();
+    try {
+      const t1 = await submit("Forecast", ["finance"]); // tara's tag
+      const out = (await tick(t1 + 25 * H)).filter((o) => o.level > 0);
+      expect(out).toHaveLength(1);
+      expect(out[0].level).toBe(2); // rung 1 (tara) skipped → nest reviewers
+      expect(out[0].recipients).toEqual([nate.email]);
+      expect(await escalations(tara)).not.toContainEqual(
+        expect.objectContaining({ message: expect.stringContaining("Forecast") }),
+      );
+      const mailed = overdueEmails().flatMap((c) => [c[0]].flat() as string[]);
+      expect(mailed).not.toContain(tara.email);
+      // Walk it to the top so later ticks in this file stay quiet.
+      expect((await tick(t1 + 50 * H)).map((o) => o.level)).toEqual([3]);
+    } finally {
+      cantOpen.clear();
+    }
   });
 });
 

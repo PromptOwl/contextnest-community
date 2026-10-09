@@ -42,9 +42,10 @@ import { resolveStewardsForNode } from "./stewardship-service.js";
  * scoping lives in the request middleware (resolveNodeGrant per node), not in
  * that helper. So a grant holder is checked against their grants directly —
  * otherwise a mention would announce a document, and its title, to someone
- * granted a different one.
+ * granted a different one. Every fan-out that names a document (mentions,
+ * replies, follower comments, review SLA escalation) gates on this.
  */
-async function canOpenNode(
+export async function canOpenNode(
   nestId: string,
   nodeId: string,
   userId: string,
@@ -154,6 +155,9 @@ async function insertInboxRows(params: {
   nodeId: string;
   recipients: Recipient[];
   message: string;
+  /** 'mention' (named in the text), 'comment_reply' (a thread you're in) or
+   *  'comment' (a document you watch or review). */
+  kind?: "mention" | "comment_reply" | "comment";
 }): Promise<number> {
   const db = getDb();
   const now = new Date().toISOString();
@@ -161,8 +165,16 @@ async function insertInboxRows(params: {
   for (const r of params.recipients) {
     await db.run(
       `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
-       VALUES (?, ?, ?, 'mention', ?, ?, ?)`,
-      [uuid(), params.nestId, r.email.toLowerCase(), params.nodeId, params.message, now],
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        uuid(),
+        params.nestId,
+        r.email.toLowerCase(),
+        params.kind ?? "mention",
+        params.nodeId,
+        params.message,
+        now,
+      ],
     );
     created++;
   }
@@ -372,12 +384,12 @@ export async function notifyCommentMentions(params: {
   actorEmail: string;
   baseUrl?: string;
 }): Promise<number> {
-  return (await fanOutCommentMentions(params)).length;
+  return (await commentMentionFanOut(params)).length;
 }
 
-/** notifyCommentMentions' body, returning WHO was notified so notifyComment
- *  can keep the watcher/reviewer fan-out from pinging them a second time. */
-async function fanOutCommentMentions(params: {
+/** notifyCommentMentions' body, returning WHO was notified so a reply can
+ *  leave those people out of its participant fan-out. */
+async function commentMentionFanOut(params: {
   nestId: string;
   nodeId: string;
   body: string;
@@ -415,6 +427,126 @@ async function fanOutCommentMentions(params: {
 }
 
 /**
+ * A reply on a comment thread: the @mentions in it notify exactly as
+ * notifyCommentMentions does, and everyone who already took part in the
+ * thread (its opener and every earlier replier) hears about the reply too —
+ * otherwise a question answered in a thread reaches nobody unless the
+ * replier remembered to tag the asker.
+ *
+ * A participant is skipped when they are the replier, or when this same
+ * reply already notified them through an @mention (one event, one row). The
+ * same open-the-document check and recipient cap apply as for a mention.
+ *
+ * Inbox row (kind 'comment_reply', linking the document) + a direct email
+ * when SMTP is configured, drawing on the same per-actor email budget as
+ * mentions. No team-channel post: a reply is addressed to the people in the
+ * thread, and posting every reply to the nest's channel (including the
+ * server-wide webhook) would be noise the channel never asked for.
+ */
+export async function notifyCommentReply(params: {
+  nestId: string;
+  nodeId: string;
+  /** The thread AFTER the reply was added — its opener and comment authors
+   *  are the participants. */
+  thread: { createdBy: string; comments: Array<{ author: string }> };
+  body: string;
+  /** Who wrote the reply. */
+  actorEmail: string;
+  baseUrl?: string;
+}): Promise<{ mentioned: number; participants: number }> {
+  const mentioned = await commentMentionFanOut(params);
+  const participants = await notifyThreadParticipants({
+    ...params,
+    exclude: mentioned.map((r) => r.email),
+  });
+  return { mentioned: mentioned.length, participants: participants.length };
+}
+
+/** notifyCommentReply's participant fan-out, returning WHO was notified so
+ *  notifyComment can keep its follower fan-out from pinging them again. */
+async function notifyThreadParticipants(params: {
+  nestId: string;
+  nodeId: string;
+  thread: { createdBy: string; comments: Array<{ author: string }> };
+  body: string;
+  actorEmail: string;
+  baseUrl?: string;
+  exclude: string[];
+}): Promise<Recipient[]> {
+  const { nestId, nodeId, thread, body, actorEmail, baseUrl } = params;
+  try {
+    const skip = new Set<string>(
+      [actorEmail, ...params.exclude].map((e) => e.toLowerCase()),
+    );
+    const emails: string[] = [];
+    for (const e of [thread.createdBy, ...thread.comments.map((c) => c.author)]) {
+      const key = (e || "").toLowerCase();
+      if (!key || skip.has(key)) continue;
+      skip.add(key);
+      emails.push(key);
+      if (emails.length >= MAX_MENTION_RECIPIENTS) break;
+    }
+    if (emails.length === 0) return [];
+
+    const db = getDb();
+    const candidates: Recipient[] = [];
+    for (const email of emails) {
+      // No account means no inbox (e.g. an anonymous OPEN-mode author).
+      const user = (await db.get(
+        "SELECT id, email FROM users WHERE LOWER(email) = LOWER(?)",
+        [email],
+      )) as { id: string; email: string } | undefined;
+      if (user) candidates.push({ email: user.email, userId: user.id });
+    }
+    // Someone who has since lost access to the document hears nothing about
+    // it — the same rule a mention keeps.
+    const checked = await Promise.all(
+      candidates.map(async (r) => ({
+        r,
+        allowed: await canOpenNode(nestId, nodeId, r.userId, r.email),
+      })),
+    );
+    const recipients = checked.filter((c) => c.allowed).map((c) => c.r);
+    if (recipients.length === 0) return [];
+
+    const ctx = await buildDocContext(nestId, nodeId, baseUrl);
+    const excerpt = excerptOf(body);
+    const message = `${actorEmail} replied to a comment thread on "${ctx.label}"`;
+    await insertInboxRows({
+      nestId,
+      nodeId,
+      recipients,
+      message,
+      kind: "comment_reply",
+    });
+    let throttled = 0;
+    for (const r of isEmailConfigured() ? recipients : []) {
+      if (!canDeliver("email", nestId, actorEmail)) {
+        throttled++;
+        continue;
+      }
+      void sendEmailToRecipient(r.email, {
+        status: "comment_reply",
+        docTitle: ctx.docTitle,
+        path: ctx.path,
+        link: ctx.link,
+        actor: actorEmail,
+        note: excerpt || null,
+      });
+    }
+    if (throttled > 0) {
+      console.warn(
+        `[notify] reply delivery budget exhausted for ${actorEmail} in ${nestId} — ${throttled} email(s) skipped; inbox rows unaffected`,
+      );
+    }
+    return recipients;
+  } catch (err) {
+    console.error("[notify] comment reply fan-out failed", nestId, nodeId, err);
+    return [];
+  }
+}
+
+/**
  * Upper bound on watcher + reviewer recipients one comment can reach. Both
  * lists are admin-curated, so this is a backstop, not a policy: it bounds the
  * inbox rows and emails a single read-tier write can cause.
@@ -446,13 +578,20 @@ export async function notifyComment(params: {
   /** Who wrote the comment. */
   actorEmail: string;
   baseUrl?: string;
-}): Promise<{ mentioned: number; followers: number }> {
-  const mentioned = await fanOutCommentMentions(params);
+  /** Set for a reply: the thread AFTER the reply was added. Its participants
+   *  hear about it first (kind 'comment_reply', as notifyCommentReply). */
+  thread?: { createdBy: string; comments: Array<{ author: string }> };
+}): Promise<{ mentioned: number; participants: number; followers: number }> {
+  const mentioned = await commentMentionFanOut(params);
+  const reached = mentioned.map((r) => r.email);
+  const participants = params.thread
+    ? await notifyThreadParticipants({ ...params, thread: params.thread, exclude: reached })
+    : [];
   const followers = await notifyCommentFollowers({
     ...params,
-    exclude: mentioned.map((r) => r.email),
+    exclude: [...reached, ...participants.map((r) => r.email)],
   });
-  return { mentioned: mentioned.length, followers };
+  return { mentioned: mentioned.length, participants: participants.length, followers };
 }
 
 async function notifyCommentFollowers(params: {
@@ -510,17 +649,15 @@ async function notifyCommentFollowers(params: {
     if (recipients.length === 0) return 0;
 
     const ctx = await buildDocContext(nestId, nodeId, baseUrl);
-    const db = getDb();
-    const now = new Date().toISOString();
-    for (const r of recipients) {
-      // subject_id is the node id, as for a mention: listNotifications links
-      // a 'comment' row straight to the document.
-      await db.run(
-        `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
-         VALUES (?, ?, ?, 'comment', ?, ?, ?)`,
-        [uuid(), nestId, r.email, nodeId, `${actorEmail} commented on "${ctx.label}"`, now],
-      );
-    }
+    // subject_id is the node id, as for a mention: listNotifications links
+    // a 'comment' row straight to the document.
+    await insertInboxRows({
+      nestId,
+      nodeId,
+      recipients,
+      message: `${actorEmail} commented on "${ctx.label}"`,
+      kind: "comment",
+    });
 
     let throttled = 0;
     const excerpt = excerptOf(body);

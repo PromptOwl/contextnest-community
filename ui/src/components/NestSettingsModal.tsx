@@ -26,6 +26,7 @@ import {
   Star,
   ShieldCheck,
   Clock,
+  Eye,
 } from "lucide-react";
 import * as api from "../lib/api";
 
@@ -43,6 +44,10 @@ interface NestSettingsModalProps {
   creatorIsReviewer: boolean;
   /** Review SLA in hours; null = off. */
   reviewSlaHours: number | null;
+  /** Reads, pulls and exports go to the activity log (default on). */
+  accessLogEnabled?: boolean;
+  /** Owner or server admin — the only callers who may turn the log OFF. */
+  canDisableAccessLog?: boolean;
   /** False hides the stewardship section. Server still enforces. */
   canManageStewardship: boolean;
   onClose: () => void;
@@ -54,6 +59,7 @@ interface NestSettingsModalProps {
     requirePushConfirmation: boolean;
     creatorIsReviewer: boolean;
     reviewSlaHours: number | null;
+    accessLogEnabled: boolean;
   }) => void;
 }
 
@@ -68,6 +74,8 @@ export function NestSettingsModal({
   isServerAdmin,
   creatorIsReviewer,
   reviewSlaHours,
+  accessLogEnabled = true,
+  canDisableAccessLog = false,
   canManageStewardship,
   onClose,
   onChanged,
@@ -83,6 +91,7 @@ export function NestSettingsModal({
   const [slaText, setSlaText] = useState(
     reviewSlaHours ? String(reviewSlaHours) : "",
   );
+  const [accessLog, setAccessLog] = useState(accessLogEnabled);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Acknowledgement required only when the caller is turning stewardship
@@ -176,6 +185,7 @@ export function NestSettingsModal({
       return;
     }
     const slaChanged = nextSla !== (reviewSlaHours ?? null);
+    const accessLogChanged = accessLog !== accessLogEnabled;
     if (
       !stewardshipChanged &&
       !selfApproveChanged &&
@@ -183,7 +193,8 @@ export function NestSettingsModal({
       !primeTagsChanged &&
       !pushConfirmChanged &&
       !creatorReviewsChanged &&
-      !slaChanged
+      !slaChanged &&
+      !accessLogChanged
     ) {
       onClose();
       return;
@@ -199,6 +210,7 @@ export function NestSettingsModal({
         ...(pushConfirmChanged ? { require_push_confirmation: pushConfirm } : {}),
         ...(creatorReviewsChanged ? { creator_is_reviewer: creatorReviews } : {}),
         ...(slaChanged ? { review_sla_hours: nextSla } : {}),
+        ...(accessLogChanged ? { access_log_enabled: accessLog } : {}),
       });
       // Trust the server's response, not our optimistic local state, in
       // case the permission check rejected silently or the DB rejected.
@@ -208,7 +220,8 @@ export function NestSettingsModal({
         result.prime_only_review !== primeOnly ||
         (pushConfirmChanged && result.require_push_confirmation !== pushConfirm) ||
         result.creator_is_reviewer !== creatorReviews ||
-        (slaChanged && (result.review_sla_hours ?? null) !== nextSla)
+        (slaChanged && (result.review_sla_hours ?? null) !== nextSla) ||
+        (accessLogChanged && result.access_log_enabled !== accessLog)
       ) {
         setError(
           "Server did not accept the change. You may not have permission to change these settings.",
@@ -226,6 +239,7 @@ export function NestSettingsModal({
         requirePushConfirmation: result.require_push_confirmation,
         creatorIsReviewer: result.creator_is_reviewer,
         reviewSlaHours: result.review_sla_hours ?? null,
+        accessLogEnabled: result.access_log_enabled ?? accessLog,
       });
     } catch (err: any) {
       setError(err.message);
@@ -477,6 +491,42 @@ export function NestSettingsModal({
               placeholder="Off"
               className="w-32"
             />
+          </div>
+          )}
+          {/* Read log — the record of what each person and agent read. Any
+              nest admin may turn it on; only the owner (or server admin)
+              may turn it off. The server enforces the same rule. */}
+          {canManageStewardship && (
+          <div className="rounded-lg border p-4 space-y-3" data-testid="access-log-setting">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label className="flex items-center gap-2 text-sm font-medium">
+                  <Eye className="h-4 w-4" />
+                  Record what people and agents read
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Default on. Every read, search hit, and export of a document
+                  is kept in its Activity log — who, which agent, which
+                  version, and when. Only document ids and versions are
+                  stored, never content or what was searched. Kept for the
+                  activity-trace retention window.{" "}
+                  <strong>Only the owner can turn this off.</strong>
+                </p>
+              </div>
+              <span
+                title={
+                  accessLog && !canDisableAccessLog
+                    ? "Only the nest owner or a server admin can turn this off."
+                    : undefined
+                }
+              >
+                <Switch
+                  checked={accessLog}
+                  onCheckedChange={setAccessLog}
+                  disabled={accessLog && !canDisableAccessLog && accessLogEnabled}
+                />
+              </span>
+            </div>
           </div>
           )}
 

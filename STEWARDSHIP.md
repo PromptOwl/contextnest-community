@@ -125,7 +125,9 @@ A per-nest setting (**off** by default; nest Settings → "Review SLA (hours)", 
 | 2 | Nest-scope reviewers | SLA after rung 1 |
 | 3 | The nest owner | SLA after rung 2 |
 
-Each rung gets a full SLA window before the next. A rung with nobody new on it — no tag reviewers for this document, or only people a lower rung already reached — is skipped in the same step, so an escalation always reaches someone if anyone is left. After the owner it stops.
+Rungs are the `priority` steward resolution already assigns: 1 = matched by a document pattern, 2 = by one of the document's tags, 3 = nest-level; only `reviewer`-role stewards count. Each rung is limited to people who can open the document now (an account with access — the same check mentions and comment notifications use), since an escalation names it.
+
+Each rung gets a full SLA window before the next. A rung with nobody new on it — no tag reviewers for this document, only people a lower rung already reached, or nobody on it who can open the document — is skipped in the same step, so an escalation always reaches someone if anyone is left. After the owner it stops.
 
 Escalating **notifies**; it grants nothing. The new rung gets a `review_escalated` row in their inbox linking the document, an email when SMTP is configured, and it goes to Slack/Teams the same way a review request does: the server-wide Slack/Teams webhooks (super-admin Settings) post it by default, folded into the same debounced digest as review requests, and a per-nest connector posts it when subscribed to `review_escalated` or `"*"`. A connector subscribed only to `review_requested` does not receive escalations — add `review_escalated` to its events. The team-inbox email (`NOTIFY_EMAIL_TO`) is skipped for escalations; the escalated reviewers are emailed directly. Who may approve is unchanged — the same approve gate, the same separation of duties — and the submitter is never an escalation recipient, since they can't approve their own submission.
 
@@ -137,7 +139,7 @@ When a review is approved, rejected or withdrawn, its `review_requested` and `re
 
 ## Comment notifications
 
-A new comment notifies the document's **watchers** and its **reviewer stewards** (document, tag and nest scope) with a `comment` inbox row and, when SMTP is set up, an email with the excerpt — on top of the `mention` rows for anyone the comment names. The author is never notified, someone the comment mentions hears once (as the mention), and nobody who can't open the document hears about it.
+A new comment notifies the document's **watchers** and its **reviewer stewards** (document, tag and nest scope) with a `comment` inbox row and, when SMTP is set up, an email with the excerpt — on top of the `mention` rows for anyone the comment names and, for a reply, the `comment_reply` rows for the thread's earlier participants. Each person hears once, by the most specific route (mention, then thread participant, then follower). The author is never notified, and nobody who can't open the document hears about it.
 
 ## Who sees what
 

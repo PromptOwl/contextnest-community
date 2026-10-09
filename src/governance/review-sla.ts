@@ -34,6 +34,7 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { resolveStewardsForNode } from "./stewardship-service.js";
+import { canOpenNode } from "./mention-notify.js";
 import { buildDocContext } from "./title-resolver.js";
 import { dispatchEvent } from "../notify/dispatch.js";
 import { notifyNestEvent } from "../notify/notify.js";
@@ -82,6 +83,16 @@ function dbTimestamp(ms: number): string {
 /**
  * Who each rung reaches for this document, lowercased. Rung 0 (document
  * reviewers) is included only so higher rungs can exclude its people.
+ *
+ * Rungs come from resolveStewardsForNode's `priority`, which is the scope the
+ * steward matched on: 1 = a document pattern, 2 = a tag on the document,
+ * 3 = nest-level (see the UNION in stewardship-service). Only `reviewer`
+ * stewards count — an `owner`-role steward doesn't review.
+ *
+ * Every rung is filtered to people who can open the document right now (the
+ * same canOpenNode gate mentions and comment notifications use): a steward
+ * row can outlive the access behind it, and an escalation names the document.
+ * A rung left empty by that filter is skipped like any other empty rung.
  */
 async function rungMembers(
   nestId: string,
@@ -96,12 +107,28 @@ async function rungMembers(
         .map((s) => s.steward.userEmail.toLowerCase()),
     ),
   ];
-  return [
+  const rungs = [
     byPriority(1), // document
     byPriority(2), // tag
     byPriority(3), // nest
     ownerEmail ? [ownerEmail.toLowerCase()] : [],
   ];
+  const allowed = await canOpenAll(nestId, nodeId, [...new Set(rungs.flat())]);
+  return rungs.map((rung) => rung.filter((e) => allowed.has(e)));
+}
+
+/** The subset of `emails` that belong to an account able to open the node. */
+async function canOpenAll(nestId: string, nodeId: string, emails: string[]): Promise<Set<string>> {
+  if (emails.length === 0) return new Set();
+  const users = (await getDb().all(
+    `SELECT id, LOWER(email) AS email FROM users
+      WHERE LOWER(email) IN (${emails.map(() => "?").join(",")})`,
+    emails,
+  )) as Array<{ id: string; email: string }>;
+  const checked = await Promise.all(
+    users.map(async (u) => ((await canOpenNode(nestId, nodeId, u.id, u.email)) ? u.email : null)),
+  );
+  return new Set(checked.filter((e): e is string => e !== null));
 }
 
 /**
