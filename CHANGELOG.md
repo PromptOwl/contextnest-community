@@ -1,5 +1,11 @@
 # @promptowl/contextnest-community
 
+## 1.29.1
+
+### Patch Changes
+
+- d7e4b68: Postgres servers whose `runs` table predates run claiming no longer crash at boot with `column "claimed_by" does not exist`; the migrations now add the missing claim columns.
+
 ## 1.29.0
 
 ### Minor Changes
