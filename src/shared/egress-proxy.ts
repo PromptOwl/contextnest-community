@@ -11,8 +11,9 @@ import { bootEnv, bootExecArgv } from "./boot-env.js";
  * Node ≥ 22.21 or ≥ 24.5. The Docker image sets NODE_USE_ENV_PROXY=1. No extra
  * dependency is involved.
  *
- * NOT proxied: SMTP (nodemailer opens raw TCP) and Postgres (pg). Those need
- * direct egress or their own tunnelling.
+ * NOT proxied: SMTP (nodemailer opens raw TCP), Postgres (pg), and — on
+ * purpose — metacognition feed / MCP fetches (metacognition/net.ts), whose
+ * SSRF check must resolve the host itself, which a proxy would do instead.
  */
 
 export interface ProxyEnv {
@@ -141,7 +142,7 @@ export function networkStartupLines(proxy: EgressProxyStatus, ca: ExtraCaStatus)
       .filter(Boolean)
       .join(", ");
     if (proxy.active) {
-      info.push(`  Egress proxy: ${where}${proxy.noProxy ? ` (bypass: ${proxy.noProxy})` : ""} — SMTP and Postgres connect directly`);
+      info.push(`  Egress proxy: ${where}${proxy.noProxy ? ` (bypass: ${proxy.noProxy})` : ""} — SMTP, Postgres and agent feed/MCP fetches connect directly`);
     } else {
       warn.push(`  ⚠️  Egress proxy configured (${where}) but NOT in use: ${proxy.problem}`);
     }

@@ -145,7 +145,7 @@ describe("egress proxy status", () => {
     expect(JSON.stringify(s)).not.toContain("s3cret");
     const flag = { https_proxy: "http://proxy.corp:3128" };
     expect(egressProxyStatus({ boot: flag, live: flag, execArgv: ["--use-env-proxy"], version: v }).active).toBe(true);
-    expect(networkStartupLines(s, extraCaStatus({ boot: {}, live: {} })).info[0]).toMatch(/Egress proxy: https → http:\/\/\*\*\*@proxy\.corp:3128.*SMTP and Postgres connect directly/);
+    expect(networkStartupLines(s, extraCaStatus({ boot: {}, live: {} })).info[0]).toMatch(/Egress proxy: https → http:\/\/\*\*\*@proxy\.corp:3128.*SMTP, Postgres and agent feed\/MCP fetches connect directly/);
   });
 
   it("explains each way a configured proxy is NOT in use", () => {
@@ -189,4 +189,81 @@ describe("NODE_EXTRA_CA_CERTS status", () => {
     ).toMatch(/doesn't exist/);
     expect(extraCaStatus({ boot: {}, live: { NODE_EXTRA_CA_CERTS: path }, fileExists: yes }).problem).toMatch(/only in \.env/);
   });
+});
+
+describe("SSRF guard under an egress proxy", () => {
+  // NODE_USE_ENV_PROXY only takes effect at process start, so run the guarded
+  // fetch in a child process with the proxy really on, against a local CONNECT
+  // proxy that records (and refuses) every tunnel it is asked for.
+  it.skipIf(!nodeSupportsEnvProxy(process.version))(
+    "refuses a feed host resolving to 169.254.169.254 — the request never reaches the proxy",
+    async () => {
+      const { createServer } = await import("node:http");
+      const { spawn } = await import("node:child_process");
+      const { mkdtempSync, writeFileSync } = await import("node:fs");
+      const { tmpdir } = await import("node:os");
+      const { join, resolve } = await import("node:path");
+      const { pathToFileURL } = await import("node:url");
+
+      const tunnels: string[] = [];
+      const proxy = createServer((_req, res) => res.writeHead(403).end());
+      proxy.on("connect", (req, sock) => {
+        tunnels.push(req.url ?? "");
+        sock.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+      });
+      await new Promise<void>((r) => proxy.listen(0, "127.0.0.1", r));
+      const port = (proxy.address() as { port: number }).port;
+
+      const dir = mkdtempSync(join(tmpdir(), "cn-ssrf-proxy-"));
+      const script = join(dir, "probe.mts");
+      const net = pathToFileURL(resolve("src/metacognition/net.ts")).href;
+      writeFileSync(
+        script,
+        `import https from "node:https";
+import { guardedFetch } from ${JSON.stringify(net)};
+// Control: a plain request on the global agent DOES go to the proxy.
+const control = await new Promise((r) => {
+  const q = https.request("https://control.example/", (res) => { res.resume(); r("status " + res.statusCode); });
+  q.on("error", (e) => r(e.code || e.message));
+  q.end();
+});
+const fetchGuarded = guardedFetch({
+  maxBytes: 1000,
+  timeoutMs: 5000,
+  resolver: async () => [{ address: "169.254.169.254", family: 4 }],
+});
+let guarded;
+try { await fetchGuarded("https://feed.example/rss"); guarded = "fetched"; }
+catch (e) { guarded = e.name + ": " + e.message; }
+console.log(JSON.stringify({ control, guarded }));
+`,
+      );
+      const out = await new Promise<string>((done, fail) => {
+        const child = spawn(process.execPath, ["--import", "tsx", script], {
+          env: {
+            ...process.env,
+            NODE_USE_ENV_PROXY: "1",
+            HTTPS_PROXY: `http://127.0.0.1:${port}`,
+            HTTP_PROXY: `http://127.0.0.1:${port}`,
+            NO_PROXY: "",
+            METACOGNITION_ALLOW_PRIVATE_URLS: "",
+            NODE_NO_WARNINGS: "1",
+          },
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (d) => (stdout += d));
+        child.stderr.on("data", (d) => (stderr += d));
+        child.on("close", (code) => (code === 0 ? done(stdout) : fail(new Error(`exit ${code}: ${stderr}`))));
+      });
+      proxy.close();
+
+      const result = JSON.parse(out.trim().split("\n").pop()!);
+      // The proxy is live in the child: the control request was tunnelled.
+      expect(tunnels).toContain("control.example:443");
+      // The guarded request was refused by our own DNS check and never proxied.
+      expect(result.guarded).toMatch(/^OutboundBlockedError: feed\.example resolves to a private address/);
+      expect(tunnels.some((t) => t.startsWith("feed.example"))).toBe(false);
+    },
+  );
 });
