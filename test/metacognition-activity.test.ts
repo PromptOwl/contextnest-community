@@ -261,6 +261,73 @@ describe("GET /metacognition/:node/stats", () => {
   });
 });
 
+/** One MCP tools/call as `key`; returns { error?, isError?, text }. */
+async function mcpTool(key: string, name: string, args: Record<string, unknown>) {
+  const res = await app.request(`/nests/${nestId}/mcp`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      Authorization: `Bearer ${key}`,
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+  });
+  const ct = res.headers.get("content-type") || "";
+  let body: any;
+  if (ct.includes("application/json")) body = await res.json();
+  else {
+    const line = (await res.text()).split("\n").find((l: string) => l.startsWith("data: "));
+    body = line ? JSON.parse(line.slice(6)) : {};
+  }
+  const text = body.result?.content?.map((c: any) => c.text).join("") ?? "";
+  return { status: res.status, error: body.error, isError: body.result?.isError === true, text };
+}
+
+describe("MCP parity: workflow_runs_list { agent_stats: true }", () => {
+  it("returns the same stats as the REST route", async () => {
+    const rest = (await stats(owner.apiKey, "?days=30&limit=5")).data.stats;
+    const out = await mcpTool(owner.apiKey, "workflow_runs_list", { agent: AGENT, agent_stats: true, days: 30, limit: 5 });
+    expect(out.error).toBeUndefined();
+    expect(out.isError).toBe(false);
+    const mcp = JSON.parse(out.text).stats;
+    expect(mcp).toEqual(rest);
+  });
+
+  it("goes through the same gate: write tier, a real agent, valid window", async () => {
+    const asReader = await mcpTool(reader.apiKey, "workflow_runs_list", { agent: AGENT, agent_stats: true });
+    expect(asReader.error !== undefined || asReader.isError).toBe(true);
+    expect(asReader.text + (asReader.error?.message ?? "")).toMatch(/write access/);
+
+    const notAgent = await mcpTool(owner.apiKey, "workflow_runs_list", { agent: "nodes/gtm/pricing", agent_stats: true });
+    expect(notAgent.error !== undefined || notAgent.isError).toBe(true);
+    expect(notAgent.text + (notAgent.error?.message ?? "")).toMatch(/not a metacognition agent/);
+
+    const noAgent = await mcpTool(owner.apiKey, "workflow_runs_list", { agent_stats: true });
+    expect(noAgent.error !== undefined || noAgent.isError).toBe(true);
+
+    const badDays = await mcpTool(owner.apiKey, "workflow_runs_list", { agent: AGENT, agent_stats: true, days: 0 });
+    expect(badDays.error !== undefined || badDays.isError).toBe(true);
+  });
+
+  it("is off when metacognition is off, like the REST route", async () => {
+    process.env.FEATURE_METACOGNITION = "false";
+    try {
+      const out = await mcpTool(owner.apiKey, "workflow_runs_list", { agent: AGENT, agent_stats: true });
+      expect(out.error !== undefined || out.isError).toBe(true);
+      expect((await stats(owner.apiKey)).status).toBe(404);
+    } finally {
+      process.env.FEATURE_METACOGNITION = "true";
+    }
+  });
+
+  it("without agent_stats it still lists runs, read tier", async () => {
+    const out = await mcpTool(reader.apiKey, "workflow_runs_list", { agent: AGENT, limit: 2 });
+    expect(out.error).toBeUndefined();
+    expect(out.isError).toBe(false);
+    expect(Array.isArray(JSON.parse(out.text)) || Array.isArray(JSON.parse(out.text).runs)).toBe(true);
+  });
+});
+
 describe("outcomeOf", () => {
   it("tells timeouts and skips apart from failures and cancels", async () => {
     const { outcomeOf } = await import("../src/metacognition/stats.js");
