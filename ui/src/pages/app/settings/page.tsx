@@ -139,6 +139,7 @@ const TABS: {
       "ms_tenant_id",
       "google_token_exchange_enabled",
       "google_client_id",
+      "mcp_oauth_enabled",
     ],
   },
   {
@@ -1280,6 +1281,53 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     onCheckedChange={(v) => set({ oidc_enabled: v })}
                   />
                 </div>
+              </CardContent>
+            </Card>
+
+            {/* Agent OAuth — the authorization server MCP clients sign into.
+                Default off; refuses to turn on without a public base URL,
+                because the metadata must name this server's exact address. */}
+            <Card>
+              <CardHeader>
+                <CardTitle>Agent OAuth — sign-in for MCP clients</CardTitle>
+                <CardDescription>
+                  Let Claude, ChatGPT, Grok or Cursor sign a person in to this
+                  server and receive a token scoped to <em>them</em>, instead
+                  of being handed a shared API key. This is what makes each
+                  person see their own nests: a key pasted by several people
+                  makes all of them the same user here, so they all see
+                  whatever its owner can see.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.mcp_oauth_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.mcp_oauth_enabled}
+                    onCheckedChange={(v) => set({ mcp_oauth_enabled: v })}
+                  />
+                </div>
+
+                {!draft.public_base_url?.trim() && (
+                  <div
+                    role="alert"
+                    className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+                  >
+                    Blocked: set the public base URL on the General tab first.
+                    The discovery documents have to name this server's exact
+                    address, and a guessed one fails the client's check with no
+                    useful error.
+                  </div>
+                )}
+
+                <p className="text-xs text-muted-foreground">
+                  While this is on, an MCP client that arrives without a
+                  credential is answered with a sign-in challenge rather than a
+                  flat refusal. Existing API keys keep working exactly as
+                  before.
+                </p>
               </CardContent>
             </Card>
 
