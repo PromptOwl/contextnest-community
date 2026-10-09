@@ -4,10 +4,14 @@
  * The shape of the whole surface is the safety argument, so it is worth
  * stating once:
  *
- *  - READS go through the same per-node gate as every other read, as the
- *    person who configured the agent (its owner), AND must fall inside the
- *    agent's configured read folders. Document text is the APPROVED version
- *    only — never someone's unreviewed draft.
+ *  - The persona works in ONE nest, the one it lives in (asserted on every
+ *    call). What it may touch there is ITS scope: the configured read and
+ *    propose folders, widened only by grants an admin gave the persona itself
+ *    (an approved access request). Its owner's access is a ceiling on top —
+ *    the owner is pinned at creation (store.ts), so whoever saves the
+ *    settings later, a server admin included, lends the persona nothing.
+ *  - READS also go through the per-node gate as the owner. Document text is
+ *    the APPROVED version only — never someone's unreviewed draft.
  *  - The only WRITES are proposals: an edit or a new document lands as a
  *    draft submitted to the review queue, authored by the persona, never
  *    published (`alwaysDraft`), and only inside the propose folders. A comment
@@ -30,6 +34,7 @@ import {
 import { resolveExportBody } from "../nodes/readable-body.js";
 import { engineCache } from "../nodes/engine.js";
 import { canReadNode } from "../governance/access-guard.js";
+import { resolveNodeGrant } from "../governance/grants-service.js";
 import { canUserEdit } from "../governance/stewardship-service.js";
 import { submitForReview, getPendingReview } from "../governance/review-service.js";
 import { hasUnsealedDraft, getCurrentVersion } from "../governance/version-service.js";
@@ -242,8 +247,18 @@ function nodeIdOf(v: unknown): string | null {
   return s;
 }
 
+/** A grant an admin gave the PERSONA itself (an approved access request). */
+async function personaGrant(ctx: ToolContext, nodeId: string): Promise<"read" | "write" | null> {
+  return (await resolveNodeGrant(ctx.nestId, ctx.agent.persona.user_id, nodeId)) as "read" | "write" | null;
+}
+
+/** Inside the persona's own read scope: the configured folders, or a grant. */
+async function inReadScope(ctx: ToolContext, nodeId: string): Promise<boolean> {
+  return inFolders(nodeId, ctx.agent.config.scope.read) || (await personaGrant(ctx, nodeId)) !== null;
+}
+
 async function mayRead(ctx: ToolContext, nodeId: string): Promise<string | null> {
-  if (!inFolders(nodeId, ctx.agent.config.scope.read)) return "outside your read scope";
+  if (!(await inReadScope(ctx, nodeId))) return "outside your read scope";
   if (!(await canReadNode(ctx.nestId, nodeId, ctx.owner.userId, ctx.owner.email))) {
     return "outside what your owner may read";
   }
@@ -252,7 +267,9 @@ async function mayRead(ctx: ToolContext, nodeId: string): Promise<string | null>
 
 /** The one propose-scope rule (both proposal tools use it). */
 async function mayPropose(ctx: ToolContext, nodeId: string): Promise<string | null> {
-  if (!mayProposeIn(nodeId, ctx.agent.config.scope)) return "outside your propose scope";
+  if (!mayProposeIn(nodeId, ctx.agent.config.scope) && (await personaGrant(ctx, nodeId)) !== "write") {
+    return "outside your propose scope";
+  }
   if (!(await canUserEdit(ctx.nestId, nodeId, ctx.owner.email)).allowed) {
     return "outside what your owner may edit";
   }
@@ -260,6 +277,11 @@ async function mayPropose(ctx: ToolContext, nodeId: string): Promise<string | nu
 }
 
 export async function runTool(ctx: ToolContext, name: string, input: Record<string, unknown>): Promise<ToolOutcome> {
+  // One nest, the persona's own. Every tool reads ctx.nestId; this keeps a
+  // future caller from handing it a different one.
+  if (ctx.nestId !== ctx.agent.nest_id) {
+    throw new Error(`metacognition: persona of ${ctx.agent.nest_id} asked to act in ${ctx.nestId}`);
+  }
   switch (name) {
     case "search_nest":
       return searchNest(ctx, input);
@@ -293,7 +315,11 @@ async function searchNest(ctx: ToolContext, input: Record<string, unknown>): Pro
     baseUrl: ctx.baseUrl,
     body: { prompt: query, max_tokens: 4000, hops: 0 },
   });
-  const hits = result.nodes.filter((n) => inFolders(n.id, ctx.agent.config.scope.read)).slice(0, 25);
+  const hits: typeof result.nodes = [];
+  for (const n of result.nodes) {
+    if (hits.length >= 25) break;
+    if (await inReadScope(ctx, n.id)) hits.push(n);
+  }
   await step(ctx, { action: "read", detail: { tool: "search_nest", query, hits: hits.map((h) => h.id) } });
   if (!hits.length) return { content: "No documents in your read scope match that." };
   return { content: hits.map((h) => `- ${h.id} — ${h.title}`).join("\n") };
@@ -305,7 +331,7 @@ async function listFolder(ctx: ToolContext, input: Record<string, unknown>): Pro
     return { isError: true, content: "folder is required" };
   }
   const probe = raw ? `nodes/${raw}/x` : "nodes/x";
-  if (!inFolders(probe, ctx.agent.config.scope.read)) {
+  if (!(await inReadScope(ctx, probe))) {
     return accessNeeded(ctx, "list_nodes", raw ? `nodes/${raw}` : "nodes", "read", "outside your read scope");
   }
   const rows = (await listNodesForCaller(ctx.nestId, ctx.owner.userId, { folder: raw })).slice(0, 100);

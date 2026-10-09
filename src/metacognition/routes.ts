@@ -11,7 +11,8 @@ import { DocumentNotFoundError } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { config } from "../config.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
-import { permissionLevel } from "../shared/access.js";
+import { permissionLevel, resolveNestPermission } from "../shared/access.js";
+import { getDb } from "../db/client.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { engineCache } from "../nodes/engine.js";
@@ -55,9 +56,22 @@ function toResponse(a: MetacognitionAgent) {
     // auth_env is a NAME of an env value, never the value — safe to return.
     mcp_servers: a.config.mcp_servers,
     model: a.config.model,
+    // The owner: who set it up (or took it over when they could no longer
+    // run it). Saving the settings does not change it.
     configured_by: a.created_by,
     updated_at: a.updated_at,
   };
+}
+
+/** Same rule the run gate applies: a real (non-service) account that still
+ *  holds write on the nest. */
+export async function ownerCanRun(nestId: string, email: string): Promise<boolean> {
+  const row = (await getDb().get(
+    "SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND COALESCE(is_service, 0) = 0",
+    [email],
+  )) as { id: string } | undefined;
+  if (!row) return false;
+  return permissionLevel(await resolveNestPermission(nestId, row.id)) >= permissionLevel("write");
 }
 
 export const metacognitionRoutes = new Hono<AuthEnv>();
@@ -115,9 +129,10 @@ metacognitionRoutes.put("/:nodeId{.+}", requireMetacognition, async (c) => {
     nodeId,
     config: parsed,
     enabled: body.enabled !== false,
-    createdBy: await resolveCallerEmail(c.get("userId")),
+    savedBy: await resolveCallerEmail(c.get("userId")),
+    ownerUsable: (email) => ownerCanRun(nestId, email),
   });
-  return c.json({ agent: toResponse(agent) });
+  return c.json({ agent: { ...toResponse(agent), owner_changed: agent.ownerChanged } });
 });
 
 metacognitionRoutes.delete("/:nodeId{.+}", requireMetacognition, async (c) => {
