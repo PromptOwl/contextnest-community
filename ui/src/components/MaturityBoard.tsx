@@ -17,19 +17,15 @@ import { NestPageHeader } from "./NestPageHeader";
 import {
   RefreshCw,
   Loader2,
-  FileText,
-  FileType,
-  Zap,
-  Bot,
-  Database,
   GripVertical,
   X,
   Plus,
-  ListTodo,
   Lock,
   ChevronDown,
   Filter,
   CheckCircle2,
+  LayoutGrid,
+  List as ListIcon,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -93,7 +89,15 @@ import {
   PriorityMenu,
   ShareAndAssignDialog,
   SubItemChip,
+  TypeIcon,
 } from "./board/CardParts";
+import { BoardListView } from "./board/BoardListView";
+import {
+  resolveViewMode,
+  viewStorageKey,
+  withLayoutParam,
+  type BoardViewMode,
+} from "../lib/board-list";
 
 interface Props {
   nestId: string;
@@ -207,16 +211,6 @@ function saveConfig(nestId: string, config: BoardSettings) {
   } catch {
     // storage full / disabled — the board still works this session
   }
-}
-
-function TypeIcon({ type }: { type: string }) {
-  const cls = "h-3.5 w-3.5 shrink-0";
-  if (type === "skill") return <Zap className={`${cls} text-blue-500`} />;
-  if (type === "agent") return <Bot className={`${cls} text-violet-500`} />;
-  if (type === "table") return <Database className={`${cls} text-emerald-500`} />;
-  if (type === "pdf") return <FileType className={`${cls} text-rose-500`} />;
-  if (type === "task") return <ListTodo className={`${cls} text-indigo-500`} />;
-  return <FileText className={`${cls} text-muted-foreground`} />;
 }
 
 export function MaturityBoard({
@@ -435,6 +429,35 @@ export function MaturityBoard({
   );
 
   const effectiveConfig = useMemo(() => resolveConfig(config), [config]);
+
+  // ── Board | List ──
+  // Per person and per board (localStorage), with ?layout=list in the URL so
+  // a link opens the same view. The URL wins over the remembered choice.
+  const [viewMode, setViewModeState] = useState<BoardViewMode>(() =>
+    resolveViewMode(window.location.search, null),
+  );
+  useEffect(() => {
+    let remembered: string | null = null;
+    try {
+      remembered = localStorage.getItem(viewStorageKey(me, activeBoard?.id));
+    } catch {
+      /* storage disabled — default to the board */
+    }
+    setViewModeState(resolveViewMode(window.location.search, remembered));
+  }, [me, activeBoard?.id]);
+  const setViewMode = useCallback(
+    (mode: BoardViewMode) => {
+      setViewModeState(mode);
+      try {
+        localStorage.setItem(viewStorageKey(me, activeBoard?.id), mode);
+      } catch {
+        /* per-browser convenience only */
+      }
+      const search = withLayoutParam(window.location.search, mode);
+      window.history.replaceState(window.history.state, "", `${window.location.pathname}${search}${window.location.hash}`);
+    },
+    [me, activeBoard?.id],
+  );
 
   // Quick-filter by person (Jira/ClickUp avatar row). Session-only: a filter
   // is a glance, not a setting.
@@ -999,6 +1022,31 @@ export function MaturityBoard({
       people.find((p) => p.email.toLowerCase() === email.toLowerCase())?.name || email,
     [people],
   );
+  // List view: a row's column(s) and their labels, and every tag in the nest
+  // for the bulk tag box.
+  const columnLabels = useMemo(() => new Map(columns.map((c) => [c.key, c.label])), [columns]);
+  const listColumnsOf = useCallback(
+    (n: BoardNode) => cardColumnKeys(n, effectiveConfig),
+    [effectiveConfig],
+  );
+  const listColumnLabel = useCallback(
+    (key: string) =>
+      columnLabels.get(key) ??
+      (key === UNCATEGORIZED
+        ? effectiveConfig.dimension === "assignee"
+          ? "Unassigned"
+          : effectiveConfig.dimension === "priority"
+            ? "No priority"
+            : "Uncategorized"
+        : key),
+    [columnLabels, effectiveConfig.dimension],
+  );
+  const allTagValues = useMemo(() => {
+    const set = new Set<string>();
+    for (const n of nodes) for (const t of n.tags) set.add(t.replace(/^#/, ""));
+    return [...set].sort();
+  }, [nodes]);
+
   const lanes = useMemo(() => {
     const lane = config.swimlane as SwimlaneKind | undefined;
     if (!lane) return null;
@@ -1340,7 +1388,9 @@ export function MaturityBoard({
             <option value="assignee">Assignee</option>
             <option value="priority">Priority</option>
           </select>
-          {/* Swimlanes: sub-group the columns into rows (Linear/Jira). */}
+          {/* Swimlanes: sub-group the columns into rows (Linear/Jira). The
+              list has no lanes — its sections are the columns. */}
+          {viewMode === "board" && (<>
           <label className="text-sm text-muted-foreground">Lanes</label>
           <select
             value={config.swimlane ?? ""}
@@ -1354,6 +1404,7 @@ export function MaturityBoard({
             {config.dimension !== "priority" && <option value="priority">Priority</option>}
             <option value="parent">Parent</option>
           </select>
+          </>)}
           {config.dimension === "tag" && (
             <Input
               value={config.tagNamespace ?? ""}
@@ -1531,6 +1582,7 @@ export function MaturityBoard({
         </div>
       )}
 
+      {viewMode === "board" && (
       <ul className="max-w-2xl list-disc space-y-1 pl-5 text-xs text-muted-foreground">
         {config.dimension === "status" ? (
           <>
@@ -1649,6 +1701,7 @@ export function MaturityBoard({
           </>
         )}
       </ul>
+      )}
 
       {/* Project-board bar: tasks-only toggle + the person quick-filter
           (Jira/ClickUp's avatar row — click faces to show only their cards). */}
@@ -1775,6 +1828,35 @@ export function MaturityBoard({
             )}
           </div>
         )}
+        {/* Board | List — the same slice, laid out as cards or rows. */}
+        <div
+          role="radiogroup"
+          aria-label="Layout"
+          className="ml-auto inline-flex items-center rounded-md border border-border bg-muted/40 p-0.5"
+        >
+          {(
+            [
+              ["board", "Board", LayoutGrid],
+              ["list", "List", ListIcon],
+            ] as const
+          ).map(([mode, label, Icon]) => (
+            <button
+              key={mode}
+              type="button"
+              role="radio"
+              aria-checked={viewMode === mode}
+              onClick={() => setViewMode(mode)}
+              className={`inline-flex h-6 items-center gap-1.5 rounded px-2 text-xs font-medium transition-colors ${
+                viewMode === mode
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {loading ? (
@@ -1791,6 +1873,30 @@ export function MaturityBoard({
             ? "No tag columns yet — add one above to start sorting documents into it."
             : "No documents to show."}
         </div>
+      ) : viewMode === "list" ? (
+        <BoardListView
+          nestId={nestId}
+          boardId={activeBoard?.id}
+          dimension={effectiveConfig.dimension}
+          sections={columns.map((c) => ({
+            key: c.key,
+            label: c.label,
+            nodes: orderedByColumn[c.key] ?? [],
+          }))}
+          boardColumns={columns}
+          allNodes={nodes}
+          columnsOf={listColumnsOf}
+          columnLabel={listColumnLabel}
+          people={people}
+          me={me}
+          personLabel={personLabel}
+          canEdit={canEditDocs}
+          governance={governance}
+          doneTags={doneTags}
+          tagSuggestions={allTagValues}
+          onOpen={onOpenDocument}
+          onChanged={load}
+        />
       ) : (
         lanes ? (
           // Swimlanes: column headers once, then one row of cells per lane.

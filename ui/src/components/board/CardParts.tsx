@@ -13,7 +13,18 @@
  * a menu item would also open the document.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { CalendarDays, ListTree, UserRound, X } from "lucide-react";
+import {
+  Bot,
+  CalendarDays,
+  Database,
+  FileText,
+  FileType,
+  ListTodo,
+  ListTree,
+  UserRound,
+  X,
+  Zap,
+} from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -61,6 +72,17 @@ function Isolate({ children }: { children: ReactNode }) {
       {children}
     </span>
   );
+}
+
+/** A node's type, as a small coloured glyph (cards and list rows). */
+export function TypeIcon({ type }: { type: string }) {
+  const cls = "h-3.5 w-3.5 shrink-0";
+  if (type === "skill") return <Zap className={`${cls} text-blue-500`} />;
+  if (type === "agent") return <Bot className={`${cls} text-violet-500`} />;
+  if (type === "table") return <Database className={`${cls} text-emerald-500`} />;
+  if (type === "pdf") return <FileType className={`${cls} text-rose-500`} />;
+  if (type === "task") return <ListTodo className={`${cls} text-indigo-500`} />;
+  return <FileText className={`${cls} text-muted-foreground`} />;
 }
 
 // ── Priority ────────────────────────────────────────────────────────────────
