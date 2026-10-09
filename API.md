@@ -2543,6 +2543,12 @@ Retention and storage settings:
 
 Surfaced in the UI at **Admin → Message log**, which is shown only to signed-in superadmins.
 
+**Over MCP** (server-level `/mcp` only):
+- `message_log_search` takes the same filters as `GET /admin/messages`, plus `limit`/`offset`.
+- `message_log_get` takes `{ id }` and returns the redacted body.
+
+They follow the same rule as REST: superadmin only, never in open mode, never through a nest-scoped key. They're listed only to superadmin callers and re-checked on every call. Every call writes a `message_log_views` row, recorded with `via: "mcp"`. Under MCP OAuth they need the `nests:write` grant, because the read-only allow-list deliberately excludes them.
+
 ### Community sites — GET/POST `/admin/community-sites`, PATCH/DELETE `/admin/community-sites/:id` (server-admin only)
 Manage the **official community sites** trusted for one-click SSO auto-login (`GET /auth/sso` — see above). Each row is a `{ name, url, secret, is_active }` connection; `url` is a display/uniqueness field, not used for audience binding. `GET /auth/sso` tries an incoming ticket's signature against every *active* site's secret, and validates the ticket's `aud` claim against this deployment's own `PUBLIC_BASE_URL` (the same value for every candidate). Replaces the single `OFFICIAL_COMMUNITY_SSO_SECRET`/`PUBLIC_BASE_URL` env-var pair with a DB-backed list for the *secret* side — the env-var pair still works as an implicit extra "legacy" entry, so existing single-site deployments are unaffected. Surfaced in the UI at **Settings → Community sites**.
 
