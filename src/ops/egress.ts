@@ -46,6 +46,8 @@ export interface ProbeResult {
 
 export interface EgressReport {
   ranAt: string;
+  /** HTTPS probes went through this proxy (credentials stripped); null = direct. */
+  proxy: string | null;
   results: ProbeResult[];
   /** Seconds this server's clock differs from PromptOwl's (positive = ahead), when measurable. */
   clockSkewSeconds: number | null;
@@ -58,6 +60,24 @@ export interface NetIO {
   tls(host: string, port: number, timeoutMs: number): Promise<{ authorized: boolean; error?: string; validTo?: string }>;
   httpGet(url: string, timeoutMs: number): Promise<{ status: number; date: string | null; body: string }>;
   smtpVerify(): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** fetch(), which Node routes through HTTPS_PROXY when env-proxy support is on. */
+  proxiedGet(url: string, timeoutMs: number): Promise<{ status: number; date: string | null }>;
+  /** The configured egress proxy (credentials stripped), or null. */
+  proxy(): string | null;
+}
+
+/** HTTPS_PROXY / https_proxy, with any userinfo removed. */
+export function configuredProxy(env: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy;
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    u.username = "";
+    u.password = "";
+    return u.toString().replace(/\/$/, "");
+  } catch {
+    return "(unparseable proxy URL)";
+  }
 }
 
 const realIO: NetIO = {
@@ -115,6 +135,12 @@ const realIO: NetIO = {
     const s = transportSettings();
     return s ? verifyEmailTransport(s) : { ok: false, error: "email is not configured" };
   },
+  proxiedGet: async (url, timeoutMs) => {
+    const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+    await res.body?.cancel();
+    return { status: res.status, date: res.headers.get("date") };
+  },
+  proxy: () => configuredProxy(),
 };
 
 async function timed<T>(fn: () => Promise<T>): Promise<{ value?: T; error?: Error; ms: number }> {
@@ -135,13 +161,35 @@ const HINTS: Record<StageName, string> = {
   smtp: "The mail server answered but refused the login or the connection. Check SMTP_URL (host, port, credentials) in Settings → Notifications.",
 };
 
-async function probe(t: EgressTarget, io: NetIO): Promise<{ result: ProbeResult; date: string | null }> {
+async function probe(t: EgressTarget, io: NetIO, proxy: string | null): Promise<{ result: ProbeResult; date: string | null }> {
   const stages: Stage[] = [];
   let date: string | null = null;
-  const finish = (ok: boolean, failed?: StageName) => ({
-    result: { id: t.id, purpose: t.purpose, host: t.host, port: t.port, ok, stages, ...(failed && { hint: HINTS[failed] }) },
+  const finish = (ok: boolean, failed?: StageName, hint?: string) => ({
+    result: { id: t.id, purpose: t.purpose, host: t.host, port: t.port, ok, stages, ...(failed && { hint: hint ?? HINTS[failed] }) },
     date,
   });
+
+  // Behind an egress proxy the proxy does DNS, TCP and TLS to the target, so
+  // dialling directly would report a false "blocked". Probe the way the
+  // server's own traffic goes: one fetch through the proxy. SMTP and Postgres
+  // aren't proxied (raw sockets), so they still go direct below.
+  if (proxy && t.protocol === "https") {
+    const h = await timed(() => io.proxiedGet(`https://${t.host}${t.port === 443 ? "" : `:${t.port}`}/`, PROBE_TIMEOUT_MS));
+    if (h.error) {
+      const cause = (h.error as Error & { cause?: Error }).cause?.message ?? h.error.message;
+      stages.push({ stage: "http", ok: false, ms: h.ms, detail: `via ${proxy}: ${cause}` });
+      return finish(
+        false,
+        "http",
+        /certificate|self[- ]signed|CERT_/i.test(cause)
+          ? HINTS.tls
+          : "The proxy refused or couldn't reach this host. Add it to the proxy's allowlist, or to NO_PROXY if it should go direct.",
+      );
+    }
+    date = h.value!.date;
+    stages.push({ stage: "http", ok: true, ms: h.ms, detail: `HTTP ${h.value!.status} via ${proxy}` });
+    return finish(true);
+  }
 
   const d = await timed(() => io.lookup(t.host));
   if (d.error || !d.value?.length) {
@@ -193,14 +241,15 @@ async function probe(t: EgressTarget, io: NetIO): Promise<{ result: ProbeResult;
 
 export async function runEgressChecks(io: NetIO = realIO): Promise<EgressReport> {
   const targets = egressTargets();
-  const probed = await Promise.all(targets.map((t) => probe(t, io)));
+  const proxy = io.proxy();
+  const probed = await Promise.all(targets.map((t) => probe(t, io, proxy)));
   const promptowl = probed.find((p) => p.result.id === "promptowl");
   let clockSkewSeconds: number | null = null;
   if (promptowl?.date) {
     const theirs = Date.parse(promptowl.date);
     if (Number.isFinite(theirs)) clockSkewSeconds = Math.round((Date.now() - theirs) / 1000);
   }
-  return { ranAt: new Date().toISOString(), results: probed.map((p) => p.result), clockSkewSeconds };
+  return { ranAt: new Date().toISOString(), proxy, results: probed.map((p) => p.result), clockSkewSeconds };
 }
 
 export interface InboundReport {

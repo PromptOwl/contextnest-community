@@ -61,6 +61,8 @@ export interface StatusReport {
   generatedAt: string;
   version: string;
   build: string | null;
+  /** Port the app listens on — what a proxy, tunnel or port forward targets. */
+  listenPort: number;
   checks: StatusCheck[];
   address: AddressInfo;
   egress: EgressTarget[];
@@ -538,5 +540,13 @@ export async function buildStatusReport(reqUrl: string, header: (name: string) =
       detail: `ContextNest Community ${SERVICE_VERSION}${build ? ` (build ${build.slice(0, 12)})` : ""}, Node ${process.versions.node}, auth mode ${config.AUTH_MODE}`,
     },
   ];
-  return { generatedAt: new Date(now).toISOString(), version: SERVICE_VERSION, build, checks, address, egress: egressTargets() };
+  return {
+    generatedAt: new Date(now).toISOString(),
+    version: SERVICE_VERSION,
+    build,
+    listenPort: config.PORT,
+    checks,
+    address,
+    egress: egressTargets(),
+  };
 }

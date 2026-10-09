@@ -115,6 +115,8 @@ function fakeIO(over: Partial<import("../src/ops/egress.js").NetIO> = {}) {
     tls: async (h) => (touched.push(h), { authorized: true, validTo: "Jan 1 00:00:00 2030 GMT" }),
     httpGet: async (u) => (touched.push(new URL(u).host), { status: 404, date: new Date(Date.now() - 30_000).toUTCString(), body: "" }),
     smtpVerify: async () => ({ ok: true }),
+    proxiedGet: async (u) => (touched.push(`proxy:${new URL(u).host}`), { status: 404, date: null }),
+    proxy: () => null,
     ...over,
   };
   return { io, touched };
@@ -150,6 +152,21 @@ describe("probes", () => {
     const { io: mitm } = fakeIO({ tls: async () => ({ authorized: false, error: "SELF_SIGNED_CERT_IN_CHAIN" }) });
     const po2 = (await runEgressChecks(mitm)).results.find((r) => r.id === "promptowl")!;
     expect(po2.hint).toMatch(/NODE_EXTRA_CA_CERTS/);
+  });
+
+  it("behind an egress proxy, probes HTTPS through it instead of dialling direct", async () => {
+    process.env.SMTP_URL = SECRETS.SMTP_URL;
+    const { runEgressChecks, configuredProxy } = await import("../src/ops/egress.js");
+    expect(configuredProxy({ HTTPS_PROXY: "http://user:pw@proxy.corp:3128" })).toBe("http://proxy.corp:3128");
+    const { io, touched } = fakeIO({ proxy: () => "http://proxy.corp:3128" });
+    const rep = await runEgressChecks(io);
+    expect(rep.proxy).toBe("http://proxy.corp:3128");
+    const po = rep.results.find((r) => r.id === "promptowl")!;
+    expect(po.stages).toHaveLength(1);
+    expect(po.stages[0].detail).toMatch(/via http:\/\/proxy\.corp:3128/);
+    // SMTP isn't proxied: still resolved and verified directly.
+    expect(rep.results.find((r) => r.id === "smtp")!.stages.map((s) => s.stage)).toEqual(["dns", "smtp"]);
+    expect(touched.filter((t) => !t.startsWith("proxy:"))).toEqual(["smtp.example.com"]);
   });
 
   it("inbound flags private answers and requires a pinned address", async () => {
