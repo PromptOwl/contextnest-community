@@ -266,6 +266,54 @@ export async function setApprovedVersion(
   await db.run(sql, [nestId, nodeId, version, approvedBy]);
 }
 
+/** Rows per multi-row INSERT — well under SQLite's and Postgres's parameter limits. */
+const BATCH_ROWS = 200;
+
+/** `createVersion` for many rows of one nest: one INSERT per chunk, not per row. */
+export async function createVersions(
+  rows: Array<Parameters<typeof createVersion>[0]>,
+): Promise<void> {
+  const db = getDb();
+  for (let i = 0; i < rows.length; i += BATCH_ROWS) {
+    const chunk = rows.slice(i, i + BATCH_ROWS);
+    await db.run(
+      `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status, change_note, tags_json, client_json)
+       VALUES ${chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ")}`,
+      chunk.flatMap((p) => [
+        p.nestId,
+        p.nodeId,
+        p.version,
+        hashContent(p.content),
+        p.author,
+        p.status,
+        p.changeNote || null,
+        p.tags ? JSON.stringify(p.tags) : null,
+        serializeClient(p.client),
+      ]),
+    );
+  }
+}
+
+/** `setApprovedVersion` for many nodes of one nest, one upsert per chunk. */
+export async function setApprovedVersions(
+  nestId: string,
+  rows: Array<{ nodeId: string; version: number }>,
+  approvedBy: string,
+): Promise<void> {
+  const db = getDb();
+  for (let i = 0; i < rows.length; i += BATCH_ROWS) {
+    const chunk = rows.slice(i, i + BATCH_ROWS);
+    const sql = insertOrReplace(
+      db,
+      `INSERT INTO approved_versions (nest_id, node_id, approved_version, approved_by)
+       VALUES ${chunk.map(() => "(?, ?, ?, ?)").join(", ")}`,
+      ["nest_id", "node_id"],
+      `approved_version = excluded.approved_version, approved_by = excluded.approved_by, approved_at = ${nowExpr(db)}`,
+    );
+    await db.run(sql, chunk.flatMap((r) => [nestId, r.nodeId, r.version, approvedBy]));
+  }
+}
+
 /** approved_by for a pin the server moved itself — never a reviewer's name. */
 export const APPROVED_HEAL_AUTHOR = "system:approved-heal";
 

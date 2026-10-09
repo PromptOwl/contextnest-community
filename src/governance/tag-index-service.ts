@@ -14,6 +14,17 @@ export function normalizeTag(raw: string): string {
   return raw.trim().replace(/^#+/, "").toLowerCase();
 }
 
+function normalizeTagSet(tags: string[]): string[] {
+  return Array.from(
+    new Set(
+      tags
+        .filter((t): t is string => typeof t === "string")
+        .map(normalizeTag)
+        .filter(Boolean),
+    ),
+  );
+}
+
 /**
  * Replace the tag set for a node. Idempotent.
  * Pass an empty array to clear.
@@ -24,14 +35,7 @@ export async function syncNodeTags(
   tags: string[],
 ): Promise<void> {
   const db = getDb();
-  const normalized = Array.from(
-    new Set(
-      tags
-        .filter((t): t is string => typeof t === "string")
-        .map(normalizeTag)
-        .filter(Boolean),
-    ),
-  );
+  const normalized = normalizeTagSet(tags);
 
   const insertSql = insertOrIgnore(
     db,
@@ -44,6 +48,38 @@ export async function syncNodeTags(
     );
     for (const tag of normalized) {
       await tx.run(insertSql, [nestId, nodeId, tag]);
+    }
+  });
+}
+
+/** `syncNodeTags` for many nodes of one nest in one transaction, multi-row. */
+export async function syncNodeTagsMany(
+  nestId: string,
+  entries: Array<{ nodeId: string; tags: string[] }>,
+): Promise<void> {
+  if (!entries.length) return;
+  const db = getDb();
+  const rows = entries.flatMap(({ nodeId, tags }) =>
+    normalizeTagSet(tags).map((tag) => [nestId, nodeId, tag]),
+  );
+  const CHUNK = 200;
+  await db.transaction(async (tx) => {
+    for (let i = 0; i < entries.length; i += CHUNK) {
+      const ids = entries.slice(i, i + CHUNK).map((e) => e.nodeId);
+      await tx.run(
+        `DELETE FROM node_tag_index WHERE nest_id = ? AND node_id IN (${ids.map(() => "?").join(", ")})`,
+        [nestId, ...ids],
+      );
+    }
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const chunk = rows.slice(i, i + CHUNK);
+      await tx.run(
+        insertOrIgnore(
+          db,
+          `INSERT INTO node_tag_index (nest_id, node_id, tag_name) VALUES ${chunk.map(() => "(?, ?, ?)").join(", ")}`,
+        ),
+        chunk.flat(),
+      );
     }
   });
 }

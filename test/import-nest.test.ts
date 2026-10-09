@@ -512,6 +512,53 @@ describe("imported vault: discovery + registration", () => {
     expect(byId["rev"]).toBe("draft"); // 'review' alias normalizes to pending_review
   });
 
+  it("records each imported doc's version, approval and tags in the governance DB", async () => {
+    const files: FileEntry[] = [
+      mdFile("t/a.md", "title: A\nstatus: published\ntags: ['#alpha', '#beta']", "a"),
+      mdFile("t/b.md", "title: B\nstatus: draft\ntags: ['#beta']", "b"),
+      mdFile("t/c.md", "title: C\nstatus: published", "c"),
+      mdFile("t/d.md", "title: D\nstatus: pending_review", "d"),
+    ];
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Governance Rows", files },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
+    const nestId = data.nest.id;
+    const { getDb } = await import("../src/db/client.js");
+    const db = getDb();
+    const versions = await db.all(
+      "SELECT node_id, status FROM node_versions WHERE nest_id = ? ORDER BY node_id",
+      [nestId],
+    );
+    expect(versions).toEqual([
+      { node_id: "t/a", status: "published" },
+      { node_id: "t/b", status: "draft" },
+      { node_id: "t/c", status: "published" },
+      { node_id: "t/d", status: "draft" },
+    ]);
+    const approved = await db.all(
+      "SELECT node_id FROM approved_versions WHERE nest_id = ? ORDER BY node_id",
+      [nestId],
+    );
+    expect(approved.map((r: any) => r.node_id)).toEqual(["t/a", "t/c"]);
+    const tags = await db.all(
+      "SELECT node_id, tag_name FROM node_tag_index WHERE nest_id = ? ORDER BY node_id, tag_name",
+      [nestId],
+    );
+    expect(tags).toEqual([
+      { node_id: "t/a", tag_name: "alpha" },
+      { node_id: "t/a", tag_name: "beta" },
+      { node_id: "t/b", tag_name: "beta" },
+    ]);
+    // A held doc keeps the status its author wrote; only a failed publish is realigned.
+    const raw = readFileSync(join(env.dataDir, "nests", nestId, "t", "d.md"), "utf-8");
+    expect(raw).toMatch(/^status: pending_review$/m);
+  });
+
   it("edits an imported draft without a version collision (publish-in-place upsert)", async () => {
     // Import a doc that stays a draft — registration seeds a node_versions row
     // at its version.
