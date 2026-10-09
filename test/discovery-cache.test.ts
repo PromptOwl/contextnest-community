@@ -100,10 +100,10 @@ describe("document discovery cache", () => {
   });
 
   /**
-   * Folding a write in means reading the one document back. On a network mount
-   * that read can fail transiently — and "unreadable" must not be mistaken for
-   * "deleted", or a document would vanish from every listing for the rest of
-   * the TTL immediately after being created.
+   * A write that THROWS is folded in by reading the document back, since only
+   * disk knows what it left. On a network mount that read can fail transiently
+   * — and "unreadable" must not be mistaken for "deleted", or a document would
+   * vanish from every listing for the rest of the TTL.
    */
   it("re-crawls instead of dropping a document whose read-back fails", async () => {
     const app = await createTestApp("key");
@@ -120,11 +120,14 @@ describe("document discovery cache", () => {
       crawls++;
       return realDiscover.apply(this, a);
     };
-    // Fail the read-back that immediately follows a write — the one the cache
-    // does to fold the new document in — and nothing else.
+    // The write lands on disk but reports failure, so the cache must read the
+    // document back — and that read-back fails too, and nothing else.
     (engineMod.NestStorage.prototype as any).writeDocument = async function (...a: any[]) {
       const out = await realWrite.apply(this, a);
-      if (armed) failNextRead = true;
+      if (armed) {
+        failNextRead = true;
+        throw new Error("EIO: write reported failure");
+      }
       return out;
     };
     (engineMod.NestStorage.prototype as any).readDocument = function (...a: any[]) {
@@ -166,6 +169,63 @@ describe("document discovery cache", () => {
       (engineMod.NestStorage.prototype as any).readDocument = realRead;
       (engineMod.NestStorage.prototype as any).writeDocument = realWrite;
     }
+  });
+
+  /**
+   * Folding a SUCCESSFUL write in parses the text that was just written rather
+   * than reading the file back — one round trip per write on a network mount.
+   * The cached set and the DB index must still match what is on disk.
+   */
+  it("folds a successful write in without reading it back from disk", async () => {
+    const app = await createTestApp("key");
+    const user = await registerUser(app, "noreadback@example.com");
+    const { NestStorage, serializeDocument } = await import("@promptowl/contextnest-engine");
+    // Installed before the nest exists: the cache binds readDocument when the
+    // nest's storage is first built.
+    const realRead = (NestStorage.prototype as any).readDocument;
+    let counting = false;
+    let readBacks = 0;
+    (NestStorage.prototype as any).readDocument = function (...a: any[]) {
+      if (counting) readBacks++;
+      return realRead.apply(this, a);
+    };
+    let nestId = "";
+    let nodeId = "";
+    let storage: InstanceType<typeof NestStorage>;
+    try {
+      const nest = await jsonRequest(app, "POST", "/nests", { name: "NoReadBack" }, user.apiKey);
+      nestId = nest.data.nest.id;
+      const created = await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes`,
+        { title: "Before", content: "# Before\n\nbody" },
+        user.apiKey,
+      );
+      nodeId = created.data.node.id;
+      const { engineCache } = await import("../src/nodes/engine.js");
+      ({ storage } = await engineCache.get(nestId));
+      await storage.discoverDocuments();
+      const node = await storage.readDocument(nodeId);
+      node.frontmatter.title = "After";
+
+      counting = true;
+      await storage.writeDocument(nodeId, serializeDocument(node));
+      counting = false;
+    } finally {
+      (NestStorage.prototype as any).readDocument = realRead;
+    }
+    const { getDb } = await import("../src/db/client.js");
+
+    expect(readBacks).toBe(0);
+    const cached = (await storage.discoverDocuments()).find((d) => d.id === nodeId);
+    expect(cached?.frontmatter.title).toBe("After");
+    expect(cached).toEqual(await storage.readDocument(nodeId));
+    const row = (await getDb().get(
+      "SELECT title FROM node_index WHERE nest_id = ? AND node_id = ?",
+      [nestId, nodeId],
+    )) as { title: string } | undefined;
+    expect(row?.title).toBe("After");
   });
 
   it("stops listing a document once it is deleted", async () => {

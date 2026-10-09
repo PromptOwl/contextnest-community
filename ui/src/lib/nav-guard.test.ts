@@ -1,5 +1,5 @@
-import { describe, it, expect, afterEach } from "vitest";
-import { setNavGuard, navigateGuarded, bypassNavGuard, historyWriteMode } from "./nav-guard";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { setNavGuard, navigateGuarded, bypassNavGuard, historyWriteMode, dropParkedEntries } from "./nav-guard";
 
 afterEach(() => setNavGuard(null));
 
@@ -125,5 +125,28 @@ describe("browser Back after a wiki-link hop (CU-wdqcq02g19)", () => {
 
     index--; // browser Back
     expect(stack[index].key).toBe("nest-1/doc-a");
+  });
+});
+
+describe("dropParkedEntries", () => {
+  it("drops the spare entries when the editor turns clean in place", () => {
+    vi.useFakeTimers();
+    const history = { state: { cnLeaveGuard: true } as any, go: vi.fn() };
+    dropParkedEntries(2, history);
+    vi.runAllTimers();
+    expect(history.go).toHaveBeenCalledWith(-2);
+    vi.useRealTimers();
+  });
+
+  it("leaves history alone when App already navigated over the spare entry", () => {
+    vi.useFakeTimers();
+    const history = { state: { cnLeaveGuard: true } as any, go: vi.fn() };
+    dropParkedEntries(1, history);
+    // Save of a new document: App replaces the parked entry with the nest view
+    // in the same commit, before the deferred drop runs.
+    history.state = { page: "nest", nestId: "n1" };
+    vi.runAllTimers();
+    expect(history.go).not.toHaveBeenCalled();
+    vi.useRealTimers();
   });
 });

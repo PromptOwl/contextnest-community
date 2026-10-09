@@ -24,6 +24,9 @@ export interface SsoTicketClaims {
    *  ticket. Load-bearing for auth: the MCP middleware requires "mcp" and
    *  GET /auth/sso rejects it, so the two ticket kinds can't cross over. */
   scope?: string;
+  /** "mcp" tickets only: email of the person driving a shared agent that runs
+   *  as `sub`. Attribution only — access stays `sub`'s. */
+  act?: string;
   /** unique ticket id, for one-time-use enforcement */
   jti?: string;
   /** issued-at (seconds) */

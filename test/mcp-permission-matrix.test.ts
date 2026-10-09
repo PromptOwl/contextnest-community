@@ -245,9 +245,11 @@ describe("context_create — write gate per role", () => {
 
   // A denial used to be a bare prose sentence with isError unset — to a
   // machine caller indistinguishable from a successful empty result. The
-  // prose is unchanged; isError and the {code, message} payload are the
-  // machine-readable half.
-  it("the denial is machine-detectable, prose byte-identical", async () => {
+  // refusal sentence leads unchanged; isError and the {code, message} payload
+  // are the machine-readable half. Since CU-wdqcq041jn the prose goes on to
+  // say how to ask for the access, and the payload carries the same
+  // can_request_access / target / level fields the REST 403 does.
+  it("the denial is machine-detectable and says how to ask for access", async () => {
     const denied = "You don't have permission to create documents in this nest.";
     const { body } = await mcpCall(
       reader.apiKey,
@@ -256,11 +258,16 @@ describe("context_create — write gate per role", () => {
       101,
     );
     expect(body.error).toBeUndefined();
-    expect(body.result.content).toEqual([{ type: "text", text: denied }]);
+    const text = body.result.content.map((c: { text: string }) => c.text).join("");
+    expect(text.startsWith(`${denied}\n\n`)).toBe(true);
+    expect(text).toMatch(/context_request_access/);
     expect(body.result.isError).toBe(true);
-    expect(body.result.structuredContent).toEqual({
+    expect(body.result.structuredContent).toMatchObject({
       code: "UNAUTHORIZED_ACTION",
-      message: denied,
+      message: text,
+      can_request_access: true,
+      target: { type: "nest" },
+      level: "write",
     });
   });
 });

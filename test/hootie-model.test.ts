@@ -123,6 +123,11 @@ describe("streamAnswer — model compatibility", () => {
       caught = err;
     }
     expect(describeModelError(caught)).toMatch(/out of credit/i);
+    // LiteLLM's 400 for a model it doesn't serve names the model that was asked for.
+    const unknownModel = { status: 400, error: { error: { message: "litellm.BadRequestError: There are no healthy deployments for this model." } } };
+    expect(describeModelError(unknownModel, { model: "default-claude/x", gateway: true })).toMatch(
+      'No model named "default-claude/x"',
+    );
 
     alwaysFail = null;
     calls = [];
@@ -138,5 +143,32 @@ describe("streamAnswer — model compatibility", () => {
       status: 401,
     });
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe("streamAnswer — logs", () => {
+  it("always logs a summary, and the nest content only with HOOTIE_DEBUG_LOG", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      delete process.env.HOOTIE_DEBUG_LOG;
+      let { streamAnswer } = await load();
+      await collect(streamAnswer({ ...base, model: "claude-opus-5", system: "SECRET-DOC" }));
+      let out = log.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(out).toContain("[hootie] → request model=claude-opus-5");
+      expect(out).toContain("[hootie] ← response");
+      expect(out).not.toContain("SECRET-DOC");
+      expect(out).not.toContain("sk-ant-test");
+
+      log.mockClear();
+      process.env.HOOTIE_DEBUG_LOG = "true";
+      ({ streamAnswer } = await load());
+      await collect(streamAnswer({ ...base, model: "claude-opus-5", system: "SECRET-DOC" }));
+      out = log.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(out).toContain("SECRET-DOC");
+      expect(out).not.toContain("sk-ant-test");
+    } finally {
+      delete process.env.HOOTIE_DEBUG_LOG;
+      log.mockRestore();
+    }
   });
 });

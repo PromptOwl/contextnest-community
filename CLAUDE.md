@@ -87,5 +87,6 @@ See `CONFIGURATION.md` for the full environment variable reference (PORT, DATA_R
 - `CONFIGURATION.md` - Full env var reference
 - `API.md` - Complete endpoint reference
 - `STEWARDSHIP.md` - Governance model
+- `LICENSING.md` - Plans, seats, model credits, license checks
 - `CHANGELOG.md` - Release history
 - `docs/prds/api-convergence.md` - PRD: one CLI / one MCP across OSS and Community (drives the Engine & CLI Sync Discipline)

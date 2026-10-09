@@ -118,6 +118,8 @@ tags:
       "jane@acme.com",
       "lead@acme.com",
     ]);
+    // The roster also names the nest owner (an implicit master steward).
+    expect(data.ownerEmail).toBe("lead@acme.com");
   });
 
   it("node created with stewards starts as draft", async () => {

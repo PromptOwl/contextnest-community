@@ -73,18 +73,16 @@ export function scopeShowsNests(scope: NestScope): boolean {
 }
 
 /**
- * Unsynced folders survive the unscoped, "mine" and unsynced-only views only,
- * and then only when they match the text query (label or path). "mine"
- * keeps them because it is the default scope and a pending folder on the
- * operator's own disk is theirs — hiding it there would hide every waiting
- * import from every fresh dashboard.
+ * Unsynced folders appear only in the "Unsynced folders only" view, and then
+ * only when they match the text query (label or path). They aren't nests, so
+ * the nest list (every other scope) never shows or counts them.
  */
 export function visibleUnsynced(
   folders: UnsyncedFolder[],
   scope: NestScope,
   query: string,
 ): UnsyncedFolder[] {
-  if (scope !== "all" && scope !== "mine" && scope !== "unsynced") return [];
+  if (scope !== "unsynced") return [];
   const q = query.trim().toLowerCase();
   if (!q) return folders;
   return folders.filter(

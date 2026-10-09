@@ -174,6 +174,18 @@ export function attributeRequest(
   return client;
 }
 
+/**
+ * Attribution for a READ. Reads carry no `client` body, and nothing calls
+ * attributeRequest on a GET, so `clientMetadata` is usually unset on the read
+ * path. Fall back to what the transport knows (the API key's label, the
+ * session header, the env overrides) — the same derivation a write gets — so
+ * an agent reading over REST with a labeled key is recorded as that agent.
+ * A browser session (no key label) derives nothing and stays unattributed.
+ */
+export function readClient(c: Context<any>): ClientMetadata | undefined {
+  return (c.get("clientMetadata") as ClientMetadata | undefined) ?? orAbsent(derivedClient(c));
+}
+
 export function serializeClient(value: ClientMetadata | undefined): string | null {
   return value ? JSON.stringify(value) : null;
 }

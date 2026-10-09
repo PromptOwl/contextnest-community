@@ -65,7 +65,26 @@ export function setupTestEnv() {
  */
 export async function createTestApp(
   authMode: "open" | "key" = "open",
-  opts: { superAdmins?: string[]; ownerEmail?: string; tier?: string } = {},
+  opts: {
+    superAdmins?: string[];
+    ownerEmail?: string;
+    tier?: string;
+    /** Named licence features (entitlements.ts). */
+    features?: string[];
+    /** License limits the mocked license reports. Read on every call, so a
+     *  test can mutate maxUsers after seeding users (seat-limit tests). */
+    licenseLimits?: { maxUsers: number; maxNests: number };
+    /** Fields merged over the mocked license on every call — mutate it to
+     *  flip the server to lapsed/suspended mid-suite. */
+    licenseOverrides?: Record<string, unknown>;
+    /** Pricing entitlement (see license.getEntitlement). Read on every call.
+     *  Defaults to unlimited so plan limits never touch unrelated tests. */
+    entitlement?: Partial<import("../src/auth/license.js").Entitlement>;
+    /** The PromptOwl model gateway the licence check hands out (default none). */
+    gateway?: { baseUrl: string; key: string; defaultModel?: string | null } | null;
+    /** The licence's own-provider gateway (byok; default none). */
+    ownGateway?: import("../src/auth/license.js").OwnGateway | null;
+  } = {},
 ) {
   process.env.AUTH_MODE = authMode;
   vi.resetModules();
@@ -82,10 +101,21 @@ export async function createTestApp(
         valid: true,
         tier: opts.tier ?? "test",
         org: "Test Org",
-        limits: null,
+        limits: opts.licenseLimits ?? null,
         suspended: false,
         suspendedReason: null,
         ownerEmail: opts.ownerEmail ?? null,
+        ...(opts.features ? { features: opts.features } : {}),
+        ...(opts.licenseOverrides ?? {}),
+      }),
+      getModelGateway: () => (opts.gateway ? { defaultModel: null, ...opts.gateway } : null),
+      getOwnGateway: () => opts.ownGateway ?? null,
+      getEntitlement: () => ({
+        plan: "enterprise",
+        maxUsers: null,
+        maxAccountOwners: null,
+        maxSubscribers: null,
+        ...(opts.entitlement ?? {}),
       }),
       // isLicenseAdminEmail reads the module-internal currentLicense, which
       // is never populated in tests. Override it so the ownerEmail opt drives

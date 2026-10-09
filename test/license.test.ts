@@ -82,6 +82,49 @@ describe("validateLicense", () => {
     expect(result2.tier).toBe("team");
   });
 
+  it("keeps the licence's features from PromptOwl, including through the cache", async () => {
+    process.env.PROMPTOWL_KEY = "pk_test_feat";
+    const fetchMock = mockFetch({
+      body: { valid: true, tier: "community", org: "Acme", features: ["hootie_branding"] },
+    });
+    const { validateLicense } = await loadLicense();
+    expect((await validateLicense()).features).toEqual(["hootie_branding"]);
+    const cached = await validateLicense();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(cached.features).toEqual(["hootie_branding"]);
+  });
+
+  it("an empty features list (revoked) survives the cache as [], never as null (tier defaults)", async () => {
+    process.env.PROMPTOWL_KEY = "pk_test_revoked";
+    const fetchMock = mockFetch({ body: { valid: true, tier: "enterprise", org: "Acme", features: [] } });
+    const { validateLicense } = await loadLicense();
+    expect((await validateLicense()).features).toEqual([]);
+    const cached = await validateLicense();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(cached.features).toEqual([]);
+  });
+
+  it("a revalidation writes changed features through to the cache", async () => {
+    process.env.PROMPTOWL_KEY = "pk_test_change";
+    mockFetch({ body: { valid: true, tier: "community", org: "Acme", features: ["hootie_branding"] } });
+    const license = await loadLicense();
+    await license.validateLicense();
+    mockFetch({ body: { valid: true, tier: "community", org: "Acme", features: [] } });
+    await license.validateLicense({ forceFresh: true });
+    const { getDb } = await import("../src/db/client.js");
+    const row = (await getDb().get("SELECT features_json FROM license_cache WHERE key = ?", ["pk_test_change"])) as { features_json: string | null };
+    expect(row.features_json).toBe("[]");
+  });
+
+  it("an older PromptOwl answer with no features reports features: null (tier defaults apply)", async () => {
+    process.env.PROMPTOWL_KEY = "pk_test_nofeat";
+    mockFetch({ body: { valid: true, tier: "enterprise", org: "Acme" } });
+    const { validateLicense } = await loadLicense();
+    const r = await validateLicense();
+    expect(r.valid).toBe(true);
+    expect(r.features ?? null).toBeNull();
+  });
+
   it("falls back to cached license on a network error (grace period)", async () => {
     process.env.PROMPTOWL_KEY = "pk_test_2";
     // First call: succeeds and caches.
@@ -173,7 +216,7 @@ describe("kill switch (isSuspended / two-strike confirmation)", () => {
     vi.restoreAllMocks();
   });
 
-  it("first suspension flag does NOT confirm — confirmation requires the 1h window", async () => {
+  it("first suspension flag does NOT confirm — one stray answer can't suspend", async () => {
     process.env.PROMPTOWL_KEY = "pk_susp_1";
     mockFetch({
       body: { valid: true, tier: "team", suspended: true, suspended_reason: "abuse" },
@@ -181,11 +224,11 @@ describe("kill switch (isSuspended / two-strike confirmation)", () => {
     const { validateLicense, isSuspended, getSuspensionReason } =
       await loadLicense();
     await validateLicense();
-    expect(isSuspended()).toBe(false); // still in confirmation window
+    expect(isSuspended()).toBe(false); // needs a second answer
     expect(getSuspensionReason()).toBe("abuse"); // reason captured early
   });
 
-  it("a second strike after the confirm window confirms suspension", async () => {
+  it("a second strike inside the hour confirms suspension (spec §9.4: two checks in one hour)", async () => {
     process.env.PROMPTOWL_KEY = "pk_susp_2";
     mockFetch({
       body: { valid: true, tier: "team", suspended: true, suspended_reason: "tos" },
@@ -205,11 +248,26 @@ describe("kill switch (isSuspended / two-strike confirmation)", () => {
       ["pk_susp_2"],
     );
 
-    // Jump past the 1h confirmation window
-    vi.spyOn(Date, "now").mockReturnValue(realNow + 61 * 60 * 1000);
+    // The next poll, a minute later, confirms
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 60 * 1000);
     await license.validateLicense();
     expect(license.isSuspended()).toBe(true);
     expect(license.getSuspensionReason()).toBe("tos");
+  });
+
+  it("a second strike more than an hour after the first starts a new window instead", async () => {
+    process.env.PROMPTOWL_KEY = "pk_susp_2b";
+    mockFetch({ body: { valid: true, tier: "team", suspended: true, suspended_reason: "tos" } });
+    const license = await loadLicense();
+    const realNow = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(realNow);
+    await license.validateLicense({ forceFresh: true });
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 61 * 60 * 1000);
+    await license.validateLicense({ forceFresh: true });
+    expect(license.isSuspended()).toBe(false); // too far apart: strike 1 again
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 62 * 60 * 1000);
+    await license.validateLicense({ forceFresh: true });
+    expect(license.isSuspended()).toBe(true);
   });
 
   it("clears a pending suspension when PromptOwl reverses the flag", async () => {
@@ -268,7 +326,7 @@ describe("suspension (valid:false + suspended:true) keeps the two-strike window"
     expect(first.tier).toBe("team");
     expect(license.isSuspended()).toBe(false);
 
-    vi.spyOn(Date, "now").mockReturnValue(realNow + 61 * 60 * 1000);
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 60 * 1000); // the next poll
     const second = await license.validateLicense({ forceFresh: true });
     expect(second.valid).toBe(true); // license kept; writes blocked via isSuspended()
     expect(license.isSuspended()).toBe(true);
@@ -455,5 +513,258 @@ describe("installLicenseKey — durable persistence (Docker)", () => {
     expect(result.persisted).toBe(false);
     expect(result.persistError).toBeTruthy();
     vi.doUnmock("../src/db/settings.js");
+  });
+});
+
+describe("license contract v2", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+
+  beforeEach(() => {
+    env = setupTestEnv();
+  });
+
+  afterEach(() => {
+    env.cleanup();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("reports seat count and server version on every validate", async () => {
+    process.env.PROMPTOWL_KEY = "pk_v2_report";
+    const fetchMock = mockFetch({ body: { valid: true, tier: "team" } });
+    const { validateLicense } = await loadLicense();
+    await validateLicense({ forceFresh: true });
+    const init = (fetchMock.mock.calls[0] as unknown[])[1] as RequestInit;
+    const sent = JSON.parse(String(init.body));
+    expect(sent.key).toBe("pk_v2_report");
+    expect(typeof sent.stats.users).toBe("number");
+    expect(typeof sent.stats.nests).toBe("number");
+    expect(typeof sent.server.version).toBe("string");
+  });
+
+  it("parses trial, expiry, grace, seats and contact from PromptOwl", async () => {
+    process.env.PROMPTOWL_KEY = "pk_v2_fields";
+    mockFetch({
+      body: {
+        valid: true,
+        tier: "team",
+        limits: { maxUsers: 30, maxNests: 0 },
+        reason: "expired_grace",
+        trial: true,
+        expires_at: "2026-10-23T00:00:00.000Z",
+        grace_ends_at: "2026-11-06T00:00:00.000Z",
+        seats: { licensed: 30, used: 34, over_limit: true },
+        contact: { url: "https://example.com/talk", email: "sales@example.com" },
+      },
+    });
+    const { validateLicense } = await loadLicense();
+    const lic = await validateLicense({ forceFresh: true });
+    expect(lic.valid).toBe(true);
+    expect(lic.trial).toBe(true);
+    expect(lic.reason).toBe("expired_grace");
+    expect(lic.expiresAt).toBe("2026-10-23T00:00:00.000Z");
+    expect(lic.graceEndsAt).toBe("2026-11-06T00:00:00.000Z");
+    expect(lic.seats).toEqual({ licensed: 30, used: 34, overLimit: true });
+    expect(lic.contact).toEqual({ url: "https://example.com/talk", email: "sales@example.com" });
+
+    // Cached reads keep the same terms.
+    const again = await validateLicense();
+    expect(again.graceEndsAt).toBe("2026-11-06T00:00:00.000Z");
+  });
+
+  it("derives seats from limits when PromptOwl predates v2", async () => {
+    process.env.PROMPTOWL_KEY = "pk_v2_legacy";
+    mockFetch({ body: { valid: true, tier: "team", limits: { maxUsers: 5, maxNests: 0 } } });
+    const { validateLicense } = await loadLicense();
+    const lic = await validateLicense({ forceFresh: true });
+    expect(lic.seats?.licensed).toBe(5);
+    expect(lic.seats?.overLimit).toBe(false);
+    expect(lic.contact?.url).toMatch(/^https:\/\//);
+  });
+
+  it("never renders a non-http contact link", async () => {
+    process.env.PROMPTOWL_KEY = "pk_v2_js";
+    mockFetch({
+      body: { valid: true, contact: { url: "javascript:alert(1)", email: "<x>" } },
+    });
+    const { validateLicense, DEFAULT_LICENSE_CONTACT } = await loadLicense();
+    const lic = await validateLicense({ forceFresh: true });
+    expect(lic.contact).toEqual(DEFAULT_LICENSE_CONTACT);
+  });
+
+  it("a lapse keeps the key and the owner, so a renewal restores the server", async () => {
+    process.env.PROMPTOWL_KEY = "pk_v2_lapse";
+    mockFetch({ body: { valid: true, tier: "team", owner_email: "owner@acme.com" } });
+    const license = await loadLicense();
+    await license.validateLicense();
+
+    const { getDb } = await import("../src/db/client.js");
+    await getDb().run(
+      "INSERT INTO users (id, email, name, password_hash) VALUES ('u1', 'm@acme.com', 'M', 'x')",
+    );
+    await getDb().run(
+      "INSERT INTO sessions (id, user_id, expires_at) VALUES ('s1', 'u1', datetime('now', '+1 day'))",
+    ).catch(() => {});
+    const sessionsBefore = (await getDb().get("SELECT COUNT(*) as c FROM sessions")) as { c: number };
+
+    vi.useFakeTimers();
+    mockFetch({
+      body: { valid: false, reason: "expired", owner_email: "owner@acme.com", expires_at: "2026-09-01T00:00:00.000Z" },
+    });
+    license.startLicenseSafetyPoll();
+    await vi.advanceTimersByTimeAsync(3 * 61 * 1000);
+
+    expect(license.getCurrentLicense()?.valid).toBe(false);
+    expect(license.getCurrentLicense()?.reason).toBe("expired");
+    expect(process.env.PROMPTOWL_KEY).toBe("pk_v2_lapse");
+    expect(license.getLicenseOwnerEmail()).toBe("owner@acme.com");
+    const sessionsAfter = (await getDb().get("SELECT COUNT(*) as c FROM sessions")) as { c: number };
+    expect(sessionsAfter.c).toBe(sessionsBefore.c);
+
+    // PromptOwl renews it: the next poll restores the server, no reinstall.
+    mockFetch({ body: { valid: true, tier: "team", owner_email: "owner@acme.com" } });
+    await vi.advanceTimersByTimeAsync(61 * 1000);
+    expect(license.getCurrentLicense()?.valid).toBe(true);
+  });
+});
+
+describe("pricing entitlement", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  beforeEach(() => {
+    env = setupTestEnv();
+  });
+  afterEach(() => {
+    env.cleanup();
+    vi.restoreAllMocks();
+  });
+
+  const lic = (limits: Record<string, unknown> | null, valid = true) =>
+    ({ valid, tier: "team", org: null, limits, suspended: false, suspendedReason: null, ownerEmail: null }) as any;
+
+  it("runs as Free with no license, or when PromptOwl names no plan", async () => {
+    const { entitlementOf } = await loadLicense();
+    const free = { plan: "free", maxUsers: 10, maxAccountOwners: 1, maxSubscribers: 0 };
+    expect(entitlementOf(null)).toEqual(free);
+    expect(entitlementOf(lic({ plan: "enterprise" }, false))).toEqual(free);
+    // An older PromptOwl's maxUsers 0 (= unlimited) must not lift the Free cap.
+    expect(entitlementOf(lic({ maxUsers: 0, maxNests: 0 }))).toEqual(free);
+  });
+
+  it("takes PromptOwl's caps over the plan defaults; null = unlimited", async () => {
+    const { entitlementOf } = await loadLicense();
+    expect(entitlementOf(lic({ plan: "enterprise" }))).toEqual({
+      plan: "enterprise", maxUsers: null, maxAccountOwners: null, maxSubscribers: null,
+    });
+    expect(
+      entitlementOf(lic({ plan: "self_hosted", maxUsers: 45, maxSubscribers: 12, maxAccountOwners: null })),
+    ).toEqual({ plan: "self_hosted", maxUsers: 45, maxAccountOwners: null, maxSubscribers: 12 });
+    // Malformed fields fall back to the plan's default; an unknown plan is Free.
+    expect(entitlementOf(lic({ plan: "free", maxUsers: "lots", maxSubscribers: -1 }))).toMatchObject({
+      maxUsers: 10, maxSubscribers: 0,
+    });
+    expect(entitlementOf(lic({ plan: "platinum" })).plan).toBe("free");
+  });
+
+  it("caches the model gateway encrypted and restores it from the cache", async () => {
+    process.env.PROMPTOWL_KEY = "pk_gw_1";
+    mockFetch({
+      body: {
+        valid: true,
+        tier: "team",
+        limits: { plan: "self_hosted", maxUsers: 30 },
+        gateway: {
+          baseUrl: "https://llm.promptowl.ai/",
+          key: "sk-litellm-secret",
+          defaultModel: "default-claude/claude-sonnet-5",
+        },
+      },
+    });
+    const license = await loadLicense();
+    await license.validateLicense();
+    expect(license.getModelGateway()).toEqual({
+      baseUrl: "https://llm.promptowl.ai",
+      key: "sk-litellm-secret",
+      defaultModel: "default-claude/claude-sonnet-5",
+    });
+    expect(license.getEntitlement().plan).toBe("self_hosted");
+
+    const { getDb } = await import("../src/db/client.js");
+    const row = (await getDb().get("SELECT gateway_json FROM license_cache WHERE key = ?", ["pk_gw_1"])) as {
+      gateway_json: string;
+    };
+    expect(row.gateway_json.startsWith("enc.v1.")).toBe(true);
+    expect(row.gateway_json).not.toContain("sk-litellm-secret");
+
+    // A fresh process reads it back from the cache without calling PromptOwl.
+    const fetchMock = mockFetch({ reject: new Error("should not be called") });
+    const again = await loadLicense();
+    await again.validateLicense();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(again.getModelGateway()?.key).toBe("sk-litellm-secret");
+    expect(again.getModelGateway()?.defaultModel).toBe("default-claude/claude-sonnet-5");
+  });
+
+  it("drops the gateway when it is malformed or the license stops being valid", async () => {
+    process.env.PROMPTOWL_KEY = "pk_gw_2";
+    mockFetch({ body: { valid: true, tier: "team", gateway: { baseUrl: "javascript:alert(1)", key: "k" } } });
+    const license = await loadLicense();
+    await license.validateLicense();
+    expect(license.getModelGateway()).toBeNull();
+
+    mockFetch({
+      body: { valid: true, tier: "team", gateway: { baseUrl: "https://llm.promptowl.ai", key: "k2", defaultModel: "bad name; rm" } },
+    });
+    await license.validateLicense({ forceFresh: true });
+    expect(license.getModelGateway()?.key).toBe("k2");
+    // A malformed model name is dropped; the gateway itself is kept.
+    expect(license.getModelGateway()?.defaultModel).toBeNull();
+
+    mockFetch({ body: { valid: false, reason: "deactivated" } });
+    await license.validateLicense({ forceFresh: true, strict: true });
+    expect(license.getCurrentLicense()?.valid).toBe(false);
+    expect(license.getModelGateway()).toBeNull();
+  });
+
+  it("keeps the own-provider gateway (byok) encrypted in the cache and drops it with the licence", async () => {
+    process.env.PROMPTOWL_KEY = "pk_own_1";
+    const own = {
+      baseUrl: "https://llm.promptowl.ai/",
+      key: "sk-own-secret",
+      models: ["community-abc-openai/gpt-5.6-sol", "bad model; rm"],
+      providers: { openai: { masked: "9876", updatedAt: "2026-10-08T00:00:00.000Z" }, "Bad!": { masked: "x" } },
+    };
+    mockFetch({ body: { valid: true, tier: "enterprise", own_gateway: own } });
+    const license = await loadLicense();
+    await license.validateLicense();
+    expect(license.getOwnGateway()).toEqual({
+      baseUrl: "https://llm.promptowl.ai",
+      key: "sk-own-secret",
+      models: ["community-abc-openai/gpt-5.6-sol"],
+      providers: { openai: { masked: "9876", updatedAt: "2026-10-08T00:00:00.000Z" } },
+    });
+
+    const { getDb } = await import("../src/db/client.js");
+    const row = (await getDb().get("SELECT own_gateway_json FROM license_cache WHERE key = ?", ["pk_own_1"])) as {
+      own_gateway_json: string;
+    };
+    expect(row.own_gateway_json.startsWith("enc.v1.")).toBe(true);
+    expect(row.own_gateway_json).not.toContain("sk-own-secret");
+
+    // A fresh process reads it back from the cache.
+    mockFetch({ reject: new Error("should not be called") });
+    const again = await loadLicense();
+    await again.validateLicense();
+    expect(again.getOwnGateway()?.models).toEqual(["community-abc-openai/gpt-5.6-sol"]);
+
+    // An answer without it (byok revoked) drops it; so does an invalid licence.
+    mockFetch({ body: { valid: true, tier: "enterprise" } });
+    await again.validateLicense({ forceFresh: true });
+    expect(again.getOwnGateway()).toBeNull();
+    mockFetch({ body: { valid: true, tier: "enterprise", own_gateway: own } });
+    await again.validateLicense({ forceFresh: true });
+    expect(again.getOwnGateway()).not.toBeNull();
+    mockFetch({ body: { valid: false, reason: "deactivated" } });
+    await again.validateLicense({ forceFresh: true, strict: true });
+    expect(again.getOwnGateway()).toBeNull();
   });
 });
