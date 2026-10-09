@@ -95,6 +95,7 @@ const TABS: {
       "posthog_host",
       "max_body_bytes",
       "trace_retention_days",
+      "run_retention_days",
     ],
   },
   {
@@ -984,6 +985,34 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   </div>
                   <p className="text-xs text-muted-foreground mt-1">
                     0–3650 — 0 disables pruning entirely.
+                  </p>
+                </CardContent>
+              </Card>
+
+              {/* Agent-run retention (runs + run_steps) */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Agent run retention</CardTitle>
+                  <CardDescription>
+                    How many days of finished agent runs, and their step-by-step
+                    traces, to keep. Proposals and comments an agent made stay;
+                    only their link to the trace stops resolving. Pruned hourly.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex items-center gap-2">
+                    <NumField
+                      value={draft.run_retention_days}
+                      min={0}
+                      max={3650}
+                      onChange={(n) => set({ run_retention_days: n })}
+                    />
+                    <span className="text-sm text-muted-foreground shrink-0">
+                      days
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    0–3650 — 0 (the default) keeps every run.
                   </p>
                 </CardContent>
               </Card>

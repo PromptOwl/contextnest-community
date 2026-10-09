@@ -131,8 +131,19 @@ const stepIcon = (action: string) => {
 
 const timeOf = (iso: string) => formatServerDate(iso) || iso;
 
+/** ?run=<id> — a link from a proposal, comment or the agent history (RunLink). */
+function runFromUrl(): string | null {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get("run");
+}
+
 export function WorkflowsView({ nestId, nestName, onBack }: Props) {
-  const [tab, setTab] = useState("canvas");
+  const [focusRun, setFocusRun] = useState<string | null>(runFromUrl);
+  const [tab, setTab] = useState(() => (runFromUrl() ? "run" : "canvas"));
+  const openRun = (runId: string) => {
+    setFocusRun(runId);
+    setTab("run");
+  };
   const { metacognitionEnabled } = useAuth();
   // Configuring an agent takes owner/admin on the nest (the server enforces it).
   const { data: nestMeta } = useQuery({ ...reads.nest(nestId), enabled: metacognitionEnabled });
@@ -170,11 +181,11 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
           <EdgesPanel nestId={nestId} />
         </TabsContent>
         <TabsContent value="run" className="mt-4">
-          <RunsPanel nestId={nestId} />
+          <RunsPanel nestId={nestId} focusRunId={focusRun} />
         </TabsContent>
         {metacognitionEnabled && (
           <TabsContent value="agents" className="mt-4">
-            <MetacognitionPanel nestId={nestId} canConfigure={canConfigureAgents} />
+            <MetacognitionPanel nestId={nestId} canConfigure={canConfigureAgents} onOpenRun={openRun} />
           </TabsContent>
         )}
         <TabsContent value="activity" className="mt-4 space-y-6">
@@ -778,7 +789,7 @@ function ParentSelect({
   );
 }
 
-function RunsPanel({ nestId }: { nestId: string }) {
+function RunsPanel({ nestId, focusRunId }: { nestId: string; focusRunId?: string | null }) {
   const { subagentRunsEnabled, subagentMaxDepth, subagentMaxChildren } = useAuth();
   // Live server caps (fall back to defaults until /health resolves).
   const maxDepth = subagentMaxDepth || SUBAGENT_MAX_DEPTH_FALLBACK;
@@ -838,6 +849,19 @@ function RunsPanel({ nestId }: { nestId: string }) {
       setError(err instanceof Error ? err.message : "Failed to load run");
     }
   };
+
+  // Arrived from a RunLink or the agent history: show that run's trace. A run
+  // pruned by the retention window (or out of reach) says so plainly.
+  useEffect(() => {
+    if (!focusRunId) return;
+    void getRun(focusRunId)
+      .then((r) => setSelected(r))
+      .catch(() =>
+        setError(
+          "That run's trace isn't available — it may be older than this server's run retention window, or outside what you can see.",
+        ),
+      );
+  }, [focusRunId]);
 
   // Cancel a queued/running run. The server rejects a PATCH once terminal, so
   // a stale row just surfaces that conflict instead of silently reopening.

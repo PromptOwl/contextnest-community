@@ -328,6 +328,8 @@ export interface AdminSettings {
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
+  /** Agent-run retention (runs + steps); 0 keeps every run. */
+  run_retention_days: number;
   /** OIDC SSO. The client secret is write-only — only its presence comes back. */
   oidc_enabled: boolean;
   oidc_issuer: string;
@@ -2100,6 +2102,8 @@ export interface AnnotationComment {
   author: string;
   body: string;
   createdAt: string;
+  /** Set when an agent run posted it: links to its trace. */
+  runId?: string;
 }
 
 export interface AnnotationThread {
@@ -2838,6 +2842,8 @@ export interface WorkItem {
   target_type?: "document" | "folder" | "nest" | "nest_archive" | "node";
   /** Access items only: the level asked for. */
   level?: "read" | "write";
+  /** Review and access items: the agent run that filed it, if one did. */
+  run_id?: string | null;
 }
 
 export interface WatcherNotification {
@@ -3568,6 +3574,54 @@ export async function saveMetacognitionAgent(
 
 export async function deleteMetacognitionAgent(nestId: string, nodeId: string) {
   return request<{ deleted: boolean }>(`/nests/${nestId}/metacognition/${nodeId}`, { method: "DELETE" });
+}
+
+export type AgentRunOutcome = "running" | "succeeded" | "failed" | "timeout" | "skipped" | "cancelled";
+
+export interface AgentRunSummary {
+  id: string;
+  outcome: AgentRunOutcome;
+  triggered_by: string;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  tokens: number;
+  est_cost_usd: number | null;
+  proposals: number;
+  approved: number;
+  rejected: number;
+  comments: number;
+  error: string | null;
+}
+
+/** GET /nests/:id/metacognition/:node/stats — what one agent did over a window. */
+export interface AgentStats {
+  node_id: string;
+  window_days: number;
+  runs: { total: number } & Record<AgentRunOutcome, number>;
+  tokens: number;
+  est_cost_usd: number;
+  proposals: {
+    made: number;
+    approved: number;
+    rejected: number;
+    pending: number;
+    withdrawn: number;
+    approval_rate: number | null;
+  };
+  comments: number;
+  access_requests: number;
+  blocked_by_scope: number;
+  last_run_at: string | null;
+  last_error: { run_id: string; at: string; message: string } | null;
+  history: AgentRunSummary[];
+}
+
+export async function getMetacognitionStats(nestId: string, nodeId: string, days = 30, limit = 25) {
+  const r = await request<{ stats: AgentStats }>(
+    `/nests/${nestId}/metacognition/${nodeId}/stats?days=${days}&limit=${limit}`,
+  );
+  return r.stats;
 }
 
 export async function runMetacognitionAgent(nestId: string, nodeId: string) {
