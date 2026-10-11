@@ -148,6 +148,35 @@ describe("structure rules per nest", () => {
     expect(saved.data.folders.map((f: { pattern: string }) => f.pattern)).not.toContain("decisions");
   });
 
+  it("a title or folder name is tried against a format alone, whatever folder it is for", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/structure/check`,
+      {
+        tests: [
+          { title: "Kickoff with Acme", file_name: "{date}-{slug}" },
+          { title: "2026-10-07 Kickoff", file_name: "{date}-{slug}" },
+          { name: "acme", folder_name: "/[a-z]+-[0-9]{3}/" },
+          { name: "acme-042", folder_name: "/[a-z]+-[0-9]{3}/" },
+          { title: "Anything", file_name: "" },
+          { title: "x", file_name: "/(a+)+/" },
+        ],
+      },
+      reader.apiKey,
+    );
+    expect(res.status, JSON.stringify(res.data)).toBe(200);
+    const r = res.data.results;
+    expect(r[0]).toMatchObject({ ok: false, slug: "kickoff-with-acme" });
+    expect(r[0].violations[0].message).toMatch(/\{date\}-\{slug\}/);
+    expect(r[1]).toMatchObject({ ok: true, slug: "2026-10-07-kickoff" });
+    expect(r[2]).toMatchObject({ ok: false, slug: "acme" });
+    expect(r[3]).toMatchObject({ ok: true, slug: "acme-042" });
+    expect(r[4]).toMatchObject({ ok: true, slug: "anything" });
+    expect(r[5].ok).toBe(false);
+    expect(r[5].violations[0].message).toMatch(/repeats a group/);
+  });
+
   it("caps a check at 50 tests", async () => {
     const tests = Array.from({ length: 51 }, () => ({ title: "x" }));
     expect((await jsonRequest(app, "POST", `/nests/${nestId}/structure/check`, { tests }, reader.apiKey)).status).toBe(400);

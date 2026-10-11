@@ -112,11 +112,48 @@ structureRoutes.put("/", async (c) => {
   return c.json({ ...describeStructure(compiled.rules), violations: violations.length });
 });
 
+interface CheckTest {
+  folder?: string;
+  title?: string;
+  name?: string;
+  type?: string;
+  body?: string;
+  /** Try the name against this file-name format alone (the editor's "Try a title"). */
+  file_name?: string;
+  /** Try the name against this folder-name format alone ("Try a folder name"). */
+  folder_name?: string;
+}
+
 interface CheckBody {
   rules?: unknown;
   report?: boolean;
-  tests?: Array<{ folder?: string; title?: string; name?: string; type?: string; body?: string }>;
+  tests?: CheckTest[];
   folders?: string[];
+}
+
+/**
+ * A name judged against one format, by the engine: a one-rule set holding
+ * just that format, so the verdict does not depend on finding a folder the
+ * rest of the rules would accept.
+ */
+function tryFormat(t: CheckTest) {
+  const folderFormat = t.folder_name !== undefined;
+  const format = String((folderFormat ? t.folder_name : t.file_name) ?? "").trim();
+  const slug = derivedNodeId(String(t.name ?? t.title ?? ""))?.split("/").pop() ?? "";
+  if (!format || !slug) return { ok: true, slug, violations: [] };
+  const compiled = compile({ folders: folderFormat ? { "try/{name}": { folder_name: format } } : { try: { file_name: format } } });
+  if ("error" in compiled) {
+    return { ok: false, slug, violations: [{ code: "CONFIG_ERROR", path: slug, message: Object.values(compiled.fieldErrors)[0] }] };
+  }
+  const violations = folderFormat
+    ? checkFolder(compiled.rules, `try/${slug}`)
+    : checkDocument(compiled.rules, { id: `nodes/try/${slug}`, type: "document" }).filter((v) => v.code === "FILE_NAME");
+  const what = folderFormat ? "Folder names" : "File names";
+  return {
+    ok: violations.length === 0,
+    slug,
+    violations: violations.map((v) => ({ ...v, path: slug, message: `${what} here must look like ${format}; "${slug}" does not.` })),
+  };
 }
 
 structureRoutes.post("/check", async (c) => {
@@ -145,6 +182,7 @@ structureRoutes.post("/check", async (c) => {
   const rules = compiled.rules;
 
   const results = tests.map((t) => {
+    if (t.file_name !== undefined || t.folder_name !== undefined) return tryFormat(t);
     let id: string | null;
     try {
       id = derivedNodeId(String(t.name ?? t.title ?? ""), String(t.folder ?? ""));

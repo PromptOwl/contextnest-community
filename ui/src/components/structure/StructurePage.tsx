@@ -421,8 +421,6 @@ export function StructurePage({ nestId, nestName, isArchived, onBack, openDocume
                         nestId={nestId}
                         pattern={current}
                         rule={folderRule(draft, current)}
-                        draft={draft}
-                        canManage={canManage}
                         templates={Object.keys(draft.templates ?? {}).sort()}
                         types={structure.data?.types ?? []}
                         fieldErrors={fieldErrors}

@@ -1260,7 +1260,8 @@ export async function checkStructure(
   body: {
     rules?: StructureRules;
     report?: boolean;
-    tests?: Array<{ folder?: string; title?: string; type?: string; body?: string }>;
+    /** With `file_name` / `folder_name`, the name is tried against that format alone. */
+    tests?: Array<{ folder?: string; title?: string; name?: string; type?: string; body?: string; file_name?: string; folder_name?: string }>;
     folders?: string[];
   },
 ) {

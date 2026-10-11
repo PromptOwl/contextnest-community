@@ -11,7 +11,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import * as api from "../../lib/api";
-import type { StructureFolderConfig, StructureRules } from "../../lib/api";
+import type { StructureFolderConfig } from "../../lib/api";
 import { FILE_NAME_PRESETS, FOLDER_NAME_PRESETS } from "../../lib/structure-draft";
 
 const NONE = "__none__";
@@ -20,10 +20,6 @@ interface Props {
   nestId: string;
   pattern: string;
   rule: StructureFolderConfig;
-  /** The whole draft, so the live checks judge what would be saved. */
-  draft: StructureRules;
-  /** Whether the caller may edit (and so check a draft); otherwise saved rules are checked. */
-  canManage: boolean;
   templates: string[];
   types: string[];
   /** Server field errors, keyed like `folders.<pattern>.file_name`. */
@@ -88,8 +84,6 @@ export function RuleEditor({
   nestId,
   pattern,
   rule,
-  draft,
-  canManage,
   templates,
   types,
   fieldErrors,
@@ -106,16 +100,17 @@ export function RuleEditor({
   // A folder name is tried only where the rule's path ends in a {name}.
   const namedLeaf = pattern.endsWith("}");
 
-  const rules = canManage ? draft : undefined;
-  const titleCheck = useCheck(nestId, title.trim() ? { rules, tests: [{ folder: pattern, title }] } : null);
-  const tried = pattern.replace(/\{[^/{}]*\}$/, folderName.trim());
-  const folderCheck = useCheck(nestId, namedLeaf && folderName.trim() ? { rules, folders: [tried] } : null);
-
-  // The title box judges the name; the folder's own path is tried below it.
+  // Each box tries a name against the format being edited — judged by the
+  // server alone, whatever folder it ends up in.
+  const titleCheck = useCheck(nestId, title.trim() ? { tests: [{ title, file_name: rule.file_name ?? "" }] } : null);
+  const folderCheck = useCheck(
+    nestId,
+    namedLeaf && folderName.trim() ? { tests: [{ name: folderName, folder_name: rule.folder_name ?? "" }] } : null,
+  );
   const titleResult = titleCheck?.results[0];
-  const nameProblems = titleResult?.violations.filter((v) => v.code === "FILE_NAME") ?? [];
-  const folderResult = folderCheck?.folders[0];
-  const folderProblems = folderResult?.violations.filter((v) => v.path === folderResult.folder) ?? [];
+  const nameProblems = titleResult?.violations ?? [];
+  const folderResult = folderCheck?.results[0];
+  const folderProblems = folderResult?.violations ?? [];
 
   const others = Object.entries(fieldErrors).filter(
     ([k]) => k.startsWith(`folders.${pattern}`) && !["types", "folder_name", "file_name", "template", "files", "required"].some((f) => k === `folders.${pattern}.${f}`),
@@ -195,7 +190,7 @@ export function RuleEditor({
               (folderProblems.length ? (
                 folderProblems.map((v, i) => <Verdict key={i} ok={false} text={v.message} />)
               ) : (
-                <Verdict ok text={`${folderResult.folder}/ fits`} />
+                <Verdict ok text={`${folderResult.slug}/ fits`} />
               ))}
           </div>
         </Section>
