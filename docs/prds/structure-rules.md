@@ -427,7 +427,7 @@ Every phase is built **test-first**:
 3. Hand the phase to the **QA agent** (`.claude/agents/qa-adversary.md`, in both repos). It only **runs** the suites and **attacks** the change. It never edits code. It reports blocking findings with exact repros and ends with a `PASS` or `BLOCKED` verdict.
 4. Each blocking finding is fixed test-first: a failing test that reproduces it, then the fix. QA runs again until the verdict is `PASS`.
 
-### 10.1 Engine phase (ContextNest) — re-review pending (round 22)
+### 10.1 Engine phase (ContextNest) — re-review pending (round 26)
 
 - Round 1 (`9c8c3a3`) passed every suite, but QA and the architecture review returned `BLOCKED` / `Needs rework`: ReDoS bypasses, closed-mode bypass through system-path look-alikes, legacy configs refusing writes, a stranded write when scaffolding failed, and unenforced paths (deprecated `delete_document`, `ctx pull`, approvals).
 - Round 2 (`e81d3f1`) wrote a failing test for every finding, then fixed them. Both reviewers re-ran and found more:
@@ -677,7 +677,19 @@ Every phase is built **test-first**:
   - allows 4 bytes per character of room;
   - exports `structureReport` for judging a draft before saving it.
 
-  QA (round 21 on `7d7c175`, then round 22) and the architecture re-review of round 22 are running. The probes QA wrote across rounds 5–21 are being turned into a committed adversarial suite, so CI repeats every attack.
+- QA round 21 (on `7d7c175`) said `BLOCKED`: the far-insertion hunk (fixed in round 22) and held edits after a frontmatter-only edit — listed live, never approvable, a second hold dropping the first. Round 23 (`366bd21`) makes such a hold stale in the listing, the proposal and approval alike, and gives reads five bytes per character of room (encrypted CJK measures 4.06).
+- The architecture review of round 22 said **Approve with nits**. Round 24 (`1dec71d`) took the minors: the disk's head is rebuilt only when a verdict needs it, the per-file ceiling matches the room, clearer approval messages, tests that fail without their fixes, docs. Not taken: turning off the patch library's line-ending conversion (older histories may rely on it; the architect agreed).
+- QA round 22 (on `366bd21`) said **PASS**, with non-blocking findings. Round 25 (`8a4cdfb`) fixed them: no process-wide read slots (four hung reads could stall other vaults), a restored history equal to the one on disk is rebuilt once, `applyStagedEdit` checks the body a held edit or suggestion proposed (a shifted patch on repetitive text could land on the wrong line), non-regular version files are refused unread, and a seeded patch round-trip property test.
+- **The adversarial suite.** Every probe QA wrote in rounds 5–21 (242 probes, about 60 attacks) is now a committed test: `packages/engine/src/__tests__/structure-adversarial.test.ts` and `packages/mcp-server/src/__tests__/structure-adversarial.regression.test.ts`. Round 25 fixed three of its findings: an imported chain-event log under another spelling (`.Versions/…`) overwrote the forget log and so undid forgets; and two quadratic regexes (the JATS importer, MCP `list_documents`).
+- The architecture review of rounds 23–25 said **Approve with nits**. Round 26 (`4c925d3`) took its minors — at most four histories judged at once per import, a failed rebuild not repeated, `isChainEventLog`, `applyStagedEdit` exported, the spec's staleness rule matching the code — and the two engine items the UX review asked for: a warning for a template whose required section is not a heading in its own body, and a clear message for an unclosed `{` in a name format.
+
+  QA round 23 (on `8a4cdfb`) is running; QA and the architect then re-check round 26.
+
+  **Known, outside structure rules** (pre-existing; open as `it.fails` in the adversarial suite, each with its repro):
+  - *s3enc* — in an encrypted vault, a re-imported sealed `.md` altered in transit lands, then `context_list` and `context_verify` fail for the whole vault (`DECRYPTION_FAILED`).
+  - *badfm / badsib* — an imported `.md` whose frontmatter does not parse lands, then list and search throw, and a later create reports failure though it wrote.
+  - *corrupt* — a folder in place of a document's `history.yaml` (only by local file access) passes `context_verify`.
+  - *obsid* — in a flat vault, a document created under a bare id is not found again by that id.
 
   **Chunked imports.** The engine judges each imported history by what the nest will hold after the call: the call's files laid over what is already there, rebuilt and hash-verified. A document may arrive before or after its history, across calls. Within a history, a call must not bring `history.yaml` ahead of the keyframes and diffs it needs, since a history that does not rebuild and verify is refused. So the UI chunker (`ui/src/lib/api.ts`), which splits by bytes, should send each `.versions/<doc>/` folder's `history.yaml` last. Community's own staging (nest import, bundle restore, `context_sync_folder`) is designed to run under `skip` (§6), which leaves it unjudged. Until that flag is wired into Community's `opContext`, those imports are judged. The browser picker currently sorts `history.yaml` before `v*.md`, so a chunk boundary inside a `.versions/<doc>/` folder would get that history refused. Sort `history.yaml` last, or wire `skip`, as part of the Community phase.
 
