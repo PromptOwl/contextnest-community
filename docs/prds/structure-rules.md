@@ -278,8 +278,8 @@ Community writes the file **only through the engine's `setStructure`**. It rewri
 
 **Prerequisites from the engine** (upstream, before this phase):
 1. A released engine version that carries the feature. The pin is `^2.9.1` today, and the feature is still on the branch.
-2. `setStructure` must create a minimal `config.yaml` when a vault has none. Imported nests (`createImportedNest`, `FlatNestStorage`) may not have one, and `setStructure` throws `ConfigError` for them today.
-3. `context_structure` must also return the saved rule blocks as YAML text (`yaml`), for the read-only "View as YAML" panel, so the UI never serialises YAML itself.
+2. `setStructure` must create a minimal `config.yaml` when a vault has none. Imported nests (`createImportedNest`, `FlatNestStorage`) may not have one. *Built:* until it does, `PUT` refuses such a nest with a 400 that names the problem (never the vault's path).
+3. *Built differently:* the GET route renders the saved rule blocks as YAML itself (`js-yaml`, presentation only), so `context_structure` did not need a `yaml` field. The engine does export `structureReport(storage, rules)` (engine round 22), so a draft is judged against the nest's content by the engine's own report, not a copy of it.
 
 ### 6.2 REST
 
@@ -287,7 +287,7 @@ All three routes live in a new `src/structure/routes.ts`, mounted under `nestsAp
 
 | Route | Who | What it does |
 |---|---|---|
-| `GET /nests/:id/structure?folder=&report=1` | anyone who can read the nest | Runs `context_structure` through `opContext`. Returns the rules, the resolved rule for `folder`, the compliance report with `report=1`, and the saved rules as `yaml`. |
+| `GET /nests/:id/structure?folder=&report=1` | anyone who can read the nest | Runs `context_structure` through `opContext`. Returns the rules, the resolved rule for `folder`, the compliance report with `report=1`, the saved blocks as written (`rules`, what the editor starts from, so a save sends back the owner's own spellings), the same as `yaml`, and the node types the server accepts (`types`). |
 | `PUT /nests/:id/structure` | owner or admin (`canManageStewards`, `src/governance/stewardship-service.ts:822`); never a nest-scoped API key (the handler checks `c.get("nestScope")`) | Validates with `compileStructure`, then saves with `setStructure`. Records a `structure_changed` activity entry. Returns the new rules and the number of existing violations. |
 | `POST /nests/:id/structure/check` | read tier; owner or admin when `rules` is sent | The validation API the UI uses for every live check (§6.3). |
 
@@ -308,19 +308,26 @@ The UI contains no engine logic: no matcher, no token logic, no regex, no YAML. 
 
 ```text
 POST /nests/:id/structure/check
-body:     { rules?, report?: true, tests?: [{ folder, title?, name?, type? }], folders?: [path] }
-response: { fieldErrors, warnings: [string],
+body:     { rules?, report?: true,
+            tests?: [{ folder?, title? | name?, type?, body?, file_name? | folder_name? }],
+            folders?: [path] }
+response: { fieldErrors, error?, warnings: [string],
             results: [{ ok, slug, violations }],           // one per test
-            scaffold: [{ folder, creates: { folders: [path], files: [{ name, template? }] } }],
+            folders: [{ folder, violations, creates: { folders: [path], files: [{ path }] } }],
             report?: { violations } }                     // existing content, judged by these rules
 ```
 
 - **Without `rules`,** everything runs against the saved rules. The create flows use this.
 - **With `rules`** (owner or admin only), the draft is compiled first, regex limits included. `fieldErrors` points at the key at fault, and `warnings` names what compiles but looks wrong: a template name with no entry, or a required section that is not a heading in its template's body.
-- `scaffold` answers "what will creating this folder also create?" (the engine's `scaffoldPlan`), for the new-folder preview.
+- A test with `file_name` or `folder_name` tries the name against that format alone (the editor's "Try a title" / "Try a folder name"): the engine compiles a one-rule set holding just that format and judges the slug. Trying it in a folder built from the rule's own path does not work — `clients/{client}` becomes `clients/client`, which a folder-name format refuses, so no rule governs it and a bad title reads as fitting (found in the local run).
+- Sections are judged only when a test carries a `body`: a title check has none yet.
+- Each `folders` entry answers "does this folder fit, and what will creating it also create?" (`checkFolder` and the engine's `scaffoldPlan`), for the new-folder preview.
 - `report: true` judges the nest's existing content against the draft, for the count in the "Enforce" confirmation before saving.
 - **Caps:** 256 folder rules, at most 50 `tests` and 50 `folders` per call. Larger bodies get 413 or 400.
-- On the server it calls the engine's exported `compileStructure`, `checkDocument`, `checkFolder`, `scaffoldPlan` and `auditStructure`. `slug` comes from Community's own `slugify`, because that function builds Community's ids. The UI therefore shows exactly what the server will enforce.
+- On the server it calls the engine's exported `compileStructure`, `checkDocument`, `checkFolder`, `scaffoldPlan` and `structureReport`. `slug` comes from Community's own `slugify` (`derivedNodeId`, which now takes a folder), because that function builds Community's ids. The UI therefore shows exactly what the server will enforce.
+- The nest middleware exempts `POST /structure/check` from the write tier; the client's cache treats it as a read (no invalidation), and a `PUT` invalidates only the structure reads.
+
+**Built (this branch):** the three routes, the global mapping of the engine's `VALIDATION_FAILED` to a 400 (so a refused create names the rule instead of a 500), the Structure nest page (Blueprint, Templates, Compliance, the Enforce confirmation with the count it would refuse, View YAML, read-only for non-managers, a per-nest empty state), "Structure rules" in the nest menu, and a Ruler button on folder rows (`?folder=`). **Not yet:** the `structure_changed` activity type (the request trace records every save), the new-document / new-folder / move integrations (§7.5), the settings-dialog summary row, the `moveNode` / `createEmptyFolder` / `deleteFolder` checks and the skip flag (§6.4), and MCP `context_structure`.
 
 ### 6.4 Write paths and the skip flag
 
