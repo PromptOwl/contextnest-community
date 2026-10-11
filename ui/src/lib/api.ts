@@ -293,6 +293,8 @@ export const DEFAULT_HOOTIE_BRAND: HootieBrand = {
 export interface AdminSettings {
   promptowl_sign_in_gate: SignInGate;
   manual_sign_in: ManualSignIn;
+  /** Password self-registration is open while SSO is live (warned about). */
+  manual_sign_in_open_with_sso?: boolean;
   community_name: string | null;
   logo_url: string | null;
   telemetry_enabled: boolean;

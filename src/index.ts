@@ -213,6 +213,14 @@ ${config.AUTH_MODE === "key" ? `
      Bind to 127.0.0.1 only, or switch to AUTH_MODE=key before exposing.
 `);
   }
+  if (config.MANUAL_SIGN_IN_OPEN_WITH_SSO) {
+    console.warn(`
+  ⚠️  MANUAL_SIGN_IN=open while single sign-on (OIDC) is on.
+     Anyone who can reach this server can register a password account the
+     identity provider never sees and can't disable. Unset MANUAL_SIGN_IN (it
+     defaults to invite-only with SSO) or set it to invite-only or disabled.
+`);
+  }
   if (config.HOOTIE_DEBUG_LOG) {
     console.warn(`
   ⚠️  HOOTIE_DEBUG_LOG is on — every Hootie prompt and answer, including the
