@@ -104,7 +104,7 @@ export function NodeFieldsPanel({
 
   return (
     <section
-      className="w-full rounded-lg border bg-card/40 px-3 py-2"
+      className="w-full max-w-xl rounded-lg border bg-card/40 px-3 py-2"
       aria-label="Fields"
       data-testid="node-fields-panel"
     >
@@ -123,7 +123,7 @@ export function NodeFieldsPanel({
           </button>
         )}
       </div>
-      <dl className="grid grid-cols-[minmax(7rem,10rem)_1fr] items-center gap-x-3 gap-y-0.5">
+      <dl className="grid grid-cols-[minmax(7rem,9rem)_minmax(0,22rem)] items-center gap-x-3 gap-y-0.5">
         {defs.map((def) => (
           <div key={def.key} className="contents">
             <dt className="truncate text-sm text-muted-foreground" title={def.key}>
