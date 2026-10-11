@@ -28,8 +28,8 @@ const items = (qs = "", u = owner, board = boardId) =>
 const bulk = (u: any, body: Record<string, unknown>, nest = nestId) =>
   jsonRequest(app, "POST", `/nests/${nest}/nodes/bulk-update`, body, u.apiKey);
 
-async function mcp(apiKey: string, name: string, args: Record<string, unknown>, nest = nestId) {
-  const res = await app.request(`/nests/${nest}/mcp`, {
+async function mcp(apiKey: string, name: string, args: Record<string, unknown>, nest: string | null = nestId) {
+  const res = await app.request(nest ? `/nests/${nest}/mcp` : "/mcp", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -286,5 +286,15 @@ describe("MCP — context_boards, context_board_items, context_bulk_update", () 
     const res = await mcp(ed.apiKey, "context_bulk_update", { ids: ["nodes/handbook"], patch: { priority: "high" } }, g);
     expect(res.structuredContent).toMatchObject({ updated: 0, skipped: 1 });
     expect(res.structuredContent.results[0].code).toBe("needs_review");
+  });
+
+  it("is on the server-level /mcp endpoint too, nest-parameterised", async () => {
+    const list = await mcp(owner.apiKey, "context_board_items", { nest: nestId, board: boardId }, null);
+    expect(list.isError).toBeUndefined();
+    expect(list.structuredContent.board.id).toBe(boardId);
+    const res = await mcp(owner.apiKey, "context_bulk_update", { nest: nestId, ids: ["nodes/echo"], patch: { priority: "medium" } }, null);
+    expect(res.structuredContent).toMatchObject({ updated: 1 });
+    const denied = await mcp(rita.apiKey, "context_bulk_update", { nest: nestId, ids: ["nodes/echo"], patch: { priority: "low" } }, null);
+    expect(denied.isError).toBe(true);
   });
 });
