@@ -179,6 +179,22 @@ export async function createTestApp(
   return createApp();
 }
 
+/**
+ * Insert `count` plain people straight into the users table — the head-count
+ * the Free tier measures (auth/free-tier.ts). Call AFTER the app's DB is open
+ * (createTestApp, or a hand-built app after initDb): the dynamic import picks
+ * up the same post-resetModules db/client instance the app uses.
+ */
+export async function seedPeople(count: number, prefix = "person") {
+  const { getDb } = await import("../src/db/client.js");
+  for (let i = 0; i < count; i++) {
+    await getDb().run(
+      "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
+      [randomUUID(), `${prefix}-${randomUUID()}@example.com`, null, "x"],
+    );
+  }
+}
+
 /** Register a user and return their API key + user ID.
  *
  * Note: `/auth/register` only opens a browser session — it deliberately

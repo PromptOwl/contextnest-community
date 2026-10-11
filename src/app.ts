@@ -167,6 +167,7 @@ import {
   modelProvider,
 } from "./shared/model-credential.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "./auth/license-copy.js";
+import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "./auth/free-tier.js";
 import { SERVICE_VERSION } from "./shared/version.js";
 import { persistSetting } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
@@ -2437,8 +2438,10 @@ export function createApp(): Hono<AuthEnv> {
   });
 
   // Why a write is refused on a read-only server — suspended by PromptOwl, or
-  // no valid license — worded for who asked: admins get the reason and who to
-  // talk to, everyone else one neutral line. null = writes are allowed.
+  // no valid license past the Free tier — worded for who asked: admins get the
+  // reason and who to talk to, everyone else one neutral line. null = writes
+  // are allowed (licensed, or unlicensed with FREE_TIER_MAX_USERS or fewer
+  // people; see writesAllowed in auth/free-tier.ts).
   const readOnlyDenial = async (
     userId: string,
   ): Promise<{ error: string; extra: Record<string, unknown> } | null> => {
@@ -2455,8 +2458,8 @@ export function createApp(): Hono<AuthEnv> {
         },
       };
     }
+    if (await writesAllowed()) return null;
     const lic = getCurrentLicense();
-    if (lic?.valid) return null;
     if (!(await admin())) return { error: NEUTRAL_READ_ONLY, extra: { read_only: true } };
     // licenseTerms carries the machine reason code; expose it as
     // license_reason so it doesn't clobber the human-readable reason.
@@ -2469,7 +2472,7 @@ export function createApp(): Hono<AuthEnv> {
         reason:
           lic?.reason === "expired"
             ? "This server's PromptOwl license has ended, so it is read-only until it is renewed. Nothing has been deleted."
-            : "This server has no valid PromptOwl license installed. Ask the server admin to install one via the setup screen or POST /license/install.",
+            : FREE_TIER_EXCEEDED_MESSAGE,
         setup_url: "/setup",
       },
     };
@@ -2568,7 +2571,8 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     // License gate: block writes until a valid PromptOwl key is
-    // installed via /license/install. Reads stay open for plain
+    // installed via /license/install — unless the server is within the Free
+    // tier (readOnlyDenial → writesAllowed). Reads stay open for plain
     // node/nest browsing — but governance endpoints (stewards,
     // review-queue, approve/reject, version history, capability
     // checks) are admin features and stay locked regardless of HTTP
