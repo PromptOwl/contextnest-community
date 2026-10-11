@@ -427,7 +427,7 @@ Every phase is built **test-first**:
 3. Hand the phase to the **QA agent** (`.claude/agents/qa-adversary.md`, in both repos). It only **runs** the suites and **attacks** the change. It never edits code. It reports blocking findings with exact repros and ends with a `PASS` or `BLOCKED` verdict.
 4. Each blocking finding is fixed test-first: a failing test that reproduces it, then the fix. QA runs again until the verdict is `PASS`.
 
-### 10.1 Engine phase (ContextNest) — re-review pending (round 19)
+### 10.1 Engine phase (ContextNest) — re-review pending (round 22)
 
 - Round 1 (`9c8c3a3`) passed every suite, but QA and the architecture review returned `BLOCKED` / `Needs rework`: ReDoS bypasses, closed-mode bypass through system-path look-alikes, legacy configs refusing writes, a stranded write when scaffolding failed, and unenforced paths (deprecated `delete_document`, `ctx pull`, approvals).
 - Round 2 (`e81d3f1`) wrote a failing test for every finding, then fixed them. Both reviewers re-ran and found more:
@@ -644,6 +644,40 @@ Every phase is built **test-first**:
   **Known, not in this phase (added):** publishing a large document with a long diff chain stalls the event loop for seconds even without rules (`reconstructFromHistory` plus `createPatch` in versioning). This predates the phase and is queued as its own task.
 
   QA and the architecture review re-run on `7bd9575`; their verdicts gate this phase.
+- Round 20 (`264e855`), from the architecture review:
+  - patch application priced per comparison;
+  - artifact reads moved off the replay queue, size-capped (`sealedReaders`);
+  - history reads capped at 16 MiB.
+- QA round 19 (on `7bd9575`) returned `BLOCKED`. Its two blockers:
+  - **B1:** a diff of added lines ahead of a context line that fits nowhere was walked at every position without being counted. A 3 KB diff stalled verify, reconstruct, updates and imports for about 19 s.
+  - **B2:** an import could put a folder where a root ledger belongs (`context_history.yaml`, `context_latest.yaml`, `chain_events.yaml`), so every later checkpoint or forget failed with `EISDIR`.
+
+  Round 21 (`7d7c175`) fixed both test-first:
+  - hunks apply only where their header says;
+  - root-ledger folders are refused, compared after folding;
+  - reads are sized to the room left in the history's cap and the budget;
+  - a bulk publish judges its documents in order, so the published prefix is the same on every run;
+  - a document with no history is never cut short;
+  - a `NaN` budget means the default.
+- The architecture review of rounds 18–21 said `Needs rework`. Its findings:
+  - **B1:** a hunk header pointing past the end of the text made the library copy without bound.
+  - **M1:** the import readers dropped the read cap.
+  - **M2:** "run it again to continue" was wrong in every mode.
+  - **M3:** conforming documents were replayed for nothing.
+
+  Round 22 (`4336ffe`) fixed those test-first:
+  - headers are bounded and must be in order;
+  - the room left is passed through every reader;
+  - a document cut short is told to publish in a separate call;
+  - a document that passes the full check is never replayed.
+
+  It also:
+  - reports a held edit or suggestion that no longer applies as stale;
+  - removes the read timeout, so verdicts no longer depend on disk speed;
+  - allows 4 bytes per character of room;
+  - exports `structureReport` for judging a draft before saving it.
+
+  QA (round 21 on `7d7c175`, then round 22) and the architecture re-review of round 22 are running. The probes QA wrote across rounds 5–21 are being turned into a committed adversarial suite, so CI repeats every attack.
 
   **Chunked imports.** The engine judges each imported history by what the nest will hold after the call: the call's files laid over what is already there, rebuilt and hash-verified. A document may arrive before or after its history, across calls. Within a history, a call must not bring `history.yaml` ahead of the keyframes and diffs it needs, since a history that does not rebuild and verify is refused. So the UI chunker (`ui/src/lib/api.ts`), which splits by bytes, should send each `.versions/<doc>/` folder's `history.yaml` last. Community's own staging (nest import, bundle restore, `context_sync_folder`) is designed to run under `skip` (§6), which leaves it unjudged. Until that flag is wired into Community's `opContext`, those imports are judged. The browser picker currently sorts `history.yaml` before `v*.md`, so a chunk boundary inside a `.versions/<doc>/` folder would get that history refused. Sort `history.yaml` last, or wire `skip`, as part of the Community phase.
 
