@@ -25,6 +25,7 @@ afterEach(() => {
   env?.cleanup();
   env = null;
   delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_BASE_URL;
   delete process.env.FEATURE_WORKFLOW_PLANE;
 });
 
@@ -48,9 +49,9 @@ describe("resolveModelCredential", () => {
     expect(resolveModelCredential({ ANTHROPIC_API_KEY: "sk-ant-nest" })?.source).toBe("promptowl");
   });
 
-  it("with byok, a nest key beats the gateway; a server-wide Anthropic key is no longer read", async () => {
+  it("with byok, a nest key beats the gateway; a bare server Anthropic key (no gateway URL) is not read", async () => {
     const { resolveModelCredential } = await boot({ features: ["byok"], gateway: GATEWAY });
-    // Own server keys live in PromptOwl's gateway now (ownModelRoute), not in env.
+    // Bare own Anthropic keys live in PromptOwl's gateway now (ownModelRoute).
     process.env.ANTHROPIC_API_KEY = "sk-ant-own";
     expect(resolveModelCredential()?.source).toBe("promptowl");
     expect(
@@ -414,12 +415,13 @@ describe("own-provider keys from Settings (byok)", () => {
     expect(sent).toEqual([]);
   });
 
-  it("Settings lists no own providers until a key is added, and no server Anthropic key fields", async () => {
+  it("Settings lists no own providers until a key is added, and an empty model gateway", async () => {
     const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY });
     const res = await jsonRequest(app, "GET", "/admin/settings", undefined, owner.apiKey);
     expect(res.data.own_providers).toEqual({});
-    expect(res.data).not.toHaveProperty("anthropic_api_key_masked");
-    expect(res.data).not.toHaveProperty("anthropic_base_url");
+    expect(res.data.anthropic_base_url).toBe("");
+    expect(res.data.anthropic_api_key_masked).toBeNull();
+    expect(res.data.model_source).toBe("promptowl");
   });
 });
 
@@ -456,6 +458,14 @@ describe("a stored server Anthropic key moves to the model gateway at boot", () 
     expect((await stored())?.value ?? null).toBeNull();
   });
 
+  it("never hands over a key paired with the server's own gateway URL", async () => {
+    process.env.ANTHROPIC_BASE_URL = "http://litellm:4000";
+    const sent = await bootWithStoredKey({ features: ["byok"], gateway: GATEWAY }, new Response(JSON.stringify({ providers: {} })));
+    expect(sent).toEqual([]);
+    expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-stored-1234");
+    expect((await stored())?.value).toBeTruthy();
+  });
+
   it("keeps it when PromptOwl refuses, or when the licence has no byok", async () => {
     await bootWithStoredKey({ features: ["byok"], gateway: GATEWAY }, new Response(JSON.stringify({ error: "invalid x-api-key" }), { status: 400 }));
     expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-stored-1234");
@@ -464,5 +474,130 @@ describe("a stored server Anthropic key moves to the model gateway at boot", () 
     const sent = await bootWithStoredKey({ gateway: GATEWAY }, new Response(JSON.stringify({ providers: {} })));
     expect(sent).toEqual([]);
     expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-stored-1234");
+  });
+});
+
+// Enterprise self-hosted: route Hootie and agent runs through the customer's
+// own LiteLLM (Bedrock, Azure, Ollama behind it). Retired by mistake in
+// 9318f956; restored, byok-gated, key and URL as a pair.
+describe("the server's own model gateway (byok)", () => {
+  const LITELLM = "http://litellm:4000";
+  afterEach(() => vi.restoreAllMocks());
+
+  /** Answer the gateway's /v1/models (the key check and the picker); pass the rest through. */
+  function gatewayAnswers(status: number, ids: string[] = []) {
+    const realFetch = globalThis.fetch;
+    const seen: Array<{ url: string; auth: string | null }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: any, init?: any) => {
+      const u = String(url instanceof Request ? url.url : url);
+      if (!u.startsWith(`${LITELLM}/v1/models`)) return realFetch(url, init);
+      const h = new Headers(url instanceof Request ? url.headers : init?.headers);
+      seen.push({ url: u, auth: h.get("x-api-key") ?? h.get("authorization") });
+      return new Response(JSON.stringify({ data: ids.map((id) => ({ id })) }), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    return seen;
+  }
+
+  it("with byok, URL + key route every call there: after a nest key, before PromptOwl", async () => {
+    const { resolveModelCredential } = await boot({ features: ["byok"], gateway: GATEWAY, ownGateway: OWN_GW });
+    process.env.ANTHROPIC_BASE_URL = LITELLM;
+    process.env.ANTHROPIC_API_KEY = "sk-litellm-virtual";
+    const server = { apiKey: "sk-litellm-virtual", baseUrl: LITELLM, source: "own", defaultModel: null };
+    expect(resolveModelCredential()).toEqual(server);
+    expect(resolveModelCredential({ ANTHROPIC_API_KEY: "sk-ant-nest" })?.apiKey).toBe("sk-ant-nest");
+    // A nest URL alone never receives the server's key.
+    expect(resolveModelCredential({ ANTHROPIC_BASE_URL: "https://evil.example" })).toEqual(server);
+  });
+
+  it("is off without byok, or with only one half set", async () => {
+    const plain = await boot({ gateway: GATEWAY });
+    process.env.ANTHROPIC_BASE_URL = LITELLM;
+    process.env.ANTHROPIC_API_KEY = "sk-litellm-virtual";
+    expect(plain.resolveModelCredential()?.source).toBe("promptowl");
+    env?.cleanup();
+    const byok = await boot({ features: ["byok"], gateway: GATEWAY });
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_BASE_URL = LITELLM;
+    expect(byok.resolveModelCredential()?.source).toBe("promptowl");
+  });
+
+  it("agent runs get the gateway through the run bundle", async () => {
+    const { app, owner, envValues } = await boot({ features: ["byok"], gateway: GATEWAY });
+    process.env.ANTHROPIC_BASE_URL = LITELLM;
+    process.env.ANTHROPIC_API_KEY = "sk-litellm-virtual";
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Runs" }, owner.apiKey);
+    const bundle = await envValues(nest.data.nest.id);
+    expect(bundle.ANTHROPIC_BASE_URL).toBe(LITELLM);
+    expect(bundle.ANTHROPIC_API_KEY).toBe("sk-litellm-virtual");
+  });
+
+  it("Settings saves URL + key after the gateway accepts the key, and never returns the key", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY });
+    const seen = gatewayAnswers(200);
+    const res = await jsonRequest(
+      app, "PATCH", "/admin/settings",
+      { anthropic_base_url: `${LITELLM}/`, anthropic_api_key: "sk-litellm-virtual" }, owner.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(seen.length).toBe(1);
+    expect(res.data.settings.anthropic_base_url).toBe(LITELLM);
+    expect(res.data.settings.anthropic_api_key_masked).toBe("••••tual");
+    expect(res.data.settings.model_source).toBe("own");
+    expect(JSON.stringify(res.data)).not.toContain("sk-litellm-virtual");
+    expect(process.env.ANTHROPIC_API_KEY).toBe("sk-litellm-virtual");
+  });
+
+  it("a key the gateway rejects, a key with no URL, or a bad URL is a field error", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY });
+    gatewayAnswers(401);
+    const rejected = await jsonRequest(
+      app, "PATCH", "/admin/settings", { anthropic_base_url: LITELLM, anthropic_api_key: "sk-bad" }, owner.apiKey,
+    );
+    expect(rejected.status).toBe(400);
+    expect(rejected.data.fieldErrors.anthropic_api_key).toMatch(/gateway rejected/);
+    const noUrl = await jsonRequest(app, "PATCH", "/admin/settings", { anthropic_api_key: "sk-x" }, owner.apiKey);
+    expect(noUrl.data.fieldErrors.anthropic_api_key).toMatch(/gateway URL/);
+    const badUrl = await jsonRequest(app, "PATCH", "/admin/settings", { anthropic_base_url: "ftp://x" }, owner.apiKey);
+    expect(badUrl.data.fieldErrors.anthropic_base_url).toMatch(/http/);
+    expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+
+  it("clearing the URL clears its key too, so a boot can't hand it to PromptOwl", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY });
+    gatewayAnswers(200);
+    await jsonRequest(
+      app, "PATCH", "/admin/settings", { anthropic_base_url: LITELLM, anthropic_api_key: "sk-litellm-virtual" }, owner.apiKey,
+    );
+    const res = await jsonRequest(app, "PATCH", "/admin/settings", { anthropic_base_url: "" }, owner.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data.settings.anthropic_api_key_masked).toBeNull();
+    expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(res.data.settings.model_source).toBe("promptowl");
+  });
+
+  it("without byok, setting either half is refused (403); clearing is allowed", async () => {
+    const { app, owner } = await boot({ gateway: GATEWAY });
+    for (const body of [{ anthropic_base_url: LITELLM }, { anthropic_api_key: "sk-x" }]) {
+      const res = await jsonRequest(app, "PATCH", "/admin/settings", body, owner.apiKey);
+      expect(res.status).toBe(403);
+      expect(res.data.code).toBe("byok_required");
+    }
+    const clear = await jsonRequest(app, "PATCH", "/admin/settings", { anthropic_base_url: "" }, owner.apiKey);
+    expect(clear.status).toBe(200);
+  });
+
+  it("the Hootie picker lists the gateway's models as named, without PromptOwl's own-provider models", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY, ownGateway: OWN_GW });
+    process.env.ANTHROPIC_BASE_URL = LITELLM;
+    process.env.ANTHROPIC_API_KEY = "sk-litellm-virtual";
+    gatewayAnswers(200, ["bedrock/anthropic.claude-sonnet-5", "ollama/llama3.2"]);
+    const res = await jsonRequest(app, "GET", "/admin/models", undefined, owner.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data.source).toBe("own");
+    expect(res.data.models).toEqual(["bedrock/anthropic.claude-sonnet-5", "ollama/llama3.2"]);
+    expect(res.data).not.toHaveProperty("own_models");
   });
 });

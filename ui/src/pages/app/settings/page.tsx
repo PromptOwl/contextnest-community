@@ -146,6 +146,8 @@ const TABS: {
     label: "Hootie",
     keys: [
       "provider_keys",
+      "anthropic_base_url",
+      "anthropic_api_key",
       "hootie_enabled",
       "hootie_model",
       "hootie_name",
@@ -605,6 +607,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
       // there's no value to diff against — "staged" means a non-empty string
       // (set) or null (clear). Everything else diffs by value like normal.
       if (
+        k === "anthropic_api_key" ||
         k === "oidc_client_secret" ||
         k === "mcp_signing_secret" ||
         k === "ses_secret_access_key"
@@ -1941,6 +1944,78 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               </CardContent>
             </Card>
 
+            {/* Model gateway — the server's own LiteLLM / Bedrock / Azure /
+                Ollama front (byok). URL + key are a pair; the key is
+                write-only (masked tail back), staged on the global Save. */}
+            {settings?.byok_available !== false && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Model gateway</CardTitle>
+                  <CardDescription>
+                    Route every model call (Hootie and agent runs) through your
+                    own gateway: LiteLLM in front of Bedrock, Azure, Ollama or
+                    any provider, speaking Anthropic's /v1/messages. Calls and
+                    nest content then stay on your network, under your budgets
+                    and spend logs. When set, it takes over from the model keys
+                    above and PromptOwl credits. The key is checked against the
+                    gateway when you save, and it stays on this server.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="anthropic-base-url">Gateway URL</Label>
+                    <TextField
+                      id="anthropic-base-url"
+                      error={fieldErrors.anthropic_base_url}
+                      value={draft.anthropic_base_url ?? ""}
+                      placeholder="http://litellm:4000 (empty turns the gateway off)"
+                      onChange={(v) => set({ anthropic_base_url: v })}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="anthropic-api-key">Gateway key</Label>
+                    <div className="text-xs text-muted-foreground" data-testid="settings-gateway-status">
+                      {draft.anthropic_api_key === null
+                        ? "Will be cleared when you save."
+                        : settings?.anthropic_api_key_masked
+                          ? `Current: ${settings.anthropic_api_key_masked}${
+                              settings.model_source === "own" ? " (in use)" : ""
+                            }`
+                          : settings?.anthropic_base_url
+                            ? "No key yet: the gateway isn't used until it has one."
+                            : "Not set."}
+                    </div>
+                    <TextField
+                      id="anthropic-api-key"
+                      error={fieldErrors.anthropic_api_key}
+                      type="password"
+                      value={typeof draft.anthropic_api_key === "string" ? draft.anthropic_api_key : ""}
+                      placeholder="sk-… (the gateway's virtual key; paste to set or replace)"
+                      onChange={(v) => set({ anthropic_api_key: v })}
+                    />
+                    {settings?.anthropic_api_key_masked && draft.anthropic_api_key !== null && (
+                      <button
+                        type="button"
+                        className="mt-2 text-xs text-destructive hover:underline"
+                        onClick={() => set({ anthropic_api_key: null })}
+                      >
+                        Clear key
+                      </button>
+                    )}
+                    {draft.anthropic_api_key === null && (
+                      <button
+                        type="button"
+                        className="mt-2 text-xs text-muted-foreground hover:underline"
+                        onClick={() => set({ anthropic_api_key: undefined })}
+                      >
+                        Keep current key
+                      </button>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
             {/* Hootie in the nest — the assistant on every page. Sits under
                 the key it depends on: switching it on without a key gives
                 everyone a panel that explains what's missing, not a broken
@@ -1954,8 +2029,9 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   can read in the nest, cites the documents it used, and lets
                   them @tag a colleague — which posts the exchange as a comment
                   and notifies them. Off until you turn it on. Runs on your
-                  own key for the model's provider, or on PromptOwl models with
-                  your plan's credits; without either the panel says so.
+                  model gateway, your own key for the model's provider, or
+                  PromptOwl models with your plan's credits; without any of
+                  them the panel says so.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -1978,7 +2054,11 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   value={draft.hootie_model ?? ""}
                   error={fieldErrors.hootie_model}
                   onChange={(v) => set({ hootie_model: v })}
-                  reloadKey={JSON.stringify(settings?.own_providers ?? {})}
+                  reloadKey={JSON.stringify([
+                    settings?.own_providers ?? {},
+                    settings?.anthropic_base_url ?? "",
+                    settings?.anthropic_api_key_masked ?? null,
+                  ])}
                 />
               </CardContent>
             </Card>

@@ -45,6 +45,7 @@ import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { pushRoutes } from "./nests/push-routes.js";
 import { hootieRoutes } from "./hootie/routes.js";
+import { verifyModelKey } from "./hootie/model.js";
 import {
   HOOTIE_BRAND_FIELDS,
   changedHootieBrandFields,
@@ -951,6 +952,14 @@ export function createApp(): Hono<AuthEnv> {
     byok_available: hasEntitlement("byok"),
     // Own-provider keys PromptOwl holds for this licence (masked tails only).
     own_providers: hasEntitlement("byok") ? getOwnGateway()?.providers ?? {} : {},
+    // The server's own model gateway (byok): URL + key used as a pair, ahead of
+    // PromptOwl's gateway. The key is NEVER returned — masked tail only.
+    anthropic_base_url: config.ANTHROPIC_BASE_URL,
+    anthropic_api_key_masked: process.env.ANTHROPIC_API_KEY
+      ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
+      : null,
+    // Which key Hootie's calls use: own (the server's gateway) or promptowl (credits).
+    model_source: resolveModelCredential()?.source ?? null,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     metacognition_enabled: config.FEATURE_METACOGNITION,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
@@ -1012,7 +1021,9 @@ export function createApp(): Hono<AuthEnv> {
       return c.json({ error: "Only the server admin can view this." }, 403);
     const credential = resolveModelCredential();
     const current = hootieModel(credential);
-    const own = hasEntitlement("byok") ? getOwnGateway()?.models ?? [] : [];
+    // On the server's own gateway every call stays there, so PromptOwl-held
+    // own-provider models aren't offered.
+    const own = hasEntitlement("byok") && credential?.source !== "own" ? getOwnGateway()?.models ?? [] : [];
     // `providers`: name → provider, read before PromptOwl's prefix comes off,
     // so the picker can group the list (OpenAI, Anthropic, …).
     const reply = (ids: string[], names: string[], extra: Record<string, unknown> = {}) => {
@@ -1106,7 +1117,10 @@ export function createApp(): Hono<AuthEnv> {
         : null;
     if (
       !hasEntitlement("byok") &&
-      Object.values(providerKeysIn ?? {}).some((v) => String(v ?? "").trim() !== "")
+      ((["anthropic_api_key", "anthropic_base_url"] as const).some(
+        (f) => f in body && String(body[f] ?? "").trim() !== "",
+      ) ||
+        Object.values(providerKeysIn ?? {}).some((v) => String(v ?? "").trim() !== ""))
     ) {
       return c.json(
         {
@@ -1220,6 +1234,53 @@ export function createApp(): Hono<AuthEnv> {
     }
     // Name, logo, accent colour, greeting (enterprise — gated above).
     pending.push(...validateHootieBrandFields(body, addError));
+    // The server's own model gateway (byok, gated above): an http(s) URL with
+    // no trailing slash, so the SDK joins /v1/messages onto it; empty clears.
+    if ("anthropic_base_url" in body) {
+      const v = String(body.anthropic_base_url ?? "").trim().replace(/\/$/, "");
+      if (!v) {
+        // The key goes with it: left alone, a bare key would be handed to
+        // PromptOwl's gateway at the next boot (moveStoredAnthropicKey).
+        pending.push({ name: "ANTHROPIC_BASE_URL", value: null });
+        if (!("anthropic_api_key" in body)) pending.push({ name: "ANTHROPIC_API_KEY", value: null });
+      } else {
+        let ok = false;
+        try {
+          const u = new URL(v);
+          ok = (u.protocol === "http:" || u.protocol === "https:") && !!u.host;
+        } catch {
+          ok = false;
+        }
+        if (!ok)
+          addError(
+            "anthropic_base_url",
+            "Model gateway URL must be an http(s) URL, e.g. http://litellm:4000 — or empty to turn it off.",
+          );
+        else pending.push({ name: "ANTHROPIC_BASE_URL", value: v });
+      }
+    }
+    // The gateway's key (a LiteLLM virtual key, or an Anthropic key behind a
+    // proxy). Any non-empty string: gateways mint their own formats. Checked
+    // against the gateway THIS patch leaves in place before it is saved.
+    if ("anthropic_api_key" in body) {
+      const v = body.anthropic_api_key;
+      if (v === null || v === "") {
+        pending.push({ name: "ANTHROPIC_API_KEY", value: null });
+      } else if (typeof v !== "string" || !v.trim() || /\s/.test(v.trim())) {
+        addError("anthropic_api_key", "Gateway key must be a single token with no spaces (or empty to clear it).");
+      } else {
+        const key = v.trim();
+        const patchedBase = pending.find((p) => p.name === "ANTHROPIC_BASE_URL");
+        const baseUrl = patchedBase ? patchedBase.value : config.ANTHROPIC_BASE_URL || null;
+        if (!baseUrl) {
+          addError("anthropic_api_key", "Set the model gateway URL too: the key is only used with it.");
+        } else {
+          const rejected = await verifyModelKey(key, baseUrl);
+          if (rejected) addError("anthropic_api_key", rejected);
+          else pending.push({ name: "ANTHROPIC_API_KEY", value: key });
+        }
+      }
+    }
     // Own-provider keys (byok): checked and stored by PromptOwl, in LiteLLM
     // only — sent after every other field validates, never kept here.
     const providerKeys: Array<[string, string | null]> = [];

@@ -382,6 +382,15 @@ export interface AdminSettings {
   notify_email_to: string;
   /** Own-provider keys PromptOwl holds for this licence (byok): masked tails only. */
   own_providers?: Record<string, { masked: string; updatedAt: string | null }>;
+  /** The server's own model gateway (byok): LiteLLM / Bedrock / Azure / Ollama
+   *  speaking /v1/messages. "" = off (PromptOwl's gateway). */
+  anthropic_base_url?: string;
+  /** Masked tail of the gateway's key; never the value. */
+  anthropic_api_key_masked?: string | null;
+  /** Write-only: the gateway's key to set, or null to clear. */
+  anthropic_api_key?: string | null;
+  /** Which key Hootie's calls use: own (the server's gateway) or promptowl (credits). */
+  model_source?: "own" | "promptowl" | null;
   /** Write-only: provider → key to set, or null to clear. Sent to PromptOwl, never stored here. */
   provider_keys?: Record<string, string | null>;
 }
