@@ -1,9 +1,10 @@
 /**
- * One folder rule of a nest, edited in place. Every verdict — does this rule
- * compile, does a title fit — comes from the server's check API; this form
- * only shapes the draft.
+ * One folder rule of a nest. Owners and admins edit it; everyone else reads
+ * it in plain words and can still try a title or folder name against it.
+ * Every verdict comes from the server's check API; this form only shapes the
+ * draft.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Trash2, X, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,13 +16,20 @@ import type { StructureFolderConfig } from "../../lib/api";
 import { FILE_NAME_PRESETS, FOLDER_NAME_PRESETS } from "../../lib/structure-draft";
 
 const NONE = "__none__";
+/** Error and verdict text: AA contrast at small sizes, light and dark. */
+const BAD = "text-red-700 dark:text-red-400";
+const GOOD = "text-green-700 dark:text-green-400";
 
 interface Props {
   nestId: string;
   pattern: string;
   rule: StructureFolderConfig;
   templates: string[];
+  /** Required sections per template, for the plain-words summary. */
+  templateSections: Record<string, string[]>;
   types: string[];
+  /** Read-only: the rule is shown in words; the Try boxes still work. */
+  readOnly: boolean;
   /** Server field errors, keyed like `folders.<pattern>.file_name`. */
   fieldErrors: Record<string, string>;
   onChange: (patch: Partial<StructureFolderConfig>) => void;
@@ -39,11 +47,15 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function FieldError({ message }: { message?: string }) {
-  return message ? <p className="text-xs text-destructive">{message}</p> : null;
+function FieldError({ id, message }: { id?: string; message?: string }) {
+  return message ? (
+    <p id={id} className={`text-xs ${BAD}`}>
+      {message}
+    </p>
+  ) : null;
 }
 
-/** Debounced server check of one title or folder name against the draft. */
+/** Debounced server check of one name against one format. */
 function useCheck(
   nestId: string,
   body: Parameters<typeof api.checkStructure>[1] | null,
@@ -73,10 +85,37 @@ function useCheck(
 
 function Verdict({ ok, text }: { ok: boolean; text: string }) {
   return (
-    <p className={`flex items-start gap-1.5 text-sm ${ok ? "text-green-700 dark:text-green-400" : "text-destructive"}`}>
-      {ok ? <Check className="mt-0.5 h-4 w-4 shrink-0" /> : <X className="mt-0.5 h-4 w-4 shrink-0" />}
+    <p className={`flex items-start gap-1.5 text-sm ${ok ? GOOD : BAD}`}>
+      {ok ? <Check className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /> : <X className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />}
       <span>{text}</span>
     </p>
+  );
+}
+
+/** The rule in words, for people who read rather than edit it. */
+function Summary({ pattern, rule, templateSections }: { pattern: string; rule: StructureFolderConfig; templateSections: Record<string, string[]> }) {
+  const parts: string[] = [];
+  parts.push(rule.types?.length ? `Takes only: ${rule.types.join(", ")}` : "Takes any type");
+  if (rule.folder_name) parts.push(`folder names look like ${rule.folder_name}`);
+  if (rule.file_name) parts.push(`file names look like ${rule.file_name} — the name comes from the title`);
+  if (rule.template) {
+    const keep = templateSections[rule.template] ?? [];
+    parts.push(`new files start from ${rule.template}${keep.length ? ` and must keep ${keep.join(", ")}` : ""}`);
+  }
+  if (rule.required) parts.push("created with its parent folder, and kept while the parent exists");
+  const files = Object.keys(rule.files ?? {});
+  if (files.length) parts.push(`must contain ${files.join(", ")}`);
+  return (
+    <div className="rounded-md border bg-muted/30 p-3 text-sm">
+      <p className="font-medium">
+        In <code>{pattern}/</code>
+      </p>
+      <ul className="mt-1 list-disc space-y-0.5 pl-5 text-muted-foreground">
+        {parts.map((p) => (
+          <li key={p}>{p}</li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -85,13 +124,18 @@ export function RuleEditor({
   pattern,
   rule,
   templates,
+  templateSections,
   types,
+  readOnly,
   fieldErrors,
   onChange,
   onRename,
   onRemove,
 }: Props) {
+  const uid = useId();
+  const errId = (field: string) => `${uid}-${field}-error`;
   const err = (field: string) => fieldErrors[`folders.${pattern}.${field}`];
+  const described = (field: string) => (err(field) ? { "aria-describedby": errId(field), "aria-invalid": true as const } : {});
   const [path, setPath] = useState(pattern);
   useEffect(() => setPath(pattern), [pattern]);
   const [title, setTitle] = useState("");
@@ -108,9 +152,8 @@ export function RuleEditor({
     namedLeaf && folderName.trim() ? { tests: [{ name: folderName, folder_name: rule.folder_name ?? "" }] } : null,
   );
   const titleResult = titleCheck?.results[0];
-  const nameProblems = titleResult?.violations ?? [];
   const folderResult = folderCheck?.results[0];
-  const folderProblems = folderResult?.violations ?? [];
+  const generatedNote = " — the title has no a–z letters or digits, so the file gets a generated name";
 
   const others = Object.entries(fieldErrors).filter(
     ([k]) => k.startsWith(`folders.${pattern}`) && !["types", "folder_name", "file_name", "template", "files", "required"].some((f) => k === `folders.${pattern}.${f}`),
@@ -125,26 +168,86 @@ export function RuleEditor({
   const files = Object.entries(rule.files ?? {});
   const setFiles = (next: Record<string, { template?: string; type?: string } | null>) => onChange({ files: next });
 
+  const tryTitle = (
+    <div className="space-y-1.5 rounded-md border bg-muted/30 p-3">
+      <Label htmlFor={`${uid}-try-title`} className="text-xs">
+        Try a title
+      </Label>
+      <Input
+        id={`${uid}-try-title`}
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        placeholder="e.g. 2026-10-07 Kickoff with Acme"
+        className="bg-background"
+      />
+      <div role="status" aria-live="polite">
+        {titleResult &&
+          (titleResult.violations.length ? (
+            titleResult.violations.map((v, i) => (
+              <Verdict key={i} ok={false} text={`${v.message}${titleResult.generated ? generatedNote : ""}`} />
+            ))
+          ) : (
+            <Verdict ok text={`Saved as ${titleResult.slug}.md${titleResult.generated ? generatedNote : ""}`} />
+          ))}
+      </div>
+      <p className="text-xs text-muted-foreground">Checked by the server, exactly as it will enforce.</p>
+    </div>
+  );
+
+  const tryFolder = namedLeaf && (
+    <div className="space-y-1.5 rounded-md border bg-muted/30 p-3">
+      <Label htmlFor={`${uid}-try-folder`} className="text-xs">
+        Try a folder name
+      </Label>
+      <Input
+        id={`${uid}-try-folder`}
+        value={folderName}
+        onChange={(e) => setFolderName(e.target.value)}
+        placeholder="e.g. acme-042"
+        className="bg-background"
+      />
+      <div role="status" aria-live="polite">
+        {folderResult &&
+          (folderResult.violations.length ? (
+            folderResult.violations.map((v, i) => <Verdict key={i} ok={false} text={v.message} />)
+          ) : (
+            <Verdict ok text={`${folderResult.slug}/ fits`} />
+          ))}
+      </div>
+    </div>
+  );
+
+  if (readOnly) {
+    return (
+      <div className="space-y-4">
+        <Summary pattern={pattern} rule={rule} templateSections={templateSections} />
+        {tryFolder}
+        {tryTitle}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-end gap-2">
         <div className="min-w-0 flex-1 space-y-1">
-          <Label htmlFor="rule-path">Folder path</Label>
+          <Label htmlFor={`${uid}-path`}>Folder path</Label>
           <Input
-            id="rule-path"
+            id={`${uid}-path`}
             value={path}
             onChange={(e) => setPath(e.target.value)}
             onBlur={commitPath}
             onKeyDown={(e) => e.key === "Enter" && commitPath()}
             className="font-mono"
-            aria-invalid={!!others.length}
+            aria-invalid={others.length > 0}
+            aria-describedby={`${uid}-path-hint`}
           />
-          <p className="text-xs text-muted-foreground">
+          <p id={`${uid}-path-hint`} className="text-xs text-muted-foreground">
             Use <code>{"{name}"}</code> for a level whose name varies, e.g. <code>{"clients/{client}/meetings"}</code>.
           </p>
         </div>
-        <Button variant="outline" size="sm" className="text-destructive" onClick={onRemove}>
-          <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+        <Button variant="outline" size="sm" className={BAD} onClick={onRemove}>
+          <Trash2 className="mr-1.5 h-3.5 w-3.5" aria-hidden />
           Remove rule
         </Button>
       </div>
@@ -153,7 +256,7 @@ export function RuleEditor({
       ))}
 
       <Section title="What can be added here">
-        <div className="flex flex-wrap gap-x-4 gap-y-2">
+        <div className="flex flex-wrap gap-x-4 gap-y-2" role="group" aria-label="Allowed types" {...described("types")}>
           {types.map((t) => {
             const on = rule.types?.includes(t) ?? false;
             return (
@@ -171,73 +274,61 @@ export function RuleEditor({
           })}
         </div>
         <p className="text-xs text-muted-foreground">None ticked: any type.</p>
-        <FieldError message={err("types")} />
+        <FieldError id={errId("types")} message={err("types")} />
       </Section>
 
       {namedLeaf && (
         <Section title="Folder names">
           <NameFormat
+            label="Folder name format"
             value={rule.folder_name ?? ""}
             presets={FOLDER_NAME_PRESETS}
             onChange={(v) => onChange({ folder_name: v })}
-            invalid={!!err("folder_name")}
+            error={err("folder_name") ? errId("folder_name") : undefined}
           />
-          <FieldError message={err("folder_name")} />
-          <div className="space-y-1.5 rounded-md border bg-muted/30 p-3">
-            <Label htmlFor="try-folder" className="text-xs">Try a folder name</Label>
-            <Input id="try-folder" value={folderName} onChange={(e) => setFolderName(e.target.value)} placeholder="acme-042" className="bg-background" />
-            {folderResult &&
-              (folderProblems.length ? (
-                folderProblems.map((v, i) => <Verdict key={i} ok={false} text={v.message} />)
-              ) : (
-                <Verdict ok text={`${folderResult.slug}/ fits`} />
-              ))}
-          </div>
+          <FieldError id={errId("folder_name")} message={err("folder_name")} />
+          {tryFolder}
         </Section>
       )}
 
       <Section title="File names">
         <NameFormat
+          label="File name format"
           value={rule.file_name ?? ""}
           presets={FILE_NAME_PRESETS}
           onChange={(v) => onChange({ file_name: v })}
-          invalid={!!err("file_name")}
+          error={err("file_name") ? errId("file_name") : undefined}
         />
-        <FieldError message={err("file_name")} />
-        <div className="space-y-1.5 rounded-md border bg-muted/30 p-3">
-          <Label htmlFor="try-title" className="text-xs">Try a title</Label>
-          <Input id="try-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="2026-10-07 Kickoff with Acme" className="bg-background" />
-          {titleResult &&
-            (nameProblems.length ? (
-              nameProblems.map((v, i) => <Verdict key={i} ok={false} text={v.message} />)
-            ) : (
-              <Verdict ok text={`Saved as ${titleResult.slug}.md`} />
-            ))}
-          <p className="text-xs text-muted-foreground">Checked by the server, exactly as it will enforce.</p>
-        </div>
+        <FieldError id={errId("file_name")} message={err("file_name")} />
+        {tryTitle}
       </Section>
 
       <div className="grid gap-5 sm:grid-cols-2">
         <Section title="New files start from">
           <Select value={rule.template ?? NONE} onValueChange={(v) => onChange({ template: v === NONE ? undefined : v })}>
-            <SelectTrigger aria-invalid={!!err("template")}>
+            <SelectTrigger aria-label="Template new files start from" {...described("template")}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value={NONE}>No template</SelectItem>
               {templates.map((t) => (
-                <SelectItem key={t} value={t}>{t}</SelectItem>
+                <SelectItem key={t} value={t}>
+                  {t}
+                </SelectItem>
               ))}
+              {rule.template && !templates.includes(rule.template) && (
+                <SelectItem value={rule.template}>{rule.template} (not defined)</SelectItem>
+              )}
             </SelectContent>
           </Select>
-          <FieldError message={err("template")} />
+          <FieldError id={errId("template")} message={err("template")} />
         </Section>
         <Section title="Required">
           <label className="flex items-start gap-2 text-sm">
             <Checkbox className="mt-0.5" checked={!!rule.required} onCheckedChange={(v) => onChange({ required: !!v })} />
             <span>Create with its parent folder, and keep it while the parent exists</span>
           </label>
-          <FieldError message={err("required")} />
+          <FieldError id={errId("required")} message={err("required")} />
         </Section>
       </div>
 
@@ -251,13 +342,15 @@ export function RuleEditor({
               value={spec?.template ?? NONE}
               onValueChange={(v) => setFiles({ ...rule.files, [leaf]: { ...spec, template: v === NONE ? undefined : v } })}
             >
-              <SelectTrigger className="h-8 w-48">
+              <SelectTrigger className="h-8 w-48" aria-label={`Template for required file ${leaf}`}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={NONE}>No template</SelectItem>
                 {templates.map((t) => (
-                  <SelectItem key={t} value={t}>{t}</SelectItem>
+                  <SelectItem key={t} value={t}>
+                    {t}
+                  </SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -271,7 +364,7 @@ export function RuleEditor({
                 setFiles(rest);
               }}
             >
-              <X className="h-4 w-4" />
+              <X className="h-4 w-4" aria-hidden />
             </Button>
           </div>
         ))}
@@ -285,12 +378,12 @@ export function RuleEditor({
             setNewFile("");
           }}
         >
-          <Input value={newFile} onChange={(e) => setNewFile(e.target.value)} placeholder="overview" className="h-8 w-48" aria-label="Required file name" />
+          <Input value={newFile} onChange={(e) => setNewFile(e.target.value)} placeholder="e.g. overview" className="h-8 w-48" aria-label="Required file name" />
           <Button type="submit" variant="outline" size="sm" disabled={!newFile.trim()}>
             Add file
           </Button>
         </form>
-        <FieldError message={err("files")} />
+        <FieldError id={errId("files")} message={err("files")} />
       </Section>
     </div>
   );
@@ -298,25 +391,29 @@ export function RuleEditor({
 
 /** A name format: one-click presets, or a token pattern / `/regex/` typed in. */
 function NameFormat({
+  label,
   value,
   presets,
   onChange,
-  invalid,
+  error,
 }: {
+  label: string;
   value: string;
   presets: readonly { label: string; value: string }[];
   onChange: (v: string) => void;
-  invalid: boolean;
+  /** The id of the error describing this field, when there is one. */
+  error?: string;
 }) {
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap gap-1.5">
+      <div className="flex flex-wrap gap-1.5" role="group" aria-label={`${label} presets`}>
         {presets.map((p) => (
           <Button
             key={p.label}
             type="button"
             size="sm"
-            variant={value === p.value ? "secondary" : "outline"}
+            variant={value === p.value ? "default" : "outline"}
+            aria-pressed={value === p.value}
             className="h-7"
             onClick={() => onChange(p.value)}
           >
@@ -328,8 +425,10 @@ function NameFormat({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder="Any name — or a pattern like {date}-{slug}, or /regex/"
-        className="font-mono"
-        aria-invalid={invalid}
+        className={`font-mono ${error ? "border-red-600 dark:border-red-400" : ""}`}
+        aria-label={label}
+        aria-invalid={!!error}
+        aria-describedby={error}
       />
     </div>
   );

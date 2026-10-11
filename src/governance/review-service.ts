@@ -9,6 +9,7 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
 import { ConflictError } from "../shared/errors.js";
+import { assertDeletionRequestable } from "../structure/writes.js";
 import {
   notifyReviewRequested,
   notifyReviewResolved,
@@ -1069,6 +1070,12 @@ export async function requestDeletion(params: {
   );
   if (existing) {
     throw new ConflictError(`${kind} is already pending for this ${noun}`);
+  }
+  // Refused when asked rather than later at approval: a required file, or a
+  // required folder alone, under enforced structure rules.
+  if (targetType === "document" || targetType === "folder") {
+    const { storage } = await engineCache.get(params.nestId);
+    await assertDeletionRequestable(storage, targetType, params.nodeId);
   }
 
   const id = uuid();

@@ -113,3 +113,47 @@ export function sameRules(a: StructureRules, b: StructureRules): boolean {
     });
   return norm(a) === norm(b);
 }
+
+const FIELD_NAMES: Record<string, string> = {
+  types: "what can be added",
+  folder_name: "folder names",
+  file_name: "file names",
+  template: "template",
+  required: "required",
+  files: "required files",
+  description: "description",
+  body: "body",
+  required_sections: "required sections",
+  enforce: "Enforce rules",
+  closed: "Closed structure",
+};
+
+/**
+ * A rule key as the server names it (`folders.clients/{client}.file_name`) in
+ * words people read: `Folder rule "clients/{client}" — file names`. Split, not
+ * parsed with a regex: a pattern may itself hold dots.
+ */
+export function describeKey(key: string): string {
+  const [kind, ...rest] = key.split(".");
+  const last = rest[rest.length - 1];
+  const field = rest.length > 1 && FIELD_NAMES[last] ? last : undefined;
+  const name = (field ? rest.slice(0, -1) : rest).join(".");
+  const what = field ? ` — ${FIELD_NAMES[field]}` : "";
+  if (kind === "folders") return `Folder rule "${name}"${what}`;
+  if (kind === "templates") return `Template "${name}"${what}`;
+  if (kind === "structure") return FIELD_NAMES[rest[0]] ?? "Structure";
+  return key;
+}
+
+/** A server message "key: text" with its key in words; anything else as it is. */
+export function describeMessage(message: string): string {
+  const at = message.indexOf(": ");
+  if (at <= 0) return message;
+  const key = message.slice(0, at);
+  return /^(folders|templates|structure)\./.test(key) ? `${describeKey(key)}: ${message.slice(at + 2)}` : message;
+}
+
+/** How many distinct places a list of violations names — "12 problems in 9 places". */
+export function placesOf(violations: Array<{ path: string }>): number {
+  return new Set(violations.map((v) => v.path)).size;
+}

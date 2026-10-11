@@ -17,6 +17,8 @@ export interface NestPageContext {
   openNest: (opts?: { tags?: string[] }) => void;
   /** Leave the nest entirely (the pages' back arrow). */
   leaveNest: () => void;
+  /** Show one folder in the nest's Documents view. */
+  openFolder: (folder: string) => void;
   /** Structure: the folder whose rule to open (?folder=). */
   folder?: string;
 }

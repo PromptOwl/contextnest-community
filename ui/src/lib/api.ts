@@ -1229,7 +1229,8 @@ export interface StructureCheckResult {
   fieldErrors: Record<string, string>;
   error?: string;
   warnings: string[];
-  results: Array<{ ok: boolean; slug: string; violations: StructureViolation[] }>;
+  /** `generated`: the title has no a-z letters or digits, so the name is generated (document-1, …). */
+  results: Array<{ ok: boolean; slug: string; generated?: boolean; violations: StructureViolation[] }>;
   folders: Array<{
     folder: string;
     violations: StructureViolation[];

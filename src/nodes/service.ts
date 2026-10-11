@@ -3,6 +3,7 @@
  * disk + DB stay in lockstep across both surfaces. Handlers stay thin
  * (auth, parse, response shape); this module owns create/update/list.
  */
+import { assertFolderCreatable, assertMovable, folderDeleteOrder, ruleRefusal, scaffold } from "../structure/writes.js";
 import {
   parseDocument,
   normalizeStatus,
@@ -334,6 +335,10 @@ async function departmentTagFor(userEmail: string): Promise<string | null> {
 // reach the API response OR the MCP result (both share this service).
 function toSafeError(err: unknown, context: string, message: string): AppError {
   if (err instanceof AppError) return err;
+  // A structure rule (or another engine validation) refusing the write: the
+  // caller can fix it, and "reload and try again" never would.
+  const refusal = ruleRefusal(err);
+  if (refusal) return refusal;
   // The engine refuses to write a document that would stay rejected. That is a
   // state the caller can act on, not an internal fault, so it keeps its meaning
   // instead of being flattened into a generic 500 the user cannot interpret.
@@ -1095,7 +1100,11 @@ export async function createEmptyFolder(
     .replace(/-/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
   const { storage } = await engineCache.get(nestId);
+  // Under enforced rules: a folder they allow, named as they say, created
+  // with its required subfolders and files.
+  const plan = await assertFolderCreatable(storage, path, vaultPath);
   await storage.writeIndexMd(vaultPath, generateIndexMd(vaultPath, title, []));
+  await scaffold(storage, plan);
   return path;
 }
 
@@ -2628,6 +2637,9 @@ export async function moveNode(
         updated_at: new Date().toISOString(),
       },
     };
+    // Under enforced rules a move is judged as a delete there and a create
+    // here — before anything is written.
+    const plan = await assertMovable(storage, nodeId, newId, moved);
     // serializeNodeSafe, not serializeDocument: `moved` came from
     // readDocument, so an empty `tags: []` on disk is back as
     // `tags: undefined` and the YAML dumper throws on it. Only published docs
@@ -2653,6 +2665,7 @@ export async function moveNode(
     }
 
     await storage.deleteDocument(nodeId);
+    await scaffold(storage, plan);
 
     // Repoint every node-keyed table for the source doc and its derived
     // annotations node, plus the run traces delete keeps. One transaction: a
@@ -2915,8 +2928,9 @@ export async function deleteNode(
       { id: nodeId },
       await opContext(nestId, userEmail),
     );
-  } catch {
-    throw new NotFoundError(`Node not found: ${nodeId}`);
+  } catch (err) {
+    // A structure rule refusing the delete (a required file) is not "missing".
+    throw ruleRefusal(err) ?? new NotFoundError(`Node not found: ${nodeId}`);
   }
 
   await removeNodeFromTagIndex(nestId, nodeId);
@@ -2983,7 +2997,13 @@ export async function deleteFolder(
 
   const { storage } = await engineCache.get(nestId);
   const docs = await storage.discoverDocuments();
-  const targets = docs.map((d) => d.id).filter((id) => isIdUnderFolder(id, rel));
+  // A required folder is not deleted alone; the rest go deepest first, each
+  // folder's required files last (see folderDeleteOrder).
+  const targets = await folderDeleteOrder(
+    storage,
+    rel,
+    docs.map((d) => d.id).filter((id) => isIdUnderFolder(id, rel)),
+  );
   if (targets.length === 0) {
     // A folder holding no document is still a directory in the vault (an
     // explicitly created one, or the remains of a folder whose documents have

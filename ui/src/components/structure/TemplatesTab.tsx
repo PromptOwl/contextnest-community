@@ -20,9 +20,11 @@ interface Props {
   setSelected: (name: string | null) => void;
   fieldErrors: Record<string, string>;
   canManage: boolean;
+  /** Ask before a destructive edit; `run` applies it. */
+  confirm: (title: string, body: string, run: () => void) => void;
 }
 
-export function TemplatesTab({ draft, setDraft, selected, setSelected, fieldErrors, canManage }: Props) {
+export function TemplatesTab({ draft, setDraft, selected, setSelected, fieldErrors, canManage, confirm }: Props) {
   const names = Object.keys(draft.templates ?? {}).sort();
   const [adding, setAdding] = useState("");
   const current = selected && draft.templates?.[selected] !== undefined ? selected : names[0] ?? null;
@@ -86,6 +88,7 @@ export function TemplatesTab({ draft, setDraft, selected, setSelected, fieldErro
           setDraft={setDraft}
           onRenamed={setSelected}
           fieldErrors={fieldErrors}
+          confirm={confirm}
         />
       ) : (
         <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
@@ -102,12 +105,14 @@ function TemplateEditor({
   setDraft,
   onRenamed,
   fieldErrors,
+  confirm,
 }: {
   name: string;
   draft: StructureRules;
   setDraft: (next: StructureRules) => void;
   onRenamed: (name: string | null) => void;
   fieldErrors: Record<string, string>;
+  confirm: (title: string, body: string, run: () => void) => void;
 }) {
   const t = draft.templates?.[name] ?? {};
   const [label, setLabel] = useState(name);
@@ -146,10 +151,19 @@ function TemplateEditor({
         <Button
           variant="outline"
           size="sm"
-          className="text-destructive"
+          className="text-red-700 dark:text-red-400"
           onClick={() => {
-            setDraft(removeTemplate(draft, name));
-            onRenamed(null);
+            const remove = () => {
+              setDraft(removeTemplate(draft, name));
+              onRenamed(null);
+            };
+            if (usedBy.length === 0) remove();
+            else
+              confirm(
+                `Remove the ${name} template?`,
+                `${usedBy.join(", ")} ${usedBy.length === 1 ? "uses" : "use"} it. Their new files will start empty and owe no sections until you pick another template.`,
+                remove,
+              );
           }}
         >
           <Trash2 className="mr-1.5 h-3.5 w-3.5" />
@@ -176,7 +190,7 @@ function TemplateEditor({
               <button
                 type="button"
                 aria-label={`Remove required section ${s}`}
-                className="rounded-full hover:bg-primary/20"
+                className="rounded-full hover:bg-primary/20 focus-visible:outline focus-visible:outline-2"
                 onClick={() => setDraft(setTemplate(draft, name, { required_sections: sections.filter((x) => x !== s) }))}
               >
                 <X className="h-3.5 w-3.5" />
@@ -201,7 +215,7 @@ function TemplateEditor({
         <p className="text-xs text-muted-foreground">Files started from this template must keep these headings.</p>
       </div>
       {errs.map(([k, m]) => (
-        <p key={k} className="text-xs text-destructive">{m}</p>
+        <p key={k} className="text-xs text-red-700 dark:text-red-400">{m}</p>
       ))}
       <p className="text-xs text-muted-foreground">
         {usedBy.length ? <>Used by {usedBy.map((p) => <code key={p} className="mr-1">{p}</code>)}</> : "No folder rule uses it yet."}

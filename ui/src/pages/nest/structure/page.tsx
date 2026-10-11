@@ -10,6 +10,7 @@ export default function StructurePage() {
       isArchived={nest.isArchived}
       onBack={nest.leaveNest}
       openDocument={nest.openDocument}
+      openFolder={nest.openFolder}
       initialFolder={nest.folder}
     />
   );

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { cleanFolder, folderPatterns, removeFolder, renameFolder, renameTemplate, sameRules, setFolder } from "./structure-draft";
+import { cleanFolder, describeKey, describeMessage, folderPatterns, placesOf, removeFolder, renameFolder, renameTemplate, sameRules, setFolder } from "./structure-draft";
 
 describe("structure draft", () => {
   const draft = {
@@ -32,5 +32,18 @@ describe("structure draft", () => {
     const reordered = { templates: draft.templates, folders: { decisions: draft.folders.decisions, "clients/{client}": draft.folders["clients/{client}"] } };
     expect(sameRules(draft, reordered)).toBe(true);
     expect(sameRules(draft, removeFolder(draft, "decisions"))).toBe(false);
+  });
+
+  it("names rule keys in words, even when a pattern holds dots", () => {
+    expect(describeKey("folders.clients/{client}.file_name")).toBe('Folder rule "clients/{client}" — file names');
+    expect(describeKey("folders.notes.v2")).toBe('Folder rule "notes.v2"');
+    expect(describeKey("templates.meeting-note.required_sections")).toBe('Template "meeting-note" — required sections');
+    expect(describeKey("structure.enforce")).toBe("Enforce rules");
+    expect(describeMessage("folders.x.types: unknown node type")).toBe('Folder rule "x" — what can be added: unknown node type');
+    expect(describeMessage("Something else: entirely")).toBe("Something else: entirely");
+  });
+
+  it("counts places, not problems", () => {
+    expect(placesOf([{ path: "a" }, { path: "a" }, { path: "b" }])).toBe(2);
   });
 });

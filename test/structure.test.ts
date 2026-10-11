@@ -203,3 +203,105 @@ describe("structure rules per nest", () => {
     expect(ok.status, JSON.stringify(ok.data)).toBe(201);
   });
 });
+
+describe("structure rules on every write the app makes (UX review)", () => {
+  let nest: string;
+  const enforced = {
+    structure: { enforce: true, closed: true },
+    folders: {
+      "clients/{client}": { folder_name: "/[a-z]+-[0-9]{3}/", types: ["document"], files: { overview: { template: "client-overview" } } },
+      "clients/{client}/meetings": { required: true, types: ["document"], file_name: "{date}-{slug}", template: "meeting-note" },
+      decisions: { types: ["document"], file_name: "adr-{n}-{slug}" },
+    },
+    templates: {
+      "meeting-note": { body: "## Decisions\n", required_sections: ["Decisions"] },
+      "client-overview": { body: "## Summary\n", required_sections: [] },
+    },
+  };
+  const create = (title: string, folder: string, content = "## Decisions\nShip.\n") =>
+    jsonRequest(app, "POST", `/nests/${nest}/nodes`, { title, content, folder }, owner.apiKey);
+
+  beforeAll(async () => {
+    nest = (await jsonRequest(app, "POST", "/nests", { name: "Enforced" }, owner.apiKey)).data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${nest}/collaborators`, { email: writer.email, permission: "write" }, owner.apiKey);
+    await jsonRequest(app, "PUT", `/nests/${nest}/structure`, enforced, owner.apiKey);
+    expect((await create("Overview", "clients/acme-042", "## Summary\nAcme.\n")).status).toBe(201);
+    expect((await create("2026-10-07 Kickoff", "clients/acme-042/meetings")).status).toBe(201);
+  });
+
+  it("an update that removes a required heading is a 400 naming it, never a 500", async () => {
+    const id = "nodes/clients/acme-042/meetings/2026-10-07-kickoff";
+    const res = await jsonRequest(app, "PATCH", `/nests/${nest}/nodes/${id}`, { content: "No decisions here.\n" }, writer.apiKey);
+    expect(res.status, JSON.stringify(res.data)).toBe(400);
+    expect(res.data.error).toMatch(/Decisions/);
+    expect(res.data.error).not.toMatch(/ctx structure/);
+    expect(res.data.error).toMatch(/Structure page/);
+  });
+
+  it("deleting a required file while its folder holds others is a 400 naming the rule, never 'not found'", async () => {
+    const res = await jsonRequest(app, "DELETE", `/nests/${nest}/nodes/nodes/clients/acme-042/overview`, undefined, owner.apiKey);
+    expect(res.status, JSON.stringify(res.data)).toBe(400);
+    expect(res.data.error).toMatch(/overview/);
+    expect(res.data.error).not.toMatch(/not found/i);
+  });
+
+  it("asking to delete a required file is refused when asked, not later at approval", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nest}/nodes/nodes/clients/acme-042/overview/request-deletion`,
+      { reason: "tidy" },
+      writer.apiKey,
+    );
+    expect(res.status, JSON.stringify(res.data)).toBe(400);
+    expect(res.data.error).toMatch(/overview/);
+  });
+
+  it("moving a document into a folder whose names it does not fit is refused", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nest}/nodes/nodes/clients/acme-042/meetings/2026-10-07-kickoff/move`,
+      { folder: "decisions" },
+      owner.apiKey,
+    );
+    expect(res.status, JSON.stringify(res.data)).toBe(400);
+    expect(res.data.error).toMatch(/adr-\{n\}-\{slug\}/);
+  });
+
+  it("moving a required file out of its folder is refused", async () => {
+    const res = await jsonRequest(app, "POST", `/nests/${nest}/nodes/nodes/clients/acme-042/overview/move`, { folder: "decisions" }, owner.apiKey);
+    expect(res.status, JSON.stringify(res.data)).toBe(400);
+  });
+
+  it("a new folder must fit the rules, and brings its required children", async () => {
+    const bad = await jsonRequest(app, "POST", `/nests/${nest}/folders`, { folder: "clients/Acme" }, owner.apiKey);
+    expect(bad.status, JSON.stringify(bad.data)).toBe(400);
+    expect(bad.data.error).toMatch(/\[a-z\]\+-\[0-9\]\{3\}/);
+    const closed = await jsonRequest(app, "POST", `/nests/${nest}/folders`, { folder: "misc" }, owner.apiKey);
+    expect(closed.status).toBe(400);
+    const ok = await jsonRequest(app, "POST", `/nests/${nest}/folders`, { folder: "clients/globex-117" }, owner.apiKey);
+    expect(ok.status, JSON.stringify(ok.data)).toBe(201);
+    const docs = await jsonRequest(app, "GET", `/nests/${nest}/structure?report=1`, undefined, owner.apiKey);
+    expect(docs.data.violations.filter((v: { path: string }) => v.path.startsWith("clients/globex-117"))).toEqual([]);
+  });
+
+  it("a required folder cannot be deleted alone, but its parent can be deleted whole", async () => {
+    const alone = await jsonRequest(app, "POST", `/nests/${nest}/delete-folder`, { folder: "clients/acme-042/meetings" }, owner.apiKey);
+    expect(alone.status, JSON.stringify(alone.data)).toBe(400);
+    const whole = await jsonRequest(app, "POST", `/nests/${nest}/delete-folder`, { folder: "clients/acme-042" }, owner.apiKey);
+    expect(whole.status, JSON.stringify(whole.data)).toBe(200);
+  });
+
+  it("a title with no a-z letters or digits is checked as the name it will get", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nest}/structure/check`,
+      { tests: [{ title: "会议记录", file_name: "{date}-{slug}" }, { title: "会议记录", folder: "clients/acme-042/meetings" }] },
+      writer.apiKey,
+    );
+    expect(res.data.results[0]).toMatchObject({ ok: false, slug: "document-1", generated: true });
+    expect(res.data.results[1]).toMatchObject({ ok: false, slug: "document-1", generated: true });
+  });
+});

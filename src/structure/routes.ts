@@ -139,8 +139,11 @@ interface CheckBody {
 function tryFormat(t: CheckTest) {
   const folderFormat = t.folder_name !== undefined;
   const format = String((folderFormat ? t.folder_name : t.file_name) ?? "").trim();
-  const slug = derivedNodeId(String(t.name ?? t.title ?? ""))?.split("/").pop() ?? "";
-  if (!format || !slug) return { ok: true, slug, violations: [] };
+  // A title with no a-z letters or digits is saved under a generated name.
+  const derived = derivedNodeId(String(t.name ?? t.title ?? ""))?.split("/").pop();
+  const slug = derived ?? GENERATED;
+  const generated = derived === undefined ? { generated: true } : {};
+  if (!format) return { ok: true, slug, ...generated, violations: [] };
   const compiled = compile({ folders: folderFormat ? { "try/{name}": { folder_name: format } } : { try: { file_name: format } } });
   if ("error" in compiled) {
     return { ok: false, slug, violations: [{ code: "CONFIG_ERROR", path: slug, message: Object.values(compiled.fieldErrors)[0] }] };
@@ -152,9 +155,13 @@ function tryFormat(t: CheckTest) {
   return {
     ok: violations.length === 0,
     slug,
+    ...generated,
     violations: violations.map((v) => ({ ...v, path: slug, message: `${what} here must look like ${format}; "${slug}" does not.` })),
   };
 }
+
+/** The name createNode gives a title with no a-z letters or digits (document-1, -2, …). */
+const GENERATED = "document-1";
 
 structureRoutes.post("/check", async (c) => {
   const nestId = c.req.param("nestId")!;
@@ -184,8 +191,13 @@ structureRoutes.post("/check", async (c) => {
   const results = tests.map((t) => {
     if (t.file_name !== undefined || t.folder_name !== undefined) return tryFormat(t);
     let id: string | null;
+    let generated = false;
     try {
       id = derivedNodeId(String(t.name ?? t.title ?? ""), String(t.folder ?? ""));
+      if (!id) {
+        generated = true;
+        id = derivedNodeId(GENERATED, String(t.folder ?? ""));
+      }
     } catch (err) {
       return { ok: false, slug: "", violations: [{ code: "FOLDER_NAME", path: String(t.folder ?? ""), message: (err as Error).message }] };
     }
@@ -194,7 +206,7 @@ structureRoutes.post("/check", async (c) => {
     const violations = checkDocument(rules, { id, type: t.type ?? "document", body: t.body ?? "" }).filter(
       (v) => t.body !== undefined || v.code !== "MISSING_SECTION",
     );
-    return { ok: violations.length === 0, slug: id.split("/").pop()!, violations };
+    return { ok: violations.length === 0, slug: id.split("/").pop()!, ...(generated ? { generated: true } : {}), violations };
   });
 
   const folderResults = folders.map((raw) => {

@@ -1794,6 +1794,8 @@ export default function App() {
             openNest: (opts?: { tags?: string[] }) =>
               setView({ page: "nest", nestId: v.nestId, nestName: v.nestName, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, ...(opts?.tags ? { initialTags: opts.tags } : {}) }),
             leaveNest,
+            openFolder: (folder: string) =>
+              setView({ page: "nest", nestId: v.nestId, nestName: v.nestName, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, initialFolder: folder, tab: "documents" }),
             folder: v.page === "structure" ? v.folder : undefined,
           };
           return (

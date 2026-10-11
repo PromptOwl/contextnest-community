@@ -70,6 +70,7 @@ import {
 import { definitionRoutes } from "./definitions/routes.js";
 import { structureRoutes } from "./structure/routes.js";
 import { ContextNestError } from "@promptowl/contextnest-engine";
+import { forPeople } from "./structure/writes.js";
 import { isDerivedAnnotationsNode } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import {
@@ -2837,7 +2838,7 @@ export function createApp(): Hono<AuthEnv> {
     // document breaks, a reserved path — is the caller's to fix: a 400 with
     // the engine's message (it names the rule), never an opaque 500.
     if (code === "VALIDATION_FAILED" && err instanceof ContextNestError) {
-      return c.json({ error: msg }, 400);
+      return c.json({ error: forPeople(msg) }, 400);
     }
 
     // SQLite constraint errors — surface a clear conflict instead of 500.
