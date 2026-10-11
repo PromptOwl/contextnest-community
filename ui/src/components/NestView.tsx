@@ -16,7 +16,7 @@ import {
   FileText, Plus, ArrowLeft, Shield, Upload, Sparkles,
   Clock, CheckCircle2, Loader2, Link2, Settings as SettingsIcon,
   Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
-  FileStack, FolderPlus, X,
+  FileStack, FolderPlus, X, FolderTree,
   Activity, BookOpen, Archive, Eye, Palette, History,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
@@ -113,6 +113,8 @@ interface NestViewProps {
   ) => void;
   /** Open this nest's activity trace (owner/nest-admin only). */
   onOpenTrace?: () => void;
+  /** Open this nest's structure rules, at a folder's rule when one is given. */
+  onOpenStructure?: (folder?: string) => void;
   /** Open the account-level API keys page. */
   onManageKeys?: () => void;
   /** Seed the search filter on mount. Used when arriving from a tag
@@ -148,6 +150,7 @@ export function NestView({
   onReaderDocChange,
   onOpenDocument,
   onOpenTrace,
+  onOpenStructure,
   onManageKeys,
   initialSearch,
   initialTags,
@@ -1561,6 +1564,13 @@ export function NestView({
               icon: SettingsIcon,
               onSelect: () => setShowSettings(true),
             });
+          // This nest's own folder rules — owners and admins set them.
+          if (canManageGovernance && onOpenStructure && !nestArchived)
+            actions.push({
+              label: "Structure rules",
+              icon: FolderTree,
+              onSelect: () => onOpenStructure(),
+            });
           // Gate on canManageGovernance (owner/admin on THIS nest), not the
           // server-admin flag — otherwise a license admin who is only an
           // editor collaborator here sees "Assign Steward" in the menu while
@@ -1906,6 +1916,7 @@ export function NestView({
           <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
             <DocumentsTab
               nestId={nestId}
+              onOpenStructure={isReaderView ? undefined : onOpenStructure}
               initialSearch={initialSearch}
               initialTags={initialTags}
               initialLoad={initialLoad}

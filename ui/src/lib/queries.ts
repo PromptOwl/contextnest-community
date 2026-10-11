@@ -58,6 +58,7 @@ export const keys = {
   mentionable: (nestId: string) =>
     [...keys.nest(nestId), "mentionable"] as const,
   definitions: (nestId: string) => [...keys.nest(nestId), "definitions"] as const,
+  structure: (nestId: string) => [...keys.nest(nestId), "structure"] as const,
   commentCounts: (nestId: string) =>
     [...keys.nest(nestId), "comment-counts"] as const,
   overview: (nestId: string) => [...keys.nest(nestId), "overview"] as const,
@@ -325,6 +326,9 @@ const NEST_WRITE_SCOPES: Array<{
   // shell's header/footer both read.
   { match: /^\/branding/, affects: (n) => [keys.nest(n)] },
   { match: /^\/definitions/, affects: (n) => [keys.definitions(n)] },
+  // A structure check judges, never writes; saving rules changes only the rules.
+  { match: /^\/structure\/check$/, affects: () => [] },
+  { match: /^\/structure$/, affects: (n) => [keys.structure(n)] },
   { match: /^\/edges/, affects: (n) => [keys.edges(n), keys.graph(n)] },
   { match: /^\/edge-types/, affects: (n) => [keys.edgeTypes(n), keys.edges(n)] },
   { match: /^\/env/, affects: (n) => [keys.env(n)] },
@@ -537,6 +541,12 @@ export const reads = {
     queryOptions({
       queryKey: keys.definitions(nestId),
       queryFn: () => api.listDefinitions(nestId),
+      staleTime: STALE.reference,
+    }),
+  structure: (nestId: string, opts: { folder?: string; report?: boolean } = {}) =>
+    queryOptions({
+      queryKey: [...keys.structure(nestId), opts.folder ?? "", opts.report ? "report" : ""] as const,
+      queryFn: () => api.getStructure(nestId, opts),
       staleTime: STALE.reference,
     }),
   commentCounts: (nestId: string) =>

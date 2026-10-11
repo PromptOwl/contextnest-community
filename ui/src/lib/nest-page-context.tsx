@@ -17,6 +17,8 @@ export interface NestPageContext {
   openNest: (opts?: { tags?: string[] }) => void;
   /** Leave the nest entirely (the pages' back arrow). */
   leaveNest: () => void;
+  /** Structure: the folder whose rule to open (?folder=). */
+  folder?: string;
 }
 
 const Ctx = createContext<NestPageContext | null>(null);

@@ -68,6 +68,8 @@ import {
   markNotificationsRead,
 } from "./governance/notify-service.js";
 import { definitionRoutes } from "./definitions/routes.js";
+import { structureRoutes } from "./structure/routes.js";
+import { ContextNestError } from "@promptowl/contextnest-engine";
 import { isDerivedAnnotationsNode } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import {
@@ -2280,6 +2282,11 @@ export function createApp(): Hono<AuthEnv> {
     const isReadQuery =
       parts.length === 2 &&
       ["context", "query", "search", "export", "chat"].includes(parts[1]);
+    // Checking a title or folder against the structure rules reads, never
+    // writes: viewers check names in the new-document form. The handler asks
+    // for owner/admin itself when the body carries draft rules.
+    const isStructureCheck =
+      parts.length === 3 && parts[1] === "structure" && parts[2] === "check";
 
     // MCP transport is read-tier (isMcpTransport, declared above with the
     // deny helper): the Streamable HTTP protocol is ALWAYS POST — even
@@ -2497,6 +2504,7 @@ export function createApp(): Hono<AuthEnv> {
       !isPinAction &&
       !isAnnotationAction &&
       !isReadQuery &&
+      !isStructureCheck &&
       !isMcpTransport
     ) {
       required = "write";
@@ -2752,6 +2760,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/connectors", connectorRoutes);
   nestsApp.route("/:nestId/hooks", hookNestRoutes);
   nestsApp.route("/:nestId/definitions", definitionRoutes);
+  nestsApp.route("/:nestId/structure", structureRoutes);
   nestsApp.route("/:nestId/assets", assetRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
 
@@ -2823,6 +2832,13 @@ export function createApp(): Hono<AuthEnv> {
     const e = err as { code?: string; message?: string };
     const code = e.code;
     const msg = e.message || "";
+
+    // The engine refusing a write it judges invalid — a structure rule the
+    // document breaks, a reserved path — is the caller's to fix: a 400 with
+    // the engine's message (it names the rule), never an opaque 500.
+    if (code === "VALIDATION_FAILED" && err instanceof ContextNestError) {
+      return c.json({ error: msg }, 400);
+    }
 
     // SQLite constraint errors — surface a clear conflict instead of 500.
     if (code === "SQLITE_CONSTRAINT_UNIQUE") {

@@ -150,6 +150,18 @@ type View =
       isArchived?: boolean;
     }
   | {
+      page: "structure";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+      /** Open at the rule governing this folder (?folder=), or start one for it. */
+      folder?: string;
+      readerMode?: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
+    }
+  | {
       page: "definitions";
       nestId: string;
       nestName: string;
@@ -208,7 +220,7 @@ const NEST_TABS = [
   "collaborators",
 ];
 
-type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" }>;
+type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure" }>;
 
 const isNestScoped = (view: View): view is NestScopedView =>
   NEST_VIEWS.some((v) => v.page === view.page);
@@ -569,7 +581,8 @@ export default function App() {
             isOwner,
             isAnonOwned: false,
             readerMode,
-          });
+            ...(subPage === "structure" && params.get("folder") ? { folder: params.get("folder")! } : {}),
+          } as View);
           return;
         }
         setView({
@@ -639,11 +652,14 @@ export default function App() {
       view.page === "ontology-graph" ||
       view.page === "workflows" ||
       view.page === "definitions" ||
+      view.page === "structure" ||
       view.page === "board" ||
       view.page === "nest-trace"
     ) {
       pathNestId = view.nestId;
       pathView = view.page === "nest-trace" ? "trace" : nestPageForView(view.page)?.path ?? null;
+      if (view.page === "structure" && view.folder) params.set("folder", view.folder);
+      else params.delete("folder");
       params.delete("doc");
       params.delete("thread");
       params.delete("tab");
@@ -1583,6 +1599,16 @@ export default function App() {
                 isAnonOwned: view.isAnonOwned,
               })
             }
+            onOpenStructure={(folder) =>
+              setView({
+                page: "structure",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+                ...(folder ? { folder } : {}),
+              })
+            }
           />
         )}
         {view.page === "nest-trace" && (
@@ -1768,6 +1794,7 @@ export default function App() {
             openNest: (opts?: { tags?: string[] }) =>
               setView({ page: "nest", nestId: v.nestId, nestName: v.nestName, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, ...(opts?.tags ? { initialTags: opts.tags } : {}) }),
             leaveNest,
+            folder: v.page === "structure" ? v.folder : undefined,
           };
           return (
             <NestPageProvider value={ctx}>

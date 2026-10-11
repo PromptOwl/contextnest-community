@@ -176,14 +176,15 @@ const slugify = (s: string) =>
     .replace(/^-|-$/g, "");
 
 /**
- * The id `createNode` will derive for a title at the nest root, or null when
- * the title slugifies to nothing (createNode generates an id at write time,
- * so it cannot be known in advance). Preview-only — the confirm modal uses it
- * to label a staged document New vs Update.
+ * The id `createNode` will derive for a title in `folder` (the nest root by
+ * default), or null when the title slugifies to nothing (createNode generates
+ * an id at write time, so it cannot be known in advance). Preview-only — the
+ * confirm modal labels a staged document New vs Update with it, and the
+ * structure check names the file a title will be saved as.
  */
-export function derivedNodeId(title: string): string | null {
+export function derivedNodeId(title: string, folder = ""): string | null {
   const slug = slugify(title).slice(0, 100).replace(/-+$/, "");
-  return slug ? `nodes/${slug}` : null;
+  return slug ? `nodes/${[...folderToSegments(folder), slug].join("/")}` : null;
 }
 
 /**
@@ -264,7 +265,7 @@ export async function storagePrefix(nestId: string): Promise<string> {
  * defense (each segment slugified independently — "../" collapses to "-",
  * empty segments drop).
  */
-function folderToSegments(folder: string): string[] {
+export function folderToSegments(folder: string): string[] {
   const segments = folder.split("/").map(slugify).filter(Boolean);
   // A folder named "!!!" or "..." slugifies away entirely, and an empty segment
   // list means "the nest root" — so the doc lands at nodes/<title> instead, and

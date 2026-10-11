@@ -29,7 +29,7 @@ import {
   CheckCircle2, Send, Loader2,
   Pencil, Trash2, FolderInput,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
-  FolderOpen, ChevronRight, Share2, FolderPlus, Activity,
+  FolderOpen, ChevronRight, Share2, FolderPlus, Activity, Ruler,
 } from "lucide-react";
 import { FolderTree, prettyFolder, prettyFolderPath, type KnownFolder } from "../FolderTree";
 import { ActivityLogPanel } from "../ActivityLogPanel";
@@ -76,6 +76,8 @@ const EMPTY_FILTERS: DocFilters = { search: "", tags: [], status: "all", type: "
 
 interface Props {
   nestId: string;
+  /** Open this nest's structure rules at the rule governing a folder. */
+  onOpenStructure?: (folder: string) => void;
   initialSearch?: string;
   initialTags?: string[];
   /** The nest's cold load / any refetch (from the nest page). */
@@ -125,6 +127,7 @@ interface Props {
 
 export function DocumentsTab({
   nestId,
+  onOpenStructure,
   initialSearch,
   initialTags,
   initialLoad,
@@ -1704,6 +1707,24 @@ export function DocumentsTab({
                                 }}
                               >
                                 <Activity className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                            {/* This folder's rules — where things go, how
+                                files are named. Everyone can look; owners and
+                                admins edit on the Structure page. */}
+                            {onOpenStructure && (
+                              <button
+                                type="button"
+                                className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 focus-visible:opacity-100 hover:text-primary hover:bg-primary/10"
+                                title={`Rules for ${prettyFolderPath(node.path)}`}
+                                aria-label={`Rules for ${prettyFolderPath(node.path)}`}
+                                data-testid={`folder-rules-${node.path}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onOpenStructure(node.path);
+                                }}
+                              >
+                                <Ruler className="h-3.5 w-3.5" />
                               </button>
                             )}
                             {/* Same split as a document: admins/owners delete

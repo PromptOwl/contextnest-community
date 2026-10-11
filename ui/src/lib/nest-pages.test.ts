@@ -4,7 +4,7 @@ import { nestPageForPath, nestPageForView, nestPages, visibleNestPages } from ".
 // Built from pages/nest/*/meta.ts — guards what a new page could break.
 describe("nest page registry", () => {
   it("finds every page folder in sidebar order", () => {
-    expect(nestPages.map((p) => p.id)).toEqual(["board", "graph", "definitions", "workflows"]);
+    expect(nestPages.map((p) => p.id)).toEqual(["board", "graph", "definitions", "workflows", "structure"]);
   });
 
   it("gives every page a unique URL segment and a unique app view", () => {
@@ -21,10 +21,12 @@ describe("nest page registry", () => {
     expect(nestPageForPath(null)).toBeUndefined();
   });
 
-  it("gates workflows on the flag and write access; the rest are for everyone", () => {
+  it("gates workflows on the flag and write access; the rest are for everyone but a reader", () => {
     const base = { isReadOnly: false, isReaderView: false, canEditDocs: true, workflowPlaneEnabled: true };
     expect(visibleNestPages(base).map((p) => p.id)).toContain("workflows");
     expect(visibleNestPages({ ...base, workflowPlaneEnabled: false }).map((p) => p.id)).not.toContain("workflows");
-    expect(visibleNestPages({ ...base, canEditDocs: false }).map((p) => p.id)).toEqual(["board", "graph", "definitions"]);
+    expect(visibleNestPages({ ...base, canEditDocs: false }).map((p) => p.id)).toEqual(["board", "graph", "definitions", "structure"]);
+    // Every nest has its own rules; a docs-site reader is not shown them.
+    expect(visibleNestPages({ ...base, isReaderView: true }).map((p) => p.id)).not.toContain("structure");
   });
 });
