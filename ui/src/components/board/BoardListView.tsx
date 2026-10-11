@@ -49,6 +49,7 @@ import { UNCATEGORIZED, type BoardColumn, type BoardNode, type DimensionKind } f
 import {
   PRIORITY_LABELS,
   PRIORITIES,
+  formatDue,
   localToday,
   moveNeedsReview,
   type GovernanceContext,
@@ -118,17 +119,6 @@ interface PendingBulk {
   note?: string;
 }
 
-/** Tracks the viewport so narrow screens drop the lower-value columns. */
-function useWidth(): number {
-  const [w, setW] = useState(() => (typeof window === "undefined" ? 1280 : window.innerWidth));
-  useEffect(() => {
-    const on = () => setW(window.innerWidth);
-    window.addEventListener("resize", on);
-    return () => window.removeEventListener("resize", on);
-  }, []);
-  return w;
-}
-
 /** A native checkbox that can show "some selected". */
 function Check({
   state,
@@ -176,17 +166,18 @@ export function BoardListView({
   onOpen,
   onChanged,
 }: Props) {
-  const width = useWidth();
   const today = localToday();
   const titles = useMemo(() => new Map(allNodes.map((n) => [n.id, n.title])), [allNodes]);
   const ctx: ListContext = useMemo(
     () => ({ titleOf: (id) => titles.get(id), columnsOf, columnLabel }),
     [titles, columnsOf, columnLabel],
   );
+  // The list's own width, not the window's: the nest sidebar takes a share.
+  const [width, setWidth] = useState(1080);
   const columns = useMemo(
     () =>
       [...LIST_COLUMNS, ...extraColumns].filter(
-        (c) => !(c.hideBelow === "lg" && width < 1100) && !(c.hideBelow === "md" && width < 820),
+        (c) => !(c.hideBelow === "lg" && width < 1080) && !(c.hideBelow === "md" && width < 760),
       ),
     [extraColumns, width],
   );
@@ -224,11 +215,16 @@ export function BoardListView({
   useEffect(() => {
     const el = scroller.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setViewport(el.clientHeight));
+    const measure = () => {
+      setViewport(el.clientHeight);
+      setWidth(el.clientWidth);
+    };
+    const ro = new ResizeObserver(measure);
     ro.observe(el);
-    setViewport(el.clientHeight);
+    measure();
     return () => ro.disconnect();
-  }, []);
+    // Re-attach when the table first appears (an empty list renders none).
+  }, [flat.length === 0]);
   const win = useMemo(() => visibleWindow(flat, scrollTop, viewport), [flat, scrollTop, viewport]);
 
   // ── Bulk ──
@@ -287,6 +283,12 @@ export function BoardListView({
   }, [selectedNodes]);
   const ask = (p: PendingBulk) => setPending(p);
 
+  // A name when the roster has one; otherwise the address's local part —
+  // the full address is on hover.
+  const shortPerson = (email: string) => {
+    const label = personLabel(email);
+    return label.toLowerCase() === email.toLowerCase() ? email.split("@")[0]! : label;
+  };
   const headerFor = (c: ListColumn) => (c.id === "column" ? DIMENSION_NAMES[dimension] : c.label);
 
   const renderCell = (c: ListColumn, n: BoardNode) => {
@@ -325,7 +327,7 @@ export function BoardListView({
         return n.assignee ? (
           <span className="flex min-w-0 items-center gap-1.5" title={n.assignee}>
             <Avatar email={n.assignee} size="sm" />
-            <span className="truncate text-muted-foreground">{personLabel(n.assignee)}</span>
+            <span className="truncate text-muted-foreground">{shortPerson(n.assignee)}</span>
           </span>
         ) : (
           <span className="text-muted-foreground/50">—</span>
@@ -343,7 +345,9 @@ export function BoardListView({
         return n.due && !n.completed_at ? (
           <DueChip due={n.due} today={today} editable={false} onChange={() => {}} />
         ) : n.due ? (
-          <span className="text-xs text-muted-foreground tabular-nums">{n.due}</span>
+          <span className="text-xs text-muted-foreground/70 tabular-nums" title={`Due ${n.due}`}>
+            {formatDue(n.due, today)}
+          </span>
         ) : (
           <span className="text-muted-foreground/50">—</span>
         );
@@ -403,7 +407,7 @@ export function BoardListView({
           {/* Header */}
           <div
             role="row"
-            className="sticky top-0 z-10 grid h-9 items-center border-b border-border bg-muted/60 text-xs font-medium text-muted-foreground backdrop-blur"
+            className="sticky top-0 z-10 grid h-9 items-center border-b border-border bg-muted text-xs font-medium text-muted-foreground"
             style={{ gridTemplateColumns: grid, minWidth: "fit-content" }}
           >
             <span className="flex justify-center">

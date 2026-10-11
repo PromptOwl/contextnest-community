@@ -274,8 +274,10 @@ export function MaturityBoard({
     };
   }, [nestId, isOwner, isAdmin, isArchived]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /** Read the nest's nodes. `silent` keeps the current view on screen (the
+   *  list's sort, sections and scroll survive a bulk edit's re-read). */
+  const load = useCallback(async (opts: { silent?: boolean } = {}) => {
+    if (!opts.silent) setLoading(true);
     setError(null);
     try {
       // Metadata-only, nest-wide — every node in the nest buckets into a
@@ -1026,8 +1028,14 @@ export function MaturityBoard({
   // for the bulk tag box.
   const columnLabels = useMemo(() => new Map(columns.map((c) => [c.key, c.label])), [columns]);
   const listColumnsOf = useCallback(
-    (n: BoardNode) => cardColumnKeys(n, effectiveConfig),
-    [effectiveConfig],
+    (n: BoardNode) => {
+      // Only the tags that ARE columns on this board — "launch" on a
+      // todo/doing/done board is a tag, not where the card sits.
+      const keys = cardColumnKeys(n, effectiveConfig);
+      const shown = keys.filter((k) => columnLabels.has(k));
+      return shown.length > 0 ? shown : keys;
+    },
+    [effectiveConfig, columnLabels],
   );
   const listColumnLabel = useCallback(
     (key: string) =>
@@ -1481,7 +1489,7 @@ export function MaturityBoard({
               </Button>
             </form>
           )}
-          <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
             <RefreshCw
               className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
             />
@@ -1895,7 +1903,10 @@ export function MaturityBoard({
           doneTags={doneTags}
           tagSuggestions={allTagValues}
           onOpen={onOpenDocument}
-          onChanged={load}
+          onChanged={async () => {
+            await qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
+            await load({ silent: true });
+          }}
         />
       ) : (
         lanes ? (

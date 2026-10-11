@@ -34,7 +34,8 @@ export interface ListColumn {
   /** CSS grid track, e.g. "minmax(220px,1fr)" or "120px". */
   width: string;
   sortable: boolean;
-  /** Hidden below this breakpoint ("md" | "lg"), so the list stays readable narrow. */
+  /** Hidden when the list is narrower than this ("md" 760px, "lg" 1080px), so
+   *  it stays readable in a narrow pane. */
   hideBelow?: "md" | "lg";
   align?: "start" | "end";
   /** The cell's raw value, for sorting and the default text renderer. */
@@ -52,14 +53,14 @@ export const LIST_COLUMNS: ListColumn[] = [
   {
     id: "title",
     label: "Title",
-    width: "minmax(240px, 1fr)",
+    width: "minmax(160px, 1fr)",
     sortable: true,
     value: (n) => n.title.toLowerCase(),
   },
   {
     id: "column",
     label: "Column",
-    width: "140px",
+    width: "128px",
     sortable: true,
     value: (n, c) => c.columnsOf(n).map(c.columnLabel).join(", ").toLowerCase() || null,
   },
@@ -68,6 +69,7 @@ export const LIST_COLUMNS: ListColumn[] = [
     label: "Assignee",
     width: "150px",
     sortable: true,
+    hideBelow: "md",
     value: (n) => n.assignee?.toLowerCase() || null,
   },
   {
@@ -75,6 +77,7 @@ export const LIST_COLUMNS: ListColumn[] = [
     label: "Priority",
     width: "104px",
     sortable: true,
+    hideBelow: "md",
     value: (n) => {
       const i = PRIORITY_ORDER.indexOf(n.priority ?? "");
       return i === -1 ? null : i;
@@ -92,7 +95,7 @@ export const LIST_COLUMNS: ListColumn[] = [
   {
     id: "tags",
     label: "Tags",
-    width: "160px",
+    width: "140px",
     sortable: true,
     hideBelow: "lg",
     value: (n) =>
