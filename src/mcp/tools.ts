@@ -63,7 +63,9 @@ import {
   createFieldDefinition,
   deleteFieldDefinition,
   describeFields,
+  listFieldDefinitionEvents,
   listFieldDefinitions,
+  nodesWithInvalidValues,
   storedFieldsOf,
   updateFieldDefinition,
   type FieldDefinition,
@@ -682,8 +684,16 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_fields",
     description:
-      "List this nest's custom field definitions — key, label, type, options, required/default, which node types each applies to, and the scale label of a number. Use before setting `fields` on context_create / context_update or filtering context_list by them.",
-    inputSchema: { type: "object" as const, properties: {} },
+      "List this nest's custom field definitions — key, label, type, options, required/default, which node types each applies to, and the scale label of a number. Use before setting `fields` on context_create / context_update or filtering context_list by them. Pass `history: true` for the audit trail of definition changes instead.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        history: {
+          type: "boolean",
+          description: "Return who changed which definition and how (newest first) instead of the definitions",
+        },
+      },
+    },
   },
   {
     name: "context_create_field",
@@ -2188,6 +2198,15 @@ async function runTool(
     }
 
     case "context_fields": {
+      if (args.history === true) {
+        const events = await listFieldDefinitionEvents(nestId);
+        if (events.length === 0) return { text: "No field definition changes recorded yet.", data: { events } };
+        const lines = events.map(
+          (e) =>
+            `- ${e.at} — ${e.actor_email ?? e.actor_id ?? "unknown"} ${e.action}d \`${e.field_key}\``,
+        );
+        return { text: `${events.length} definition change(s):\n\n${lines.join("\n")}`, data: { events } };
+      }
       const defs = await listFieldDefinitions(nestId);
       if (defs.length === 0) {
         return {
@@ -2244,9 +2263,14 @@ async function runTool(
           if (args[k] !== undefined) patch[k] = args[k];
         }
         const field = await updateFieldDefinition(nestId, String(args.field ?? ""), userId, patch);
+        const invalid = await nodesWithInvalidValues(nestId, field);
         return {
-          text: `Updated field:\n${describeDefinition(field)}`,
-          data: { field },
+          text: `Updated field:\n${describeDefinition(field)}${
+            invalid.length
+              ? `\n\n${invalid.length} document(s) keep a value that no longer fits this definition (it stays in their history; the next edit of that field must fix it): ${invalid.slice(0, 10).join(", ")}`
+              : ""
+          }`,
+          data: { field, invalid_values: invalid.length, invalid_nodes: invalid.slice(0, 50) },
         };
       } catch (err) {
         return fieldToolError(err);

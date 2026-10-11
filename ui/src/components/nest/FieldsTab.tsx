@@ -204,7 +204,14 @@ export function FieldsTab({ nestId }: { nestId: string }) {
       const creating = editing.def === null;
       const body = inputOf(editing.draft, creating);
       if (creating) await api.createField(nestId, body);
-      else await api.updateField(nestId, editing.def!.key, body);
+      else {
+        const res = await api.updateField(nestId, editing.def!.key, body);
+        if (res.invalid_values) {
+          toast.warning(
+            `${res.invalid_values} document${res.invalid_values === 1 ? "" : "s"} keep a value that no longer fits “${body.label}”. It stays in their history; the next edit of that field must fix it.`,
+          );
+        }
+      }
       toast.success(creating ? `“${body.label}” added` : `“${body.label}” saved`);
       setEditing(null);
     } catch (e: any) {
@@ -589,6 +596,7 @@ function FieldDialog({
                   <div className="text-sm font-medium">Required</div>
                   <div className="text-xs text-muted-foreground">
                     New documents need a value — the default fills it if set.
+                    Existing documents without one aren't changed.
                   </div>
                 </div>
                 <Switch checked={d.required} onCheckedChange={(v) => set({ required: v })} />

@@ -16,7 +16,9 @@ import {
   canManageFields,
   createFieldDefinition,
   deleteFieldDefinition,
+  listFieldDefinitionEvents,
   listFieldDefinitions,
+  nodesWithInvalidValues,
   updateFieldDefinition,
 } from "../nodes/custom-fields.js";
 import { ValidationError } from "../shared/errors.js";
@@ -47,6 +49,15 @@ fieldRoutes.get("/", async (c) => {
   });
 });
 
+// Who changed which definition, before → after. Read-tier like the list:
+// the definitions govern every write, so their history is everyone's to see.
+fieldRoutes.get("/history", async (c) => {
+  const limit = Number(c.req.query("limit") ?? 100);
+  return c.json({
+    events: await listFieldDefinitionEvents(c.req.param("nestId")!, Number.isFinite(limit) ? limit : 100),
+  });
+});
+
 fieldRoutes.post("/", async (c) => {
   const body = await jsonObject(c);
   const field = await createFieldDefinition(c.req.param("nestId")!, c.get("userId"), body);
@@ -61,7 +72,10 @@ fieldRoutes.patch("/:fieldId", async (c) => {
     c.get("userId"),
     body,
   );
-  return c.json({ field });
+  // Narrowing options or applies_to can leave values on documents that no
+  // longer validate. They stay (governed history), but the admin is told.
+  const invalid = await nodesWithInvalidValues(c.req.param("nestId")!, field);
+  return c.json({ field, invalid_values: invalid.length, invalid_nodes: invalid.slice(0, 50) });
 });
 
 fieldRoutes.delete("/:fieldId", async (c) => {

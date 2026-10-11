@@ -95,7 +95,8 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // import. Field VALUES add no tool: they live in frontmatter `metadata.fields` and travel
 // through the existing context_create/update (a `fields` arg) and come back inside the
 // catalog's own `frontmatter.metadata` on get/list/query. They mirror REST
-// /nests/:id/fields 1:1.
+// /nests/:id/fields 1:1. Upstream catalog proposal: PromptOwl/ContextNest#178 — adopt the
+// descriptors and lower this by 4 if it lands there.
 const BASELINE = 52;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;

@@ -3601,10 +3601,13 @@ export async function createField(nestId: string, data: FieldDefinitionInput) {
 }
 
 export async function updateField(nestId: string, key: string, data: FieldDefinitionInput) {
-  return request<{ field: FieldDefinition }>(`/nests/${nestId}/fields/${encodeURIComponent(key)}`, {
+  return request<{ field: FieldDefinition; invalid_values?: number; invalid_nodes?: string[] }>(
+    `/nests/${nestId}/fields/${encodeURIComponent(key)}`,
+    {
     method: "PATCH",
     body: JSON.stringify(data),
-  });
+  },
+  );
 }
 
 export async function deleteField(nestId: string, key: string) {

@@ -690,6 +690,10 @@ Types: `text` (≤ 2000 chars), `number` (with an optional scale `unit`, e.g. `p
 
 **Who may write:** the nest owner, a nest admin, the server license-admin, or a **reviewer steward scoped to the whole nest** (`403` for everyone else, including write collaborators and editor stewards). Writes are admitted at read tier by the nest middleware so a read-collaborator reviewer reaches the handler; the handler is the gate. Archived nest → `403`. MCP: `context_fields`, `context_create_field`, `context_update_field`, `context_delete_field` (same rules — see [§9 MCP](#9-mcp)).
 
+**GET** `/nests/:nestId/fields/history?limit=100` (read+) — the audit trail of definition changes, newest first: `{ "events": [{ "field_key", "action": "create"|"update"|"delete", "actor_id", "actor_email", "before", "after", "at" }] }`. Definitions are config rows, not documents, so this is their history. MCP: `context_fields` with `history: true`.
+
+A PATCH answers `invalid_values` (and up to 50 `invalid_nodes`) when narrowing `options` or `applies_to` left documents holding a value that no longer fits; the values stay in their history, and the next edit of that field must fix them. Re-creating a deleted key as a type its leftover values don't fit → `409`.
+
 **Values on nodes** — see [§4](#4-nodes-documents): `fields` on create/update, `fields` + `status_since` on responses, `field.<key>` list filters.
 
 **Time in status** is whole seconds since the node entered its current board column: `moved_at` (stamped when a task's tag set changes — and, once a time-in-status field covers another node type, that type's moves too), else `created_at`. It is returned inside `fields` under the definition's key on list/get/create/update responses, alongside `status_since` so a client can tick it live. Writing it → `400`.

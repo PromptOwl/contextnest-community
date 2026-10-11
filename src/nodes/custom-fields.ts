@@ -25,6 +25,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { getDb } from "../db/client.js";
+import { ensureNodeIndex, readIndexedNodes } from "./node-index.js";
 import { config } from "../config.js";
 import { resolveNestAccess, isNestArchived } from "../shared/access.js";
 import { getStewardsForUser } from "../governance/stewardship-service.js";
@@ -373,7 +374,15 @@ export async function normalizeFieldValue(
       const v = raw instanceof Date ? raw.toISOString().slice(0, 10) : raw;
       if (typeof v !== "string") throw new ValidationError(`${name} must be a date like 2026-10-31`);
       if (!v.trim()) return null;
-      if (!DATE_RE.test(v.trim()) || Number.isNaN(Date.parse(v.trim()))) {
+      // Round-trip, not just Date.parse: some engines roll 2026-02-31 over
+      // to March instead of returning NaN.
+      const day = v.trim();
+      const parsed = Date.parse(`${day}T00:00:00Z`);
+      if (
+        !DATE_RE.test(day) ||
+        Number.isNaN(parsed) ||
+        new Date(parsed).toISOString().slice(0, 10) !== day
+      ) {
         throw new ValidationError(`${name} must be a date like 2026-10-31, got "${v}"`);
       }
       return v.trim();
@@ -616,13 +625,129 @@ export function matchesFieldFilter(
 
 /** Validate a filter map against the nest's definitions (unknown key → 400). */
 export function assertFilterKeys(filters: Record<string, unknown>, defs: FieldDefinition[]): void {
-  for (const key of Object.keys(filters)) {
-    if (!defs.some((d) => d.key === key)) {
+  for (const [key, wanted] of Object.entries(filters)) {
+    const def = defs.find((d) => d.key === key);
+    if (!def) {
       throw new ValidationError(
         `can't filter on "${key}" — this nest defines: ${defs.map((d) => d.key).join(", ") || "no fields"}`,
       );
     }
+    // A non-numeric number filter would silently match nothing.
+    if (
+      (def.type === "number" || def.type === "time_in_status") &&
+      wanted !== null &&
+      wanted !== "" &&
+      wanted !== "none" &&
+      !Number.isFinite(Number(wanted))
+    ) {
+      throw new ValidationError(`${def.label} (${key}) filters by a number, got "${String(wanted)}"`);
+    }
   }
+}
+
+// ─── Stored values vs a definition ─────────────────────────────────────────
+
+/** A roster check that only looks at shape — for re-validating values that
+ *  were already accepted, where the person may since have left the nest. */
+const shapeOnlyRoster = async () =>
+  new Proxy(new Set<string>(), { get: (t, p) => (p === "has" ? () => true : (t as any)[p]) }) as Set<string>;
+
+/**
+ * Nodes whose stored value under `def.key` no longer validates against
+ * `def` — after narrowing options or applies_to, or before re-creating a
+ * deleted key with a different type. Reads the index mirror (frontmatter
+ * only, no file reads).
+ */
+export async function nodesWithInvalidValues(
+  nestId: string,
+  def: Pick<FieldDefinition, "key" | "label" | "type" | "options" | "applies_to">,
+): Promise<string[]> {
+  if (isComputed(def.type)) return [];
+  await ensureNodeIndex(nestId);
+  const bad: string[] = [];
+  for (const n of await readIndexedNodes(nestId)) {
+    const stored = storedFieldsOf(n.frontmatter.metadata);
+    if (!(def.key in stored)) continue;
+    if (!appliesTo(def, n.frontmatter.type)) {
+      bad.push(n.id);
+      continue;
+    }
+    try {
+      await normalizeFieldValue(def, stored[def.key], shapeOnlyRoster);
+    } catch {
+      bad.push(n.id);
+    }
+  }
+  return bad;
+}
+
+// ─── Definition history (audit) ────────────────────────────────────────────
+
+export interface FieldDefinitionEvent {
+  id: string;
+  nest_id: string;
+  field_key: string;
+  action: "create" | "update" | "delete";
+  actor_id: string | null;
+  actor_email: string | null;
+  before: Partial<FieldDefinition> | null;
+  after: Partial<FieldDefinition> | null;
+  at: string;
+}
+
+/** The parts of a definition worth auditing (ids and timestamps aren't). */
+function auditShape(d: FieldDefinition | null): Partial<FieldDefinition> | null {
+  if (!d) return null;
+  const { id: _i, nest_id: _n, created_at: _c, updated_at: _u, created_by: _b, ...rest } = d;
+  return rest;
+}
+
+async function recordDefinitionEvent(
+  nestId: string,
+  key: string,
+  action: FieldDefinitionEvent["action"],
+  actorId: string,
+  before: FieldDefinition | null,
+  after: FieldDefinition | null,
+): Promise<void> {
+  await getDb().run(
+    `INSERT INTO field_definition_events (id, nest_id, field_key, action, actor_id, before_json, after_json, at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      randomUUID(),
+      nestId,
+      key,
+      action,
+      actorId,
+      before ? JSON.stringify(auditShape(before)) : null,
+      after ? JSON.stringify(auditShape(after)) : null,
+      new Date().toISOString(),
+    ],
+  );
+}
+
+/** Who changed which definition, and from what to what — newest first. */
+export async function listFieldDefinitionEvents(
+  nestId: string,
+  limit = 100,
+): Promise<FieldDefinitionEvent[]> {
+  const rows = (await getDb().all(
+    `SELECT e.*, u.email AS actor_email FROM field_definition_events e
+       LEFT JOIN users u ON u.id = e.actor_id
+      WHERE e.nest_id = ? ORDER BY e.at DESC LIMIT ?`,
+    [nestId, Math.max(1, Math.min(500, Math.floor(limit)))],
+  )) as Array<Record<string, any>>;
+  return rows.map((r) => ({
+    id: r.id,
+    nest_id: r.nest_id,
+    field_key: r.field_key,
+    action: r.action,
+    actor_id: r.actor_id ?? null,
+    actor_email: r.actor_email ?? null,
+    before: parseJson(r.before_json, null),
+    after: parseJson(r.after_json, null),
+    at: r.at,
+  }));
 }
 
 // ─── Definition CRUD ───────────────────────────────────────────────────────
@@ -691,6 +816,20 @@ export async function createFieldDefinition(
     [nestId, key],
   );
   if (taken) throw new ConflictError(`A field with key "${key}" already exists on this nest`);
+  // A deleted key's values are still on documents. Re-creating it as a type
+  // they don't fit would reinterpret governed history — refuse instead.
+  const stale = await nodesWithInvalidValues(nestId, {
+    key,
+    label,
+    type,
+    options,
+    applies_to: [ANY_TYPE],
+  });
+  if (stale.length > 0) {
+    throw new ConflictError(
+      `${stale.length} document${stale.length === 1 ? "" : "s"} still carr${stale.length === 1 ? "ies" : "y"} "${key}" values from an earlier field that aren't valid as ${type}${options.length ? ` (${options.join(", ")})` : ""} — use another key, or define it to fit them`,
+    );
+  }
   if (type === "time_in_status") {
     const other = await db.get(
       "SELECT field_key FROM field_definitions WHERE nest_id = ? AND type = 'time_in_status'",
@@ -727,7 +866,9 @@ export async function createFieldDefinition(
       ts,
     ],
   );
-  return getDefinition(nestId, id);
+  const created = await getDefinition(nestId, id);
+  await recordDefinitionEvent(nestId, key, "create", userId, null, created);
+  return created;
 }
 
 /**
@@ -802,7 +943,9 @@ export async function updateFieldDefinition(
     ...(params as any[]),
     def.id,
   ]);
-  return getDefinition(nestId, def.id);
+  const updated = await getDefinition(nestId, def.id);
+  await recordDefinitionEvent(nestId, def.key, "update", userId, def, updated);
+  return updated;
 }
 
 /**
@@ -819,5 +962,6 @@ export async function deleteFieldDefinition(
   await assertCanManageFields(nestId, userId);
   const def = await getDefinition(nestId, idOrKey);
   await getDb().run("DELETE FROM field_definitions WHERE id = ?", [def.id]);
+  await recordDefinitionEvent(nestId, def.key, "delete", userId, def, null);
   return def;
 }

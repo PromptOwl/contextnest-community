@@ -2866,6 +2866,10 @@ export function createApp(): Hono<AuthEnv> {
     // while holding only read collaborator access, so writes are admitted at
     // read tier and gated in the handler (assertCanManageFields), which also
     // refuses an archived nest. Exact resource segment.
+    // ANY route added under /fields inherits this bypass — every handler in
+    // src/nests/field-routes.ts must call assertCanManageFields itself
+    // (test/custom-fields.test.ts pins read collaborators, editor stewards
+    // and tag-scoped reviewers at 403).
     const isFieldDefinitionAction = parts[1] === "fields";
     // isNestLifecycleAction (archive/restore) is defined above, next to
     // isMcpTransport — the open-mode branch needs it too, and that branch runs

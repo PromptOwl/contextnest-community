@@ -564,3 +564,58 @@ describe("boards group and filter by fields", () => {
     expect(data.board.config).toMatchObject({ dimension: "field", fieldKey: "severity" });
   });
 });
+
+describe("review hardening", () => {
+  it("a tag-scoped reviewer may not define fields", async () => {
+    await resetAuthRateLimit();
+    const tagRev = await registerUser(app, "tagrev@acme.com", "TagRev");
+    await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: tagRev.email, permission: "read" }, owner.apiKey);
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/stewards`,
+      { scope: "tag", tagName: "ops", users: [{ email: tagRev.email, role: "reviewer" }] },
+      owner.apiKey,
+    );
+    expect((await createField(tagRev, { key: "tagrev_x", label: "X", type: "text" })).status).toBe(403);
+    expect((await jsonRequest(app, "DELETE", `${fieldsUrl()}/severity`, undefined, tagRev.apiKey)).status).toBe(403);
+  });
+
+  it("re-creating a deleted key as a type its old values don't fit is refused", async () => {
+    await createField(owner, { key: "points_old", label: "Old points", type: "number" });
+    await createNode(owner, { title: "has-old-points", fields: { points_old: 5 } });
+    await jsonRequest(app, "DELETE", `${fieldsUrl()}/points_old`, undefined, owner.apiKey);
+    const clash = await createField(owner, { key: "points_old", label: "Old", type: "select", options: ["a", "b"] });
+    expect(clash.status).toBe(409);
+    expect(clash.data.error).toMatch(/1 document still carries/);
+    // Same type: the values come back.
+    expect((await createField(owner, { key: "points_old", label: "Old points", type: "number" })).status).toBe(201);
+    expect((await getNode("has-old-points")).fields.points_old).toBe(5);
+  });
+
+  it("narrowing options reports the documents left with a stale value", async () => {
+    const res = await jsonRequest(app, "PATCH", `${fieldsUrl()}/severity`, { options: ["low", "critical"] }, owner.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data.invalid_values).toBeGreaterThan(0);
+    expect(res.data.invalid_nodes).toContain("nodes/ship-it");
+    await jsonRequest(app, "PATCH", `${fieldsUrl()}/severity`, { options: ["low", "high", "critical"] }, owner.apiKey);
+  });
+
+  it("every definition change is in the audit history, REST and MCP", async () => {
+    const { data } = await jsonRequest(app, "GET", `${fieldsUrl()}/history`, undefined, reader.apiKey);
+    const sev = data.events.filter((e: any) => e.field_key === "severity");
+    expect(sev.map((e: any) => e.action)).toContain("create");
+    const narrowed = sev.find((e: any) => e.action === "update" && e.after?.options?.length === 2);
+    expect(narrowed.before.options).toEqual(["low", "high", "critical"]);
+    expect(narrowed.actor_email).toBe(owner.email);
+    expect(data.events.some((e: any) => e.field_key === "points_old" && e.action === "delete")).toBe(true);
+    const m = await mcp(reader, "context_fields", { history: true });
+    expect(m.data.events.length).toBeGreaterThan(0);
+  });
+
+  it("refuses an impossible date and a non-numeric number filter", async () => {
+    const bad = await patchNode(owner, "ship-it", { fields: { target: "2026-02-31" } });
+    expect(bad.status).toBe(400);
+    expect((await list("?field.estimate=lots")).status).toBe(400);
+  });
+});

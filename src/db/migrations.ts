@@ -1974,6 +1974,23 @@ export function runMigrations(db: Database.Database): void {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_key
         ON field_definitions(nest_id, field_key);
+      -- One time-in-status field per nest, enforced atomically.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_one_tis
+        ON field_definitions(nest_id) WHERE type = 'time_in_status';
+      -- Audit trail of definition changes (who, what, before → after).
+      -- Definitions are plain config rows, so this is their history.
+      CREATE TABLE IF NOT EXISTS field_definition_events (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        field_key TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('create', 'update', 'delete')),
+        actor_id TEXT,
+        before_json TEXT,
+        after_json TEXT,
+        at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_field_definition_events_nest
+        ON field_definition_events(nest_id, at);
     `);
     recordMigration("062_field_definitions");
   }
