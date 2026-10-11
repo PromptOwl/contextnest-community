@@ -55,6 +55,16 @@ env:
 permissions:
   contents: read
 
+# One run at a time against the shared environment: every run signs in as the
+# same accounts, and its orphan sweep deletes ALL AUTO_ nests on them — so
+# overlapping runs delete each other's fixtures (404 Nest not found), skew
+# counts and trip the rate limiter (429).
+# ponytail: GitHub keeps only the newest pending run per group, so an older
+# queued PR run is cancelled — re-run it, or give runs their own accounts.
+concurrency:
+  group: e2e-${{ vars.TEST_URL || 'https://nest-dev.promptowl.ai' }}
+  cancel-in-progress: false
+
 jobs:
   e2e:
     runs-on: ubuntu-latest
