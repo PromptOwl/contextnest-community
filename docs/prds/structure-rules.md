@@ -427,7 +427,7 @@ Every phase is built **test-first**:
 3. Hand the phase to the **QA agent** (`.claude/agents/qa-adversary.md`, in both repos). It only **runs** the suites and **attacks** the change. It never edits code. It reports blocking findings with exact repros and ends with a `PASS` or `BLOCKED` verdict.
 4. Each blocking finding is fixed test-first: a failing test that reproduces it, then the fix. QA runs again until the verdict is `PASS`.
 
-### 10.1 Engine phase (ContextNest) — re-review pending (round 17)
+### 10.1 Engine phase (ContextNest) — re-review pending (round 19)
 
 - Round 1 (`9c8c3a3`) passed every suite, but QA and the architecture review returned `BLOCKED` / `Needs rework`: ReDoS bypasses, closed-mode bypass through system-path look-alikes, legacy configs refusing writes, a stranded write when scaffolding failed, and unenforced paths (deprecated `delete_document`, `ctx pull`, approvals).
 - Round 2 (`e81d3f1`) wrote a failing test for every finding, then fixed them. Both reviewers re-ran and found more:
@@ -614,7 +614,36 @@ Every phase is built **test-first**:
   - An overwrite import can replace the nest checkpoint ledger.
   - The `.versions/<doc>/<file>` path grammar is still parsed in several modules.
 
-  QA and the architecture review re-run on `b02b408`; their verdicts gate this phase.
+  The architecture review of round 17 returned `Needs rework`:
+  - jsdiff's position search for a hunk that does not fit was unbounded (seconds to hours from one patch);
+  - a set re-sending an identical history skipped replaying its own version files;
+  - an unparseable head was accepted as an import baseline;
+  - a file named `.versions` could block a folder.
+
+  It judged the round-17 sidecar reversal acceptable and the per-call budget sound.
+- Round 18 (`aa6048d`) fixed those test-first:
+  - every patch goes through `applyPatchBounded` (replay, reconstruct, held edits, suggestion approval);
+  - a set that brings a version file is always replayed;
+  - only a parsed head is a baseline;
+  - `.versions` files are refused;
+  - a `source` under `sources/` is no baseline;
+  - the sealed bytes restore over a drifted sidecar;
+  - kept-name twins use the file-system fold;
+  - a forgotten version's text is refused under any name;
+  - a test pins that the `.versions` path parsers agree.
+
+  QA on round 17 returned `BLOCKED`, with a partial report:
+  - the budget did not count reading and hashing (planted histories with junk lines: about 20 s and 3.5 GiB from a 738 KB request);
+  - bulk publish (`context_import ids`) was unbudgeted;
+  - an import could write the vault's own write lock.
+- Round 19 (`7bd9575`) fixed those test-first:
+  - reads, hashing and replay are charged to one budget per import call (verdicts and bulk publish), with a 64 Mi per-history read cap;
+  - histories are read and replayed one at a time;
+  - dot-named `.versions/` entries are refused.
+
+  **Known, not in this phase (added):** publishing a large document with a long diff chain stalls the event loop for seconds even without rules (`reconstructFromHistory` plus `createPatch` in versioning). This predates the phase and is queued as its own task.
+
+  QA and the architecture review re-run on `7bd9575`; their verdicts gate this phase.
 
   **Chunked imports.** The engine judges each imported history by what the nest will hold after the call: the call's files laid over what is already there, rebuilt and hash-verified. A document may arrive before or after its history, across calls. Within a history, a call must not bring `history.yaml` ahead of the keyframes and diffs it needs, since a history that does not rebuild and verify is refused. So the UI chunker (`ui/src/lib/api.ts`), which splits by bytes, should send each `.versions/<doc>/` folder's `history.yaml` last. Community's own staging (nest import, bundle restore, `context_sync_folder`) is designed to run under `skip` (§6), which leaves it unjudged. Until that flag is wired into Community's `opContext`, those imports are judged. The browser picker currently sorts `history.yaml` before `v*.md`, so a chunk boundary inside a `.versions/<doc>/` folder would get that history refused. Sort `history.yaml` last, or wire `skip`, as part of the Community phase.
 
