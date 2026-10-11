@@ -193,4 +193,69 @@ describe("MCP context_my_drafts: reading back the author's own draft", () => {
     const theirs = await callTool(app, nestId, owner.apiKey, "context_my_drafts", { id: "nodes/submitted-doc" });
     expect(textOf(theirs)).not.toContain("revised after submit");
   });
+
+  it("a rejected draft reads back as the author's working copy, by title too", async () => {
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Bounced Doc", content: "needs another pass" },
+      writer.apiKey,
+    );
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes/nodes/bounced-doc/submit-review`, {}, writer.apiKey);
+    const reject = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/bounced-doc/reject`,
+      { note: "tighten the intro" },
+      reviewer.apiKey,
+    );
+    expect(reject.status).toBe(200);
+
+    const byTitle = await callTool(app, nestId, writer.apiKey, "context_my_drafts", { title: "Bounced Doc" });
+    expect(byTitle.isError).toBeFalsy();
+    expect(textOf(byTitle)).toContain("needs another pass");
+    expect(textOf(byTitle)).toContain("rejected");
+  });
+
+  it("is refused on a nest without stewardship (context_get already serves the live text)", async () => {
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Open Vault" }, writer.apiKey);
+    const openNest = data.nest.id;
+    await jsonRequest(app, "PATCH", `/nests/${openNest}/settings`, { stewardship_enabled: false }, writer.apiKey);
+    await jsonRequest(app, "POST", `/nests/${openNest}/nodes`, { title: "Open Doc", content: "live text" }, writer.apiKey);
+
+    const r = await callTool(app, openNest, writer.apiKey, "context_my_drafts", { id: "nodes/open-doc" });
+    expect(r.isError).toBe(true);
+    expect(textOf(r)).toContain("context_get");
+    const get = await callTool(app, openNest, writer.apiKey, "context_get", { id: "nodes/open-doc" });
+    expect(textOf(get)).toContain("live text");
+  });
+
+  // Last: downgrades the writer for the rest of the file.
+  it("an author who lost edit rights can no longer read the draft back", async () => {
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Orphaned Draft", content: "written before the downgrade" },
+      writer.apiKey,
+    );
+    const before = await callTool(app, nestId, writer.apiKey, "context_my_drafts", { id: "nodes/orphaned-draft" });
+    expect(textOf(before)).toContain("written before the downgrade");
+
+    const collabs = await jsonRequest(app, "GET", `/nests/${nestId}/collaborators`, undefined, owner.apiKey);
+    const row = (collabs.data.collaborators ?? collabs.data).find((c: any) => c.email === "writer@acme.com");
+    const down = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/collaborators/${row.id}`,
+      { permission: "read" },
+      owner.apiKey,
+    );
+    expect(down.status).toBe(200);
+
+    const after = await callTool(app, nestId, writer.apiKey, "context_my_drafts", { id: "nodes/orphaned-draft" });
+    expect(after.isError).toBe(true);
+    expect(textOf(after)).not.toContain("written before the downgrade");
+  });
 });

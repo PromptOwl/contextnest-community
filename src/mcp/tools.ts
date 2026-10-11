@@ -1024,16 +1024,20 @@ async function resolveOwnDraft(
   node: ContextNode,
 ): Promise<{ body: string; version: number; status: string; approved: number | null } | null> {
   if (!ctx.userEmail || !(await isStewardshipEnabled(ctx.nestId))) return null;
-  const current = await versions.getCurrentVersion(ctx.nestId, node.id);
-  const approved = await versions.getApprovedVersion(ctx.nestId, node.id);
+  const [current, approved, pending] = await Promise.all([
+    versions.getCurrentVersion(ctx.nestId, node.id),
+    versions.getApprovedVersion(ctx.nestId, node.id),
+    reviews.getPendingReview(ctx.nestId, node.id),
+  ]);
   if (current === 0 || (approved != null && current <= approved)) return null;
   const row = await versions.getVersion(ctx.nestId, node.id, current);
   if (!row || !["draft", "rejected", "pending_review"].includes(row.status)) return null;
   const me = ctx.userEmail.toLowerCase();
-  const pending = await reviews.getPendingReview(ctx.nestId, node.id);
+  // The submitter counts only while their review covers the CURRENT version —
+  // otherwise these bytes may be someone else's later write.
   const mine =
     row.editedBy.toLowerCase() === me ||
-    pending?.requestedBy.toLowerCase() === me;
+    (pending?.version === current && pending.requestedBy.toLowerCase() === me);
   if (!mine) return null;
   if (!(await stewardship.canUserEdit(ctx.nestId, node.id, ctx.userEmail)).allowed) {
     return null;
