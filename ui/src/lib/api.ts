@@ -3549,7 +3549,7 @@ export interface BulkRowResult {
   id: string;
   title?: string;
   outcome: "updated" | "unchanged" | "skipped" | "failed";
-  code?: "needs_review" | "locked" | "forbidden" | "not_found" | "invalid" | "error";
+  code?: "needs_review" | "locked" | "forbidden" | "not_found" | "conflict" | "invalid" | "error";
   reason?: string;
   version?: number;
   status?: string;

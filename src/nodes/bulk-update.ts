@@ -22,6 +22,7 @@
  */
 import { engineCache } from "./engine.js";
 import { updateNode } from "./service.js";
+import * as versions from "../governance/version-service.js";
 import { taskFieldsOf, TASK_PRIORITIES } from "./task-fields.js";
 import { canReadNode } from "../governance/access-guard.js";
 import { canUserEdit } from "../governance/stewardship-service.js";
@@ -32,6 +33,7 @@ import { assertSafeNodeId } from "../shared/node-id.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
 import {
   AppError,
+  ConflictError,
   ForbiddenError,
   LockedError,
   NotFoundError,
@@ -68,6 +70,7 @@ export type BulkReasonCode =
   | "locked"
   | "forbidden"
   | "not_found"
+  | "conflict"
   | "invalid"
   | "error";
 
@@ -133,7 +136,10 @@ export function cleanBulkPatch(raw: unknown): BulkPatch {
     out.priority = r.priority as string | null;
   }
   if (r.due !== undefined) {
-    if (r.due !== null && (typeof r.due !== "string" || !DATE_RE.test(r.due) || Number.isNaN(Date.parse(r.due)))) {
+    // Round-trip, so a rolled-over day (2026-02-31 → Mar 3) is refused.
+    const realDay = (d: string) =>
+      DATE_RE.test(d) && !Number.isNaN(Date.parse(d)) && new Date(d).toISOString().slice(0, 10) === d;
+    if (r.due !== null && (typeof r.due !== "string" || !realDay(r.due))) {
       throw new ValidationError("patch.due must be a date like 2026-10-31, or null");
     }
     out.due = r.due as string | null;
@@ -239,8 +245,11 @@ const reasonOf = (err: unknown): { code: BulkReasonCode; reason: string; outcome
   if (err instanceof LockedError) return { code: "locked", reason, outcome: "skipped" };
   if (err instanceof ForbiddenError) return { code: "forbidden", reason, outcome: "skipped" };
   if (err instanceof NotFoundError) return { code: "not_found", reason, outcome: "skipped" };
+  if (err instanceof ConflictError) return { code: "conflict", reason, outcome: "skipped" };
   if (err instanceof ValidationError) return { code: "invalid", reason, outcome: "failed" };
   if (err instanceof AppError) return { code: "error", reason, outcome: "failed" };
+  // Not surfaced to the caller (it may carry internals) — logged instead.
+  console.error("bulk update row failed", err);
   return { code: "error", reason: "Couldn't save this one — try it again on its own.", outcome: "failed" };
 };
 
@@ -283,8 +292,13 @@ export async function bulkUpdateNodes(
       results.push({ id, outcome: "skipped", code: "not_found", reason: "Node not found" });
       continue;
     }
+    // The head we computed the change from. The write refuses (inside the
+    // node lock) if anyone saved in between, instead of overwriting their
+    // tags with a set derived from the older read.
+    let head: number;
     let node;
     try {
+      head = await versions.getCurrentVersion(nestId, id);
       node = await storage.readDocument(id);
     } catch {
       results.push({ id, outcome: "skipped", code: "not_found", reason: "Node not found" });
@@ -297,14 +311,24 @@ export async function bulkUpdateNodes(
       continue;
     }
 
-    // Only what actually changes goes into the write.
-    const before = ((node.frontmatter.tags ?? []) as unknown[]).map((t) => asStored(String(t)));
-    let next = before.filter(
-      (t) => !remove.has(t) && !(col?.dropPrefix && t.startsWith(col.dropPrefix) && t !== col.add),
-    );
-    for (const t of add) if (!next.includes(t)) next.push(t);
-    next = [...new Set(next)];
-    const tagsChanged = next.length !== before.length || next.some((t) => !before.includes(t));
+    // Only what actually changes goes into the write. Tags this patch doesn't
+    // touch are passed back exactly as stored; matching is on the stored form.
+    const before = ((node.frontmatter.tags ?? []) as unknown[]).map((t) => String(t));
+    const beforeKeys = new Set(before.map(asStored));
+    const drop = (t: string) => {
+      const k = asStored(t);
+      return remove.has(k) || (!!col?.dropPrefix && k.startsWith(col.dropPrefix) && k !== col.add);
+    };
+    const next = before.filter((t) => !drop(t));
+    const nextKeys = new Set(next.map(asStored));
+    for (const t of add) {
+      if (!nextKeys.has(t)) {
+        next.push(t);
+        nextKeys.add(t);
+      }
+    }
+    const tagsChanged =
+      nextKeys.size !== beforeKeys.size || [...nextKeys].some((t) => !beforeKeys.has(t));
     const current = taskFieldsOf(node.frontmatter.metadata) as Record<string, unknown>;
     const changedFields: Record<string, string | null> = {};
     for (const [k, v] of Object.entries(fields)) {
@@ -325,7 +349,7 @@ export async function bulkUpdateNodes(
           client: opts.client,
         },
         caller.userEmail,
-        { publishOnly: true },
+        { publishOnly: true, expectHead: head },
       );
       results.push({
         id,

@@ -318,6 +318,7 @@ export const BULK_REASON_LABELS: Record<string, string> = {
   locked: "In review",
   forbidden: "No edit access",
   not_found: "Not found",
+  conflict: "Changed meanwhile",
   invalid: "Invalid",
   error: "Error",
 };

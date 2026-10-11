@@ -177,6 +177,8 @@ describe("POST /nodes/bulk-update", () => {
     expect((await bulk(owner, { ids: ["nodes/alpha"], patch: { colour: "red" } })).status).toBe(400);
     expect((await bulk(owner, { ids: ["nodes/alpha"], patch: { priority: "asap" } })).status).toBe(400);
     expect((await bulk(owner, { ids: ["nodes/alpha"], patch: { due: "tomorrow" } })).status).toBe(400);
+    // A day that doesn't exist, which Date.parse would roll into March.
+    expect((await bulk(owner, { ids: ["nodes/alpha"], patch: { due: "2026-02-31" } })).status).toBe(400);
     expect((await bulk(owner, { ids: ["nodes/alpha"], patch: { assignee: "stranger@else.com" } })).status).toBe(400);
     expect((await bulk(owner, { ids: ["nodes/alpha"], patch: { column: "done" } })).status).toBe(400);
   });
@@ -296,5 +298,18 @@ describe("MCP — context_boards, context_board_items, context_bulk_update", () 
     expect(res.structuredContent).toMatchObject({ updated: 1 });
     const denied = await mcp(rita.apiKey, "context_bulk_update", { nest: nestId, ids: ["nodes/echo"], patch: { priority: "low" } }, null);
     expect(denied.isError).toBe(true);
+  });
+
+  it("reports per row (not a blanket refusal) when only some targets are editable", async () => {
+    // Rita reads the nest and holds a write share on one document only.
+    const g = await mcp(owner.apiKey, "context_grant", {
+      email: rita.email, target_type: "document", target: "nodes/echo", role: "write",
+    });
+    expect(g.content[0].text).toMatch(/Shared document/);
+    const res = await mcp(rita.apiKey, "context_bulk_update", { ids: ["nodes/alpha", "nodes/echo"], patch: { priority: "medium" } });
+    expect(res.isError).toBeUndefined();
+    const by = Object.fromEntries(res.structuredContent.results.map((r: any) => [r.id, r]));
+    expect(by["nodes/alpha"]).toMatchObject({ outcome: "skipped", code: "forbidden" });
+    expect(by["nodes/echo"].outcome).toBe("unchanged");
   });
 });

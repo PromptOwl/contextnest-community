@@ -42,7 +42,6 @@ const PRIORITY_LABELS: Record<string, string> = {
 export const LIST_SORTS = [
   "rank",
   "title",
-  "column",
   "status",
   "assignee",
   "priority",
@@ -234,7 +233,7 @@ export function sortRows(
   titles: Map<string, string>,
   rank?: string[],
 ): NodeResponse[] {
-  if (sort === "rank" || sort === "column") {
+  if (sort === "rank") {
     // Board order: ranked cards first, the rest as listed (orderByRank).
     if (!rank || rank.length === 0) return rows;
     const pos = new Map(rank.map((id, i) => [id, i]));

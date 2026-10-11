@@ -2119,13 +2119,13 @@ async function runTool(
           assignee: Array.isArray(args.assignee) ? args.assignee.join(",") : args.assignee,
         });
         const label = new Map(res.groups.map((g) => [g.key, g.label]));
+        const count = new Map(res.groups.map((g) => [g.key, g.count]));
         let lastGroup: string | null = null;
         const lines: string[] = [];
         for (const r of res.items) {
           if (r.group !== lastGroup) {
             lastGroup = r.group;
-            const g = res.groups.find((x) => x.key === r.group)!;
-            lines.push(`\n## ${label.get(r.group)} (${g.count})`);
+            lines.push(`\n## ${label.get(r.group)} (${count.get(r.group)})`);
           }
           const bits = [
             r.priority,
