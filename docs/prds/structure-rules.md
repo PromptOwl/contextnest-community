@@ -427,7 +427,7 @@ Every phase is built **test-first**:
 3. Hand the phase to the **QA agent** (`.claude/agents/qa-adversary.md`, in both repos). It only **runs** the suites and **attacks** the change. It never edits code. It reports blocking findings with exact repros and ends with a `PASS` or `BLOCKED` verdict.
 4. Each blocking finding is fixed test-first: a failing test that reproduces it, then the fix. QA runs again until the verdict is `PASS`.
 
-### 10.1 Engine phase (ContextNest) — re-review pending (round 28)
+### 10.1 Engine phase (ContextNest) — QA PASS, architecture Approve with nits (round 31, `f5f11bd`)
 
 - Round 1 (`9c8c3a3`) passed every suite, but QA and the architecture review returned `BLOCKED` / `Needs rework`: ReDoS bypasses, closed-mode bypass through system-path look-alikes, legacy configs refusing writes, a stranded write when scaffolding failed, and unenforced paths (deprecated `delete_document`, `ctx pull`, approvals).
 - Round 2 (`e81d3f1`) wrote a failing test for every finding, then fixed them. Both reviewers re-ran and found more:
@@ -694,10 +694,38 @@ Every phase is built **test-first**:
   - Version files are opened without blocking: a FIFO had hung verify, reconstruct and update.
   - Two more backtracking trims are now loops.
 
-  QA round 24 and the architecture review of rounds 27–28 are running on `e6db383`.
+- QA round 24 said **BLOCKED** and the architecture review of rounds 27–28 said **Needs rework**. Five of the seven blockers came from rounds 27–28. From then on, by the user's stopping rule, only blockers were fixed. Round 29 (`7c651df`) fixed them, each with a test that fails on `e6db383`:
+  - A file sealed under a key the config does not hold fails the read (`ForeignVaultKeyError`), never listing as empty. `encryptVault` will not create a new key over sealed files.
+  - A checkpoint carries forward an unreadable document's last sealed entry.
+  - `ctx verify` names `unreadable_document`.
+  - Frontmatter of the wrong shape is one typed error (`FrontmatterShapeError`), and `tags: x` reads as a list.
+  - An imported forget reaches a copy whose sealed versions hold the erased body. A reused event id with a different record is refused, and a versions-scoped record is logged, not applied.
+  - `context_update` validates the id before reading.
+  - A name format is at most 200 characters.
+  - The changesets no longer claim that the forget gate authorizes anything.
+- `5b95747` merged `development` (the engine 2.12.0 line). Six conflicts were resolved by keeping both sides.
+- The re-checks found one new blocker, introduced by round 29's forget fix: finding an erased body in a copy's versions was unbounded work under the vault lock. Three commits closed it:
+  - `e78f66c`: once per document per import, within the replay budget.
+  - `34d5ee1`: one forward pass (`replayEveryVersion`), charged like the sealed-head replay. A planted 600-version history went from 35 s to 0.3 s.
+  - `f5f11bd`: the per-import cache keyed by file identity (`documentFileKey`), not a per-record folder listing. 5,000 records against a 20,000-file folder went from 79 s to 4.2 s.
+- QA round 25 on `f5f11bd` said **PASS**, and the architecture re-check said **Approve with nits**.
 
   **Known** (open as `it.fails` in the adversarial suite, with its repro):
   - *r23 outrange* — an import whose `history.yaml` equals the one on disk judges its version files by the head's rebuild, from the last keyframe. With overwrite, a file before that range (`v1.md` of a 12-version history) replaces the sealed file with other bytes, and verify then reports `content_hash_mismatch`. The same was true before structure rules. A check on bytes would refuse an encrypted vault's own re-import, so the fix needs the opened text.
+  - *r27 B4 informed / poison* — a forged forget record carrying hashes any reader can obtain (a document's checksum) passes the pre-forget-copy check. One naming an absent path is logged with those hashes. Who may import forget records needs host authorization; the engine applies no forget tier.
+  - *r27 M2* — an imported forget record with an unquoted timestamp is applied but not logged.
+
+  **Recorded, not fixed** (non-blocking under the stopping rule):
+  - A forget made elsewhere, applied to a copy whose versions differ, leaves this vault's own content hashes unrecorded. Verify then shows `unrecorded_tombstone`, and re-importing that vault's older `.versions/` files with overwrite brings the erased text back. This was true before for unedited copies.
+  - A NUL in a document id leaks the vault path from get, delete, forget, versions, reconstruct and skill. `assertSafeDocumentId` does not refuse NUL.
+  - Each imported forget record reads its document and history before any cache is consulted (records × history size). This was the same on `development`.
+  - Two `.md` files hard-linked or symlinked to one inode share a cache key. That needs hand-made links.
+  - On file systems that report no inode, the cache key falls back to the folder-listing lookup.
+  - `replayEveryVersion` does not apply the `MAX_SEALED_ARTIFACT_BYTES` cap.
+  - `context_update {id: "packs"}` is refused before the bare id resolves.
+  - The changesets mark an API change as breaking under a minor bump.
+  - A malformed imported `packs/*.yml` breaks `context_packs`, which was the same on `development`.
+  - Community's `withDiscoveryCache` drops `onUnreadable`, so Community's verify won't name unreadable documents until it bypasses the cache for that call. Fix this with the engine pin bump.
 
   **Chunked imports.** The engine judges each imported history by what the nest will hold after the call: the call's files laid over what is already there, rebuilt and hash-verified. A document may arrive before or after its history, across calls. Within a history, a call must not bring `history.yaml` ahead of the keyframes and diffs it needs, since a history that does not rebuild and verify is refused. So the UI chunker (`ui/src/lib/api.ts`), which splits by bytes, should send each `.versions/<doc>/` folder's `history.yaml` last. Community's own staging (nest import, bundle restore, `context_sync_folder`) is designed to run under `skip` (§6), which leaves it unjudged. Until that flag is wired into Community's `opContext`, those imports are judged. The browser picker currently sorts `history.yaml` before `v*.md`, so a chunk boundary inside a `.versions/<doc>/` folder would get that history refused. Sort `history.yaml` last, or wire `skip`, as part of the Community phase.
 
