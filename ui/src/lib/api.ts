@@ -293,6 +293,8 @@ export const DEFAULT_HOOTIE_BRAND: HootieBrand = {
 export interface AdminSettings {
   promptowl_sign_in_gate: SignInGate;
   manual_sign_in: ManualSignIn;
+  /** Password self-registration is open while SSO is live (warned about). */
+  manual_sign_in_open_with_sso?: boolean;
   community_name: string | null;
   logo_url: string | null;
   telemetry_enabled: boolean;
@@ -852,6 +854,27 @@ export async function deleteApiKey(keyId: string) {
   });
 }
 
+// ─── Connected apps (MCP OAuth grants) ─────────────────────────────────
+
+export interface ConnectedApp {
+  clientId: string;
+  clientName: string;
+  scopes: string[];
+  redirectOrigin: string | null;
+  connectedAt: string;
+  lastUsedAt: string | null;
+}
+
+export async function listConnectedApps() {
+  return request<{ apps: ConnectedApp[] }>("/oauth/connected");
+}
+
+export async function disconnectApp(clientId: string) {
+  return request<{ revoked: boolean }>(`/oauth/connected/${encodeURIComponent(clientId)}`, {
+    method: "DELETE",
+  });
+}
+
 // ─── Nest settings ─────────────────────────────────────────────────────
 
 export interface NestSettings {
@@ -865,6 +888,8 @@ export interface NestSettings {
   require_push_confirmation: boolean;
   /** The person who creates a document becomes its reviewer; v1 publishes. */
   creator_is_reviewer: boolean;
+  /** Review SLA in hours; null = off. Overdue reviews escalate one rung. */
+  review_sla_hours?: number | null;
   /** Reads, pulls and exports are recorded in the activity log (default on).
    *  Only the owner or server admin may turn it off. */
   access_log_enabled?: boolean;
@@ -884,6 +909,7 @@ export async function updateNestSettings(
     /** Superadmin-only — a per-field 403 is returned to anyone else. */
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
+    review_sla_hours?: number | null;
     /** Owner / server admin only to turn OFF; any nest admin may turn on. */
     access_log_enabled?: boolean;
   },

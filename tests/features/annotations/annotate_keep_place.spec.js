@@ -52,6 +52,39 @@ async function domClick(page, selector) {
   await page.locator(selector).first().evaluate((el) => el.click());
 }
 
+/**
+ * Open the artifact and hand back its preview frame once it has settled.
+ *
+ * The viewer can load the preview twice: it mounts the iframe at once, then
+ * learns the served version from its own text fetch and points the iframe at
+ * that version (`…&v=N`), which reloads it. A frame handle taken before that
+ * reload goes dead ("Execution context was destroyed" / a null frame), so
+ * wait for the viewer's reads to finish, and look the iframe up afresh on
+ * every check rather than holding on to the first one.
+ */
+async function openSettledPreview(page, nestId, nodeId) {
+  await page.goto(`/nest/${nestId}?doc=${encodeURIComponent(nodeId)}`);
+  await page.waitForSelector('[data-testid="artifact-preview-frame"]');
+  await page.waitForLoadState('networkidle');
+  await expect
+    .poll(() => commentHighlights(page), { timeout: 15_000 })
+    .toBe(1);
+  return livePreviewFrame(page);
+}
+
+/** The preview iframe's current frame — never a handle from an earlier load. */
+async function livePreviewFrame(page) {
+  const el = await page.$('[data-testid="artifact-preview-frame"]');
+  return (await el?.contentFrame()) ?? null;
+}
+
+/** Painted comment highlights in the preview; -1 while it is (re)loading. */
+async function commentHighlights(page) {
+  const frame = await livePreviewFrame(page);
+  if (!frame) return -1;
+  return frame.evaluate(() => CSS.highlights.get('cn-comment')?.size ?? 0).catch(() => -1);
+}
+
 /** Top of a heading inside the rich editor, in viewport px. */
 function headingTop(page, scope, text) {
   return page.evaluate(
@@ -109,20 +142,15 @@ test.describe('Annotations keep your place', () => {
     test('CN-ANNO-001 preview carries the bridge and paints the comment @smoke', async ({ primary_user }) => {
       await primary_user.initialize();
       const page = primary_user.page;
-      await page.goto(`/nest/${seeded.nestId}?doc=${encodeURIComponent(seeded.artifactId)}`);
-      const frameEl = await page.waitForSelector('[data-testid="artifact-preview-frame"]');
-      const frame = await frameEl.contentFrame();
-      await expect
-        .poll(() => frame.evaluate(() => CSS.highlights.get('cn-comment')?.size ?? 0), { timeout: 15_000 })
-        .toBe(1);
+      const frame = await openSettledPreview(page, seeded.nestId, seeded.artifactId);
+      expect(frame).not.toBeNull();
+      expect(await commentHighlights(page)).toBe(1);
     });
 
     test('CN-ANNO-002 Preview → Annotate lands on the same passage, with the comment highlighted', async ({ primary_user }) => {
       await primary_user.initialize();
       const page = primary_user.page;
-      await page.goto(`/nest/${seeded.nestId}?doc=${encodeURIComponent(seeded.artifactId)}`);
-      const frame = await (await page.waitForSelector('[data-testid="artifact-preview-frame"]')).contentFrame();
-      await expect.poll(() => frame.evaluate(() => CSS.highlights.get('cn-comment')?.size ?? 0)).toBe(1);
+      const frame = await openSettledPreview(page, seeded.nestId, seeded.artifactId);
       await frame.evaluate(() => document.querySelectorAll('h2')[29].scrollIntoView({ block: 'start' }));
       await pause(600); // bridge reports place 200ms after scrolling stops
       await page.getByRole('button', { name: /Annotate/ }).evaluate((b) => b.click());

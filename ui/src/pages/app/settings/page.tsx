@@ -874,6 +874,14 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     );
                   })}
                 </div>
+                {draft.manual_sign_in === "open" && draft.oidc_ready && (
+                  <p className="mt-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                    Single sign-on is on, but anyone can still create a
+                    password account here that your identity provider never
+                    sees and can't disable. Everyone in your directory already
+                    gets in through SSO — choose Invite only.
+                  </p>
+                )}
               </CardContent>
             </Card>
 

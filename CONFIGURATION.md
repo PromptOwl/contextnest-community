@@ -26,7 +26,7 @@ curl -H 'Authorization: Bearer cnst_<your-token>' http://your-server/nests
 No authentication required. Every request is attributed to the anonymous admin user (`00000000-...`). Everyone effectively owns every anon-created nest.
 
 **Use this only when:**
-- You're running locally for yourself (`bind 127.0.0.1`), or
+- You're running locally for yourself (`HOST=127.0.0.1`), or
 - You're on a trusted LAN and don't care about access controls, or
 - You're behind an upstream reverse proxy that already authenticates.
 
@@ -44,6 +44,11 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | Var | Default | Purpose |
 |---|---|---|
 | `PORT` | `3838` | HTTP port the server listens on. |
+| `HOST` | _(unset — every interface)_ | Interface to listen on. `127.0.0.1` accepts only local connections — use it when a reverse proxy on the same machine is the only thing that should reach the server, or for `AUTH_MODE=open`. |
+| `TRUSTED_PROXIES` | _(unset — trust every peer)_ | Who may set `X-Forwarded-For`, `X-Real-IP` and `X-Forwarded-Proto`: comma-separated IPs, CIDRs (`10.0.0.0/8`, `2001:db8::/32`) and/or the keywords `loopback` and `private`. When set, those headers are believed only from a matching TCP peer; the client IP is the nearest hop in the `X-Forwarded-For` chain that isn't a listed proxy. Unset keeps the old behaviour (believe any peer), which lets a client that reaches the server directly spoof its IP — dodging per-IP rate limits — and its scheme. Startup warns while it's unset (except on Cloud Run). A malformed value stops the server from starting. See [Reverse proxies](#reverse-proxies). |
+| `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | _(unset — direct egress)_ | Corporate egress proxy for outbound HTTP(S). Must be set in the **process environment** (not `.env`) and needs `NODE_USE_ENV_PROXY=1`. See [Corporate egress proxy](#corporate-egress-proxy). |
+| `NODE_USE_ENV_PROXY` | `1` in the Docker image, unset otherwise | Node's switch for honouring the proxy variables above (Node ≥ 22.21 or ≥ 24.5). A no-op when no proxy is set. Outside Docker, export it yourself or start with `node --use-env-proxy`. |
+| `NODE_EXTRA_CA_CERTS` | _(unset)_ | Path to a PEM bundle of extra root CAs — needed when a TLS-inspecting proxy re-signs outbound traffic with a corporate CA. Read by Node at process start only, so set it in the process environment. Startup logs the path, or warns if the file is missing or the value came from `.env`. |
 | `DATA_ROOT` | `./data` (relative to cwd) | Root directory for SQLite DB + nest filesystem vaults. Set to an absolute path in production so it's independent of where you `cd`'d from. |
 | `DATABASE_PATH` | `$DATA_ROOT/community.db` | Override the SQLite file location explicitly. (SQLite backend only.) |
 | `NEST_STORAGE_ROOT` | `$DATA_ROOT/nests` | Root directory for nest vault files (markdown + version history). Override to store nests separately from the DB — e.g. point it at a Cloud Storage (GCS) volume mount on Cloud Run (`/mnt/nests`) while the SQLite DB stays on `DATA_ROOT` off the mount. **Moving existing nests:** the app does not relocate files — copy `$DATA_ROOT/nests/*` to the new root (e.g. `gsutil rsync`) before switching, or existing nests will appear empty (DB rows present, files missing). On a GCS mount, also set `DRIFT_SCAN_INTERVAL_MS=0` to avoid constant FUSE scans, and run a single instance (GCS FUSE has no file locking — concurrent writers lose data). |
@@ -57,8 +62,8 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `AUTH_MODE` | `key` | `key` or `open`. See above. |
 | `PROMPTOWL_API_URL` | `https://app.promptowl.ai` | PromptOwl's API origin — used for device auth, license validation, telemetry. Override for air-gapped or test setups. |
 | `PROMPTOWL_KEY` | `""` | Your PromptOwl Community License key (`pk_...`). Unlicensed instances still run and serve reads, but every write returns `503` until a valid key is installed. Can also be set via the browser License Setup Page, which persists it to the database (`server_settings` table) so it survives a rebuild and reaches every instance — see [Runtime settings persistence](#runtime-settings-persistence). Setting it here in the deploy environment takes precedence on the next boot. The license is re-checked with PromptOwl every 60s. Each check reports the server's user and nest counts, version and `PUBLIC_BASE_URL`, independently of `TELEMETRY_ENABLED` and never including content. See [API.md → License](API.md#license). |
-| `PROMPTOWL_SIGN_IN_GATE` | `open` | Restrict "Sign in with PromptOwl". `open` = anyone may; `admin-only` = only the license owner (admin) may, everyone else uses email/password (admin opens the login page with `?admin=1`); `disabled` = nobody may. Enforced server-side at `POST /auth/promptowl` and surfaced on the health endpoint. Unknown values fall back to `open`. |
-| `MANUAL_SIGN_IN` | `open` | Email + password sign-in mode. `open` = anyone may log in and self-register a new account; `invite-only` = existing/invited users may log in but brand-new self-registration returns `403` (the admin provisions accounts via invite/share/steward and shares the password — there is no self-service "set password", which would be account takeover without email verification); `disabled` = no email/password sign-in at all (`POST /auth/login` and `POST /auth/register` return `403`). Independent of `PROMPTOWL_SIGN_IN_GATE`, so the two methods are controlled separately (e.g. `invite-only` manual + `admin-only` PromptOwl). Also settable from Server settings → Basic. The server refuses `disabled` while PromptOwl sign-in is also `disabled`, unless SSO (OIDC) is on and fully configured (that would leave no way to log in — see [Making SSO the only way in](#making-sso-the-only-way-in)). Unknown values fall back to `open`. |
+| `PROMPTOWL_SIGN_IN_GATE` | `open` | Restrict "Sign in with PromptOwl". `open` = anyone may; `admin-only` = only the license owner (admin) may, everyone else uses email/password (admin opens the login page with `?admin=1`); `disabled` = nobody may. Enforced server-side at `POST /auth/promptowl` and surfaced on the health endpoint. Unset or unknown values take the default. With SSO on, everyone your identity provider vouches for already gets in through SSO, so password self-registration is closed by default; an explicit `open` still works but logs a startup warning and shows one on the Settings page, and while `OIDC_ALLOWED_DOMAINS` is set, password self-registration is limited to those domains too. |
+| `MANUAL_SIGN_IN` | `open`; `invite-only` when SSO (OIDC) is on and configured | Email + password sign-in mode. `open` = anyone may log in and self-register a new account; `invite-only` = existing/invited users may log in but brand-new self-registration returns `403` (the admin provisions accounts via invite/share/steward and shares the password — there is no self-service "set password", which would be account takeover without email verification); `disabled` = no email/password sign-in at all (`POST /auth/login` and `POST /auth/register` return `403`). Independent of `PROMPTOWL_SIGN_IN_GATE`, so the two methods are controlled separately (e.g. `invite-only` manual + `admin-only` PromptOwl). Also settable from Server settings → Basic. The server refuses `disabled` while PromptOwl sign-in is also `disabled`, unless SSO (OIDC) is on and fully configured (that would leave no way to log in — see [Making SSO the only way in](#making-sso-the-only-way-in)). Unset or unknown values take the default. With SSO on, everyone your identity provider vouches for already gets in through SSO, so password self-registration is closed by default; an explicit `open` still works but logs a startup warning and shows one on the Settings page, and while `OIDC_ALLOWED_DOMAINS` is set, password self-registration is limited to those domains too. |
 | `OFFICIAL_COMMUNITY_SSO_SECRET` | `""` | **Legacy — official deployment only, leave unset on self-hosted.** Shared HMAC secret enabling the one-click "Open Community" SSO auto-login from PromptOwl. Must exactly match the same-named var on PromptOwl. Superseded by the DB-backed **Server settings → Community sites** list (`/admin/community-sites`), which supports multiple official sites each with their own name/url/secret/active flag — this env var still works as an implicit extra site for backward compatibility. When no site is configured (env var unset and no DB rows), `GET /auth/sso` returns `404` and the feature is disabled; self-hosted users keep using the manual device-code flow. See `API.md → Community sites`. |
 | `PUBLIC_BASE_URL` | `""` | This server's canonical external URL (e.g. `https://community.promptowl.ai`). Two uses. (1) Checked against the SSO ticket's `aud` claim so a ticket minted for this server can't be replayed against another — whenever a ticket-signing secret is set (`OFFICIAL_COMMUNITY_SSO_SECRET` on the official deployment, `MCP_SIGNING_SECRET` on a self-hosted one); with neither set no ticket verifies at all, so the audience check is moot. (2) **Set this whenever `OIDC_ENABLED=true`.** It's the base for the OIDC `redirect_uri` sent to your IdP and replayed at token exchange. Unset, that URI is derived from the incoming request's `Host` header — fine when your proxy overwrites `Host` with a trusted value, but a proxy that passes an attacker-supplied `Host` through would feed it straight into the redirect URI. Setting this pins the value regardless of what the proxy forwards. (Your IdP's own redirect-URI allowlist is a second line of defence, not a substitute.) (3) **Set this wherever email- or invite-gated publish links are used.** The magic link mailed by `POST /p/:slug/gate` is built from it; unset, it falls back to the request origin, so a proxy forwarding an attacker-supplied `Host` would send the recipient a one-time access token pointing at the attacker's domain — the classic reset-link poisoning. (4) **Set this wherever `POST /nests/:id/context` citations reach users.** The `url` on each node and the `_source:` line in each context block are built from it; unset, they fall back to the request origin, so a proxy forwarding an untrusted `Host` would put an attacker-influenced URL in front of both the model and the reader as a trustworthy citation. (5) It is rendered into the copy-paste setup snippets on **Server settings → Connecting agents** — a `bash` block and quoted strings in `config.toml` / `config.yaml` / `mcp.json`. Because those are pasted verbatim into other people's terminals, `PATCH /admin/settings` refuses a value that is not a plain `http(s)` URL, or that contains whitespace, quotes or shell characters (`" ' ` \ $ ; | & < > ( ) { }`). A value stored before that check is not rewritten, so re-save it if the panel shows it oddly. |
 | `MCP_OAUTH_ENABLED` | `false` | Run an OAuth 2.1 authorization server for MCP clients, so an agent (Claude, ChatGPT, Grok, Cursor) signs its user in and is issued a token scoped to **that person** instead of carrying a shared API key. This is what makes per-user nest visibility reachable from vendor-hosted surfaces: the server already gates every nest through `canRead(nestId, userId)`, but a key pasted by several people resolves all of them to the same user. **Requires `PUBLIC_BASE_URL`** — the discovery documents' `resource` must equal the URL the user types into their client, and `/admin/settings` refuses to enable this without one. Off means the surface does not exist: `/.well-known/*` keeps returning 404 and `/mcp` answers unauthenticated callers exactly as before. Superadmin-togglable at runtime (Server settings → Features → Agent OAuth). |
@@ -180,7 +185,11 @@ Per-nest connector rows post the same Adaptive Card format to a nest-specific
 webhook, with per-event filtering: `POST /nests/:id/connectors` with a JSON
 body like `{"channel": "teams", "url": "https://…", "events":
 ["review_requested", "review_rejected"]}` (`events` is any of `review_requested`,
-`review_approved`, `review_rejected`, `run_failed`, `mention`, or `["*"]`; the
+`review_approved`, `review_rejected`, `run_failed`, `mention`, `review_escalated`
+— a review passed the nest's review SLA and moved up a rung — or `["*"]`;
+subscription is explicit, so list `review_escalated` next to `review_requested`
+to hear escalations on that row; the server-wide webhook above posts review
+requests and escalations with no row at all; the
 `url` may be an `env:KEY` reference into the nest's env store). Manage rows
 with `GET`/`PATCH`/`DELETE` on the same path.
 
@@ -971,7 +980,69 @@ PROMPTOWL_KEY=pk_... \
 npm start
 ```
 
-Terminate TLS at the proxy, forward `X-Forwarded-Proto` and an overwritten `X-Forwarded-For` (the rate limiter reads it), and keep the app's port reachable only from the proxy. See [Firewalls, VPNs and tunnels](#firewalls-vpns-and-tunnels) for proxy configs.
+Terminate TLS at the proxy and set `HOST=127.0.0.1` and `TRUSTED_PROXIES=loopback` so only the proxy can reach the server and only its forwarded headers count. Details in [Reverse proxies](#reverse-proxies).
+
+### Reverse proxies
+
+The server reads three forwarded headers: `X-Forwarded-For` / `X-Real-IP` (the client IP that per-IP rate limits on sign-in are keyed on) and `X-Forwarded-Proto` (whether session cookies get `Secure`). A header is only as trustworthy as whoever set it, so tell the server which peers are proxies:
+
+| Topology | Settings |
+|---|---|
+| Proxy on the same host (nginx, Caddy, Traefik) | `HOST=127.0.0.1`, `TRUSTED_PROXIES=loopback` |
+| Proxy or load balancer elsewhere on a private network | `TRUSTED_PROXIES=10.0.0.0/8` (its subnet), or `private` for every RFC 1918 / CGNAT / link-local range |
+| Exposed directly, no proxy | `TRUSTED_PROXIES=loopback` — forwarded headers from the internet are then ignored |
+| Cloud Run | Leave unset. Google's front end sets the headers and its peer addresses aren't stable. |
+
+The proxy must **overwrite** the headers rather than pass client values through, and must forward `Host` unchanged or you must set `PUBLIC_BASE_URL` (see the env reference). If your proxy sets only `X-Real-IP` (a common nginx snippet), also set `X-Forwarded-For` to the same value — otherwise a client can send its own `X-Forwarded-For` and choose the IP its rate limit is keyed on. nginx:
+
+```nginx
+location / {
+  proxy_pass http://127.0.0.1:3838;
+  proxy_set_header Host              $host;
+  proxy_set_header X-Forwarded-For   $remote_addr;
+  proxy_set_header X-Real-IP         $remote_addr;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_http_version 1.1;            # MCP streams over HTTP/1.1
+  proxy_buffering off;
+}
+```
+
+Caddy sets these headers itself: `reverse_proxy 127.0.0.1:3838`.
+
+With port forwarding (router or firewall NAT), forward the public `443` to the **proxy**, never the server's `3838` directly — `3838` speaks plain HTTP.
+
+### Corporate egress proxy
+
+When outbound traffic must go through a proxy, set in the process environment (Docker `-e`, a systemd `Environment=` line, or your shell — **not** `.env`, which loads after Node has configured networking):
+
+```bash
+HTTPS_PROXY=http://proxy.corp.example:3128
+HTTP_PROXY=http://proxy.corp.example:3128
+NO_PROXY=localhost,127.0.0.1,.corp.example
+NODE_USE_ENV_PROXY=1          # already set in the Docker image
+NODE_EXTRA_CA_CERTS=/etc/ssl/corp-root-ca.pem   # only if the proxy inspects TLS
+```
+
+Startup logs the proxy in use (credentials masked), or says why a configured proxy is not being used. Everything the server fetches over HTTP(S) goes through it, with these exceptions, which connect **directly**:
+
+- SMTP (nodemailer opens its own TCP connection) and PostgreSQL.
+- AWS SES, which goes through the AWS SDK's HTTP client.
+- **Metacognition agent feeds and MCP servers — on purpose.** Those URLs come from agent configuration, so the server resolves each host itself and refuses private addresses (`169.254.169.254`, `10.x`, …) at connect time. Through a proxy, the proxy would do the resolving and that check would never run. If your network only allows egress via the proxy, these agent fetches fail closed rather than bypass the check.
+
+Give those direct egress, or put them on a path the firewall allows.
+
+Outbound destinations to allow, through the proxy or the firewall:
+
+| Destination | Port | Used for | Configured by |
+|---|---|---|---|
+| `app.promptowl.ai` | 443 | License validation, PromptOwl sign-in (device flow), teams import, own-model keys, telemetry ingest | `PROMPTOWL_API_URL` |
+| The model gateway host sent with your license, else `api.anthropic.com` | 443 | Hootie and other model calls | License / nest model settings |
+| Your IdP (e.g. `login.microsoftonline.com`) | 443 | OIDC discovery, keys and token exchange | `OIDC_ISSUER` |
+| Your Slack / Teams webhook hosts | 443 | Notifications | Settings → Notifications |
+| `us.i.posthog.com` | 443 | Product analytics, when telemetry is on | `POSTHOG_HOST` |
+| Your SMTP server | 25 / 465 / 587 | Email notifications — **direct, not proxied** | `SMTP_URL` |
+| Your PostgreSQL server | 5432 | Database, when not SQLite — **direct, not proxied** | `DATABASE_URL` / `DB_HOST` |
+| Hosts your metacognition agents read (feeds, MCP servers) | 443 | Agent research — **direct, never proxied** (SSRF check) | Agent configuration |
 
 ### Hosted / commercial SaaS
 
@@ -1005,10 +1076,8 @@ app's own port (`PORT`, default 3838) to the internet.
 
 ### Behind a reverse proxy
 
-The app decides whether a request was HTTPS from `X-Forwarded-Proto` (this
-controls the `Secure` flag on cookies) and rate-limits by the first
-`X-Forwarded-For` address. Make the proxy overwrite `X-Forwarded-For` rather
-than append to it, and keep the app reachable only from the proxy.
+A full TLS server block. Which forwarded headers the app trusts (`HOST`,
+`TRUSTED_PROXIES`) is covered in [Reverse proxies](#reverse-proxies).
 
 ```nginx
 server {
@@ -1083,15 +1152,9 @@ ingress:
 the whole app; add path rules in front if only the connector paths should be
 public.
 
-### Corporate egress proxy
+### Behind an egress proxy
 
-Set `HTTPS_PROXY` (and `NO_PROXY` for internal hosts) in the server's
-environment, together with `NODE_USE_ENV_PROXY=1` — Node's built-in `fetch`
-only honours the proxy variables with it (Node 22.21 or later). If the proxy
-inspects TLS, mount its CA certificate and set `NODE_EXTRA_CA_CERTS` to the PEM
-file. Node reads all of these at startup, so set them in the container or
-service environment, not in `.env` or Settings. Email over
-SMTP and Postgres connect directly and need their own firewall rules. Then run
+Set it up as in [Corporate egress proxy](#corporate-egress-proxy), then run
 **Test connections** on the Network & status tab: with a proxy set, HTTPS
 targets are tested through it.
 

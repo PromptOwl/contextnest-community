@@ -20,15 +20,34 @@ import { setupTestEnv, createTestApp, jsonRequest } from "./helpers";
 
 let env: ReturnType<typeof setupTestEnv>;
 
+const SSO_ENV = [
+  "MANUAL_SIGN_IN",
+  "OIDC_ENABLED",
+  "OIDC_ISSUER",
+  "OIDC_CLIENT_ID",
+  "OIDC_CLIENT_SECRET",
+  "OIDC_ALLOWED_DOMAINS",
+];
+
 beforeEach(() => {
   env = setupTestEnv();
-  delete process.env.MANUAL_SIGN_IN;
+  for (const k of SSO_ENV) delete process.env[k];
 });
 
 afterEach(() => {
-  delete process.env.MANUAL_SIGN_IN;
+  for (const k of SSO_ENV) delete process.env[k];
   env.cleanup();
 });
+
+function configureOidc(extra: Record<string, string> = {}) {
+  Object.assign(process.env, {
+    OIDC_ENABLED: "true",
+    OIDC_ISSUER: "https://idp.test",
+    OIDC_CLIENT_ID: "client",
+    OIDC_CLIENT_SECRET: "secret",
+    ...extra,
+  });
+}
 
 describe("manual sign-in gate", () => {
   it("open (default): allows self-register + login", async () => {
@@ -124,5 +143,72 @@ describe("manual sign-in gate", () => {
 
     const health = await jsonRequest(app, "GET", "/health");
     expect(health.data.manual_sign_in).toBe("invite-only");
+  });
+
+  // With SSO live, everyone the IdP vouches for gets in through SSO, so the
+  // password door is closed unless the admin opens it on purpose.
+  describe("with SSO (OIDC) on", () => {
+    it("defaults to invite-only: existing users log in, new self-registration is refused", async () => {
+      const app = await createTestApp("key");
+      const reg = await jsonRequest(app, "POST", "/auth/register", {
+        email: "u@example.com",
+        password: "testpass",
+      });
+      expect(reg.status).toBe(201);
+
+      configureOidc();
+      const health = await jsonRequest(app, "GET", "/health");
+      expect(health.data.manual_sign_in).toBe("invite-only");
+
+      const newReg = await jsonRequest(app, "POST", "/auth/register", {
+        email: "new@example.com",
+        password: "testpass",
+      });
+      expect(newReg.status).toBe(403);
+
+      const login = await jsonRequest(app, "POST", "/auth/login", {
+        email: "u@example.com",
+        password: "testpass",
+      });
+      expect(login.status).toBe(200);
+    });
+
+    it("an enabled but unconfigured SSO doesn't change the default", async () => {
+      process.env.OIDC_ENABLED = "true";
+      const { config } = await import("../src/config.js");
+      expect(config.MANUAL_SIGN_IN).toBe("open");
+      expect(config.MANUAL_SIGN_IN_OPEN_WITH_SSO).toBe(false);
+    });
+
+    it("an explicit open is honoured but flagged, and held to OIDC_ALLOWED_DOMAINS", async () => {
+      configureOidc({ MANUAL_SIGN_IN: "open", OIDC_ALLOWED_DOMAINS: "acme.com" });
+      const { config } = await import("../src/config.js");
+      expect(config.MANUAL_SIGN_IN).toBe("open");
+      expect(config.MANUAL_SIGN_IN_OPEN_WITH_SSO).toBe(true);
+      const app = await createTestApp("key");
+
+      const outside = await jsonRequest(app, "POST", "/auth/register", {
+        email: "x@gmail.com",
+        password: "testpass",
+      });
+      expect(outside.status).toBe(403);
+      expect(outside.data.error).toMatch(/single sign-on/i);
+
+      const inside = await jsonRequest(app, "POST", "/auth/register", {
+        email: "y@ACME.com",
+        password: "testpass",
+      });
+      expect(inside.status).toBe(201);
+    });
+
+    it("the domain limit only applies while SSO is live", async () => {
+      process.env.OIDC_ALLOWED_DOMAINS = "acme.com";
+      const app = await createTestApp("key");
+      const reg = await jsonRequest(app, "POST", "/auth/register", {
+        email: "x@gmail.com",
+        password: "testpass",
+      });
+      expect(reg.status).toBe(201);
+    });
   });
 });

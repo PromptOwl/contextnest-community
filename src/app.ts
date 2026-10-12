@@ -169,6 +169,7 @@ import {
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "./auth/license-copy.js";
 import { tryConsume } from "./shared/rate-limit.js";
 import { clientIp } from "./shared/request-ip.js";
+import { FREE_TIER_EXCEEDED_MESSAGE, withinFreeTier, writesAllowed } from "./auth/free-tier.js";
 import { SERVICE_VERSION } from "./shared/version.js";
 import { persistSetting } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
@@ -288,6 +289,15 @@ function isPublicReadEligiblePath(method: string, path: string): boolean {
 }
 
 /**
+ * Presence of a session cookie, not its value. Kept in one place so the two
+ * middlewares that ask cannot drift; extracting the id is
+ * getSessionIdFromRequest's job.
+ */
+function hasSessionCookie(c: Context<AuthEnv>): boolean {
+  return !!getSessionIdFromRequest(c);
+}
+
+/**
  * The OAuth challenge on /mcp. Runs ahead of every other auth path.
  *
  * An MCP client's first request carries no credential on purpose: it expects a
@@ -297,22 +307,14 @@ function isPublicReadEligiblePath(method: string, path: string): boolean {
  * error, so the status and the header have to be exactly this.
  *
  * Deliberately narrow:
- * - Only when a credential is entirely absent. A caller presenting a bad or
- *   expired token gets the ordinary rejection, so a client holding a stale
- *   token fails instead of looping back through consent.
+ * - Only when a credential is entirely absent. A stale OAuth access token is
+ *   answered by mcpOAuthBearer with `error="invalid_token"`, which tells the
+ *   client to refresh or re-authorize; other bad credentials get the
+ *   ordinary rejection.
  * - Never in open mode, where there is no credential to ask for.
  * - Never while MCP_OAUTH_ENABLED is off, so the flag-off behaviour of this
  *   endpoint is byte-identical to before.
  */
-/**
- * Presence of a session cookie, not its value. Kept in one place so the two
- * middlewares that ask cannot drift; extracting the id is
- * getSessionIdFromRequest's job.
- */
-function hasSessionCookie(c: Context<AuthEnv>): boolean {
-  return !!getSessionIdFromRequest(c);
-}
-
 const mcpOAuthChallenge = createMiddleware<AuthEnv>(async (c, next) => {
   if (!config.MCP_OAUTH_ENABLED || config.AUTH_MODE === "open")
     return next();
@@ -332,10 +334,10 @@ const mcpOAuthChallenge = createMiddleware<AuthEnv>(async (c, next) => {
 /**
  * Accept an access token this server issued, and resolve it to its user.
  *
- * Runs after the challenge and before the ticket path. A token we don't
- * recognise is passed through untouched rather than rejected, so `cnst_` keys
- * and MCP tickets keep working exactly as before — this middleware only ever
- * adds a way in.
+ * Runs after the challenge and before the ticket path. A credential that is
+ * not 64 hex is passed through untouched, so `cnst_` keys and MCP tickets keep
+ * working exactly as before. A 64-hex token that does not resolve is one of
+ * ours gone stale, and gets a 401 with `error="invalid_token"`.
  *
  * The user id set here is what `buildNestIndex` gates on, which is the whole
  * point: the caller now arrives as a person rather than as whoever owns a
@@ -352,9 +354,17 @@ const mcpOAuthBearer = createMiddleware<AuthEnv>(async (c, next) => {
   if (!/^[0-9a-f]{64}$/.test(token)) return fallThrough();
 
   const grant = await resolveAccessToken(token);
-  // Not one of ours — could be a key or a ticket. Hand it on untouched; this
-  // middleware only ever ADDS a way in.
-  if (!grant) return fallThrough();
+  // Expired, revoked, or its user removed. Nothing else is 64 hex, so this is
+  // a stale token of ours: answer with the challenge so the client refreshes
+  // or re-authorizes (MCP authorization spec; RFC 6750 §3.1).
+  if (!grant) {
+    if (config.PUBLIC_BASE_URL)
+      c.header("WWW-Authenticate", mcpChallenge(config.PUBLIC_BASE_URL, "invalid_token"));
+    return c.json(
+      { error: "This connection has expired or was revoked — reconnect to continue.", code: "invalid_token" },
+      401,
+    );
+  }
 
   c.set("userId", grant.userId);
   // OAuth grants are never narrowed to one nest: the whole point is that one
@@ -745,17 +755,16 @@ export function createApp(): Hono<AuthEnv> {
     });
   });
 
-  // Admin-features gate: teammate management and governance routes are
-  // blocked until a valid license is installed. Login/register/device/
-  // promptowl/admin-status stay public so users can sign in and reach
-  // the setup flow.
+  // Admin-features gate: teammate management is blocked until a valid
+  // license is installed, unless the server is within the Free tier.
+  // Login/register/device/promptowl/admin-status stay public so users can
+  // sign in and reach the setup flow.
   app.use("/auth/invite", async (c, next) => {
-    if (!getCurrentLicense()?.valid) {
+    if (!getCurrentLicense()?.valid && !(await withinFreeTier())) {
       return c.json(
         {
           error: "License required",
-          reason:
-            "Install a valid PromptOwl license key before inviting teammates.",
+          reason: FREE_TIER_EXCEEDED_MESSAGE,
         },
         503,
       );
@@ -763,12 +772,11 @@ export function createApp(): Hono<AuthEnv> {
     return next();
   });
   app.use("/auth/teammates", async (c, next) => {
-    if (!getCurrentLicense()?.valid) {
+    if (!getCurrentLicense()?.valid && !(await withinFreeTier())) {
       return c.json(
         {
           error: "License required",
-          reason:
-            "Install a valid PromptOwl license key to view teammates.",
+          reason: FREE_TIER_EXCEEDED_MESSAGE,
         },
         503,
       );
@@ -919,6 +927,9 @@ export function createApp(): Hono<AuthEnv> {
   const currentServerSettings = () => ({
     promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
     manual_sign_in: config.MANUAL_SIGN_IN,
+    // True while password self-registration is open alongside live SSO —
+    // the Settings page shows a warning on the Manual sign-in card.
+    manual_sign_in_open_with_sso: config.MANUAL_SIGN_IN_OPEN_WITH_SSO,
     community_name: config.COMMUNITY_NAME,
     logo_url: config.LOGO_URL,
     telemetry_enabled: config.TELEMETRY_ENABLED,
@@ -2461,8 +2472,10 @@ export function createApp(): Hono<AuthEnv> {
   });
 
   // Why a write is refused on a read-only server — suspended by PromptOwl, or
-  // no valid license — worded for who asked: admins get the reason and who to
-  // talk to, everyone else one neutral line. null = writes are allowed.
+  // no valid license past the Free tier — worded for who asked: admins get the
+  // reason and who to talk to, everyone else one neutral line. null = writes
+  // are allowed (licensed, or unlicensed with FREE_TIER_MAX_USERS or fewer
+  // people; see writesAllowed in auth/free-tier.ts).
   const readOnlyDenial = async (
     userId: string,
   ): Promise<{ error: string; extra: Record<string, unknown> } | null> => {
@@ -2479,8 +2492,8 @@ export function createApp(): Hono<AuthEnv> {
         },
       };
     }
+    if (await writesAllowed()) return null;
     const lic = getCurrentLicense();
-    if (lic?.valid) return null;
     if (!(await admin())) return { error: NEUTRAL_READ_ONLY, extra: { read_only: true } };
     // licenseTerms carries the machine reason code; expose it as
     // license_reason so it doesn't clobber the human-readable reason.
@@ -2493,7 +2506,7 @@ export function createApp(): Hono<AuthEnv> {
         reason:
           lic?.reason === "expired"
             ? "This server's PromptOwl license has ended, so it is read-only until it is renewed. Nothing has been deleted."
-            : "This server has no valid PromptOwl license installed. Ask the server admin to install one via the setup screen or POST /license/install.",
+            : FREE_TIER_EXCEEDED_MESSAGE,
         setup_url: "/setup",
       },
     };
@@ -2592,7 +2605,8 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     // License gate: block writes until a valid PromptOwl key is
-    // installed via /license/install. Reads stay open for plain
+    // installed via /license/install — unless the server is within the Free
+    // tier (readOnlyDenial → writesAllowed). Reads stay open for plain
     // node/nest browsing — but governance endpoints (stewards,
     // review-queue, approve/reject, version history, capability
     // checks) are admin features and stay locked regardless of HTTP

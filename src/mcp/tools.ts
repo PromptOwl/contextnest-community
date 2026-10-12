@@ -36,10 +36,7 @@ import {
   setThreadStatus,
   syncAnnotationsNode,
 } from "../annotations/service.js";
-import {
-  notifyCommentMentions,
-  notifyCommentReply,
-} from "../governance/mention-notify.js";
+import { notifyComment } from "../governance/mention-notify.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
@@ -773,10 +770,17 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_my_drafts",
     description:
-      "List YOUR unsubmitted drafts in this nest — documents you wrote that were never submitted for review (plus any that came back rejected). These are invisible to the review queue and unreadable by AI queries until submitted and approved. Use context_submit_review to hand one to a steward.",
+      "List YOUR unsubmitted drafts in this nest — documents you wrote that were never submitted for review (plus any that came back rejected). These are invisible to the review queue and unreadable by AI queries until submitted and approved — pass an id here to read one back and fix it. Use context_submit_review to hand one to a steward.",
     inputSchema: {
       type: "object" as const,
-      properties: {},
+      properties: {
+        id: {
+          type: "string",
+          description:
+            "Read one of YOUR drafts: returns its unapproved working copy (by node id) so you can fix it. Omit to list.",
+        },
+        title: { type: "string", description: "Same as id, by title." },
+      },
     },
   },
   {
@@ -993,6 +997,58 @@ async function resolveLlmBody(
     console.error("reconstructVersion failed", node.id, approved, err);
     return null;
   }
+}
+
+/**
+ * The caller's OWN unapproved working copy — context_my_drafts with an id.
+ *
+ * Under stewardship an unapproved body never reaches AI, which left an author
+ * fixing a draft through an agent editing blind: context_get refuses a
+ * never-approved draft and serves the older approved text otherwise. The
+ * author wrote these bytes and can open them in the UI, so handing them back
+ * on an explicit ask discloses nothing new.
+ *
+ * Explicit on purpose, never folded into context_get: agents run on personal
+ * keys (a support bot on the author's key must keep answering from the
+ * approved policy, not the author's half-finished rewrite), and search /
+ * query / export stay approved-only.
+ *
+ * "Own" means the caller authored the current (unapproved) version, or
+ * submitted its open review, and still holds edit rights on the node.
+ */
+async function resolveOwnDraft(
+  ctx: McpToolContext,
+  node: ContextNode,
+): Promise<{ body: string; version: number; status: string; approved: number | null } | null> {
+  if (!ctx.userEmail || !(await isStewardshipEnabled(ctx.nestId))) return null;
+  const [current, approved, pending] = await Promise.all([
+    versions.getCurrentVersion(ctx.nestId, node.id),
+    versions.getApprovedVersion(ctx.nestId, node.id),
+    reviews.getPendingReview(ctx.nestId, node.id),
+  ]);
+  if (current === 0 || (approved != null && current <= approved)) return null;
+  // node was read before these lookups: a write in between would pair one
+  // version's bytes with another version's label and author check.
+  if (Number(node.frontmatter?.version) !== current) return null;
+  const row = await versions.getVersion(ctx.nestId, node.id, current);
+  if (!row || !["draft", "rejected", "pending_review"].includes(row.status)) return null;
+  const me = ctx.userEmail.toLowerCase();
+  // The submitter counts only while their review covers the CURRENT version —
+  // otherwise these bytes may be someone else's later write.
+  const mine =
+    row.editedBy.toLowerCase() === me ||
+    (pending?.version === current && pending.requestedBy.toLowerCase() === me);
+  if (!mine) return null;
+  if (!(await stewardship.canUserEdit(ctx.nestId, node.id, ctx.userEmail)).allowed) {
+    return null;
+  }
+  ctx.servedVersions?.set(node.id, current);
+  return {
+    body: node.body || "",
+    version: current,
+    status: pending ? "pending_review" : row.status,
+    approved,
+  };
 }
 
 /** Read tools whose `data` names the documents they handed over, and what
@@ -1753,31 +1809,22 @@ async function runTool(
       // be allowed to READ (the approval gate applies to context_comments, not
       // here), so the reply should tell them what THEY did and nothing about
       // what is already in the thread.
-      // A reply also notifies the thread's earlier participants, the same
-      // fan-out the REST reply route uses.
+      // The @mentions, then (for a reply) the thread's earlier participants —
+      // the same fan-out the REST reply route uses — then the document's
+      // watchers and reviewer stewards. One notification per person.
       //
       // baseUrl: without it the notification still reaches the person, but
       // its "Open document" link falls back to PUBLIC_BASE_URL and comes out
       // empty when that isn't configured — every other notifying tool in
       // this file passes it, and the REST route passes requestBaseUrl.
-      if (threadId) {
-        await notifyCommentReply({
-          nestId,
-          nodeId: node.id,
-          thread,
-          body,
-          actorEmail: userEmail,
-          baseUrl: ctx.baseUrl,
-        });
-      } else {
-        await notifyCommentMentions({
-          nestId,
-          nodeId: node.id,
-          body,
-          actorEmail: userEmail,
-          baseUrl: ctx.baseUrl,
-        });
-      }
+      await notifyComment({
+        nestId,
+        nodeId: node.id,
+        body,
+        actorEmail: userEmail,
+        baseUrl: ctx.baseUrl,
+        ...(threadId ? { thread } : {}),
+      });
       await syncAnnotationsNode(nestId, node.id, userEmail);
       return threadId
         ? `Replied on "${label}", in thread ${thread.id}.`
@@ -2381,6 +2428,42 @@ async function runTool(
     }
 
     case "context_my_drafts": {
+      if (args.id || args.title) {
+        // Read one draft back. getNodeForCaller is context_get's gate: a miss
+        // and a denied id answer alike, so this is no existence oracle.
+        let node: ContextNode;
+        try {
+          node = await getNodeForCaller(
+            nestId,
+            args.title ? { title: args.title } : { id: args.id },
+            ctx.userId,
+            userEmail,
+          );
+        } catch {
+          return toolError(`Node not found: ${args.title || args.id}`, "DOCUMENT_NOT_FOUND");
+        }
+        const draft = await resolveOwnDraft(ctx, node);
+        if (!draft) {
+          return toolError(
+            `"${node.frontmatter.title}" has no unapproved draft of yours — use context_get for its approved text.`,
+            "UNAUTHORIZED_ACTION",
+          );
+        }
+        const meta = [
+          `**Title:** ${node.frontmatter.title}`,
+          `**Type:** ${node.frontmatter.type || "document"}`,
+          node.frontmatter.tags?.length
+            ? `**Tags:** ${node.frontmatter.tags.join(" ")}`
+            : null,
+          `**Status:** your unapproved draft v${draft.version} (${draft.status}) — ` +
+            (draft.approved != null
+              ? `AI readers still get approved v${draft.approved}.`
+              : `not available to AI readers until approved.`),
+        ]
+          .filter(Boolean)
+          .join("\n");
+        return `${meta}\n\n---\n\n${draft.body || "(no content)"}\n\n_Fix it with \`context_update\`; it stays a draft until approved._`;
+      }
       // Self-scoped by construction — only rows this caller authored, in a nest
       // they already hold read on, so no extra permission gate.
       const { drafts, total } = await versions.listMyDrafts({
@@ -2403,7 +2486,7 @@ async function runTool(
         total > drafts.length
           ? `\n\n_Showing the ${drafts.length} most recent of ${total}._`
           : "";
-      return `# My Drafts\n**${total} unsubmitted document(s)**\n\n${list}${more}\n\nSubmit one with \`context_submit_review\`.`;
+      return `# My Drafts\n**${total} unsubmitted document(s)**\n\n${list}${more}\n\nRead one back with \`context_my_drafts\` + its id; submit with \`context_submit_review\`.`;
     }
 
     case "context_submit_review": {

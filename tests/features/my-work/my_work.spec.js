@@ -198,23 +198,36 @@ test.describe('My Work', () => {
       await api.submitForReview(nest.id, doc.id);
       cleanups.push(() => api.cancelReview(nest.id, doc.id));
 
-      const pending = (await api.myWork({ limit: 1 })).pagination.total;
-      expect(pending).toBeGreaterThan(0);
+      expect((await api.myWork({ limit: 1 })).pagination.total).toBeGreaterThan(0);
 
-      await primary_user.nestsPage.goto();
-      await expect(myWork.railItem).toBeVisible();
-      await expect(myWork.railItem).toContainText('My Work');
-      await expect(myWork.railBadge).toHaveText(String(pending));
-
-      // The badge follows the inbox: one submission withdrawn, one fewer.
-      await api.cancelReview(nest.id, doc.id);
-      await page.reload();
-      if (pending > 1) {
-        await expect(myWork.railBadge).toHaveText(String(pending - 1));
-      } else {
+      /**
+       * Load `open` and check the badge shows the server's pending count.
+       * Other suites raise and settle work on this account in parallel, so the
+       * badge is held to the total read just before the page loaded or the
+       * one read now — never to a number taken earlier.
+       */
+      const pendingTotal = async () => (await api.myWork({ limit: 1 })).pagination.total;
+      const expectBadgeMatchesServer = async (open) => {
+        const before = await pendingTotal();
+        await open();
         await expect(myWork.railItem).toBeVisible();
-        await expect(myWork.railBadge).toHaveCount(0);
-      }
+        await expect
+          .poll(async () => {
+            const shown = (await myWork.railBadge.count()) ? Number(await myWork.railBadge.textContent()) : 0;
+            const now = await pendingTotal();
+            return shown === before || shown === now;
+          }, { message: 'the rail badge should show the server pending count', timeout: 30_000 })
+          .toBe(true);
+      };
+
+      await expectBadgeMatchesServer(() => primary_user.nestsPage.goto());
+      await expect(myWork.railItem).toContainText('My Work');
+
+      // The badge follows the inbox: the submission withdrawn, and the count
+      // the page shows after a reload is the server's new one.
+      await api.cancelReview(nest.id, doc.id);
+      expect((await api.myWork()).waiting.some((w) => w.node_id === doc.id)).toBe(false);
+      await expectBadgeMatchesServer(() => page.reload());
 
       await myWork.openFromRail();
 
@@ -368,7 +381,12 @@ test.describe('My Work', () => {
       // Only that row goes, and the page stays where it is.
       await expect(myWork.notificationRow(dismissed)).toHaveCount(0);
       await expect(myWork.notificationRow(kept)).toBeVisible();
-      await expect(myWork.notificationsCount).toHaveText(`(${work.notifications.length - 1})`);
+      // One fewer than the page loaded with — or, if the strip refetched
+      // while other suites raised notifications, the server's own count.
+      const unreadNow = (await api.myWork()).notifications.length;
+      await expect(myWork.notificationsCount).toHaveText(
+        new RegExp(`^\\((${work.notifications.length - 1}|${unreadNow})\\)$`)
+      );
       await expect(page).toHaveURL(/\/my-work$/);
       expect(await api.isNotificationUnread(target.id)).toBe(false);
 
@@ -527,7 +545,9 @@ test.describe('My Work', () => {
       expect(layout[reviews]).toBe('divider');
       const afterDivider = layout.slice(reviews + 1);
       expect(afterDivider).toHaveLength(requests);
-      expect(afterDivider.every((kind) => kind === 'Deletion' || kind === 'Archive')).toBe(true);
+      // Requests are deletion, archive and access asks (the last raised by other
+      // suites on the same account) — never a review.
+      expect(afterDivider.every((kind) => ['Deletion', 'Archive', 'Access'].includes(kind))).toBe(true);
 
       // The divider counts what follows it.
       await expect(myWork.requestsDivider).toHaveText(

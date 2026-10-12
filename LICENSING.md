@@ -14,7 +14,7 @@ Setting the key up for the first time is covered in [README.md → License setup
 
 ## The short version
 
-- Every server runs on a **PromptOwl Community License key** (`pk_...`). The key decides the **plan**.
+- Every server runs on a **PromptOwl Community License key** (`pk_...`). The key decides the **plan**. A server with no key behaves like **Free**: it accepts writes while it has 10 or fewer users, and goes read-only past that until a key is installed.
 - The plan sets how many **users**, **editors** and **Account Owners** the server may have. **Viewers are always free.**
 - Each person is counted **once**, at their **highest role on any nest**.
 - When a change would take the server past its plan, that change is refused. **Nothing you already have is ever taken away.**
@@ -48,6 +48,7 @@ A **trial** key behaves like Self-Hosted until it ends.
 
 - **Trial ends:** the key carries on as a **Free** key. The server keeps working within the Free limits.
 - **Paid plan ends:** the server gets a **14-day grace period**, and Settings → License shows the date it ends. If the plan isn't renewed by then, the server becomes **read-only** (see [When the license stops being valid](#when-the-license-stops-being-valid)).
+- **Small servers fall back to Free.** If the license ends, is revoked, or can't be validated, a server with **10 or fewer users** keeps writing as Free. Read-only applies past 10 users. Only a suspension by PromptOwl blocks writes at any size.
 
 ---
 
@@ -162,7 +163,7 @@ It **never** sends document content or names of people. This happens whether or 
 | PromptOwl **suspends** the key | After **2 suspended answers within an hour**, so about 1 minute |
 | PromptOwl answers "valid" again | On the next check. Nothing to reinstall. |
 
-When the license stops being valid, the server goes **read-only**:
+When the license stops being valid, a server with more than 10 users goes **read-only** (10 or fewer keep writing as Free):
 
 - **Reading keeps working:** browsing nests, search, documents and MCP reads.
 - **Writing is refused** (`503`): documents, and nest create, rename and delete.

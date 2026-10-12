@@ -16,6 +16,13 @@
  * Redirects are never followed (a 3xx comes back as a 3xx), so a public URL
  * can't bounce the request onto a private one.
  *
+ * Never proxied. With NODE_USE_ENV_PROXY=1 (set in the Docker image) Node
+ * sends requests on the GLOBAL agents through HTTPS_PROXY, and the proxy —
+ * not `lookup` — resolves the name, so a host pointing at 169.254.169.254
+ * would sail past the check. These requests use their own agents, which
+ * carry no proxy, so the pinned `lookup` always runs. Agent feeds and MCP
+ * servers therefore need direct egress (documented in CONFIGURATION.md).
+ *
  * Returns a WHATWG Response so it can stand in for `fetch` — the MCP SDK's
  * transport takes it as its `fetch`.
  */
@@ -84,6 +91,9 @@ export function guardedLookup(resolve: Resolver = systemResolver): LookupFunctio
   }) as LookupFunction;
 }
 
+/** Proxy-free agents: see "Never proxied" above. Not the global agents. */
+const directAgents = { "https:": new https.Agent(), "http:": new http.Agent() } as const;
+
 export class OutboundTooLargeError extends Error {
   constructor(max: number) {
     super(`response is larger than ${max} bytes`);
@@ -119,7 +129,13 @@ export function guardedFetch(opts: { maxBytes: number; timeoutMs: number; resolv
     return new Promise<Response>((resolve, reject) => {
       const req = mod.request(
         url,
-        { method: init.method ?? "GET", headers, lookup, timeout: opts.timeoutMs },
+        {
+          method: init.method ?? "GET",
+          headers,
+          lookup,
+          agent: directAgents[url.protocol as "https:" | "http:"],
+          timeout: opts.timeoutMs,
+        },
         (res) => {
           let seen = 0;
           const cap = new Transform({

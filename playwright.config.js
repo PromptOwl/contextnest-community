@@ -77,6 +77,31 @@ const testRun = [
     independent: true, // Arranges its own nest, reviews and requests
   },
   {
+    // My Drafts (CN-DRAFT-001 … CN-DRAFT-013). Serial on purpose: the cases
+    // share one account's draft list and one seeded nest, so a parallel run
+    // would have them selecting, submitting and discarding each other's drafts.
+    file: 'my-drafts/my_drafts.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest and drafts
+  },
+  {
+    // Workspace → Teams (CN-TEAM-001 … CN-TEAM-005). Serial: the cases share
+    // one account's team list, and some count it.
+    file: 'teams/teams.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Creates and deletes its own teams
+  },
+  {
+    // Workspace → API keys (CN-KEYS-001 … CN-KEYS-009). Serial: the cases share
+    // one account's key list, which is capped at 20 keys.
+    file: 'api-keys/api_keys.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Creates and revokes its own keys; arranges its own nests
+  },
+  {
     // Request access on a denied write (CN-ACCESS-001 … CN-ACCESS-004).
     // Serial: the cases share one seeded nest and build on each other's
     // requests (ask → approve → deny → refused save).
@@ -185,7 +210,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'access-requests'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'access-requests'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -217,6 +242,12 @@ export default defineConfig({
   // 2 minutes per test — a self-hosted community server responds fast; tests
   // with known-long flows set larger budgets explicitly via test.setTimeout()
   timeout: 2 * 60 * 1000,
+  // How long an assertion waits. A deployed server shared by several runs can
+  // take seconds to render a page that is instant locally, so the 5s default
+  // turns load into failures. Override with PLAYWRIGHT_EXPECT_TIMEOUT (ms).
+  expect: {
+    timeout: parseInt(process.env.PLAYWRIGHT_EXPECT_TIMEOUT) || 15_000,
+  },
 
   // Test output directory
   outputDir: 'tests/test-results/artifacts',
@@ -329,6 +360,39 @@ export default defineConfig({
           name: 'my-work',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/my-work/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'my-drafts',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/my-drafts/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'teams',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/teams/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'api-keys',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/api-keys/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],

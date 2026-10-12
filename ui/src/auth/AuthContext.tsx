@@ -23,6 +23,7 @@ import {
 import * as api from "../lib/api";
 import { DEFAULT_HOOTIE_BRAND, type HootieBrand } from "../lib/api";
 import { initAnalytics } from "../lib/analytics";
+import { captureOAuthReturn, takeOAuthReturn } from "../lib/oauth-return";
 
 type AuthMode = "open" | "key" | null;
 type Me = {
@@ -132,6 +133,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [adminStatus, setAdminStatus] = useState<AdminStatus | null>(null);
   const [authenticated, setAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
+  // Before any child renders, so the authorize URL is parked first.
+  useState(captureOAuthReturn);
   const [error, setError] = useState<string | null>(null);
 
   const seqRef = useRef(0);
@@ -230,6 +233,13 @@ export function AuthProvider({ children }: PropsWithChildren) {
       cancelled = true;
     };
   }, [deriveAuthenticated]);
+
+  // Signed in (by any method) mid MCP OAuth flow: go back to the consent page.
+  useEffect(() => {
+    if (loading || !authenticated) return;
+    const back = takeOAuthReturn();
+    if (back) window.location.assign(back);
+  }, [authenticated, loading]);
 
   // Swap browser tab favicon to the operator's custom logo when set.
   // The fallback href in index.html stays as the inline 🪺 SVG.

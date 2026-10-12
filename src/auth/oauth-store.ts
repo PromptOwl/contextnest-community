@@ -6,15 +6,19 @@
  * stored as a plain SHA-256 hash, never in the clear — the same discipline
  * `api_keys` uses (`src/auth/keys.ts`). A slow KDF buys nothing against a
  * value with that much entropy; what matters is that a database dump contains
- * no usable token, and that lookups compare in constant time.
+ * no usable token. Lookups are an indexed `WHERE hash = ?`, which is not
+ * constant time, but timing on the hash of a random secret reveals nothing
+ * an attacker can use.
  *
  * SINGLE USE. An authorization code is consumed by stamping `used_at` rather
  * than by deletion, so a replay is *detectable*: seeing an already-used code
  * means the code leaked, and OAuth 2.1 requires us to treat that as a
  * compromise of the whole grant, not merely to refuse the second exchange.
+ * The same holds for a refresh token presented after it was rotated.
  */
 import { randomBytes, createHash } from "crypto";
 import { getDb } from "../db/client.js";
+import { nowExpr } from "../db/sql.js";
 
 /** Access tokens are short by design; a leaked one should expire quickly. */
 export const ACCESS_TTL_SECONDS = 60 * 60; // 1 hour
@@ -24,6 +28,8 @@ export const REFRESH_TTL_SECONDS = 60 * 60 * 24 * 60; // 60 days
 export const CODE_TTL_SECONDS = 60;
 /** How stale last_used_at may get before a resolution bothers to refresh it. */
 const LAST_USED_THROTTLE_MINUTES = 5;
+/** A client with no codes or tokens this long after registering is purged. */
+const CLIENT_IDLE_DAYS = 30;
 
 function secret(): string {
   return randomBytes(32).toString("hex");
@@ -35,6 +41,11 @@ function hash(value: string): string {
 
 function iso(secondsFromNow: number): string {
   return new Date(Date.now() + secondsFromNow * 1000).toISOString();
+}
+
+/** The `YYYY-MM-DD HH:MM:SS` UTC text nowExpr writes, offset from now. */
+function sqlTime(secondsFromNow: number): string {
+  return iso(secondsFromNow).slice(0, 19).replace("T", " ");
 }
 
 function expired(at: string | null | undefined): boolean {
@@ -54,11 +65,11 @@ export async function upsertClient(c: OAuthClient): Promise<void> {
   const db = getDb();
   await db.run(
     `INSERT INTO oauth_clients (client_id, client_name, redirect_uris, kind, last_seen_at)
-     VALUES (?, ?, ?, ?, datetime('now'))
+     VALUES (?, ?, ?, ?, ${nowExpr(db)})
      ON CONFLICT(client_id) DO UPDATE SET
        client_name = excluded.client_name,
        redirect_uris = excluded.redirect_uris,
-       last_seen_at = datetime('now')`,
+       last_seen_at = ${nowExpr(db)}`,
     [c.client_id, c.client_name, JSON.stringify(c.redirect_uris), c.kind],
   );
 }
@@ -130,34 +141,32 @@ export interface ConsumedCode {
   resource: string | null;
 }
 
-export type CodeConsumeResult =
+export type CodeRedeemResult =
   | { ok: true; code: ConsumedCode }
-  | { ok: false; reason: "unknown" | "expired" | "replayed" };
+  | { ok: false; reason: "unknown" | "expired" | "mismatch" | "replayed" };
+
+/** `used_at` marker for a code presented again after it was redeemed. */
+const REPLAYED = "replayed";
 
 /**
- * Consume a code exactly once.
+ * Redeem a code exactly once.
  *
- * A code presented twice is reported as `replayed` rather than `unknown`, so
- * the caller can revoke the whole grant: a second presentation means the code
- * was observed by someone, and OAuth 2.1 treats that as a compromise.
+ * `verify` (client, redirect, PKCE) runs BEFORE the claim. Someone who only
+ * saw the code — in a log or a referer — fails it, so they can neither spend
+ * the code nor make the real exchange look like a replay and revoke the grant.
+ *
+ * A presenter who passes `verify` on a code already redeemed holds the code
+ * AND its verifier: that is the leak OAuth 2.1 means, so the whole grant is
+ * revoked. An expired code is never claimed, so it can never count as one.
  */
-export async function consumeCode(code: string): Promise<CodeConsumeResult> {
+export async function redeemCode(
+  code: string,
+  verify: (c: ConsumedCode) => boolean,
+): Promise<CodeRedeemResult> {
   const db = getDb();
   const h = hash(code);
-
-  // ATOMIC CLAIM. This UPDATE is the single source of truth for "who got the
-  // code", not the SELECT below it. A SELECT-then-UPDATE lets two concurrent
-  // exchanges both pass the used_at check before either write lands, and both
-  // would be handed a full token pair — a real race on Postgres, where
-  // requests run on separate connections, not merely a theoretical one.
-  // `changes` is what tells the loser it lost.
-  const claim = await db.run(
-    "UPDATE oauth_codes SET used_at = datetime('now') WHERE code_hash = ? AND used_at IS NULL",
-    [h],
-  );
-
   const row = (await db.get(
-    `SELECT client_id, user_id, redirect_uri, scope, code_challenge, resource, expires_at
+    `SELECT client_id, user_id, redirect_uri, scope, code_challenge, resource, expires_at, used_at
        FROM oauth_codes WHERE code_hash = ?`,
     [h],
   )) as
@@ -169,29 +178,55 @@ export async function consumeCode(code: string): Promise<CodeConsumeResult> {
         code_challenge: string;
         resource: string | null;
         expires_at: string;
+        used_at: string | null;
       }
     | undefined;
-
-  if (claim.changes !== 1) {
-    // Lost the race, or the code was already spent, or it never existed. A row
-    // that exists but we could not claim was used by someone — which is the
-    // replay the caller must react to by revoking the whole grant.
-    return { ok: false, reason: row ? "replayed" : "unknown" };
-  }
   if (!row) return { ok: false, reason: "unknown" };
+  const consumed: ConsumedCode = {
+    clientId: row.client_id,
+    userId: row.user_id,
+    redirectUri: row.redirect_uri,
+    scope: row.scope,
+    codeChallenge: row.code_challenge,
+    resource: row.resource,
+  };
+  if (!verify(consumed)) return { ok: false, reason: "mismatch" };
+
+  const replayed = async (): Promise<CodeRedeemResult> => {
+    await db.run(`UPDATE oauth_codes SET used_at = ? WHERE code_hash = ?`, [REPLAYED, h]);
+    await revokeGrant(row.user_id, row.client_id);
+    return { ok: false, reason: "replayed" };
+  };
+  if (row.used_at) return replayed();
   if (expired(row.expires_at)) return { ok: false, reason: "expired" };
 
-  return {
-    ok: true,
-    code: {
-      clientId: row.client_id,
-      userId: row.user_id,
-      redirectUri: row.redirect_uri,
-      scope: row.scope,
-      codeChallenge: row.code_challenge,
-      resource: row.resource,
-    },
-  };
+  // ATOMIC CLAIM. This UPDATE is the single source of truth for "who got the
+  // code": two concurrent exchanges can both pass the reads above, and on
+  // Postgres (separate connections) both would otherwise get a token pair.
+  const claim = await db.run(
+    `UPDATE oauth_codes SET used_at = ${nowExpr(db)}
+      WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?`,
+    [h, iso(0)],
+  );
+  if (claim.changes === 1) return { ok: true, code: consumed };
+  // Lost the claim: either it expired in between, or a second presenter with
+  // the same verifier won the race — a replay.
+  const now = (await db.get("SELECT used_at FROM oauth_codes WHERE code_hash = ?", [h])) as
+    | { used_at: string | null }
+    | undefined;
+  return now?.used_at ? replayed() : { ok: false, reason: "expired" };
+}
+
+/**
+ * Call after issuing tokens for a redeemed code. A replay that landed between
+ * the claim and the token insert revoked the grant before those tokens
+ * existed; this catches it and revokes them too.
+ */
+export async function revokeIfReplayed(code: string, c: ConsumedCode): Promise<void> {
+  const row = (await getDb().get("SELECT used_at FROM oauth_codes WHERE code_hash = ?", [
+    hash(code),
+  ])) as { used_at: string | null } | undefined;
+  if (row?.used_at === REPLAYED) await revokeGrant(c.userId, c.clientId);
 }
 
 // ─── Tokens ───────────────────────────────────────────────────────────────
@@ -260,8 +295,11 @@ export async function resolveAccessToken(
   token: string,
 ): Promise<ResolvedToken | null> {
   const row = (await getDb().get(
-    `SELECT id, user_id, client_id, scope, resource, expires_at, revoked_at
-       FROM oauth_tokens WHERE access_token_hash = ?`,
+    // JOIN users: a token outlives nothing — a removed user's token is dead
+    // even on a database whose FK predates ON DELETE CASCADE.
+    `SELECT t.id, t.user_id, t.client_id, t.scope, t.resource, t.expires_at, t.revoked_at
+       FROM oauth_tokens t JOIN users u ON u.id = t.user_id
+      WHERE t.access_token_hash = ?`,
     [hash(token)],
   )) as
     | {
@@ -275,16 +313,15 @@ export async function resolveAccessToken(
       }
     | undefined;
   if (!row || row.revoked_at || expired(row.expires_at)) return null;
+  const db = getDb();
   // last_used_at is for the connected-apps list, not accounting, so it does
   // not need to be exact. Writing it on every resolution would put a write on
   // the hot path of every tool call in a chatty MCP session; once every few
   // minutes carries the same information.
-  await getDb().run(
-    `UPDATE oauth_tokens SET last_used_at = datetime('now')
-      WHERE id = ?
-        AND (last_used_at IS NULL
-             OR last_used_at < datetime('now', '-${LAST_USED_THROTTLE_MINUTES} minutes'))`,
-    [row.id],
+  await db.run(
+    `UPDATE oauth_tokens SET last_used_at = ${nowExpr(db)}
+      WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)`,
+    [row.id, sqlTime(-LAST_USED_THROTTLE_MINUTES * 60)],
   );
   return {
     id: row.id,
@@ -320,11 +357,21 @@ export async function rotateRefreshToken(
   // served. The client_id is part of the claim so another client cannot
   // redeem a token that was not issued to it.
   const claim = await db.run(
-    `UPDATE oauth_tokens SET revoked_at = datetime('now')
+    `UPDATE oauth_tokens SET revoked_at = ${nowExpr(db)}
       WHERE refresh_token_hash = ? AND revoked_at IS NULL AND client_id = ?`,
     [h, clientId],
   );
-  if (claim.changes !== 1) return { ok: false, reason: "invalid" };
+  if (claim.changes !== 1) {
+    // A refresh token that was already rotated (or revoked) and is presented
+    // again by its own client has leaked. OAuth 2.1 §4.3.1: revoke the grant.
+    const old = (await db.get(
+      "SELECT user_id, client_id, revoked_at FROM oauth_tokens WHERE refresh_token_hash = ?",
+      [h],
+    )) as { user_id: string; client_id: string; revoked_at: string | null } | undefined;
+    if (old?.revoked_at && old.client_id === clientId)
+      await revokeGrant(old.user_id, old.client_id);
+    return { ok: false, reason: "invalid" };
+  }
 
   const row = (await db.get(
     `SELECT user_id, client_id, client_name, scope, resource, refresh_expires_at
@@ -358,59 +405,132 @@ export async function rotateRefreshToken(
 
 /** Revoke by either token value. Idempotent, and silent about what it found. */
 export async function revokeByToken(token: string): Promise<void> {
-  await getDb().run(
-    `UPDATE oauth_tokens SET revoked_at = datetime('now')
+  const db = getDb();
+  await db.run(
+    `UPDATE oauth_tokens SET revoked_at = ${nowExpr(db)}
       WHERE revoked_at IS NULL
         AND (access_token_hash = ? OR refresh_token_hash = ?)`,
     [hash(token), hash(token)],
   );
 }
 
-/** Revoke every live grant a user holds for one client — the "disconnect" action. */
+/**
+ * Revoke every live grant a user holds for one client — the "disconnect"
+ * action. Returns how many tokens it revoked (0: nothing of theirs to revoke).
+ */
 export async function revokeGrant(
   userId: string,
   clientId: string,
-): Promise<void> {
-  await getDb().run(
-    `UPDATE oauth_tokens SET revoked_at = datetime('now')
+): Promise<number> {
+  const db = getDb();
+  const res = await db.run(
+    `UPDATE oauth_tokens SET revoked_at = ${nowExpr(db)}
       WHERE user_id = ? AND client_id = ? AND revoked_at IS NULL`,
     [userId, clientId],
+  );
+  return res.changes;
+}
+
+/**
+ * Delete codes and tokens that can never be used again. Used codes are kept a
+ * day past expiry so a late replay is still detected and revokes the grant.
+ */
+export async function purgeExpired(): Promise<void> {
+  const db = getDb();
+  const now = iso(0);
+  await db.run("DELETE FROM oauth_codes WHERE expires_at < ?", [iso(-86400)]);
+  await db.run(
+    `DELETE FROM oauth_tokens
+      WHERE COALESCE(refresh_expires_at, expires_at) < ?
+         OR (revoked_at IS NOT NULL AND revoked_at < ?)`,
+    [now, sqlTime(-86400)],
+  );
+  // Registration is open, so clients that never connected (or whose tokens
+  // are all gone) would pile up. A client removed here re-registers.
+  await db.run(
+    `DELETE FROM oauth_clients
+      WHERE created_at < ?
+        AND NOT EXISTS (SELECT 1 FROM oauth_tokens t WHERE t.client_id = oauth_clients.client_id)
+        AND NOT EXISTS (SELECT 1 FROM oauth_codes k WHERE k.client_id = oauth_clients.client_id)`,
+    [sqlTime(-CLIENT_IDLE_DAYS * 86400)],
+  );
+}
+
+/** Revoke every live grant a user holds — on password change, reset or removal. */
+export async function revokeAllForUser(userId: string): Promise<void> {
+  const db = getDb();
+  await db.run(
+    `UPDATE oauth_tokens SET revoked_at = ${nowExpr(db)}
+      WHERE user_id = ? AND revoked_at IS NULL`,
+    [userId],
   );
 }
 
 export interface ConnectedApp {
   clientId: string;
   clientName: string;
-  scope: string;
-  createdAt: string;
+  /** Union of the scopes across this client's live tokens. */
+  scopes: string[];
+  /** Where the client registered its approvals to go, so two apps with the
+   *  same self-chosen name can be told apart. */
+  redirectOrigin: string | null;
+  connectedAt: string;
   lastUsedAt: string | null;
 }
 
-/** What the user sees under "connected apps". Live grants only. */
+/**
+ * What the user sees under "Connected apps": one row per client with a token
+ * that can still be used — an unexpired access token, or a refresh token that
+ * can mint one.
+ */
 export async function listConnectedApps(
   userId: string,
 ): Promise<ConnectedApp[]> {
   const rows = (await getDb().all(
-    `SELECT client_id, client_name, scope,
-            MIN(created_at) AS created_at,
-            MAX(last_used_at) AS last_used_at
-       FROM oauth_tokens
-      WHERE user_id = ? AND revoked_at IS NULL
-      GROUP BY client_id, client_name, scope
-      ORDER BY created_at DESC`,
-    [userId],
+    `SELECT t.client_id, t.client_name, t.scope, t.created_at, t.last_used_at, c.redirect_uris
+       FROM oauth_tokens t LEFT JOIN oauth_clients c ON c.client_id = t.client_id
+      WHERE t.user_id = ? AND t.revoked_at IS NULL
+        AND COALESCE(t.refresh_expires_at, t.expires_at) > ?`,
+    [userId, iso(0)],
   )) as Array<{
     client_id: string;
     client_name: string;
     scope: string;
     created_at: string;
     last_used_at: string | null;
+    redirect_uris: string | null;
   }>;
-  return rows.map((r) => ({
-    clientId: r.client_id,
-    clientName: r.client_name,
-    scope: r.scope,
-    createdAt: r.created_at,
-    lastUsedAt: r.last_used_at,
-  }));
+  // Grouped here rather than in SQL: the scope union has no portable
+  // aggregate across SQLite and Postgres.
+  const apps = new Map<string, ConnectedApp>();
+  for (const r of rows) {
+    let app = apps.get(r.client_id);
+    if (!app) {
+      app = {
+        clientId: r.client_id,
+        clientName: r.client_name,
+        scopes: [],
+        redirectOrigin: firstOrigin(r.redirect_uris),
+        connectedAt: r.created_at,
+        lastUsedAt: null,
+      };
+      apps.set(r.client_id, app);
+    }
+    for (const s of r.scope.split(" ").filter(Boolean))
+      if (!app.scopes.includes(s)) app.scopes.push(s);
+    if (r.created_at < app.connectedAt) app.connectedAt = r.created_at;
+    if (r.last_used_at && (!app.lastUsedAt || r.last_used_at > app.lastUsedAt))
+      app.lastUsedAt = r.last_used_at;
+  }
+  return [...apps.values()].sort((a, b) => b.connectedAt.localeCompare(a.connectedAt));
+}
+
+function firstOrigin(redirectUris: string | null): string | null {
+  try {
+    const first = (JSON.parse(redirectUris ?? "[]") as unknown[])[0];
+    return typeof first === "string" ? new URL(first).origin : null;
+  } catch {
+    // A client row we can't read still lists — just without a destination.
+    return null;
+  }
 }

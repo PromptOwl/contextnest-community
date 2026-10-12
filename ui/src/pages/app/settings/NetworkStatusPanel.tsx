@@ -447,8 +447,8 @@ NODE_EXTRA_CA_CERTS=/etc/ssl/certs/corp-proxy-ca.pem`;
 
         <Expandable title="Behind a reverse proxy (nginx, Caddy, load balancer)" summary="The proxy handles HTTPS and forwards to the app on a private port.">
           <p>
-            The app trusts the proxy's <code>X-Forwarded-Proto</code> to know a request was HTTPS (it decides whether cookies are marked Secure), and the
-            first <code>X-Forwarded-For</code> address for rate limiting. Make the proxy <strong>overwrite</strong> X-Forwarded-For rather than append, and
+            The app trusts the proxy's <code>X-Forwarded-Proto</code> to know a request was HTTPS (it decides whether cookies are marked Secure), and its
+            <code>X-Forwarded-For</code> for the client IP that rate limits are keyed on. Make the proxy <strong>overwrite</strong> X-Forwarded-For rather than append, and
             keep the app's port reachable only from the proxy. Set <code>HOST=127.0.0.1</code> when the proxy runs on the same machine, and{" "}
             <code>TRUSTED_PROXIES</code> to the proxy's address so forwarded headers from anyone else are ignored.
           </p>

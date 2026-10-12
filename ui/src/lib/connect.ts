@@ -377,6 +377,14 @@ export function isPrivateHost(serverUrl: string): boolean {
   if (!host.includes(".") && !host.includes(":")) return true; // bare intranet name
   if (/\.(local|internal|lan|corp|intranet|home\.arpa)$/.test(host)) return true;
   if (host === "::1" || /^f[cd][0-9a-f]{2}:/.test(host) || host.startsWith("fe80:")) return true;
+  // IPv4-mapped IPv6: URL writes [::ffff:10.0.0.1] as ::ffff:a00:1.
+  const mapped = host.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (mapped) {
+    const [hi, lo] = [parseInt(mapped[1], 16), parseInt(mapped[2], 16)];
+    host = `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+  }
+  // Decimal, octal and hex IPv4 forms need nothing here: URL already
+  // normalizes them to dotted decimal (167772161 and 012.0.0.1 → 10.0.0.1).
   const m = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
   if (!m) return false;
   const [a, b] = [Number(m[1]), Number(m[2])];
