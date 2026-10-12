@@ -177,6 +177,26 @@ describe("structure rules per nest", () => {
     expect(r[5].violations[0].message).toMatch(/repeats a group/);
   });
 
+  // Review of #403: a body that parses but is no object (`null`), a test
+  // that is no object, or a field that is no text threw from the handler —
+  // a 500 any reader could cause. And PUT took an unparseable body as empty
+  // rules, clearing the nest's saved rules.
+  it("a malformed check or save is a 400, never a 500, and never clears the rules", async () => {
+    const raw = (method: string, path: string, body: string) =>
+      app.request(path, { method, headers: { "Content-Type": "application/json", Authorization: `Bearer ${owner.apiKey}` }, body });
+    for (const body of ["null", "[]", '"x"', '{"tests":[null]}', '{"tests":[1]}', '{"tests":[{"title":"x","body":5}]}', '{"rules":"x"}']) {
+      const res = await raw("POST", `/nests/${nestId}/structure/check`, body);
+      expect(res.status, body).toBe(400);
+    }
+    const before = await jsonRequest(app, "GET", `/nests/${nestId}/structure`, undefined, owner.apiKey);
+    for (const body of ["null", "not json", "[]"]) {
+      const res = await raw("PUT", `/nests/${nestId}/structure`, body);
+      expect(res.status, body).toBe(400);
+    }
+    const after = await jsonRequest(app, "GET", `/nests/${nestId}/structure`, undefined, owner.apiKey);
+    expect(after.data.rules).toEqual(before.data.rules);
+  });
+
   it("caps a check at 50 tests", async () => {
     const tests = Array.from({ length: 51 }, () => ({ title: "x" }));
     expect((await jsonRequest(app, "POST", `/nests/${nestId}/structure/check`, { tests }, reader.apiKey)).status).toBe(400);

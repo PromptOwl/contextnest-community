@@ -204,6 +204,9 @@ export function derivedNodeId(title: string, folder = ""): string | null {
   return slug ? `nodes/${[...folderToSegments(folder), slug].join("/")}` : null;
 }
 
+/** The first name a title with no a-z letters or digits gets (`document-N`, below). */
+export const FIRST_GENERATED_NAME = "document-1";
+
 /**
  * The id for a title that carries no ASCII at all: document-1, document-2, …,
  * the first one free in this folder. The title stays exactly what the author

@@ -23,11 +23,8 @@ import { resolveNestAccess } from "../shared/access.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { nestRequiresPushConfirmation } from "./service.js";
 import { engineCache } from "../nodes/engine.js";
-import { derivedNodeId } from "../nodes/service.js";
+import { derivedNodeId, FIRST_GENERATED_NAME } from "../nodes/service.js";
 import { assertPushConforms } from "../structure/writes.js";
-
-/** The first name a title with no a-z letters or digits gets (createNode's `document-N`). */
-const GENERATED_NAME = "document-1";
 import { notifyPendingPush } from "../governance/notify-service.js";
 import {
   applyPublish,
@@ -229,7 +226,7 @@ export async function createPendingPush(params: {
     storage,
     publishableDocs(payload).map((d) => ({
       title: d.title,
-      id: derivedNodeId(d.title, d.folder) ?? derivedNodeId(GENERATED_NAME, d.folder)!,
+      id: derivedNodeId(d.title, d.folder) ?? derivedNodeId(FIRST_GENERATED_NAME, d.folder)!,
       type: d.type,
       body: d.content,
       status: d.status,

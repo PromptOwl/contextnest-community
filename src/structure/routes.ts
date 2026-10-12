@@ -29,7 +29,7 @@ import { ForbiddenError, ValidationError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { canManageStewards } from "../governance/stewardship-service.js";
 import { engineApi, opContext } from "../nodes/engine.js";
-import { ACCEPTED_NODE_TYPES, derivedNodeId, folderToSegments } from "../nodes/service.js";
+import { ACCEPTED_NODE_TYPES, derivedNodeId, FIRST_GENERATED_NAME, folderToSegments } from "../nodes/service.js";
 
 export const structureRoutes = new Hono<AuthEnv>();
 
@@ -37,6 +37,17 @@ export const structureRoutes = new Hono<AuthEnv>();
 const MAX_CHECKS = 50;
 
 /** The three config blocks the rules live in; every other key is the vault's own. */
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** A request body that must be a JSON object: anything else is a 400, never an empty value. */
+function objectBody(body: unknown): Record<string, unknown> {
+  if (!isObject(body)) throw new ValidationError("The request body must be a JSON object.");
+  return body;
+}
+
+/** The fields of a check test that are text, when given. */
+const TEST_TEXT_FIELDS = ["folder", "title", "name", "type", "body", "file_name", "folder_name"] as const;
+
 function rulesOf(body: unknown): StructureConfig {
   const b = (body ?? {}) as Record<string, unknown>;
   const rules: Record<string, unknown> = {};
@@ -100,7 +111,8 @@ structureRoutes.get("/", async (c) => {
 structureRoutes.put("/", async (c) => {
   const nestId = c.req.param("nestId")!;
   await assertCanManage(c, nestId);
-  const rules = rulesOf(await c.req.json().catch(() => ({})));
+  // Unparseable is refused, never read as empty rules: that would clear them.
+  const rules = rulesOf(objectBody(await c.req.json().catch(() => undefined)));
   const compiled = compile(rules);
   if ("error" in compiled) return c.json({ error: compiled.error, fieldErrors: compiled.fieldErrors }, 400);
   const ctx = await context(c, nestId);
@@ -141,7 +153,7 @@ function tryFormat(t: CheckTest) {
   const format = String((folderFormat ? t.folder_name : t.file_name) ?? "").trim();
   // A title with no a-z letters or digits is saved under a generated name.
   const derived = derivedNodeId(String(t.name ?? t.title ?? ""))?.split("/").pop();
-  const slug = derived ?? GENERATED;
+  const slug = derived ?? FIRST_GENERATED_NAME;
   const generated = derived === undefined ? { generated: true } : {};
   if (!format) return { ok: true, slug, ...generated, violations: [] };
   const compiled = compile({ folders: folderFormat ? { "try/{name}": { folder_name: format } } : { try: { file_name: format } } });
@@ -161,14 +173,20 @@ function tryFormat(t: CheckTest) {
 }
 
 /** The name createNode gives a title with no a-z letters or digits (document-1, -2, …). */
-const GENERATED = "document-1";
 
 structureRoutes.post("/check", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const body = (await c.req.json().catch(() => ({}))) as CheckBody;
+  const body = objectBody(await c.req.json().catch(() => ({}))) as CheckBody;
   const tests = body.tests ?? [];
   const folders = body.folders ?? [];
   if (!Array.isArray(tests) || !Array.isArray(folders)) throw new ValidationError("tests and folders must be lists");
+  for (const [i, t] of tests.entries()) {
+    if (!isObject(t)) throw new ValidationError(`tests[${i}] must be an object`);
+    for (const key of TEST_TEXT_FIELDS) {
+      if (t[key] !== undefined && typeof t[key] !== "string") throw new ValidationError(`tests[${i}].${key} must be text`);
+    }
+  }
+  if (body.rules !== undefined && !isObject(body.rules)) throw new ValidationError("rules must be an object");
   if (tests.length > MAX_CHECKS || folders.length > MAX_CHECKS) {
     throw new ValidationError(`A check judges at most ${MAX_CHECKS} titles and ${MAX_CHECKS} folders.`);
   }
@@ -196,7 +214,7 @@ structureRoutes.post("/check", async (c) => {
       id = derivedNodeId(String(t.name ?? t.title ?? ""), String(t.folder ?? ""));
       if (!id) {
         generated = true;
-        id = derivedNodeId(GENERATED, String(t.folder ?? ""));
+        id = derivedNodeId(FIRST_GENERATED_NAME, String(t.folder ?? ""));
       }
     } catch (err) {
       return { ok: false, slug: "", violations: [{ code: "FOLDER_NAME", path: String(t.folder ?? ""), message: (err as Error).message }] };
