@@ -33,6 +33,7 @@ export function ComplianceTab({
   nestName,
   violations,
   loading,
+  error,
   dirty,
   canEdit,
   templates,
@@ -44,6 +45,8 @@ export function ComplianceTab({
   nestName: string;
   violations: StructureViolation[] | undefined;
   loading: boolean;
+  /** Why the report could not be read (it needs read access to the whole nest). */
+  error?: string;
   dirty: boolean;
   /** Can create documents and folders here (the fix actions). */
   canEdit: boolean;
@@ -55,6 +58,9 @@ export function ComplianceTab({
 }) {
   const [busy, setBusy] = useState<string | null>(null);
 
+  if (error && !violations) {
+    return <p className="text-sm text-muted-foreground">{error}</p>;
+  }
   if (loading || !violations) {
     return (
       <div className="space-y-2" aria-busy="true" aria-label="Loading the compliance report">

@@ -102,9 +102,8 @@ export async function folderDeleteOrder(storage: NestStorage, folder: string, id
   if (!rules) return ids;
   await judged(() => enforceStructure(rules, checkDeleteFolder(rules, folder)));
   // Asked as if other documents remain beside it (1): is this a required file at all.
-  const required = (id: string) => (checkDeleteDocument(rules, id, 1).length > 0 ? 1 : 0);
-  const depth = (id: string) => id.split("/").length;
-  return [...ids].sort((a, b) => depth(b) - depth(a) || required(a) - required(b));
+  const key = new Map(ids.map((id) => [id, { depth: id.split("/").length, required: checkDeleteDocument(rules, id, 1).length > 0 ? 1 : 0 }]));
+  return [...ids].sort((a, b) => key.get(b)!.depth - key.get(a)!.depth || key.get(a)!.required - key.get(b)!.required);
 }
 
 /**

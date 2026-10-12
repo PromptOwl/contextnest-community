@@ -584,6 +584,7 @@ export function StructurePage({ nestId, nestName, isArchived, onBack, openDocume
                 nestName={nestName}
                 violations={violations}
                 loading={report.isLoading}
+                error={report.error ? (report.error as Error).message : undefined}
                 dirty={dirty}
                 canEdit={canEdit}
                 templates={structure.data?.templates ?? {}}

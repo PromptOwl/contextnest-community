@@ -347,3 +347,29 @@ describe("structure rules on every write the app makes (UX review)", () => {
     expect(res.data.results[1]).toMatchObject({ ok: false, slug: "document-1", generated: true });
   });
 });
+
+describe("the compliance report lists only what the caller may read whole", () => {
+  it("a visibility-only reader of a public nest gets the rules, never the report's paths", async () => {
+    // `writer` has no role on this new nest: its public visibility is all that lets them in.
+    const stranger = writer;
+    const nest = (await jsonRequest(app, "POST", "/nests", { name: "Public rules" }, owner.apiKey)).data.nest.id;
+    expect((await jsonRequest(app, "PUT", `/nests/${nest}/structure`, RULES, owner.apiKey)).status).toBe(200);
+    // A draft that breaks a rule: its path is in the report, and a stranger may not see it.
+    const draft = await jsonRequest(app, "POST", `/nests/${nest}/nodes`, { title: "Secret plan", content: "x\n", folder: "clients/acme-042/meetings" }, owner.apiKey);
+    expect(draft.status, JSON.stringify(draft.data)).toBe(201);
+    const pub = await jsonRequest(app, "PATCH", `/nests/${nest}/visibility`, { visibility: "public", acknowledge_public: true }, owner.apiKey);
+    expect(pub.status, JSON.stringify(pub.data)).toBe(200);
+
+    const rules = await jsonRequest(app, "GET", `/nests/${nest}/structure`, undefined, stranger.apiKey);
+    expect(rules.status, JSON.stringify(rules.data)).toBe(200);
+    for (const res of [
+      await jsonRequest(app, "GET", `/nests/${nest}/structure?report=1`, undefined, stranger.apiKey),
+      await jsonRequest(app, "POST", `/nests/${nest}/structure/check`, { report: true }, stranger.apiKey),
+    ]) {
+      expect(res.status, JSON.stringify(res.data)).toBe(403);
+      expect(JSON.stringify(res.data)).not.toMatch(/secret-plan/);
+    }
+    const own = await jsonRequest(app, "GET", `/nests/${nest}/structure?report=1`, undefined, owner.apiKey);
+    expect(JSON.stringify(own.data.violations)).toMatch(/secret-plan/);
+  });
+});

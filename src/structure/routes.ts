@@ -26,7 +26,7 @@ import {
 } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { ForbiddenError, ValidationError } from "../shared/errors.js";
-import { resolveCallerEmail } from "../governance/access-guard.js";
+import { readsWholeNest, resolveCallerEmail } from "../governance/access-guard.js";
 import { canManageStewards } from "../governance/stewardship-service.js";
 import { engineApi, opContext } from "../nodes/engine.js";
 import { ACCEPTED_NODE_TYPES, derivedNodeId, FIRST_GENERATED_NAME, folderToSegments } from "../nodes/service.js";
@@ -89,6 +89,19 @@ async function assertCanManage(c: Context<AuthEnv>, nestId: string): Promise<voi
   }
 }
 
+/**
+ * The compliance report names every document that breaks a rule, drafts
+ * included, so it goes only to callers who read the whole nest. Never to a
+ * visibility-only reader (approved content only) or one a governed nest
+ * narrows: the rules themselves stay readable to them.
+ */
+async function assertReadsWholeNest(c: Context<AuthEnv>, nestId: string): Promise<void> {
+  const userId = c.get("userId");
+  if (!(await readsWholeNest(nestId, userId, (await resolveCallerEmail(userId)) ?? ""))) {
+    throw new ForbiddenError("The compliance report lists every document in the nest, so it needs read access to the whole nest.");
+  }
+}
+
 /** The saved rule blocks as YAML, for the read-only "View YAML" panel. */
 function asYaml(rules: StructureConfig): string {
   return Object.keys(rules).length === 0 ? "" : yaml.dump(rules, { lineWidth: -1, noRefs: true });
@@ -98,9 +111,11 @@ structureRoutes.get("/", async (c) => {
   const nestId = c.req.param("nestId")!;
   const ctx = await context(c, nestId);
   const folder = c.req.query("folder");
+  const report = ["1", "true"].includes(c.req.query("report") ?? "");
+  if (report) await assertReadsWholeNest(c, nestId);
   const out = await engineApi.run<Record<string, unknown>>(
     "context_structure",
-    { ...(folder !== undefined ? { folder } : {}), ...(["1", "true"].includes(c.req.query("report") ?? "") ? { report: true } : {}) },
+    { ...(folder !== undefined ? { folder } : {}), ...(report ? { report: true } : {}) },
     ctx,
   );
   const saved = rulesOf(await ctx.storage.readConfig());
@@ -196,6 +211,7 @@ structureRoutes.post("/check", async (c) => {
   if (tests.length > MAX_CHECKS || folders.length > MAX_CHECKS) {
     throw new ValidationError(`A check judges at most ${MAX_CHECKS} titles and ${MAX_CHECKS} folders.`);
   }
+  if (body.report === true) await assertReadsWholeNest(c, nestId);
   const ctx = await context(c, nestId);
 
   // A draft is judged only for the people who could save it.
