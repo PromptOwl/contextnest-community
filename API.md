@@ -365,6 +365,7 @@ Pins are per `(user, nest)` in the `nest_pins` table and cascade with the nest. 
   "done_tags": ["done"],
   "require_push_confirmation": false,
   "creator_is_reviewer": false,
+  "review_sla_hours": null,
   "access_log_enabled": true
 }
 ```
@@ -382,6 +383,7 @@ Every field is optional; only the ones present are changed.
 - `done_tags` — tags whose Board columns mean "done" (default `["done"]`). A **task** whose tags change to include one gets `metadata.completed_at`; removing it clears the stamp. Same input and normalization as `prime_tags`. An empty list turns completion off. Applies to future moves only — tasks already carrying the tag are not stamped.
 - `require_push_confirmation` — the **Push Confirmation Gate** (see below). **Superadmin-only to SET**: a PATCH carrying this field from anyone who is not a server superadmin is refused with a per-field `403` (`{ "error": ..., "field": "require_push_confirmation" }`) and no other field in the same body is applied. Readable by anyone who can read the nest. Off by default.
 - `creator_is_reviewer` — in a governed nest, whoever creates a document becomes its document-scope `reviewer` and v1 publishes immediately; later changes go through review as usual (the creator approves teammates' changes, another reviewer approves the creator's). Prime documents still draft. Future creates only. Off by default. See `STEWARDSHIP.md → Creators review their own documents`.
+- `review_sla_hours` — review SLA in whole hours (`1`–`8760`), or `null` (or `0`) for off, the default. When set, a review left pending that long escalates **one rung**: from the document's own reviewers to its **tag**-scope reviewers, then **nest**-scope reviewers, then the **nest owner** — each rung getting the same window before the next. Escalating notifies the new rung (a `review_escalated` inbox row linking the document, a Slack/Teams post — through the server-wide webhooks by default, in the same digest as review requests, and through any per-nest connector subscribed to `review_escalated` or `"*"` — and an email to each escalated reviewer when SMTP is configured); it never changes who may approve, and the submitter is never a recipient. Any other value → `400`, with nothing in the body applied. Inert while off and in ungoverned or archived nests. See `STEWARDSHIP.md → Review SLA escalation`.
 - `access_log_enabled` — record reads, retrievals and exports of this nest's documents in the activity log (see `GET /nests/:nestId/activity-log`). **On by default.** Any nest admin may turn it on; turning it **off** is owner / server-admin only — anyone else gets a per-field `403` (`"field": "access_log_enabled"`) and nothing in the same body is applied. Takes effect for the next read; rows already recorded stay until the retention window prunes them.
 
 Turning stewardship **off** wipes stewards and pending reviews and is owner-only; the other fields are non-destructive and never change the state of anything already published.
@@ -1292,7 +1294,10 @@ Duplicate ids collapse. Up to **50** ids per call; an empty or oversized
 selection is refused up front (`400`) rather than silently truncated.
 
 ### GET `/nests/:nestId/nodes/:nodeId/reviews`
-Full review history for a node.
+Full review history for a node. Each review carries `escalationLevel` — the
+last review-SLA rung it was escalated to (`0` none, `1` tag reviewers, `2` nest
+reviewers, `3` nest owner) — and `escalatedAt` once it has escalated. A
+resubmission is a new review and starts back at `0`.
 
 ### POST `/nests/:nestId/nodes/:nodeId/request-deletion`
 Body: `{ "reason": "superseded by the new runbook" }` (required).
@@ -1504,7 +1509,9 @@ The UI deep-links a comment item to its document with the thread focused via
 
 ### Notification rows (`GET /me/work` → `notifications`, `GET /me/notifications`)
 
-Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review verdicts, document deletion flags, mentions, `comment_reply` thread replies); nest-level rows have `node_id: null`.
+Each row carries `nest_id`, `nest_name` (resolved in the same read, so the inbox navigates without fetching the nest list), `kind`, `message`, `created_at`, `read_at`, and `node_id` when the row is about a document (review requests, verdicts and SLA escalations, document deletion flags, mentions, `comment_reply` thread replies, `comment` notes to a document's watchers and reviewers); nest-level rows have `node_id: null`.
+
+`review_requested` and `review_escalated` rows are marked read for every recipient when their review is approved (singly or in bulk), rejected or withdrawn (`cancel-review`), so an answered request stops looking open; the rows remain in the history.
 
 Unread `nest_invite` rows are what the Nests page shows as **Pending invites**. Accept marks them read (`POST /me/notifications/read`) and opens the nest.
 
@@ -1716,6 +1723,19 @@ agent working through a review posts a comment per finding, which is exactly
 what `context_comment` is for, and throttling the write would break it. The same applies to the
 annotation thread endpoints (§ Hosted artifacts), which are what the UI's
 comments panel posts.
+
+**Followers hear about every comment.** Besides the people it names, a new
+comment (or reply) notifies the document's **watchers**
+(`POST /nests/:nestId/nodes/:nodeId/watchers`) and its **reviewer stewards** at
+document, tag and nest scope: a `comment` row in `GET /me/notifications`
+linking the document, plus an email carrying the excerpt when SMTP is set up.
+Never the comment's author, never twice for someone the same comment mentions
+(they get the `mention`), never an address with no account or a person who
+can't open the document; at most 50 followers per comment
+(`MAX_COMMENT_FOLLOWERS`). Emails draw on the same per-actor budget as mention
+emails. There is no channel post for a plain comment — the connector audience
+isn't derived from who can read the document. This applies to the REST,
+annotation-thread and MCP `context_comment` write paths.
 
 ### POST `/nests/:nestId/nodes/:nodeId/comments/:commentId/resolve`
 Mark a comment resolved. Records `resolvedBy` + `resolvedAt`. Returns `{ comment }`.
@@ -2360,7 +2380,7 @@ Values ride to the runner inside the run bundle. With `byok`, `ANTHROPIC_API_KEY
 Not behind the workflow-plane flag: connectors fire on review events too.
 
 - `GET /nests/:nestId/connectors` (read).
-- `POST /nests/:nestId/connectors` (write) — Body: `{ channel, url, events }`. `channel` = `slack` | `teams` | `webhook`; `url` is a literal `https://…` or `env:KEY` to pull it from the env store; `events` is a non-empty array of `review_requested`, `review_approved`, `review_rejected`, `run_failed`, `mention`, or `["*"]`.
+- `POST /nests/:nestId/connectors` (write) — Body: `{ channel, url, events }`. `channel` = `slack` | `teams` | `webhook`; `url` is a literal `https://…` or `env:KEY` to pull it from the env store; `events` is a non-empty array of `review_requested`, `review_approved`, `review_rejected`, `run_failed`, `mention`, `review_escalated` (a review passed its nest's review SLA and moved up a rung), or `["*"]`. Subscription is explicit: a connector that should hear escalations needs `review_escalated` (or `"*"`) alongside `review_requested`. The server-wide Slack/Teams webhooks need no row — they receive review requests and escalations by default, through the debounced digest.
 - `PATCH /nests/:nestId/connectors/:id` (write) — `{ enabled?, events?, url? }`.
 - `DELETE /nests/:nestId/connectors/:id` (write).
 
@@ -2608,7 +2628,7 @@ For any `/nests/:nestId/...` request, the middleware computes:
 
 Returns 403 `Insufficient permissions` if not met. Open-mode (`AUTH_MODE=open`) treats everyone as `owner`.
 
-License gate: any non-GET request OR any governance path requires a valid PromptOwl license (`/license/install`). Otherwise 503. **Who hears why:** a server admin (open mode, license owner, superadmin), or the key's owner after it lapsed, gets `{ "error": "License required", "reason": "...", "setup_url": "/setup", "trial", "expires_at", "days_left", "license_reason", "grace_ends_at", "contact": { "url", "email" } }` (or `"Server suspended by PromptOwl"` with `reason`, `contact`, `contact_url`). Everyone else gets only `{ "error": "This workspace is read-only right now. Your administrator has been notified.", "read_only": true }`, with no licensing vocabulary. The server-level `/mcp` write tools and run writes follow the same rule.
+License gate: any non-GET request OR any governance path requires a valid PromptOwl license (`/license/install`), unless the server is within the Free tier (10 or fewer billed users, counted as a Free key counts them; viewers never count). Otherwise 503, and the admin-facing `reason` says the server has more than 10 users and no valid license. **Who hears why:** a server admin (open mode, license owner, superadmin), or the key's owner after it lapsed, gets `{ "error": "License required", "reason": "...", "setup_url": "/setup", "trial", "expires_at", "days_left", "license_reason", "grace_ends_at", "contact": { "url", "email" } }` (or `"Server suspended by PromptOwl"` with `reason`, `contact`, `contact_url`). Everyone else gets only `{ "error": "This workspace is read-only right now. Your administrator has been notified.", "read_only": true }`, with no licensing vocabulary. The server-level `/mcp` write tools and run writes follow the same rule.
 
 ---
 

@@ -185,7 +185,11 @@ Per-nest connector rows post the same Adaptive Card format to a nest-specific
 webhook, with per-event filtering: `POST /nests/:id/connectors` with a JSON
 body like `{"channel": "teams", "url": "https://…", "events":
 ["review_requested", "review_rejected"]}` (`events` is any of `review_requested`,
-`review_approved`, `review_rejected`, `run_failed`, `mention`, or `["*"]`; the
+`review_approved`, `review_rejected`, `run_failed`, `mention`, `review_escalated`
+— a review passed the nest's review SLA and moved up a rung — or `["*"]`;
+subscription is explicit, so list `review_escalated` next to `review_requested`
+to hear escalations on that row; the server-wide webhook above posts review
+requests and escalations with no row at all; the
 `url` may be an `env:KEY` reference into the nest's env store). Manage rows
 with `GET`/`PATCH`/`DELETE` on the same path.
 

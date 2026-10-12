@@ -24,11 +24,13 @@ import {
 import { loadActiveCommunitySites } from "./auth/community-sites.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
 import { startScheduler } from "./workflow/scheduler.js";
+import { startReviewSlaLoop } from "./governance/review-sla.js";
 import { sweepStale } from "./shared/rate-limit.js";
 import { purgeExpired as purgeExpiredOAuth } from "./auth/oauth-store.js";
 import { bannerHeading } from "./shared/startup-banner.js";
 import { currentEgressProxyStatus, currentExtraCaStatus, networkStartupLines } from "./shared/egress-proxy.js";
 import { parseTrustedProxies } from "./shared/trusted-proxies.js";
+import { FREE_TIER_MAX_USERS } from "./auth/free-tier.js";
 
 async function main() {
   // Refuse to boot on a malformed TRUSTED_PROXIES rather than guess who to trust.
@@ -112,8 +114,9 @@ async function main() {
   if (!license.valid) {
     console.warn(`
   WARNING: No valid PromptOwl license key found.
-  Server boots in SETUP MODE — writes return 503 and admin features
-  (stewards, teammates, governance) are locked until a key is installed.
+  Free tier: writes, governance and teammate management stay open while
+  the server has ${FREE_TIER_MAX_USERS} or fewer users (viewers are free and never count).
+  Past that, writes return 503 until a key is installed.
 
   To activate:
     1. Sign up at https://app.promptowl.ai
@@ -244,6 +247,11 @@ ${config.AUTH_MODE === "key" ? `
 
   // Workflow-plane interval schedules → run rows (no-op unless the flag is on).
   startScheduler();
+
+  // Review SLA escalation (per-nest review_sla_hours). Independent of the
+  // workflow plane — that loop above is a no-op unless its flag is on, and
+  // review governance isn't. Inert while no nest sets an SLA.
+  startReviewSlaLoop();
 
   // Metacognition runs execute in this process; any still "running" from a
   // previous process lost their loop. Close them so the agents aren't stuck.

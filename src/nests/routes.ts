@@ -28,6 +28,9 @@ import {
   nestAllowsSelfApprove,
   nestCreatorIsReviewer,
   setCreatorIsReviewer,
+  nestReviewSlaHours,
+  setReviewSlaHours,
+  MAX_REVIEW_SLA_HOURS,
   setAllowSelfApprove,
   nestReviewsPrimeOnly,
   setPrimeOnlyReview,
@@ -749,6 +752,7 @@ nestRoutes.get("/:nestId/settings", async (c) => {
     // anyone who can read the nest so the CLI/UI knows the posture.
     require_push_confirmation: await nestRequiresPushConfirmation(nestId),
     creator_is_reviewer: await nestCreatorIsReviewer(nestId),
+    review_sla_hours: await nestReviewSlaHours(nestId),
     access_log_enabled: await nestAccessLogEnabled(nestId),
   });
 });
@@ -782,8 +786,24 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     done_tags?: string[] | string;
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
+    review_sla_hours?: number | null;
     access_log_enabled?: boolean;
   }>();
+
+  // Validated before anything is written, so a bad SLA can't leave the other
+  // fields in the same body half-applied.
+  if (
+    body.review_sla_hours !== undefined &&
+    body.review_sla_hours !== null &&
+    (typeof body.review_sla_hours !== "number" ||
+      !Number.isInteger(body.review_sla_hours) ||
+      body.review_sla_hours < 0 ||
+      body.review_sla_hours > MAX_REVIEW_SLA_HOURS)
+  ) {
+    throw new ValidationError(
+      `review_sla_hours must be a whole number of hours between 1 and ${MAX_REVIEW_SLA_HOURS}, or null to turn it off`,
+    );
+  }
 
   // Read logging (the record of what each person and agent read) is an audit
   // control. Any admin may turn it ON; turning it OFF stays with the owner or
@@ -877,6 +897,11 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
   if (typeof body.creator_is_reviewer === "boolean") {
     await setCreatorIsReviewer(nestId, body.creator_is_reviewer);
   }
+  // Review SLA: null/0 turns it off. Future-facing like the rest — changing it
+  // never un-notifies a rung that already escalated.
+  if (body.review_sla_hours !== undefined) {
+    await setReviewSlaHours(nestId, body.review_sla_hours);
+  }
   // Read logging: checked up front (see the guard after the body parse).
   if (typeof body.access_log_enabled === "boolean") {
     await setAccessLogEnabled(nestId, body.access_log_enabled);
@@ -890,6 +915,7 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     done_tags: await nestDoneTags(nestId),
     require_push_confirmation: await nestRequiresPushConfirmation(nestId),
     creator_is_reviewer: await nestCreatorIsReviewer(nestId),
+    review_sla_hours: await nestReviewSlaHours(nestId),
     access_log_enabled: await nestAccessLogEnabled(nestId),
     wiped,
   });
