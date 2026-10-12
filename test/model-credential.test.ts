@@ -578,6 +578,35 @@ describe("the server's own model gateway (byok)", () => {
     expect(res.data.settings.model_source).toBe("promptowl");
   });
 
+  it("a new URL needs the key re-entered, so the stored key never goes to an unchecked host", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY });
+    const seen = gatewayAnswers(200);
+    await jsonRequest(
+      app, "PATCH", "/admin/settings", { anthropic_base_url: LITELLM, anthropic_api_key: "sk-litellm-virtual" }, owner.apiKey,
+    );
+    const moved = await jsonRequest(app, "PATCH", "/admin/settings", { anthropic_base_url: "http://evil:4000" }, owner.apiKey);
+    expect(moved.status).toBe(400);
+    expect(moved.data.fieldErrors.anthropic_api_key).toMatch(/again/);
+    expect(process.env.ANTHROPIC_BASE_URL).toBe(LITELLM);
+    // The same URL, or a new URL with its key, still saves.
+    const same = await jsonRequest(app, "PATCH", "/admin/settings", { anthropic_base_url: `${LITELLM}/` }, owner.apiKey);
+    expect(same.status).toBe(200);
+    expect(seen.length).toBe(1);
+  });
+
+  it("clearing an unset URL leaves a bare key alone, and an oversized key is refused", async () => {
+    const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY });
+    process.env.ANTHROPIC_API_KEY = "sk-ant-bare";
+    const clear = await jsonRequest(app, "PATCH", "/admin/settings", { anthropic_base_url: "" }, owner.apiKey);
+    expect(clear.status).toBe(200);
+    expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-bare");
+    const big = await jsonRequest(
+      app, "PATCH", "/admin/settings", { anthropic_base_url: LITELLM, anthropic_api_key: "k".repeat(513) }, owner.apiKey,
+    );
+    expect(big.status).toBe(400);
+    expect(big.data.fieldErrors.anthropic_api_key).toMatch(/512/);
+  });
+
   it("without byok, setting either half is refused (403); clearing is allowed", async () => {
     const { app, owner } = await boot({ gateway: GATEWAY });
     for (const body of [{ anthropic_base_url: LITELLM }, { anthropic_api_key: "sk-x" }]) {

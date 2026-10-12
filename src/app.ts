@@ -1242,7 +1242,9 @@ export function createApp(): Hono<AuthEnv> {
         // The key goes with it: left alone, a bare key would be handed to
         // PromptOwl's gateway at the next boot (moveStoredAnthropicKey).
         pending.push({ name: "ANTHROPIC_BASE_URL", value: null });
-        if (!("anthropic_api_key" in body)) pending.push({ name: "ANTHROPIC_API_KEY", value: null });
+        // Only a key that WAS paired with a URL: a bare key waits for hand-over.
+        if (config.ANTHROPIC_BASE_URL && !("anthropic_api_key" in body))
+          pending.push({ name: "ANTHROPIC_API_KEY", value: null });
       } else {
         let ok = false;
         try {
@@ -1256,6 +1258,9 @@ export function createApp(): Hono<AuthEnv> {
             "anthropic_base_url",
             "Model gateway URL must be an http(s) URL, e.g. http://litellm:4000 — or empty to turn it off.",
           );
+        else if (v !== config.ANTHROPIC_BASE_URL && process.env.ANTHROPIC_API_KEY && !("anthropic_api_key" in body))
+          // The stored key is write-only: never send it to a host it wasn't checked against.
+          addError("anthropic_api_key", "Paste the gateway key again: a new gateway URL needs its key re-entered.");
         else pending.push({ name: "ANTHROPIC_BASE_URL", value: v });
       }
     }
@@ -1266,8 +1271,8 @@ export function createApp(): Hono<AuthEnv> {
       const v = body.anthropic_api_key;
       if (v === null || v === "") {
         pending.push({ name: "ANTHROPIC_API_KEY", value: null });
-      } else if (typeof v !== "string" || !v.trim() || /\s/.test(v.trim())) {
-        addError("anthropic_api_key", "Gateway key must be a single token with no spaces (or empty to clear it).");
+      } else if (typeof v !== "string" || !v.trim() || /\s/.test(v.trim()) || v.trim().length > 512) {
+        addError("anthropic_api_key", "Gateway key must be a single token with no spaces, up to 512 characters (or empty to clear it).");
       } else {
         const key = v.trim();
         const patchedBase = pending.find((p) => p.name === "ANTHROPIC_BASE_URL");
