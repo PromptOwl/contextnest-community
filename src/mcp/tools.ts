@@ -1030,6 +1030,9 @@ async function resolveOwnDraft(
     reviews.getPendingReview(ctx.nestId, node.id),
   ]);
   if (current === 0 || (approved != null && current <= approved)) return null;
+  // node was read before these lookups: a write in between would pair one
+  // version's bytes with another version's label and author check.
+  if (Number(node.frontmatter?.version) !== current) return null;
   const row = await versions.getVersion(ctx.nestId, node.id, current);
   if (!row || !["draft", "rejected", "pending_review"].includes(row.status)) return null;
   const me = ctx.userEmail.toLowerCase();
