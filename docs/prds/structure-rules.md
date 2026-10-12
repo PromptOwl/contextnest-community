@@ -290,7 +290,7 @@ Per the sync discipline, all of this lands in the engine repo first and ships in
   - On the server it calls the engine's exported `compileStructure`, `checkDocument` and `checkFolder`, and Community's own `slugify` for `slug` (it is the function that builds Community's ids, so it is what the server will produce). The UI therefore shows exactly what the server will enforce.
 
 - **Write paths that don't go through an engine op** call the engine's exported `enforcedStructure`, checkers, `missingFolders` and `scaffoldFolders` directly — never a copy of them:
-  - `moveNode` (`src/nodes/service.ts:2571`) checks the destination and scaffolds any new folder. The move keeps the file's leaf, so a non-conforming name cannot move into a folder with a name rule until a rename op exists (§12). The guard → `checkDocument` → `missingFolders` → write → `scaffoldFolders` sequence is the engine's create sequence. Before this phase, export it from the engine as one placement helper, so Community calls it rather than assembling the steps itself (architecture review, round 5). *As shipped, #183 did not add that one helper: Community composes the engine's exported checkers (`checkDocument`, `missingFolders`, `scaffoldFolders`, `checkDeleteDocument`) in `src/structure/writes.ts`, and every judgement is still the engine's. An upstream placement helper, and a name-format checker for the Try box, are follow-ups.*
+  - `moveNode` (`src/nodes/service.ts:2571`) checks the destination and scaffolds any new folder. The move keeps the file's leaf, so a non-conforming name cannot move into a folder with a name rule until a rename op exists (§12). The guard → `checkDocument` → `missingFolders` → write → `scaffoldFolders` sequence is the engine's create sequence. Community composes it from the engine's exported checkers (`checkDocument`, `missingFolders`, `scaffoldFolders`, `checkDeleteDocument`) in `src/structure/writes.ts`, and every judgement is still the engine's. One upstream placement helper (asked for by architecture review round 5), and a name-format checker for the Try box, are follow-ups.
   - `createEmptyFolder` (:1078) checks the folder and scaffolds its required children.
   - `deleteFolder` (:2972) first calls `checkDeleteFolder` on the folder itself (a required subfolder cannot go on its own), then passes the skip flag for its own children, so the required-file guard does not block deleting the whole folder.
 
@@ -368,7 +368,7 @@ clients/{client}/meetings
 
 **Step 5 — Save.** Save sends `PUT /nests/:id/structure`.
 - The server re-validates, and any error appears inline at the field it names.
-- An activity-log entry records the change.
+- The request trace records the save. A `structure_changed` activity entry (who, when, what changed) is planned; see §6.3 "Not yet".
 - The **Compliance** tab badge then shows how many existing documents and folders don't fit.
 
 **Step 6 — Clean up, then enforce.**
@@ -745,7 +745,7 @@ Every phase is built **test-first**:
   - `GET /nests/:id/structure` for every role;
   - `PUT` allowed only for owners and admins (`canManageStewards`), and refused for editors, reviewers, viewers and nest-scoped keys;
   - an invalid rule is refused with 400 naming the key, and nothing is written;
-  - the activity-log entry is recorded;
+  - the `structure_changed` activity entry, once it is built (§6.3 "Not yet");
   - `POST /structure/check`: saved rules at read tier, draft rules at manage tier only, field errors, per-test results, and `slug` matching Community's `slugify`.
 - `test/structure-enforcement.test.ts`:
   - REST create, update and delete are refused with **400** (never 500), and bulk publish reports the refusal per row;
