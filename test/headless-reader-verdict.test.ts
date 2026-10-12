@@ -34,7 +34,7 @@ describe("headlessReaderVerdict", () => {
 
   it("refuses node sub-resources: history, comments, annotations, files", () => {
     for (const sub of ["versions", "versions/2", "comments", "annotations", "activity",
-      "reviews", "stewards", "watchers", "hosted", "pdf", "can-edit", "external-edits"]) {
+      "reviews", "stewards", "watchers", "relations", "hosted", "pdf", "can-edit", "external-edits"]) {
       expect(ok("GET", `/nests/${N}/nodes/nodes/guide/${sub}`), sub).toBe(false);
     }
   });

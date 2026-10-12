@@ -1517,11 +1517,14 @@ async function runTool(
         );
       }
       // Relations ride along so an agent sees what blocks a task without a
-      // second call — gated per related node like the relations tool.
-      const relations = await listRelations(
-        { nestId, userId: ctx.userId, userEmail },
-        node.id,
-      ).catch(() => null);
+      // second call — gated per related node like the relations tool. Not for
+      // a headless access key: it reads approved content only, and a related
+      // node's title could name a draft (context_relations is closed to it too).
+      const relations = (await isServiceUser(ctx.userId))
+        ? null
+        : await listRelations({ nestId, userId: ctx.userId, userEmail }, node.id).catch(
+            () => null,
+          );
       const hasRelations =
         !!relations && (relations.relations.length > 0 || relations.hidden_count > 0);
       const meta = [
