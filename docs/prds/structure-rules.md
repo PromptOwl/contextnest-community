@@ -1,6 +1,6 @@
 # PRD: Structure Rules — Governed Folder Layout, Naming, and Templates
 
-**Status:** Proposed · **Date:** 2026-10-07 · **Owner:** Qaish
+**Status:** Engine merged (PromptOwl/ContextNest#183); Community routes and Structure page in PromptOwl/contextnest-community#403 · **Date:** 2026-10-07 · **Owner:** Qaish
 **Governing rules:** Engine Logic Boundary · Engine & CLI Sync Discipline (see `CLAUDE.md`)
 
 ## 1. Problem
@@ -438,7 +438,7 @@ There is no sheet, no table primitive and no chip input, so the few new pieces a
   - **Required sections:** a chip list. Type a heading and press Enter to add it. The check API warns when a required section is not a heading in the body; the UI never parses the markdown.
   - **Where it's used:** the folders that use the template.
 - **Compliance tab:** the saved rules' report (`GET ?report=1`) in a table grouped by violation code: Code, Path, What's wrong, Actions.
-  - **Actions:** **Open** (`openDocument`) and **Move…** (the existing move dialog) on every row. A `MISSING_FILE` row adds **Create from template**, and a `MISSING_FOLDER` row adds **Create folder**.
+  - **Actions:** **Open** (`openDocument`), or **Open folder** for a folder row. A `MISSING_FILE` row adds **Create from template**, and a `MISSING_FOLDER` row adds **Create folder**. There is no **Move…**: a move keeps the leaf, so it cannot fix a name until a rename op exists (§12).
   - **Count:** the tab label shows it as a `Badge`, since nest pages have no badge field.
   - **Empty:** "Everything in this nest fits the rules."
 - **View YAML:** a `Dialog` showing the saved blocks (the `yaml` field) with `CodeHighlight`, and a Copy button. It is read-only; hand-editing YAML stays out of scope (§12).
