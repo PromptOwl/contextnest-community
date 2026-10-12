@@ -78,7 +78,16 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //
 // Lowered 56 -> 45: the server-level /mcp tools now derive from the per-nest
 // definitions (plus a `nest` arg) instead of keeping hand-written copies.
-const BASELINE = 45;
+//
+// Raised 45 -> 48 for the access-request trio (`context_request_access`,
+// `context_access_requests`, `context_resolve_access_request`, CU-wdqcq041jn). Same reason
+// as the deletion trio: access requests are not an engine operation — they live in this
+// repo's governance tables and grant through its share/collaborator paths, so there is no
+// upstream descriptor to import. They mirror the REST /access-requests routes 1:1; the
+// server-level `context_request_access` derives from the per-nest definition (no new
+// literal). Promotion is tracked upstream in PromptOwl/ContextNest#167 — adopt the
+// descriptors and lower this by 3 if it lands there.
+const BASELINE = 48;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

@@ -43,9 +43,12 @@ export function describeActivity(item: ActivityLogItem): string {
     item.type === "exported" && item.nodeId === null
       ? "exported the whole nest"
       : ACTIVITY_LABELS[item.type] ?? item.type;
-  const version = item.version != null && ["created", "edited", "restored"].includes(item.type)
-    ? ` v${item.version}`
-    : "";
+  // Changes name the version they sealed; reads and pulls name the version
+  // the caller was served (recorded since migration 050).
+  const version =
+    item.version != null && ["created", "edited", "restored", "read", "retrieved"].includes(item.type)
+      ? ` v${item.version}`
+      : "";
   return `${who} ${what}${version}`;
 }
 

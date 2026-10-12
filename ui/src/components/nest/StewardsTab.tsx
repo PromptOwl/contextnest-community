@@ -9,6 +9,8 @@ import { useQuery } from "@tanstack/react-query";
 import { Shield } from "lucide-react";
 import { reads } from "../../lib/queries";
 import { StewardList, type Steward, type StewardRole } from "../governance";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -32,6 +34,7 @@ interface Props {
 export function StewardsTab({ nestId, canManage, currentUserEmail, onAssign, onRemove, onEditRole }: Props) {
   const roster = useQuery(reads.stewards(nestId));
   const stewards = roster.data?.stewards ?? [];
+  const ownerEmail = roster.data?.ownerEmail;
   const [scope, setScope] = useState<"all" | "document" | "tag" | "nest">("all");
   const [role, setRole] = useState<"all" | StewardRole>("all");
 
@@ -59,10 +62,11 @@ export function StewardsTab({ nestId, canManage, currentUserEmail, onAssign, onR
             <li><strong>Nest</strong> — anything not matched above</li>
           </ol>
           <p>
-            <strong className="text-foreground">Reviewers</strong> can approve/reject;{" "}
+            <strong className="text-foreground">Viewers</strong> have read access;{" "}
             <strong className="text-foreground">editors</strong> can edit;{" "}
-            <strong className="text-foreground">viewers</strong> have read access. Authors
-            can't approve their own work.
+            <strong className="text-foreground">reviewers</strong> can approve/reject. The
+            nest owner holds full stewardship authority over all documents. Authors can't
+            approve their own work.
           </p>
         </CardContent>
       </Card>
@@ -102,23 +106,51 @@ export function StewardsTab({ nestId, canManage, currentUserEmail, onAssign, onR
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">All</SelectItem>
+                    <SelectItem value="viewer">Viewer</SelectItem>
                     <SelectItem value="editor">Editor</SelectItem>
                     <SelectItem value="reviewer">Reviewer</SelectItem>
-                    <SelectItem value="viewer">Viewer</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
             )}
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
+          {ownerEmail && (
+            <div
+              className="flex items-center justify-between gap-3 p-3 rounded-lg border bg-amber-50/40 border-amber-200/80"
+              data-testid="steward-owner-row"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <Avatar className="h-8 w-8 border border-amber-300">
+                  <AvatarFallback className="bg-amber-100 text-amber-900 font-semibold text-xs">
+                    {ownerEmail[0].toUpperCase()}
+                  </AvatarFallback>
+                </Avatar>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 font-medium text-foreground text-sm">
+                    <span className="truncate">{ownerEmail}</span>
+                    <Badge variant="outline" className="bg-amber-100/90 text-amber-900 border-amber-300 text-[10px] py-0 px-1.5">
+                      Nest Owner
+                    </Badge>
+                  </div>
+                  <p className="text-muted-foreground text-xs mt-0.5">
+                    Master Steward • Governs all documents, tags and nest settings
+                  </p>
+                </div>
+              </div>
+              <Badge variant="secondary" className="shrink-0 text-[11px] bg-amber-100/50 text-amber-900 border-amber-200">
+                Implicit Authority
+              </Badge>
+            </div>
+          )}
           {roster.isLoading ? (
             <StewardList stewards={[]} loading showScope />
           ) : stewards.length === 0 ? (
             <div className="text-sm space-y-3 py-2">
               <p className="text-muted-foreground leading-relaxed">
-                Without stewards, every draft needs the nest owner to approve. Add an
-                editor/reviewer to delegate approvals for a tag or specific doc.
+                No delegated stewards yet, so every draft needs the nest owner to approve.
+                Add an editor or reviewer to delegate approvals for a tag or a document.
               </p>
               {canManage && (
                 <Button variant="outline" size="sm" className="w-full" onClick={onAssign}>

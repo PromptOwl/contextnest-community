@@ -16,6 +16,7 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { ValidationError } from "../shared/errors.js";
+import { assertCanGrant, permissionClass } from "../auth/seats.js";
 import { sendEmailToRecipient } from "../notify/email.js";
 import {
   docLink,
@@ -145,6 +146,7 @@ export async function createGrant(params: {
       throw new ValidationError("folder target must name a subfolder, not the nest root");
     }
   }
+  await assertCanGrant([{ userId, next: permissionClass(role) }]);
   const db = getDb();
   const now = new Date().toISOString();
   // Never shadow the nest owner (they already have everything) — but that's a
