@@ -404,6 +404,11 @@ function NameFormat({
   /** The id of the error describing this field, when there is one. */
   error?: string;
 }) {
+  const hintId = useId();
+  // Names are derived from titles and folder names, so a regex sees lowercase
+  // kebab-case: `/[A-Z]+/` can never match (docs/prds/structure-rules.md §3.3).
+  const isRegex = value.trim().startsWith("/");
+  const describedBy = [error, isRegex ? hintId : undefined].filter(Boolean).join(" ") || undefined;
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap gap-1.5" role="group" aria-label={`${label} presets`}>
@@ -428,8 +433,13 @@ function NameFormat({
         className={`font-mono ${error ? "border-red-600 dark:border-red-400" : ""}`}
         aria-label={label}
         aria-invalid={!!error}
-        aria-describedby={error}
+        aria-describedby={describedBy}
       />
+      {isRegex && (
+        <p id={hintId} className="text-xs text-muted-foreground">
+          A /regex/ is matched against the name as it is stored: lowercase letters, digits and "-".
+        </p>
+      )}
     </div>
   );
 }
