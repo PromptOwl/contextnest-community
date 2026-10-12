@@ -22,18 +22,26 @@
  * "B is blocked by A" is the one `A —task:blocks→ B` row read from B's side.
  * `relates_to` is symmetric and stored once.
  *
- * PERMISSIONS. Callers gate the write (REST: the nest middleware's write tier;
- * MCP: canUserEdit on the task). This module enforces what both share: the
- * caller must be able to READ the task and the other end, and a related node
+ * PERMISSIONS. Writes need edit access to the TASK — canUserEdit, the same
+ * per-node rule context_update applies — enforced here so REST and MCP share
+ * it (REST also passes the nest middleware's write tier first). The OTHER end
+ * only needs to be readable: "A blocks B" changes what B's card shows, the
+ * way a link to B in A's body would, but writes nothing to B. A related node
  * the caller can't read is never named — it is counted in `hidden` instead.
  */
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import type { Querier } from "../db/adapter.js";
-import { ConflictError, NotFoundError, ValidationError } from "../shared/errors.js";
+import {
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  ValidationError,
+} from "../shared/errors.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { canReadNode, filterAccessible } from "../governance/access-guard.js";
 import { nestDoneTags } from "../nests/service.js";
+import { canUserEdit } from "../governance/stewardship-service.js";
 import { ensureNodeIndex } from "./node-index.js";
 
 /** What a caller can ask for. The `_by` kinds are the inverse views. */
@@ -218,16 +226,33 @@ export async function openBlockerCounts(
   nestId: string,
   only?: Iterable<string>,
 ): Promise<Map<string, number>> {
-  const rows = (await getDb().all(
-    `SELECT e.from_node, e.to_node FROM edges e
+  const base = `SELECT e.from_node, e.to_node FROM edges e
        JOIN edge_types t ON t.id = e.type_id
-      WHERE e.nest_id = ? AND LOWER(t.name) = ?`,
-    [nestId, STORED.blocks.name],
-  )) as Array<{ from_node: string; to_node: string }>;
+      WHERE e.nest_id = ? AND LOWER(t.name) = ?`;
+  const relevant: Array<{ from_node: string; to_node: string }> = [];
   const out = new Map<string, number>();
-  if (rows.length === 0) return out;
-  const wanted = only ? new Set(only) : null;
-  const relevant = wanted ? rows.filter((r) => wanted.has(r.to_node)) : rows;
+  if (only) {
+    // Narrowed in SQL (chunked: SQLite caps bound parameters) so a listing
+    // costs the edges into the rendered nodes, not every edge in the nest.
+    const wanted = [...new Set(only)];
+    if (wanted.length === 0) return out;
+    for (let i = 0; i < wanted.length; i += 500) {
+      const chunk = wanted.slice(i, i + 500);
+      relevant.push(
+        ...((await getDb().all(
+          `${base} AND e.to_node IN (${chunk.map(() => "?").join(",")})`,
+          [nestId, STORED.blocks.name, ...chunk],
+        )) as Array<{ from_node: string; to_node: string }>),
+      );
+    }
+  } else {
+    relevant.push(
+      ...((await getDb().all(base, [nestId, STORED.blocks.name])) as Array<{
+        from_node: string;
+        to_node: string;
+      }>),
+    );
+  }
   if (relevant.length === 0) return out;
   const meta = await indexedMeta(
     nestId,
@@ -285,6 +310,14 @@ export async function callerCanRead(
     { id: nodeId },
   ]);
   return visible.length === 1;
+}
+
+/** Writes need edit access to the task itself (after it's known readable). */
+async function assertCanEditTask(caller: RelationCaller, taskId: string): Promise<void> {
+  const check = await canUserEdit(caller.nestId, taskId, caller.userEmail);
+  if (!check.allowed) {
+    throw new ForbiddenError(`You can't change this task's relations: ${check.reason}`);
+  }
 }
 
 /** The task must exist and be readable; a miss and a denial look the same. */
@@ -371,8 +404,9 @@ export async function listRelations(
 /**
  * False when `from —blocks→ to` would close a loop. BFS forward from `to` over the
  * existing blocks edges; reaching `from` means `to` already (transitively)
- * blocks `from`. Runs on the caller's tx so the read and the INSERT share one
- * write lock — two concurrent adds can't each pass against the old graph.
+ * blocks `from`. Runs on the caller's tx, after addRelation has locked the
+ * nest's task:blocks type row (Postgres) — SQLite's single writer covers it —
+ * so two concurrent adds can't each pass against the old graph.
  */
 async function blockingLoopFree(
   db: Querier,
@@ -427,6 +461,7 @@ export async function addRelation(
     throw new ValidationError("A task can't be related to itself.");
   }
   await assertReadableNode(caller, taskId);
+  await assertCanEditTask(caller, taskId);
   // The other end must exist in THIS nest and be readable — a node the caller
   // can't see answers exactly like one that doesn't exist.
   await assertReadableNode(caller, otherId);
@@ -449,6 +484,12 @@ export async function addRelation(
     )) as { id: string } | undefined;
     if (dup) throw new ConflictError("Those two are already related that way.");
     if (type === STORED.blocks) {
+      // Postgres runs READ COMMITTED: two concurrent adds could each pass the
+      // loop check against the old graph. Locking the nest's one task:blocks
+      // type row serialises them; SQLite's write transaction already does.
+      if (db.dialect === "postgres") {
+        await tx.get("SELECT id FROM edge_types WHERE id = ? FOR UPDATE", [typeId]);
+      }
       if (!(await blockingLoopFree(tx, caller.nestId, typeId, from, to))) {
         const titles = await indexedMeta(caller.nestId, [from, to]);
         const t = (n: string) => `"${titles.get(n)?.title ?? n}"`;
@@ -465,7 +506,9 @@ export async function addRelation(
     );
   });
   const relations = await listRelations(caller, taskId);
-  const relation = relations.relations.find((r) => r.id === id)!;
+  const relation = relations.relations.find((r) => r.id === id);
+  // Only a delete racing in between the commit and the listing gets here.
+  if (!relation) throw new NotFoundError("The relation was removed before it could be listed");
   return { relation, relations };
 }
 
@@ -477,6 +520,7 @@ export async function removeRelation(
 ): Promise<RelationsResult> {
   const taskId = assertSafeNodeId(rawTaskId);
   await assertReadableNode(caller, taskId);
+  await assertCanEditTask(caller, taskId);
   const rid = typeof relationId === "string" ? relationId.trim() : "";
   if (!rid) throw new ValidationError("relation id is required");
   const db = getDb();

@@ -12,6 +12,7 @@ import {
   jsonRequest,
   resetAuthRateLimit,
 } from "./helpers.js";
+import { addRelation, removeRelation } from "../src/nodes/relations.js";
 
 const MCP_HEADERS = {
   "Content-Type": "application/json",
@@ -250,6 +251,15 @@ describe("permissions", () => {
     expect((await delRel(reader, "nodes/design", blocks.id)).status).toBe(403);
     expect((await addRel(guest, "nodes/build", "relates_to", "nodes/docs")).status).toBe(403);
   });
+
+  it("the service itself needs edit access to the task, whichever surface calls it", async () => {
+    const caller = { nestId, userId: reader.userId, userEmail: reader.email };
+    await expect(addRelation(caller, "nodes/build", "relates_to", "nodes/docs")).rejects.toMatchObject({ statusCode: 403 });
+    const blocks = (await rel(owner, "nodes/design")).data.relations[0];
+    await expect(removeRelation(caller, "nodes/design", blocks.id)).rejects.toMatchObject({ statusCode: 403 });
+    // Nothing changed.
+    expect((await rel(owner, "nodes/design")).data.relations[0].id).toBe(blocks.id);
+  });
 });
 
 describe("MCP parity", () => {
@@ -347,6 +357,13 @@ describe("workflow plane boundary", () => {
     const names = data.edge_types.map((t: any) => t.name);
     expect(names).toContain("next");
     expect(names.some((n: string) => n.startsWith("task:"))).toBe(false);
+  });
+
+  it("the generic edge listing leaves relation edges out", async () => {
+    expect((await rel(owner, "nodes/design")).data.relations.length).toBeGreaterThan(0);
+    const { status, data } = await jsonRequest(app, "GET", `/nests/${nestId}/edges`, undefined, owner.apiKey);
+    expect(status).toBe(200);
+    expect(data.edges.some((e: any) => String(e.type?.name ?? e.type).startsWith("task:"))).toBe(false);
   });
 
   it("the generic edge API can't write a relation type", async () => {

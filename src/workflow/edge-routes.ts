@@ -23,6 +23,7 @@ import { safeJson } from "../shared/json.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { nodeTrail } from "./flow-graph.js";
+import { RELATION_TYPE_PREFIX } from "../nodes/relations.js";
 import {
   requireWorkflowPlane,
   seedDefaultEdgeTypes,
@@ -223,8 +224,11 @@ edgeRoutes.get("/", requireWorkflowPlane, async (c) => {
 
   let sql = `SELECT e.*, t.id as t_id, t.name as t_name, t.color as t_color, t.is_flow as t_is_flow
                FROM edges e JOIN edge_types t ON t.id = e.type_id
-              WHERE e.nest_id = ?`;
-  const args: unknown[] = [nestId];
+              WHERE e.nest_id = ?
+                -- Task relations aren't flow edges: they have their own API,
+                -- which hides an end the caller can't read. Keep them out.
+                AND LOWER(t.name) NOT LIKE ?`;
+  const args: unknown[] = [nestId, `${RELATION_TYPE_PREFIX}%`];
   if (typeFilter) {
     sql += " AND (t.id = ? OR LOWER(t.name) = LOWER(?))";
     args.push(typeFilter, typeFilter);
