@@ -51,11 +51,7 @@ import {
   createNest,
 } from "../nests/service.js";
 import { ValidationError, ForbiddenError } from "../shared/errors.js";
-import {
-  isSuspended,
-  getSuspensionReason,
-  getCurrentLicense,
-} from "../auth/license.js";
+import { isSuspended, getSuspensionReason } from "../auth/license.js";
 import {
   handleToolCall,
   normalizeSearchLimit,
@@ -67,6 +63,7 @@ import {
 import { isDerivedAnnotationsNode } from "../nodes/service.js";
 import type { Nest } from "../shared/types.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "../auth/license-copy.js";
+import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
 import { HEADLESS_READER_SERVER_TOOLS, isServiceUser } from "../auth/headless.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
@@ -396,12 +393,10 @@ async function handleServerToolCall(
     return { text: renderNestIndexMarkdown(nests, baseUrl), data };
   }
 
-  // Kill-switch + license gate for writes — parity with per-nest write path.
-  if (SERVER_WRITE_TOOLS.has(toolName)) {
-    if (
-      (isSuspended() || !getCurrentLicense()?.valid) &&
-      !(await canSeeLicenseDetail(userId))
-    ) {
+  // Kill-switch + license gate for writes — parity with per-nest write path
+  // (both ask writesAllowed, so the Free tier applies here too).
+  if (SERVER_WRITE_TOOLS.has(toolName) && !(await writesAllowed())) {
+    if (!(await canSeeLicenseDetail(userId))) {
       return NEUTRAL_READ_ONLY;
     }
     if (isSuspended()) {
@@ -410,9 +405,7 @@ async function handleServerToolCall(
         reason ? ` — ${reason}` : ""
       }. Contact support@promptowl.ai.`;
     }
-    if (!getCurrentLicense()?.valid) {
-      return "This server has no valid PromptOwl license installed, so writes are disabled. Ask the server admin to install one (POST /license/install).";
-    }
+    return FREE_TIER_EXCEEDED_MESSAGE;
   }
 
   if (toolName === "nest_create") {

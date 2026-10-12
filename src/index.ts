@@ -26,6 +26,7 @@ import { startReviewSlaLoop } from "./governance/review-sla.js";
 import { sweepStale } from "./shared/rate-limit.js";
 import { purgeExpired as purgeExpiredOAuth } from "./auth/oauth-store.js";
 import { bannerHeading } from "./shared/startup-banner.js";
+import { FREE_TIER_MAX_USERS } from "./auth/free-tier.js";
 
 async function main() {
   // Initialize the database backend (SQLite by default, or Postgres/Cloud SQL
@@ -106,8 +107,9 @@ async function main() {
   if (!license.valid) {
     console.warn(`
   WARNING: No valid PromptOwl license key found.
-  Server boots in SETUP MODE — writes return 503 and admin features
-  (stewards, teammates, governance) are locked until a key is installed.
+  Free tier: writes, governance and teammate management stay open while
+  the server has ${FREE_TIER_MAX_USERS} or fewer users (viewers are free and never count).
+  Past that, writes return 503 until a key is installed.
 
   To activate:
     1. Sign up at https://app.promptowl.ai
