@@ -190,7 +190,7 @@ There is no new error code and no change to any wire shape. Agents self-correct 
 
 ## 4. One read path for every surface: `context_structure`
 
-A new **core catalog operation**, `context_structure`, is the single way to read the rules.
+A new **core catalog operation**, `context_structure`, is the single way to read the rules. The shape below is illustrative; the engine's operation descriptor (`@promptowl/contextnest-engine/api`) is canonical.
 
 ```text
 input:  { folder?: string, report?: boolean }
@@ -267,14 +267,14 @@ Per the sync discipline, all of this lands in the engine repo first and ships in
 
 ## 6. Community phase
 
-- **Engine pin.** Bump `@promptowl/contextnest-engine` to the release that carries this feature.
+- **Engine pin.** Bump `@promptowl/contextnest-engine` to the first release that carries this feature: PromptOwl/ContextNest#183, a **major** bump (`9c7c9df`). The version number is set at release; check `npm view @promptowl/contextnest-engine version` and read that release's breaking changes before bumping.
 
 - **REST:**
 
   | Route | Tier | Purpose |
   |---|---|---|
-  | `GET /nests/:id/structure?folder=&report=1` | read | The `context_structure` binding: rules, the resolved rule and template for a folder, and the compliance report. |
-  | `PUT /nests/:id/structure` | manage (`canManageStewards`, `src/governance/stewardship-service.ts:822`) | Saves rules via the engine's `setStructure` and writes an activity-log entry (who, when, what changed). |
+  | `GET /nests/:id/structure?folder=&report=1` | read; the report only for callers who read the whole nest | The `context_structure` binding: rules, the resolved rule and template for a folder, and the compliance report. The report names every document that breaks a rule, drafts included, so a visibility-only reader (approved content only) or a reader a governed nest narrows gets the rules but a 403 for the report (`readsWholeNest`). |
+  | `PUT /nests/:id/structure` | manage (`canManageStewards`, `src/governance/stewardship-service.ts:822`) | Saves rules via the engine's `setStructure`. The `structure_changed` activity entry (who, when, what changed) is not built yet (§6.3 "Not yet"); until it is, the request trace records each save. |
   | `POST /nests/:id/structure/check` | read; manage when `rules` is sent | The UI's validation API; see below. |
 
 - **`POST /nests/:id/structure/check`.** The UI contains no engine code: no matcher, no token logic, no regex. Every check is a server call, debounced to about 300 ms.
@@ -290,7 +290,7 @@ Per the sync discipline, all of this lands in the engine repo first and ships in
   - On the server it calls the engine's exported `compileStructure`, `checkDocument` and `checkFolder`, and Community's own `slugify` for `slug` (it is the function that builds Community's ids, so it is what the server will produce). The UI therefore shows exactly what the server will enforce.
 
 - **Write paths that don't go through an engine op** call the engine's exported `enforcedStructure`, checkers, `missingFolders` and `scaffoldFolders` directly — never a copy of them:
-  - `moveNode` (`src/nodes/service.ts:2571`) checks the destination and scaffolds any new folder. The move keeps the file's leaf, so a non-conforming name cannot move into a folder with a name rule until a rename op exists (§12). The guard → `checkDocument` → `missingFolders` → write → `scaffoldFolders` sequence is the engine's create sequence. Before this phase, export it from the engine as one placement helper, so Community calls it rather than assembling the steps itself (architecture review, round 5).
+  - `moveNode` (`src/nodes/service.ts:2571`) checks the destination and scaffolds any new folder. The move keeps the file's leaf, so a non-conforming name cannot move into a folder with a name rule until a rename op exists (§12). The guard → `checkDocument` → `missingFolders` → write → `scaffoldFolders` sequence is the engine's create sequence. Before this phase, export it from the engine as one placement helper, so Community calls it rather than assembling the steps itself (architecture review, round 5). *As shipped, #183 did not add that one helper: Community composes the engine's exported checkers (`checkDocument`, `missingFolders`, `scaffoldFolders`, `checkDeleteDocument`) in `src/structure/writes.ts`, and every judgement is still the engine's. An upstream placement helper, and a name-format checker for the Try box, are follow-ups.*
   - `createEmptyFolder` (:1078) checks the folder and scaffolds its required children.
   - `deleteFolder` (:2972) first calls `checkDeleteFolder` on the folder itself (a required subfolder cannot go on its own), then passes the skip flag for its own children, so the required-file guard does not block deleting the whole folder.
 
@@ -728,7 +728,7 @@ Every phase is built **test-first**:
   - A malformed imported `packs/*.yml` breaks `context_packs`, which was the same on `development`.
   - Community's `withDiscoveryCache` drops `onUnreadable`, so Community's verify won't name unreadable documents until it bypasses the cache for that call. Fix this with the engine pin bump.
 
-  **Chunked imports.** The engine judges each imported history by what the nest will hold after the call: the call's files laid over what is already there, rebuilt and hash-verified. A document may arrive before or after its history, across calls. Within a history, a call must not bring `history.yaml` ahead of the keyframes and diffs it needs, since a history that does not rebuild and verify is refused. So the UI chunker (`ui/src/lib/api.ts`), which splits by bytes, should send each `.versions/<doc>/` folder's `history.yaml` last. Community's own staging (nest import, bundle restore, `context_sync_folder`) is designed to run under `skip` (§6), which leaves it unjudged. Until that flag is wired into Community's `opContext`, those imports are judged. The browser picker currently sorts `history.yaml` before `v*.md`, so a chunk boundary inside a `.versions/<doc>/` folder would get that history refused. Sort `history.yaml` last, or wire `skip`, as part of the Community phase.
+  **Chunked imports.** The engine judges each imported history by what the nest will hold after the call: the call's files laid over what is already there, rebuilt and hash-verified. A document may arrive before or after its history, across calls. Within a history, a call must not bring `history.yaml` ahead of the keyframes and diffs it needs, since a history that does not rebuild and verify is refused. The engine runs these history verdicts only for a nest with enforced rules. Community's browser import always stages into the nest it just created, which has no rules (`.context/` cannot be imported), so its chunks are never judged and their order doesn't matter (checked for #403). The order would matter only for a chunked import into a nest with enforced rules. If Community ever adds one, it must send each `.versions/<doc>/` folder's `history.yaml` last, or run under `skip` (§6).
 
 | Suite | Kind | What it pins |
 |---|---|---|
