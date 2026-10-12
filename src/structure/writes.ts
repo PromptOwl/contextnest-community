@@ -104,6 +104,28 @@ export async function folderDeleteOrder(storage: NestStorage, folder: string, id
   return [...ids].sort((a, b) => depth(b) - depth(a) || required(a) - required(b));
 }
 
+/**
+ * A push held for a reviewer is judged when it is sent: a reviewer is never
+ * asked to confirm documents that cannot land. `id` is the one createNode
+ * will give the document.
+ */
+export async function assertPushConforms(
+  storage: NestStorage,
+  docs: Array<{ title: string; id: string; type?: string; body: string; status?: string }>,
+): Promise<void> {
+  const rules = await enforcedStructure(storage);
+  if (!rules) return;
+  const refused = docs.flatMap((d) => {
+    const violations = checkDocument(rules, { id: d.id, type: d.type ?? "document", body: d.body, status: d.status });
+    return violations.length ? [`"${d.title}": ${violations.map((v) => v.message).join(" ")}`] : [];
+  });
+  if (refused.length) {
+    throw new ValidationError(
+      `Not sent for review: ${refused.length === 1 ? "a document breaks" : `${refused.length} documents break`} this nest's structure rules. ${refused.join(" ")} See this nest's Structure page for its rules.`,
+    );
+  }
+}
+
 /** Refused at the request, not later at approval: a required file, or a required folder alone. */
 export async function assertDeletionRequestable(
   storage: NestStorage,

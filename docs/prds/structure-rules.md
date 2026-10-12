@@ -336,6 +336,8 @@ response: { fieldErrors, error?, warnings: [string],
 - Contrast (errors in red-700), labels and live regions for the checks; no horizontal scroll at 390 px.
 - Engine round 26 added the warnings the review asked for: a required section that is not a heading in its template's body, and an unclosed `{` in a name format.
 
+**Every way in, with enforcement on** (`test/structure-enforcement.test.ts`, and a live run of the real `ctx push` against a served app): a document that breaks a rule never lands, whichever door it uses — the app's create, update, move, new folder and folder delete; `ctx push` (`POST /publish`), where each such document fails alone naming its rule (it said "Could not create this document") and the push exits 1; a push held for confirmation, now refused when sent if any document breaks a rule, so a reviewer is never asked to confirm what cannot land (`assertPushConforms`, in `createPendingPush`, which every held write goes through); the nest's MCP `context_create`, `context_update` and `context_move`; and an out-of-band edit approved from the app. An import cannot carry rules (the engine refuses `.context/`). Files written straight onto the server's disk are not a write the app makes; they show on the Compliance tab.
+
 **Not yet:** the `structure_changed` activity type (the request trace records every save), the new-document / new-folder / move-dialog pre-checks and template pre-fill (§7.5), the settings-dialog summary row, the path builder (rule paths are typed), "Copy rules from another nest", the skip flag for import staging (§6.4), and MCP `context_structure`.
 
 ### 6.4 Write paths and the skip flag
@@ -349,7 +351,7 @@ response: { fieldErrors, error?, warnings: [string],
   - import staging (`stageImportedFiles`): nest import, bundle restore and `context_sync_folder`, which bring a whole vault, rules included.
 
   Revert and agent-activity undo stay enforced.
-- **Error mapping.** `createNodeOnce` maps the engine's `VALIDATION_FAILED` to `ValidationError` (400), as `pdfEngineError` does. Today an engine validation failure there surfaces as a 500, and bulk publish (`src/nodes/publish-apply.ts`) flattens it to "Could not create this document". Held agent writes take the same path when confirmed.
+- **Error mapping.** `createNode` maps the engine's `VALIDATION_FAILED` to `ValidationError` (400), so bulk publish (`src/nodes/publish-apply.ts`) reports the rule rather than "Could not create this document". A held push is judged when it is sent (`assertPushConforms`).
 - **MCP.** Add `context_structure` to `TOOL_DEFINITIONS` (`src/mcp/tools.ts`) and to `SERVER_NEST_TOOLS` (`src/mcp/server-routes.ts`). Its schema comes from the engine's operation catalog, never a new inline literal (`npm run lint:mcp-schemas`).
 - **Docs.** `API.md` (the three routes and the refusal messages) and `STEWARDSHIP.md` (who edits rules).
 

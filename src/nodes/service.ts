@@ -1528,7 +1528,9 @@ export async function createNode(
       return await createNodeOnce(nestId, input, userEmail, opts);
     } catch (err) {
       if (!generatedId || attempt >= 3 || !(err instanceof ConflictError)) {
-        throw err;
+        // A rule refusing the document is the caller's to fix — kept as a 400
+        // naming the rule, also where only an AppError's message is shown (a push).
+        throw ruleRefusal(err) ?? err;
       }
     }
   }

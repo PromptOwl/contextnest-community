@@ -22,6 +22,12 @@ import { ValidationError } from "../shared/errors.js";
 import { resolveNestAccess } from "../shared/access.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { nestRequiresPushConfirmation } from "./service.js";
+import { engineCache } from "../nodes/engine.js";
+import { derivedNodeId } from "../nodes/service.js";
+import { assertPushConforms } from "../structure/writes.js";
+
+/** The first name a title with no a-z letters or digits gets (createNode's `document-N`). */
+const GENERATED_NAME = "document-1";
 import { notifyPendingPush } from "../governance/notify-service.js";
 import {
   applyPublish,
@@ -217,6 +223,18 @@ export async function createPendingPush(params: {
       `Push payload exceeds the ${config.MAX_PENDING_PUSH_BYTES}-byte limit for a held push (MAX_PENDING_PUSH_BYTES).`,
     );
   }
+
+  const { storage } = await engineCache.get(nestId);
+  await assertPushConforms(
+    storage,
+    publishableDocs(payload).map((d) => ({
+      title: d.title,
+      id: derivedNodeId(d.title, d.folder) ?? derivedNodeId(GENERATED_NAME, d.folder)!,
+      type: d.type,
+      body: d.content,
+      status: d.status,
+    })),
+  );
 
   const id = uuid();
   const now = new Date();
