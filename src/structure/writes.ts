@@ -3,6 +3,8 @@
  * moving a document, creating an empty folder, deleting a folder, asking to
  * delete — and the engine's refusals worded for people. Every judgement is
  * the engine's own (its exported checkers); nothing here reads a rule.
+ * Each guard checks, then the caller writes: a rules save landing between the
+ * two is judged on the next write, as with every other nest setting.
  */
 import {
   assertStructureDelete,

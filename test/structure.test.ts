@@ -197,6 +197,28 @@ describe("structure rules per nest", () => {
     expect(after.data.rules).toEqual(before.data.rules);
   });
 
+  it("a save naming a key that is not a rule block is refused, never read as no rules", async () => {
+    const before = await jsonRequest(app, "GET", `/nests/${nestId}/structure`, undefined, owner.apiKey);
+    expect(Object.keys(before.data.rules)).not.toEqual([]);
+    const typo = await jsonRequest(app, "PUT", `/nests/${nestId}/structure`, { folder: { clients: { types: ["document"] } } }, owner.apiKey);
+    expect(typo.status, JSON.stringify(typo.data)).toBe(400);
+    expect(typo.data.error).toMatch(/folder/);
+    const after = await jsonRequest(app, "GET", `/nests/${nestId}/structure`, undefined, owner.apiKey);
+    expect(after.data.rules).toEqual(before.data.rules);
+  });
+
+  it("only report=1 or report=true asks for the compliance report", async () => {
+    for (const off of ["0", "false"]) {
+      const res = await jsonRequest(app, "GET", `/nests/${nestId}/structure?report=${off}`, undefined, reader.apiKey);
+      expect(res.status).toBe(200);
+      expect(res.data.violations, off).toBeUndefined();
+    }
+    for (const on of ["1", "true"]) {
+      const res = await jsonRequest(app, "GET", `/nests/${nestId}/structure?report=${on}`, undefined, reader.apiKey);
+      expect(Array.isArray(res.data.violations), on).toBe(true);
+    }
+  });
+
   it("caps a check at 50 tests", async () => {
     const tests = Array.from({ length: 51 }, () => ({ title: "x" }));
     expect((await jsonRequest(app, "POST", `/nests/${nestId}/structure/check`, { tests }, reader.apiKey)).status).toBe(400);

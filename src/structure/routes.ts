@@ -10,7 +10,7 @@
  *   PUT  /nests/:id/structure                    owner or admin
  *   POST /nests/:id/structure/check              read tier; owner or admin with `rules`
  */
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import yaml from "js-yaml";
 import {
   checkDocument,
@@ -48,10 +48,12 @@ function objectBody(body: unknown): Record<string, unknown> {
 const TEST_TEXT_FIELDS = ["folder", "title", "name", "type", "body", "file_name", "folder_name"] as const;
 
 /** The three config blocks the rules live in; every other key is the vault's own. */
+const RULE_BLOCKS = ["structure", "folders", "templates"] as const;
+
 function rulesOf(body: unknown): StructureConfig {
   const b = (body ?? {}) as Record<string, unknown>;
   const rules: Record<string, unknown> = {};
-  for (const key of ["structure", "folders", "templates"] as const) {
+  for (const key of RULE_BLOCKS) {
     if (b[key] !== undefined && b[key] !== null) rules[key] = b[key];
   }
   return rules as StructureConfig;
@@ -80,7 +82,7 @@ async function context(c: { get: (k: "userId") => string }, nestId: string) {
 }
 
 /** Owners and admins manage a nest's rules — never a key scoped to the nest. */
-async function assertCanManage(c: any, nestId: string): Promise<void> {
+async function assertCanManage(c: Context<AuthEnv>, nestId: string): Promise<void> {
   if (c.get("nestScope")) throw new ForbiddenError("A nest-scoped API key cannot change structure rules.");
   if (!(await canManageStewards(nestId, c.get("userId")))) {
     throw new ForbiddenError("Only the nest's owners and admins can change its structure rules.");
@@ -98,7 +100,7 @@ structureRoutes.get("/", async (c) => {
   const folder = c.req.query("folder");
   const out = await engineApi.run<Record<string, unknown>>(
     "context_structure",
-    { ...(folder !== undefined ? { folder } : {}), ...(c.req.query("report") ? { report: true } : {}) },
+    { ...(folder !== undefined ? { folder } : {}), ...(["1", "true"].includes(c.req.query("report") ?? "") ? { report: true } : {}) },
     ctx,
   );
   const saved = rulesOf(await ctx.storage.readConfig());
@@ -111,8 +113,14 @@ structureRoutes.get("/", async (c) => {
 structureRoutes.put("/", async (c) => {
   const nestId = c.req.param("nestId")!;
   await assertCanManage(c, nestId);
-  // Unparseable is refused, never read as empty rules: that would clear them.
-  const rules = rulesOf(objectBody(await c.req.json().catch(() => undefined)));
+  // Unparseable, or a key that is no rule block (a typo), is refused — never
+  // read as empty rules: that would clear them. `{}` clears them on purpose.
+  const body = objectBody(await c.req.json().catch(() => undefined));
+  const unknown = Object.keys(body).filter((k) => !(RULE_BLOCKS as readonly string[]).includes(k));
+  if (unknown.length > 0) {
+    throw new ValidationError(`Unknown key${unknown.length > 1 ? "s" : ""} ${unknown.join(", ")}: rules live under structure, folders and templates.`);
+  }
+  const rules = rulesOf(body);
   const compiled = compile(rules);
   if ("error" in compiled) return c.json({ error: compiled.error, fieldErrors: compiled.fieldErrors }, 400);
   const ctx = await context(c, nestId);
