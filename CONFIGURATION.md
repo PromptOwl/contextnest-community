@@ -987,7 +987,7 @@ The server reads three forwarded headers: `X-Forwarded-For` / `X-Real-IP` (the c
 | Exposed directly, no proxy | `TRUSTED_PROXIES=loopback` — forwarded headers from the internet are then ignored |
 | Cloud Run | Leave unset. Google's front end sets the headers and its peer addresses aren't stable. |
 
-The proxy must **overwrite** the headers rather than pass client values through, and must forward `Host` unchanged or you must set `PUBLIC_BASE_URL` (see the env reference). nginx:
+The proxy must **overwrite** the headers rather than pass client values through, and must forward `Host` unchanged or you must set `PUBLIC_BASE_URL` (see the env reference). If your proxy sets only `X-Real-IP` (a common nginx snippet), also set `X-Forwarded-For` to the same value — otherwise a client can send its own `X-Forwarded-For` and choose the IP its rate limit is keyed on. nginx:
 
 ```nginx
 location / {
