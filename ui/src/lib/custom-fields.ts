@@ -122,6 +122,19 @@ function shortDate(iso: string): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+/** A url value safe to put in an href: http(s) only, else undefined. Stored
+ *  frontmatter can arrive verbatim (vault import, external edit), so a
+ *  `javascript:` value must never reach an anchor. */
+export function safeHref(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** A value as display text, or "" when unset. */
 export function formatFieldValue(
   def: FieldDefinition,

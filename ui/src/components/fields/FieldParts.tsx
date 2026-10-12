@@ -34,6 +34,7 @@ import {
   isComputed,
   optionDot,
   optionTone,
+  safeHref,
   type FieldDefinition,
 } from "../../lib/custom-fields";
 
@@ -296,9 +297,9 @@ export function FieldValueEditor({
       {def.type === "number" && def.unit && (
         <span className="shrink-0 text-xs text-muted-foreground">{def.unit}</span>
       )}
-      {def.type === "url" && typeof value === "string" && value && (
+      {def.type === "url" && safeHref(value) && (
         <a
-          href={value}
+          href={safeHref(value)}
           target="_blank"
           rel="noreferrer noopener"
           className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"

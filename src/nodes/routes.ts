@@ -59,6 +59,8 @@ import {
   toNodeResponse,
   bodyOnly,
   withComputedFields,
+  fieldsOfRaw,
+  setStoredFields,
 } from "./service.js";
 
 /** Board fields off a request body, keeping "absent" (leave alone) distinct
@@ -519,6 +521,8 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       // Kept for the raw path: frontmatter=1 must serve the APPROVED
       // snapshot's stored frontmatter, never the live working copy's.
       let approvedRaw = "";
+      // Field values are the approved version's too, never the live draft's.
+      setStoredFields(response, {});
       try {
         ({ raw: approvedRaw, version: approved } = await reconstructApproved(
           versionManager,
@@ -527,6 +531,8 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
           approved,
         ));
         response.content = bodyOnly(nodeId, approvedRaw);
+        setStoredFields(response, fieldsOfRaw(nodeId, approvedRaw));
+        await withComputedFields(nestId, [response]);
         // A pdf node's `pdf:` block must describe the same version as the
         // body — the approved one, whose binary is what /pdf serves here —
         // not the live draft's.

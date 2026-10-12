@@ -56,6 +56,7 @@ import {
   getNodeForCaller,
   isIdUnderFolder,
   isDerivedAnnotationsNode,
+  fieldsOfRaw,
 } from "../nodes/service.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
 import {
@@ -1588,18 +1589,24 @@ async function runTool(
           data: { documents: [], traversal },
         };
       // Field values from the index mirror (frontmatter only, no file reads).
+      // Under stewardship resolveLlmBody served the approved version's raw
+      // markdown, so the values come from IT, never the live (draft) file.
       const queryDefs = await listFieldDefinitions(nestId);
+      const queryGoverned = queryDefs.length > 0 && (await isStewardshipEnabled(nestId));
       const fmById = new Map<string, ContextNode["frontmatter"]>();
       if (queryDefs.length > 0) {
         for (const n of await readIndexedNodes(nestId)) fmById.set(n.id, n.frontmatter);
       }
+      const bodyById = new Map(visible.map((e) => [e.doc.id, e.body ?? ""]));
       const queryValues = (id: string) => {
         const fm = fmById.get(id);
         if (!fm) return undefined;
         return nodeFieldValues(
           {
             type: fm.type,
-            metadata: fm.metadata,
+            metadata: queryGoverned
+              ? { fields: fieldsOfRaw(id, bodyById.get(id) ?? "") }
+              : fm.metadata,
             moved_at: (fm.metadata as any)?.moved_at,
             created_at: fm.created_at == null ? undefined : String(fm.created_at),
           },
@@ -1666,10 +1673,13 @@ async function runTool(
         );
       }
       const fieldDefs = await listFieldDefinitions(nestId);
+      // Under stewardship `body` is the approved version's raw markdown: its
+      // field values, never the live (draft) file's.
+      const fieldGoverned = fieldDefs.length > 0 && (await isStewardshipEnabled(nestId));
       const fieldValues = nodeFieldValues(
         {
           type: node.frontmatter.type,
-          metadata: node.frontmatter.metadata,
+          metadata: fieldGoverned ? { fields: fieldsOfRaw(node.id, body) } : node.frontmatter.metadata,
           moved_at: (node.frontmatter.metadata as any)?.moved_at,
           created_at: node.frontmatter.created_at == null ? undefined : String(node.frontmatter.created_at),
         },
@@ -1721,6 +1731,9 @@ async function runTool(
         tag: args.tag,
         status: args.status,
         approvedOnly: args.approved_only === true,
+        // Under stewardship an agent sees approved content only — field
+        // values and field filters included, never the live draft's.
+        approvedFields: await isStewardshipEnabled(nestId),
         limit: args.limit || 50,
         ...(args.fields && typeof args.fields === "object" && !Array.isArray(args.fields)
           ? { fields: args.fields }

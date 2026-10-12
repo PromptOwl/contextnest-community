@@ -10,6 +10,7 @@ import {
   fieldValueForMove,
   formatFieldValue,
   matchesFieldFilters,
+  safeHref,
   timeInStatus,
   type FieldDefinition,
 } from "../ui/src/lib/custom-fields";
@@ -161,5 +162,17 @@ describe("board field filters", () => {
     expect(matchesFieldFilters(b, { gone: "x" }, defs)).toBe(true);
     // A field that doesn't apply to the card's type can't match.
     expect(matchesFieldFilters({ ...b, type: "document" }, { severity: "low" }, defs)).toBe(false);
+  });
+});
+
+describe("safeHref @unit", () => {
+  it("passes http(s) URLs and refuses every other scheme", () => {
+    expect(safeHref("https://example.com/a")).toBe("https://example.com/a");
+    expect(safeHref("http://example.com")).toBe("http://example.com");
+    expect(safeHref("javascript:alert(1)")).toBeUndefined();
+    expect(safeHref(" JavaScript:alert(1)")).toBeUndefined();
+    expect(safeHref("data:text/html,<script>1</script>")).toBeUndefined();
+    expect(safeHref("not a url")).toBeUndefined();
+    expect(safeHref(42)).toBeUndefined();
   });
 });

@@ -391,6 +391,26 @@ export function bodyOnly(nodeId: string, raw: string): string {
   }
 }
 
+/**
+ * Custom field values stored in a reconstructed version's frontmatter. A read
+ * that serves an approved version takes its fields from HERE: the live file
+ * may hold an unapproved draft's values. Unparseable → no values (fail closed).
+ */
+export function fieldsOfRaw(nodeId: string, raw: string): Record<string, unknown> {
+  try {
+    return storedFieldsOf(parseDocument(`${nodeId}.md`, raw, nodeId).frontmatter.metadata);
+  } catch (err) {
+    console.error("[custom-fields] approved frontmatter unreadable", nodeId, err);
+    return {};
+  }
+}
+
+/** Replace a response's stored field values (computed ones are added later). */
+export function setStoredFields(r: { fields?: Record<string, unknown> }, fields: Record<string, unknown>): void {
+  if (Object.keys(fields).length > 0) r.fields = fields;
+  else delete r.fields;
+}
+
 export interface NodeResponse extends TaskFields {
   id: string;
   title: string;
@@ -771,6 +791,12 @@ export interface ListNodesFilters {
    * Every entry must match. An unknown key is a 400.
    */
   fields?: Record<string, unknown>;
+  /**
+   * Take custom field values (and filter on them) from each node's APPROVED
+   * version, never the live file — for callers who may only see approved
+   * content (MCP under stewardship). Implied by approvedOnly / public readers.
+   */
+  approvedFields?: boolean;
 }
 
 /**
@@ -964,18 +990,25 @@ export async function listNodesForCaller(
   // computed values (time-in-status) added to every row at the end.
   const fieldDefs = await listFieldDefinitions(nestId);
   const fieldFilters = filters.fields ?? {};
-  if (Object.keys(fieldFilters).length > 0) assertFilterKeys(fieldFilters, fieldDefs);
-  const scoped = Object.keys(fieldFilters).length === 0
+  const hasFieldFilters = Object.keys(fieldFilters).length > 0;
+  if (hasFieldFilters) assertFilterKeys(fieldFilters, fieldDefs);
+  const matchesFields = (type: string | undefined, stored: Record<string, unknown>) =>
+    Object.entries(fieldFilters).every(([key, wanted]) => {
+      const def = fieldDefs.find((f) => f.key === key)!;
+      // A field that doesn't apply to this node's type can't match.
+      if (!appliesTo(def, type)) return false;
+      return matchesFieldFilter(def, stored[key], wanted);
+    });
+  const publicReader = await isPublicReader(nestId, userId);
+  // Approved-only view: what a public nest shows a stranger.
+  const approvedOnly = publicReader || filters.approvedOnly === true;
+  // A caller limited to approved content filters on APPROVED values (after
+  // the access gate, below) — filtering on the live file here would let them
+  // probe an unapproved draft's values.
+  const approvedFields = approvedOnly || filters.approvedFields === true;
+  const scoped = !hasFieldFilters || approvedFields
     ? folderScoped
-    : folderScoped.filter((d) => {
-        const stored = storedFieldsOf(d.frontmatter.metadata);
-        return Object.entries(fieldFilters).every(([key, wanted]) => {
-          const def = fieldDefs.find((f) => f.key === key)!;
-          // A field that doesn't apply to this node's type can't match.
-          if (!appliesTo(def, d.frontmatter.type)) return false;
-          return matchesFieldFilter(def, stored[key], wanted);
-        });
-      });
+    : folderScoped.filter((d) => matchesFields(d.frontmatter.type, storedFieldsOf(d.frontmatter.metadata)));
   const nodes: ContextNode[] = scoped.map((d) => ({
     id: d.id,
     filePath: "",
@@ -985,12 +1018,10 @@ export async function listNodesForCaller(
     // approved-only branch below serves its own from the version store.
     body: d.body ?? "",
   }));
-  const publicReader = await isPublicReader(nestId, userId);
-  // Approved-only view: what a public nest shows a stranger. ONE scan of the
-  // nest, shared by the access filter (which decides what a public reader may
-  // see) and the enrichment below (which serves each body at its approved
-  // version) — those asked the same question separately.
-  const approvedOnly = publicReader || filters.approvedOnly === true;
+  // ONE scan of the nest for the approved-only view, shared by the access
+  // filter (which decides what a public reader may see) and the enrichment
+  // below (which serves each body at its approved version) — those asked the
+  // same question separately.
   const approvedVersions = approvedOnly
     ? await versions.getApprovedVersions(nestId)
     : null;
@@ -1018,6 +1049,36 @@ export async function listNodesForCaller(
   // any other caller asking for this view is narrowed here.
   if (approvedVersions && !publicReader) {
     accessible = accessible.filter((d) => approvedVersions.has(d.id));
+  }
+
+  // Approved versions, reconstructed at most once per node and shared by the
+  // approved field filter and the enrichment below. null = none / unreadable.
+  const approvedMap = approvedVersions ?? (approvedFields ? await versions.getApprovedVersions(nestId) : null);
+  const approvedRaw = new Map<string, Promise<{ raw: string; version: number } | null>>();
+  const loadApproved = (id: string) => {
+    let p = approvedRaw.get(id);
+    if (!p) {
+      const v = approvedMap?.get(id);
+      p = v == null
+        ? Promise.resolve(null)
+        : reconstructApproved(versionManager, nestId, id, v).catch((err) => {
+            console.error("reconstructVersion failed (list)", id, v, err);
+            return null;
+          });
+      approvedRaw.set(id, p);
+    }
+    return p;
+  };
+  if (approvedFields && hasFieldFilters) {
+    // ponytail: reconstructs every accessible node's approved version to
+    // filter — an approved-values index if governed nests grow large.
+    const keep = await Promise.all(
+      accessible.map(async (d) => {
+        const a = await loadApproved(d.id);
+        return !!a && matchesFields(d.frontmatter.type, fieldsOfRaw(d.id, a.raw));
+      }),
+    );
+    accessible = accessible.filter((_, i) => keep[i]);
   }
 
   // Trim to the requested count BEFORE the per-node work below. Enrichment
@@ -1071,28 +1132,15 @@ export async function listNodesForCaller(
         (r as any).myGrant = grantRoleForNode(myGrants, doc.id);
       }
 
+      // Field values from the approved version, never the live draft.
+      const approved = approvedFields ? await loadApproved(doc.id) : null;
+      if (approvedFields) setStoredFields(r, approved ? fieldsOfRaw(doc.id, approved.raw) : {});
+
       if (approvedVersions) {
-        let approved = approvedVersions.get(doc.id);
-        if (approved != null) {
-          try {
-            let raw: string;
-            ({ raw, version: approved } = await reconstructApproved(
-              versionManager,
-              nestId,
-              doc.id,
-              approved
-            ));
-            r.content = bodyOnly(doc.id, raw);
-          } catch (err) {
-            console.error(
-              "reconstructVersion failed (list)",
-              doc.id,
-              approved,
-              err
-            );
-            r.content = "";
-          }
-          r.version = approved;
+        const wanted = approvedVersions.get(doc.id);
+        if (wanted != null) {
+          r.content = approved ? bodyOnly(doc.id, approved.raw) : "";
+          r.version = approved?.version ?? wanted;
           r.status = "published";
         }
         return r;

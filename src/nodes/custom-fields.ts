@@ -28,7 +28,8 @@ import { getDb } from "../db/client.js";
 import { ensureNodeIndex, readIndexedNodes } from "./node-index.js";
 import { config } from "../config.js";
 import { resolveNestAccess, isNestArchived } from "../shared/access.js";
-import { getStewardsForUser } from "../governance/stewardship-service.js";
+import { getStewardsForUser, isUniqueViolation } from "../governance/stewardship-service.js";
+import type { Querier } from "../db/adapter.js";
 import { ForbiddenError, NotFoundError, ValidationError, ConflictError } from "../shared/errors.js";
 
 /** Types a person or agent can write a value for. */
@@ -135,7 +136,8 @@ function parseJson<T>(raw: string | null, fallback: T): T {
   if (raw == null) return fallback;
   try {
     return JSON.parse(raw) as T;
-  } catch {
+  } catch (err) {
+    console.error("[custom-fields] corrupt JSON column, using fallback:", raw.slice(0, 200), err);
     return fallback;
   }
 }
@@ -172,8 +174,12 @@ export async function listFieldDefinitions(nestId: string): Promise<FieldDefinit
   return rows.map(toDefinition);
 }
 
-async function getDefinition(nestId: string, idOrKey: string): Promise<FieldDefinition> {
-  const row = (await getDb().get(
+async function getDefinition(
+  nestId: string,
+  idOrKey: string,
+  q: Querier = getDb(),
+): Promise<FieldDefinition> {
+  const row = (await q.get(
     "SELECT * FROM field_definitions WHERE nest_id = ? AND (id = ? OR field_key = ?)",
     [nestId, idOrKey, idOrKey],
   )) as Row | undefined;
@@ -209,13 +215,15 @@ export async function assertCanManageFields(nestId: string, userId: string): Pro
   );
 }
 
-/** Whether the caller could manage fields — for UI affordances. Never throws. */
+/** Whether the caller could manage fields — for UI affordances. A refusal is
+ *  `false`; anything else (a DB failure) still throws. */
 export async function canManageFields(nestId: string, userId: string): Promise<boolean> {
   try {
     await assertCanManageFields(nestId, userId);
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    if (err instanceof ForbiddenError || err instanceof NotFoundError) return false;
+    throw err;
   }
 }
 
@@ -703,6 +711,7 @@ function auditShape(d: FieldDefinition | null): Partial<FieldDefinition> | null 
 }
 
 async function recordDefinitionEvent(
+  q: Querier,
   nestId: string,
   key: string,
   action: FieldDefinitionEvent["action"],
@@ -710,7 +719,7 @@ async function recordDefinitionEvent(
   before: FieldDefinition | null,
   after: FieldDefinition | null,
 ): Promise<void> {
-  await getDb().run(
+  await q.run(
     `INSERT INTO field_definition_events (id, nest_id, field_key, action, actor_id, before_json, after_json, at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [
@@ -804,13 +813,6 @@ export async function createFieldDefinition(
   const defaultValue = await cleanDefault(input.default_value, { key, label, type, options });
 
   const db = getDb();
-  const existing = (await db.get(
-    "SELECT COUNT(*) AS n FROM field_definitions WHERE nest_id = ?",
-    [nestId],
-  )) as { n: number | string };
-  if (Number(existing.n) >= MAX_FIELDS_PER_NEST) {
-    throw new ValidationError(`a nest can define at most ${MAX_FIELDS_PER_NEST} fields`);
-  }
   const taken = await db.get(
     "SELECT 1 AS present FROM field_definitions WHERE nest_id = ? AND field_key = ?",
     [nestId, key],
@@ -837,38 +839,64 @@ export async function createFieldDefinition(
     );
     if (other) throw new ConflictError("This nest already has a time-in-status field");
   }
-  const max = (await db.get(
-    "SELECT COALESCE(MAX(position), -1) AS p FROM field_definitions WHERE nest_id = ?",
-    [nestId],
-  )) as { p: number | string };
+  // Count, insert and audit row in one transaction: the change and its audit
+  // trail land together or not at all. The unique indexes catch a concurrent
+  // create of the same key (or a second time-in-status field) — a 409, not a
+  // raw constraint error.
   const id = randomUUID();
   const ts = now();
-  await db.run(
-    `INSERT INTO field_definitions
-       (id, nest_id, field_key, label, type, options_json, required, default_json,
-        applies_to_json, unit, preset, position, created_by, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      id,
-      nestId,
-      key,
-      label,
-      type,
-      JSON.stringify(options),
-      required ? 1 : 0,
-      defaultValue === null ? null : JSON.stringify(defaultValue),
-      JSON.stringify(applies),
-      unit,
-      preset,
-      Number(max.p) + 1,
-      userId,
-      ts,
-      ts,
-    ],
-  );
-  const created = await getDefinition(nestId, id);
-  await recordDefinitionEvent(nestId, key, "create", userId, null, created);
-  return created;
+  try {
+    return await db.transaction(async (tx) => {
+      const existing = (await tx.get(
+        "SELECT COUNT(*) AS n FROM field_definitions WHERE nest_id = ?",
+        [nestId],
+      )) as { n: number | string };
+      if (Number(existing.n) >= MAX_FIELDS_PER_NEST) {
+        throw new ValidationError(`a nest can define at most ${MAX_FIELDS_PER_NEST} fields`);
+      }
+      const max = (await tx.get(
+        "SELECT COALESCE(MAX(position), -1) AS p FROM field_definitions WHERE nest_id = ?",
+        [nestId],
+      )) as { p: number | string };
+      await tx.run(
+        `INSERT INTO field_definitions
+           (id, nest_id, field_key, label, type, options_json, required, default_json,
+            applies_to_json, unit, preset, position, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          nestId,
+          key,
+          label,
+          type,
+          JSON.stringify(options),
+          required ? 1 : 0,
+          defaultValue === null ? null : JSON.stringify(defaultValue),
+          JSON.stringify(applies),
+          unit,
+          preset,
+          Number(max.p) + 1,
+          userId,
+          ts,
+          ts,
+        ],
+      );
+      const created = await getDefinition(nestId, id, tx);
+      await recordDefinitionEvent(tx, nestId, key, "create", userId, null, created);
+      return created;
+    });
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    const keyTaken = await db.get(
+      "SELECT 1 AS present FROM field_definitions WHERE nest_id = ? AND field_key = ?",
+      [nestId, key],
+    );
+    throw new ConflictError(
+      keyTaken
+        ? `A field with key "${key}" already exists on this nest`
+        : "This nest already has a time-in-status field",
+    );
+  }
 }
 
 /**
@@ -939,13 +967,15 @@ export async function updateFieldDefinition(
   if (sets.length === 0) return def;
   sets.push("updated_at = ?");
   params.push(now());
-  await getDb().run(`UPDATE field_definitions SET ${sets.join(", ")} WHERE id = ?`, [
-    ...(params as any[]),
-    def.id,
-  ]);
-  const updated = await getDefinition(nestId, def.id);
-  await recordDefinitionEvent(nestId, def.key, "update", userId, def, updated);
-  return updated;
+  return getDb().transaction(async (tx) => {
+    await tx.run(`UPDATE field_definitions SET ${sets.join(", ")} WHERE id = ?`, [
+      ...(params as any[]),
+      def.id,
+    ]);
+    const updated = await getDefinition(nestId, def.id, tx);
+    await recordDefinitionEvent(tx, nestId, def.key, "update", userId, def, updated);
+    return updated;
+  });
 }
 
 /**
@@ -961,7 +991,9 @@ export async function deleteFieldDefinition(
 ): Promise<FieldDefinition> {
   await assertCanManageFields(nestId, userId);
   const def = await getDefinition(nestId, idOrKey);
-  await getDb().run("DELETE FROM field_definitions WHERE id = ?", [def.id]);
-  await recordDefinitionEvent(nestId, def.key, "delete", userId, def, null);
+  await getDb().transaction(async (tx) => {
+    await tx.run("DELETE FROM field_definitions WHERE id = ?", [def.id]);
+    await recordDefinitionEvent(tx, nestId, def.key, "delete", userId, def, null);
+  });
   return def;
 }
