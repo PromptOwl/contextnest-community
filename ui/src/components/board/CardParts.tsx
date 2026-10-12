@@ -343,7 +343,7 @@ export function BlockedBadge({ count, className = "" }: { count: number; classNa
   if (count <= 0) return null;
   return (
     <span
-      className={`inline-flex items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-[10px] font-medium bg-red-500/10 text-red-700 dark:text-red-300 ${className}`}
+      className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-[10px] font-medium bg-red-500/10 text-red-700 dark:text-red-300 ${className}`}
       title={`Blocked by ${count} open task${count === 1 ? "" : "s"}`}
       data-testid="blocked-badge"
     >

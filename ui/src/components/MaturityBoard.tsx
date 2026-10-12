@@ -1245,7 +1245,7 @@ export function MaturityBoard({
                 )}
                 {/* Footer, Linear-style: priority · due · sub-items · last
                     touched on the left, assignee on the right. */}
-                <div className="mt-1.5 flex items-center gap-1.5 pl-5 min-h-6">
+                <div className="mt-1.5 flex min-w-0 items-center gap-1.5 pl-5 min-h-6">
                   <PriorityMenu
                     value={n.priority}
                     editable={canEditDocs}
@@ -1265,17 +1265,23 @@ export function MaturityBoard({
                     done={kids.filter((k) => !!k.completed_at).length}
                     onOpen={onOpenDocument}
                   />
+                  {/* Last touched — the first thing to give way on a crowded
+                      card: a zero-width lead lets the label wrap onto a clipped
+                      second line, so it disappears whole instead of as "j…". */}
                   {(n.updated_at || n.created_at) && (
-                    <span
-                      className="text-[10px] text-muted-foreground/80 tabular-nums whitespace-pre"
-                      title={timestampsTooltip(n, (iso) => new Date(iso).toLocaleString())}
-                    >
-                      {completed && n.completed_at
-                        ? `done ${timeAgo(n.completed_at)}`
-                        : timeAgo((n.updated_at || n.created_at)!)}
+                    <span className="flex h-4 min-w-0 flex-1 flex-wrap items-center overflow-hidden">
+                      <span aria-hidden className="h-4 w-0" />
+                      <span
+                        className="whitespace-pre text-[10px] text-muted-foreground/80 tabular-nums"
+                        title={timestampsTooltip(n, (iso) => new Date(iso).toLocaleString())}
+                      >
+                        {completed && n.completed_at
+                          ? `done ${timeAgo(n.completed_at)}`
+                          : timeAgo((n.updated_at || n.created_at)!)}
+                      </span>
                     </span>
                   )}
-                  <span className="ml-auto flex items-center gap-1">
+                  <span className="ml-auto flex shrink-0 items-center gap-1">
                     {canEditDocs && newCardPlacement(col.key, effectiveConfig) && (
                       <button
                         type="button"
