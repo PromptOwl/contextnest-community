@@ -55,6 +55,13 @@ env:
 permissions:
   contents: read
 
+# Every run hits the same deployed server with the same test accounts, so
+# two runs at once collide (rate limits, 500s, each deleting the other's
+# fixtures). Queue them: one run at a time across all PRs and branches.
+concurrency:
+  group: e2e-shared-dev
+  cancel-in-progress: false
+
 jobs:
   e2e:
     runs-on: ubuntu-latest
