@@ -20,6 +20,7 @@
  * The response names every node with its outcome, which is what makes a
  * non-transactional batch defensible (same contract as bulk publish).
  */
+import { DocumentNotFoundError } from "@promptowl/contextnest-engine";
 import { engineCache } from "./engine.js";
 import { updateNode } from "./service.js";
 import * as versions from "../governance/version-service.js";
@@ -210,6 +211,7 @@ async function columnOp(nestId: string, userId: string, boardId: string, column:
 /** The ids a call targets: an explicit list, or what a selector resolves to. */
 async function resolveTargets(
   nestId: string,
+  caller: { userId: string; userEmail: string },
   input: { ids?: unknown; selector?: unknown },
 ): Promise<string[]> {
   if (input.ids !== undefined && input.selector !== undefined) {
@@ -222,7 +224,12 @@ async function resolveTargets(
     }
     const { query } = await engineCache.get(nestId);
     const res = await query.query(input.selector.trim(), { hops: 0 });
-    ids = res.documents.map((d) => d.id);
+    // Only what the caller can read: matches they can't see are neither
+    // targeted nor counted (the over-cap message below must not leak them).
+    ids = [];
+    for (const d of res.documents) {
+      if (await canReadNode(nestId, d.id, caller.userId, caller.userEmail)) ids.push(d.id);
+    }
   } else {
     if (!Array.isArray(input.ids) || input.ids.some((x) => typeof x !== "string" || !x)) {
       throw new ValidationError("ids must be a list of node ids");
@@ -260,7 +267,7 @@ export async function bulkUpdateNodes(
   opts: { client?: ClientMetadata } = {},
 ): Promise<BulkUpdateResult> {
   const patch = cleanBulkPatch(input.patch);
-  const ids = await resolveTargets(nestId, input);
+  const ids = await resolveTargets(nestId, caller, input);
   const col = patch.board_id ? await columnOp(nestId, caller.userId, patch.board_id, patch.column!) : null;
   const fields = { ...col?.fields };
   for (const k of ["assignee", "priority", "due"] as const) {
@@ -300,8 +307,18 @@ export async function bulkUpdateNodes(
     try {
       head = await versions.getCurrentVersion(nestId, id);
       node = await storage.readDocument(id);
-    } catch {
-      results.push({ id, outcome: "skipped", code: "not_found", reason: "Node not found" });
+    } catch (err) {
+      // Only a missing document reads as not_found; an IO error or lock
+      // timeout is reported as what it is.
+      const missing =
+        err instanceof DocumentNotFoundError ||
+        err instanceof NotFoundError ||
+        (err as NodeJS.ErrnoException | null)?.code === "ENOENT";
+      results.push(
+        missing
+          ? { id, outcome: "skipped", code: "not_found", reason: "Node not found" }
+          : { id, ...reasonOf(err) },
+      );
       continue;
     }
     const title = String(node.frontmatter.title ?? id);

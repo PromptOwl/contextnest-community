@@ -510,7 +510,11 @@ export function BoardListView({
       {/* Bulk bar — Linear's floating selection bar. */}
       {canEdit && selected.size > 0 && (
         <div className="fixed inset-x-0 bottom-6 z-40 flex justify-center px-4 pointer-events-none">
-          <div className="pointer-events-auto flex items-center gap-1 rounded-lg border border-border bg-popover px-2 py-1.5 text-sm shadow-lg">
+          <div
+            role="toolbar"
+            aria-label="Bulk actions"
+            className="pointer-events-auto flex items-center gap-1 rounded-lg border border-border bg-popover px-2 py-1.5 text-sm shadow-lg"
+          >
             <span className="px-2 font-medium tabular-nums">{selected.size} selected</span>
             <span className="mx-1 h-4 w-px bg-border" />
             {canMove && (
@@ -575,7 +579,7 @@ export function BoardListView({
                     onChange={(e) => setTagDraft(e.target.value)}
                     placeholder="Add a tag…"
                     list="board-list-tags"
-                    className="h-8 text-sm"
+                    className="h-8 text-sm [&::-webkit-calendar-picker-indicator]:!hidden"
                     autoFocus
                   />
                   <datalist id="board-list-tags">
