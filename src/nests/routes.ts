@@ -22,6 +22,8 @@ import {
   renameNest,
   isStewardshipEnabled,
   setStewardshipEnabled,
+  nestAccessLogEnabled,
+  setAccessLogEnabled,
   disableStewardshipAndWipeGovernance,
   nestAllowsSelfApprove,
   nestCreatorIsReviewer,
@@ -31,6 +33,8 @@ import {
   setPrimeOnlyReview,
   nestPrimeTags,
   setPrimeTags,
+  nestDoneTags,
+  setDoneTags,
   nestRequiresPushConfirmation,
   setRequirePushConfirmation,
 } from "./service.js";
@@ -740,10 +744,12 @@ nestRoutes.get("/:nestId/settings", async (c) => {
     allow_self_approve: await nestAllowsSelfApprove(nestId),
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
+    done_tags: await nestDoneTags(nestId),
     // Push Confirmation Gate — superadmin-only to SET (see PATCH), readable by
     // anyone who can read the nest so the CLI/UI knows the posture.
     require_push_confirmation: await nestRequiresPushConfirmation(nestId),
     creator_is_reviewer: await nestCreatorIsReviewer(nestId),
+    access_log_enabled: await nestAccessLogEnabled(nestId),
   });
 });
 
@@ -773,9 +779,31 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     allow_self_approve?: boolean;
     prime_only_review?: boolean;
     prime_tags?: string[] | string;
+    done_tags?: string[] | string;
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
+    access_log_enabled?: boolean;
   }>();
+
+  // Read logging (the record of what each person and agent read) is an audit
+  // control. Any admin may turn it ON; turning it OFF stays with the owner or
+  // the server license-admin, like disabling stewardship — an admin
+  // collaborator must not be able to switch off the record of their own
+  // reads. Refused before anything in the body is applied.
+  if (
+    body.access_log_enabled === false &&
+    !isServerAdmin &&
+    permission !== "owner"
+  ) {
+    return c.json(
+      {
+        error:
+          "Only the nest owner or the server license-admin can turn off read logging.",
+        field: "access_log_enabled",
+      },
+      403,
+    );
+  }
 
   // Push Confirmation Gate is a SERVER-admin (superadmin) control, not a
   // per-nest owner setting — the whole point is that a nest admin cannot turn
@@ -837,10 +865,21 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
       Array.isArray(body.prime_tags) ? body.prime_tags : [body.prime_tags],
     );
   }
+  // Done columns only change how FUTURE task moves are stamped.
+  if (body.done_tags !== undefined) {
+    await setDoneTags(
+      nestId,
+      Array.isArray(body.done_tags) ? body.done_tags : [body.done_tags],
+    );
+  }
   // Creator-reviews is likewise future-only: it stewards nobody retroactively
   // and turning it off leaves every steward row it created in place.
   if (typeof body.creator_is_reviewer === "boolean") {
     await setCreatorIsReviewer(nestId, body.creator_is_reviewer);
+  }
+  // Read logging: checked up front (see the guard after the body parse).
+  if (typeof body.access_log_enabled === "boolean") {
+    await setAccessLogEnabled(nestId, body.access_log_enabled);
   }
 
   return c.json({
@@ -848,8 +887,10 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     allow_self_approve: await nestAllowsSelfApprove(nestId),
     prime_only_review: await nestReviewsPrimeOnly(nestId),
     prime_tags: await nestPrimeTags(nestId),
+    done_tags: await nestDoneTags(nestId),
     require_push_confirmation: await nestRequiresPushConfirmation(nestId),
     creator_is_reviewer: await nestCreatorIsReviewer(nestId),
+    access_log_enabled: await nestAccessLogEnabled(nestId),
     wiped,
   });
 });

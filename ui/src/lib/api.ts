@@ -13,6 +13,12 @@
  */
 
 import { clearDraft } from "./draft";
+import {
+  ACCESS_OFFER_EVENT,
+  accessOfferFromError,
+  type AccessRequest,
+  type AccessTarget,
+} from "./access-requests";
 import type { NestBranding } from "./branding";
 
 /**
@@ -87,6 +93,22 @@ async function request<T = any>(
     const err = new Error(data.error || `Request failed: ${res.status}`) as ApiError;
     err.status = res.status;
     err.body = data;
+    // A role grant past the pricing plan: the dialog shows the message; the
+    // license banner offers admins the way to change plans (one listener).
+    if (res.status === 402 && data.code === "plan_limit" && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("license:plan-limit", { detail: data }));
+    }
+    // A write refused for someone who could ask for the access instead
+    // (CU-wdqcq041jn): one listener (RequestAccessHost) offers the request over
+    // whatever they were doing. The caller still gets the error, so its own
+    // state — an unsaved edit above all — stays as it was.
+    const offer =
+      (options.method ?? "GET").toUpperCase() !== "GET"
+        ? accessOfferFromError(path, res.status, data)
+        : null;
+    if (offer && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent(ACCESS_OFFER_EVENT, { detail: offer }));
+    }
     throw err;
   }
   // Every successful mutation invalidates the cached reads its result affects.
@@ -217,6 +239,7 @@ export async function getHealth() {
     type_artifact_enabled?: boolean;
     shared_deployment?: boolean;
     type_table_enabled?: boolean;
+    type_task_enabled?: boolean;
     subagent_runs_enabled?: boolean;
     subagent_max_depth?: number;
     subagent_max_children?: number;
@@ -224,11 +247,16 @@ export async function getHealth() {
     /** Hootie in the nest (default OFF — admins opt in). Off → the launcher
      *  is hidden and POST /nests/:id/chat 404s. */
     hootie_enabled?: boolean;
+    /** Metacognition agents: server-run, persona-attributed, proposals only.
+     *  Needs the workflow plane too. Off → the Workflows "Agents" tab hides. */
+    metacognition_enabled?: boolean;
     /** The assistant identity to show: the admin's custom one on an
      *  enterprise licence, the default Hootie otherwise (server-enforced). */
     hootie_brand?: HootieBrand;
     /** Whether custom assistant identity is allowed (enterprise licence). */
     hootie_branding_available?: boolean;
+    /** Own model key / gateway allowed (licence feature byok, Enterprise). */
+    byok_available?: boolean;
     /** PostHog project key, or null when analytics is unconfigured or usage
      *  telemetry is switched off. The browser needs it to send events. */
     posthog_key?: string | null;
@@ -279,6 +307,8 @@ export interface AdminSettings {
    *  the type only — existing nodes still read/render/version. */
   type_artifact_enabled: boolean;
   type_table_enabled: boolean;
+  /** The server accepts `task` nodes (its engine knows the type). */
+  type_task_enabled?: boolean;
   /** Hootie in the nest (default OFF — admins opt in). */
   hootie_enabled: boolean;
   /** Custom assistant identity (enterprise). "" = default. Returned even
@@ -288,13 +318,13 @@ export interface AdminSettings {
   hootie_accent_color: string;
   hootie_greeting: string;
   hootie_branding_available: boolean;
-  /** Model Hootie answers with (default claude-opus-5; a gateway-side name
+  /** Own key + gateway fields are in effect and editable only with byok. */
+  byok_available?: boolean;
+  /** Model Hootie answers with (default claude-sonnet-5; a gateway-side name
    *  such as `ollama/…` when routed through a gateway). */
   hootie_model: string;
-  /** Model gateway (LiteLLM / PromptOwl) for Hootie AND agent runs;
-   *  "" = Anthropic directly. */
-  anthropic_base_url: string;
   subagent_runs_enabled: boolean;
+  metacognition_enabled: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
@@ -331,7 +361,6 @@ export interface AdminSettings {
   ms_tenant_id: string;
   google_token_exchange_enabled: boolean;
   google_client_id: string;
-  anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   msteams_webhook_url: string;
   email_provider: "smtp" | "ses";
@@ -344,7 +373,10 @@ export interface AdminSettings {
   ses_secret_access_key?: string | null;
   notify_email_from: string;
   notify_email_to: string;
-  anthropic_api_key?: string | null
+  /** Own-provider keys PromptOwl holds for this licence (byok): masked tails only. */
+  own_providers?: Record<string, { masked: string; updatedAt: string | null }>;
+  /** Write-only: provider → key to set, or null to clear. Sent to PromptOwl, never stored here. */
+  provider_keys?: Record<string, string | null>;
 }
 
 export async function getAdminSettings() {
@@ -353,9 +385,7 @@ export async function getAdminSettings() {
 
 /** Admin: patch one or more server settings. Live + persisted server-side. */
 export async function updateAdminSettings(
-  patch: Partial<AdminSettings> & {
-    anthropic_api_key?: string | null;
-  },
+  patch: Partial<AdminSettings>,
 ) {
   return request<{ settings: AdminSettings }>("/admin/settings", {
     method: "PATCH",
@@ -374,6 +404,24 @@ export async function sendTestNotification(channel: "slack" | "teams") {
 
 // ─── License ───────────────────────────────────────────────────────────
 
+export interface LicenseContact {
+  url: string;
+  email: string;
+}
+
+/** Trial / expiry / refusal fields shared by the public and admin views. */
+export interface LicenseTerms {
+  trial?: boolean;
+  expires_at?: string | null;
+  /** Whole days until expires_at (negative once past); null = no end date. */
+  days_left?: number | null;
+  /** not_found | deactivated | suspended | expired — or expired_grace (past
+   *  the end date, still fully working until grace_ends_at). */
+  reason?: string | null;
+  grace_ends_at?: string | null;
+  contact?: LicenseContact;
+}
+
 export interface LicenseStatus {
   valid: boolean;
   tier: string;
@@ -382,10 +430,50 @@ export interface LicenseStatus {
   suspended: boolean;
   suspended_reason: string | null;
   limits: { maxNests: number; maxUsers: number } | null;
+  /** Never licensed: show activation. False for a lapsed license. */
+  setup_required?: boolean;
 }
 
 export async function getLicenseStatus() {
   return request<LicenseStatus>("/license/status");
+}
+
+/** Admin-only license detail (Settings → License, the admin banner). */
+export interface AdminLicense extends LicenseTerms {
+  valid: boolean;
+  tier: string;
+  org: string | null;
+  owner_email: string | null;
+  suspended: boolean;
+  suspended_reason: string | null;
+  seats: {
+    licensed: number | null;
+    used: number;
+    over_limit: boolean;
+    at_limit: boolean;
+  };
+  pending_rejections: number;
+  last_checked_at: string | null;
+  /** Own model keys / LLM gateway (licence feature byok) is on for this licence. */
+  byok?: boolean;
+  /** free | trial | self_hosted | enterprise. */
+  plan?: string;
+  /** Editors in use and the cap (null = unlimited, 0 = needs a paid plan). */
+  subscribers?: { licensed: number | null; used: number };
+  max_account_owners?: number | null;
+  /** PromptOwl's page for this key: plan and Upgrade. */
+  manage_url?: string | null;
+}
+
+export async function getAdminLicense() {
+  return request<AdminLicense>("/admin/license");
+}
+
+/** Models this server's credential can reach (admin), and the one Hootie uses now. */
+export async function getAdminModels() {
+  return request<{ models: string[]; current: string; source: "own" | "promptowl" | null; own_models?: string[]; providers?: Record<string, string>; error?: string }>(
+    "/admin/models",
+  );
 }
 
 export async function installLicense(key: string) {
@@ -399,7 +487,7 @@ export async function installLicense(key: string) {
     // restart); `warning` carries the operator-facing explanation.
     persisted?: boolean;
     warning?: string;
-  }>("/license/install", {
+  } & LicenseTerms>("/license/install", {
     method: "POST",
     body: JSON.stringify({ key }),
   });
@@ -680,6 +768,9 @@ export interface NestSettings {
   require_push_confirmation: boolean;
   /** The person who creates a document becomes its reviewer; v1 publishes. */
   creator_is_reviewer: boolean;
+  /** Reads, pulls and exports are recorded in the activity log (default on).
+   *  Only the owner or server admin may turn it off. */
+  access_log_enabled?: boolean;
 }
 
 export async function getNestSettings(nestId: string) {
@@ -696,6 +787,8 @@ export async function updateNestSettings(
     /** Superadmin-only — a per-field 403 is returned to anyone else. */
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
+    /** Owner / server admin only to turn OFF; any nest admin may turn on. */
+    access_log_enabled?: boolean;
   },
 ) {
   return request<NestSettings>(`/nests/${nestId}/settings`, {
@@ -1384,6 +1477,11 @@ export async function createNode(
     schedule?: string;
     /** Flag as prime (always needs approval). Owner/admin only. */
     prime?: boolean;
+    /** Board fields — any node; `null` clears (see src/nodes/task-fields.ts). */
+    assignee?: string | null;
+    due?: string | null;
+    priority?: string | null;
+    parent?: string | null;
   },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
@@ -1464,6 +1562,11 @@ export async function updateNode(
     prime?: boolean | null;
     /** Re-type the node ("Turn into…"). Same accepted set as create. */
     type?: string;
+    /** Board fields — any node; `null` clears (see src/nodes/task-fields.ts). */
+    assignee?: string | null;
+    due?: string | null;
+    priority?: string | null;
+    parent?: string | null;
   },
   baseVersion?: number,
 ) {
@@ -1603,7 +1706,7 @@ export async function listTags(nestId: string): Promise<string[]> {
 // ─── Governance ─────────────────────────────────────────────────────────
 
 export async function listStewards(nestId: string) {
-  return request<{ stewards: any[] }>(`/nests/${nestId}/stewards`);
+  return request<{ stewards: any[]; ownerEmail: string | null }>(`/nests/${nestId}/stewards`);
 }
 
 export async function syncStewards(nestId: string) {
@@ -1707,6 +1810,50 @@ export async function requestTargetDeletion(
 export async function getDeletionRequests(nestId: string, status = "pending") {
   return request<{ requests: DeletionRequest[]; total: number }>(
     `/nests/${nestId}/deletion-requests?status=${encodeURIComponent(status)}`,
+  );
+}
+
+// ─── Access requests (CU-wdqcq041jn) ─────────────────────────────────────
+
+/** Ask for write access to a document, folder or the nest. 201 = filed,
+ *  200 = the pending one already there (`created: false`). */
+export async function requestAccess(
+  nestId: string,
+  target: AccessTarget,
+  note?: string,
+) {
+  return request<{ request: AccessRequest; created: boolean }>(
+    `/nests/${nestId}/access-requests`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        target_type: target.type,
+        target_id: target.id,
+        level: "write",
+        ...(note ? { note } : {}),
+      }),
+    },
+  );
+}
+
+/** The caller's latest request for one target, whatever its state. */
+export async function getMyAccessRequest(nestId: string, target: AccessTarget) {
+  return request<{ request: AccessRequest | null }>(
+    `/nests/${nestId}/access-requests/mine?target_type=${encodeURIComponent(target.type)}&target_id=${encodeURIComponent(target.id)}`,
+  );
+}
+
+export async function approveAccessRequest(nestId: string, id: string, note?: string) {
+  return request<{ request: AccessRequest }>(
+    `/nests/${nestId}/access-requests/${id}/approve`,
+    { method: "POST", body: JSON.stringify(note ? { note } : {}) },
+  );
+}
+
+export async function denyAccessRequest(nestId: string, id: string, note?: string) {
+  return request<{ request: AccessRequest }>(
+    `/nests/${nestId}/access-requests/${id}/deny`,
+    { method: "POST", body: JSON.stringify(note ? { note } : {}) },
   );
 }
 
@@ -1926,7 +2073,7 @@ export type ActivityLogScope =
 export async function getActivityLog(
   nestId: string,
   scope: ActivityLogScope,
-  opts: { types?: ActivityLogType[]; actor?: string; limit?: number; offset?: number } = {},
+  opts: { types?: ActivityLogType[]; actor?: string; agent?: string; limit?: number; offset?: number } = {},
 ) {
   const params = new URLSearchParams({
     limit: String(opts.limit ?? 50),
@@ -1936,6 +2083,7 @@ export async function getActivityLog(
   if (scope.kind === "folder") params.set("folder", scope.folder);
   if (opts.types?.length) params.set("type", opts.types.join(","));
   if (opts.actor) params.set("actor", opts.actor);
+  if (opts.agent) params.set("agent", opts.agent);
   return request<{ items: ActivityLogItem[]; limit: number; offset: number; hasMore: boolean }>(
     `/nests/${encodeURIComponent(nestId)}/activity-log?${params.toString()}`,
   );
@@ -2088,8 +2236,13 @@ export function hostedArtifactUrl(
   nodeId: string,
   version?: number | null,
   cacheBust?: number | string | null,
+  opts?: { embed?: boolean },
 ): string {
   const params = new URLSearchParams();
+  // embed=1: the in-app viewer's iframe, which gets the place/highlight
+  // bridge appended (src/shared/artifact-bridge.ts). Open in new tab and the
+  // text fetch never ask for it.
+  if (opts?.embed) params.set("embed", "1");
   if (version != null) params.set("v", String(version));
   if (cacheBust != null) params.set("_", String(cacheBust));
   const qs = params.toString();
@@ -2450,7 +2603,7 @@ export async function listCollaborators(nestId: string) {
  *  so a read-only reviewer's comment box can offer the roster too — unlike
  *  listCollaborators, which needs write. */
 export async function listMentionablePeople(nestId: string) {
-  return request<{ people: Array<{ email: string; name: string | null }> }>(
+  return request<{ people: Array<{ email: string; name: string | null; member?: boolean }> }>(
     `/nests/${nestId}/mentionable`,
   );
 }
@@ -2774,8 +2927,9 @@ export async function getNestGraph(nestId: string) {
 
 export interface WorkItem {
   /** "deletion" = someone asked for the document to be deleted; only nest
-   *  owners/admins get those in the waiting-on-me bucket. */
-  type: "review" | "deletion";
+   *  owners/admins get those in the waiting-on-me bucket. "access" = someone
+   *  who can only read asked to edit (CU-wdqcq041jn) — same owners/admins. */
+  type: "review" | "deletion" | "access";
   nest_id: string;
   nest_name: string;
   node_id: string;
@@ -2789,7 +2943,9 @@ export interface WorkItem {
   /** Deletion items only. For "folder"/"nest"/"nest_archive", node_id is a
    *  folder path or the nest id — NOT a document id, so don't open the editor
    *  on it. "nest_archive" is the reversible ask: honouring it archives. */
-  target_type?: "document" | "folder" | "nest" | "nest_archive";
+  target_type?: "document" | "folder" | "nest" | "nest_archive" | "node";
+  /** Access items only: the level asked for. */
+  level?: "read" | "write";
 }
 
 export interface WatcherNotification {
@@ -2813,6 +2969,18 @@ export interface WorkPagination {
   has_more: boolean;
 }
 
+/** A board card assigned to the caller (open ones only), from /me/work. */
+export interface AssignedItem {
+  nest_id: string;
+  nest_name: string;
+  node_id: string;
+  title: string;
+  type: string;
+  due: string | null;
+  priority: string | null;
+  assigned_at: string | null;
+}
+
 export async function getMyWork(opts?: { limit?: number; offset?: number }) {
   const q = new URLSearchParams();
   if (opts?.limit != null) q.set("limit", String(opts.limit));
@@ -2822,6 +2990,7 @@ export async function getMyWork(opts?: { limit?: number; offset?: number }) {
     items: WorkItem[];
     waiting: WorkItem[];
     notifications?: WatcherNotification[];
+    assigned?: AssignedItem[];
     pagination?: WorkPagination;
   }>(`/me/work${qs ? `?${qs}` : ""}`);
 }
@@ -3388,4 +3557,130 @@ export async function chatWithHootie(
     }
   }
   if (buffer.trim()) dispatch(buffer);
+}
+
+// ─── Boards (saved Board views) ─────────────────────────────────────────
+
+export interface SavedBoard {
+  id: string;
+  nest_id: string;
+  name: string;
+  private: boolean;
+  position: number;
+  created_by: string;
+  created_by_email: string | null;
+  /** BoardSettings plus filterTags and per-column ranks; see board-service.ts. */
+  config: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listBoards(nestId: string) {
+  return request<{ boards: SavedBoard[] }>(`/nests/${nestId}/boards`);
+}
+
+export async function createBoard(
+  nestId: string,
+  data: { name: string; private?: boolean; config?: Record<string, any> },
+) {
+  return request<{ board: SavedBoard }>(`/nests/${nestId}/boards`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateBoard(
+  nestId: string,
+  boardId: string,
+  data: { name?: string; private?: boolean; config?: Record<string, any>; position?: number },
+) {
+  return request<{ board: SavedBoard }>(`/nests/${nestId}/boards/${boardId}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+/** Set one column's card order (merged server-side, per column). */
+export async function rankBoardColumn(
+  nestId: string,
+  boardId: string,
+  key: string,
+  order: string[],
+) {
+  return request<{ board: SavedBoard }>(`/nests/${nestId}/boards/${boardId}/rank`, {
+    method: "POST",
+    body: JSON.stringify({ key, order }),
+  });
+}
+
+export async function deleteBoard(nestId: string, boardId: string) {
+  return request<{ deleted: boolean }>(`/nests/${nestId}/boards/${boardId}`, {
+    method: "DELETE",
+  });
+}
+
+// ─── Metacognition agents (CU-wdqcq041jm) ─────────────────────────────────
+
+export interface MetacognitionAgentConfig {
+  persona: { name: string; avatar: string | null };
+  scope: { read: string[]; propose: string[] };
+  caps: { max_steps: number; max_tokens: number; max_seconds: number; max_proposals: number };
+  feeds: Array<{ name: string; url: string }>;
+  mcp_servers: Array<{ name: string; url: string; allowed_tools: string[]; auth_env?: string }>;
+  model: string | null;
+}
+
+export interface MetacognitionAgent extends Omit<MetacognitionAgentConfig, "persona"> {
+  node_id: string;
+  enabled: boolean;
+  persona: { name: string; avatar: string | null; email: string };
+  configured_by: string;
+  updated_at: string;
+}
+
+/** What a metacognition run records on its trace (write tier). */
+export interface MetacognitionTrace {
+  persona?: { name: string; avatar: string | null };
+  model?: string;
+  billing?: "promptowl_credits" | "own_key";
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+  };
+  est_cost_usd?: number | null;
+  proposals?: number;
+  stopped_by?: string;
+  summary?: string;
+  skipped?: string;
+  error?: string;
+}
+
+export async function listMetacognitionAgents(nestId: string) {
+  const r = await request<{ agents: MetacognitionAgent[] }>(`/nests/${nestId}/metacognition`);
+  return r.agents;
+}
+
+export async function saveMetacognitionAgent(
+  nestId: string,
+  nodeId: string,
+  body: MetacognitionAgentConfig & { enabled: boolean },
+) {
+  const r = await request<{ agent: MetacognitionAgent }>(`/nests/${nestId}/metacognition/${nodeId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+  return r.agent;
+}
+
+export async function deleteMetacognitionAgent(nestId: string, nodeId: string) {
+  return request<{ deleted: boolean }>(`/nests/${nestId}/metacognition/${nodeId}`, { method: "DELETE" });
+}
+
+export async function runMetacognitionAgent(nestId: string, nodeId: string) {
+  return request<{ run_id: string; executes: "server" }>(`/nests/${nestId}/metacognition/${nodeId}/run`, {
+    method: "POST",
+    body: "{}",
+  });
 }

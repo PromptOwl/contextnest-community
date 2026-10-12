@@ -14,7 +14,8 @@
  * all writes require an explicit `nest` argument.
  *
  * Writes available here: `nest_create`, `context_create`, `context_update`,
- * `context_delete`, `context_move`, `context_submit_review`. Each is gated
+ * `context_delete`, `context_move`, `context_submit_review`,
+ * `context_request_access`. Each is gated
  * per-call by the same permission checks the per-nest endpoint uses
  * (handleToolCall's canCreateInNest / canUserEdit / canUserApprove).
  *
@@ -65,6 +66,7 @@ import {
 } from "./tools.js";
 import { isDerivedAnnotationsNode } from "../nodes/service.js";
 import type { Nest } from "../shared/types.js";
+import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "../auth/license-copy.js";
 import { HEADLESS_READER_SERVER_TOOLS, isServiceUser } from "../auth/headless.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
@@ -79,6 +81,7 @@ const SERVER_WRITE_TOOLS = new Set([
   "context_delete",
   "context_move",
   "context_submit_review",
+  "context_request_access",
 ]);
 
 // Read tools that support fan-out when `nest` is omitted — search/list/query/overview
@@ -279,6 +282,7 @@ const SERVER_NEST_TOOLS = [
   "context_delete",
   "context_move",
   "context_submit_review",
+  "context_request_access",
 ];
 
 function withNestArg(tool: (typeof TOOL_DEFINITIONS)[number]) {
@@ -352,6 +356,12 @@ async function handleServerToolCall(
 
   // Kill-switch + license gate for writes — parity with per-nest write path.
   if (SERVER_WRITE_TOOLS.has(toolName)) {
+    if (
+      (isSuspended() || !getCurrentLicense()?.valid) &&
+      !(await canSeeLicenseDetail(userId))
+    ) {
+      return NEUTRAL_READ_ONLY;
+    }
     if (isSuspended()) {
       const reason = getSuspensionReason();
       return `This server is suspended by PromptOwl; writes are blocked${
@@ -730,15 +740,16 @@ Streamable HTTP, stateless. Two endpoints:
     \`context_list\`, \`context_query\`, \`context_overview\`
   - Targeted reads (\`nest\` required): \`context_get\`, \`context_resolve\`, \`context_comments\`, \`context_versions\`
   - Writes (\`nest\` required): \`nest_create\`, \`context_create\`, \`context_update\`,
-    \`context_delete\`, \`context_move\`, \`context_submit_review\`
+    \`context_delete\`, \`context_move\`, \`context_submit_review\`,
+    \`context_request_access\` (ask for write access when a write is refused)
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, the full toolset. Same names as the
   server-level tools without the \`nest\` argument, plus:
   - read: \`context_init\` (operating instructions — call first), \`context_export\`, \`context_table_query\`, \`context_versions\`
-  - write: \`context_update\`, \`context_delete\`, \`context_move\`, \`context_request_deletion\`
+  - write: \`context_update\`, \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`
   - review: \`context_submit_review\`, \`context_approve\`, \`context_reject\`, \`context_review_queue\`, \`context_my_drafts\`
   - comments: \`context_comment\`, \`context_resolve_comment\`
   - people: \`context_stewards\`, \`context_assign_steward\`, \`context_share_nest\`, \`context_grant\`
-  - admin: \`context_deletion_queue\`, \`context_resolve_deletion\`, \`context_unsynced_list\`, \`context_sync_folder\`
+  - admin: \`context_deletion_queue\`, \`context_resolve_deletion\`, \`context_access_requests\`, \`context_resolve_access_request\`, \`context_unsynced_list\`, \`context_sync_folder\`
   - \`workflow_*\` (runs, edges, edge types) when the nest's workflow plane is on
   Sharing a slice is one call: \`context_grant\` with
   \`{ "email", "target_type": "document" | "folder", "target", "role": "read" | "write" }\`

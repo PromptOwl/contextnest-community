@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { splitWorkItems } from "./my-work-groups";
+import { splitWorkItems, workItemKey } from "./my-work-groups";
 import type { WorkItem } from "./api";
 
 const item = (node_id: string, type: WorkItem["type"], target_type?: string) =>
@@ -19,5 +19,14 @@ describe("splitWorkItems", () => {
 
   it("returns empty groups for an empty inbox", () => {
     expect(splitWorkItems([])).toEqual({ reviews: [], requests: [] });
+  });
+});
+
+describe("workItemKey", () => {
+  const base = { nest_id: "n", nest_name: "N", node_id: "nodes/a", title: "A", requested_by: "x", requested_at: "t" };
+  it("names reviews and flags by document, access requests by request", () => {
+    expect(workItemKey({ ...base, type: "review" } as any)).toBe("n:nodes/a");
+    expect(workItemKey({ ...base, type: "deletion" } as any)).toBe("n:nodes/a");
+    expect(workItemKey({ ...base, type: "access", request_id: "r1" } as any)).toBe("access:r1");
   });
 });

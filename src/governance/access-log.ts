@@ -19,7 +19,19 @@
  *   - capped: at most MAX_PER_CALL documents per retrieval;
  *   - pruned on the activity trace's retention window.
  *
- * `client` is self-reported attribution (§9.4) — shown, never trusted.
+ * `client` is self-reported attribution (§9.4) — shown, never trusted. Its
+ * `agent` is also stored in its own column (migration 050) so an admin can ask
+ * "what did agent X read" without scanning JSON.
+ *
+ * Each row carries the version the caller was served where the surface hands
+ * back one known version (a single-document read, a version fetch, an agent
+ * search under stewardship). With versioned history that is enough to rebuild
+ * exactly what the agent saw. A changed version is a new fact, so it is part
+ * of the throttle key.
+ *
+ * On by default; an owner can turn it off per nest (nests.access_log_enabled,
+ * migration 050). The setting is read inside the background insert, so even
+ * that lookup stays off the read path.
  * `detail` names the surface ("search", "context_get"), never what the caller
  * typed: admins read this log, and a search box or a Hootie prompt is not
  * theirs to read.
@@ -37,6 +49,9 @@ export const MAX_PER_CALL = 50;
 /** Documents recorded per selector export — larger, since each one left. */
 export const MAX_PER_EXPORT = 1000;
 const THROTTLE_MAX_KEYS = 20_000;
+/** Rows per INSERT (11 bound values each — well under SQLite's and
+ *  Postgres's parameter limits). */
+const INSERT_CHUNK = 200;
 const PRUNE_EVERY = 500;
 
 /**
@@ -61,13 +76,33 @@ export interface AccessEvent {
   userId?: string | null;
   userEmail?: string | null;
   client?: ClientMetadata;
+  /** The version each document was served at, by id, where the surface knows
+   *  it. Omitted or null → recorded without a version. */
+  versions?: Record<string, number | null | undefined>;
   /** How it was accessed ("search", "markdown export (12 documents)").
    *  Never the caller's query or prompt text. */
   detail?: string;
 }
 
-/** A different surface or agent is a different fact ("hootie read it" is not
- *  "alice opened it"), so both are part of the throttle key. */
+/** Agent name as stored: the caller's self-reported `client.agent`, bounded. */
+function agentOf(e: AccessEvent): string | null {
+  const a = e.client?.agent;
+  return typeof a === "string" && a.trim() ? a.trim().slice(0, 200) : null;
+}
+
+/** Served version for one document, if the caller knew it. */
+function versionOf(e: AccessEvent, nodeId: string | null): number | null {
+  if (!nodeId || !e.versions) return null;
+  const v = e.versions[nodeId];
+  return typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null;
+}
+
+function throttleKey(actor: string, e: AccessEvent, nodeId: string | null): string {
+  return `${actor}|${e.nestId}|${nodeId ?? "*"}|${e.action}|${e.surface}|${agentOf(e) ?? ""}|${versionOf(e, nodeId) ?? ""}`;
+}
+
+/** A different surface, agent or version is a different fact ("hootie read
+ *  v3" is not "alice opened v4"), so all three are part of the throttle key. */
 function admit(
   actor: string,
   nestId: string,
@@ -75,8 +110,7 @@ function admit(
   e: AccessEvent,
   now: number,
 ) {
-  const agent = typeof e.client?.agent === "string" ? e.client.agent : "";
-  const key = `${actor}|${nestId}|${nodeId ?? "*"}|${e.action}|${e.surface}|${agent}`;
+  const key = throttleKey(actor, { ...e, nestId }, nodeId);
   const prev = lastSeen.get(key);
   if (prev !== undefined && now - prev < THROTTLE_MS) return false;
   // Evict the oldest tenth rather than clearing: a full clear re-records
@@ -98,24 +132,78 @@ function admit(
 /** Undo admit() for keys whose insert failed, so the next access is retried
  *  rather than suppressed for the whole window. */
 function release(actor: string, e: AccessEvent, targets: Array<string | null>) {
-  const agent = typeof e.client?.agent === "string" ? e.client.agent : "";
-  for (const nodeId of targets) {
-    lastSeen.delete(`${actor}|${e.nestId}|${nodeId ?? "*"}|${e.action}|${e.surface}|${agent}`);
+  for (const nodeId of targets) lastSeen.delete(throttleKey(actor, e, nodeId));
+}
+
+/**
+ * Per-nest on/off (nests.access_log_enabled), cached briefly so a burst of
+ * reads costs one lookup. A nest that can't be read (missing row, a database
+ * without migration 050) counts as ON — failing open to "record" is the safe
+ * direction for an audit log.
+ */
+const SETTING_TTL_MS = 5_000;
+const settingCache = new Map<string, { on: boolean; at: number }>();
+
+export async function readAccessLogSetting(nestId: string): Promise<boolean> {
+  const hit = settingCache.get(nestId);
+  if (hit && Date.now() - hit.at < SETTING_TTL_MS) return hit.on;
+  let on = true;
+  try {
+    const row = (await getDb().get(
+      "SELECT access_log_enabled FROM nests WHERE id = ?",
+      [nestId],
+    )) as { access_log_enabled: number | null } | undefined;
+    if (row && row.access_log_enabled != null) on = !!row.access_log_enabled;
+  } catch {
+    /* unknown → record */
   }
+  if (settingCache.size > 5_000) settingCache.clear();
+  settingCache.set(nestId, { on, at: Date.now() });
+  return on;
+}
+
+/** Drop the cached setting (after it changes, and in tests). */
+export function forgetAccessLogSetting(nestId?: string): void {
+  if (nestId) settingCache.delete(nestId);
+  else settingCache.clear();
 }
 
 async function write(e: AccessEvent, targets: Array<string | null>, actor: string): Promise<void> {
   try {
+    if (!(await readAccessLogSetting(e.nestId))) {
+      // Turned off for this nest: record nothing, and don't let the throttle
+      // remember a read that was never written.
+      release(actor, e, targets);
+      return;
+    }
     const db = getDb();
     const ts = new Date().toISOString();
     const client = serializeClient(e.client);
+    // Stored lowercased: the per-agent filter is a case-insensitive exact match
+    // on an indexed column. The original spelling stays in client_json.
+    const agent = agentOf(e)?.toLowerCase() ?? null;
     const detail = e.detail ? e.detail.slice(0, 200) : null;
-    for (const nodeId of targets) {
+    // One multi-row INSERT per chunk, not one per document: a 50-hit search
+    // is one statement, so the cost of recording doesn't grow with the page.
+    for (let i = 0; i < targets.length; i += INSERT_CHUNK) {
+      const chunk = targets.slice(i, i + INSERT_CHUNK);
       await db.run(
         `INSERT INTO node_access_events
-           (ts, nest_id, node_id, action, surface, user_id, user_email, client_json, detail)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [ts, e.nestId, nodeId, e.action, e.surface, e.userId ?? null, e.userEmail ?? null, client, detail],
+           (ts, nest_id, node_id, action, surface, user_id, user_email, client_json, detail, version, agent)
+         VALUES ${chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ")}`,
+        chunk.flatMap((nodeId) => [
+          ts,
+          e.nestId,
+          nodeId,
+          e.action,
+          e.surface,
+          e.userId ?? null,
+          e.userEmail ?? null,
+          client,
+          detail,
+          versionOf(e, nodeId),
+          agent,
+        ]),
       );
     }
     insertsSincePrune += targets.length;

@@ -18,7 +18,10 @@ import {
   Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
   FileStack, FolderPlus, X, FolderTree,
   Activity, BookOpen, Archive, Eye, Palette, History,
+  KeyRound,
 } from "lucide-react";
+import { RequestAccessDialog } from "./RequestAccessDialog";
+import type { AccessOffer } from "../lib/access-requests";
 import { ConnectModal } from "./ConnectModal";
 import { prettyFolderPath } from "./FolderTree";
 
@@ -170,6 +173,8 @@ export function NestView({
   // Local mirror of the nest name so inline rename feels instant while the
   // backend autosave lands. Resets if the parent passes a different nest.
   const [editableName, setEditableName] = useState(nestName);
+  // "Request edit access" for a viewer of the nest (CU-wdqcq041jn).
+  const [accessOffer, setAccessOffer] = useState<AccessOffer | null>(null);
   const lastSavedName = useRef(nestName);
   useEffect(() => {
     setEditableName(nestName);
@@ -261,6 +266,7 @@ export function NestView({
   const [allowSelfApprove, setAllowSelfApprove] = useState(false);
   const [primeOnlyReview, setPrimeOnlyReview] = useState(false);
   const [creatorIsReviewer, setCreatorIsReviewer] = useState(false);
+  const [accessLogEnabled, setAccessLogEnabled] = useState(true);
   const [primeTags, setPrimeTags] = useState<string[]>([]);
   // Push Confirmation Gate (superadmin-set). Held-push count drives the badge.
   const [requirePushConfirmation, setRequirePushConfirmation] = useState(false);
@@ -418,6 +424,10 @@ export function NestView({
     setActiveTabState(tab);
     onTabChange?.(tab);
   };
+  // Follow tab changes made outside the tab strip (sidebar, breadcrumb, back/forward).
+  useEffect(() => {
+    if (initialTab) setActiveTabState(initialTab);
+  }, [initialTab]);
   // Expanded folders, not collapsed ones: a folder's documents are fetched on
   // first expand, so the default has to be closed.
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
@@ -588,6 +598,7 @@ export function NestView({
     setAllowSelfApprove(settingsData.allow_self_approve);
     setPrimeOnlyReview(!!settingsData.prime_only_review);
     setCreatorIsReviewer(!!settingsData.creator_is_reviewer);
+    setAccessLogEnabled((settingsData as Partial<api.NestSettings>).access_log_enabled ?? true);
     setPrimeTags(settingsData.prime_tags ?? []);
     setRequirePushConfirmation(!!(settingsData as any).require_push_confirmation);
     if (nestMeta?.nest?.visibility) {
@@ -868,6 +879,8 @@ export function NestView({
     try {
       await api.approveNode(nestId, reviewNode.id, note);
       toast.success("Approved");
+      // Drop the row now; fetchData below reconciles in the background.
+      setReviewQueue((q) => q.filter((r) => r.nodeId !== reviewNode.id));
       setReviewNode(null);
       fetchData();
     } catch (err: any) {
@@ -881,6 +894,7 @@ export function NestView({
     try {
       await api.rejectNode(nestId, reviewNode.id, note);
       toast.success("Rejected");
+      setReviewQueue((q) => q.filter((r) => r.nodeId !== reviewNode.id));
       setReviewNode(null);
       fetchData();
     } catch (err: any) {
@@ -1493,6 +1507,28 @@ export function NestView({
             Add with AI
           </Button>
         )}
+        {/* Someone who can read this nest but not add to it can ask for that
+            instead of finding no way in (CU-wdqcq041jn). Signed-in only —
+            there's no one to grant a signed-out reader anything. */}
+        {!canEditDocs && !nestArchived && !previewReader && !!adminStatus?.me && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              setAccessOffer({
+                nestId,
+                target: { type: "nest", id: nestId },
+                level: "write",
+                label: editableName || nestName,
+              })
+            }
+            data-testid="nest-request-access"
+            title="Ask the nest owner or an admin for edit access to this nest"
+          >
+            <KeyRound className="h-3.5 w-3.5 mr-1.5" />
+            Request edit access
+          </Button>
+        )}
         {canManage && !isPhone && (
           // Inside the nest, Share IS the Collaborators tab — one surface
           // for visibility, people and teams (CU-wdqcpzzzy6). On a phone it
@@ -2080,6 +2116,9 @@ export function NestView({
         />
       )}
 
+      {accessOffer && (
+        <RequestAccessDialog offer={accessOffer} onClose={() => setAccessOffer(null)} />
+      )}
       {showGenerate && (
         <GenerateContextModal
           isOpen={showGenerate}
@@ -2106,6 +2145,8 @@ export function NestView({
           requirePushConfirmation={requirePushConfirmation}
           isServerAdmin={isAdmin}
           creatorIsReviewer={creatorIsReviewer}
+          accessLogEnabled={accessLogEnabled}
+          canDisableAccessLog={isAdmin || isOwner || permission === "owner"}
           canManageStewardship={canManageGovernance}
           onClose={() => setShowSettings(false)}
           onChanged={(next) => {
@@ -2119,6 +2160,7 @@ export function NestView({
             setPrimeTags(next.primeTags);
             setRequirePushConfirmation(next.requirePushConfirmation);
             setCreatorIsReviewer(next.creatorIsReviewer);
+            setAccessLogEnabled(next.accessLogEnabled);
             fetchData();
           }}
         />
