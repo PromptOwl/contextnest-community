@@ -274,7 +274,7 @@ Per the sync discipline, all of this lands in the engine repo first and ships in
   | Route | Tier | Purpose |
   |---|---|---|
   | `GET /nests/:id/structure?folder=&report=1` | read; the report only for callers who read the whole nest | The `context_structure` binding: rules, the resolved rule and template for a folder, and the compliance report. The report names every document that breaks a rule, drafts included, so a visibility-only reader (approved content only) or a reader a governed nest narrows gets the rules but a 403 for the report (`readsWholeNest`). |
-  | `PUT /nests/:id/structure` | manage (`canManageStewards`, `src/governance/stewardship-service.ts:822`) | Saves rules via the engine's `setStructure`. The `structure_changed` activity entry (who, when, what changed) is not built yet (§6.3 "Not yet"); until it is, the request trace records each save. |
+  | `PUT /nests/:id/structure` | manage (`canManageStewards`, `src/governance/stewardship-service.ts:822`) | Saves rules via the engine's `setStructure`. The `structure_changed` activity entry (who, when, what changed) is not built yet (phase 2, §9); until it is, the request trace records each save. |
   | `POST /nests/:id/structure/check` | read; manage when `rules` is sent | The UI's validation API; see below. |
 
 - **`POST /nests/:id/structure/check`.** The UI contains no engine code: no matcher, no token logic, no regex. Every check is a server call, debounced to about 300 ms.
@@ -284,7 +284,7 @@ Per the sync discipline, all of this lands in the engine repo first and ships in
   response: { errors: [{ key, message }], warnings: [string], results: [{ ok, slug, violations }] }
   ```
 
-  - **Caps.** `rules` must compile within the engine's limits (256 folder rules), and a call takes at most 50 `tests`; bigger bodies are refused with 413/400.
+  - **Caps.** `rules` must compile within the engine's limits (256 folder rules), and a call takes at most 50 `tests`; more than 50 tests, or rules past the engine's limits, are refused with 400.
   - **Without `rules`,** the tests run against the saved rules. The new-document and new-folder forms use this: does this folder, title and type fit, and what slug does the title become?
   - **With `rules`,** the draft is compiled, regex safety included. `errors` points at the offending key, `warnings` names what compiles but looks wrong (a template name with no entry under `templates` — the editor is where that typo happens), and the tests run against the draft. The rule editor uses this for its "Try" boxes and field errors before saving.
   - On the server it calls the engine's exported `compileStructure`, `checkDocument` and `checkFolder`, and Community's own `slugify` for `slug` (it is the function that builds Community's ids, so it is what the server will produce). The UI therefore shows exactly what the server will enforce.
@@ -368,7 +368,7 @@ clients/{client}/meetings
 
 **Step 5 — Save.** Save sends `PUT /nests/:id/structure`.
 - The server re-validates, and any error appears inline at the field it names.
-- The request trace records the save. A `structure_changed` activity entry (who, when, what changed) is planned; see §6.3 "Not yet".
+- The request trace records the save. A `structure_changed` activity entry (who, when, what changed) is planned for phase 2 (§9).
 - The **Compliance** tab badge then shows how many existing documents and folders don't fit.
 
 **Step 6 — Clean up, then enforce.**
@@ -409,8 +409,8 @@ clients/{client}/meetings
 
 ## 9. Phases
 
-1. **Engine (upstream PR, minor release):** schema, `structure.ts`, `setStructure`, enforcement and scaffolding in the executors, the `.context/` import fix, the `context_structure` op, `ctx structure`, the plugin changes, and the spec text. *Implemented test-first on `PromptOwl/ContextNest` branch `claude/context-nest-hard-rules-design-yhcj6z` (§10).*
-2. **Community API and enforcement:** engine bump, the three REST routes, the MCP tool, `moveNode`/`createEmptyFolder`/`deleteFolder` checks, the skip flag, and the error mapping.
+1. **Engine (upstream PR, major release):** schema, `structure.ts`, `setStructure`, enforcement and scaffolding in the executors, the `.context/` import fix, the `context_structure` op, `ctx structure`, the plugin changes, and the spec text. *Implemented test-first on `PromptOwl/ContextNest` branch `claude/context-nest-hard-rules-design-yhcj6z` (§10).*
+2. **Community API and enforcement:** engine bump, the three REST routes, the `structure_changed` activity entry (actor, before and after rules), the MCP tool, `moveNode`/`createEmptyFolder`/`deleteFolder` checks, the skip flag, and the error mapping.
 3. **Community UI:** the Structure page (Blueprint, Templates and Compliance tabs) and the create-flow integration.
 
 Each phase is shippable on its own:
@@ -745,7 +745,7 @@ Every phase is built **test-first**:
   - `GET /nests/:id/structure` for every role;
   - `PUT` allowed only for owners and admins (`canManageStewards`), and refused for editors, reviewers, viewers and nest-scoped keys;
   - an invalid rule is refused with 400 naming the key, and nothing is written;
-  - the `structure_changed` activity entry, once it is built (§6.3 "Not yet");
+  - the `structure_changed` activity entry, once it is built (phase 2, §9);
   - `POST /structure/check`: saved rules at read tier, draft rules at manage tier only, field errors, per-test results, and `slug` matching Community's `slugify`.
 - `test/structure-enforcement.test.ts`:
   - REST create, update and delete are refused with **400** (never 500), and bulk publish reports the refusal per row;
@@ -779,7 +779,7 @@ Then the QA agent repeats the run independently and attacks the change.
 - **Mixed engine versions.** An engine older than phase 1 strips the new keys, and `ctx init` re-init rewrites the config. On such a version, rules are advisory only.
 - **On-disk edits.** Files added straight to disk, outside every write surface, cannot be refused. They show up in the compliance report.
 - **No rename.** A document whose leaf doesn't fit a destination's `file_name` cannot be moved there yet. The workaround is to create a conforming document and delete the old one, which loses its history; a rename op fixes this.
-- **Config history.** `config.yaml` is not versioned by the engine. Rule changes are audited in Community's activity log only.
+- **Config history.** `config.yaml` is not versioned by the engine. Rule changes are to be audited in Community's activity log (`structure_changed`, phase 2). Until that entry is built, the request trace is the only record of a save.
 
 ## 12. Out of scope / later
 
