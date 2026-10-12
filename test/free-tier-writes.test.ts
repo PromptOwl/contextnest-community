@@ -128,6 +128,15 @@ describe("no license, 10 or fewer people", () => {
     expect((await writeEverywhere()).restNode.status).toBe(201);
   });
 
+  it("falls back to Free when a license has ended, so writes stay open", async () => {
+    overrides.reason = "expired";
+    try {
+      expect((await writeEverywhere()).restNode.status).toBe(201);
+    } finally {
+      delete overrides.reason;
+    }
+  });
+
   it("still blocks writes while PromptOwl has the server suspended", async () => {
     overrides.suspended = true;
     try {

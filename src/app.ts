@@ -762,8 +762,7 @@ export function createApp(): Hono<AuthEnv> {
       return c.json(
         {
           error: "License required",
-          reason:
-            "Install a valid PromptOwl license key before inviting teammates.",
+          reason: FREE_TIER_EXCEEDED_MESSAGE,
         },
         503,
       );
@@ -775,8 +774,7 @@ export function createApp(): Hono<AuthEnv> {
       return c.json(
         {
           error: "License required",
-          reason:
-            "Install a valid PromptOwl license key to view teammates.",
+          reason: FREE_TIER_EXCEEDED_MESSAGE,
         },
         503,
       );

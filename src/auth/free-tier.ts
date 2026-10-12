@@ -21,7 +21,11 @@ export const FREE_TIER_EXCEEDED_MESSAGE =
   `This server has more than ${FREE_TIER_MAX_USERS} users and no valid PromptOwl license, so writes are disabled. ` +
   `Install a license (POST /license/install) or bring the server back to ${FREE_TIER_MAX_USERS} or fewer users.`;
 
-/** True when the server has no more billed users than the Free tier allows. */
+/**
+ * True when the server has no more billed users than the Free tier allows.
+ * ponytail: count and write aren't atomic, same as assertCanGrant — a burst at
+ * the limit can briefly pass; editors stay capped by Free's maxSubscribers: 0.
+ */
 export async function withinFreeTier(): Promise<boolean> {
   return (await countBilled()).users <= FREE_TIER_MAX_USERS;
 }

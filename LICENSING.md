@@ -48,6 +48,7 @@ A **trial** key behaves like Self-Hosted until it ends.
 
 - **Trial ends:** the key carries on as a **Free** key. The server keeps working within the Free limits.
 - **Paid plan ends:** the server gets a **14-day grace period**, and Settings → License shows the date it ends. If the plan isn't renewed by then, the server becomes **read-only** (see [When the license stops being valid](#when-the-license-stops-being-valid)).
+- **Small servers fall back to Free.** If the license ends, is revoked, or can't be validated, a server with **10 or fewer users** keeps writing as Free. Read-only applies past 10 users. Only a suspension by PromptOwl blocks writes at any size.
 
 ---
 
@@ -162,7 +163,7 @@ It **never** sends document content or names of people. This happens whether or 
 | PromptOwl **suspends** the key | After **2 suspended answers within an hour**, so about 1 minute |
 | PromptOwl answers "valid" again | On the next check. Nothing to reinstall. |
 
-When the license stops being valid, the server goes **read-only**:
+When the license stops being valid, a server with more than 10 users goes **read-only** (10 or fewer keep writing as Free):
 
 - **Reading keeps working:** browsing nests, search, documents and MCP reads.
 - **Writing is refused** (`503`): documents, and nest create, rename and delete.

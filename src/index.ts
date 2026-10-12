@@ -25,6 +25,7 @@ import { startScheduler } from "./workflow/scheduler.js";
 import { sweepStale } from "./shared/rate-limit.js";
 import { purgeExpired as purgeExpiredOAuth } from "./auth/oauth-store.js";
 import { bannerHeading } from "./shared/startup-banner.js";
+import { FREE_TIER_MAX_USERS } from "./auth/free-tier.js";
 
 async function main() {
   // Initialize the database backend (SQLite by default, or Postgres/Cloud SQL
@@ -106,7 +107,7 @@ async function main() {
     console.warn(`
   WARNING: No valid PromptOwl license key found.
   Free tier: writes, governance and teammate management stay open while
-  the server has 10 or fewer users (viewers are free and never count).
+  the server has ${FREE_TIER_MAX_USERS} or fewer users (viewers are free and never count).
   Past that, writes return 503 until a key is installed.
 
   To activate:
