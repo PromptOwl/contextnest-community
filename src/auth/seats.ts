@@ -110,20 +110,6 @@ function tally(classes: Map<string, BillingClass>) {
   return { users, subscribers };
 }
 
-/**
- * Signed-up people on this server: every account except the anonymous user
- * and access-key service identities — the same set billingClasses() starts
- * from, before roles are applied. Viewers count. This is the head-count the
- * Free tier's "up to 10 users" is measured against (see free-tier.ts).
- */
-export async function countPeople(): Promise<number> {
-  const row = (await getDb().get(
-    "SELECT COUNT(*) AS n FROM users WHERE id != ? AND COALESCE(is_service, 0) = 0",
-    [ANON_USER_ID],
-  )) as { n: number | string } | undefined;
-  return Number(row?.n ?? 0);
-}
-
 /** Billed users and subscribers on this server — what the license poll reports. */
 export async function countBilled(): Promise<{ users: number; subscribers: number }> {
   return tally(await billingClasses());

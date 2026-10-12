@@ -105,9 +105,9 @@ async function main() {
   if (!license.valid) {
     console.warn(`
   WARNING: No valid PromptOwl license key found.
-  Free tier: writes (and governance) stay open while the server has 10 or
-  fewer users. Past that, writes return 503 until a key is installed.
-  Teammate management stays locked until a key is installed.
+  Free tier: writes, governance and teammate management stay open while
+  the server has 10 or fewer users (viewers are free and never count).
+  Past that, writes return 503 until a key is installed.
 
   To activate:
     1. Sign up at https://app.promptowl.ai

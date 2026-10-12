@@ -1,6 +1,6 @@
 /**
  * Free tier: an unlicensed server accepts writes while it has 10 or fewer
- * people (auth/free-tier.ts). Past that, the license gate closes with a
+ * billed users (auth/free-tier.ts). Viewers never count. Past that, the license gate closes with a
  * message that says why. A valid license allows writes at any head-count.
  *
  * Every write surface asks the same writesAllowed(), so each case below is
@@ -66,8 +66,8 @@ async function writeEverywhere() {
 }
 
 async function peopleCount(): Promise<number> {
-  const { countPeople } = await import("../src/auth/seats.js");
-  return countPeople();
+  const { countBilled } = await import("../src/auth/seats.js");
+  return (await countBilled()).users;
 }
 
 beforeAll(async () => {
@@ -117,6 +117,27 @@ describe("no license, 10 or fewer people", () => {
     const res = await jsonRequest(app, "GET", `/nests/${nestId}/review-queue`);
     expect(res.status).toBe(200);
   });
+
+  it("opens teammate management too", async () => {
+    expect((await jsonRequest(app, "GET", "/auth/teammates")).status).not.toBe(503);
+  });
+
+  it("never counts viewers, so sign-ups alone can't close the gate", async () => {
+    await seedPeople(FREE_TIER_MAX_USERS * 2, "viewer", { viewers: true });
+    expect(await peopleCount()).toBe(FREE_TIER_MAX_USERS);
+    expect((await writeEverywhere()).restNode.status).toBe(201);
+  });
+
+  it("still blocks writes while PromptOwl has the server suspended", async () => {
+    overrides.suspended = true;
+    try {
+      const w = await writeEverywhere();
+      expect(w.restNode.status).toBe(503);
+      expect(w.nestMcp.status).toBe(503);
+    } finally {
+      delete overrides.suspended;
+    }
+  });
 });
 
 describe("no license, 11 people", () => {
@@ -143,6 +164,10 @@ describe("no license, 11 people", () => {
   it("tells the admin how to fix it", async () => {
     const res = await jsonRequest(app, "POST", "/nests", { name: "Blocked" });
     expect(res.data.reason).toContain("POST /license/install");
+  });
+
+  it("locks teammate management", async () => {
+    expect((await jsonRequest(app, "GET", "/auth/teammates")).status).toBe(503);
   });
 
   it("keeps reads open", async () => {
@@ -173,13 +198,16 @@ describe("valid license, any number of people", () => {
 });
 
 describe("people count", () => {
-  it("leaves out access-key service identities", async () => {
+  it("leaves out access-key service identities, even ones that own a nest", async () => {
     const before = await peopleCount();
     const { getDb } = await import("../src/db/client.js");
     await getDb().run(
       "INSERT INTO users (id, email, name, password_hash, is_service) VALUES (?, ?, ?, ?, 1)",
       ["svc-free-tier", "svc-free-tier@keys.local", null, "x"],
     );
+    await getDb().run("INSERT INTO nests (id, user_id, name, slug) VALUES (?, ?, ?, ?)", [
+      "svc-free-tier-nest", "svc-free-tier", "Service nest", "service-nest",
+    ]);
     expect(await peopleCount()).toBe(before);
   });
 });

@@ -14,7 +14,7 @@ Setting the key up for the first time is covered in [README.md → License setup
 
 ## The short version
 
-- Every server runs on a **PromptOwl Community License key** (`pk_...`). The key decides the **plan**.
+- Every server runs on a **PromptOwl Community License key** (`pk_...`). The key decides the **plan**. A server with no key behaves like **Free**: it accepts writes while it has 10 or fewer users, and goes read-only past that until a key is installed.
 - The plan sets how many **users**, **editors** and **Account Owners** the server may have. **Viewers are always free.**
 - Each person is counted **once**, at their **highest role on any nest**.
 - When a change would take the server past its plan, that change is refused. **Nothing you already have is ever taken away.**

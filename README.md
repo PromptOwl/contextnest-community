@@ -69,7 +69,7 @@ The key is read at boot. The server validates against PromptOwl on startup; if v
 
 ### 3. How licensing behaves at runtime
 
-- **Unlicensed / Free tier** — a server with 10 or fewer users accepts writes without a key, matching the published Free tier ("free for up to 10 users"). Users means every signed-up account except access-key service identities. With more than 10 users and no valid key, reads still work but every write returns `503` until a key is installed.
+- **Unlicensed / Free tier** — a server with 10 or fewer users accepts writes without a key, matching the published Free tier ("free for up to 10 users"). Users are counted as a Free key counts them (nest owners, admins, reviewers, server admins); viewers are free and never count. With more than 10 users and no valid key, reads still work but every write returns `503` until a key is installed.
 - **Live license checks** — the server re-checks its key with PromptOwl every minute. If the key is rejected or suspended, the server goes read-only within minutes: reads keep working, nobody is signed out, and writing comes back on its own once the key is valid again.
 - **Plans, seats and models** — the key's plan (Free, Self-Hosted, Enterprise) sets how many users, editors and server admins you can have, and how AI models are paid for. See [LICENSING.md](./LICENSING.md).
 - **Admin identity follows the license** — the admin user is whichever PromptOwl account owns the installed key, resolved live per request. Transferring the license to another account immediately promotes the new owner and demotes the old one.
