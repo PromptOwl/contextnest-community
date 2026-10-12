@@ -161,6 +161,30 @@ export async function cleanupStaleEntities(page) {
 }
 
 /**
+ * How old an AUTO_ nest must be before the sweep treats it as an orphan.
+ * Override with ORPHAN_MIN_AGE_MINUTES.
+ */
+const ORPHAN_MIN_AGE_MS = (Number(process.env.ORPHAN_MIN_AGE_MINUTES) || 120) * 60_000;
+
+/**
+ * When an AUTO_ nest was created: from the timestamp generateEntityName()
+ * puts in its name (`AUTO_<base36 ms>-…`), else from the server's created_at.
+ * Null when neither can be read — such a nest is swept as before.
+ */
+function autoCreatedAt(nest) {
+  const m = /^AUTO_([0-9a-z]+)-/.exec(nest.name);
+  if (m) {
+    const t = parseInt(m[1], 36);
+    if (Number.isFinite(t) && t > 1.5e12 && t < 4e12) return t;
+  }
+  const raw = typeof nest.created_at === 'string' ? nest.created_at : '';
+  if (!raw) return null;
+  const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(raw) ? `${raw.replace(' ', 'T')}Z` : raw;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : null;
+}
+
+/**
  * Phase 2 of the orphan sweeper: scan the server for AUTO_ nests the registry
  * doesn't know about (created by crashed runs before registration could
  * happen) and delete them.
@@ -181,9 +205,22 @@ export async function sweepOrphans(page, currentRunId = null) {
   const nests = Array.isArray(data) ? data : data?.nests || [];
   // Only sweep nests this account owns — shared/discovered AUTO_ nests belong
   // to another test account's run and its own sweep will take them.
-  const orphans = nests.filter(
+  const candidates = nests.filter(
     (n) => typeof n.name === 'string' && n.name.startsWith(AUTO_PREFIX) && !n.discovered
   );
+  // Several runs (CI on every PR, local runs) share the same accounts on a
+  // deployed server. A young AUTO_ nest may belong to a run still in
+  // progress, and deleting it pulls the data out from under that run's tests
+  // — so only nests old enough to be leftovers count as orphans.
+  const now = Date.now();
+  const orphans = candidates.filter((n) => {
+    const created = autoCreatedAt(n);
+    return created === null || now - created >= ORPHAN_MIN_AGE_MS;
+  });
+  const kept = candidates.length - orphans.length;
+  if (kept > 0) {
+    logger.info(`[OrphanSweep] Leaving ${kept} AUTO_ nest(s) younger than ${ORPHAN_MIN_AGE_MS / 60_000} min — they may belong to a run in progress`);
+  }
 
   if (orphans.length === 0) {
     logger.info(`[OrphanSweep] No orphan AUTO_ nests found (runId: ${currentRunId || 'none'})`);
