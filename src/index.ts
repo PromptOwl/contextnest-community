@@ -22,9 +22,11 @@ import {
 import { loadActiveCommunitySites } from "./auth/community-sites.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
 import { startScheduler } from "./workflow/scheduler.js";
+import { startReviewSlaLoop } from "./governance/review-sla.js";
 import { sweepStale } from "./shared/rate-limit.js";
 import { purgeExpired as purgeExpiredOAuth } from "./auth/oauth-store.js";
 import { bannerHeading } from "./shared/startup-banner.js";
+import { FREE_TIER_MAX_USERS } from "./auth/free-tier.js";
 
 async function main() {
   // Initialize the database backend (SQLite by default, or Postgres/Cloud SQL
@@ -105,8 +107,9 @@ async function main() {
   if (!license.valid) {
     console.warn(`
   WARNING: No valid PromptOwl license key found.
-  Server boots in SETUP MODE — writes return 503 and admin features
-  (stewards, teammates, governance) are locked until a key is installed.
+  Free tier: writes, governance and teammate management stay open while
+  the server has ${FREE_TIER_MAX_USERS} or fewer users (viewers are free and never count).
+  Past that, writes return 503 until a key is installed.
 
   To activate:
     1. Sign up at https://app.promptowl.ai
@@ -213,6 +216,14 @@ ${config.AUTH_MODE === "key" ? `
      Bind to 127.0.0.1 only, or switch to AUTH_MODE=key before exposing.
 `);
   }
+  if (config.MANUAL_SIGN_IN_OPEN_WITH_SSO) {
+    console.warn(`
+  ⚠️  MANUAL_SIGN_IN=open while single sign-on (OIDC) is on.
+     Anyone who can reach this server can register a password account the
+     identity provider never sees and can't disable. Unset MANUAL_SIGN_IN (it
+     defaults to invite-only with SSO) or set it to invite-only or disabled.
+`);
+  }
   if (config.HOOTIE_DEBUG_LOG) {
     console.warn(`
   ⚠️  HOOTIE_DEBUG_LOG is on — every Hootie prompt and answer, including the
@@ -224,6 +235,11 @@ ${config.AUTH_MODE === "key" ? `
 
   // Workflow-plane interval schedules → run rows (no-op unless the flag is on).
   startScheduler();
+
+  // Review SLA escalation (per-nest review_sla_hours). Independent of the
+  // workflow plane — that loop above is a no-op unless its flag is on, and
+  // review governance isn't. Inert while no nest sets an SLA.
+  startReviewSlaLoop();
 
   // Metacognition runs execute in this process; any still "running" from a
   // previous process lost their loop. Close them so the agents aren't stuck.

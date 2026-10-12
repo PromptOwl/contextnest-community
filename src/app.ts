@@ -168,6 +168,7 @@ import {
   modelProvider,
 } from "./shared/model-credential.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "./auth/license-copy.js";
+import { FREE_TIER_EXCEEDED_MESSAGE, withinFreeTier, writesAllowed } from "./auth/free-tier.js";
 import { SERVICE_VERSION } from "./shared/version.js";
 import { persistSetting } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
@@ -753,17 +754,16 @@ export function createApp(): Hono<AuthEnv> {
     });
   });
 
-  // Admin-features gate: teammate management and governance routes are
-  // blocked until a valid license is installed. Login/register/device/
-  // promptowl/admin-status stay public so users can sign in and reach
-  // the setup flow.
+  // Admin-features gate: teammate management is blocked until a valid
+  // license is installed, unless the server is within the Free tier.
+  // Login/register/device/promptowl/admin-status stay public so users can
+  // sign in and reach the setup flow.
   app.use("/auth/invite", async (c, next) => {
-    if (!getCurrentLicense()?.valid) {
+    if (!getCurrentLicense()?.valid && !(await withinFreeTier())) {
       return c.json(
         {
           error: "License required",
-          reason:
-            "Install a valid PromptOwl license key before inviting teammates.",
+          reason: FREE_TIER_EXCEEDED_MESSAGE,
         },
         503,
       );
@@ -771,12 +771,11 @@ export function createApp(): Hono<AuthEnv> {
     return next();
   });
   app.use("/auth/teammates", async (c, next) => {
-    if (!getCurrentLicense()?.valid) {
+    if (!getCurrentLicense()?.valid && !(await withinFreeTier())) {
       return c.json(
         {
           error: "License required",
-          reason:
-            "Install a valid PromptOwl license key to view teammates.",
+          reason: FREE_TIER_EXCEEDED_MESSAGE,
         },
         503,
       );
@@ -927,6 +926,9 @@ export function createApp(): Hono<AuthEnv> {
   const currentServerSettings = () => ({
     promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
     manual_sign_in: config.MANUAL_SIGN_IN,
+    // True while password self-registration is open alongside live SSO —
+    // the Settings page shows a warning on the Manual sign-in card.
+    manual_sign_in_open_with_sso: config.MANUAL_SIGN_IN_OPEN_WITH_SSO,
     community_name: config.COMMUNITY_NAME,
     logo_url: config.LOGO_URL,
     telemetry_enabled: config.TELEMETRY_ENABLED,
@@ -2438,8 +2440,10 @@ export function createApp(): Hono<AuthEnv> {
   });
 
   // Why a write is refused on a read-only server — suspended by PromptOwl, or
-  // no valid license — worded for who asked: admins get the reason and who to
-  // talk to, everyone else one neutral line. null = writes are allowed.
+  // no valid license past the Free tier — worded for who asked: admins get the
+  // reason and who to talk to, everyone else one neutral line. null = writes
+  // are allowed (licensed, or unlicensed with FREE_TIER_MAX_USERS or fewer
+  // people; see writesAllowed in auth/free-tier.ts).
   const readOnlyDenial = async (
     userId: string,
   ): Promise<{ error: string; extra: Record<string, unknown> } | null> => {
@@ -2456,8 +2460,8 @@ export function createApp(): Hono<AuthEnv> {
         },
       };
     }
+    if (await writesAllowed()) return null;
     const lic = getCurrentLicense();
-    if (lic?.valid) return null;
     if (!(await admin())) return { error: NEUTRAL_READ_ONLY, extra: { read_only: true } };
     // licenseTerms carries the machine reason code; expose it as
     // license_reason so it doesn't clobber the human-readable reason.
@@ -2470,7 +2474,7 @@ export function createApp(): Hono<AuthEnv> {
         reason:
           lic?.reason === "expired"
             ? "This server's PromptOwl license has ended, so it is read-only until it is renewed. Nothing has been deleted."
-            : "This server has no valid PromptOwl license installed. Ask the server admin to install one via the setup screen or POST /license/install.",
+            : FREE_TIER_EXCEEDED_MESSAGE,
         setup_url: "/setup",
       },
     };
@@ -2569,7 +2573,8 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     // License gate: block writes until a valid PromptOwl key is
-    // installed via /license/install. Reads stay open for plain
+    // installed via /license/install — unless the server is within the Free
+    // tier (readOnlyDenial → writesAllowed). Reads stay open for plain
     // node/nest browsing — but governance endpoints (stewards,
     // review-queue, approve/reject, version history, capability
     // checks) are admin features and stay locked regardless of HTTP

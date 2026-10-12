@@ -3017,6 +3017,7 @@ function RunnerKeyCallout({ nestId }: { nestId: string }) {
 
 const CONNECTOR_EVENTS = [
   ["review_requested", "review requested"],
+  ["review_escalated", "review overdue"],
   ["review_approved", "approved"],
   ["review_rejected", "rejected"],
   ["run_failed", "run failed"],

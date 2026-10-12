@@ -20,7 +20,9 @@ import {
   registerUser,
   jsonRequest,
   authed,
+  seedPeople,
 } from "./helpers";
+import { FREE_TIER_MAX_USERS } from "../src/auth/free-tier.js";
 
 const HOOTIE = { agent: "hootie" };
 
@@ -405,6 +407,8 @@ describe("agent activity: license gate", () => {
     const dbClient = await import("../src/db/client.js");
     await dbClient.resetDb();
     await dbClient.initDb();
+    // Past the Free tier, so the unlicensed gate closes.
+    await seedPeople(FREE_TIER_MAX_USERS + 1);
     const { createApp } = await import("../src/app.js");
     app = createApp();
   });
