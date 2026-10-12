@@ -1126,8 +1126,15 @@ export function DocumentsTab({
                     canReviewNode(node) &&
                     (submitterByNode.get(node.id) !== currentEmail ||
                       (isOwner && allowSelfApprove));
+                  // A pending review freezes the doc for everyone but the
+                  // person who submitted it — the server lets them revise and
+                  // repoints the review (nodes/service updateNode), same as
+                  // DocumentEditor's isOwnPendingReview.
                   const canEdit =
-                    node.status !== "pending_review" && canEditNode(node);
+                    (node.status !== "pending_review" ||
+                      (!!currentEmail &&
+                        submitterByNode.get(node.id) === currentEmail)) &&
+                    canEditNode(node);
                   // Deleting is a nest admin/owner call — an editor who can
                   // write this doc still goes through the request queue. Same
                   // tier the document view uses for its Delete/Request split.
