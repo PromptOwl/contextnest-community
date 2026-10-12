@@ -1,6 +1,6 @@
 # PRD: Structure Rules — Governed Folder Layout, Naming, and Templates
 
-**Status:** Proposed · **Date:** 2026-10-07 · **Owner:** Qaish
+**Status:** Engine merged (PromptOwl/ContextNest#183); Community routes and Structure page in PromptOwl/contextnest-community#403 · **Date:** 2026-10-07 · **Owner:** Qaish
 **Governing rules:** Engine Logic Boundary · Engine & CLI Sync Discipline (see `CLAUDE.md`)
 
 ## 1. Problem
@@ -372,7 +372,7 @@ clients/{client}/meetings
 - The **Compliance** tab badge then shows how many existing documents and folders don't fit.
 
 **Step 6 — Clean up, then enforce.**
-- The **Compliance** tab groups violations by code. Each row offers **Open** and **Move…**; a missing required file or folder also offers **Create from template**.
+- The **Compliance** tab groups violations by code. Each row offers **Open** (or **Open folder**); a missing required folder also offers **Create**, and a missing required file **Create from template**. There is no **Move…**: a move keeps the leaf, so it cannot fix a name until a rename op exists (§12).
 - Turning **Enforce** on asks for confirmation: "12 existing items still don't fit. They stay editable, but new documents, moves and imports that break these rules will be refused for everyone: editors, agents and `ctx`." → **[Enforce rules]**
 
 **Changing or removing rules.** Click a rule in the tree to edit it. Its `⋯` menu has **Remove**, which asks for confirmation when the rule has subfolder rules. Because existing content is grandfathered, saving a change never breaks what is already there.
