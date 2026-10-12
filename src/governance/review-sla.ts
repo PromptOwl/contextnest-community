@@ -5,7 +5,8 @@
  * left pending that long escalates ONE rung, and each rung gets the same
  * window before the next:
  *
- *   rung 0  document-scope reviewers   (notified at submit, as always)
+ *   rung 0  document-scope reviewers   (at submit every reviewer steward is
+ *                                       emailed; a later rung re-pings + inboxes)
  *   rung 1  tag-scope reviewers
  *   rung 2  nest-scope reviewers
  *   rung 3  the nest owner

@@ -120,14 +120,14 @@ A per-nest setting (**off** by default; nest Settings → "Review SLA (hours)", 
 
 | Rung | Who hears | When |
 |---|---|---|
-| 0 | Document-scope reviewers | At submit, as always |
+| 0 | Document-scope reviewers (every reviewer steward — document, tag and nest — is emailed at submit) | At submit, as always |
 | 1 | Tag-scope reviewers | SLA after submit |
 | 2 | Nest-scope reviewers | SLA after rung 1 |
 | 3 | The nest owner | SLA after rung 2 |
 
 Rungs are the `priority` steward resolution already assigns: 1 = matched by a document pattern, 2 = by one of the document's tags, 3 = nest-level; only `reviewer`-role stewards count. Each rung is limited to people who can open the document now (an account with access — the same check mentions and comment notifications use), since an escalation names it.
 
-Each rung gets a full SLA window before the next. A rung with nobody new on it — no tag reviewers for this document, only people a lower rung already reached, or nobody on it who can open the document — is skipped in the same step, so an escalation always reaches someone if anyone is left. After the owner it stops.
+Each rung gets a full SLA window before the next. A rung with nobody new on it — no tag reviewers for this document, only people a lower rung already reached, or nobody on it who can open the document — is skipped in the same step, so an escalation always reaches someone if anyone is left. After the owner it stops. Tag and nest reviewers already got the submit email, so for them an escalation is a reminder that the review is overdue, plus an inbox row; for the owner it is the first notice.
 
 Escalating **notifies**; it grants nothing. The new rung gets a `review_escalated` row in their inbox linking the document, an email when SMTP is configured, and it goes to Slack/Teams the same way a review request does: the server-wide Slack/Teams webhooks (super-admin Settings) post it by default, folded into the same debounced digest as review requests, and a per-nest connector posts it when subscribed to `review_escalated` or `"*"`. A connector subscribed only to `review_requested` does not receive escalations — add `review_escalated` to its events. The team-inbox email (`NOTIFY_EMAIL_TO`) is skipped for escalations; the escalated reviewers are emailed directly. Who may approve is unchanged — the same approve gate, the same separation of duties — and the submitter is never an escalation recipient, since they can't approve their own submission.
 
