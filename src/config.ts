@@ -286,7 +286,7 @@ export const config = {
   /**
    * Manual (email + password) sign-in. Three modes, independent of
    * `PROMPTOWL_SIGN_IN_GATE` (the two methods are controlled separately):
-   *   "open"        — anyone may log in and self-register (default).
+   *   "open"        — anyone may log in and self-register (default without SSO).
    *   "invite-only" — existing + admin-invited users may log in and an invited
    *                   placeholder may set its password ("claim"), but brand-new
    *                   self-registration is refused. Use this when the admin
@@ -296,12 +296,37 @@ export const config = {
    * Enforced at POST /auth/login and POST /auth/register. The /admin/settings
    * validator refuses "disabled" while PromptOwl is also disabled, so a server
    * can never be left with no way to sign in.
+   *
+   * Unset, the default follows SSO: with OIDC enabled and configured it is
+   * "invite-only", because everyone the IdP vouches for already gets in
+   * through SSO, and an open password door would let anyone mint an account
+   * the IdP never sees (and can't disable). An explicit "open" is honoured,
+   * with a startup warning.
    */
   get MANUAL_SIGN_IN(): "open" | "invite-only" | "disabled" {
-    const v = (process.env.MANUAL_SIGN_IN || "open").trim().toLowerCase();
-    return v === "invite-only" || v === "disabled"
-      ? (v as "invite-only" | "disabled")
-      : "open";
+    const raw = (process.env.MANUAL_SIGN_IN || "").trim().toLowerCase();
+    if (raw === "invite-only" || raw === "disabled" || raw === "open") return raw;
+    return this.OIDC_CONFIGURED ? "invite-only" : "open";
+  },
+  /**
+   * OIDC enabled AND fully configured (issuer + client id + secret). Same
+   * test as auth/oidc.ts isOidcReady(), kept here so config getters can use
+   * it without importing the auth layer.
+   */
+  get OIDC_CONFIGURED(): boolean {
+    return (
+      this.OIDC_ENABLED &&
+      !!this.OIDC_ISSUER &&
+      !!this.OIDC_CLIENT_ID &&
+      !!this.OIDC_CLIENT_SECRET
+    );
+  },
+  /**
+   * Password self-registration is open while SSO is live — the setup the
+   * startup log, /admin/settings and the Settings page warn about.
+   */
+  get MANUAL_SIGN_IN_OPEN_WITH_SSO(): boolean {
+    return this.OIDC_CONFIGURED && this.MANUAL_SIGN_IN === "open";
   },
   /**
    * Generic OIDC single sign-on (Microsoft Entra ID, Google, any spec-
