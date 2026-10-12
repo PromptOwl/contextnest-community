@@ -25,6 +25,7 @@ import { loadActiveCommunitySites } from "./auth/community-sites.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
 import { startScheduler } from "./workflow/scheduler.js";
 import { sweepStale } from "./shared/rate-limit.js";
+import { purgeExpired as purgeExpiredOAuth } from "./auth/oauth-store.js";
 import { bannerHeading } from "./shared/startup-banner.js";
 import { currentEgressProxyStatus, currentExtraCaStatus, networkStartupLines } from "./shared/egress-proxy.js";
 import { parseTrustedProxies } from "./shared/trusted-proxies.js";
@@ -256,6 +257,11 @@ ${config.AUTH_MODE === "key" ? `
   // Rate-limit bucket GC — bounded keys can still accumulate across a long
   // uptime; sweep expired buckets every 10 minutes.
   setInterval(() => sweepStale(), 10 * 60_000).unref?.();
+
+  // MCP OAuth: drop codes and tokens that can never be used again.
+  setInterval(() => {
+    purgeExpiredOAuth().catch((err) => console.error("[oauth] purge failed", err));
+  }, 60 * 60_000).unref?.();
 }
 
 main().catch((err) => {

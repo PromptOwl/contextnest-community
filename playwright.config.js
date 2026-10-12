@@ -77,6 +77,15 @@ const testRun = [
     independent: true, // Arranges its own nest, reviews and requests
   },
   {
+    // My Drafts (CN-DRAFT-001 … CN-DRAFT-013). Serial on purpose: the cases
+    // share one account's draft list and one seeded nest, so a parallel run
+    // would have them selecting, submitting and discarding each other's drafts.
+    file: 'my-drafts/my_drafts.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Arranges its own nest and drafts
+  },
+  {
     // Request access on a denied write (CN-ACCESS-001 … CN-ACCESS-004).
     // Serial: the cases share one seeded nest and build on each other's
     // requests (ask → approve → deny → refused save).
@@ -185,7 +194,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'access-requests'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'access-requests'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -329,6 +338,17 @@ export default defineConfig({
           name: 'my-work',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/my-work/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'my-drafts',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/my-drafts/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],

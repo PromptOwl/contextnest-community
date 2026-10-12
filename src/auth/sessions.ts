@@ -22,6 +22,7 @@ import { getDb } from "../db/client.js";
 import { nowExpr } from "../db/sql.js";
 import { ForbiddenError } from "../shared/errors.js";
 import { forwardedTrust } from "../shared/trusted-proxies.js";
+import { revokeAllForUser } from "./oauth-store.js";
 
 export const SESSION_COOKIE = "cnst_session";
 const SESSION_TTL_DAYS = 30;
@@ -110,10 +111,15 @@ export async function deleteSession(id: string): Promise<void> {
   await db.run("DELETE FROM sessions WHERE id = ?", [id]);
 }
 
-/** Drop every session row for a user — e.g. on password change. */
+/**
+ * Sign a user out everywhere — e.g. on password change, admin reset or
+ * removal. That includes the MCP OAuth grants their agents hold: a refresh
+ * token lives 60 days, so leaving it would undo the point of the reset.
+ */
 export async function deleteAllSessionsForUser(userId: string): Promise<void> {
   const db = getDb();
   await db.run("DELETE FROM sessions WHERE user_id = ?", [userId]);
+  await revokeAllForUser(userId);
 }
 
 /** Parse the session id out of the `Cookie` header, if present. */

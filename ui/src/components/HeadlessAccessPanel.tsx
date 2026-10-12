@@ -13,6 +13,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { Copy, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -110,6 +111,7 @@ export function HeadlessAccessPanel({ nestId, onError }: Props) {
     setBusy(true);
     try {
       await api.revokeNestHeadlessKey(nestId, key.id);
+      toast.success(`Key "${key.label}" revoked — anything using it has stopped working.`);
       await load();
     } catch (err: any) {
       onError?.(err?.message || "Couldn't revoke the key");

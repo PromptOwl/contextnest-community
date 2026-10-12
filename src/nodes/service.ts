@@ -35,7 +35,11 @@ import { serializeClient, type ClientMetadata } from "../shared/client-metadata.
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
-import { syncNodeTags, removeNodeFromTagIndex } from "../governance/tag-index-service.js";
+import {
+  syncNodeTags,
+  syncNodeTagsMany,
+  removeNodeFromTagIndex,
+} from "../governance/tag-index-service.js";
 import {
   isStewardshipEnabled,
   resolveNestPath,
@@ -1982,6 +1986,7 @@ export async function stageImportedFiles(
     (f) => !String(f?.path || "").split(/[\\/]/).includes("_suggestions")
   );
   if (!carried.length) return { written: 0, rejected: [] };
+  const startedAt = Date.now();
   const result = await engineApi.run<{
     written?: number;
     failed: Array<{ id?: string; error: string }>;
@@ -1989,6 +1994,9 @@ export async function stageImportedFiles(
     "context_import",
     { files: carried, publish: false },
     await opContext(nestId, userEmail)
+  );
+  console.log(
+    `[import] staged: nest=${nestId} files=${carried.length} written=${result.written ?? 0} ms=${Date.now() - startedAt}`
   );
   // A rejected path (traversal, empty) comes back per-file rather than throwing:
   // one bad path shouldn't cost the whole import. It must not pass silently.
@@ -2098,29 +2106,44 @@ export async function registerImportedDocuments(
   // A document the engine could not publish (an imported version chain that no
   // longer reconstructs) still registers — as a draft, at its own version, with
   // its history left untouched on disk. Losing the doc would be the worse loss.
-  for (const d of docs) {
-    const tags = d.tags.map((t) => storedTag(String(t)));
-    await versions.createVersion({
+  // Batched: one multi-row statement per table, not a few queries per document.
+  // One transaction: a retry skips docs that already have a version row, so a
+  // half-written batch would leave them unapproved for good.
+  const tagged = docs.map((d) => ({ d, tags: d.tags.map((t) => storedTag(String(t))) }));
+  await getDb().transaction(async (tx) => {
+    await versions.createVersions(
+      tagged.map(({ d, tags }) => ({
+        nestId,
+        nodeId: d.id,
+        version: d.version,
+        content: d.content,
+        author: userEmail,
+        status: d.status,
+        changeNote:
+          d.status === "published"
+            ? "Imported from existing folder"
+            : "Imported from existing folder — could not be published, kept as a draft",
+        tags,
+        client,
+      })),
+      tx
+    );
+    await versions.setApprovedVersions(
       nestId,
-      nodeId: d.id,
-      version: d.version,
-      content: d.content,
-      author: userEmail,
-      status: d.status,
-      changeNote:
-        d.status === "published"
-          ? "Imported from existing folder"
-          : "Imported from existing folder — could not be published, kept as a draft",
-      tags,
-      client,
-    });
-    if (d.status === "published") {
-      await versions.setApprovedVersion(nestId, d.id, d.version, userEmail);
-    } else {
-      await alignOnDiskStatus(nestId, d.id, d.status);
-    }
-    await syncNodeTags(nestId, d.id, tags);
-  }
+      docs.filter((d) => d.status === "published").map((d) => ({ nodeId: d.id, version: d.version })),
+      userEmail,
+      tx
+    );
+    await syncNodeTagsMany(nestId, tagged.map(({ d, tags }) => ({ nodeId: d.id, tags })), tx);
+  });
+  // Only a failed publish can leave `published` on disk; the engine already
+  // stamped every held document, so checking those too cost a read each.
+  const failedIds = new Set(result.failed.map((f) => f.id));
+  await Promise.all(
+    docs
+      .filter((d) => d.status !== "published" && failedIds.has(d.id))
+      .map((d) => alignOnDiskStatus(nestId, d.id, d.status))
+  );
 
   const published = docs.filter((d) => d.status === "published").length;
   // Phase split — a slow import is almost always one phase, and the total alone

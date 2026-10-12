@@ -122,6 +122,7 @@ export const keys = {
   auth: ["auth"] as const,
   teammates: () => [...keys.auth, "teammates"] as const,
   apiKeys: () => [...keys.auth, "keys"] as const,
+  connectedApps: () => [...keys.auth, "connected-apps"] as const,
 
   license: ["license"] as const,
   licenseStatus: () => [...keys.license, "status"] as const,
@@ -762,6 +763,12 @@ export const reads = {
       queryFn: () => api.listApiKeys(),
       staleTime: STALE.reference,
     }),
+  connectedApps: () =>
+    queryOptions({
+      queryKey: keys.connectedApps(),
+      queryFn: () => api.listConnectedApps(),
+      staleTime: STALE.reference,
+    }),
   licenseStatus: () =>
     queryOptions({
       queryKey: keys.licenseStatus(),
@@ -837,6 +844,7 @@ export const useAdminSettings = () => useQuery(reads.adminSettings());
 export const useTeammates = () => useQuery(reads.teammates());
 export const useApiKeys = (opts?: { enabled?: boolean }) =>
   useQuery({ ...reads.apiKeys(), ...opts });
+export const useConnectedApps = () => useQuery(reads.connectedApps());
 export const useNestTeams = (nestId: string | undefined) =>
   useQuery({ ...reads.nestTeams(nestId ?? ""), enabled: !!nestId });
 export const useDefinitions = (nestId: string | undefined) =>

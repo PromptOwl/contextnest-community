@@ -10,6 +10,13 @@ export type AuthEnv = {
   Variables: {
     userId: string;
     nestScope: string | null;
+    /**
+     * Scopes on the OAuth grant this request authenticated with, when it did.
+     * ABSENT means "not an OAuth caller" — a cnst_ key or an MCP ticket — and
+     * must not be read as "no permissions": those transports are unaffected
+     * by scope and keep whatever the user themselves can do.
+     */
+    oauthScope?: string[];
     nestPermission: NestPermission;
     // The API key the request authenticated with, when it used a Bearer key
     // (null for cookie/session requests and open mode). Lets pending-push rows
