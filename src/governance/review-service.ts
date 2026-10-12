@@ -13,6 +13,7 @@ import {
   notifyReviewRequested,
   notifyReviewResolved,
   markNotificationsReadBySubject,
+  markReviewNotificationsRead,
 } from "./notify-service.js";
 import { dispatchEvent } from "../notify/dispatch.js";
 import { notifyNestEvent } from "../notify/notify.js";
@@ -506,6 +507,9 @@ async function markApproved(p: {
      WHERE id = ?`,
     [p.approvedBy, p.note || null, p.override ? 1 : 0, p.reviewId],
   );
+  // The request (and any SLA escalation of it) is answered — single and bulk
+  // approve both land here.
+  await markReviewNotificationsRead(p.reviewId);
 
   // Update version status. We write 'published' (not 'approved') so the DB
   // mirrors the engine's terminal status — history.yaml/frontmatter record
@@ -673,6 +677,7 @@ export async function reject(params: {
      WHERE id = ?`,
       [params.rejectedBy, params.note, pending.id],
     );
+    await markReviewNotificationsRead(pending.id);
 
     await db.run(
       "UPDATE node_versions SET status = 'rejected' WHERE nest_id = ? AND node_id = ? AND version = ?",
@@ -778,6 +783,7 @@ export async function cancelReview(params: {
      WHERE id = ?`,
       [params.cancelledBy, pending.id],
     );
+    await markReviewNotificationsRead(pending.id);
 
     await db.run(
       "UPDATE node_versions SET status = 'draft' WHERE nest_id = ? AND node_id = ? AND version = ?",
@@ -1498,5 +1504,7 @@ function rowToReviewRequest(row: any): ReviewRequest {
     resolvedAt: row.resolved_at || undefined,
     resolutionNote: row.resolution_note || undefined,
     priority: row.priority,
+    escalationLevel: Number(row.escalation_level ?? 0),
+    escalatedAt: row.escalated_at || undefined,
   };
 }

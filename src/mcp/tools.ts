@@ -36,10 +36,7 @@ import {
   setThreadStatus,
   syncAnnotationsNode,
 } from "../annotations/service.js";
-import {
-  notifyCommentMentions,
-  notifyCommentReply,
-} from "../governance/mention-notify.js";
+import { notifyComment } from "../governance/mention-notify.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
@@ -1753,31 +1750,22 @@ async function runTool(
       // be allowed to READ (the approval gate applies to context_comments, not
       // here), so the reply should tell them what THEY did and nothing about
       // what is already in the thread.
-      // A reply also notifies the thread's earlier participants, the same
-      // fan-out the REST reply route uses.
+      // The @mentions, then (for a reply) the thread's earlier participants —
+      // the same fan-out the REST reply route uses — then the document's
+      // watchers and reviewer stewards. One notification per person.
       //
       // baseUrl: without it the notification still reaches the person, but
       // its "Open document" link falls back to PUBLIC_BASE_URL and comes out
       // empty when that isn't configured — every other notifying tool in
       // this file passes it, and the REST route passes requestBaseUrl.
-      if (threadId) {
-        await notifyCommentReply({
-          nestId,
-          nodeId: node.id,
-          thread,
-          body,
-          actorEmail: userEmail,
-          baseUrl: ctx.baseUrl,
-        });
-      } else {
-        await notifyCommentMentions({
-          nestId,
-          nodeId: node.id,
-          body,
-          actorEmail: userEmail,
-          baseUrl: ctx.baseUrl,
-        });
-      }
+      await notifyComment({
+        nestId,
+        nodeId: node.id,
+        body,
+        actorEmail: userEmail,
+        baseUrl: ctx.baseUrl,
+        ...(threadId ? { thread } : {}),
+      });
       await syncAnnotationsNode(nestId, node.id, userEmail);
       return threadId
         ? `Replied on "${label}", in thread ${thread.id}.`

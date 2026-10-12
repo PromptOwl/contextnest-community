@@ -85,6 +85,7 @@ const HISTORICAL_MIGRATIONS = [
   "054_metacognition_agents",
   "055_access_requests",
   "056_mcp_oauth",
+  "057_review_sla_escalation",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -120,6 +121,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       prime_only_review INTEGER NOT NULL DEFAULT 0,
       prime_tags TEXT NOT NULL DEFAULT 'prime-document',
       creator_is_reviewer INTEGER NOT NULL DEFAULT 0,
+      review_sla_hours INTEGER,
       shared_teams TEXT NOT NULL DEFAULT '[]',
       index_synced_at TEXT,
       require_push_confirmation INTEGER NOT NULL DEFAULT 0,
@@ -260,7 +262,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       resolution_note TEXT,
       is_override INTEGER NOT NULL DEFAULT 0,
       priority TEXT NOT NULL DEFAULT 'normal'
-        CHECK(priority IN ('low', 'normal', 'high', 'urgent'))
+        CHECK(priority IN ('low', 'normal', 'high', 'urgent')),
+      escalation_level INTEGER NOT NULL DEFAULT 0,
+      escalated_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_reviews_nest ON review_requests(nest_id);
     CREATE INDEX IF NOT EXISTS idx_reviews_node ON review_requests(nest_id, node_id);
@@ -1044,6 +1048,14 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       ON oauth_tokens(access_token_hash);
     CREATE INDEX IF NOT EXISTS idx_oauth_tokens_refresh
       ON oauth_tokens(refresh_token_hash);
+  `);
+
+  // Migration 057 parity: review SLA escalation. Declared inline above for a
+  // fresh database; the ALTERs reach one created before it shipped.
+  await db.exec(`
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS review_sla_hours INTEGER;
+    ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS escalation_level INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS escalated_at TEXT;
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

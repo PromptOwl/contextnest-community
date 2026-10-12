@@ -22,6 +22,7 @@ import {
 import { loadActiveCommunitySites } from "./auth/community-sites.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
 import { startScheduler } from "./workflow/scheduler.js";
+import { startReviewSlaLoop } from "./governance/review-sla.js";
 import { sweepStale } from "./shared/rate-limit.js";
 import { purgeExpired as purgeExpiredOAuth } from "./auth/oauth-store.js";
 import { bannerHeading } from "./shared/startup-banner.js";
@@ -224,6 +225,11 @@ ${config.AUTH_MODE === "key" ? `
 
   // Workflow-plane interval schedules → run rows (no-op unless the flag is on).
   startScheduler();
+
+  // Review SLA escalation (per-nest review_sla_hours). Independent of the
+  // workflow plane — that loop above is a no-op unless its flag is on, and
+  // review governance isn't. Inert while no nest sets an SLA.
+  startReviewSlaLoop();
 
   // Metacognition runs execute in this process; any still "running" from a
   // previous process lost their loop. Close them so the agents aren't stuck.
