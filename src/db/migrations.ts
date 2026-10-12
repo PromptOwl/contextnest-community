@@ -1978,6 +1978,54 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("057_review_sla_escalation");
   }
+
+  // 062: nest-level custom field definitions (056–061 are reserved by open
+  //   branches). One row per field a nest admin or steward defines; the VALUES
+  //   live on each node, in frontmatter `metadata.fields`, so they are
+  //   versioned and hash-chained with the document (src/nodes/custom-fields.ts).
+  //   options/default/applies_to are JSON. applies_to '["task"]' is the default;
+  //   '["*"]' means every node type.
+  if (!hasMigration("062_field_definitions")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS field_definitions (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        field_key TEXT NOT NULL,
+        label TEXT NOT NULL,
+        type TEXT NOT NULL,
+        options_json TEXT NOT NULL DEFAULT '[]',
+        required INTEGER NOT NULL DEFAULT 0,
+        default_json TEXT,
+        applies_to_json TEXT NOT NULL DEFAULT '["task"]',
+        unit TEXT,
+        preset TEXT,
+        position INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_key
+        ON field_definitions(nest_id, field_key);
+      -- One time-in-status field per nest, enforced atomically.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_one_tis
+        ON field_definitions(nest_id) WHERE type = 'time_in_status';
+      -- Audit trail of definition changes (who, what, before → after).
+      -- Definitions are plain config rows, so this is their history.
+      CREATE TABLE IF NOT EXISTS field_definition_events (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        field_key TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('create', 'update', 'delete')),
+        actor_id TEXT,
+        before_json TEXT,
+        after_json TEXT,
+        at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_field_definition_events_nest
+        ON field_definition_events(nest_id, at);
+    `);
+    recordMigration("062_field_definitions");
+  }
 }
 
 /**

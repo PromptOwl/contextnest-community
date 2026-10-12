@@ -665,7 +665,40 @@ Named Board views of a nest (columns, filters, card order). A board is a view, n
 
 **DELETE** `/nests/:nestId/boards/:boardId` (write+) — the creator, or a nest owner/admin → `{ "deleted": true }`.
 
-Limits (`400` when exceeded): 100 boards per nest; `name` ≤ 80 characters; config ≤ 256 KB; ≤ 500 layout/rank keys; ≤ 2000 ids per list, each ≤ 600 characters; `config.dimension` ∈ `folder` / `status` / `tag`. A body that isn't a JSON object → `400`. Boards are deleted with their nest.
+Limits (`400` when exceeded): 100 boards per nest; `name` ≤ 80 characters; config ≤ 256 KB; ≤ 500 layout/rank keys; ≤ 2000 ids per list, each ≤ 600 characters; `config.dimension` ∈ `folder` / `status` / `tag` / `assignee` / `priority` / `field`. A body that isn't a JSON object → `400`. Boards are deleted with their nest.
+
+Custom-field boards: `"dimension": "field"` with `"fieldKey": "severity"` makes the field's values the columns (layout key `field:severity`); `"swimlane": "field"` with `"swimlaneField"` makes them lanes; `"filterFields": { "severity": "high", "blocked": "true" }` keeps only matching cards (same matching as the node list's `field.<key>` filter). Keys must look like field keys; a board naming a field that was later deleted still loads.
+
+### Custom fields — `/nests/:nestId/fields`
+Structured properties the nest defines once and every applicable node carries. **Definitions** live here; **values** live on each node in frontmatter `metadata.fields`, so a value change is an ordinary governed edit — a new version, a new link in the hash chain, the usual draft/review rules. Estimates and time-in-status are presets of this model, not separate features.
+
+Types: `text` (≤ 2000 chars), `number` (with an optional scale `unit`, e.g. `points` / `hours`), `select` (one of `options`), `multi_select` (any of `options`, stored in option order), `date` (`YYYY-MM-DD`), `user` (an email on the nest's roster, stored lower-cased), `url` (`http(s)`), `checkbox` (`true`/`false`) — and the computed `time_in_status`.
+
+**GET** `/nests/:nestId/fields` (read+, including document/folder grantees):
+```json
+{ "fields": [{
+  "id": "…", "nest_id": "…", "key": "severity", "label": "Severity", "type": "select",
+  "options": ["low", "high"], "required": false, "default_value": null,
+  "applies_to": ["task"], "unit": null, "preset": null, "position": 0,
+  "created_by": "<userId>", "created_at": "…", "updated_at": "…"
+}], "can_manage": true, "types": […], "presets": ["estimate", "time_in_status"], "estimate_units": ["points", "hours"] }
+```
+
+**POST** `/nests/:nestId/fields` → `201 { "field": … }`. Body: `key` (`^[a-z][a-z0-9_]{0,39}$`, unique per nest), `label` (≤ 60), `type`, `options` (select / multi_select only, 1–100, each ≤ 60, no duplicates), `required`, `default_value` (validated against the type), `applies_to` (node types; default `["task"]`, `["*"]` = every type), `unit` (number only). Or a **preset**: `{ "preset": "estimate", "unit": "hours" }` (a number field keyed `estimate`, unit default `points`) or `{ "preset": "time_in_status" }` (computed, read-only; one per nest). At most 50 fields per nest.
+
+**PATCH** `/nests/:nestId/fields/:key` (key or id) — `label`, `options`, `required`, `default_value`, `applies_to`, `unit`, `position` → `{ "field": … }`. `key` and `type` are fixed (`400`): values on documents are stored under the key and were validated as that type.
+
+**DELETE** `/nests/:nestId/fields/:key` → `{ "deleted": true, "field": … }`. Values already on documents stay in their frontmatter and history; they stop being interpreted, and defining the same key again brings them back.
+
+**Who may write:** the nest owner, a nest admin, the server license-admin, or a **reviewer steward scoped to the whole nest** (`403` for everyone else, including write collaborators and editor stewards). Writes are admitted at read tier by the nest middleware so a read-collaborator reviewer reaches the handler; the handler is the gate. Archived nest → `403`. MCP: `context_fields`, `context_create_field`, `context_update_field`, `context_delete_field` (same rules — see [§9 MCP](#9-mcp)).
+
+**GET** `/nests/:nestId/fields/history?limit=100` (read+) — the audit trail of definition changes, newest first: `{ "events": [{ "field_key", "action": "create"|"update"|"delete", "actor_id", "actor_email", "before", "after", "at" }] }`. Definitions are config rows, not documents, so this is their history. MCP: `context_fields` with `history: true`.
+
+A PATCH answers `invalid_values` (and up to 50 `invalid_nodes`) when narrowing `options` or `applies_to` left documents holding a value that no longer fits; the values stay in their history, and the next edit of that field must fix them. Re-creating a deleted key as a type its leftover values don't fit → `409`.
+
+**Values on nodes** — see [§4](#4-nodes-documents): `fields` on create/update, `fields` + `status_since` on responses, `field.<key>` list filters.
+
+**Time in status** is whole seconds since the node entered its current board column: `moved_at` (stamped when a task's tag set changes — and, once a time-in-status field covers another node type, that type's moves too), else `created_at`. It is returned inside `fields` under the definition's key on list/get/create/update responses, alongside `status_since` so a client can tick it live. Writing it → `400`.
 
 ---
 
@@ -948,6 +981,7 @@ Optional query params, applied before the per-node enrichment:
 | `limit` | Max nodes to return. A non-numeric value is ignored, not an error. |
 | `folder` | Present (even as `""`) → that one folder level only, for a lazily-expanded document tree. Absent → the whole nest. |
 | `content` | `1`/`true` — include document bodies. **Off by default:** the listing is served from the nest's document index, which holds metadata only, so bodies cost a vault crawl and are opt-in. |
+| `field.<key>` | Custom-field filter, repeatable (every one must match). select / user / date / url / number match exactly (case-insensitive), `multi_select` matches when the option is one of its values, `text` matches a substring, `checkbox` takes `true`/`false` (unset counts as `false`), and `none` matches an unset field. A node whose type the field doesn't apply to never matches. An unknown key → `400`. |
 ```json
 {
   "count": 1,
@@ -968,6 +1002,7 @@ Optional query params, applied before the per-node enrichment:
 }
 ```
 - `schedule` is present only on runnable nodes (`type` `agent`/`skill`); omitted otherwise.
+- `fields` — custom field values, key → value (see [Custom fields](#custom-fields--nestsnestidfields)): the stored values plus computed ones (time in status, in seconds). Omitted when the node has none. `status_since` (tasks) — when the node entered its current board column.
 - `author` = the doc's creator (frontmatter author, else the first version's author); `null` for old imports with neither. `collaborators` = distinct version authors ∪ document-scope grant holders, minus the author, sorted. Both also appear on the single-node GET below.
 - Public readers (callers who reach a `visibility: public` or `visibility: org` nest without being its owner or a collaborator) do **not** receive `collaborators` — the field is omitted, and `author` falls back to the frontmatter value only, never to a version author. The roster is treated as private to the nest's members, like draft content.
 
@@ -992,6 +1027,7 @@ Optional query params, applied before the per-node enrichment:
 - Optional `prime` (boolean) flags the document as **prime** — it then always requires steward approval, whoever writes it. Owner/admin only; any other caller sending the field gets `403`. Omit to inherit from the nest's `prime_tags`; `false` exempts this document from an otherwise-prime tag. Echoed back on every node response as `prime` (absent when inherited). See `STEWARDSHIP.md → Prime documents`.
 - If stewardship enabled → status defaults `draft`. Else `approved`.
 - Optional `client` — caller attribution, recorded on the version this create seals. See [Caller attribution](#caller-attribution-client).
+- Optional `fields` — custom field values, `{ "severity": "high", "estimate": 3 }`. Validated against the nest's definitions: an unknown key, a field that doesn't apply to this node type, a value of the wrong shape, or a computed field → `400` naming the field. Defaults fill fields left out; a required field still empty after that → `400`.
 - Auto-syncs tag index for steward resolution.
 
 Response (201): `{ "node": { ... }, "stewards": [...] }`.
@@ -1064,6 +1100,7 @@ Requires nest write permission.
 - `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
 - `type` — re-type the node in place (the editor's "Turn into…"): `document`, `artifact`, `table`, `agent`, `skill`, `tool`, or any other engine type. Same gate as create — the artifact/table feature flags and the accepted set (`400` otherwise). The body is kept as-is. Converting to `skill` defaults the trigger from the title; converting away from a runnable type drops its `schedule`.
 - `prime` — owner/admin only (`403` otherwise). `true`/`false` set the document-scope flag, `null` clears it back to tag/nest inheritance. An edit that makes the document prime is itself gated, so it lands as a draft awaiting approval.
+- `fields` — custom field values to set, merged into the stored ones (keys left out are untouched; `null` clears one; clearing a required field → `400`). Same validation as create. A value change seals a version like any edit; a `fields`-only PATCH that changes nothing seals none.
 
 ### DELETE `/nests/:nestId/nodes/:nodeId`
 Write permission. Hidden in UI for reviewer/viewer; server still enforces.
@@ -2414,6 +2451,8 @@ Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually;
 Both are **read-tier**, matching REST (`isAnnotationAction` in `app.ts`): a reviewer who can see the document may comment on it. The transport is read-tier too, so each tool re-checks `canReadNode` itself — that check is the real gate. Deliberately *not* gated on an approved version: a reviewer comments on drafts, and writing a comment discloses nothing (the caller supplies the text), whereas *reading* threads stays gated because anchors quote draft body text. Both run the same side effects the REST routes do — the `@mention` fan-out (so tagging a human notifies them) and the derived `— Annotations` re-projection for artifacts, so an agent's comment doesn't leave that node stale. A `thread` that belongs to another document is refused by name rather than silently opening a new thread.
 
 `context_comments` is also available on the **server-level** endpoint (nest-parameterised, read-only). Comment visibility matches UI node visibility: collaborators/stewards who can read the node may read its threads even before approval; public readers remain blocked until the document is approved. Comment *writes* stay per-nest with the other write tools.
+
+**Custom fields.** `context_fields` lists the nest's definitions (any reader). `context_create_field`, `context_update_field` and `context_delete_field` mirror `POST` / `PATCH` / `DELETE /nests/:id/fields` — same validation, same gate (owner, nest admin, license admin, nest-wide reviewer steward; anyone else gets `UNAUTHORIZED_ACTION`). Values ride the existing tools: `context_create` and `context_update` take `fields` (key → value, `null` clears; a refused value is a `VALIDATION_FAILED` tool error naming the field), `context_list` takes a `fields` filter (same matching as REST `field.<key>`), and `context_get` / `context_list` / `context_query` return values in their prose and, structured, in the catalog's own `frontmatter.metadata.fields` — where they are stored — including computed time in status (seconds).
 
 **`context_my_drafts`** mirrors `GET /me/drafts`, nest-scoped: the caller's own unsubmitted (or rejected) documents in this nest, with their path and version. Capped at the 100 most recent; the reply says so explicitly when there are more, so an agent can't read a capped page as the whole set. Self-scoped by construction — it only ever returns rows the caller authored, in a nest they already hold read on, so it needs no permission check of its own. It exists because an agent otherwise cannot see its own unsubmitted work: a draft has no review request, so `context_review_queue` never lists it, and `context_query` skips it (only approved versions are AI-readable). The response names `context_submit_review` as the next step.
 

@@ -9,6 +9,7 @@ import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
 import { boardRoutes } from "./nests/board-routes.js";
+import { fieldRoutes } from "./nests/field-routes.js";
 import { listAssignedTo } from "./nodes/assigned-service.js";
 import { headlessRoutes } from "./nests/headless-routes.js";
 import { countPeople } from "./auth/headless.js";
@@ -2760,7 +2761,7 @@ export function createApp(): Hono<AuthEnv> {
         // half of that same rule.
         grantNestVisible = access.hasGrant;
       } else if (
-        parts[1] === "definitions" &&
+        (parts[1] === "definitions" || parts[1] === "fields") &&
         parts.length === 2 &&
         c.req.method === "GET"
       ) {
@@ -2866,6 +2867,15 @@ export function createApp(): Hono<AuthEnv> {
     // the handler for anyone but the owner, a nest admin or the server admin.
     // Exact resource segment, so a node slugged "access-requests" stays a node.
     const isAccessRequestAction = parts[1] === "access-requests";
+    // Custom field definitions: a nest-wide reviewer steward may define them
+    // while holding only read collaborator access, so writes are admitted at
+    // read tier and gated in the handler (assertCanManageFields), which also
+    // refuses an archived nest. Exact resource segment.
+    // ANY route added under /fields inherits this bypass — every handler in
+    // src/nests/field-routes.ts must call assertCanManageFields itself
+    // (test/custom-fields.test.ts pins read collaborators, editor stewards
+    // and tag-scoped reviewers at 403).
+    const isFieldDefinitionAction = parts[1] === "fields";
     // isNestLifecycleAction (archive/restore) is defined above, next to
     // isMcpTransport — the open-mode branch needs it too, and that branch runs
     // before this point.
@@ -2952,6 +2962,7 @@ export function createApp(): Hono<AuthEnv> {
       !isCommentAction &&
       !isDeletionRequestAction &&
       !isAccessRequestAction &&
+      !isFieldDefinitionAction &&
       !isNestLifecycleAction &&
       !isPinAction &&
       !isAnnotationAction &&
@@ -3232,6 +3243,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/publications", publishRoutes);
   nestsApp.route("/:nestId/teams", nestTeamRoutes);
   nestsApp.route("/:nestId/boards", boardRoutes);
+  nestsApp.route("/:nestId/fields", fieldRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);

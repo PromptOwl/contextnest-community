@@ -1407,6 +1407,8 @@ export async function createNode(
     due?: string | null;
     priority?: string | null;
     parent?: string | null;
+    /** Custom field values, key → value (see lib/custom-fields.ts). */
+    fields?: Record<string, unknown>;
   },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
@@ -1492,6 +1494,8 @@ export async function updateNode(
     due?: string | null;
     priority?: string | null;
     parent?: string | null;
+    /** Custom field values to set; `null` clears one, omitted keys stay. */
+    fields?: Record<string, unknown>;
   },
   baseVersion?: number,
 ) {
@@ -3540,6 +3544,79 @@ export async function rankBoardColumn(
 
 export async function deleteBoard(nestId: string, boardId: string) {
   return request<{ deleted: boolean }>(`/nests/${nestId}/boards/${boardId}`, {
+    method: "DELETE",
+  });
+}
+
+// ─── Custom fields ─────────────────────────────────────────────────────────
+
+export type FieldType =
+  | "text"
+  | "number"
+  | "select"
+  | "multi_select"
+  | "date"
+  | "user"
+  | "url"
+  | "checkbox"
+  | "time_in_status";
+
+/** A nest's field definition (src/nodes/custom-fields.ts FieldDefinition). */
+export interface FieldDefinition {
+  id: string;
+  nest_id: string;
+  key: string;
+  label: string;
+  type: FieldType;
+  options: string[];
+  required: boolean;
+  default_value: unknown;
+  /** Node types it applies to; ["*"] = every type. */
+  applies_to: string[];
+  unit: string | null;
+  preset: "estimate" | "time_in_status" | null;
+  position: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FieldDefinitionInput {
+  key?: string;
+  label?: string;
+  type?: FieldType;
+  options?: string[];
+  required?: boolean;
+  default_value?: unknown;
+  applies_to?: string[];
+  unit?: string | null;
+  preset?: "estimate" | "time_in_status";
+  position?: number;
+}
+
+export async function listFields(nestId: string) {
+  return request<{ fields: FieldDefinition[]; can_manage: boolean }>(`/nests/${nestId}/fields`);
+}
+
+export async function createField(nestId: string, data: FieldDefinitionInput) {
+  return request<{ field: FieldDefinition }>(`/nests/${nestId}/fields`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateField(nestId: string, key: string, data: FieldDefinitionInput) {
+  return request<{ field: FieldDefinition; invalid_values?: number; invalid_nodes?: string[] }>(
+    `/nests/${nestId}/fields/${encodeURIComponent(key)}`,
+    {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  },
+  );
+}
+
+export async function deleteField(nestId: string, key: string) {
+  return request<{ deleted: boolean }>(`/nests/${nestId}/fields/${encodeURIComponent(key)}`, {
     method: "DELETE",
   });
 }
