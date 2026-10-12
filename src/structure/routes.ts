@@ -143,8 +143,15 @@ structureRoutes.put("/", async (c) => {
     throw new ValidationError("This nest has no settings file to keep rules in yet. Re-import or recreate the nest, then try again.");
   }
   await setStructure(ctx.storage, rules);
-  const violations = await structureReport(ctx.storage, compiled.rules);
-  return c.json({ ...describeStructure(compiled.rules), violations: violations.length });
+  // The rules are saved: a count that fails now must not read as a failed save.
+  const violations = await structureReport(ctx.storage, compiled.rules).then(
+    (v) => v.length,
+    (err) => {
+      console.error(`[structure] nest=${nestId}: rules saved, but counting violations failed:`, err);
+      return null;
+    },
+  );
+  return c.json({ ...describeStructure(compiled.rules), violations });
 });
 
 interface CheckTest {
@@ -169,7 +176,9 @@ interface CheckBody {
 /**
  * A name judged against one format, by the engine: a one-rule set holding
  * just that format, so the verdict does not depend on finding a folder the
- * rest of the rules would accept.
+ * rest of the rules would accept. It leans on the engine's id shape and
+ * violation codes; an engine name-format checker would replace it (a
+ * follow-up in docs/prds/structure-rules.md §6.4).
  */
 function tryFormat(t: CheckTest) {
   const folderFormat = t.folder_name !== undefined;

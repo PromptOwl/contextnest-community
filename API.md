@@ -357,6 +357,36 @@ Every field is optional; only the ones present are changed.
 
 Turning stewardship **off** wipes stewards and pending reviews and is owner-only; the other fields are non-destructive and never change the state of anything already published.
 
+## Structure rules
+
+A nest's structure rules decide which folders may exist, which node types each holds, how folders and files are named, which template a new document starts from, and which sections and files are required (spec §11.1.1; `docs/prds/structure-rules.md`). They live in the nest's own `.context/config.yaml` and are judged by the engine. With `structure.enforce: true`, every write that breaks a rule is refused with a `400` naming the rule; otherwise the rules only report.
+
+### GET `/nests/:nestId/structure?folder=&report=1`
+Anyone who can read the nest. Returns the rules (`enforce`, `closed`, `folders`, `templates`), `resolved` (the rule and template governing `folder`, when given), `rules` (the saved blocks as written), `yaml` (the same, for display) and `types` (the node types this server accepts).
+
+`report=1` (or `true`) adds `violations`: every document and folder that breaks a rule, `{ code, path, rule, message }`. The report names documents of every status, drafts included, so it needs read access to the whole nest. A visibility-only reader of a public or org nest, or a reader a governed nest narrows, gets a `403` for it.
+
+### PUT `/nests/:nestId/structure` (owner/admin)
+```json
+{ "structure": { "enforce": true, "closed": false }, "folders": { "clients/{client}": { "folder_name": "/[a-z]+-[0-9]{3}/" } }, "templates": {} }
+```
+Replaces the three rule blocks; every other key in the config, its comments and its line endings are kept. `{}` clears the rules. Never a nest-scoped API key.
+
+- `200` → the compiled rules and `violations`: how many existing documents and folders break them. The count is `null` if it could not be computed, but the rules are saved either way.
+- `400` → a body that isn't an object, a key other than `structure`/`folders`/`templates`, or a rule that doesn't compile: `{ "error", "fieldErrors": { "<rule key>": "<reason>" } }`. Nothing is written.
+
+### POST `/nests/:nestId/structure/check`
+The validation API the Structure page and the create forms use. Read tier; owner/admin when `rules` is sent.
+```json
+{ "rules": { … }, "tests": [{ "folder": "clients/acme-042/meetings", "title": "2026-10-07 Kickoff", "type": "document", "body": "## Decisions\n" }], "folders": ["clients/globex-117"], "report": true }
+```
+- `rules` — a draft to judge instead of the saved rules.
+- `tests` — at most 50. Each result is `{ ok, slug, generated?, violations }`. Sections are judged only when `body` is sent. A test with `file_name` or `folder_name` instead tries that one name format.
+- `folders` — at most 50. Each result is `{ folder, violations, creates: { folders, files } }`: what creating the folder would scaffold.
+- `report: true` adds `report.violations` for the draft, under the same whole-nest read rule as `GET`.
+
+A draft that doesn't compile answers `200` with `{ "error", "fieldErrors" }` and empty results: live typing is not a failed request. A malformed body, or more than 50 tests or folders, is a `400`.
+
 ## Push Confirmation Gate
 
 When a nest has `require_push_confirmation` on, a document written by an agent or script — through the MCP `context_create` tool, `POST /nests/:id/nodes` with an API key, or a bulk `POST /nests/:id/publish` — is **held** as a pending record instead of applying. It lands only after a reviewer confirms it in the web UI. Superadmin-set; default off (immediate-apply, as before).

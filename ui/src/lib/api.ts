@@ -1342,7 +1342,7 @@ export async function getStructure(nestId: string, opts: { folder?: string; repo
 
 /** Owner/admin. A 400 carries `fieldErrors` keyed like `folders.<pattern>.file_name`. */
 export async function saveStructure(nestId: string, rules: StructureRules) {
-  return request<Omit<StructureResponse, "rules" | "yaml" | "types" | "violations"> & { violations: number }>(
+  return request<Omit<StructureResponse, "rules" | "yaml" | "types" | "violations"> & { violations: number | null }>(
     `/nests/${nestId}/structure`,
     { method: "PUT", body: JSON.stringify(rules) },
   );
