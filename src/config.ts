@@ -642,6 +642,16 @@ export const config = {
     return process.env.HOOTIE_DEBUG_LOG === "true";
   },
   /**
+   * The server's own model gateway (Enterprise, licence feature byok): a
+   * LiteLLM / Bedrock / Azure / Ollama front speaking Anthropic's
+   * /v1/messages. With ANTHROPIC_API_KEY as its key it routes Hootie AND agent
+   * runs (via the run bundle's env floor) — one setting, superadmin-editable
+   * (anthropic_base_url). Used only as a pair with the key; empty = off.
+   */
+  get ANTHROPIC_BASE_URL(): string {
+    return (process.env.ANTHROPIC_BASE_URL || "").trim().replace(/\/$/, "");
+  },
+  /**
    * Sub-agent runs: lets a run spawn nested runs (an external runner calling
    * back into POST /run for a child agent). Gated SEPARATELY from the base
    * plane because recursion is the risky surface — unbounded fan-out,

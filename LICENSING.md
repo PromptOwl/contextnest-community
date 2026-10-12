@@ -110,9 +110,11 @@ Hootie (the in-nest assistant) and workflow agent runs need an AI model. The ser
 Does the license include "byok" (Enterprise)?
 ├── yes → does the nest have its own model key?
 │         ├── yes → use the nest's key (and the nest's base URL, if it set one)
-│         └── no  → Hootie: is there an own key for the model's provider?
-│                   ├── yes → use that key (kept in PromptOwl's model gateway)
-│                   └── no  → use PromptOwl credits (agent runs always do)
+│         └── no  → has the server set its own model gateway (URL + key)?
+│                   ├── yes → use it, for every model (Hootie and agent runs)
+│                   └── no  → Hootie: is there an own key for the model's provider?
+│                             ├── yes → use that key (kept in PromptOwl's model gateway)
+│                             └── no  → use PromptOwl credits (agent runs always do)
 └── no  → use PromptOwl credits (any own key is kept but ignored)
 ```
 
@@ -126,8 +128,9 @@ Does the license include "byok" (Enterprise)?
 
 - Add your keys for Anthropic, OpenAI, Google Gemini, xAI Grok or Groq in **Settings → Hootie → Model keys**. PromptOwl checks each key and keeps it in its model gateway; this server only shows the last 4 characters. A single nest can also have its own Anthropic key for agent runs, in its env settings.
 - Your own key is used for its provider. Calls with no own key still use PromptOwl credits.
+- Or run every call through **your own model gateway** (LiteLLM in front of Bedrock, Azure, Ollama or any provider): set its URL and key in **Settings → Hootie → Model gateway** (`ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`). Hootie and agent runs then never use PromptOwl's gateway, so prompts and nest content stay on your network. The key is checked against your gateway when you save and stays on this server.
 - A nest's key and base URL always come **as a pair**. If a nest sets only a base URL, no key is sent there.
-- On other plans the Model keys card is hidden, and the server refuses to save a key (`403`).
+- On other plans the Model keys and Model gateway cards are hidden, and the server refuses to save a key or gateway URL (`403`).
 
 ### Choosing the model
 
