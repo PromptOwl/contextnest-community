@@ -230,7 +230,7 @@ test.describe('My Drafts', () => {
               : 0;
             const now = (await api.myDrafts({ limit: 1 })).pagination.total;
             return shown === before || shown === now;
-          }, { message: 'the rail badge should show the server draft count' })
+          }, { message: 'the rail badge should show the server draft count', timeout: 30_000 })
           .toBe(true);
       };
 

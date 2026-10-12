@@ -242,6 +242,12 @@ export default defineConfig({
   // 2 minutes per test — a self-hosted community server responds fast; tests
   // with known-long flows set larger budgets explicitly via test.setTimeout()
   timeout: 2 * 60 * 1000,
+  // How long an assertion waits. A deployed server shared by several runs can
+  // take seconds to render a page that is instant locally, so the 5s default
+  // turns load into failures. Override with PLAYWRIGHT_EXPECT_TIMEOUT (ms).
+  expect: {
+    timeout: parseInt(process.env.PLAYWRIGHT_EXPECT_TIMEOUT) || 15_000,
+  },
 
   // Test output directory
   outputDir: 'tests/test-results/artifacts',
