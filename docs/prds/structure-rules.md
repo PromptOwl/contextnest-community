@@ -323,7 +323,7 @@ response: { fieldErrors, error?, warnings: [string],
 - Sections are judged only when a test carries a `body`: a title check has none yet.
 - Each `folders` entry answers "does this folder fit, and what will creating it also create?" (`checkFolder` and the engine's `scaffoldPlan`), for the new-folder preview.
 - `report: true` judges the nest's existing content against the draft, for the count in the "Enforce" confirmation before saving.
-- **Caps:** 256 folder rules, at most 50 `tests` and 50 `folders` per call. Larger bodies get 413 or 400.
+- **Caps:** 256 folder rules, at most 50 `tests` and 50 `folders` per call. Past either cap, the call gets a 400.
 - On the server it calls the engine's exported `compileStructure`, `checkDocument`, `checkFolder`, `scaffoldPlan` and `structureReport`. `slug` comes from Community's own `slugify` (`derivedNodeId`, which now takes a folder), because that function builds Community's ids. The UI therefore shows exactly what the server will enforce.
 - The nest middleware exempts `POST /structure/check` from the write tier; the client's cache treats it as a read (no invalidation), and a `PUT` invalidates only the structure reads.
 
@@ -497,7 +497,7 @@ There is no sheet, no table primitive and no chip input, so the few new pieces a
 
 ## 9. Phases
 
-1. **Engine (upstream PR, minor release):** schema, `structure.ts`, `setStructure`, enforcement and scaffolding in the executors, the `.context/` import fix, the `context_structure` op, `ctx structure`, the plugin changes, and the spec text. *Implemented test-first on `PromptOwl/ContextNest` branch `claude/context-nest-hard-rules-design-yhcj6z` (§10).*
+1. **Engine (upstream PR, major release):** schema, `structure.ts`, `setStructure`, enforcement and scaffolding in the executors, the `.context/` import fix, the `context_structure` op, `ctx structure`, the plugin changes, and the spec text. *Implemented test-first on `PromptOwl/ContextNest` branch `claude/context-nest-hard-rules-design-yhcj6z` (§10).*
 2. **Community API and enforcement:** engine release and bump (with the §6.1 prerequisites), the three REST routes, the `structure_changed` activity type, the MCP tool, `moveNode`/`createEmptyFolder`/`deleteFolder` checks, the skip flag, and the error mapping.
 3. **Community UI:** the Structure page (Blueprint, Templates and Compliance tabs, View YAML), its four entry points, and the create, new-folder and move integration (§7).
 
@@ -881,7 +881,7 @@ Then the QA agent repeats the run independently and attacks the change.
 - **Mixed engine versions.** An engine older than phase 1 strips the new keys, and `ctx init` re-init rewrites the config. On such a version, rules are advisory only.
 - **On-disk edits.** Files added straight to disk, outside every write surface, cannot be refused. They show up in the compliance report.
 - **No rename.** A document whose leaf doesn't fit a destination's `file_name` cannot be moved there yet. The workaround is to create a conforming document and delete the old one, which loses its history; a rename op fixes this.
-- **Config history.** `config.yaml` is not versioned by the engine. Rule changes are audited in Community's activity log only.
+- **Config history.** `config.yaml` is not versioned by the engine. Rule changes are to be audited in Community's activity log (`structure_changed`, phase 2). Until that entry is built, the request trace is the only record of a save.
 
 ## 12. Out of scope / later
 
