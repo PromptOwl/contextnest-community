@@ -36,7 +36,6 @@ export const structureRoutes = new Hono<AuthEnv>();
 /** Most titles or folders one check may judge. */
 const MAX_CHECKS = 50;
 
-/** The three config blocks the rules live in; every other key is the vault's own. */
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /** A request body that must be a JSON object: anything else is a 400, never an empty value. */
@@ -48,6 +47,7 @@ function objectBody(body: unknown): Record<string, unknown> {
 /** The fields of a check test that are text, when given. */
 const TEST_TEXT_FIELDS = ["folder", "title", "name", "type", "body", "file_name", "folder_name"] as const;
 
+/** The three config blocks the rules live in; every other key is the vault's own. */
 function rulesOf(body: unknown): StructureConfig {
   const b = (body ?? {}) as Record<string, unknown>;
   const rules: Record<string, unknown> = {};
@@ -171,8 +171,6 @@ function tryFormat(t: CheckTest) {
     violations: violations.map((v) => ({ ...v, path: slug, message: `${what} here must look like ${format}; "${slug}" does not.` })),
   };
 }
-
-/** The name createNode gives a title with no a-z letters or digits (document-1, -2, …). */
 
 structureRoutes.post("/check", async (c) => {
   const nestId = c.req.param("nestId")!;
