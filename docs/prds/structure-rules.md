@@ -190,7 +190,7 @@ There is no new error code and no change to any wire shape. Agents self-correct 
 
 ## 4. One read path for every surface: `context_structure`
 
-A new **core catalog operation**, `context_structure`, is the single way to read the rules.
+A new **core catalog operation**, `context_structure`, is the single way to read the rules. The shape below is illustrative; the engine's operation descriptor (`@promptowl/contextnest-engine/api`) is canonical.
 
 ```text
 input:  { folder?: string, report?: boolean }
@@ -277,7 +277,7 @@ The rules for a nest live in that nest's vault, in `<NEST_STORAGE_ROOT>/<id>/.co
 Community writes the file **only through the engine's `setStructure`**. It rewrites the three rule blocks and keeps every other key, its comments and its line endings. Community never writes `config.yaml` itself, and never parses rules.
 
 **Prerequisites from the engine** (upstream, before this phase):
-1. A released engine version that carries the feature. The pin is `^2.9.1` today, and the feature is still on the branch.
+1. A released engine version that carries the feature: the first release with PromptOwl/ContextNest#183 (merged into `development`), a **major** bump (`9c7c9df`). The pin is `^2.12.0` today. The version number is set at release; check `npm view @promptowl/contextnest-engine version` and read that release's breaking changes before bumping.
 2. `setStructure` must create a minimal `config.yaml` when a vault has none. Imported nests (`createImportedNest`, `FlatNestStorage`) may not have one. *Built:* until it does, `PUT` refuses such a nest with a 400 that names the problem (never the vault's path).
 3. *Built differently:* the GET route renders the saved rule blocks as YAML itself (`js-yaml`, presentation only), so `context_structure` did not need a `yaml` field. The engine does export `structureReport(storage, rules)` (engine round 22), so a draft is judged against the nest's content by the engine's own report, not a copy of it.
 
@@ -287,7 +287,7 @@ All three routes live in a new `src/structure/routes.ts`, mounted under `nestsAp
 
 | Route | Who | What it does |
 |---|---|---|
-| `GET /nests/:id/structure?folder=&report=1` | anyone who can read the nest | Runs `context_structure` through `opContext`. Returns the rules, the resolved rule for `folder`, the compliance report with `report=1`, the saved blocks as written (`rules`, what the editor starts from, so a save sends back the owner's own spellings), the same as `yaml`, and the node types the server accepts (`types`). |
+| `GET /nests/:id/structure?folder=&report=1` | anyone who can read the nest; the report only for callers who read the whole nest (`readsWholeNest`), since it names draft paths: a visibility-only or narrowed reader gets a 403 for it | Runs `context_structure` through `opContext`. Returns the rules, the resolved rule for `folder`, the compliance report with `report=1` (or `true`), the saved blocks as written (`rules`, what the editor starts from, so a save sends back the owner's own spellings), the same as `yaml`, and the node types the server accepts (`types`). |
 | `PUT /nests/:id/structure` | owner or admin (`canManageStewards`, `src/governance/stewardship-service.ts:822`); never a nest-scoped API key (the handler checks `c.get("nestScope")`) | Validates with `compileStructure`, then saves with `setStructure`. Returns the new rules and the number of existing violations. The `structure_changed` activity entry is not built yet (§6.3 "Not yet"); until it is, the request trace records each save. |
 | `POST /nests/:id/structure/check` | read tier; owner or admin when `rules` is sent | The validation API the UI uses for every live check (§6.3). |
 
@@ -343,7 +343,7 @@ response: { fieldErrors, error?, warnings: [string],
 ### 6.4 Write paths and the skip flag
 
 - **Write paths that don't go through an engine op** call the engine's exported `enforcedStructure`, its checkers, `missingFolders` and `scaffoldFolders` directly, never a copy of them:
-  - `moveNode` (`src/nodes/service.ts`) checks the destination and scaffolds any new folder. A move keeps the file's name, so a non-conforming name cannot move into a folder with a name rule until a rename op exists (§12). The engine should export this placement sequence as one helper first (architecture review, round 5).
+  - `moveNode` (`src/nodes/service.ts`) checks the destination and scaffolds any new folder. A move keeps the file's name, so a non-conforming name cannot move into a folder with a name rule until a rename op exists (§12). Community composes this placement sequence from the engine's exported checkers (`checkDocument`, `missingFolders`, `scaffoldFolders`, `checkDeleteDocument`) in `src/structure/writes.ts`, and every judgement is still the engine's. One upstream placement helper (asked for by architecture review round 5), and a name-format checker for the Try box, are follow-ups.
   - `createEmptyFolder` checks the folder and scaffolds its required children.
   - `deleteFolder` first calls `checkDeleteFolder` on the folder itself, then passes the skip flag for its own children, so the required-file guard does not block deleting the whole folder.
 - **Skip flag.** `opContext` (`src/nodes/engine.ts:430`) passes `structure: "skip"` the way it passes `limits`, and only for system writers that bring or derive content rather than author it:
@@ -816,7 +816,7 @@ Every phase is built **test-first**:
   - A malformed imported `packs/*.yml` breaks `context_packs`, which was the same on `development`.
   - Community's `withDiscoveryCache` drops `onUnreadable`, so Community's verify won't name unreadable documents until it bypasses the cache for that call. Fix this with the engine pin bump.
 
-  **Chunked imports.** The engine judges each imported history by what the nest will hold after the call: the call's files laid over what is already there, rebuilt and hash-verified. A document may arrive before or after its history, across calls. Within a history, a call must not bring `history.yaml` ahead of the keyframes and diffs it needs, since a history that does not rebuild and verify is refused. So the UI chunker (`ui/src/lib/api.ts`), which splits by bytes, should send each `.versions/<doc>/` folder's `history.yaml` last. Community's own staging (nest import, bundle restore, `context_sync_folder`) is designed to run under `skip` (§6), which leaves it unjudged. Until that flag is wired into Community's `opContext`, those imports are judged. The browser picker currently sorts `history.yaml` before `v*.md`, so a chunk boundary inside a `.versions/<doc>/` folder would get that history refused. Sort `history.yaml` last, or wire `skip`, as part of the Community phase.
+  **Chunked imports.** The engine judges each imported history by what the nest will hold after the call: the call's files laid over what is already there, rebuilt and hash-verified. A document may arrive before or after its history, across calls. Within a history, a call must not bring `history.yaml` ahead of the keyframes and diffs it needs, since a history that does not rebuild and verify is refused. The engine runs these history verdicts only for a nest with enforced rules. Community's browser import always stages into the nest it just created, which has no rules (`.context/` cannot be imported), so its chunks are never judged and their order doesn't matter (checked for #403). The order would matter only for a chunked import into a nest with enforced rules. If Community ever adds one, it must send each `.versions/<doc>/` folder's `history.yaml` last, or run under `skip` (§6).
 
 | Suite | Kind | What it pins |
 |---|---|---|
@@ -834,7 +834,7 @@ Every phase is built **test-first**:
   - **Saving:** `PUT` succeeds only for owners and admins (`canManageStewards`). It is refused for editors, reviewers, viewers and nest-scoped keys, whatever the key's role.
   - **Invalid rules:** a rule that doesn't compile is refused with 400 `{ error, fieldErrors }`, keyed by the rule key, and nothing is written.
   - **Storage:** rules land in the nest's `.context/config.yaml` with its other keys and comments kept. An imported nest with no `config.yaml` can save rules too (engine prerequisite, §6.1).
-  - **Audit:** a `structure_changed` activity entry records the actor, the summary and the before and after rules.
+  - **Audit:** the `structure_changed` activity entry (actor, summary, before and after rules), once it is built (§6.3 "Not yet").
   - **The check API** (`POST /structure/check`):
     - saved rules at read tier, including for viewers (the middleware exemption);
     - draft rules at manage tier only;
