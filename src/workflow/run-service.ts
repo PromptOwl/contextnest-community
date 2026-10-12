@@ -203,6 +203,8 @@ export interface RunBundle {
     title: string;
     type: string;
     schedule: unknown;
+    /** The runner model this agent asked for (metadata.model), or null. */
+    model: string | null;
     content: string;
   };
   edges: Awaited<ReturnType<typeof flowSubgraph>>;
@@ -308,6 +310,10 @@ export async function triggerRun(opts: {
       title: String(doc.frontmatter.title ?? agentNode),
       type: nodeType,
       schedule: (doc.frontmatter.metadata as any)?.schedule ?? null,
+      model:
+        (doc.frontmatter.metadata as any)?.model != null
+          ? String((doc.frontmatter.metadata as any).model)
+          : null,
       content: doc.body || "",
     },
     edges,

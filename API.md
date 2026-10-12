@@ -967,7 +967,7 @@ Optional query params, applied before the per-node enrichment:
   }]
 }
 ```
-- `schedule` is present only on runnable nodes (`type` `agent`/`skill`); omitted otherwise.
+- `schedule` and `model` are present only on runnable nodes (`type` `agent`/`skill`) that set them; omitted otherwise.
 - `author` = the doc's creator (frontmatter author, else the first version's author); `null` for old imports with neither. `collaborators` = distinct version authors ∪ document-scope grant holders, minus the author, sorted. Both also appear on the single-node GET below.
 - Public readers (callers who reach a `visibility: public` or `visibility: org` nest without being its owner or a collaborator) do **not** receive `collaborators` — the field is omitted, and `author` falls back to the frontmatter value only, never to a version author. The roster is treated as private to the nest's members, like draft content.
 
@@ -989,6 +989,7 @@ Optional query params, applied before the per-node enrichment:
 - Optional `folder` (string) nests the doc → `nodes/<folder>/<slug>`. Each `/`-separated segment is slugified independently (so `../` or absolute paths can't escape the vault); empty segments drop. A leading `nodes/` segment is stripped, so `nodes/gtm/deals` and `gtm/deals` mean the same folder. Max 8 levels deep; each segment (and the title slug) max 100 chars — otherwise `400`.
 - `409` when the derived id is already taken (same folder + same title). The existing document is left untouched — update it, or pick another folder or title. The same title in a *different* folder is still allowed here; MCP `context_create` is stricter and refuses it (see [§9 MCP](#9-mcp)).
 - Optional `schedule` (free-form cron/interval string, opaque to the server) — **only valid when `type` is `agent` or `skill`**; sent on any other type → `400`. Stored in frontmatter metadata and echoed back on every node response. See [§9 `GET /runnables`](#get-nestsnestidrunnables-read).
+- Optional `model` (free-form model id, opaque to the server): the model a runner should use for this agent. Same rules as `schedule`: runnable types only (`400` otherwise), stored in frontmatter `metadata.model`, echoed on node responses, and returned as `agent.model` in the run bundle (`null` when unset, meaning the runner's default).
 - Optional `prime` (boolean) flags the document as **prime** — it then always requires steward approval, whoever writes it. Owner/admin only; any other caller sending the field gets `403`. Omit to inherit from the nest's `prime_tags`; `false` exempts this document from an otherwise-prime tag. Echoed back on every node response as `prime` (absent when inherited). See `STEWARDSHIP.md → Prime documents`.
 - If stewardship enabled → status defaults `draft`. Else `approved`.
 - Optional `client` — caller attribution, recorded on the version this create seals. See [Caller attribution](#caller-attribution-client).
@@ -1062,7 +1063,8 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
 Requires nest write permission.
 - `client` — caller attribution, recorded on the version this edit seals. See [Caller attribution](#caller-attribution-client).
 - `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
-- `type` — re-type the node in place (the editor's "Turn into…"): `document`, `artifact`, `table`, `agent`, `skill`, `tool`, or any other engine type. Same gate as create — the artifact/table feature flags and the accepted set (`400` otherwise). The body is kept as-is. Converting to `skill` defaults the trigger from the title; converting away from a runnable type drops its `schedule`.
+- `model` — the runner model for this agent; same rules as `schedule` (runnable types only, `""` clears it).
+- `type` — re-type the node in place (the editor's "Turn into…"): `document`, `artifact`, `table`, `agent`, `skill`, `tool`, or any other engine type. Same gate as create — the artifact/table feature flags and the accepted set (`400` otherwise). The body is kept as-is. Converting to `skill` defaults the trigger from the title; converting away from a runnable type drops its `schedule` and `model`.
 - `prime` — owner/admin only (`403` otherwise). `true`/`false` set the document-scope flag, `null` clears it back to tag/nest inheritance. An edit that makes the document prime is itself gated, so it lands as a draft awaiting approval.
 
 ### DELETE `/nests/:nestId/nodes/:nodeId`
@@ -2202,6 +2204,7 @@ sees **approved** agent/skill definitions; unapproved drafts are omitted.
     "title": "Nightly Digest Agent",
     "type": "agent",
     "schedule": "0 6 * * *",
+    "model": null,
     "status": "published",
     "tags": ["#ops"],
     "updated_at": "...",
@@ -2209,7 +2212,7 @@ sees **approved** agent/skill definitions; unapproved drafts are omitted.
   }]
 }
 ```
-- `schedule` is `null` when the node carries no schedule.
+- `schedule` is `null` when the node carries no schedule; `model` is `null` when the agent names no model.
 - Filtering to runnable types happens before the per-node governance/version
   enrichment, so cost scales with the number of runnables, not total nest size.
 

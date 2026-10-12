@@ -200,6 +200,7 @@ queryRoutes.get("/runnables", async (c) => {
     title: n.title,
     type: n.type,
     schedule: n.schedule ?? null,
+    model: n.model ?? null,
     status: n.status,
     tags: n.tags,
     updated_at: n.updated_at,

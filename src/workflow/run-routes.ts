@@ -189,6 +189,11 @@ async function buildRunBundle(nestId: string, agentNode: string) {
       title: String(doc.frontmatter.title ?? agentNode),
       type: nodeType,
       schedule: (doc.frontmatter.metadata as any)?.schedule ?? null,
+      // The runner model this agent asked for; null → the runner's default.
+      model:
+        (doc.frontmatter.metadata as any)?.model != null
+          ? String((doc.frontmatter.metadata as any).model)
+          : null,
       content: doc.body || "",
     },
     edges,

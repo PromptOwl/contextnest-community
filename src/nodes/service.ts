@@ -400,6 +400,9 @@ export interface NodeResponse extends TaskFields {
   /** Orchestrator hint for runnable nodes (type agent/skill) — free-form
    *  cron/interval string, opaque to the server. */
   schedule?: string;
+  /** Model the runner should use for this runnable node (agent/skill) —
+   *  free-form model id, opaque to the server. */
+  model?: string;
   /** Document-scope prime flag, undefined when the doc inherits from tag/nest
    *  scope. Clients resolve the inherited case from `tags` + the nest's
    *  `prime_tags` setting; the server gate is authoritative either way. */
@@ -561,6 +564,8 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
       (fm.metadata as any)?.schedule != null
         ? String((fm.metadata as any).schedule)
         : undefined,
+    model:
+      (fm.metadata as any)?.model != null ? String((fm.metadata as any).model) : undefined,
     prime: documentPrimeFlag(fm.metadata),
     ...(fm.type === "pdf" && fm.pdf ? { pdf: fm.pdf } : {}),
     ...taskFieldsOf(fm.metadata),
@@ -1403,6 +1408,8 @@ export interface CreateNodeInput extends TaskFieldsPatch {
   /** Orchestrator schedule (cron/interval string, opaque to the server).
    *  Only valid for runnable types (agent/skill). */
   schedule?: string;
+  /** Runner model for this agent/skill (opaque id). Runnable types only. */
+  model?: string;
   /** Folder path under nodes/ (e.g. "gtm/deals"). Each segment is slugified;
    *  storage and read/update/delete already handle nested ids, only creation
    *  was flat. Ignored when an explicit id is given. */
@@ -1429,6 +1436,8 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   changeNote?: string;
   /** Orchestrator schedule — runnable types only; empty string clears it. */
   schedule?: string;
+  /** Runner model — runnable types only; empty string clears it. */
+  model?: string;
   /** Document-scope prime flag. `null` clears it back to tag/nest inheritance. */
   prime?: boolean | null;
   /** See CreateNodeInput.client. */
@@ -1684,12 +1693,14 @@ async function createNodeOnce(
     throw new ValidationError(`a PDF upload creates a "pdf" node, not "${requestedType}"`);
   }
 
-  if (input.schedule !== undefined && !isRunnableType(input.type)) {
-    throw new ValidationError(
-      `schedule is only valid for runnable node types (${RUNNABLE_NODE_TYPES.join(
-        ", "
-      )})`
-    );
+  for (const field of ["schedule", "model"] as const) {
+    if (input[field] !== undefined && !isRunnableType(input.type)) {
+      throw new ValidationError(
+        `${field} is only valid for runnable node types (${RUNNABLE_NODE_TYPES.join(
+          ", "
+        )})`
+      );
+    }
   }
 
   // Check-then-write must be atomic per node id, or two concurrent creates
@@ -1746,6 +1757,7 @@ async function createNodeOnce(
       owners: ["*"],
       scope: input.scope || "team",
       ...(input.schedule ? { schedule: input.schedule } : {}),
+      ...(input.model ? { model: input.model } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
     };
     if (input.type === TASK_NODE_TYPE) {
@@ -2382,8 +2394,9 @@ export async function updateNode(
         if (isRunnableType(node.frontmatter.type) && !isRunnableType(patch.type)) {
           const metadata = { ...(node.frontmatter.metadata as any) };
           delete metadata.schedule;
+          delete metadata.model;
           node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
-          opInput.metadata = { ...(opInput.metadata as object), schedule: null };
+          opInput.metadata = { ...(opInput.metadata as object), schedule: null, model: null };
         }
         node = { ...node, frontmatter: { ...node.frontmatter, type: patch.type as any } };
         opInput.type = patch.type;
@@ -2405,6 +2418,21 @@ export async function updateNode(
         opInput.metadata = {
           ...(opInput.metadata as object),
           schedule: patch.schedule === "" ? null : patch.schedule,
+        };
+      }
+      if (patch.model !== undefined) {
+        if (!isRunnableType(node.frontmatter.type)) {
+          throw new ValidationError(
+            `model is only valid for runnable node types (${RUNNABLE_NODE_TYPES.join(", ")})`
+          );
+        }
+        const metadata = { ...(node.frontmatter.metadata as any) };
+        if (patch.model === "") delete metadata.model;
+        else metadata.model = patch.model;
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+        opInput.metadata = {
+          ...(opInput.metadata as object),
+          model: patch.model === "" ? null : patch.model,
         };
       }
       if (patch.prime !== undefined) {

@@ -36,6 +36,7 @@ export interface PublishDoc {
   folder?: string;
   status?: string;
   schedule?: string;
+  model?: string;
   prime?: boolean;
 }
 
@@ -150,6 +151,7 @@ export async function applyPublish(
           folder: doc.folder,
           status: doc.status,
           schedule: doc.schedule,
+          model: doc.model,
           prime: doc.prime,
         },
         authorEmail,

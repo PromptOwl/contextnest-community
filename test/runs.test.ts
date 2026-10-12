@@ -118,6 +118,25 @@ describe("trigger → bundle", () => {
     expect(pairs).toContain("nodes/weekly-log→nodes/escalation-playbook");
     const nl = res.data.edges.find((e: any) => e.condition_mode === "nl");
     expect(nl.condition).toContain("lost a deal on price");
+    // An agent that names no model leaves the choice to the runner.
+    expect(res.data.agent.model).toBeNull();
+  });
+
+  it("carries the agent's model in the bundle; model is runnable-only and clearable", async () => {
+    const set = await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/nodes/digest-agent`, { model: "claude-haiku-5" }, owner.apiKey);
+    expect(set.status).toBe(200);
+    const read = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/digest-agent`, undefined, owner.apiKey);
+    expect(read.data.model ?? read.data.node?.model).toBe("claude-haiku-5");
+
+    const run = await jsonRequest(app, "POST", `/nests/${nestId}/run/nodes/digest-agent`, {}, owner.apiKey);
+    expect(run.data.agent.model).toBe("claude-haiku-5");
+
+    const onDoc = await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/nodes/plain-doc`, { model: "x" }, owner.apiKey);
+    expect(onDoc.status).toBe(400);
+
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/nodes/digest-agent`, { model: "" }, owner.apiKey);
+    const cleared = await jsonRequest(app, "POST", `/nests/${nestId}/run/nodes/digest-agent`, {}, owner.apiKey);
+    expect(cleared.data.agent.model).toBeNull();
   });
 });
 
