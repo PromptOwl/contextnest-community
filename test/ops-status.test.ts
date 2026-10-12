@@ -86,6 +86,37 @@ describe("/admin/status — report", () => {
     expect(egress.some((e: string) => e.startsWith("promptowl:"))).toBe(true);
   });
 
+  it("checks nest storage without creating it", async () => {
+    const { existsSync } = await import("node:fs");
+    const { config } = await import("../src/config.js");
+    const app = await createTestApp("key", { ownerEmail: OWNER });
+    const admin = await registerUser(app, OWNER);
+    const before = existsSync(config.NEST_STORAGE_ROOT);
+    const { data } = await jsonRequest(app, "GET", "/admin/status", undefined, admin.apiKey);
+    expect(data.checks.find((c: any) => c.id === "storage").state).toBe("green");
+    expect(existsSync(config.NEST_STORAGE_ROOT)).toBe(before);
+  });
+
+  it("flags a database migrated by a newer build", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER });
+    const admin = await registerUser(app, OWNER);
+    const { getDb } = await import("../src/db/client.js");
+    await getDb().run("INSERT INTO schema_migrations (id) VALUES (?)", ["999_from_the_future"]);
+    const { data } = await jsonRequest(app, "GET", "/admin/status", undefined, admin.apiKey);
+    const m = data.checks.find((c: any) => c.id === "migrations");
+    expect(m.state).toBe("amber");
+    expect(m.fix).toMatch(/newer version/);
+  });
+
+  it("knows every SQLite migration, so the head check can't silently fall behind", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { HISTORICAL_MIGRATIONS } = await import("../src/db/migrations.postgres.js");
+    const src = readFileSync(new URL("../src/db/migrations.ts", import.meta.url), "utf8");
+    const ids = [...new Set([...src.matchAll(/["'`](\d{3}_[a-z0-9_]+)["'`]/g)].map((m) => m[1]))];
+    expect(ids.length).toBeGreaterThan(0);
+    expect(ids.filter((id) => !HISTORICAL_MIGRATIONS.includes(id))).toEqual([]);
+  });
+
   it("flags a private public address as amber (connectors can't reach it)", async () => {
     process.env.PUBLIC_BASE_URL = "https://nest.corp";
     const app = await createTestApp("key", { ownerEmail: OWNER });
@@ -115,8 +146,8 @@ function fakeIO(over: Partial<import("../src/ops/egress.js").NetIO> = {}) {
     tls: async (h) => (touched.push(h), { authorized: true, validTo: "Jan 1 00:00:00 2030 GMT" }),
     httpGet: async (u) => (touched.push(new URL(u).host), { status: 404, date: new Date(Date.now() - 30_000).toUTCString(), body: "" }),
     smtpVerify: async () => ({ ok: true }),
-    proxiedGet: async (u) => (touched.push(`proxy:${new URL(u).host}`), { status: 404, date: null }),
-    proxy: () => null,
+    proxiedGet: async (u) => (touched.push(`proxy:${new URL(u).host}`), { status: 404, date: null, body: "" }),
+    proxy: () => ({ configured: false, active: false }),
     ...over,
   };
   return { io, touched };
@@ -156,12 +187,8 @@ describe("probes", () => {
 
   it("behind an egress proxy, probes HTTPS through it instead of dialling direct", async () => {
     process.env.SMTP_URL = SECRETS.SMTP_URL;
-    const { runEgressChecks, configuredProxy } = await import("../src/ops/egress.js");
-    expect(configuredProxy({ HTTPS_PROXY: "http://user:pw@proxy.corp:3128", NODE_USE_ENV_PROXY: "1" }, [])).toBe("http://proxy.corp:3128");
-    // Without env-proxy support Node's fetch ignores HTTPS_PROXY, so the probe must too.
-    expect(configuredProxy({ HTTPS_PROXY: "http://proxy.corp:3128" }, [])).toBeNull();
-    expect(configuredProxy({ HTTPS_PROXY: "http://proxy.corp:3128" }, ["--use-env-proxy"])).toBe("http://proxy.corp:3128");
-    const { io, touched } = fakeIO({ proxy: () => "http://proxy.corp:3128" });
+    const { runEgressChecks } = await import("../src/ops/egress.js");
+    const { io, touched } = fakeIO({ proxy: () => ({ configured: true, active: true, https: "http://proxy.corp:3128" }) });
     const rep = await runEgressChecks(io);
     expect(rep.proxy).toBe("http://proxy.corp:3128");
     const po = rep.results.find((r) => r.id === "promptowl")!;
@@ -170,6 +197,34 @@ describe("probes", () => {
     // SMTP isn't proxied: still resolved and verified directly.
     expect(rep.results.find((r) => r.id === "smtp")!.stages.map((s) => s.stage)).toEqual(["dns", "smtp"]);
     expect(touched.filter((t) => !t.startsWith("proxy:"))).toEqual(["smtp.example.com"]);
+  });
+
+  it("sends NO_PROXY hosts direct, as Node does", async () => {
+    const { runEgressChecks, bypassesProxy } = await import("../src/ops/egress.js");
+    expect(bypassesProxy("smtp.example.com", 465, ".example.com")).toBe(true);
+    expect(bypassesProxy("example.com", 443, "*.example.com")).toBe(true);
+    expect(bypassesProxy("notexample.com", 443, "example.com")).toBe(false);
+    expect(bypassesProxy("app.promptowl.ai", 443, "localhost, app.promptowl.ai:8443")).toBe(false);
+    expect(bypassesProxy("anything", 1, "*")).toBe(true);
+
+    const { egressTargets } = await import("../src/ops/status.js");
+    const host = egressTargets().find((t) => t.id === "promptowl")!.host;
+    const { io, touched } = fakeIO({
+      proxy: () => ({ configured: true, active: true, https: "http://proxy.corp:3128", noProxy: host }),
+    });
+    const rep = await runEgressChecks(io);
+    expect(rep.results.find((r) => r.id === "promptowl")!.stages.map((s) => s.stage)).toEqual(["dns", "tcp", "tls", "http"]);
+    expect(touched.filter((t) => t.startsWith("proxy:") && t.includes(host))).toEqual([]);
+  });
+
+  it("reports a configured proxy Node isn't using, and tests direct", async () => {
+    const { runEgressChecks } = await import("../src/ops/egress.js");
+    const problem = "Node's proxy support is off. Set NODE_USE_ENV_PROXY=1";
+    const { io, touched } = fakeIO({ proxy: () => ({ configured: true, active: false, https: "http://proxy.corp:3128", problem }) });
+    const rep = await runEgressChecks(io);
+    expect(rep.proxy).toBeNull();
+    expect(rep.proxyProblem).toBe(problem);
+    expect(touched.some((t) => t.startsWith("proxy:"))).toBe(false);
   });
 
   it("inbound flags private answers and requires a pinned address", async () => {
@@ -212,5 +267,41 @@ describe("probes", () => {
     );
     expect(wrong.ok).toBe(false);
     expect(wrong.detail).toMatch(/different issuer/);
+  });
+
+  it("OIDC discovery goes through the egress proxy, like sign-in does, and never echoes credentials", async () => {
+    const { runOidcDiscoveryCheck } = await import("../src/ops/egress.js");
+    const issuer = "https://login.example.com/tenant/v2.0";
+    process.env.OIDC_ISSUER = "https://user:s3cret@login.example.com/tenant/v2.0";
+    const doc = { issuer: process.env.OIDC_ISSUER, authorization_endpoint: `${issuer}/a`, token_endpoint: `${issuer}/t`, jwks_uri: `${issuer}/k` };
+    const { io, touched } = fakeIO({
+      proxy: () => ({ configured: true, active: true, https: "http://proxy.corp:3128" }),
+      proxiedGet: async (u) => (touched.push(`proxy:${new URL(u).host}`), { status: 200, date: null, body: JSON.stringify(doc) }),
+    });
+    const rep = await runOidcDiscoveryCheck(io);
+    expect(rep.ok).toBe(true);
+    expect(touched).toEqual(["proxy:login.example.com"]);
+    expect(JSON.stringify(rep)).not.toContain("s3cret");
+  });
+
+  it("brackets IPv6 targets when building probe URLs", async () => {
+    const { runEgressChecks } = await import("../src/ops/egress.js");
+    const status = await import("../src/ops/status.js");
+    vi.spyOn(status, "egressTargets").mockReturnValue([
+      { id: "v6", purpose: "test", protocol: "https", host: "2001:db8::1", port: 8443, configuredBy: "test", required: false },
+    ] as any);
+    const urls: string[] = [];
+    const { io } = fakeIO({ httpGet: async (u) => (urls.push(u), { status: 404, date: null, body: "" }) });
+    const rep = await runEgressChecks(io);
+    expect(urls).toEqual(["https://[2001:db8::1]:8443/"]);
+    expect(rep.results[0].ok).toBe(true);
+  });
+
+  it("a probe step that never answers fails at the deadline", async () => {
+    const { withDeadline } = await import("../src/ops/egress.js");
+    let released = false;
+    const never = new Promise<never>(() => {});
+    await expect(withDeadline(never, 20, "DNS lookup", () => (released = true))).rejects.toThrow(/DNS lookup took longer/);
+    expect(released).toBe(true);
   });
 });

@@ -13,6 +13,7 @@
  * `/health` stays as it was: it is public, and none of this belongs on it.
  */
 import { promises as fsp, constants as fsConstants } from "node:fs";
+import path from "node:path";
 import { getDb } from "../db/client.js";
 import { HISTORICAL_MIGRATIONS } from "../db/migrations.postgres.js";
 import { config } from "../config.js";
@@ -255,14 +256,23 @@ async function databaseChecks(): Promise<StatusCheck[]> {
     const rows = await db.all<{ id: string }>("SELECT id FROM schema_migrations");
     const applied = rows.map((r) => r.id).filter((id) => /^\d{3}_/.test(id)).sort().at(-1) ?? null;
     const behind = !!expected && (!applied || applied < expected);
+    // Newer than this build: an older image was rolled back onto a migrated database.
+    const ahead = !!expected && !!applied && applied > expected;
     checks.push({
       id: "migrations",
       group: "data",
       label: "Schema migrations",
-      state: behind ? "amber" : "green",
-      detail: behind ? `Database is at ${applied ?? "none"}; this build expects ${expected}` : `Up to date (${applied})`,
+      state: behind || ahead ? "amber" : "green",
+      detail: behind
+        ? `Database is at ${applied ?? "none"}; this build expects ${expected}`
+        : ahead
+          ? `Database is at ${applied}, newer than this build (${expected})`
+          : `Up to date (${applied})`,
       ...(behind && {
         fix: "Restart the server so it applies pending migrations at startup. If it keeps falling behind, look for a migration error in the startup log.",
+      }),
+      ...(ahead && {
+        fix: "A newer version migrated this database. Run that version again (or newer); an older build may misread the schema.",
       }),
     });
   } catch (err) {
@@ -321,9 +331,12 @@ async function diskChecks(): Promise<StatusCheck[]> {
     });
   }
   try {
-    await fsp.mkdir(config.NEST_STORAGE_ROOT, { recursive: true });
-    await fsp.access(config.NEST_STORAGE_ROOT, fsConstants.W_OK);
-    checks.push({ id: "storage", group: "data", label: "Nest storage", state: "green", detail: `Writable: ${config.NEST_STORAGE_ROOT}` });
+    // Read-only check. The folder is created with the first nest, so until then test its nearest existing parent.
+    let dir = config.NEST_STORAGE_ROOT;
+    while (!(await fsp.stat(dir).then(() => true, () => false)) && path.dirname(dir) !== dir) dir = path.dirname(dir);
+    await fsp.access(dir, fsConstants.W_OK);
+    const detail = dir === config.NEST_STORAGE_ROOT ? `Writable: ${dir}` : `${config.NEST_STORAGE_ROOT} is created with the first nest; ${dir} is writable`;
+    checks.push({ id: "storage", group: "data", label: "Nest storage", state: "green", detail });
   } catch (err) {
     checks.push({
       id: "storage",
@@ -394,7 +407,7 @@ function servicesChecks(now: number): StatusCheck[] {
   } else {
     checks.push(
       isOidcReady()
-        ? { id: "oidc", group: "services", label: "Single sign-on", state: "green", detail: `On — issuer ${config.OIDC_ISSUER}. Use "Test discovery" to confirm this server can reach it.` }
+        ? { id: "oidc", group: "services", label: "Single sign-on", state: "green", detail: `On — issuer ${redactUrl(config.OIDC_ISSUER)}. Use "Test discovery" to confirm this server can reach it.` }
         : {
             id: "oidc",
             group: "services",
@@ -451,7 +464,7 @@ function addressInfo(reqUrl: string, header: (name: string) => string | undefine
     // leave blank
   }
   const pinned = !!config.PUBLIC_BASE_URL;
-  const effectiveBaseUrl = config.PUBLIC_BASE_URL || requestOrigin;
+  const effectiveBaseUrl = config.PUBLIC_BASE_URL ? redactUrl(config.PUBLIC_BASE_URL) : requestOrigin;
   return {
     effectiveBaseUrl,
     pinned,
@@ -488,7 +501,7 @@ function addressCheck(a: AddressInfo): StatusCheck {
       group: "network",
       label: "Public address",
       state: "red",
-      detail: `${config.PUBLIC_BASE_URL} is plain HTTP on a public name`,
+      detail: `${redactUrl(config.PUBLIC_BASE_URL)} is plain HTTP on a public name`,
       fix: "Serve the server over HTTPS (reverse proxy or tunnel) and update the public base URL. Sign-in cookies and API keys travel in the clear otherwise.",
     };
   }
@@ -498,7 +511,7 @@ function addressCheck(a: AddressInfo): StatusCheck {
       group: "network",
       label: "Public address",
       state: "amber",
-      detail: `${config.PUBLIC_BASE_URL} is a private-network address`,
+      detail: `${redactUrl(config.PUBLIC_BASE_URL)} is a private-network address`,
       fix: "People on your network and Claude Code work. Hosted connectors (claude.ai, ChatGPT) can't reach it — see the VPN-only scenario below.",
     };
   }
@@ -515,17 +528,17 @@ function addressCheck(a: AddressInfo): StatusCheck {
       group: "network",
       label: "Public address",
       state: "amber",
-      detail: `Set to ${config.PUBLIC_BASE_URL}, but this page was loaded via ${a.requestOrigin}`,
+      detail: `Set to ${redactUrl(config.PUBLIC_BASE_URL)}, but this page was loaded via ${a.requestOrigin}`,
       fix: "Fine if you're on an internal address on purpose. Otherwise make sure your proxy or DNS sends people to the public base URL.",
     };
   }
-  return { id: "base-url", group: "network", label: "Public address", state: "green", detail: config.PUBLIC_BASE_URL };
+  return { id: "base-url", group: "network", label: "Public address", state: "green", detail: redactUrl(config.PUBLIC_BASE_URL) };
 }
 
 export async function buildStatusReport(reqUrl: string, header: (name: string) => string | undefined): Promise<StatusReport> {
   const now = Date.now();
   const address = addressInfo(reqUrl, header);
-  const build = process.env.GIT_SHA?.trim() || process.env.BUILD_SHA?.trim() || null;
+  const build = config.GIT_SHA || null;
   const checks: StatusCheck[] = [
     ...(await databaseChecks()),
     ...(await diskChecks()),

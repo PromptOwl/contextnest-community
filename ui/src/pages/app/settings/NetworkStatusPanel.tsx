@@ -357,6 +357,9 @@ function ReachabilityCard({ report }: { report: StatusReport }) {
           <div className="flex flex-wrap items-center gap-3">
             <CopyButton text={allowlist} label="Copy allowlist" />
             {egress.result?.proxy && <span className="text-xs text-muted-foreground">HTTPS tested through {egress.result.proxy}</span>}
+            {egress.result?.proxyProblem && (
+              <span className="text-xs text-amber-700 dark:text-amber-400">Egress proxy set but not in use: {egress.result.proxyProblem}</span>
+            )}
             {egress.result && egress.result.clockSkewSeconds !== null && (
               <span className={`text-xs ${Math.abs(egress.result.clockSkewSeconds) > 120 ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}>
                 Clock is {Math.abs(egress.result.clockSkewSeconds)}s {egress.result.clockSkewSeconds >= 0 ? "ahead of" : "behind"} PromptOwl

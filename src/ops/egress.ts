@@ -20,7 +20,8 @@ import { config } from "../config.js";
 import { isPrivateAddress } from "../metacognition/net.js";
 import { transportSettings, verifyEmailTransport } from "../notify/email.js";
 import { SERVICE_VERSION } from "../shared/version.js";
-import { egressTargets, type EgressTarget } from "./status.js";
+import { currentEgressProxyStatus, type EgressProxyStatus } from "../shared/egress-proxy.js";
+import { egressTargets, redactUrl, type EgressTarget } from "./status.js";
 
 export const PROBE_TIMEOUT_MS = 5_000;
 
@@ -48,6 +49,8 @@ export interface EgressReport {
   ranAt: string;
   /** HTTPS probes went through this proxy (credentials stripped); null = direct. */
   proxy: string | null;
+  /** A proxy is configured but Node isn't using it — why, and the fix. */
+  proxyProblem: string | null;
   results: ProbeResult[];
   /** Seconds this server's clock differs from PromptOwl's (positive = ahead), when measurable. */
   clockSkewSeconds: number | null;
@@ -61,36 +64,49 @@ export interface NetIO {
   httpGet(url: string, timeoutMs: number): Promise<{ status: number; date: string | null; body: string }>;
   smtpVerify(): Promise<{ ok: true } | { ok: false; error: string }>;
   /** fetch(), which Node routes through HTTPS_PROXY when env-proxy support is on. */
-  proxiedGet(url: string, timeoutMs: number): Promise<{ status: number; date: string | null }>;
-  /** The configured egress proxy (credentials stripped), or null. */
-  proxy(): string | null;
+  proxiedGet(url: string, timeoutMs: number): Promise<{ status: number; date: string | null; body: string }>;
+  /** Egress proxy state, as the server's own fetch sees it. */
+  proxy(): EgressProxyStatus;
 }
 
-/**
- * The proxy Node's fetch actually uses (credentials stripped), or null. Node
- * only honours HTTPS_PROXY when env-proxy support is on — NODE_USE_ENV_PROXY=1
- * or --use-env-proxy (Node ≥ 22.21) — so a proxy set without it doesn't count:
- * the server's own traffic goes direct, and so should the probe.
- */
-export function configuredProxy(
-  env: NodeJS.ProcessEnv = process.env,
-  execArgv: string[] = process.execArgv,
-): string | null {
-  const raw = env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy;
-  if (!raw) return null;
-  if (env.NODE_USE_ENV_PROXY !== "1" && !execArgv.includes("--use-env-proxy")) return null;
-  try {
-    const u = new URL(raw);
-    u.username = "";
-    u.password = "";
-    return u.toString().replace(/\/$/, "");
-  } catch {
-    return "(unparseable proxy URL)";
-  }
+/** Whether NO_PROXY sends this host direct, the way Node's env proxy decides it. */
+export function bypassesProxy(host: string, port: number, noProxy: string | undefined): boolean {
+  if (!noProxy) return false;
+  const h = host.toLowerCase();
+  return noProxy.split(/[\s,]+/).some((raw) => {
+    if (raw === "*") return true;
+    const m = /^(.*?)(?::(\d+))?$/.exec(raw.toLowerCase())!;
+    if (m[2] && Number(m[2]) !== port) return false;
+    const entry = m[1].replace(/^\*?\./, "");
+    return !!entry && (h === entry || h.endsWith(`.${entry}`));
+  });
+}
+
+/** A host as it goes in a URL: IPv6 literals need brackets. */
+const urlHost = (host: string) => (net.isIPv6(host) ? `[${host}]` : host);
+
+/** Rejects after `ms` whatever `p` is doing; `onTimeout` releases its socket. */
+export function withDeadline<T>(p: Promise<T>, ms: number, what: string, onTimeout?: () => void): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      onTimeout?.();
+      reject(new Error(`${what} took longer than ${ms / 1000}s`));
+    }, ms);
+  });
+  return Promise.race([p, deadline]).finally(() => clearTimeout(timer));
+}
+
+/** GET the way the server's own fetch would reach this URL: via the egress proxy unless NO_PROXY says direct. */
+function getLikeServer(io: NetIO, url: string) {
+  const p = io.proxy();
+  const u = new URL(url);
+  const proxied = p.active && !bypassesProxy(u.hostname.replace(/^\[|\]$/g, ""), Number(u.port) || 443, p.noProxy);
+  return proxied ? io.proxiedGet(url, PROBE_TIMEOUT_MS) : io.httpGet(url, PROBE_TIMEOUT_MS);
 }
 
 const realIO: NetIO = {
-  lookup: (host) => dns.promises.lookup(host, { all: true, verbatim: true }),
+  lookup: (host) => withDeadline(dns.promises.lookup(host, { all: true, verbatim: true }), PROBE_TIMEOUT_MS, "DNS lookup"),
   tcp: (host, port, timeoutMs) =>
     new Promise((resolve, reject) => {
       const sock = net.connect({ host, port });
@@ -124,10 +140,12 @@ const realIO: NetIO = {
         reject(e);
       });
     }),
-  httpGet: (url, timeoutMs) =>
-    new Promise((resolve, reject) => {
+  httpGet: (url, timeoutMs) => {
+    let req: ReturnType<typeof https.request> | undefined;
+    // The socket timeout only fires when idle; the deadline also stops a slow-drip body.
+    return withDeadline(new Promise((resolve, reject) => {
       // https.request never follows redirects; certificate checks stay on.
-      const req = https.request(url, { method: "GET", timeout: timeoutMs, headers: { Accept: "application/json" } }, (res) => {
+      req = https.request(url, { method: "GET", timeout: timeoutMs, headers: { Accept: "application/json" } }, (res) => {
         let body = "";
         res.setEncoding("utf8");
         res.on("data", (chunk: string) => {
@@ -136,20 +154,27 @@ const realIO: NetIO = {
         res.on("end", () => resolve({ status: res.statusCode ?? 0, date: (res.headers.date as string) ?? null, body }));
         res.on("error", reject);
       });
-      req.on("timeout", () => req.destroy(new Error(`no response within ${timeoutMs / 1000}s`)));
+      req.on("timeout", () => req!.destroy(new Error(`no response within ${timeoutMs / 1000}s`)));
       req.on("error", reject);
       req.end();
-    }),
+    }), timeoutMs, "The request", () => req?.destroy());
+  },
   smtpVerify: async () => {
     const s = transportSettings();
     return s ? verifyEmailTransport(s) : { ok: false, error: "email is not configured" };
   },
   proxiedGet: async (url, timeoutMs) => {
-    const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
-    await res.body?.cancel();
-    return { status: res.status, date: res.headers.get("date") };
+    // The abort signal covers the body read too, so a slow drip can't outlast the timeout.
+    const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs), headers: { Accept: "application/json" } });
+    let body = "";
+    const decoder = new TextDecoder();
+    for await (const chunk of res.body ?? []) {
+      body += decoder.decode(chunk, { stream: true });
+      if (body.length >= 16_384) break; // breaking the loop cancels the stream
+    }
+    return { status: res.status, date: res.headers.get("date"), body };
   },
-  proxy: () => configuredProxy(),
+  proxy: currentEgressProxyStatus,
 };
 
 async function timed<T>(fn: () => Promise<T>): Promise<{ value?: T; error?: Error; ms: number }> {
@@ -183,7 +208,7 @@ async function probe(t: EgressTarget, io: NetIO, proxy: string | null): Promise<
   // server's own traffic goes: one fetch through the proxy. SMTP and Postgres
   // aren't proxied (raw sockets), so they still go direct below.
   if (proxy && t.protocol === "https") {
-    const h = await timed(() => io.proxiedGet(`https://${t.host}${t.port === 443 ? "" : `:${t.port}`}/`, PROBE_TIMEOUT_MS));
+    const h = await timed(() => io.proxiedGet(`https://${urlHost(t.host)}${t.port === 443 ? "" : `:${t.port}`}/`, PROBE_TIMEOUT_MS));
     if (h.error) {
       const cause = (h.error as Error & { cause?: Error }).cause?.message ?? h.error.message;
       stages.push({ stage: "http", ok: false, ms: h.ms, detail: `via ${proxy}: ${cause}` });
@@ -237,7 +262,7 @@ async function probe(t: EgressTarget, io: NetIO, proxy: string | null): Promise<
   if (!trusted) return finish(false, "tls");
 
   // Origin only: webhook paths carry secrets, and reachability is all we're proving.
-  const h = await timed(() => io.httpGet(`https://${t.host}${t.port === 443 ? "" : `:${t.port}`}/`, PROBE_TIMEOUT_MS));
+  const h = await timed(() => io.httpGet(`https://${urlHost(t.host)}${t.port === 443 ? "" : `:${t.port}`}/`, PROBE_TIMEOUT_MS));
   if (h.error) {
     stages.push({ stage: "http", ok: false, ms: h.ms, detail: h.error.message });
     return finish(false, "http");
@@ -250,15 +275,24 @@ async function probe(t: EgressTarget, io: NetIO, proxy: string | null): Promise<
 
 export async function runEgressChecks(io: NetIO = realIO): Promise<EgressReport> {
   const targets = egressTargets();
-  const proxy = io.proxy();
-  const probed = await Promise.all(targets.map((t) => probe(t, io, proxy)));
+  const p = io.proxy();
+  const proxy = p.active ? (p.https ?? p.http ?? null) : null;
+  const probed = await Promise.all(
+    targets.map((t) => probe(t, io, proxy && !bypassesProxy(t.host, t.port, p.noProxy) ? proxy : null)),
+  );
   const promptowl = probed.find((p) => p.result.id === "promptowl");
   let clockSkewSeconds: number | null = null;
   if (promptowl?.date) {
     const theirs = Date.parse(promptowl.date);
     if (Number.isFinite(theirs)) clockSkewSeconds = Math.round((Date.now() - theirs) / 1000);
   }
-  return { ranAt: new Date().toISOString(), proxy, results: probed.map((p) => p.result), clockSkewSeconds };
+  return {
+    ranAt: new Date().toISOString(),
+    proxy,
+    proxyProblem: p.problem ?? null,
+    results: probed.map((r) => r.result),
+    clockSkewSeconds,
+  };
 }
 
 export interface InboundReport {
@@ -294,7 +328,7 @@ export async function runInboundCheck(io: NetIO = realIO): Promise<InboundReport
   const d = await timed(() => (net.isIP(host) ? Promise.resolve([{ address: host, family: net.isIP(host) }]) : io.lookup(host)));
   if (d.error || !d.value?.length) {
     stages.push({ stage: "dns", ok: false, ms: d.ms, detail: d.error?.message ?? "no addresses" });
-    return { ranAt, url: base, ok: false, stages, privateAddresses: false, note: INBOUND_NOTE, hint: "The public name doesn't resolve from here. Create the DNS record, or check split-horizon DNS." };
+    return { ranAt, url: redactUrl(base), ok: false, stages, privateAddresses: false, note: INBOUND_NOTE, hint: "The public name doesn't resolve from here. Create the DNS record, or check split-horizon DNS." };
   }
   const addrs = d.value.map((a) => a.address);
   const privateAddresses = addrs.every((a) => isPrivateAddress(a));
@@ -302,7 +336,7 @@ export async function runInboundCheck(io: NetIO = realIO): Promise<InboundReport
   if (u.protocol !== "https:") {
     return {
       ranAt,
-      url: base,
+      url: redactUrl(base),
       ok: false,
       stages,
       privateAddresses,
@@ -310,13 +344,13 @@ export async function runInboundCheck(io: NetIO = realIO): Promise<InboundReport
       hint: "The public base URL is plain HTTP. Put HTTPS in front (reverse proxy or tunnel) — hosted connectors and Agent OAuth require it.",
     };
   }
-  const h = await timed(() => io.httpGet(`${base}/health`, PROBE_TIMEOUT_MS));
+  const h = await timed(() => getLikeServer(io, `${base}/health`));
   if (h.error) {
     stages.push({ stage: "http", ok: false, ms: h.ms, detail: h.error.message });
     const tlsFail = /certificate|self[- ]signed|CERT_|unable to verify/i.test(h.error.message);
     return {
       ranAt,
-      url: base,
+      url: redactUrl(base),
       ok: false,
       stages,
       privateAddresses,
@@ -341,7 +375,7 @@ export async function runInboundCheck(io: NetIO = realIO): Promise<InboundReport
   });
   return {
     ranAt,
-    url: base,
+    url: redactUrl(base),
     ok: ours,
     stages,
     privateAddresses,
@@ -371,11 +405,11 @@ export async function runOidcDiscoveryCheck(io: NetIO = realIO): Promise<Discove
   if (!issuer) {
     return { ranAt, issuer: null, ok: false, ms: 0, detail: "No issuer set", endpointHosts: [], hint: "Enter the issuer URL in Settings → Single sign-on first." };
   }
-  const r = await timed(() => io.httpGet(`${issuer}/.well-known/openid-configuration`, PROBE_TIMEOUT_MS));
+  const r = await timed(() => getLikeServer(io, `${issuer}/.well-known/openid-configuration`));
   if (r.error) {
     return {
       ranAt,
-      issuer,
+      issuer: redactUrl(issuer),
       ok: false,
       ms: r.ms,
       detail: r.error.message,
@@ -386,7 +420,7 @@ export async function runOidcDiscoveryCheck(io: NetIO = realIO): Promise<Discove
   if (r.value!.status !== 200) {
     return {
       ranAt,
-      issuer,
+      issuer: redactUrl(issuer),
       ok: false,
       ms: r.ms,
       detail: `HTTP ${r.value!.status}`,
@@ -402,11 +436,11 @@ export async function runOidcDiscoveryCheck(io: NetIO = realIO): Promise<Discove
       throw new Error(`the document names a different issuer (${String(doc.issuer)})`);
     }
     const endpointHosts = [...new Set(["authorization_endpoint", "token_endpoint", "jwks_uri"].map((k) => new URL(String(doc[k])).host))];
-    return { ranAt, issuer, ok: true, ms: r.ms, detail: "Discovery document found and matches the issuer", endpointHosts };
+    return { ranAt, issuer: redactUrl(issuer), ok: true, ms: r.ms, detail: "Discovery document found and matches the issuer", endpointHosts };
   } catch (err) {
     return {
       ranAt,
-      issuer,
+      issuer: redactUrl(issuer),
       ok: false,
       ms: r.ms,
       detail: (err as Error).message,

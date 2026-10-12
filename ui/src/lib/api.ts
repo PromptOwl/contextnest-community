@@ -461,6 +461,7 @@ export interface ProbeStage {
 export interface EgressReport {
   ranAt: string;
   proxy: string | null;
+  proxyProblem: string | null;
   results: { id: string; purpose: string; host: string; port: number; ok: boolean; stages: ProbeStage[]; hint?: string }[];
   clockSkewSeconds: number | null;
 }
