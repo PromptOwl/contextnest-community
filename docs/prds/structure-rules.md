@@ -797,11 +797,12 @@ Every phase is built **test-first**:
   - `34d5ee1`: one forward pass (`replayEveryVersion`), charged like the sealed-head replay. A planted 600-version history went from 35 s to 0.3 s.
   - `f5f11bd`: the per-import cache keyed by file identity (`documentFileKey`), not a per-record folder listing. 5,000 records against a 20,000-file folder went from 79 s to 4.2 s.
 - QA round 25 on `f5f11bd` said **PASS**, and the architecture re-check said **Approve with nits**.
+- PromptOwl/ContextNest#183 **merged** into `development` after a maintainer's follow-ups. `abfe34b` covered the forget-log alias bomb, r27 M2, the replay cap, existing long names and approval order. `9c7c9df` made the bump major. `93c736e` covered the id cap, `7a4b0df` the review asks, and `3206a81` links into machinery, shared `structureView`, the recipe guard and bare ids. Community consumes it once it is released to npm.
 
   **Known** (open as `it.fails` in the adversarial suite, with its repro):
   - *r23 outrange* — an import whose `history.yaml` equals the one on disk judges its version files by the head's rebuild, from the last keyframe. With overwrite, a file before that range (`v1.md` of a 12-version history) replaces the sealed file with other bytes, and verify then reports `content_hash_mismatch`. The same was true before structure rules. A check on bytes would refuse an encrypted vault's own re-import, so the fix needs the opened text.
   - *r27 B4 informed / poison* — a forged forget record carrying hashes any reader can obtain (a document's checksum) passes the pre-forget-copy check. One naming an absent path is logged with those hashes. Who may import forget records needs host authorization; the engine applies no forget tier.
-  - *r27 M2* — an imported forget record with an unquoted timestamp is applied but not logged.
+  - ~~*r27 M2*~~ — an imported forget record with an unquoted timestamp was applied but not logged. **Fixed upstream in `abfe34b`**: it is logged as ISO, and a record that cannot be logged is refused.
 
   **Recorded, not fixed** (non-blocking under the stopping rule):
   - A forget made elsewhere, applied to a copy whose versions differ, leaves this vault's own content hashes unrecorded. Verify then shows `unrecorded_tombstone`, and re-importing that vault's older `.versions/` files with overwrite brings the erased text back. This was true before for unedited copies.
@@ -809,9 +810,9 @@ Every phase is built **test-first**:
   - Each imported forget record reads its document and history before any cache is consulted (records × history size). This was the same on `development`.
   - Two `.md` files hard-linked or symlinked to one inode share a cache key. That needs hand-made links.
   - On file systems that report no inode, the cache key falls back to the folder-listing lookup.
-  - `replayEveryVersion` does not apply the `MAX_SEALED_ARTIFACT_BYTES` cap.
+  - ~~`replayEveryVersion` does not apply the `MAX_SEALED_ARTIFACT_BYTES` cap.~~ **Fixed upstream in `abfe34b`** (`MAX_REPLAY_READ` per history, with or without a budget).
   - `context_update {id: "packs"}` is refused before the bare id resolves.
-  - The changesets mark an API change as breaking under a minor bump.
+  - ~~The changesets mark an API change as breaking under a minor bump.~~ **The engine changeset is major since `9c7c9df`.**
   - A malformed imported `packs/*.yml` breaks `context_packs`, which was the same on `development`.
   - Community's `withDiscoveryCache` drops `onUnreadable`, so Community's verify won't name unreadable documents until it bypasses the cache for that call. Fix this with the engine pin bump.
 
