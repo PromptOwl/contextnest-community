@@ -56,6 +56,8 @@ export interface EmailEventDetails {
     | "deletion_declined"
     | "deletion_deleted"
     | "deletion_archived"
+    | "review_overdue"
+    | "comment"
     | "access_requested"
     | "access_approved"
     | "access_denied";
@@ -122,6 +124,15 @@ const STATUS_META: Record<
     label: "Archived",
     color: "#0891b2",
   },
+  // Review SLA escalation: a pending review outlived the nest's SLA and has
+  // reached the next rung of reviewers. Amber like pending_review, but darker.
+  review_overdue: {
+    subjectWord: "overdue for review",
+    label: "Review overdue",
+    color: "#b45309",
+  },
+  // A comment on a document the recipient watches or reviews.
+  comment: { subjectWord: "has a new comment", label: "Comment", color: "#7c3aed" },
   // Access requests (CU-wdqcq041jn): someone who could only read asked to
   // change it; the verdict goes back to them.
   access_requested: {
@@ -348,6 +359,26 @@ const TEMPLATES: Record<EmailEventDetails["status"], EmailTemplate> = {
     lineH: (x) =>
       `${x.doc} has been archived${x.byH}${x.noteH} — your request was accepted. Nothing was deleted: every document and version is intact, and an owner can restore it.`,
     rows: governanceRows,
+  },
+  review_overdue: {
+    heading: (x) => `${x.title} is ${x.meta.subjectWord}`,
+    detailsHeader: "Document details",
+    linkLabel: "Review it",
+    lineT: (x) =>
+      `A review requested for ${x.title}${x.vT}${x.byT} has passed the nest's review SLA and was escalated to you${x.noteT}.`,
+    lineH: (x) =>
+      `A review requested for ${x.doc}${x.vH}${x.byH} has passed the nest's review SLA and was escalated to you${x.noteH}.`,
+    rows: governanceRows,
+  },
+  // Addressed to someone who watches or reviews the document. `note` carries
+  // the comment excerpt, like a mention does.
+  comment: {
+    heading: (x) => `${x.d.actor || "Someone"} commented on ${x.title}`,
+    detailsHeader: "Document details",
+    linkLabel: "Open document",
+    lineT: (x) => `New comment on ${x.title}${x.byT}${x.noteT}.`,
+    lineH: (x) => `New comment on ${x.doc}${x.byH}${x.noteH}.`,
+    rows: (x) => [plainRow("Nest", x.d.path)],
   },
   // `permission` carries the level asked for ("write"), `note` the asker's
   // reason or the decider's note.

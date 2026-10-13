@@ -107,12 +107,7 @@ const discoveryCache = new Map<
 
 /** Enabled AND fully configured — the only state the login button is live. */
 export function isOidcReady(): boolean {
-  return (
-    config.OIDC_ENABLED &&
-    !!config.OIDC_ISSUER &&
-    !!config.OIDC_CLIENT_ID &&
-    !!config.OIDC_CLIENT_SECRET
-  );
+  return config.OIDC_CONFIGURED;
 }
 
 export async function discover(issuer: string): Promise<{

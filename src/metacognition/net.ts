@@ -16,6 +16,13 @@
  * Redirects are never followed (a 3xx comes back as a 3xx), so a public URL
  * can't bounce the request onto a private one.
  *
+ * Never proxied. With NODE_USE_ENV_PROXY=1 (set in the Docker image) Node
+ * sends requests on the GLOBAL agents through HTTPS_PROXY, and the proxy —
+ * not `lookup` — resolves the name, so a host pointing at 169.254.169.254
+ * would sail past the check. These requests use their own agents, which
+ * carry no proxy, so the pinned `lookup` always runs. Agent feeds and MCP
+ * servers therefore need direct egress (documented in CONFIGURATION.md).
+ *
  * Returns a WHATWG Response so it can stand in for `fetch` — the MCP SDK's
  * transport takes it as its `fetch`.
  */
@@ -24,7 +31,7 @@ import https from "node:https";
 import dns from "node:dns";
 import { Readable, Transform } from "node:stream";
 import { isIP, type LookupFunction } from "node:net";
-import { isForbiddenConnectorHost } from "../notify/dispatch.js";
+import { isForbiddenConnectorHost, embeddedIPv4 } from "../notify/dispatch.js";
 import { config } from "../config.js";
 
 export class OutboundBlockedError extends Error {
@@ -34,28 +41,16 @@ export class OutboundBlockedError extends Error {
   }
 }
 
-/** "::ffff:7f00:1" or "::ffff:127.0.0.1" → "127.0.0.1"; anything else as-is. */
-function unmapIPv4(address: string): string {
-  const a = address.toLowerCase().replace(/^\[|\]$/g, "");
-  const m = /^(?:0{0,4}:){0,5}:?ffff:(.+)$/.exec(a.startsWith("::") ? a : "");
-  if (!m) return a;
-  const tail = m[1];
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(tail)) return tail;
-  const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail);
-  if (!hex) return a;
-  const hi = parseInt(hex[1], 16);
-  const lo = parseInt(hex[2], 16);
-  return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
-}
-
-/** True for an address this server must never connect to for an agent. */
+/** True for an address this server must never connect to for an agent: the
+ *  connector fence (which also unwraps IPv4 carried in IPv6 — mapped,
+ *  compatible, NAT64, 6to4) plus carrier-grade NAT, which is not public and
+ *  often internal in clouds. */
 export function isPrivateAddress(address: string): boolean {
-  const a = unmapIPv4(address);
+  const a = address.toLowerCase().replace(/^\[|\]$/g, "");
   if (isForbiddenConnectorHost(a)) return true;
-  const m = a.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
-  // Carrier-grade NAT (100.64/10) — not public, often internal in clouds.
-  if (m && Number(m[1]) === 100 && Number(m[2]) >= 64 && Number(m[2]) <= 127) return true;
-  return a === "::" || a === "0:0:0:0:0:0:0:1";
+  const v4 = isIP(a) === 4 ? a : embeddedIPv4(a);
+  const m = v4?.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  return !!m && Number(m[1]) === 100 && Number(m[2]) >= 64 && Number(m[2]) <= 127;
 }
 
 type Resolver = (host: string) => Promise<Array<{ address: string; family: number }>>;
@@ -83,6 +78,9 @@ export function guardedLookup(resolve: Resolver = systemResolver): LookupFunctio
     );
   }) as LookupFunction;
 }
+
+/** Proxy-free agents: see "Never proxied" above. Not the global agents. */
+const directAgents = { "https:": new https.Agent(), "http:": new http.Agent() } as const;
 
 export class OutboundTooLargeError extends Error {
   constructor(max: number) {
@@ -119,7 +117,13 @@ export function guardedFetch(opts: { maxBytes: number; timeoutMs: number; resolv
     return new Promise<Response>((resolve, reject) => {
       const req = mod.request(
         url,
-        { method: init.method ?? "GET", headers, lookup, timeout: opts.timeoutMs },
+        {
+          method: init.method ?? "GET",
+          headers,
+          lookup,
+          agent: directAgents[url.protocol as "https:" | "http:"],
+          timeout: opts.timeoutMs,
+        },
         (res) => {
           let seen = 0;
           const cap = new Transform({

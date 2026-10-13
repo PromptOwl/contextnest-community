@@ -3,8 +3,8 @@
  *
  * Joining is never refused: over the limit, new people still sign up, and only
  * the admin sees a private notice (role grants are capped — plan-limits.test.ts).
- * When the license lapses, the server goes
- * read-only; the admin/owner is told why, everyone else gets one neutral line
+ * When the license lapses on a server past the
+ * Free tier (more than 10 people), it goes read-only; the admin/owner is told why, everyone else gets one neutral line
  * with no licensing vocabulary in it.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -14,7 +14,9 @@ import {
   registerUser,
   jsonRequest,
   resetAuthRateLimit,
+  seedPeople,
 } from "./helpers";
+import { FREE_TIER_MAX_USERS } from "../src/auth/free-tier.js";
 
 const NEUTRAL =
   "This workspace is read-only right now. Your administrator has been notified.";
@@ -117,7 +119,9 @@ describe("who hears what", () => {
   });
 
   describe("license lapsed", () => {
-    beforeAll(() => {
+    beforeAll(async () => {
+      // Past the Free tier, so a lapsed license makes the server read-only.
+      await seedPeople(FREE_TIER_MAX_USERS + 1);
       overrides.valid = false;
       overrides.reason = "expired";
       overrides.expiresAt = "2026-09-01T00:00:00.000Z";

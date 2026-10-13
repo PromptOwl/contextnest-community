@@ -87,7 +87,17 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // server-level `context_request_access` derives from the per-nest definition (no new
 // literal). Promotion is tracked upstream in PromptOwl/ContextNest#167 — adopt the
 // descriptors and lower this by 3 if it lands there.
-const BASELINE = 48;
+//
+// Raised 48 -> 52 for the custom-field definition tools (`context_fields`,
+// `context_create_field`, `context_update_field`, `context_delete_field`). Same reason as
+// the access-request trio: field DEFINITIONS are nest configuration in this repo's
+// field_definitions table, not an engine operation, so there is no upstream descriptor to
+// import. Field VALUES add no tool: they live in frontmatter `metadata.fields` and travel
+// through the existing context_create/update (a `fields` arg) and come back inside the
+// catalog's own `frontmatter.metadata` on get/list/query. They mirror REST
+// /nests/:id/fields 1:1. Upstream catalog proposal: PromptOwl/ContextNest#178 — adopt the
+// descriptors and lower this by 4 if it lands there.
+const BASELINE = 52;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

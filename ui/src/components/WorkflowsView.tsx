@@ -131,8 +131,19 @@ const stepIcon = (action: string) => {
 
 const timeOf = (iso: string) => formatServerDate(iso) || iso;
 
+/** ?run=<id> — a link from a proposal, comment or the agent history (RunLink). */
+function runFromUrl(): string | null {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get("run");
+}
+
 export function WorkflowsView({ nestId, nestName, onBack }: Props) {
-  const [tab, setTab] = useState("canvas");
+  const [focusRun, setFocusRun] = useState<string | null>(runFromUrl);
+  const [tab, setTab] = useState(() => (runFromUrl() ? "run" : "canvas"));
+  const openRun = (runId: string) => {
+    setFocusRun(runId);
+    setTab("run");
+  };
   const { metacognitionEnabled } = useAuth();
   // Configuring an agent takes owner/admin on the nest (the server enforces it).
   const { data: nestMeta } = useQuery({ ...reads.nest(nestId), enabled: metacognitionEnabled });
@@ -170,11 +181,11 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
           <EdgesPanel nestId={nestId} />
         </TabsContent>
         <TabsContent value="run" className="mt-4">
-          <RunsPanel nestId={nestId} />
+          <RunsPanel nestId={nestId} focusRunId={focusRun} />
         </TabsContent>
         {metacognitionEnabled && (
           <TabsContent value="agents" className="mt-4">
-            <MetacognitionPanel nestId={nestId} canConfigure={canConfigureAgents} />
+            <MetacognitionPanel nestId={nestId} canConfigure={canConfigureAgents} onOpenRun={openRun} />
           </TabsContent>
         )}
         <TabsContent value="activity" className="mt-4 space-y-6">
@@ -778,7 +789,7 @@ function ParentSelect({
   );
 }
 
-function RunsPanel({ nestId }: { nestId: string }) {
+function RunsPanel({ nestId, focusRunId }: { nestId: string; focusRunId?: string | null }) {
   const { subagentRunsEnabled, subagentMaxDepth, subagentMaxChildren } = useAuth();
   // Live server caps (fall back to defaults until /health resolves).
   const maxDepth = subagentMaxDepth || SUBAGENT_MAX_DEPTH_FALLBACK;
@@ -838,6 +849,19 @@ function RunsPanel({ nestId }: { nestId: string }) {
       setError(err instanceof Error ? err.message : "Failed to load run");
     }
   };
+
+  // Arrived from a RunLink or the agent history: show that run's trace. A run
+  // pruned by the retention window (or out of reach) says so plainly.
+  useEffect(() => {
+    if (!focusRunId) return;
+    void getRun(focusRunId)
+      .then((r) => setSelected(r))
+      .catch(() =>
+        setError(
+          "That run's trace isn't available — it may be older than this server's run retention window, or outside what you can see.",
+        ),
+      );
+  }, [focusRunId]);
 
   // Cancel a queued/running run. The server rejects a PATCH once terminal, so
   // a stale row just surfaces that conflict instead of silently reopening.
@@ -1280,7 +1304,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
         className={`grid gap-4 items-start ${selected ? "lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]" : "grid-cols-1"
           }`}
       >
-        <div className="rounded-lg border divide-y min-w-0">
+        <div className={`rounded-lg border divide-y min-w-0 ${selected ? PANE_SCROLL : ""}`}>
           {loading ? (
             <div className="px-3 py-6 text-center text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin inline" />
@@ -1296,7 +1320,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
 
         {/* Trace / editor — right-hand pane, appears when a run is selected. */}
         {selected && (
-          <div className="rounded-lg border p-4 min-w-0 lg:sticky lg:top-20">
+          <div className={`rounded-lg border p-4 min-w-0 ${PANE_SCROLL}`}>
             <RunTrace
               run={selected}
               children={runs.filter((r) => r.parent_run_id === selected.id)}
@@ -1317,6 +1341,10 @@ function RunsPanel({ nestId }: { nestId: string }) {
     </div>
   );
 }
+
+/** Side by side, each pane scrolls on its own so a long run list never pushes
+ *  the trace off screen (and vice versa). Narrow screens keep page scroll. */
+const PANE_SCROLL = "lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto";
 
 function RunTrace({
   run,
@@ -3017,6 +3045,7 @@ function RunnerKeyCallout({ nestId }: { nestId: string }) {
 
 const CONNECTOR_EVENTS = [
   ["review_requested", "review requested"],
+  ["review_escalated", "review overdue"],
   ["review_approved", "approved"],
   ["review_rejected", "rejected"],
   ["run_failed", "run failed"],

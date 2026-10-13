@@ -55,11 +55,13 @@ env:
 permissions:
   contents: read
 
-# Every run hits the same deployed server with the same test accounts, so
-# two runs at once collide (rate limits, 500s, each deleting the other's
-# fixtures). Queue them: one run at a time across all PRs and branches.
+# Every run drives the same shared test accounts on the same deployed server,
+# so two runs at once collide: rate limits (429), 500s, and each deleting the
+# other's data (the orphan sweep at the start of one run removed the live nests
+# of another). Queue them instead: one e2e run per target server at a time,
+# never cancelling a run in progress.
 concurrency:
-  group: e2e-shared-dev
+  group: e2e-${{ vars.TEST_URL || 'https://nest-dev.promptowl.ai' }}
   cancel-in-progress: false
 
 jobs:

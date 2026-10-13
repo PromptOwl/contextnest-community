@@ -48,6 +48,7 @@ import { modelOptions } from "@/lib/model-options";
 import { useAuth } from "../../../auth/AuthContext";
 import { AgentConnectPanel } from "./AgentConnectPanel";
 import { LicensePanel } from "./LicensePanel";
+import { NetworkStatusPanel } from "./NetworkStatusPanel";
 import { toast } from "sonner";
 
 interface SettingsPageProps {
@@ -95,6 +96,7 @@ const TABS: {
       "posthog_host",
       "max_body_bytes",
       "trace_retention_days",
+      "run_retention_days",
     ],
   },
   {
@@ -146,6 +148,8 @@ const TABS: {
     label: "Hootie",
     keys: [
       "provider_keys",
+      "anthropic_base_url",
+      "anthropic_api_key",
       "hootie_enabled",
       "hootie_model",
       "hootie_name",
@@ -181,6 +185,12 @@ const TABS: {
     // Docs only — nothing here persists, so no keys for the unsaved dot.
     id: "agents",
     label: "Connecting agents",
+    keys: [],
+  },
+  {
+    // Read-only health checks, probes and the deployment guide.
+    id: "network",
+    label: "Network & status",
     keys: [],
   },
   {
@@ -489,6 +499,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   // rejected field — otherwise the error banner points at fields on a tab
   // they've navigated away from.
   const [activeTab, setActiveTab] = useState<string>("basic");
+  // Entra preset clicked with no Entra issuer yet: show the tenant field.
+  const [entraTenantOpen, setEntraTenantOpen] = useState(false);
   // Switching SSO off while on its tab hides that tab — fall back to Features.
   const visibleTabs = TABS.filter((t) => !t.visible || (draft && t.visible(draft)));
   const currentTab = visibleTabs.some((t) => t.id === activeTab) ? activeTab : "features";
@@ -605,6 +617,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
       // there's no value to diff against — "staged" means a non-empty string
       // (set) or null (clear). Everything else diffs by value like normal.
       if (
+        k === "anthropic_api_key" ||
         k === "oidc_client_secret" ||
         k === "mcp_signing_secret" ||
         k === "ses_secret_access_key"
@@ -865,6 +878,14 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     );
                   })}
                 </div>
+                {draft.manual_sign_in === "open" && draft.oidc_ready && (
+                  <p className="mt-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                    Single sign-on is on, but anyone can still create a
+                    password account here that your identity provider never
+                    sees and can't disable. Everyone in your directory already
+                    gets in through SSO — choose Invite only.
+                  </p>
+                )}
               </CardContent>
             </Card>
 
@@ -985,6 +1006,34 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   </div>
                   <p className="text-xs text-muted-foreground mt-1">
                     0–3650 — 0 disables pruning entirely.
+                  </p>
+                </CardContent>
+              </Card>
+
+              {/* Agent-run retention (runs + run_steps) */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Agent run retention</CardTitle>
+                  <CardDescription>
+                    How many days of finished agent runs, and their step-by-step
+                    traces, to keep. Proposals and comments an agent made stay;
+                    only their link to the trace stops resolving. Pruned hourly.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex items-center gap-2">
+                    <NumField
+                      value={draft.run_retention_days}
+                      min={0}
+                      max={3650}
+                      onChange={(n) => set({ run_retention_days: n })}
+                    />
+                    <span className="text-sm text-muted-foreground shrink-0">
+                      days
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    0–3650 — 0 (the default) keeps every run.
                   </p>
                 </CardContent>
               </Card>
@@ -1268,7 +1317,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     role="alert"
                     className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive"
                   >
-                    Blocked: set the public base URL on the General tab first.
+                    Blocked: set the public base URL on the Basic tab first.
                     The discovery documents have to name this server's exact
                     address, and a guessed one fails the client's check with no
                     useful error.
@@ -1477,15 +1526,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                             variant={preset === "entra" ? "default" : "outline"}
                             size="sm"
                             aria-pressed={preset === "entra"}
-                            onClick={() => {
-                              const tenant = window.prompt(
-                                "Microsoft Entra tenant ID (Directory ID) — find it on your app registration's Overview page:",
-                              );
-                              if (tenant && tenant.trim())
-                                set({
-                                  oidc_issuer: `https://login.microsoftonline.com/${tenant.trim()}/v2.0`,
-                                });
-                            }}
+                            onClick={() => setEntraTenantOpen(true)}
                           >
                             Microsoft Entra ID
                           </Button>
@@ -1506,6 +1547,45 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                             </span>
                           )}
                         </div>
+                        {(preset === "entra" || entraTenantOpen) && (() => {
+                          const tenant =
+                            /^https:\/\/login\.microsoftonline\.com\/([^/]+)\/v2\.0$/.exec(issuer)?.[1] ?? "";
+                          const looksLikeGuid =
+                            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenant);
+                          return (
+                            <div className="mb-2 rounded-md border bg-muted/30 p-3">
+                              <label className="text-sm font-medium" htmlFor="entra-tenant">
+                                Directory (tenant) ID
+                              </label>
+                              <p className="mb-1.5 text-xs text-muted-foreground">
+                                On your app registration's Overview page in Entra. The
+                                issuer below fills in from it.
+                              </p>
+                              <Input
+                                id="entra-tenant"
+                                value={tenant}
+                                placeholder="00000000-0000-0000-0000-000000000000"
+                                autoComplete="off"
+                                spellCheck={false}
+                                onChange={(e) => {
+                                  const t = e.target.value.trim();
+                                  set({
+                                    oidc_issuer: t
+                                      ? `https://login.microsoftonline.com/${t}/v2.0`
+                                      : "",
+                                  });
+                                }}
+                              />
+                              {tenant && !looksLikeGuid && (
+                                <p role="alert" className="mt-1.5 text-xs text-amber-700 dark:text-amber-400">
+                                  Use the tenant GUID. <code>common</code>,{" "}
+                                  <code>organizations</code> or a domain name won't
+                                  match Entra's discovery document, and sign-in fails.
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })()}
                         <TextField
                           error={fieldErrors.oidc_issuer}
                           value={draft.oidc_issuer ?? ""}
@@ -1941,6 +2021,78 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               </CardContent>
             </Card>
 
+            {/* Model gateway — the server's own LiteLLM / Bedrock / Azure /
+                Ollama front (byok). URL + key are a pair; the key is
+                write-only (masked tail back), staged on the global Save. */}
+            {settings?.byok_available !== false && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Model gateway</CardTitle>
+                  <CardDescription>
+                    Route every model call (Hootie and agent runs) through your
+                    own gateway: LiteLLM in front of Bedrock, Azure, Ollama or
+                    any provider, speaking Anthropic's /v1/messages. Calls and
+                    nest content then stay on your network, under your budgets
+                    and spend logs. When set, it takes over from the model keys
+                    above and PromptOwl credits. The key is checked against the
+                    gateway when you save, and it stays on this server.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="anthropic-base-url">Gateway URL</Label>
+                    <TextField
+                      id="anthropic-base-url"
+                      error={fieldErrors.anthropic_base_url}
+                      value={draft.anthropic_base_url ?? ""}
+                      placeholder="http://litellm:4000 (empty turns the gateway off)"
+                      onChange={(v) => set({ anthropic_base_url: v })}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="anthropic-api-key">Gateway key</Label>
+                    <div className="text-xs text-muted-foreground" data-testid="settings-gateway-status">
+                      {draft.anthropic_api_key === null
+                        ? "Will be cleared when you save."
+                        : settings?.anthropic_api_key_masked
+                          ? `Current: ${settings.anthropic_api_key_masked}${
+                              settings.model_source === "own" ? " (in use)" : ""
+                            }`
+                          : settings?.anthropic_base_url
+                            ? "No key yet: the gateway isn't used until it has one."
+                            : "Not set."}
+                    </div>
+                    <TextField
+                      id="anthropic-api-key"
+                      error={fieldErrors.anthropic_api_key}
+                      type="password"
+                      value={typeof draft.anthropic_api_key === "string" ? draft.anthropic_api_key : ""}
+                      placeholder="sk-… (the gateway's virtual key; paste to set or replace)"
+                      onChange={(v) => set({ anthropic_api_key: v })}
+                    />
+                    {settings?.anthropic_api_key_masked && draft.anthropic_api_key !== null && (
+                      <button
+                        type="button"
+                        className="mt-2 text-xs text-destructive hover:underline"
+                        onClick={() => set({ anthropic_api_key: null })}
+                      >
+                        Clear key
+                      </button>
+                    )}
+                    {draft.anthropic_api_key === null && (
+                      <button
+                        type="button"
+                        className="mt-2 text-xs text-muted-foreground hover:underline"
+                        onClick={() => set({ anthropic_api_key: undefined })}
+                      >
+                        Keep current key
+                      </button>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
             {/* Hootie in the nest — the assistant on every page. Sits under
                 the key it depends on: switching it on without a key gives
                 everyone a panel that explains what's missing, not a broken
@@ -1954,8 +2106,9 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   can read in the nest, cites the documents it used, and lets
                   them @tag a colleague — which posts the exchange as a comment
                   and notifies them. Off until you turn it on. Runs on your
-                  own key for the model's provider, or on PromptOwl models with
-                  your plan's credits; without either the panel says so.
+                  model gateway, your own key for the model's provider, or
+                  PromptOwl models with your plan's credits; without any of
+                  them the panel says so.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -1978,7 +2131,11 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   value={draft.hootie_model ?? ""}
                   error={fieldErrors.hootie_model}
                   onChange={(v) => set({ hootie_model: v })}
-                  reloadKey={JSON.stringify(settings?.own_providers ?? {})}
+                  reloadKey={JSON.stringify([
+                    settings?.own_providers ?? {},
+                    settings?.anthropic_base_url ?? "",
+                    settings?.anthropic_api_key_masked ?? null,
+                  ])}
                 />
               </CardContent>
             </Card>
@@ -2236,6 +2393,10 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               publicBaseUrl={draft.public_base_url}
               openMode={authMode === "open"}
             />
+          </TabsContent>
+
+          <TabsContent value="network" className="space-y-4">
+            {activeTab === "network" && <NetworkStatusPanel />}
           </TabsContent>
 
           <TabsContent value="license" className="space-y-4">

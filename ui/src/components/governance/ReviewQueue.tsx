@@ -2,6 +2,7 @@
  * ReviewQueue — ported from packages/ui-components/src/stewardship/ReviewQueue.tsx
  * Adapted: uses `requests` prop + `onSelect` callback instead of server-action import.
  */
+import { RunLink } from "../RunLink";
 import React from "react";
 import {
   FileText,
@@ -32,6 +33,7 @@ export type ReviewRequestPriority = "low" | "normal" | "high" | "urgent";
 
 export interface ReviewRequest {
   id: string;
+  nestId?: string;
   nodeId: string;
   title?: string;
   version: number;
@@ -43,6 +45,8 @@ export interface ReviewRequest {
   // (mirrors approve/reject's canUserApprove). The UI gates affordances off
   // this instead of re-deriving steward scope client-side.
   canReview?: boolean;
+  /** Set when an agent run filed this proposal: links to its trace. */
+  runId?: string;
 }
 
 /** A comment event from the nest activity feed (new thread or reply) —
@@ -332,6 +336,12 @@ export function ReviewQueue({
                         </Avatar>
                         <span>{request.requestedBy}</span>
                       </div>
+                      {request.runId && (
+                        <>
+                          <span>•</span>
+                          <RunLink nestId={request.nestId} runId={request.runId} />
+                        </>
+                      )}
                       <span>•</span>
                       <Clock className="h-3 w-3" />
                       <span>{formatDate(request.requestedAt)}</span>

@@ -82,6 +82,7 @@ describe("MCP tools", () => {
     };
     setMcpConnector(async () => conn);
     const agent: any = {
+      nest_id: "n",
       node_id: "nodes/a",
       persona: { name: "A", email: "p@agents.invalid", avatar: null, user_id: "u" },
       config: parseConfig({
@@ -96,6 +97,8 @@ describe("MCP tools", () => {
       owner: { userId: "o", email: "o@x.com" },
       baseUrl: "",
       proposals: { made: 0 },
+      comments: { made: 0 },
+      accessRequests: { made: 0 },
       mcp: new McpPool(() => null),
       signal: new AbortController().signal,
     };

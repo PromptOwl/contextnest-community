@@ -9,9 +9,15 @@
  * - One seeded nest per run (AUTO_ name, registered for teardown) holding one
  *   agent document. Arranged over REST; the UI is driven for configuring and
  *   running the agent.
- * - The suite skips unless the server under test has metacognition on
- *   (`/health` → metacognition_enabled). CI runs e2e against the deployed
- *   server, where it is off until an operator turns it on.
+ * - Metacognition is off by default. When `/health` reports it off and the
+ *   primary account is a server admin, the suite switches it on in Server
+ *   settings (`PATCH /admin/settings`) for the run and switches it back off
+ *   afterwards — only ever undoing what it did itself. Without an admin
+ *   account the suite skips.
+ * - Once every case has passed, the suite removes its test data from the
+ *   server straight away (the agent's metacognition config, then the seeded
+ *   nest). After a failure the data is left for debugging; the global
+ *   teardown still deletes the registered nest at the end of the run.
  * - A run calls a real model, which costs money and depends on a key. The
  *   assertions therefore hold for any outcome the server can honestly record:
  *   the run is executed by the server (never left queued for a runner) and
@@ -28,6 +34,10 @@ const primaryRole = samples.primary_user ?? null;
 /** @type {{ nestId: string, agentId: string } | null} */
 let seeded = null;
 let enabled = false;
+/** True when this suite switched metacognition on, so it must switch it off. */
+let turnedOn = false;
+/** Any case in this file that did not pass — keeps the data for debugging. */
+let anyFailed = false;
 
 test.describe('Metacognition agents', () => {
   test.describe.configure({ mode: 'serial' });
@@ -37,6 +47,11 @@ test.describe('Metacognition agents', () => {
     await primary_user.initialize();
     const api = primary_user.dashboardApi;
     enabled = (await api.health()).metacognition_enabled === true;
+    if (!enabled && (await api.isServerAdmin())) {
+      const res = await api.request('PATCH', '/admin/settings', { metacognition_enabled: true });
+      turnedOn = res.ok;
+      enabled = turnedOn && (await api.health()).metacognition_enabled === true;
+    }
     if (!enabled) return;
     const nest = await api.createNest(primary_user.commonFunction.generateEntityName('metacognition'));
     const agent = await api.expectOk('POST', `/nests/${nest.id}/nodes`, {
@@ -53,7 +68,30 @@ test.describe('Metacognition agents', () => {
   });
 
   test.beforeEach(() => {
-    test.skip(!enabled, 'The server under test does not have FEATURE_METACOGNITION on.');
+    test.skip(!enabled, 'Metacognition is off on the server under test and the primary account is not a server admin, so it cannot be switched on.');
+  });
+
+  test.afterEach(async ({}, testInfo) => {
+    if (testInfo.status !== testInfo.expectedStatus) anyFailed = true;
+  });
+
+  test.afterAll(async ({ primary_user }) => {
+    await primary_user.initialize();
+    const api = primary_user.dashboardApi;
+    try {
+      // Clean the site once everything passed: config first, then the nest.
+      if (seeded && !anyFailed) {
+        await api.request('DELETE', `/nests/${seeded.nestId}/metacognition/${seeded.agentId}`);
+        await api.deleteNest(seeded.nestId);
+        seeded = null;
+      }
+    } finally {
+      // Put the feature back the way the suite found it.
+      if (turnedOn) {
+        await api.request('PATCH', '/admin/settings', { metacognition_enabled: false });
+        turnedOn = false;
+      }
+    }
   });
 
   test('CN-META-001 an owner turns an agent document into a metacognition agent @smoke', async ({ primary_user }) => {

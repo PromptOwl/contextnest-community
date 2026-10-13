@@ -1334,3 +1334,26 @@ describe("/admin/settings — OIDC", () => {
     expect(swap.data.settings.manual_sign_in).toBe("open");
   });
 });
+
+describe("OIDC × manual sign-in default", () => {
+  it("turning SSO on closes password self-registration unless open was chosen, and flags an explicit open", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const on = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { oidc_enabled: true, oidc_issuer: ISSUER, oidc_client_id: CLIENT_ID, oidc_client_secret: CLIENT_SECRET },
+      admin.apiKey,
+    );
+    expect(on.status).toBe(200);
+    expect(on.data.settings.manual_sign_in).toBe("invite-only");
+    expect(on.data.settings.manual_sign_in_open_with_sso).toBe(false);
+
+    const open = await jsonRequest(app, "PATCH", "/admin/settings", { manual_sign_in: "open" }, admin.apiKey);
+    expect(open.status).toBe(200);
+    expect(open.data.settings.manual_sign_in).toBe("open");
+    expect(open.data.settings.manual_sign_in_open_with_sso).toBe(true);
+  });
+});
