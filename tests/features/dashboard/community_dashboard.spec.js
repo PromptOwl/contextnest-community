@@ -923,8 +923,11 @@ test.describe('Community Dashboard', () => {
 
         await expect(nestsPage.unpinIcon(nest.name)).toBeVisible();
         await expect(nestsPage.unpinIcon(nest.name)).toHaveAttribute('aria-pressed', 'true');
-        // Accepted by the server, not just reflected optimistically.
-        expect((await api.listNests()).find((n) => n.id === nest.id).pinned).toBeTruthy();
+        // Accepted by the server, not just reflected optimistically. The icon
+        // flips before the pin request lands, so wait for the server to agree.
+        await expect
+          .poll(async () => (await api.listNests()).find((n) => n.id === nest.id)?.pinned ?? false, { timeout: 15_000 })
+          .toBe(true);
         // Still a viewer — pinning granted nothing else.
         await expect(nestsPage.renameIcon(nest.name)).toHaveCount(0);
         await expect(nestsPage.deleteIcon(nest.name)).toHaveCount(0);

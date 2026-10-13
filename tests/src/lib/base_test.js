@@ -30,6 +30,7 @@ import MyWorkPage from '../page_factory/app/my_work_page.js';
 import MyDraftsPage from '../page_factory/app/my_drafts_page.js';
 import TeamsPage from '../page_factory/app/teams_page.js';
 import ApiKeysPage from '../page_factory/app/api_keys_page.js';
+import TeammatesPage from '../page_factory/app/teammates_page.js';
 
 // REST helper used to arrange dashboard preconditions (nests, pins, sharing)
 import DashboardApi from './dashboard_api.js';
@@ -45,6 +46,9 @@ import TeamsApi from './teams_api.js';
 
 // REST helper used to arrange API keys preconditions (keys, scoped nests)
 import ApiKeysApi from './api_keys_api.js';
+
+// REST helper used to read Teammates state (directory, super admins)
+import TeammatesApi from './teammates_api.js';
 
 /**
  * Global fixtures available to all tests
@@ -262,6 +266,16 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
       /** REST helper for the API keys suite — keys and scoped nests. */
       get apiKeysApi() {
         return new ApiKeysApi(this.page);
+      },
+
+      // Admin → Teammates
+      get teammatesPage() {
+        return new TeammatesPage(this.page, role.alias);
+      },
+
+      /** REST helper for the Teammates suite — read-only directory lookups. */
+      get teammatesApi() {
+        return new TeammatesApi(this.page);
       },
 
       /**

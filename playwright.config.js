@@ -102,6 +102,14 @@ const testRun = [
     independent: true, // Creates and revokes its own keys; arranges its own nests
   },
   {
+    // Admin → Teammates (CN-TMATE-001 … CN-TMATE-011). Serial: the cases
+    // share one server's user directory. Writes to accounts are stubbed.
+    file: 'teammates/teammates.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Reads the real directory; arranges its own nest
+  },
+  {
     // Request access on a denied write (CN-ACCESS-001 … CN-ACCESS-004).
     // Serial: the cases share one seeded nest and build on each other's
     // requests (ask → approve → deny → refused save).
@@ -210,7 +218,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'access-requests'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'access-requests'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -393,6 +401,17 @@ export default defineConfig({
           name: 'api-keys',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/api-keys/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'teammates',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/teammates/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],
