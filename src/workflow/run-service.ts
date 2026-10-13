@@ -384,6 +384,53 @@ export async function appendRunStep(
   return { seq };
 }
 
+/**
+ * Stamp the run's id on what a step produced, so the review, comment or access
+ * request can link back to its trace. Keys read from the step detail:
+ * `review_id`, `thread_id` (every comment in that new thread) and
+ * `access_request_id`. Only rows in the run's own nest that carry no run yet
+ * are touched, so a step can't claim someone else's row or re-point one.
+ * Best-effort: the link is a convenience, never a reason to fail the step.
+ */
+export async function linkRunArtifacts(runId: string, detail: unknown): Promise<void> {
+  if (!detail || typeof detail !== "object") return;
+  const d = detail as Record<string, unknown>;
+  const id = (v: unknown) => (typeof v === "string" && v.length > 0 && v.length <= 200 ? v : null);
+  const reviewId = id(d.review_id);
+  const threadId = id(d.thread_id);
+  const accessId = id(d.access_request_id);
+  if (!reviewId && !threadId && !accessId) return;
+  const db = getDb();
+  try {
+    const run = (await db.get("SELECT nest_id FROM runs WHERE id = ?", [runId])) as
+      | { nest_id: string }
+      | undefined;
+    if (!run) return;
+    if (reviewId) {
+      await db.run(
+        "UPDATE review_requests SET run_id = ? WHERE id = ? AND nest_id = ? AND run_id IS NULL",
+        [runId, reviewId, run.nest_id],
+      );
+    }
+    if (threadId) {
+      await db.run(
+        `UPDATE annotation_comments SET run_id = ?
+          WHERE thread_id = ? AND run_id IS NULL
+            AND thread_id IN (SELECT id FROM annotation_threads WHERE id = ? AND nest_id = ?)`,
+        [runId, threadId, threadId, run.nest_id],
+      );
+    }
+    if (accessId) {
+      await db.run(
+        "UPDATE access_requests SET run_id = ? WHERE id = ? AND nest_id = ? AND run_id IS NULL",
+        [runId, accessId, run.nest_id],
+      );
+    }
+  } catch (err) {
+    console.warn(`[runs] could not link artifacts to run ${runId}:`, err);
+  }
+}
+
 const RUN_STATUSES = ["running", "succeeded", "failed", "cancelled"];
 
 /**

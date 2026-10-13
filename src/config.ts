@@ -706,6 +706,19 @@ export const config = {
     const n = parseInt(process.env.SUBAGENT_MAX_CHILDREN || "16", 10);
     return Number.isFinite(n) ? Math.min(128, Math.max(1, n)) : 16;
   },
+  /**
+   * Agent-run retention in days (the runs + run_steps tables behind the Run
+   * Trace and the per-agent activity history). 0 = keep forever, the default:
+   * a run is the record of what an agent did, and an operator should choose to
+   * drop it. Finished runs older than this are pruned hourly; a running run is
+   * never pruned. Same [0, 3650] range as TRACE_RETENTION_DAYS. Editable at
+   * runtime from the admin Settings page (/admin/settings).
+   */
+  get RUN_RETENTION_DAYS(): number {
+    const n = parseInt(process.env.RUN_RETENTION_DAYS || "0", 10);
+    if (!Number.isFinite(n) || n < 0) return 0;
+    return Math.min(n, 3650);
+  },
   /** Max steps a single run may accumulate — bounds a runaway/hostile
    *  runner's step log. Clamped to [10, 100000]. */
   get RUN_MAX_STEPS(): number {

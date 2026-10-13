@@ -76,6 +76,8 @@ export interface AccessRequest {
   resolved_by: string | null;
   resolved_at: string | null;
   resolution_note: string | null;
+  /** The agent run that filed it, when one did (migration 060). */
+  run_id: string | null;
   /** Human label: the document title, the folder path, or the nest name. */
   title?: string;
 }
@@ -226,6 +228,7 @@ function rowToRequest(row: any): AccessRequest {
     resolved_by: row.resolved_by ?? null,
     resolved_at: row.resolved_at ?? null,
     resolution_note: row.resolution_note ?? null,
+    run_id: row.run_id ?? null,
   };
 }
 

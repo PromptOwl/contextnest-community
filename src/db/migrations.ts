@@ -1979,6 +1979,26 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("057_review_sla_escalation");
   }
 
+  // 060: run back-links. A proposal (review_requests), comment
+  //   (annotation_comments) or access request an agent run produced carries
+  //   that run's id, so the UI can say "agent run <id>" and open the trace.
+  //   Nullable: people's rows have no run.
+  if (!hasMigration("060_run_links")) {
+    db.transaction(() => {
+      const hasRunId = (table: string) =>
+        (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === "run_id");
+      if (!hasRunId("review_requests")) db.exec("ALTER TABLE review_requests ADD COLUMN run_id TEXT");
+      if (!hasRunId("annotation_comments")) db.exec("ALTER TABLE annotation_comments ADD COLUMN run_id TEXT");
+      if (!hasRunId("access_requests")) db.exec("ALTER TABLE access_requests ADD COLUMN run_id TEXT");
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_reviews_run ON review_requests(run_id) WHERE run_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_annot_comments_run ON annotation_comments(run_id) WHERE run_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_access_requests_run ON access_requests(run_id) WHERE run_id IS NOT NULL;
+      `);
+    })();
+    recordMigration("060_run_links");
+  }
+
   // 062: nest-level custom field definitions (056–061 are reserved by open
   //   branches). One row per field a nest admin or steward defines; the VALUES
   //   live on each node, in frontmatter `metadata.fields`, so they are

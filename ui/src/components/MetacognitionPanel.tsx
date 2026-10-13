@@ -8,7 +8,7 @@
  * Activity → Schedules row; the full step-by-step trace is the Run tab.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Loader2, Play, Pencil, Trash2, Plus, Brain } from "lucide-react";
+import { Loader2, Play, Pencil, Trash2, Plus, Brain, ChevronDown, ChevronRight } from "lucide-react";
 import {
   listMetacognitionAgents,
   saveMetacognitionAgent,
@@ -22,6 +22,7 @@ import {
   type RunSummary,
 } from "../lib/api";
 import { formatServerDate } from "../lib/dates";
+import { AgentActivity } from "./AgentActivity";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { Input } from "./ui/input";
@@ -141,7 +142,16 @@ export function RunCost({ trace }: { trace: MetacognitionTrace | null | undefine
   );
 }
 
-export function MetacognitionPanel({ nestId, canConfigure }: { nestId: string; canConfigure: boolean }) {
+export function MetacognitionPanel({
+  nestId,
+  canConfigure,
+  onOpenRun,
+}: {
+  nestId: string;
+  canConfigure: boolean;
+  /** Open a run's trace (Workflows → Run). */
+  onOpenRun?: (runId: string) => void;
+}) {
   const [agents, setAgents] = useState<MetacognitionAgent[]>([]);
   const [agentDocs, setAgentDocs] = useState<Array<{ id: string; title: string }>>([]);
   const [runs, setRuns] = useState<RunSummary[]>([]);
@@ -150,6 +160,15 @@ export function MetacognitionPanel({ nestId, canConfigure }: { nestId: string; c
   const [draft, setDraft] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  // Which agents have their activity history open.
+  const [open, setOpen] = useState<Set<string>>(new Set());
+  const toggle = (id: string) =>
+    setOpen((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   const load = useCallback(async () => {
     try {
@@ -243,9 +262,9 @@ export function MetacognitionPanel({ nestId, canConfigure }: { nestId: string; c
             const last = runs.find((r) => r.agent_node === a.node_id);
             return (
               <div key={a.node_id} className="px-3 py-2.5 space-y-1" data-testid="metacognition-agent-row">
-                <div className="flex items-center gap-2 text-sm">
+                <div className="flex flex-wrap items-center gap-2 text-sm">
                   <Avatar avatar={a.persona.avatar} name={a.persona.name} />
-                  <span className="font-medium truncate">{a.persona.name}</span>
+                  <span className="font-medium truncate shrink-0 max-w-[16rem]">{a.persona.name}</span>
                   <span className="text-xs text-muted-foreground truncate" title={a.node_id}>
                     runs {titleOf(a.node_id)}
                   </span>
@@ -259,6 +278,21 @@ export function MetacognitionPanel({ nestId, canConfigure }: { nestId: string; c
                     {a.scope.propose[0] === "*" ? "what it reads" : a.scope.propose.length ? a.scope.propose.join(", ") : "nothing (proposals off)"}
                   </Badge>
                   <div className="flex-1" />
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 text-xs shrink-0"
+                    onClick={() => toggle(a.node_id)}
+                    aria-expanded={open.has(a.node_id)}
+                    data-testid="metacognition-activity-toggle"
+                  >
+                    {open.has(a.node_id) ? (
+                      <ChevronDown className="h-3.5 w-3.5 mr-1" />
+                    ) : (
+                      <ChevronRight className="h-3.5 w-3.5 mr-1" />
+                    )}
+                    Activity
+                  </Button>
                   <Button
                     variant="outline"
                     size="sm"
@@ -327,6 +361,16 @@ export function MetacognitionPanel({ nestId, canConfigure }: { nestId: string; c
                         {(last.trace as MetacognitionTrace).summary}
                       </div>
                     )}
+                  </div>
+                )}
+                {open.has(a.node_id) && (
+                  <div className="pl-9 pt-2 pb-1">
+                    <AgentActivity
+                      nestId={nestId}
+                      nodeId={a.node_id}
+                      onOpenRun={onOpenRun}
+                      refreshKey={`${last?.id ?? ""}:${last?.status ?? ""}`}
+                    />
                   </div>
                 )}
               </div>

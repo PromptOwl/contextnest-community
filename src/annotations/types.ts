@@ -36,6 +36,8 @@ export interface AnnotationComment {
   author: string; // email
   body: string;
   createdAt: string;
+  /** The agent run that posted it, when one did (migration 060). */
+  runId?: string;
 }
 
 export type ThreadStatus = "open" | "resolved";

@@ -86,6 +86,7 @@ export const HISTORICAL_MIGRATIONS = [
   "055_access_requests",
   "056_mcp_oauth",
   "057_review_sla_escalation",
+  "060_run_links",
   "062_field_definitions",
 ];
 
@@ -1097,6 +1098,16 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS review_sla_hours INTEGER;
     ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS escalation_level INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS escalated_at TEXT;
+  `);
+
+  // Migration 060 parity: run back-links (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS run_id TEXT;
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS run_id TEXT;
+    ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS run_id TEXT;
+    CREATE INDEX IF NOT EXISTS idx_reviews_run ON review_requests(run_id) WHERE run_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_annot_comments_run ON annotation_comments(run_id) WHERE run_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_access_requests_run ON access_requests(run_id) WHERE run_id IS NOT NULL;
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

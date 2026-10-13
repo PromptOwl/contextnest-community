@@ -24,6 +24,7 @@ import {
 import { loadActiveCommunitySites } from "./auth/community-sites.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
 import { startScheduler } from "./workflow/scheduler.js";
+import { startRunRetention } from "./workflow/run-retention.js";
 import { startReviewSlaLoop } from "./governance/review-sla.js";
 import { sweepStale } from "./shared/rate-limit.js";
 import { purgeExpired as purgeExpiredOAuth } from "./auth/oauth-store.js";
@@ -256,6 +257,7 @@ ${config.AUTH_MODE === "key" ? `
 
   // Workflow-plane interval schedules → run rows (no-op unless the flag is on).
   startScheduler();
+  startRunRetention();
 
   // Review SLA escalation (per-nest review_sla_hours). Independent of the
   // workflow plane — that loop above is a no-op unless its flag is on, and
