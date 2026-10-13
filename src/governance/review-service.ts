@@ -41,6 +41,7 @@ import type {
   ReviewRequestStatus,
   ResolvedSteward,
 } from "./types.js";
+import { insertNotification } from "../notify/inbox.js";
 
 // ─── Submit for Review ──────────────────────────────────────────────────
 // Ported from PromptOwl submitForReview()
@@ -1018,11 +1019,7 @@ export async function inboxInsert(
   const now = new Date().toISOString();
   for (const email of recipients) {
     try {
-      await db.run(
-        `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [uuid(), nestId, email.toLowerCase(), kind, subjectId, message, now],
-      );
+      await insertNotification({ nestId, userEmail: email, kind, subjectId, message, createdAt: now });
     } catch (err) {
       console.error(`[notify] ${kind} inbox insert failed`, nestId, email, err);
     }

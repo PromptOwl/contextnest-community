@@ -65,6 +65,13 @@ async function pendingAndEscalated(title: string): Promise<string> {
 
   expect(unread(await rows(wally, id), "review_requested")).toHaveLength(1);
   expect(unread(await rows(nate, id), "review_escalated")).toHaveLength(1);
+  // The escalation reaches the superadmin message log like every inbox row.
+  const { getDb } = await import("../src/db/client.js");
+  const logged = (await getDb().all(
+    "SELECT recipients_json, sender_id FROM outbound_messages WHERE channel = 'inbox' AND subject = 'review_escalated' AND node_id = ?",
+    [id],
+  )) as Array<{ recipients_json: string; sender_id: string }>;
+  expect(logged.some((r) => r.recipients_json.includes(nate.email) && r.sender_id === alice.email)).toBe(true);
   return id;
 }
 

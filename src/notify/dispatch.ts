@@ -20,6 +20,7 @@ import { getDb } from "../db/client.js";
 import { envValues } from "../workflow/env-routes.js";
 import { msTeamsPayload } from "./msteams.js";
 import { escapeMrkdwn } from "./slack.js";
+import { senderFor } from "./outbound-log.js";
 import { postWebhook, resolveNestName, testWebhook } from "./webhook.js";
 
 export type ConnectorChannel = "slack" | "teams" | "webhook";
@@ -249,6 +250,12 @@ export async function hasAnyConnector(nestId: string, kind: string): Promise<boo
 export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
   const db = getDb();
   const nestName = await resolveNestName(ev.nestId);
+  // Message-log context: who caused it, and the run when a run is the subject.
+  const logCtx = {
+    nestId: ev.nestId,
+    ...senderFor(ev.actor),
+    runId: ev.kind.startsWith("run_") ? (ev.subjectId ?? null) : null,
+  };
 
   // Implicit server-wide Slack + Microsoft Teams connectors (super-admin
   // Settings). MSTEAMS_*, never "teams": that name means user groups here.
@@ -265,6 +272,7 @@ export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
       config.SLACK_WEBHOOK_URL,
       formatBody("slack", nestName, ev),
       "server-slack",
+      logCtx,
     );
   }
 
@@ -273,6 +281,7 @@ export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
       config.MSTEAMS_WEBHOOK_URL,
       formatBody("teams", nestName, ev),
       "server-msteams",
+      logCtx,
     );
   }
 
@@ -296,7 +305,10 @@ export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
     if (!kinds.includes("*") && !kinds.includes(ev.kind)) continue;
     const url = await resolveUrl(ev.nestId, r.url);
     if (!url) continue;
-    void postWebhook(url, formatBody(r.channel, nestName, ev), `connector:${r.id}`);
+    void postWebhook(url, formatBody(r.channel, nestName, ev), `connector:${r.id}`, {
+      ...logCtx,
+      channel: r.channel === "slack" ? "slack" : r.channel === "teams" ? "msteams" : "webhook",
+    });
   }
 }
 

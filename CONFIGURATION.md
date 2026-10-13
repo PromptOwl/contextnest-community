@@ -88,6 +88,8 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `POSTHOG_KEY` | `""` | PostHog project API key for product analytics in the UI. Empty = analytics off (the default — a self-hosted install brings its own project). Served to the browser via `/health`, but only while `TELEMETRY_ENABLED` is on, so that switch turns off everything this server sends outward. Also editable from Server settings → Basic. |
 | `POSTHOG_HOST` | `https://us.i.posthog.com` | PostHog ingestion host. Set it to your own region or self-hosted PostHog. Also editable from Server settings → Basic. |
 | `TRACE_RETENTION_DAYS` | `14` | Activity-trace retention window in days (the `api_events` rows behind `GET /admin/trace` and `GET /nests/:id/trace`). Rows older than this are pruned opportunistically (every ~500 inserts). `0` = keep forever (pruning is skipped entirely). Capped at `3650`; invalid/negative values fall back to `14`. Also editable from Server settings → Basic. |
+| `MESSAGE_LOG_RETENTION_DAYS` | `30` | Superadmin message log retention in days (`outbound_messages`, behind `GET /admin/messages`). Every email, Slack/Teams/connector webhook, inbox notification and agent comment the server sends is logged, redacted. Older rows are pruned opportunistically. `0` = keep forever. Capped at `3650`; invalid/negative → `30`. Access-audit rows (`message_log_views`) are kept 365 days regardless. Also editable from Server settings → Basic → Message log. |
+| `MESSAGE_LOG_STORE_BODIES` | `true` | Store the (redacted) message body in the message log. `false` keeps metadata only: channel, sender, recipients, subject, delivery status. Also editable from Server settings → Basic → Message log. |
 | `RUN_RETENTION_DAYS` | `0` | Agent-run retention in days (the `runs` + `run_steps` rows behind the Run Trace and each metacognition agent's Activity history). Finished runs older than this are pruned hourly; a run still in progress never is. `0` = keep every run (the default — a run is the record of what an agent did, so dropping it is the operator's call). Proposals, comments and access requests an agent made are not pruned; their link to the trace stops resolving. Capped at `3650`; invalid/negative values fall back to `0`. Also editable from Server settings → Basic. |
 | `DRIFT_SCAN_INTERVAL_MS` | `30000` (30 s) | How often the drift scanner walks every nest for files edited outside the app (external edits) and stages them as suggestions for review. Set `0` to disable — do this on a GCS FUSE or other network mount, where the walk is slow and costly. Unset, empty or non-numeric falls back to the default. |
 | `CONTEXTNEST_AGENT` | `""` | Overrides the `agent` this server derives for caller attribution (`client`, spec §9.4) when a call sends none of its own. Without it the name comes from the MCP `initialize` handshake's `clientInfo.name` when the connection reports one, else the label of the API key the call authenticated with. A caller's own `client.agent` always wins. |
@@ -1191,3 +1193,16 @@ See `STEWARDSHIP.md` for how super-admins and groups interact with per-nest stew
 ## Reload
 
 Changing env vars requires a restart — the server reads them at boot. `tsx watch` in dev will pick up code changes automatically but not env changes.
+
+## Message log and privacy
+
+Superadmins can read the message log at **Admin → Message log**. It holds every message this server sent, across every nest, including the text of notifications and agent comments about documents the superadmin may never have opened.
+
+That is the point of it: one place to see what people and agents were told. But it is also a second copy of message content. It is controlled like this:
+
+- **Superadmin only.** The log is never available in open mode, or to nest owners or nest admins.
+- **Every read is audited.** Listing, opening a message, and viewing the audit itself each write a `message_log_views` row. That row is kept for 365 days, longer than the messages it covers.
+- **Secrets never reach it.** Temporary passwords, sign-in tokens, API and hook keys, Bearer tokens and webhook URLs are redacted before the row is written. Bodies are capped at 4 KB.
+- **Retention.** `MESSAGE_LOG_RETENTION_DAYS` (default 30) bounds how long message content lives. Database backups taken within that window will contain it.
+- **Metadata-only mode.** `MESSAGE_LOG_STORE_BODIES=false` keeps who, when, where and delivery status, but no body. The subject (often a document title), recipients and any delivery error text are still kept, redacted. Use this where a second copy of message content is not acceptable.
+

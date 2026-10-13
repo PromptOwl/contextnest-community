@@ -1999,6 +1999,51 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("060_run_links");
   }
 
+  // 061: superadmin message log. Every message the server sends — email,
+  //   Slack/Teams/connector webhooks, in-app notifications, persona comments —
+  //   is recorded once at its choke point (notify/outbound-log.ts). Bodies are
+  //   redacted and capped at write time; MESSAGE_LOG_STORE_BODIES=false keeps
+  //   metadata only. message_log_views is the append-only audit of who read
+  //   the log.
+  if (!hasMigration("061_outbound_messages")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS outbound_messages (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL,           -- email | slack | msteams | webhook | inbox | comment
+        sender_kind TEXT NOT NULL DEFAULT 'system'
+          CHECK(sender_kind IN ('human', 'persona', 'system')),
+        sender_id TEXT,                  -- email / user id, or null for system
+        recipients_json TEXT NOT NULL DEFAULT '[]',
+        subject TEXT,
+        body_redacted TEXT,
+        status TEXT NOT NULL DEFAULT 'sent'
+          CHECK(status IN ('sent', 'failed', 'skipped')),
+        provider_id TEXT,
+        error TEXT,
+        nest_id TEXT,
+        node_id TEXT,
+        run_id TEXT,
+        via_proxy INTEGER,               -- 1/0 when it left through HTTPS_PROXY; null = n/a
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_created ON outbound_messages(created_at);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_channel ON outbound_messages(channel, created_at);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_status ON outbound_messages(status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_sender ON outbound_messages(sender_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_nest ON outbound_messages(nest_id, created_at);
+      CREATE TABLE IF NOT EXISTS message_log_views (
+        id TEXT PRIMARY KEY,
+        viewer_id TEXT NOT NULL,
+        action TEXT NOT NULL,            -- list | detail | views
+        filters_json TEXT,
+        message_id TEXT,
+        at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_message_log_views_at ON message_log_views(at);
+    `);
+    recordMigration("061_outbound_messages");
+  }
+
   // 062: nest-level custom field definitions (056–061 are reserved by open
   //   branches). One row per field a nest admin or steward defines; the VALUES
   //   live on each node, in frontmatter `metadata.fields`, so they are

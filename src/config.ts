@@ -533,6 +533,26 @@ export const config = {
     return Math.min(n, 3650);
   },
   /**
+   * Superadmin message log (outbound_messages behind GET /admin/messages)
+   * retention in days. 0 = keep forever. Invalid / negative → default 30;
+   * capped at 3650. Message bodies carry other users' content, so the default
+   * is deliberately short. Editable at runtime from /admin/settings.
+   */
+  get MESSAGE_LOG_RETENTION_DAYS(): number {
+    const n = parseInt(process.env.MESSAGE_LOG_RETENTION_DAYS || "30", 10);
+    if (!Number.isFinite(n) || n < 0) return 30;
+    return Math.min(n, 3650);
+  },
+  /**
+   * Store (redacted) message bodies in the message log. On by default; "false"
+   * keeps metadata only — channel, sender, recipients, subject, status — for
+   * deployments that must not hold a second copy of message content.
+   * Editable at runtime from /admin/settings.
+   */
+  get MESSAGE_LOG_STORE_BODIES(): boolean {
+    return process.env.MESSAGE_LOG_STORE_BODIES !== "false";
+  },
+  /**
    * Optional custom logo URL shown in UI header + login screen.
    * Must be an absolute https://, http://, or data:image/… URL. Other
    * schemes (file://, javascript:, relative paths) are rejected with a

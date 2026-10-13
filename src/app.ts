@@ -67,6 +67,7 @@ import { scheduleRoutes } from "./workflow/schedule-routes.js";
 import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
+import { messageLogRoutes } from "./notify/message-log-routes.js";
 import { sendTestNotification } from "./notify/dispatch.js";
 import { hookNestRoutes, hookFireRoutes } from "./workflow/hook-routes.js";
 import {
@@ -970,6 +971,8 @@ export function createApp(): Hono<AuthEnv> {
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
+    message_log_retention_days: config.MESSAGE_LOG_RETENTION_DAYS,
+    message_log_store_bodies: config.MESSAGE_LOG_STORE_BODIES,
     run_retention_days: config.RUN_RETENTION_DAYS,
     // OIDC SSO. The client secret is WRITE-ONLY: only its presence is
     // reported, never the value.
@@ -1408,6 +1411,27 @@ export function createApp(): Hono<AuthEnv> {
           addError("trace_retention_days", "Trace retention must be a whole number of days between 0 and 3650 (0 keeps activity forever).");
         else pending.push({ name: "TRACE_RETENTION_DAYS", value: String(n) });
       }
+    }
+    // Message-log retention (outbound_messages). Same [0, 3650] range as the
+    // getter; 0 keeps messages forever, null clears → default (30).
+    if ("message_log_retention_days" in body) {
+      const v = body.message_log_retention_days;
+      if (v === null || v === "") {
+        pending.push({ name: "MESSAGE_LOG_RETENTION_DAYS", value: null });
+      } else {
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 0 || n > 3650)
+          addError("message_log_retention_days", "Message log retention must be a whole number of days between 0 and 3650 (0 keeps messages forever).");
+        else pending.push({ name: "MESSAGE_LOG_RETENTION_DAYS", value: String(n) });
+      }
+    }
+    // Store redacted bodies (default on). Off persists "false"; on clears to
+    // the default so an unset env stays the source of truth.
+    if ("message_log_store_bodies" in body) {
+      pending.push({
+        name: "MESSAGE_LOG_STORE_BODIES",
+        value: body.message_log_store_bodies ? null : "false",
+      });
     }
     // Agent-run retention in days. Same [0, 3650] range as the config getter.
     // 0 = keep every run (the default). null clears → default (0).
@@ -2063,6 +2087,14 @@ export function createApp(): Hono<AuthEnv> {
   app.use("/admin/community-sites", flexAuthMiddleware);
   app.use("/admin/community-sites/*", flexAuthMiddleware);
   app.route("/admin/community-sites", communitySiteRoutes);
+
+  // ─── /admin/messages — superadmin message log ────────────────────────────
+  // Every message the server sent, redacted. Superadmin ONLY (never open
+  // mode, never nest admins); every read is audited. See
+  // notify/message-log-routes.ts.
+  app.use("/admin/messages", flexAuthMiddleware);
+  app.use("/admin/messages/*", flexAuthMiddleware);
+  app.route("/admin/messages", messageLogRoutes);
 
   // GET /stats — dashboard summary counts: nests visible to caller,
   // documents across those nests, total users on the server. Uses
