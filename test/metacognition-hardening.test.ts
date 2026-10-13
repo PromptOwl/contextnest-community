@@ -125,6 +125,9 @@ function toolResults(): string[] {
   return out;
 }
 
+// Read by the mocked license on every call (the seat-limit case).
+const plan: { maxSubscribers?: number | null } = {};
+
 const CONFIG = {
   persona: { name: "Curator", avatar: "🦉" },
   scope: { read: ["gtm"], propose: ["gtm"] },
@@ -141,6 +144,7 @@ beforeAll(async () => {
   process.env.SLACK_WEBHOOK_URL = WEBHOOK;
   env = setupTestEnv();
   app = await createTestApp("key", {
+    entitlement: plan,
     superAdmins: ["root@acme.com"],
     gateway: { baseUrl: "https://gateway.promptowl.test", key: "po-key", defaultModel: "default-claude/claude-sonnet-5" },
   });
@@ -265,6 +269,32 @@ describe("the owner is pinned; the persona's reach is its own", () => {
     script = [call(toolUse("read_node", { id: "nodes/private/board-notes" })), say("Read it.")];
     await run("nodes/curator");
     expect(toolResults()[0]).toContain("Confidential");
+  });
+
+  it("approving a persona's propose request takes no seat, even on a full plan", async () => {
+    requests = [];
+    script = [
+      call(toolUse("request_access", { target: "nodes/private", kind: "folder", level: "propose", reason: "Fix board notes." })),
+      say("Asked."),
+    ];
+    const asked = (await run("nodes/curator")).steps.find((s: any) => s.detail?.kind === "access_request");
+    plan.maxSubscribers = 0;
+    try {
+      const approve = await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/access-requests/${asked.detail.access_request_id}/approve`,
+        {},
+        owner.apiKey,
+      );
+      expect(approve.status, JSON.stringify(approve.data)).toBe(200);
+    } finally {
+      delete plan.maxSubscribers;
+    }
+    const { resolveNodeGrant } = await import("../src/governance/grants-service.js");
+    const { getAgent } = await import("../src/metacognition/store.js");
+    const agent = (await getAgent(nestId, "nodes/curator"))!;
+    expect(await resolveNodeGrant(nestId, agent.persona.user_id, "nodes/private/board-notes")).toBe("write");
   });
 
   it("a persona may not ask for a whole nest, nor for anything in a nest it doesn't live in", async () => {
@@ -457,9 +487,24 @@ describe("scheduled runs into an unchanged nest", () => {
     expect(idle.run.trace.skipped).toMatch(/Nothing changed/);
     expect(requests.length).toBe(0);
 
-    // A person pressing Run always runs.
-    script = [say("Manual.")];
-    expect((await run("nodes/quiet-agent")).run.status).toBe("succeeded");
+    // A person pressing Run always runs. Its own proposal is not news to the next schedule.
+    await new Promise((r) => setTimeout(r, 1100)); // second-resolution timestamps
+    script = [
+      call(toolUse("propose_new", { folder: "gtm", title: "Quiet Notes", content: "Notes.", note: "Missing." })),
+      say("Proposed."),
+    ];
+    const manual = await run("nodes/quiet-agent");
+    expect(manual.run.status).toBe("succeeded");
+    expect(manual.run.trace.proposals).toBe(1);
+    requests = [];
+    expect((await start()).run.status).toBe("cancelled");
+    expect(requests.length).toBe(0);
+
+    // A settings save is news.
+    await new Promise((r) => setTimeout(r, 1100));
+    await jsonRequest(app, "PUT", `/nests/${nestId}/metacognition/nodes/quiet-agent`, CONFIG, owner.apiKey);
+    script = [say("New settings.")];
+    expect((await start()).run.status).toBe("succeeded");
 
     await new Promise((r) => setTimeout(r, 1100)); // second-resolution timestamps
     const edit = await jsonRequest(

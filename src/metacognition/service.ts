@@ -649,8 +649,9 @@ export async function verdictStats(
 /**
  * Should a scheduled run skip? Only a schedule: a person pressing Run, a hook
  * or a trigger brought a reason. And only when nothing could be new — no
- * feeds or MCP servers (outside sources change without the nest knowing), no
- * document change and no verdict on its proposals since its last good run.
+ * feeds or MCP servers (outside sources change without the nest knowing), and
+ * since its last good run no one else's document change, no verdict on its
+ * proposals, no grant to the persona and no settings save.
  * Returns the reason recorded on the skipped run, or null to run.
  */
 async function nothingNewSince(
@@ -669,15 +670,22 @@ async function nothingNewSince(
   if (!last) return null;
   const since = asInstant(last.started_at);
   if (!Number.isFinite(since)) return null;
-  const latest = (await db.get(
-    `SELECT MAX(created_at) AS v FROM node_versions WHERE nest_id = ?`,
-    [run.nest_id],
-  )) as { v: string | null } | undefined;
-  const verdict = (await db.get(
-    `SELECT MAX(resolved_at) AS v FROM review_requests WHERE nest_id = ? AND LOWER(requested_by) = LOWER(?)`,
-    [run.nest_id, agent.persona.email],
-  )) as { v: string | null } | undefined;
-  if (Math.max(asInstant(latest?.v), asInstant(verdict?.v)) >= since) return null;
+  // Its own proposals aren't news; a grant to the persona or a settings save is.
+  // Kept as separate columns: grants stamp ISO, the others 'YYYY-MM-DD HH:MM:SS'.
+  const seen = (await db.get(
+    `SELECT
+       (SELECT MAX(created_at) FROM node_versions WHERE nest_id = ? AND LOWER(author) != LOWER(?)) AS version,
+       (SELECT MAX(resolved_at) FROM review_requests WHERE nest_id = ? AND LOWER(requested_by) = LOWER(?)) AS verdict,
+       (SELECT MAX(updated_at) FROM grants WHERE nest_id = ? AND user_id = ?) AS granted`,
+    [run.nest_id, agent.persona.email, run.nest_id, agent.persona.email, run.nest_id, agent.persona.user_id],
+  )) as { version: string | null; verdict: string | null; granted: string | null } | undefined;
+  const changed = Math.max(
+    asInstant(seen?.version),
+    asInstant(seen?.verdict),
+    asInstant(seen?.granted),
+    asInstant(agent.updated_at),
+  );
+  if (changed >= since) return null;
   return `Nothing changed in the nest since its last run (${last.started_at}), so this scheduled run was skipped without calling the model.`;
 }
 
