@@ -97,6 +97,7 @@ import {
 import { DocumentViewer } from "./DocumentViewer";
 import { AuthorshipChips } from "./AuthorshipChips";
 import { TaskRelations } from "./board/TaskRelations";
+import { NodeFieldsPanel } from "./fields/NodeFieldsPanel";
 import { TableViewer, TableGrid } from "./TableViewer";
 import { tableDiffSides } from "../lib/csv-table";
 import { TableSourceEditor } from "./TableSourceEditor";
@@ -346,6 +347,10 @@ export function DocumentEditor({
   const [diffRendered, setDiffRendered] = useState(false);
   const [tagInput, setTagInput] = useState("");
   const [baseVersion, setBaseVersion] = useState<number | undefined>(undefined);
+  // Custom field values + when the node entered its column (time in status).
+  // Saved by NodeFieldsPanel on their own, outside the body's Save.
+  const [nodeFields, setNodeFields] = useState<Record<string, unknown> | undefined>(undefined);
+  const [statusSince, setStatusSince] = useState<string | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
   // Creator + everyone else with a hand in the doc (version authors ∪
   // document-scope grantees) — server-resolved on GET /nodes/:id.
@@ -1130,6 +1135,8 @@ export function DocumentEditor({
       setPrime(loadedPrime);
       loadedPrimeRef.current = loadedPrime;
       setBaseVersion(node?.version);
+      setNodeFields((node as any)?.fields ?? undefined);
+      setStatusSince((node as any)?.status_since ?? undefined);
       setStatus(node?.status ?? null);
       setAuthor(node?.author ?? null);
       setUpdatedAt(node?.updated_at ?? null);
@@ -3078,6 +3085,25 @@ export function DocumentEditor({
                     onOpen={(id, t) =>
                       confirmLeave(`open "${t}"`, () => onNavigateDocument?.(nestId, id, title))
                     }
+                  />
+                )}
+
+                {/* Custom fields — the nest's definitions that apply to this
+              node type, each saved on its own (see NodeFieldsPanel). */}
+                {!isNew && nodeType && (
+                  <NodeFieldsPanel
+                    nestId={nestId}
+                    nodeId={nodeId}
+                    nodeType={nodeType}
+                    fields={nodeFields}
+                    statusSince={statusSince}
+                    canEdit={canEditContent && !isLocked}
+                    onSaved={(n) => {
+                      if (typeof n?.version === "number") setBaseVersion(n.version);
+                      if (typeof n?.status === "string") setStatus(n.status);
+                      setUpdatedAt(n?.updated_at ?? new Date().toISOString());
+                      setNodeFields(n?.fields ?? undefined);
+                    }}
                   />
                 )}
 

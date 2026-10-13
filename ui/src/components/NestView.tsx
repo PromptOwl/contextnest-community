@@ -62,6 +62,7 @@ import { RenameNestDialog } from "./RenameNestDialog";
 import { FolderDeleteDialog, type FolderDeleteTarget } from "./nest/FolderDeleteDialog";
 // Each tab is its own chunk, loaded when first opened.
 const ExternalEditsTab = lazyChunk(() => import("./nest/ExternalEditsTab").then((m) => ({ default: m.ExternalEditsTab })));
+const FieldsTab = lazyChunk(() => import("./nest/FieldsTab").then((m) => ({ default: m.FieldsTab })));
 const StewardsTab = lazyChunk(() => import("./nest/StewardsTab").then((m) => ({ default: m.StewardsTab })));
 const CollaboratorsTab = lazyChunk(() => import("./nest/CollaboratorsTab").then((m) => ({ default: m.CollaboratorsTab })));
 const ReviewTab = lazyChunk(() => import("./nest/ReviewTab").then((m) => ({ default: m.ReviewTab })));
@@ -263,6 +264,7 @@ export function NestView({
   const [allowSelfApprove, setAllowSelfApprove] = useState(false);
   const [primeOnlyReview, setPrimeOnlyReview] = useState(false);
   const [creatorIsReviewer, setCreatorIsReviewer] = useState(false);
+  const [reviewSlaHours, setReviewSlaHours] = useState<number | null>(null);
   const [accessLogEnabled, setAccessLogEnabled] = useState(true);
   const [primeTags, setPrimeTags] = useState<string[]>([]);
   // Push Confirmation Gate (superadmin-set). Held-push count drives the badge.
@@ -595,6 +597,7 @@ export function NestView({
     setAllowSelfApprove(settingsData.allow_self_approve);
     setPrimeOnlyReview(!!settingsData.prime_only_review);
     setCreatorIsReviewer(!!settingsData.creator_is_reviewer);
+    setReviewSlaHours((settingsData as api.NestSettings).review_sla_hours ?? null);
     setAccessLogEnabled((settingsData as Partial<api.NestSettings>).access_log_enabled ?? true);
     setPrimeTags(settingsData.prime_tags ?? []);
     setRequirePushConfirmation(!!(settingsData as any).require_push_confirmation);
@@ -821,6 +824,7 @@ export function NestView({
     "external-edits": !isReadOnly,
     stewards: stewardshipEnabled && canManageGovernance,
     collaborators: canManage || collabCanWrite,
+    fields: !grantOnly,
   };
   useEffect(() => {
     if (!initialLoad && !tabVisible[activeTab]) setActiveTab("overview");
@@ -1725,6 +1729,12 @@ export function NestView({
             {(canManage || collabCanWrite) && (
               <TabsTrigger value="collaborators" className={NEST_TAB}>Collaborators</TabsTrigger>
             )}
+            {/* Custom fields — readable by everyone on the nest (they explain
+              the values on its documents); the tab's own controls appear only
+              for admins and nest-wide reviewers (server-decided can_manage). */}
+            {!grantOnly && (
+              <TabsTrigger value="fields" className={NEST_TAB}>Fields</TabsTrigger>
+            )}
           </TabsList>
           {!isReadOnly && canEditDocs && (
             <div className="ml-auto flex shrink-0 items-center gap-2 pb-2 max-sm:order-first max-sm:w-full max-sm:justify-end">
@@ -2040,6 +2050,14 @@ export function NestView({
           </TabsContent>
         )}
 
+        {!grantOnly && (
+          <TabsContent value="fields" className="space-y-4">
+            <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+              <FieldsTab nestId={nestId} />
+            </Suspense>
+          </TabsContent>
+        )}
+
         {(canManage || collabCanWrite) && (
           <TabsContent value="collaborators" className="space-y-4">
             <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
@@ -2134,10 +2152,15 @@ export function NestView({
           requirePushConfirmation={requirePushConfirmation}
           isServerAdmin={isAdmin}
           creatorIsReviewer={creatorIsReviewer}
+          reviewSlaHours={reviewSlaHours}
           accessLogEnabled={accessLogEnabled}
           canDisableAccessLog={isAdmin || isOwner || permission === "owner"}
           canManageStewardship={canManageGovernance}
           onClose={() => setShowSettings(false)}
+          onManageFields={() => {
+            setShowSettings(false);
+            setActiveTab("fields");
+          }}
           onChanged={(next) => {
             setShowSettings(false);
             // Flip the governance UI (Pending/AI Ready/Review Queue tiles,
@@ -2149,6 +2172,7 @@ export function NestView({
             setPrimeTags(next.primeTags);
             setRequirePushConfirmation(next.requirePushConfirmation);
             setCreatorIsReviewer(next.creatorIsReviewer);
+            setReviewSlaHours(next.reviewSlaHours);
             setAccessLogEnabled(next.accessLogEnabled);
             fetchData();
           }}

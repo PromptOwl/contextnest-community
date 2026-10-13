@@ -128,7 +128,17 @@ export async function assertCanGrant(
 ): Promise<void> {
   const ent = getEntitlement();
   if (ent.maxUsers == null && ent.maxSubscribers == null) return;
-  const raises = changes.filter((c) => c.next !== "viewer");
+  let raises = changes.filter((c) => c.next !== "viewer");
+  // Service identities (access keys, agent personas) are never billed, so they never take a seat.
+  const ids = raises.map((c) => c.userId).filter((id): id is string => !!id);
+  if (ids.length) {
+    const svc = (await getDb().all(
+      `SELECT id FROM users WHERE COALESCE(is_service, 0) = 1 AND id IN (${ids.map(() => "?").join(",")})`,
+      ids,
+    )) as Array<{ id: string }>;
+    const skip = new Set(svc.map((r) => r.id));
+    raises = raises.filter((c) => !c.userId || !skip.has(c.userId));
+  }
   if (!raises.length) return;
 
   const classes = await billingClasses();

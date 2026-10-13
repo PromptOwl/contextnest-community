@@ -49,10 +49,7 @@ import {
   setThreadStatus,
   syncAnnotationsNode,
 } from "../annotations/service.js";
-import {
-  notifyCommentMentions,
-  notifyCommentReply,
-} from "../governance/mention-notify.js";
+import { notifyComment } from "../governance/mention-notify.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
@@ -69,8 +66,23 @@ import {
   getNodeForCaller,
   isIdUnderFolder,
   isDerivedAnnotationsNode,
+  fieldsOfRaw,
 } from "../nodes/service.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
+import {
+  addComputedFields,
+  createFieldDefinition,
+  deleteFieldDefinition,
+  describeFields,
+  listFieldDefinitionEvents,
+  listFieldDefinitions,
+  nodesWithInvalidValues,
+  storedFieldsOf,
+  updateFieldDefinition,
+  type FieldDefinition,
+} from "../nodes/custom-fields.js";
+import { readIndexedNodes } from "../nodes/node-index.js";
+import { AppError } from "../shared/errors.js";
 import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
@@ -165,6 +177,47 @@ function toolError(
   extra?: Record<string, unknown>,
 ): ToolResult {
   return { text, isError: true, data: { ...extra, code, message: text } };
+}
+
+/** A field definition write's AppError → a typed tool error. */
+function fieldToolError(err: unknown): ToolResult {
+  if (!(err instanceof AppError)) throw err;
+  const code =
+    err.statusCode === 403
+      ? "UNAUTHORIZED_ACTION"
+      : err.statusCode === 404
+        ? "DOCUMENT_NOT_FOUND"
+        : "VALIDATION_FAILED";
+  return toolError(err.message, code);
+}
+
+/** A field definition, for prose. */
+function describeDefinition(d: FieldDefinition): string {
+  const bits = [d.type + (d.unit ? ` (${d.unit})` : "")];
+  if (d.options.length) bits.push(`options: ${d.options.join(", ")}`);
+  if (d.required) bits.push("required");
+  if (d.default_value !== null && d.default_value !== undefined) {
+    bits.push(`default: ${Array.isArray(d.default_value) ? d.default_value.join(", ") : String(d.default_value)}`);
+  }
+  bits.push(`applies to: ${d.applies_to.join(", ")}`);
+  if (d.type === "time_in_status") bits.push("computed, read-only");
+  return `- **${d.label}** \`${d.key}\` — ${bits.join(" · ")}`;
+}
+
+/** Stored + computed field values for a node, or undefined when it has none. */
+function nodeFieldValues(
+  node: { type?: string; metadata?: unknown; moved_at?: string; created_at?: string },
+  defs: FieldDefinition[],
+): Record<string, unknown> | undefined {
+  const stored = storedFieldsOf(node.metadata);
+  const [withComputed] = addComputedFields(
+    [{ type: node.type, fields: stored, moved_at: node.moved_at, created_at: node.created_at }],
+    defs,
+  );
+  const known = Object.fromEntries(
+    Object.entries(withComputed.fields ?? {}).filter(([k]) => defs.some((d) => d.key === k)),
+  );
+  return Object.keys(known).length > 0 ? known : undefined;
 }
 
 /**
@@ -398,6 +451,11 @@ export const TOOL_DEFINITIONS = [
             "Return only nodes with an approved version, each served at that version rather than the live file — the view a public nest gives a stranger.",
         },
         limit: { type: "number", description: "Max nodes to return" },
+        fields: {
+          type: "object",
+          description:
+            'Filter by custom fields, field key → value; every entry must match. select/user/date/url/number match exactly (case-insensitive), multi_select matches when the option is one of its values, text matches a substring, checkbox takes true/false (unset counts as false), and "none" matches an unset field. E.g. {"severity": "high", "blocked": true}.',
+        },
       },
     },
   },
@@ -570,6 +628,11 @@ export const TOOL_DEFINITIONS = [
           description:
             'Folder path under nodes/ (e.g. "gtm/deals"); segments are slugified. A leading "nodes/" is accepted and not doubled, so "nodes/gtm/deals" and "gtm/deals" mean the same folder.',
         },
+        fields: {
+          type: "object",
+          description:
+            "Custom field values, field key → value (see context_fields for this nest's fields and their types). Validated against the definitions: select takes one option, multi_select a list of options, user an email on the nest, date YYYY-MM-DD, url an http(s) URL, checkbox true/false, number a number. null clears a field. Computed fields (time in status) can't be set.",
+        },
       },
       required: ["title", "content"],
     },
@@ -612,6 +675,11 @@ export const TOOL_DEFINITIONS = [
         changeNote: {
           type: "string",
           description: "Why this changed — recorded in version history",
+        },
+        fields: {
+          type: "object",
+          description:
+            "Custom field values, field key → value (see context_fields for this nest's fields and their types). Validated against the definitions: select takes one option, multi_select a list of options, user an email on the nest, date YYYY-MM-DD, url an http(s) URL, checkbox true/false, number a number. null clears a field; keys you leave out are untouched. Computed fields (time in status) can't be set.",
         },
       },
       // Neither is required alone — one of them is (the engine catalog's
@@ -666,6 +734,119 @@ export const TOOL_DEFINITIONS = [
         },
       },
       required: ["folder"],
+    },
+  },
+
+  // ─── Custom fields ──────────────────────────────────────────────────
+  // Nest configuration, not engine operations: definitions live in this
+  // repo's field_definitions table; VALUES live in each node's frontmatter
+  // (metadata.fields) and travel through context_create/update/get/list.
+
+  {
+    name: "context_fields",
+    description:
+      "List this nest's custom field definitions — key, label, type, options, required/default, which node types each applies to, and the scale label of a number. Use before setting `fields` on context_create / context_update or filtering context_list by them. Pass `history: true` for the audit trail of definition changes instead.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        history: {
+          type: "boolean",
+          description: "Return who changed which definition and how (newest first) instead of the definitions",
+        },
+      },
+    },
+  },
+  {
+    name: "context_create_field",
+    description:
+      "Define a custom field on this nest (nest admins, the owner, and nest-wide reviewer stewards only). Types: text, number, select, multi_select, date, user (a person on the nest), url, checkbox — plus the computed time_in_status. Presets: `estimate` (a number with a points/hours scale) and `time_in_status` (read-only, how long a task has sat in its current board column).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        key: {
+          type: "string",
+          description:
+            "Stable key values are stored under — lowercase letters, digits and _, starting with a letter. Can't change later. Optional with a preset.",
+        },
+        type: {
+          type: "string",
+          description:
+            "text | number | select | multi_select | date | user | url | checkbox | time_in_status. Optional with a preset.",
+        },
+        preset: {
+          type: "string",
+          description: "estimate | time_in_status — fills key, label and type",
+        },
+        label: { type: "string", description: "Display name, e.g. Severity" },
+        options: {
+          type: "array",
+          items: { type: "string" },
+          description: "Allowed values, in display order — select and multi_select only",
+        },
+        required: {
+          type: "boolean",
+          description: "New documents must carry a value (defaults fill it when set)",
+        },
+        default_value: {
+          description: "Value filled in on create when none is sent; must be valid for the type",
+        },
+        applies_to: {
+          type: "array",
+          items: { type: "string" },
+          description: 'Node types the field applies to. Default ["task"]; ["*"] for every type.',
+        },
+        unit: {
+          type: "string",
+          description: "Scale label for a number field, e.g. points or hours",
+        },
+      },
+    },
+  },
+  {
+    name: "context_update_field",
+    description:
+      "Change a custom field's label, options, required/default, node types or unit (nest admins, the owner, and nest-wide reviewer stewards only). The key and type are fixed: values on documents are stored under them.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        field: { type: "string", description: "The field's key (or id)" },
+        label: { type: "string", description: "Display name, e.g. Severity" },
+        options: {
+          type: "array",
+          items: { type: "string" },
+          description: "Allowed values, in display order — select and multi_select only",
+        },
+        required: {
+          type: "boolean",
+          description: "New documents must carry a value (defaults fill it when set)",
+        },
+        default_value: {
+          description: "Value filled in on create when none is sent; must be valid for the type",
+        },
+        applies_to: {
+          type: "array",
+          items: { type: "string" },
+          description: 'Node types the field applies to. Default ["task"]; ["*"] for every type.',
+        },
+        unit: {
+          type: "string",
+          description: "Scale label for a number field, e.g. points or hours",
+        },
+        position: { type: "number", description: "Display order, 0 first" },
+      },
+      required: ["field"],
+    },
+  },
+  {
+    name: "context_delete_field",
+    description:
+      "Remove a custom field definition (nest admins, the owner, and nest-wide reviewer stewards only). Values already on documents stay in their frontmatter and version history; they stop being shown, and defining the same key again brings them back.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        field: { type: "string", description: "The field's key (or id)" },
+      },
+      required: ["field"],
     },
   },
 
@@ -836,10 +1017,17 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_my_drafts",
     description:
-      "List YOUR unsubmitted drafts in this nest — documents you wrote that were never submitted for review (plus any that came back rejected). These are invisible to the review queue and unreadable by AI queries until submitted and approved. Use context_submit_review to hand one to a steward.",
+      "List YOUR unsubmitted drafts in this nest — documents you wrote that were never submitted for review (plus any that came back rejected). These are invisible to the review queue and unreadable by AI queries until submitted and approved — pass an id here to read one back and fix it. Use context_submit_review to hand one to a steward.",
     inputSchema: {
       type: "object" as const,
-      properties: {},
+      properties: {
+        id: {
+          type: "string",
+          description:
+            "Read one of YOUR drafts: returns its unapproved working copy (by node id) so you can fix it. Omit to list.",
+        },
+        title: { type: "string", description: "Same as id, by title." },
+      },
     },
   },
   {
@@ -1056,6 +1244,58 @@ async function resolveLlmBody(
     console.error("reconstructVersion failed", node.id, approved, err);
     return null;
   }
+}
+
+/**
+ * The caller's OWN unapproved working copy — context_my_drafts with an id.
+ *
+ * Under stewardship an unapproved body never reaches AI, which left an author
+ * fixing a draft through an agent editing blind: context_get refuses a
+ * never-approved draft and serves the older approved text otherwise. The
+ * author wrote these bytes and can open them in the UI, so handing them back
+ * on an explicit ask discloses nothing new.
+ *
+ * Explicit on purpose, never folded into context_get: agents run on personal
+ * keys (a support bot on the author's key must keep answering from the
+ * approved policy, not the author's half-finished rewrite), and search /
+ * query / export stay approved-only.
+ *
+ * "Own" means the caller authored the current (unapproved) version, or
+ * submitted its open review, and still holds edit rights on the node.
+ */
+async function resolveOwnDraft(
+  ctx: McpToolContext,
+  node: ContextNode,
+): Promise<{ body: string; version: number; status: string; approved: number | null } | null> {
+  if (!ctx.userEmail || !(await isStewardshipEnabled(ctx.nestId))) return null;
+  const [current, approved, pending] = await Promise.all([
+    versions.getCurrentVersion(ctx.nestId, node.id),
+    versions.getApprovedVersion(ctx.nestId, node.id),
+    reviews.getPendingReview(ctx.nestId, node.id),
+  ]);
+  if (current === 0 || (approved != null && current <= approved)) return null;
+  // node was read before these lookups: a write in between would pair one
+  // version's bytes with another version's label and author check.
+  if (Number(node.frontmatter?.version) !== current) return null;
+  const row = await versions.getVersion(ctx.nestId, node.id, current);
+  if (!row || !["draft", "rejected", "pending_review"].includes(row.status)) return null;
+  const me = ctx.userEmail.toLowerCase();
+  // The submitter counts only while their review covers the CURRENT version —
+  // otherwise these bytes may be someone else's later write.
+  const mine =
+    row.editedBy.toLowerCase() === me ||
+    (pending?.version === current && pending.requestedBy.toLowerCase() === me);
+  if (!mine) return null;
+  if (!(await stewardship.canUserEdit(ctx.nestId, node.id, ctx.userEmail)).allowed) {
+    return null;
+  }
+  ctx.servedVersions?.set(node.id, current);
+  return {
+    body: node.body || "",
+    version: current,
+    status: pending ? "pending_review" : row.status,
+    approved,
+  };
 }
 
 /** Read tools whose `data` names the documents they handed over, and what
@@ -1467,8 +1707,36 @@ async function runTool(
           text: `No nodes matched: ${args.query}`,
           data: { documents: [], traversal },
         };
+      // Field values from the index mirror (frontmatter only, no file reads).
+      // Under stewardship resolveLlmBody served the approved version's raw
+      // markdown, so the values come from IT, never the live (draft) file.
+      const queryDefs = await listFieldDefinitions(nestId);
+      const queryGoverned = queryDefs.length > 0 && (await isStewardshipEnabled(nestId));
+      const fmById = new Map<string, ContextNode["frontmatter"]>();
+      if (queryDefs.length > 0) {
+        for (const n of await readIndexedNodes(nestId)) fmById.set(n.id, n.frontmatter);
+      }
+      const bodyById = new Map(visible.map((e) => [e.doc.id, e.body ?? ""]));
+      const queryValues = (id: string) => {
+        const fm = fmById.get(id);
+        if (!fm) return undefined;
+        return nodeFieldValues(
+          {
+            type: fm.type,
+            metadata: queryGoverned
+              ? { fields: fieldsOfRaw(id, bodyById.get(id) ?? "") }
+              : fm.metadata,
+            moved_at: (fm.metadata as any)?.moved_at,
+            created_at: fm.created_at == null ? undefined : String(fm.created_at),
+          },
+          queryDefs,
+        );
+      };
       const list = nodes
-        .map((n, i) => `${i + 1}. **${n.title}** [${n.type}] ${(n.tags || []).join(" ")}`)
+        .map((n, i) => {
+          const f = describeFields(queryValues(n.id), queryDefs);
+          return `${i + 1}. **${n.title}** [${n.type}] ${(n.tags || []).join(" ")}${f.length ? `\n   ${f.join(" · ")}` : ""}`;
+        })
         .join("\n\n");
       return {
         text: `Found ${nodes.length} node(s) for \`${args.query}\`:\n\n${list}`,
@@ -1477,7 +1745,14 @@ async function runTool(
         // `source_nodes` is deliberately absent: this handler never gates
         // them, so serving them would hand out content the prose refuses.
         data: {
-          documents: visible.map((e) => ({ ...e.doc, body: e.body ?? undefined })),
+          documents: visible.map((e) => {
+            const values = queryValues(e.doc.id);
+            return {
+              ...e.doc,
+              body: e.body ?? undefined,
+              ...(values ? { frontmatter: { title: e.doc.title, metadata: { fields: values } } } : {}),
+            };
+          }),
           traversal,
         },
       };
@@ -1533,6 +1808,19 @@ async function runTool(
           );
       const hasRelations =
         !!relations && (relations.relations.length > 0 || relations.hidden_count > 0);
+      const fieldDefs = await listFieldDefinitions(nestId);
+      // Under stewardship `body` is the approved version's raw markdown: its
+      // field values, never the live (draft) file's.
+      const fieldGoverned = fieldDefs.length > 0 && (await isStewardshipEnabled(nestId));
+      const fieldValues = nodeFieldValues(
+        {
+          type: node.frontmatter.type,
+          metadata: fieldGoverned ? { fields: fieldsOfRaw(node.id, body) } : node.frontmatter.metadata,
+          moved_at: (node.frontmatter.metadata as any)?.moved_at,
+          created_at: node.frontmatter.created_at == null ? undefined : String(node.frontmatter.created_at),
+        },
+        fieldDefs,
+      );
       const meta = [
         `**Title:** ${node.frontmatter.title}`,
         `**Type:** ${node.frontmatter.type || "document"}`,
@@ -1540,6 +1828,7 @@ async function runTool(
           ? `**Tags:** ${node.frontmatter.tags.join(" ")}`
           : null,
         pdfSourceLine(node, body),
+        ...describeFields(fieldValues, fieldDefs).map((l) => `**${l.replace(": ", ":** ")}`),
         hasRelations ? `**Relations:**\n${relationsProse(relations!)}` : null,
       ]
         .filter(Boolean)
@@ -1562,6 +1851,9 @@ async function runTool(
             description: node.frontmatter.description,
             type: node.frontmatter.type || "document",
             tags: node.frontmatter.tags,
+            // Custom field values, where they are stored (metadata.fields),
+            // plus computed ones. The catalog's frontmatter carries metadata.
+            ...(fieldValues ? { metadata: { fields: fieldValues } } : {}),
           },
           body,
           ...(hasRelations
@@ -1584,8 +1876,25 @@ async function runTool(
         tag: args.tag,
         status: args.status,
         approvedOnly: args.approved_only === true,
+        // Under stewardship an agent sees approved content only — field
+        // values and field filters included, never the live draft's.
+        approvedFields: await isStewardshipEnabled(nestId),
         limit: args.limit || 50,
+        ...(args.fields && typeof args.fields === "object" && !Array.isArray(args.fields)
+          ? { fields: args.fields }
+          : {}),
+      }).catch((err) => {
+        if (err instanceof ValidationError) return err;
+        throw err;
       });
+      if (nodes instanceof ValidationError) return toolError(nodes.message, "VALIDATION_FAILED");
+      const listDefs = await listFieldDefinitions(nestId);
+      const valuesOf = (n: (typeof nodes)[number]) => {
+        const known = Object.fromEntries(
+          Object.entries(n.fields ?? {}).filter(([k]) => listDefs.some((d) => d.key === k)),
+        );
+        return Object.keys(known).length > 0 ? known : undefined;
+      };
       // No `body`: listNodesForCaller gates WHICH documents come back, but
       // the `content` it carries is the latest on-disk text — under
       // stewardship that is the unapproved draft resolveLlmBody would refuse.
@@ -1597,11 +1906,17 @@ async function runTool(
         type: n.type || "document",
         status: n.status || "draft",
         tags: n.tags,
+        // Custom field values ride in the catalog's optional `frontmatter`,
+        // where they are stored (metadata.fields).
+        ...(valuesOf(n) ? { frontmatter: { title: n.title, metadata: { fields: valuesOf(n) } } } : {}),
       }));
       if (!nodes.length)
         return { text: "No nodes found with the given filters.", data: { documents } };
       const list = nodes
-        .map((n, i) => `${i + 1}. **${n.title}** [${n.type}]`)
+        .map((n, i) => {
+          const f = describeFields(valuesOf(n), listDefs);
+          return `${i + 1}. **${n.title}** [${n.type}]${f.length ? ` — ${f.join(" · ")}` : ""}`;
+        })
         .join("\n");
       return { text: `${nodes.length} node(s):\n\n${list}`, data: { documents } };
     }
@@ -1898,31 +2213,22 @@ async function runTool(
       // be allowed to READ (the approval gate applies to context_comments, not
       // here), so the reply should tell them what THEY did and nothing about
       // what is already in the thread.
-      // A reply also notifies the thread's earlier participants, the same
-      // fan-out the REST reply route uses.
+      // The @mentions, then (for a reply) the thread's earlier participants —
+      // the same fan-out the REST reply route uses — then the document's
+      // watchers and reviewer stewards. One notification per person.
       //
       // baseUrl: without it the notification still reaches the person, but
       // its "Open document" link falls back to PUBLIC_BASE_URL and comes out
       // empty when that isn't configured — every other notifying tool in
       // this file passes it, and the REST route passes requestBaseUrl.
-      if (threadId) {
-        await notifyCommentReply({
-          nestId,
-          nodeId: node.id,
-          thread,
-          body,
-          actorEmail: userEmail,
-          baseUrl: ctx.baseUrl,
-        });
-      } else {
-        await notifyCommentMentions({
-          nestId,
-          nodeId: node.id,
-          body,
-          actorEmail: userEmail,
-          baseUrl: ctx.baseUrl,
-        });
-      }
+      await notifyComment({
+        nestId,
+        nodeId: node.id,
+        body,
+        actorEmail: userEmail,
+        baseUrl: ctx.baseUrl,
+        ...(threadId ? { thread } : {}),
+      });
       await syncAnnotationsNode(nestId, node.id, userEmail);
       return threadId
         ? `Replied on "${label}", in thread ${thread.id}.`
@@ -1991,6 +2297,7 @@ async function runTool(
                 tags: args.tags,
                 scope: args.scope,
                 folder: args.folder,
+                ...(args.fields !== undefined ? { fields: args.fields } : {}),
               },
             ],
           },
@@ -2005,19 +2312,28 @@ async function runTool(
           );
         }
 
-        const { node, version } = await createNode(
-          nestId,
-          {
-            title: args.title,
-            content: args.content,
-            type: args.type,
-            tags: args.tags,
-            scope: args.scope,
-            folder: args.folder,
-            client: ctx.client,
-          },
-          userEmail,
-        );
+        let created: Awaited<ReturnType<typeof createNode>>;
+        try {
+          created = await createNode(
+            nestId,
+            {
+              title: args.title,
+              content: args.content,
+              type: args.type,
+              tags: args.tags,
+              scope: args.scope,
+              folder: args.folder,
+              client: ctx.client,
+              ...(args.fields !== undefined ? { fields: args.fields } : {}),
+            },
+            userEmail,
+          );
+        } catch (err) {
+          // A field value the nest's definitions refuse: say which, typed.
+          if (err instanceof ValidationError) return toolError(err.message, "VALIDATION_FAILED");
+          throw err;
+        }
+        const { node, version } = created;
         return {
           text: `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}`,
           // checkpoint is null by construction: this server seals nothing —
@@ -2053,19 +2369,27 @@ async function runTool(
       }
       // Tags REPLACE, per the engine catalog's context_update. This used to
       // merge ("Tags to add"), which left no way to remove a tag over MCP.
-      const { node: updated, version } = await updateNode(
-        nestId,
-        node.id,
-        {
-          content: args.content,
-          append: args.append,
-          tags: args.tags,
-          status: args.status,
-          changeNote: args.changeNote,
-          client: ctx.client,
-        },
-        userEmail,
-      );
+      let result: Awaited<ReturnType<typeof updateNode>>;
+      try {
+        result = await updateNode(
+          nestId,
+          node.id,
+          {
+            content: args.content,
+            append: args.append,
+            tags: args.tags,
+            status: args.status,
+            changeNote: args.changeNote,
+            client: ctx.client,
+            ...(args.fields !== undefined ? { fields: args.fields } : {}),
+          },
+          userEmail,
+        );
+      } catch (err) {
+        if (err instanceof ValidationError) return toolError(err.message, "VALIDATION_FAILED");
+        throw err;
+      }
+      const { node: updated, version } = result;
       return {
         text: `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}`,
         // checkpoint null — see context_create.
@@ -2076,6 +2400,98 @@ async function runTool(
           checkpoint: null,
         },
       };
+    }
+
+    case "context_fields": {
+      if (args.history === true) {
+        const events = await listFieldDefinitionEvents(nestId);
+        if (events.length === 0) return { text: "No field definition changes recorded yet.", data: { events } };
+        const lines = events.map(
+          (e) =>
+            `- ${e.at} — ${e.actor_email ?? e.actor_id ?? "unknown"} ${e.action}d \`${e.field_key}\``,
+        );
+        return { text: `${events.length} definition change(s):\n\n${lines.join("\n")}`, data: { events } };
+      }
+      const defs = await listFieldDefinitions(nestId);
+      if (defs.length === 0) {
+        return {
+          text: "This nest defines no custom fields yet. A nest admin can add some with context_create_field.",
+          data: { fields: [] },
+        };
+      }
+      return {
+        text: `${defs.length} custom field(s):\n\n${defs.map(describeDefinition).join("\n")}`,
+        data: { fields: defs },
+      };
+    }
+
+    // PRIMARY gate for the three definition writes is assertCanManageFields
+    // inside the service (owner / nest admin / license admin / nest-wide
+    // reviewer steward, never on an archived nest) — the same function the
+    // REST routes call, so the two surfaces can't disagree.
+    case "context_create_field": {
+      try {
+        const field = await createFieldDefinition(nestId, userId, {
+          key: args.key,
+          label: args.label,
+          type: args.type,
+          options: args.options,
+          required: args.required,
+          default_value: args.default_value,
+          applies_to: args.applies_to,
+          unit: args.unit,
+          preset: args.preset,
+        });
+        return {
+          text: `Defined field:\n${describeDefinition(field)}`,
+          data: { field },
+        };
+      } catch (err) {
+        return fieldToolError(err);
+      }
+    }
+
+    case "context_update_field": {
+      try {
+        const patch: Record<string, unknown> = {};
+        for (const k of [
+          "label",
+          "options",
+          "required",
+          "default_value",
+          "applies_to",
+          "unit",
+          "position",
+          "key",
+          "type",
+        ]) {
+          if (args[k] !== undefined) patch[k] = args[k];
+        }
+        const field = await updateFieldDefinition(nestId, String(args.field ?? ""), userId, patch);
+        const invalid = await nodesWithInvalidValues(nestId, field);
+        return {
+          text: `Updated field:\n${describeDefinition(field)}${
+            invalid.length
+              ? `\n\n${invalid.length} document(s) keep a value that no longer fits this definition (it stays in their history; the next edit of that field must fix it): ${invalid.slice(0, 10).join(", ")}`
+              : ""
+          }`,
+          data: { field, invalid_values: invalid.length, invalid_nodes: invalid.slice(0, 50) },
+        };
+      } catch (err) {
+        return fieldToolError(err);
+      }
+    }
+
+    case "context_delete_field": {
+      try {
+        const field = await deleteFieldDefinition(nestId, String(args.field ?? ""), userId);
+        return {
+          text: `Removed field **${field.label}** (\`${field.key}\`). Values already on documents stay in their history.`,
+          data: { deleted: true, field },
+        };
+      } catch (err) {
+        return fieldToolError(err);
+      }
     }
 
     case "context_delete": {
@@ -2526,6 +2942,42 @@ async function runTool(
     }
 
     case "context_my_drafts": {
+      if (args.id || args.title) {
+        // Read one draft back. getNodeForCaller is context_get's gate: a miss
+        // and a denied id answer alike, so this is no existence oracle.
+        let node: ContextNode;
+        try {
+          node = await getNodeForCaller(
+            nestId,
+            args.title ? { title: args.title } : { id: args.id },
+            ctx.userId,
+            userEmail,
+          );
+        } catch {
+          return toolError(`Node not found: ${args.title || args.id}`, "DOCUMENT_NOT_FOUND");
+        }
+        const draft = await resolveOwnDraft(ctx, node);
+        if (!draft) {
+          return toolError(
+            `"${node.frontmatter.title}" has no unapproved draft of yours — use context_get for its approved text.`,
+            "UNAUTHORIZED_ACTION",
+          );
+        }
+        const meta = [
+          `**Title:** ${node.frontmatter.title}`,
+          `**Type:** ${node.frontmatter.type || "document"}`,
+          node.frontmatter.tags?.length
+            ? `**Tags:** ${node.frontmatter.tags.join(" ")}`
+            : null,
+          `**Status:** your unapproved draft v${draft.version} (${draft.status}) — ` +
+            (draft.approved != null
+              ? `AI readers still get approved v${draft.approved}.`
+              : `not available to AI readers until approved.`),
+        ]
+          .filter(Boolean)
+          .join("\n");
+        return `${meta}\n\n---\n\n${draft.body || "(no content)"}\n\n_Fix it with \`context_update\`; it stays a draft until approved._`;
+      }
       // Self-scoped by construction — only rows this caller authored, in a nest
       // they already hold read on, so no extra permission gate.
       const { drafts, total } = await versions.listMyDrafts({
@@ -2548,7 +3000,7 @@ async function runTool(
         total > drafts.length
           ? `\n\n_Showing the ${drafts.length} most recent of ${total}._`
           : "";
-      return `# My Drafts\n**${total} unsubmitted document(s)**\n\n${list}${more}\n\nSubmit one with \`context_submit_review\`.`;
+      return `# My Drafts\n**${total} unsubmitted document(s)**\n\n${list}${more}\n\nRead one back with \`context_my_drafts\` + its id; submit with \`context_submit_review\`.`;
     }
 
     case "context_submit_review": {

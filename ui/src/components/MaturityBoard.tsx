@@ -97,6 +97,15 @@ import {
   ShareAndAssignDialog,
   SubItemChip,
 } from "./board/CardParts";
+import { FieldChip, FieldFilterMenu } from "./fields/FieldParts";
+import {
+  applicableFields,
+  fieldKeyLabel,
+  fieldValueForMove,
+  isGroupable,
+  matchesFieldFilters,
+  optionDot,
+} from "../lib/custom-fields";
 
 interface Props {
   nestId: string;
@@ -149,6 +158,7 @@ function loadConfig(nestId: string): BoardSettings {
         layouts,
         tasksOnly: p.tasksOnly === true,
         filterTags: strings(p.filterTags),
+        ...fieldSettings(p),
       };
     }
   } catch {
@@ -159,8 +169,31 @@ function loadConfig(nestId: string): BoardSettings {
   return { dimension: "folder", tagNamespace: "", layouts: {} };
 }
 
-const DIMENSION_KINDS: readonly string[] = ["folder", "status", "tag", "assignee", "priority"];
-const SWIMLANE_KINDS: readonly string[] = ["assignee", "priority", "parent"];
+const DIMENSION_KINDS: readonly string[] = ["folder", "status", "tag", "assignee", "priority", "field"];
+const SWIMLANE_KINDS: readonly string[] = ["assignee", "priority", "parent", "field"];
+
+/** The custom-field parts of a stored board config, shape-checked. */
+function fieldSettings(cfg: Record<string, any>): Pick<
+  BoardSettings,
+  "fieldKey" | "swimlaneField" | "filterFields"
+> {
+  const key = (v: unknown) => (typeof v === "string" && /^[a-z][a-z0-9_]*$/.test(v) ? v : undefined);
+  const filters: Record<string, string> = {};
+  if (cfg?.filterFields && typeof cfg.filterFields === "object") {
+    for (const [k, v] of Object.entries(cfg.filterFields)) {
+      if (key(k) && typeof v === "string") filters[k] = v;
+    }
+  }
+  return {
+    fieldKey: key(cfg?.fieldKey),
+    swimlaneField: key(cfg?.swimlaneField),
+    filterFields: Object.keys(filters).length > 0 ? filters : undefined,
+  };
+}
+
+/** "field:severity" ↔ { dimension: "field", fieldKey: "severity" } — the
+ *  value the Columns-by / Lanes selects carry for a custom field. */
+const FIELD_PREFIX = "field:";
 
 /** A saved board's config → the settings this component works on. Same
  *  normalisation as loadConfig, so a hand-edited blob can't break the page. */
@@ -191,6 +224,7 @@ function settingsFromBoard(cfg: Record<string, any>): BoardSettings {
     swimlane: SWIMLANE_KINDS.includes(cfg?.swimlane) ? cfg.swimlane : undefined,
     hideDoneAfterDays:
       typeof cfg?.hideDoneAfterDays === "number" ? cfg.hideDoneAfterDays : undefined,
+    ...fieldSettings(cfg),
   };
 }
 
@@ -234,6 +268,16 @@ export function MaturityBoard({
   const me = adminStatus?.me?.email?.toLowerCase();
   const qc = useQueryClient();
   const nestSettings = useNestSettings(nestId);
+  // Custom field definitions: card chips, field columns/lanes, field filters.
+  const fieldsQuery = useQuery(reads.fields(nestId));
+  const fieldDefs = useMemo(() => fieldsQuery.data?.fields ?? [], [fieldsQuery.data]);
+  // Time in status ticks on the cards without refetching.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!fieldDefs.some((d) => d.type === "time_in_status")) return;
+    const t = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(t);
+  }, [fieldDefs]);
   const [nodes, setNodes] = useState<BoardNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -309,6 +353,8 @@ export function MaturityBoard({
           updated_at: n.updated_at,
           prime: n.prime,
           open_blockers: n.open_blockers,
+          fields: n.fields,
+          status_since: n.status_since,
         })),
       );
     } catch (e: any) {
@@ -438,7 +484,24 @@ export function MaturityBoard({
     [persist],
   );
 
-  const effectiveConfig = useMemo(() => resolveConfig(config), [config]);
+  const effectiveConfig = useMemo(() => resolveConfig(config, fieldDefs), [config, fieldDefs]);
+  const laneField = useMemo(
+    () =>
+      config.swimlane === "field"
+        ? fieldDefs.find((d) => d.key === config.swimlaneField)
+        : undefined,
+    [config.swimlane, config.swimlaneField, fieldDefs],
+  );
+  // Fields a board can group or filter by, among those its cards can carry.
+  const groupableFields = useMemo(
+    () =>
+      fieldDefs.filter(
+        (d) =>
+          isGroupable(d) &&
+          (!config.tasksOnly || !typeTaskEnabled || applicableFields([d], "task").length > 0),
+      ),
+    [fieldDefs, config.tasksOnly, typeTaskEnabled],
+  );
 
   // Quick-filter by person (Jira/ClickUp avatar row). Session-only: a filter
   // is a glance, not a setting.
@@ -479,9 +542,10 @@ export function MaturityBoard({
             n.tags.some(
               (t) => t.replace(/^#/, "").toLowerCase() === f.toLowerCase(),
             ),
-          ),
+          ) &&
+          matchesFieldFilters(n, config.filterFields, fieldDefs),
       ),
-    [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, config.hideDoneAfterDays, assigneeFilter, hideBlocked],
+    [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, config.filterFields, fieldDefs, config.hideDoneAfterDays, assigneeFilter, hideBlocked],
   );
 
   const { columns, byColumn } = useMemo(
@@ -561,6 +625,8 @@ export function MaturityBoard({
     due?: string | null;
     priority?: Priority | string | null;
     parent?: string | null;
+    /** Custom field values — merged server-side, so only changed keys. */
+    fields?: Record<string, unknown>;
   };
 
   // A write that would land as a draft on a governed document waits here for
@@ -578,7 +644,16 @@ export function MaturityBoard({
       if (!prev) return;
       const optimistic: BoardNode = { ...prev };
       for (const [k, v] of Object.entries(fields)) {
+        if (k === "fields") continue;
         (optimistic as any)[k] = v === null ? undefined : v;
+      }
+      if (fields.fields) {
+        const next = { ...(prev.fields ?? {}) };
+        for (const [k, v] of Object.entries(fields.fields)) {
+          if (v === null) delete next[k];
+          else next[k] = v;
+        }
+        optimistic.fields = next;
       }
       setNodes((ns) => ns.map((n) => (n.id === id ? optimistic : n)));
       try {
@@ -596,6 +671,8 @@ export function MaturityBoard({
                     due: r.due,
                     priority: r.priority,
                     parent: r.parent,
+                    fields: r.fields,
+                    status_since: r.status_since ?? n.status_since,
                     updated_at: r.updated_at ?? n.updated_at,
                   }
                 : n,
@@ -654,8 +731,25 @@ export function MaturityBoard({
             : {}),
           // Added inside a swimlane: it belongs to that lane.
           ...(config.swimlane && laneKey !== undefined
-            ? laneFields(config.swimlane as SwimlaneKind, laneKey)
+            ? laneFields(config.swimlane as SwimlaneKind, laneKey, laneField)
             : {}),
+          // Custom fields from the column, the lane and the board's field
+          // filters, merged — or the new card would land off the board.
+          ...(() => {
+            const merged: Record<string, unknown> = {};
+            for (const [k, v] of Object.entries(config.filterFields ?? {})) {
+              const def = fieldDefs.find((d) => d.key === k);
+              if (!def || v === "none") continue;
+              if (def.type === "checkbox") merged[k] = v === "true";
+              else if (def.type === "multi_select") merged[k] = [v];
+              else merged[k] = v;
+            }
+            Object.assign(merged, placement.fields ?? {});
+            if (config.swimlane === "field" && laneKey !== undefined) {
+              Object.assign(merged, laneFields("field", laneKey, laneField).fields ?? {});
+            }
+            return Object.keys(merged).length > 0 ? { fields: merged } : {};
+          })(),
           ...(parent ? { parent } : {}),
           // Filtering by one person and adding a card hands it to them —
           // otherwise it would vanish from the filtered board on creation.
@@ -670,7 +764,7 @@ export function MaturityBoard({
         throw e;
       }
     },
-    [effectiveConfig, config.filterTags, config.swimlane, nestId, typeTaskEnabled, assigneeFilter, qc, load],
+    [effectiveConfig, config.filterTags, config.filterFields, config.swimlane, laneField, fieldDefs, nestId, typeTaskEnabled, assigneeFilter, qc, load],
   );
 
   /**
@@ -694,13 +788,23 @@ export function MaturityBoard({
           rankId = res?.node?.id ?? id;
           if (hasExtra) await api.updateNode(nestId, rankId, extra as any);
           toast.success("Moved");
-        } else if (plan?.kind === "retag" || plan?.kind === "set-fields" || hasExtra) {
+        } else if (
+          plan?.kind === "retag" ||
+          plan?.kind === "set-fields" ||
+          plan?.kind === "set-custom" ||
+          hasExtra
+        ) {
           // updateNode replaces the tag set, so a retag's full next set both
           // adds the target column's tag and drops the source column's.
+          const customFields = {
+            ...(plan?.kind === "set-custom" ? plan.fields : {}),
+            ...(extra.fields ?? {}),
+          };
           const body = {
             ...(plan?.kind === "retag" ? { tags: plan.tags } : {}),
             ...(plan?.kind === "set-fields" ? plan.fields : {}),
             ...extra,
+            ...(Object.keys(customFields).length > 0 ? { fields: customFields } : {}),
           };
           const res: any = await api.updateNode(nestId, id, body as any);
           const st = res?.node?.status;
@@ -743,9 +847,24 @@ export function MaturityBoard({
 
       // Changing lane sets that lane's field (Linear: drag across swimlanes).
       const lane = config.swimlane as SwimlaneKind | undefined;
+      const currentLane = lane ? laneKeyOf(node, lane, laneField) : undefined;
       const extra: CardFields =
-        lane && laneKey !== undefined && laneKey !== laneKeyOf(node, lane) && laneKey !== node.id
-          ? laneFields(lane, laneKey)
+        lane && laneKey !== undefined && laneKey !== currentLane && laneKey !== node.id
+          ? lane === "field" && laneField
+            ? laneField.type === "time_in_status"
+              ? {}
+              : {
+                  // Keep a multi-select card's other options; swap the lane's.
+                  fields: {
+                    [laneField.key]: fieldValueForMove(
+                      laneField,
+                      node.fields?.[laneField.key],
+                      laneKey,
+                      currentLane,
+                    ),
+                  },
+                }
+            : laneFields(lane, laneKey)
           : {};
       const laneChange = Object.keys(extra).length > 0;
 
@@ -780,7 +899,7 @@ export function MaturityBoard({
       }
       await executeMove(id, plan, place, extra);
     },
-    [dragId, dragFromCol, dropBefore, nodes, config.swimlane, effectiveConfig, governance, executeMove, activeBoard, rankCard],
+    [dragId, dragFromCol, dropBefore, nodes, config.swimlane, laneField, effectiveConfig, governance, executeMove, activeBoard, rankCard],
   );
 
   // Every dimension is draggable now that a same-column drop reorders: on the
@@ -1013,7 +1132,16 @@ export function MaturityBoard({
   const lanes = useMemo(() => {
     const lane = config.swimlane as SwimlaneKind | undefined;
     if (!lane) return null;
-    const none = { assignee: "Unassigned", priority: "No priority", parent: "No parent" }[lane];
+    if (lane === "field" && !laneField) return null;
+    if (lane === "field" && laneField) {
+      return buildLanes(
+        visibleNodes,
+        lane,
+        (key) => fieldKeyLabel(laneField, key, personLabel),
+        laneField,
+      );
+    }
+    const none = { assignee: "Unassigned", priority: "No priority", parent: "No parent", field: "" }[lane];
     return buildLanes(visibleNodes, lane, (key) =>
       key === UNCATEGORIZED
         ? none
@@ -1023,7 +1151,7 @@ export function MaturityBoard({
             ? PRIORITY_LABELS[key as Priority] ?? key
             : (nodes.find((n) => n.id === key)?.title ?? key),
     );
-  }, [config.swimlane, visibleNodes, nodes, personLabel]);
+  }, [config.swimlane, laneField, visibleNodes, nodes, personLabel]);
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(new Set());
 
   /** Drop handling for a column (no lane) or one lane's cell of it. */
@@ -1085,6 +1213,13 @@ export function MaturityBoard({
           {effectiveConfig.dimension === "priority" && (
             <PriorityIcon priority={col.key === UNCATEGORIZED ? undefined : col.key} />
           )}
+          {effectiveConfig.field && col.key !== UNCATEGORIZED && (
+            effectiveConfig.field.type === "user" ? (
+              <Avatar email={col.key} size="sm" />
+            ) : effectiveConfig.field.type === "select" || effectiveConfig.field.type === "multi_select" ? (
+              <span className={`h-2 w-2 shrink-0 rounded-full ${optionDot(effectiveConfig.field, col.key)}`} />
+            ) : null
+          )}
           {isDone && <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" />}
           <span
             className={`min-w-0 text-sm font-medium truncate ${
@@ -1093,7 +1228,9 @@ export function MaturityBoard({
           >
             {effectiveConfig.dimension === "assignee" && col.key !== UNCATEGORIZED
               ? personLabel(col.key)
-              : col.label}
+              : effectiveConfig.field?.type === "user" && col.key !== UNCATEGORIZED
+                ? personLabel(col.key)
+                : col.label}
           </span>
         </span>
         <div className="flex items-center gap-1 shrink-0">
@@ -1243,6 +1380,20 @@ export function MaturityBoard({
                     ))}
                   </div>
                 )}
+                {/* Custom fields with a value, in the nest's order. The
+                    board's own grouping field is the column — not repeated. */}
+                {(() => {
+                  const shown = applicableFields(fieldDefs, n.type).filter(
+                    (d) =>
+                      d.key !== effectiveConfig.field?.key &&
+                      d.key !== laneField?.key,
+                  );
+                  if (shown.length === 0) return null;
+                  const chips = shown.map((d) => (
+                    <FieldChip key={d.key} def={d} node={n} now={now} personLabel={personLabel} />
+                  ));
+                  return <div className="mt-1.5 flex flex-wrap gap-1 pl-5">{chips}</div>;
+                })()}
                 {/* Footer, Linear-style: priority · due · sub-items · last
                     touched on the left, assignee on the right. */}
                 <div className="mt-1.5 flex min-w-0 items-center gap-1.5 pl-5 min-h-6">
@@ -1342,13 +1493,18 @@ export function MaturityBoard({
         <div className="flex items-center gap-2">
           <label className="text-sm text-muted-foreground">Columns by</label>
           <select
-            value={config.dimension}
+            value={config.dimension === "field" ? `${FIELD_PREFIX}${config.fieldKey ?? ""}` : config.dimension}
             onChange={(e) => {
               // The add-column input is shared between folder and tag mode;
               // an unsubmitted value from one doesn't mean anything in the
               // other, so switching dimensions clears it.
               setNewColumn("");
-              updateConfig({ dimension: e.target.value as DimensionKind });
+              const v = e.target.value;
+              if (v.startsWith(FIELD_PREFIX)) {
+                updateConfig({ dimension: "field", fieldKey: v.slice(FIELD_PREFIX.length) });
+              } else {
+                updateConfig({ dimension: v as DimensionKind });
+              }
             }}
             className="h-8 rounded-md border border-input bg-background px-2 text-sm"
           >
@@ -1357,20 +1513,49 @@ export function MaturityBoard({
             <option value="tag">Tag namespace</option>
             <option value="assignee">Assignee</option>
             <option value="priority">Priority</option>
+            {groupableFields.length > 0 && (
+              <optgroup label="Fields">
+                {groupableFields.map((d) => (
+                  <option key={d.key} value={`${FIELD_PREFIX}${d.key}`}>
+                    {d.label}
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </select>
           {/* Swimlanes: sub-group the columns into rows (Linear/Jira). */}
           <label className="text-sm text-muted-foreground">Lanes</label>
           <select
-            value={config.swimlane ?? ""}
-            onChange={(e) =>
-              updateConfig({ swimlane: (e.target.value || undefined) as SwimlaneKind | undefined })
+            value={
+              config.swimlane === "field"
+                ? `${FIELD_PREFIX}${config.swimlaneField ?? ""}`
+                : (config.swimlane ?? "")
             }
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v.startsWith(FIELD_PREFIX)) {
+                updateConfig({ swimlane: "field", swimlaneField: v.slice(FIELD_PREFIX.length) });
+              } else {
+                updateConfig({ swimlane: (v || undefined) as SwimlaneKind | undefined });
+              }
+            }}
             className="h-8 rounded-md border border-input bg-background px-2 text-sm"
           >
             <option value="">None</option>
             {config.dimension !== "assignee" && <option value="assignee">Assignee</option>}
             {config.dimension !== "priority" && <option value="priority">Priority</option>}
             <option value="parent">Parent</option>
+            {groupableFields.some((d) => !(config.dimension === "field" && d.key === config.fieldKey)) && (
+              <optgroup label="Fields">
+                {groupableFields
+                  .filter((d) => !(config.dimension === "field" && d.key === config.fieldKey))
+                  .map((d) => (
+                    <option key={d.key} value={`${FIELD_PREFIX}${d.key}`}>
+                      {d.label}
+                    </option>
+                  ))}
+              </optgroup>
+            )}
           </select>
           {config.dimension === "tag" && (
             <Input
@@ -1604,6 +1789,21 @@ export function MaturityBoard({
               remove one.
             </li>
           </>
+        ) : config.dimension === "field" ? (
+          <>
+            <li>
+              One column per{" "}
+              <span className="font-medium text-foreground">
+                {effectiveConfig.field?.label.toLowerCase() ?? "value"}
+              </span>
+              {effectiveConfig.field
+                ? canEditDocs
+                  ? " — drag a card across to change it. Every change is a versioned edit."
+                  : "."
+                : " — this field no longer exists; pick another grouping."}
+            </li>
+            <li>Drag a card up or down to rank it; pick Lanes to split rows.</li>
+          </>
         ) : isFieldDimension(config.dimension) ? (
           <>
             <li>
@@ -1734,6 +1934,26 @@ export function MaturityBoard({
             className="h-7 w-32 text-xs"
           />
         </div>
+        {/* Custom-field filters (select / person / checkbox), saved per board. */}
+        {groupableFields.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5" data-testid="board-field-filters">
+            {groupableFields.map((d) => (
+              <FieldFilterMenu
+                key={d.key}
+                def={d}
+                value={config.filterFields?.[d.key]}
+                people={members}
+                personLabel={personLabel}
+                onChange={(v) => {
+                  const next = { ...(config.filterFields ?? {}) };
+                  if (v === undefined) delete next[d.key];
+                  else next[d.key] = v;
+                  updateConfig({ filterFields: Object.keys(next).length > 0 ? next : undefined });
+                }}
+              />
+            ))}
+          </div>
+        )}
         {(boardPeople.length > 0 || assigneeFilter.size > 0) && (
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-muted-foreground">Assignee</span>
@@ -1862,6 +2082,14 @@ export function MaturityBoard({
                         <Avatar email={lane.key} size="sm" />
                       )}
                       {config.swimlane === "priority" && <PriorityIcon priority={lane.key === UNCATEGORIZED ? undefined : lane.key} />}
+                      {laneField && lane.key !== UNCATEGORIZED && laneField.type === "user" && (
+                        <Avatar email={lane.key} size="sm" />
+                      )}
+                      {laneField &&
+                        lane.key !== UNCATEGORIZED &&
+                        (laneField.type === "select" || laneField.type === "multi_select") && (
+                          <span className={`h-2 w-2 rounded-full ${optionDot(laneField, lane.key)}`} />
+                        )}
                       <span className={lane.key === UNCATEGORIZED ? "text-muted-foreground" : ""}>
                         {lane.label}
                       </span>
@@ -1871,7 +2099,7 @@ export function MaturityBoard({
                       <div className="flex gap-3">
                         {columns.map((col) => {
                           const cards = (orderedByColumn[col.key] ?? []).filter(
-                            (n) => laneKeyOf(n, config.swimlane as SwimlaneKind) === lane.key,
+                            (n) => laneKeyOf(n, config.swimlane as SwimlaneKind, laneField) === lane.key,
                           );
                           const cell = `${lane.key}\u0001${col.key}`;
                           return (

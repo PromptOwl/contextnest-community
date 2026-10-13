@@ -106,7 +106,11 @@ function srcFiles(dir: string): string[] {
 describe("node sub-route completeness", () => {
   it("every registered GET /nodes/:id/<sub> route is refused to an access key", () => {
     const subs = new Set<string>();
+    // Routers that share the `/:nodeId{.+}/<sub>` shape but are mounted
+    // somewhere other than /nests/:id/nodes — checked on their own below.
+    const notNodeRouters = [join("src", "metacognition", "routes.ts")];
     for (const f of srcFiles("src")) {
+      if (notNodeRouters.some((r) => f.endsWith(r))) continue;
       const text = readFileSync(f, "utf8");
       for (const m of text.matchAll(/\.(?:get|head|all)\(\s*"\/:nodeId\{\.\+\}(\/[^"]+)"/g)) {
         subs.add(m[1].replace(/:version\{\[0-9\]\+\}/, "3").replace(/:[A-Za-z]+(\{[^}]*\})?/g, "x"));
@@ -117,5 +121,16 @@ describe("node sub-route completeness", () => {
       (s) => !ALLOWED_NODE_SUBROUTES.includes(s) && ok("GET", `/nests/${N}/nodes/nodes/guide${s}`),
     );
     expect(open).toEqual([]);
+  });
+
+  it("refuses the metacognition agent routes (config, run, stats) to an access key", () => {
+    for (const [m, p] of [
+      ["GET", `/nests/${N}/metacognition`],
+      ["GET", `/nests/${N}/metacognition/nodes/agent`],
+      ["GET", `/nests/${N}/metacognition/nodes/agent/stats`],
+      ["POST", `/nests/${N}/metacognition/nodes/agent/run`],
+    ]) {
+      expect(ok(m, p), `${m} ${p}`).toBe(false);
+    }
   });
 });

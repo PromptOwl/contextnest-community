@@ -18,7 +18,7 @@ describe("dashboard page registry", () => {
     expect(ids).toEqual([
       "nests", "my-work", "my-drafts",
       "teams", "api-keys", "connected-apps",
-      "teammates", "settings", "trace",
+      "teammates", "settings", "trace", "messages",
       "guide", "account",
     ]);
     const orders = appPages.map((p) => p.order);
@@ -69,6 +69,16 @@ describe("dashboard rail groups", () => {
     expect(visibleAppPage("settings", { isAdmin: true }).id).toBe("settings");
     expect(visibleAppPage("settings", { isAdmin: false }).id).toBe(DEFAULT_PAGE_ID);
     expect(visibleAppPage("teams", { isAdmin: false }).id).toBe("teams");
+  });
+
+  it("shows the message log to signed-in superadmins only — never open-mode admins", () => {
+    expect(visibleAppPage("messages", { isAdmin: true, isSuperadmin: true }).id).toBe("messages");
+    expect(visibleAppPage("messages", { isAdmin: true }).id).toBe(DEFAULT_PAGE_ID);
+    expect(visibleAppPage("messages", { isAdmin: false }).id).toBe(DEFAULT_PAGE_ID);
+    const openModeAdminIds = appRail({ isAdmin: true, isSuperadmin: false })
+      .groups.flatMap((g) => g.pages)
+      .map((p) => p.id);
+    expect(openModeAdminIds).not.toContain("messages");
   });
 
   it("lists Connected apps only while MCP agent sign-in is on", () => {

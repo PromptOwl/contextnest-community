@@ -12,6 +12,14 @@
  * and keeps the governance guardrail in one obvious place.
  */
 
+import {
+  fieldColumnKeys,
+  fieldColumnOrder,
+  fieldKeyLabel,
+  fieldValueForMove,
+  type FieldDefinition,
+} from "./custom-fields";
+
 /** The bucket for nodes that don't carry a value for the active dimension. */
 export const UNCATEGORIZED = "__uncategorized__";
 
@@ -37,9 +45,13 @@ export interface BoardNode {
   /** Blocking relations from nodes not yet in a done column (server-counted,
    *  including blockers this viewer can't read). */
   open_blockers?: number;
+  /** Custom field values (stored + computed), key → value. */
+  fields?: Record<string, unknown>;
+  /** When the node entered its current column — time-in-status counts from it. */
+  status_since?: string;
 }
 
-export type DimensionKind = "folder" | "status" | "tag" | "assignee" | "priority";
+export type DimensionKind = "folder" | "status" | "tag" | "assignee" | "priority" | "field";
 
 /** Field-valued dimensions: a column is a value of a board field, and a drag
  *  between columns sets that field (Linear's group-by-assignee/priority). */
@@ -88,6 +100,8 @@ const STATUS_LABELS: Record<string, string> = {
 
 export interface BoardConfig {
   dimension: DimensionKind;
+  /** For the "field" dimension: the custom field whose values are columns. */
+  field?: FieldDefinition;
   /** For the "tag" dimension: the namespace, e.g. "stage" groups by stage:* . */
   tagNamespace?: string;
   /** Optional explicit column ordering; unknown-but-present keys append after. */
@@ -216,6 +230,12 @@ export interface BoardSettings {
   swimlane?: SwimlaneKind;
   /** Hide cards completed more than this many days ago. */
   hideDoneAfterDays?: number;
+  /** dimension "field": the custom field key whose values are the columns. */
+  fieldKey?: string;
+  /** swimlane "field": the custom field key whose values are the lanes. */
+  swimlaneField?: string;
+  /** Only cards whose custom fields match, key → value ("none" = unset). */
+  filterFields?: Record<string, string>;
 }
 
 /**
@@ -227,7 +247,9 @@ export interface BoardSettings {
 export function layoutKey(s: {
   dimension: DimensionKind;
   tagNamespace?: string;
+  fieldKey?: string;
 }): string {
+  if (s.dimension === "field") return `field:${s.fieldKey ?? ""}`;
   return s.dimension === "tag" ? `tag:${namespaceOf(s)}` : s.dimension;
 }
 
@@ -251,10 +273,13 @@ export function migrateLayout(key: string, layout: ColumnLayout): ColumnLayout {
 }
 
 /** The BoardConfig for the active dimension: its own layout, nothing else's. */
-export function resolveConfig(s: BoardSettings): BoardConfig {
+export function resolveConfig(s: BoardSettings, fieldDefs: FieldDefinition[] = []): BoardConfig {
   const layout = s.layouts[layoutKey(s)] ?? {};
+  const field =
+    s.dimension === "field" ? fieldDefs.find((d) => d.key === s.fieldKey) : undefined;
   return {
     dimension: s.dimension,
+    field,
     tagNamespace: s.tagNamespace,
     // Status defaults to the lifecycle order until the user reorders it.
     columnOrder:
@@ -263,7 +288,9 @@ export function resolveConfig(s: BoardSettings): BoardConfig {
         ? STATUS_ORDER
         : s.dimension === "priority"
           ? PRIORITY_ORDER
-          : undefined),
+          : field
+            ? fieldColumnOrder(field)
+            : undefined),
     hiddenColumns: layout.hiddenColumns,
     // The tag board is user-curatable, but starts auto-populated: every
     // present tag is a column, exactly like folder/status, until the user
@@ -290,6 +317,10 @@ export function cardColumnKeys(node: BoardNode, config: BoardConfig): string[] {
       return [node.assignee ? node.assignee.toLowerCase() : UNCATEGORIZED];
     case "priority":
       return [node.priority || UNCATEGORIZED];
+    case "field":
+      return config.field
+        ? fieldColumnKeys(config.field, node.fields?.[config.field.key])
+        : [UNCATEGORIZED];
     case "tag": {
       const ns = namespaceOf(config);
       const tags = node.tags.map(stripHash);
@@ -338,14 +369,16 @@ function shownKeys(
 }
 
 /** The catch-all column's name, which on a field board is a real value. */
-function uncategorizedLabel(d: DimensionKind): string {
+function uncategorizedLabel(d: DimensionKind, field?: FieldDefinition): string {
+  if (d === "field" && field) return fieldKeyLabel(field, UNCATEGORIZED);
   if (d === "assignee") return "Unassigned";
   if (d === "priority") return "No priority";
   return "Uncategorized";
 }
 
 function labelFor(key: string, config: BoardConfig): string {
-  if (key === UNCATEGORIZED) return uncategorizedLabel(config.dimension);
+  if (key === UNCATEGORIZED) return uncategorizedLabel(config.dimension, config.field);
+  if (config.dimension === "field" && config.field) return fieldKeyLabel(config.field, key);
   if (config.dimension === "priority") return PRIORITY_COLUMN_LABELS[key] ?? key;
   if (key === "" && config.dimension === "folder") return "(root)";
   // A status the server grew but this map hasn't: spaces beat raw snake_case,
@@ -365,11 +398,13 @@ function labelFor(key: string, config: BoardConfig): string {
  */
 export function capitalizeColumnHeader(dimension: DimensionKind): boolean {
   // Assignee columns are email addresses — capitalizing them misspells them.
-  return dimension !== "tag" && dimension !== "assignee";
+  // Field values are what the admin typed — keep their casing.
+  return dimension !== "tag" && dimension !== "assignee" && dimension !== "field";
 }
 
 function titleFor(key: string, config: BoardConfig): string {
-  if (key === UNCATEGORIZED) return uncategorizedLabel(config.dimension);
+  if (key === UNCATEGORIZED) return uncategorizedLabel(config.dimension, config.field);
+  if (config.dimension === "field" && config.field) return fieldKeyLabel(config.field, key);
   if (key === "" && config.dimension === "folder") return "(root)";
   return key;
 }
@@ -406,7 +441,11 @@ export function buildColumns(
   }
   // On a field board "Unassigned"/"No priority" is a value you drag TO, so it
   // stays as a drop target even when nothing is in it.
-  const needUncat = present.has(UNCATEGORIZED) || isFieldDimension(config.dimension);
+  // A checkbox board has no "unset" column — unset reads as unchecked.
+  const needUncat =
+    present.has(UNCATEGORIZED) ||
+    isFieldDimension(config.dimension) ||
+    (config.dimension === "field" && !!config.field && config.field.type !== "checkbox");
   present.delete(UNCATEGORIZED);
 
   const ordered: string[] = [];
@@ -454,6 +493,8 @@ export type MovePlan =
   | { kind: "move-folder"; folder: string }
   | { kind: "retag"; tags: string[] }
   | { kind: "set-fields"; fields: { assignee?: string | null; priority?: string | null } }
+  /** Custom field values — merged server-side, so only this key is sent. */
+  | { kind: "set-custom"; fields: Record<string, unknown> }
   | { kind: "unsupported"; reason: string };
 
 /**
@@ -512,6 +553,18 @@ export function planMove(
         reason:
           "Status changes go through the review workflow, not the board — open the doc and submit for review.",
       };
+    case "field": {
+      const def = config.field;
+      if (!def) return { kind: "unsupported", reason: "This field no longer exists." };
+      if (def.type === "time_in_status") {
+        return { kind: "unsupported", reason: "Time in status is computed — it can't be set." };
+      }
+      if (fromKey ? fromKey === targetKey : cardColumnKey(node, config) === targetKey) {
+        return { kind: "unsupported", reason: "Already in this column." };
+      }
+      const value = fieldValueForMove(def, node.fields?.[def.key], targetKey, fromKey);
+      return { kind: "set-custom", fields: { [def.key]: value } };
+    }
     case "assignee":
     case "priority": {
       if (cardColumnKey(node, config) === targetKey) {
@@ -537,8 +590,15 @@ export function newCardPlacement(
   folder?: string;
   assignee?: string;
   priority?: string;
+  fields?: Record<string, unknown>;
 } | null {
   switch (config.dimension) {
+    case "field": {
+      const def = config.field;
+      if (!def || def.type === "time_in_status") return null;
+      if (columnKey === UNCATEGORIZED) return {};
+      return { fields: { [def.key]: fieldValueForMove(def, undefined, columnKey) } };
+    }
     case "assignee":
       return columnKey === UNCATEGORIZED ? {} : { assignee: columnKey };
     case "priority":
@@ -557,10 +617,13 @@ export function newCardPlacement(
 
 // ── Swimlanes ───────────────────────────────────────────────────────────────
 
-export type SwimlaneKind = "assignee" | "priority" | "parent";
+export type SwimlaneKind = "assignee" | "priority" | "parent" | "field";
 
-/** The lane a card rides in. */
-export function laneKeyOf(node: BoardNode, lane: SwimlaneKind): string {
+/** The lane a card rides in. A multi-select card rides in its first option. */
+export function laneKeyOf(node: BoardNode, lane: SwimlaneKind, field?: FieldDefinition): string {
+  if (lane === "field") {
+    return field ? fieldColumnKeys(field, node.fields?.[field.key])[0]! : UNCATEGORIZED;
+  }
   if (lane === "assignee") return node.assignee ? node.assignee.toLowerCase() : UNCATEGORIZED;
   if (lane === "priority") return node.priority || UNCATEGORIZED;
   return node.parent || UNCATEGORIZED;
@@ -581,17 +644,21 @@ export function buildLanes(
   nodes: BoardNode[],
   lane: SwimlaneKind,
   labelOf: (key: string) => string,
+  field?: FieldDefinition,
 ): Lane[] {
   const groups = new Map<string, BoardNode[]>();
   for (const n of nodes) {
-    const k = laneKeyOf(n, lane);
+    const k = laneKeyOf(n, lane, field);
     const list = groups.get(k) ?? [];
     list.push(n);
     groups.set(k, list);
   }
   const keys = [...groups.keys()].filter((k) => k !== UNCATEGORIZED);
+  const fieldOrder = lane === "field" && field ? fieldColumnOrder(field) : undefined;
   if (lane === "priority") {
     keys.sort((a, b) => PRIORITY_ORDER.indexOf(a) - PRIORITY_ORDER.indexOf(b));
+  } else if (fieldOrder) {
+    keys.sort((a, b) => fieldOrder.indexOf(a) - fieldOrder.indexOf(b));
   } else {
     keys.sort((a, b) => labelOf(a).localeCompare(labelOf(b)));
   }
@@ -603,7 +670,17 @@ export function buildLanes(
 export function laneFields(
   lane: SwimlaneKind,
   laneKey: string,
-): { assignee?: string | null; priority?: string | null; parent?: string | null } {
+  field?: FieldDefinition,
+): {
+  assignee?: string | null;
+  priority?: string | null;
+  parent?: string | null;
+  fields?: Record<string, unknown>;
+} {
+  if (lane === "field") {
+    if (!field || field.type === "time_in_status") return {};
+    return { fields: { [field.key]: fieldValueForMove(field, undefined, laneKey) } };
+  }
   const v = laneKey === UNCATEGORIZED ? null : laneKey;
   return { [lane]: v };
 }

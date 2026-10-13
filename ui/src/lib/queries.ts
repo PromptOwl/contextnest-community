@@ -58,6 +58,8 @@ export const keys = {
   mentionable: (nestId: string) =>
     [...keys.nest(nestId), "mentionable"] as const,
   definitions: (nestId: string) => [...keys.nest(nestId), "definitions"] as const,
+  // Custom field definitions — what a document's `fields` values mean.
+  fields: (nestId: string) => [...keys.nest(nestId), "fields"] as const,
   commentCounts: (nestId: string) =>
     [...keys.nest(nestId), "comment-counts"] as const,
   overview: (nestId: string) => [...keys.nest(nestId), "overview"] as const,
@@ -334,6 +336,9 @@ const NEST_WRITE_SCOPES: Array<{
   // shell's header/footer both read.
   { match: /^\/branding/, affects: (n) => [keys.nest(n)] },
   { match: /^\/definitions/, affects: (n) => [keys.definitions(n)] },
+  // A definition change re-labels or hides values on every listed document,
+  // and a time-in-status field changes what the listing computes.
+  { match: /^\/fields/, affects: (n) => [keys.fields(n), keys.nodes(n)] },
   { match: /^\/edges/, affects: (n) => [keys.edges(n), keys.graph(n)] },
   { match: /^\/edge-types/, affects: (n) => [keys.edgeTypes(n), keys.edges(n)] },
   { match: /^\/env/, affects: (n) => [keys.env(n)] },
@@ -540,6 +545,12 @@ export const reads = {
     queryOptions({
       queryKey: keys.peopleSuggest(q),
       queryFn: () => api.suggestPeople(q),
+      staleTime: STALE.reference,
+    }),
+  fields: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.fields(nestId),
+      queryFn: () => api.listFields(nestId),
       staleTime: STALE.reference,
     }),
   definitions: (nestId: string) =>

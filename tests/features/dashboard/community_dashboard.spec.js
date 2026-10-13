@@ -170,16 +170,37 @@ test.describe('Community Dashboard', () => {
       // A nest with a known document count of 0 guarantees at least one row.
       await api.createNest(commonFunction.generateEntityName('counts'), 'Count check');
 
-      await nestsPage.goto();
-      await expect(nestsPage.countSkeletons).toHaveCount(0);
-
       // The banner counts every nest the grid knows about — pending invites
       // live in their own card and are excluded from both numbers.
-      const nests = await gridNests(api);
-      const expectedDocs = nests.reduce((sum, n) => sum + Number(n.document_count ?? 0), 0);
+      const totals = async () => {
+        const nests = await gridNests(api);
+        return {
+          nests: String(nests.length),
+          docs: String(nests.reduce((sum, n) => sum + Number(n.document_count ?? 0), 0)),
+        };
+      };
 
-      await expect(nestsPage.bannerNestCount).toHaveText(String(nests.length));
-      await expect(nestsPage.bannerDocumentCount).toHaveText(String(expectedDocs));
+      // Other suites add nests and documents on this account while this one
+      // reads, so the banner is held to the totals read just before the page
+      // loaded or just after it was read — and re-read if both moved on.
+      let shown;
+      let before;
+      let after;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        before = await totals();
+        if (attempt === 0) await nestsPage.goto();
+        else await nestsPage.reload();
+        await expect(nestsPage.countSkeletons).toHaveCount(0);
+        shown = {
+          nests: (await nestsPage.bannerNestCount.innerText()).trim(),
+          docs: (await nestsPage.bannerDocumentCount.innerText()).trim(),
+        };
+        after = await totals();
+        const ok = (k) => shown[k] === before[k] || shown[k] === after[k];
+        if (ok('nests') && ok('docs')) break;
+      }
+      expect([before.nests, after.nests], 'banner Nest count').toContain(shown.nests);
+      expect([before.docs, after.docs], 'banner Document count').toContain(shown.docs);
     });
 
     test('CN-DASH-006: the whole-brain bar appears only when the user has at least one nest', async ({
@@ -240,7 +261,6 @@ test.describe('Community Dashboard', () => {
 
     test('CN-DASH-009: a nest cannot be created with an empty name', async ({ primary_user }) => {
       const { nestsPage, api } = await openDashboard(primary_user);
-      const before = (await api.listNests()).length;
 
       await nestsPage.goto();
       await nestsPage.openCreateDialog();
@@ -256,7 +276,9 @@ test.describe('Community Dashboard', () => {
       await expect(nestsPage.createSubmit).toBeDisabled();
 
       await nestsPage.createCancel.click();
-      expect((await api.listNests()).length).toBe(before);
+      // Nothing was created from it. (Checked by name, not by counting: other
+      // suites create nests on this account at the same time.)
+      expect((await api.listNests()).some((n) => !(n.name ?? '').trim())).toBe(false);
     });
 
     test('CN-DASH-010: a nest name over 100 characters is rejected with an inline message', async ({
@@ -283,11 +305,11 @@ test.describe('Community Dashboard', () => {
 
     test('CN-DASH-011: a nest name containing an HTML tag is rejected', async ({ primary_user }) => {
       const { nestsPage, api } = await openDashboard(primary_user);
-      const before = (await api.listNests()).length;
+      const tagged = 'AUTO_<img src=x onerror=alert(1)>';
 
       await nestsPage.goto();
       await nestsPage.openCreateDialog();
-      await nestsPage.createNameInput.fill('AUTO_<img src=x onerror=alert(1)>');
+      await nestsPage.createNameInput.fill(tagged);
 
       // Refused, not stripped — names are stored as plain text.
       await expect(nestsPage.createError).toHaveText(
@@ -296,7 +318,9 @@ test.describe('Community Dashboard', () => {
       await expect(nestsPage.createSubmit).toBeDisabled();
 
       await nestsPage.createCancel.click();
-      expect((await api.listNests()).length).toBe(before);
+      // Nothing was created from it. (Checked by name, not by counting: other
+      // suites create nests on this account at the same time.)
+      expect((await api.listNests()).some((n) => n.name === tagged)).toBe(false);
     });
 
     test('CN-DASH-012: a nest name without letters or digits is rejected', async ({
@@ -321,7 +345,6 @@ test.describe('Community Dashboard', () => {
     }) => {
       const { page, nestsPage, api } = await openDashboard(primary_user);
       const name = commonFunction.generateEntityName('cancelled');
-      const before = (await api.listNests()).length;
 
       await nestsPage.goto();
 
@@ -338,9 +361,9 @@ test.describe('Community Dashboard', () => {
       await expect(nestsPage.createError).toHaveCount(0);
       await nestsPage.createCancel.click();
 
-      const after = await api.listNests();
-      expect(after.length).toBe(before);
-      expect(after.some((n) => n.name === name)).toBe(false);
+      // Checked by name, not by counting: other suites create nests on this
+      // account at the same time.
+      expect((await api.listNests()).some((n) => n.name === name)).toBe(false);
     });
 
     test('CN-DASH-014: a nest is created successfully with valid data and opens automatically', async ({
@@ -997,8 +1020,12 @@ test.describe('Community Dashboard', () => {
 
         // It is in the invite card instead of the grid, and out of the counts.
         await expect(nestsPage.nestCard(nest.name)).toHaveCount(0);
-        const counted = await gridNests(api);
-        await expect(nestsPage.bannerNestCount).toHaveText(String(counted.length));
+        // Other suites create nests on this account meanwhile, so the banner is
+        // held to the grid total read just before or just after it.
+        const before = (await gridNests(api)).length;
+        const shown = (await nestsPage.bannerNestCount.innerText()).trim();
+        const after = (await gridNests(api)).length;
+        expect([String(before), String(after)]).toContain(shown);
       } finally {
         await dispose();
       }

@@ -88,6 +88,9 @@ describe("node row cleanup", () => {
       // these inline; delete keeps them.
       ["runs.agent_node", "run trace"],
       ["run_steps.node_id", "run trace"],
+      // What was sent about a document stays sent: the message log is a
+      // record of the past, pruned by its own retention window.
+      ["outbound_messages.node_id", "message log"],
       // The one row that must survive a delete — it IS the delete record.
       ["node_deletions.node_id", "deletion tombstone"],
       // Predicated: only rows whose scope/target_type names a document.

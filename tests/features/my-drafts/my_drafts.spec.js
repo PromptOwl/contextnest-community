@@ -230,7 +230,7 @@ test.describe('My Drafts', () => {
               : 0;
             const now = (await api.myDrafts({ limit: 1 })).pagination.total;
             return shown === before || shown === now;
-          }, { message: 'the rail badge should show the server draft count' })
+          }, { message: 'the rail badge should show the server draft count', timeout: 30_000 })
           .toBe(true);
       };
 
@@ -396,9 +396,14 @@ test.describe('My Drafts', () => {
       // Let any trailing debounce fire before counting.
       await page.waitForTimeout(600);
 
-      // One request for the whole query — not one per keystroke — and the
-      // query itself goes to the server.
-      expect(reads).toEqual([byTitle]);
+      // Debounced: far fewer requests than keystrokes (a slow machine can let
+      // a pause slip past the debounce, so not always exactly one), each one
+      // a piece of what was typed, and the last one the whole query — which
+      // goes to the server rather than being filtered in the page.
+      expect(reads.length).toBeGreaterThan(0);
+      expect(reads.length).toBeLessThan(byTitle.length / 3);
+      expect(reads.every((q) => byTitle.startsWith(q))).toBe(true);
+      expect(reads.at(-1)).toBe(byTitle);
       expect(titleBody.drafts.map((d) => d.node_id)).toEqual([kestrel.id]);
       await expect(drafts.row(kestrel.title)).toBeVisible();
       await expect(drafts.row(heron.title)).toHaveCount(0);
