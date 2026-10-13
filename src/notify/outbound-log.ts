@@ -186,7 +186,8 @@ export async function recordOutbound(m: OutboundMessage): Promise<void> {
     );
     if (++insertsSincePrune >= PRUNE_EVERY) {
       insertsSincePrune = 0;
-      await pruneMessageLog();
+      // Not awaited: the send that trips the counter shouldn't pay for the DELETEs.
+      void pruneMessageLog().catch(() => {});
     }
   } catch {
     /* the log must never break a send */

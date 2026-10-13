@@ -1204,5 +1204,5 @@ That is the point of it: one place to see what people and agents were told. But 
 - **Every read is audited.** Listing, opening a message, and viewing the audit itself each write a `message_log_views` row. That row is kept for 365 days, longer than the messages it covers.
 - **Secrets never reach it.** Temporary passwords, sign-in tokens, API and hook keys, Bearer tokens and webhook URLs are redacted before the row is written. Bodies are capped at 4 KB.
 - **Retention.** `MESSAGE_LOG_RETENTION_DAYS` (default 30) bounds how long message content lives. Database backups taken within that window will contain it.
-- **Metadata-only mode.** `MESSAGE_LOG_STORE_BODIES=false` keeps who, when, where and delivery status, but no body. Use this where a second copy of message content is not acceptable.
+- **Metadata-only mode.** `MESSAGE_LOG_STORE_BODIES=false` keeps who, when, where and delivery status, but no body. The subject (often a document title), recipients and any delivery error text are still kept, redacted. Use this where a second copy of message content is not acceptable.
 

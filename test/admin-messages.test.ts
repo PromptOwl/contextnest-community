@@ -86,6 +86,14 @@ describe("access", () => {
     expect(listRow.filters).toMatchObject({ channel: "inbox", q: "ops" });
   });
 
+  it("treats an empty or zero ?limit= as the default page size", async () => {
+    const { clampPage } = await import("../src/notify/message-log.js");
+    expect(clampPage({ limit: Number(""), offset: Number("") })).toEqual({ limit: 50, offset: 0 });
+    expect(clampPage({ limit: 0 })).toEqual({ limit: 50, offset: 0 });
+    expect(clampPage({ limit: 500 })).toEqual({ limit: 200, offset: 0 });
+    expect(clampPage({ limit: 7 })).toEqual({ limit: 7, offset: 0 });
+  });
+
   it("audits a lookup of an unknown id, so probing leaves a trace", async () => {
     const before = await viewCount();
     const res = await get("/admin/messages/no-such-id", superadmin.apiKey);

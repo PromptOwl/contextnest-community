@@ -2004,7 +2004,7 @@ export function runMigrations(db: Database.Database): void {
   //   is recorded once at its choke point (notify/outbound-log.ts). Bodies are
   //   redacted and capped at write time; MESSAGE_LOG_STORE_BODIES=false keeps
   //   metadata only. message_log_views is the append-only audit of who read
-  //   the log. 057–060 are reserved for in-flight branches.
+  //   the log.
   if (!hasMigration("061_outbound_messages")) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS outbound_messages (

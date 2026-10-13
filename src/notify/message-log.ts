@@ -93,7 +93,8 @@ export function clampPage(p: MessageLogPage): { limit: number; offset: number } 
   const l = Number(p.limit);
   const o = Number(p.offset);
   return {
-    limit: Number.isFinite(l) ? Math.min(Math.max(Math.trunc(l), 1), 200) : 50,
+    // `?limit=` arrives as Number("") === 0: treat non-positive as unset.
+    limit: Number.isFinite(l) && l >= 1 ? Math.min(Math.trunc(l), 200) : 50,
     offset: Number.isFinite(o) ? Math.max(Math.trunc(o), 0) : 0,
   };
 }
