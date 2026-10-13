@@ -24,7 +24,20 @@ import {
   permissionLevel,
 } from "../shared/access.js";
 import { isStewardshipEnabled } from "../nests/service.js";
-import { VaultBusyError, isVaultLockTimeout } from "../shared/errors.js";
+import {
+  VaultBusyError,
+  isVaultLockTimeout,
+  NotFoundError,
+  ValidationError,
+  ConflictError,
+} from "../shared/errors.js";
+import {
+  addRelation,
+  callerCanRead,
+  listRelations,
+  relationsProse,
+  removeRelation,
+} from "../nodes/relations.js";
 import { engineApi, opContext } from "../nodes/engine.js";
 import { addCollaborator } from "../nests/sharing-service.js";
 import { holdWriteIfGated } from "../nests/push-confirmation-service.js";
@@ -69,7 +82,7 @@ import {
   type FieldDefinition,
 } from "../nodes/custom-fields.js";
 import { readIndexedNodes } from "../nodes/node-index.js";
-import { AppError, ValidationError } from "../shared/errors.js";
+import { AppError } from "../shared/errors.js";
 import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
@@ -535,6 +548,56 @@ export const TOOL_DEFINITIONS = [
         },
       },
       required: ["thread"],
+    },
+  },
+  // Task relations (src/nodes/relations.ts) — the MCP half of the task
+  // Relations panel. Not engine operations: they live in this repo's edges
+  // table, like comments live in its annotation store.
+  {
+    name: "context_relations",
+    description:
+      "List a task's relations — what it blocks, what blocks it (blocked_by), related tasks (relates_to), and duplicates — by title or ID. Says whether the task is blocked (an open blocker is one not in a done column). Related documents you can't read are counted as hidden, never named.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the task" },
+        id: { type: "string", description: "ID of the task" },
+      },
+    },
+  },
+  {
+    name: "context_add_relation",
+    description:
+      "Relate a task to another document in the same nest. `type` is blocks | blocked_by | relates_to | duplicates | duplicated_by, read from the task's side (\"this task blocks <node>\"). blocked_by is the inverse view of blocks, not a separate link. Refuses self-relations, duplicates, and a blocks link that would make a loop. Needs edit access to the task.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the task" },
+        id: { type: "string", description: "ID of the task" },
+        type: {
+          type: "string",
+          description: "blocks | blocked_by | relates_to | duplicates | duplicated_by",
+        },
+        node: {
+          type: "string",
+          description: 'ID of the other document (e.g. "nodes/ship-the-api")',
+        },
+      },
+      required: ["type", "node"],
+    },
+  },
+  {
+    name: "context_remove_relation",
+    description:
+      "Remove one of a task's relations by its relation id (from context_relations or context_get). Needs edit access to the task.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the task" },
+        id: { type: "string", description: "ID of the task" },
+        relation: { type: "string", description: "Relation id" },
+      },
+      required: ["relation"],
     },
   },
   {
@@ -1728,6 +1791,23 @@ async function runTool(
           "UNAUTHORIZED_ACTION",
         );
       }
+      // Relations ride along so an agent sees what blocks a task without a
+      // second call — gated per related node like the relations tool. Not for
+      // a headless access key: it reads approved content only, and a related
+      // node's title could name a draft (context_relations is closed to it too).
+      const relations = (await isServiceUser(ctx.userId))
+        ? null
+        : await listRelations({ nestId, userId: ctx.userId, userEmail }, node.id).catch(
+            (err) => {
+              // Not found = no relations to show; anything else is a real fault.
+              if (!(err instanceof NotFoundError)) {
+                console.error("context_get relations failed", node.id, err);
+              }
+              return null;
+            },
+          );
+      const hasRelations =
+        !!relations && (relations.relations.length > 0 || relations.hidden_count > 0);
       const fieldDefs = await listFieldDefinitions(nestId);
       // Under stewardship `body` is the approved version's raw markdown: its
       // field values, never the live (draft) file's.
@@ -1749,6 +1829,7 @@ async function runTool(
           : null,
         pdfSourceLine(node, body),
         ...describeFields(fieldValues, fieldDefs).map((l) => `**${l.replace(": ", ":** ")}`),
+        hasRelations ? `**Relations:**\n${relationsProse(relations!)}` : null,
       ]
         .filter(Boolean)
         .join("\n");
@@ -1775,6 +1856,14 @@ async function runTool(
             ...(fieldValues ? { metadata: { fields: fieldValues } } : {}),
           },
           body,
+          ...(hasRelations
+            ? {
+                relations: relations!.relations,
+                relations_hidden: relations!.hidden_count,
+                blocked: relations!.blocked,
+                open_blockers: relations!.open_blockers,
+              }
+            : {}),
         },
       };
     }
@@ -1931,6 +2020,62 @@ async function runTool(
       return `# Nest export — ${parts.length} document(s)\n\n${parts.join(
         "\n\n---\n\n",
       )}${note}`;
+    }
+
+    // ── Task relations ────────────────────────────────────────────────────
+    // PRIMARY permission gate (the /mcp transport admits read-tier callers):
+    // listing needs read access to the task; adding/removing needs edit access
+    // to it — canUserEdit, the same per-node rule context_update applies. The
+    // relations service then requires read access to the OTHER end and hides
+    // any related node the caller can't read.
+    case "context_relations":
+    case "context_add_relation":
+    case "context_remove_relation": {
+      const target = await resolveTargetNode(storage, args);
+      const caller = { nestId, userId: ctx.userId, userEmail };
+      if (typeof target === "string" || !(await callerCanRead(caller, target.id))) {
+        return toolError(
+          typeof target === "string" ? target : `Node not found: ${args.id || args.title}`,
+          "DOCUMENT_NOT_FOUND",
+        );
+      }
+      if (toolName !== "context_relations") {
+        const editCheck = await stewardship.canUserEdit(nestId, target.id, userEmail);
+        if (!editCheck.allowed) {
+          return writeRefusal(
+            ctx,
+            `You don't have permission to change the relations of "${target.frontmatter.title}": ${editCheck.reason}`,
+            { type: "node", id: target.id },
+          );
+        }
+      }
+      try {
+        if (toolName === "context_relations") {
+          const r = await listRelations(caller, target.id);
+          return {
+            text: `# Relations of "${target.frontmatter.title}"\n\n${relationsProse(r)}`,
+            data: r,
+          };
+        }
+        if (toolName === "context_add_relation") {
+          const { relation, relations } = await addRelation(caller, target.id, args.type, args.node);
+          return {
+            text: `Added: "${target.frontmatter.title}" ${relation.type.replace(/_/g, " ")} "${relation.node.title}" (relation ${relation.id}).\n\n${relationsProse(relations)}`,
+            data: { relation, ...relations },
+          };
+        }
+        const r = await removeRelation(caller, target.id, args.relation);
+        return {
+          text: `Removed relation ${args.relation}.\n\n${relationsProse(r)}`,
+          data: r,
+        };
+      } catch (err) {
+        if (err instanceof NotFoundError) return toolError(err.message, "DOCUMENT_NOT_FOUND");
+        if (err instanceof ValidationError || err instanceof ConflictError) {
+          return toolError(err.message, "VALIDATION_FAILED");
+        }
+        throw err;
+      }
     }
 
     case "context_comments": {

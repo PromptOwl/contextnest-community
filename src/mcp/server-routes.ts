@@ -280,6 +280,9 @@ const SERVER_NEST_TOOLS = [
   "context_move",
   "context_submit_review",
   "context_request_access",
+  "context_relations",
+  "context_add_relation",
+  "context_remove_relation",
 ];
 
 function withNestArg(tool: (typeof TOOL_DEFINITIONS)[number]) {

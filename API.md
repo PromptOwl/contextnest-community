@@ -1146,6 +1146,15 @@ Serves the asset bytes with the correct content-type and immutable caching. Read
 ### Watchers — GET/POST/DELETE `/nests/:nestId/nodes/:nodeId/watchers`
 "Tag a person to this node." Watchers of a document are notified when it changes or lands for review; watchers of an agent hear when its output does. `POST` body `{ email }` (write); `DELETE …/watchers?email=` (write). All three return `{ "watchers": [ … ] }`. Watchers follow a `move` and are purged by a `DELETE` of the node.
 
+### Relations — GET/POST `/nests/:nestId/nodes/:nodeId/relations`, DELETE `…/relations/:relationId`
+Task relations: `blocks`, `blocked_by`, `relates_to`, `duplicates`, `duplicated_by`, read from the node's side. **Not behind `FEATURE_WORKFLOW_PLANE`** — relations are core task UX. They are stored as rows in the workflow plane's `edges` table under three reserved edge types (`task:blocks`, `task:relates-to`, `task:duplicates`, created lazily per nest, never flow types). `blocked_by` / `duplicated_by` are the inverse *view* of the stored `blocks` / `duplicates` edge, not a second row; `relates_to` is symmetric and stored once.
+
+- `GET` (read) → `{ node_id, relations: [{ id, type, node: { id, title, type, done }, created_by, created_at }], hidden: { <type>: n }, hidden_count, open_blockers, blocked }`. A related document the caller can't read is never named — it is counted in `hidden`. `open_blockers` counts `blocks` edges from documents that are not done (no `completed_at` and none of the nest's `done_tags`), readable or not.
+- `POST` (write) body `{ type, node }` → `201 { relation, relations }`. `400` for a self-relation, an unknown type, or a cross-nest target (`contextnest://…` — edges carry one `nest_id`); `404` when either end doesn't exist in this nest or the caller can't read it; `409` for a duplicate (either direction for `relates_to`) or a `blocks` relation that would close a loop.
+- `DELETE` (write) → the fresh `GET` shape. `404` unless the relation touches `:nodeId`.
+
+Node listings (`GET /nodes`, `GET /nodes/:nodeId`) and My Work's `assigned` rows carry `open_blockers` when it is non-zero — the board's **Blocked** badge. Relations follow a `move` and are purged by a `DELETE`, like every node-keyed edge. The reserved `task:*` types are hidden from the edge-type registry and refused by the generic `/edges` create/retype paths and their `workflow_*` MCP mirrors.
+
 ---
 
 ## 5. Stewardship
@@ -2463,6 +2472,13 @@ Both are **read-tier**, matching REST (`isAnnotationAction` in `app.ts`): a revi
 **Custom fields.** `context_fields` lists the nest's definitions (any reader). `context_create_field`, `context_update_field` and `context_delete_field` mirror `POST` / `PATCH` / `DELETE /nests/:id/fields` — same validation, same gate (owner, nest admin, license admin, nest-wide reviewer steward; anyone else gets `UNAUTHORIZED_ACTION`). Values ride the existing tools: `context_create` and `context_update` take `fields` (key → value, `null` clears; a refused value is a `VALIDATION_FAILED` tool error naming the field), `context_list` takes a `fields` filter (same matching as REST `field.<key>`), and `context_get` / `context_list` / `context_query` return values in their prose and, structured, in the catalog's own `frontmatter.metadata.fields` — where they are stored — including computed time in status (seconds).
 
 **`context_my_drafts`** mirrors `GET /me/drafts`, nest-scoped: the caller's own unsubmitted (or rejected) documents in this nest, with their path and version. Capped at the 100 most recent; the reply says so explicitly when there are more, so an agent can't read a capped page as the whole set. Self-scoped by construction — it only ever returns rows the caller authored, in a nest they already hold read on, so it needs no permission check of its own. It exists because an agent otherwise cannot see its own unsubmitted work: a draft has no review request, so `context_review_queue` never lists it, and `context_query` skips it (only approved versions are AI-readable). The response names `context_submit_review` as the next step.
+
+**Task relations** mirror `/nodes/:nodeId/relations` 1:1 and are advertised with the workflow plane off:
+- `context_relations` — a task's relations by title or id, grouped, with whether it is blocked. Read-tier; unreadable related documents are counted as hidden.
+- `context_add_relation` — `type` (`blocks | blocked_by | relates_to | duplicates | duplicated_by`) and `node` (the other document's id). Needs edit access to the task (`canUserEdit`, the same per-node gate as `context_update`); refuses self, duplicates and blocking loops.
+- `context_remove_relation` — by `relation` id. Same edit gate.
+
+`context_get` includes the task's relations (prose plus `relations`, `relations_hidden`, `blocked`, `open_blockers` in `structuredContent`), so an agent sees what blocks a task without a second call. All three are also on the server-level endpoint (with `nest`). None are on the headless access-key allowlist.
 
 Server-admin-only tools (gated by `isLicenseAdminUserId` in non-open mode, same as their REST counterparts):
 - `context_unsynced_list` — mirrors `GET /nests/unsynced`.

@@ -46,6 +46,8 @@ import {
   seedDefaultEdgeTypes,
   parseConditionSchema,
   edgeTypeToResponse,
+  assertNotRelationType,
+  NOT_RELATION_TYPE_SQL,
   type EdgeTypeRow,
 } from "../workflow/edge-type-routes.js";
 
@@ -351,7 +353,7 @@ export async function runWorkflowTool(
       requireTier(perm, "read");
       await seedDefaultEdgeTypes(ctx.nestId);
       const rows = (await getDb().all(
-        "SELECT * FROM edge_types WHERE nest_id = ? ORDER BY LOWER(name)",
+        `SELECT * FROM edge_types WHERE nest_id = ? AND ${NOT_RELATION_TYPE_SQL} ORDER BY LOWER(name)`,
         [ctx.nestId],
       )) as EdgeTypeRow[];
       return json({ count: rows.length, edge_types: rows.map(edgeTypeToResponse) });
@@ -426,6 +428,7 @@ async function createEdge(ctx: McpToolContext, args: Record<string, any>) {
       `unknown edge type "${typeRef}" — create it first with workflow_edge_type_upsert`,
     );
   }
+  assertNotRelationType(type);
 
   for (const nodeId of [fromNode, toNode]) {
     try {
@@ -526,11 +529,12 @@ async function upsertEdgeType(ctx: McpToolContext, args: Record<string, any>) {
 
 async function deleteEdgeType(nestId: string, id: string) {
   await getDb().transaction(async (tx) => {
-    const row = await tx.get(
-      "SELECT id FROM edge_types WHERE id = ? AND nest_id = ?",
+    const row = (await tx.get(
+      "SELECT id, name FROM edge_types WHERE id = ? AND nest_id = ?",
       [id, nestId],
-    );
+    )) as { id: string; name: string } | undefined;
     if (!row) throw new NotFoundError("Edge type not found");
+    assertNotRelationType(row);
     const inUse = (await tx.get(
       "SELECT COUNT(*) as c FROM edges WHERE type_id = ?",
       [id],

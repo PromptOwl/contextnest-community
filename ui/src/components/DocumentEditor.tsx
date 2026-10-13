@@ -96,6 +96,7 @@ import {
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
 import { AuthorshipChips } from "./AuthorshipChips";
+import { TaskRelations } from "./board/TaskRelations";
 import { NodeFieldsPanel } from "./fields/NodeFieldsPanel";
 import { TableViewer, TableGrid } from "./TableViewer";
 import { tableDiffSides } from "../lib/csv-table";
@@ -3073,6 +3074,19 @@ export function DocumentEditor({
                   </div>
                 )}
 
+                {/* Relations — tasks only: blocks / blocked by / related /
+              duplicates. Not content, so editable in view mode too; the
+              caller's edit access to the task gates it. */}
+                {!isNew && nodeType === "task" && (
+                  <TaskRelations
+                    nestId={nestId}
+                    nodeId={nodeId}
+                    canEdit={canEditContent && !isArchived}
+                    onOpen={(id, t) =>
+                      confirmLeave(`open "${t}"`, () => onNavigateDocument?.(nestId, id, title))
+                    }
+                  />
+                )}
 
                 {/* Custom fields — the nest's definitions that apply to this
               node type, each saved on its own (see NodeFieldsPanel). */}

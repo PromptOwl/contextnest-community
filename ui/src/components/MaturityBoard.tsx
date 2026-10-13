@@ -75,7 +75,9 @@ import {
   assigneesOnBoard,
   localToday,
   matchesAssigneeFilter,
+  matchesBlockedFilter,
   moveNeedsReview,
+  openBlockers,
   subItemsByParent,
   timestampsTooltip,
   PRIORITY_LABELS,
@@ -86,6 +88,7 @@ import {
   AddCardComposer,
   AssigneeMenu,
   Avatar,
+  BlockedBadge,
   DueChip,
   DeleteBoardDialog,
   GovernedMoveDialog,
@@ -349,6 +352,7 @@ export function MaturityBoard({
           created_at: n.created_at,
           updated_at: n.updated_at,
           prime: n.prime,
+          open_blockers: n.open_blockers,
           fields: n.fields,
           status_since: n.status_since,
         })),
@@ -511,6 +515,12 @@ export function MaturityBoard({
     });
   }, []);
   const boardPeople = useMemo(() => assigneesOnBoard(nodes), [nodes]);
+  // "Hide blocked" — a glance, like the assignee filter, not a saved setting.
+  const [hideBlocked, setHideBlocked] = useState(false);
+  const blockedCount = useMemo(
+    () => nodes.filter((n) => openBlockers(n) > 0).length,
+    [nodes],
+  );
   const subItems = useMemo(() => subItemsByParent(nodes), [nodes]);
 
   const visibleNodes = useMemo(
@@ -521,6 +531,7 @@ export function MaturityBoard({
           // Tasks only would hide every card added here.
           (!config.tasksOnly || !typeTaskEnabled || n.type === "task") &&
           matchesAssigneeFilter(n, assigneeFilter) &&
+          matchesBlockedFilter(n, hideBlocked) &&
           // Linear's "completed issues: past week/month" display option.
           !(
             config.hideDoneAfterDays !== undefined &&
@@ -534,7 +545,7 @@ export function MaturityBoard({
           ) &&
           matchesFieldFilters(n, config.filterFields, fieldDefs),
       ),
-    [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, config.filterFields, fieldDefs, config.hideDoneAfterDays, assigneeFilter],
+    [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, config.filterFields, fieldDefs, config.hideDoneAfterDays, assigneeFilter, hideBlocked],
   );
 
   const { columns, byColumn } = useMemo(
@@ -1385,12 +1396,13 @@ export function MaturityBoard({
                 })()}
                 {/* Footer, Linear-style: priority · due · sub-items · last
                     touched on the left, assignee on the right. */}
-                <div className="mt-1.5 flex items-center gap-1.5 pl-5 min-h-6">
+                <div className="mt-1.5 flex min-w-0 items-center gap-1.5 pl-5 min-h-6">
                   <PriorityMenu
                     value={n.priority}
                     editable={canEditDocs}
                     onChange={(priority) => patchFields(n.id, { priority })}
                   />
+                  <BlockedBadge count={openBlockers(n)} />
                   {!completed && (
                     <DueChip
                       due={n.due}
@@ -1404,17 +1416,23 @@ export function MaturityBoard({
                     done={kids.filter((k) => !!k.completed_at).length}
                     onOpen={onOpenDocument}
                   />
+                  {/* Last touched — the first thing to give way on a crowded
+                      card: a zero-width lead lets the label wrap onto a clipped
+                      second line, so it disappears whole instead of as "j…". */}
                   {(n.updated_at || n.created_at) && (
-                    <span
-                      className="text-[10px] text-muted-foreground/80 tabular-nums whitespace-pre"
-                      title={timestampsTooltip(n, (iso) => new Date(iso).toLocaleString())}
-                    >
-                      {completed && n.completed_at
-                        ? `done ${timeAgo(n.completed_at)}`
-                        : timeAgo((n.updated_at || n.created_at)!)}
+                    <span className="flex h-4 min-w-0 flex-1 flex-wrap items-center overflow-hidden">
+                      <span aria-hidden className="h-4 w-0" />
+                      <span
+                        className="whitespace-pre text-[10px] text-muted-foreground/80 tabular-nums"
+                        title={timestampsTooltip(n, (iso) => new Date(iso).toLocaleString())}
+                      >
+                        {completed && n.completed_at
+                          ? `done ${timeAgo(n.completed_at)}`
+                          : timeAgo((n.updated_at || n.created_at)!)}
+                      </span>
                     </span>
                   )}
-                  <span className="ml-auto flex items-center gap-1">
+                  <span className="ml-auto flex shrink-0 items-center gap-1">
                     {canEditDocs && newCardPlacement(col.key, effectiveConfig) && (
                       <button
                         type="button"
@@ -1994,6 +2012,20 @@ export function MaturityBoard({
               </Button>
             )}
           </div>
+        )}
+        {(blockedCount > 0 || hideBlocked) && (
+          <Button
+            variant={hideBlocked ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 px-2 text-xs"
+            aria-pressed={hideBlocked}
+            title={hideBlocked ? "Show blocked tasks again" : "Hide tasks that have an open blocker"}
+            onClick={() => setHideBlocked((v) => !v)}
+            data-testid="board-hide-blocked"
+          >
+            Hide blocked
+            <span className="ml-1 tabular-nums text-muted-foreground">{blockedCount}</span>
+          </Button>
         )}
       </div>
 

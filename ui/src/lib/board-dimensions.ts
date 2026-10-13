@@ -42,6 +42,9 @@ export interface BoardNode {
   updated_at?: string;
   /** Document-scope prime flag; undefined = inherit from tags. */
   prime?: boolean;
+  /** Blocking relations from nodes not yet in a done column (server-counted,
+   *  including blockers this viewer can't read). */
+  open_blockers?: number;
   /** Custom field values (stored + computed), key → value. */
   fields?: Record<string, unknown>;
   /** When the node entered its current column — time-in-status counts from it. */
