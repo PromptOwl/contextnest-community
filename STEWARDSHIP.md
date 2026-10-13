@@ -114,6 +114,33 @@ Only **future** creates are affected. Turning it on doesn't steward anyone on ex
 
 Like prime, this only applies to **governed** nests. With stewardship off there is nothing to review, so the flag is inert until you turn stewardship on.
 
+## Review SLA escalation (`review_sla_hours`)
+
+A per-nest setting (**off** by default; nest Settings → "Review SLA (hours)", or `PATCH /nests/:id/settings` with `review_sla_hours`) for reviews nobody picks up. When it's set, a review that has been pending that long is **escalated one rung** up the same ladder steward resolution already uses:
+
+| Rung | Who hears | When |
+|---|---|---|
+| 0 | Document-scope reviewers (every reviewer steward — document, tag and nest — is emailed at submit) | At submit, as always |
+| 1 | Tag-scope reviewers | SLA after submit |
+| 2 | Nest-scope reviewers | SLA after rung 1 |
+| 3 | The nest owner | SLA after rung 2 |
+
+Rungs are the `priority` steward resolution already assigns: 1 = matched by a document pattern, 2 = by one of the document's tags, 3 = nest-level; only `reviewer`-role stewards count. Each rung is limited to people who can open the document now (an account with access — the same check mentions and comment notifications use), since an escalation names it.
+
+Each rung gets a full SLA window before the next. A rung with nobody new on it — no tag reviewers for this document, only people a lower rung already reached, or nobody on it who can open the document — is skipped in the same step, so an escalation always reaches someone if anyone is left. After the owner it stops. Tag and nest reviewers already got the submit email, so for them an escalation is a reminder that the review is overdue, plus an inbox row; for the owner it is the first notice.
+
+Escalating **notifies**; it grants nothing. The new rung gets a `review_escalated` row in their inbox linking the document, an email when SMTP is configured, and it goes to Slack/Teams the same way a review request does: the server-wide Slack/Teams webhooks (super-admin Settings) post it by default, folded into the same debounced digest as review requests, and a per-nest connector posts it when subscribed to `review_escalated` or `"*"`. A connector subscribed only to `review_requested` does not receive escalations — add `review_escalated` to its events. The team-inbox email (`NOTIFY_EMAIL_TO`) is skipped for escalations; the escalated reviewers are emailed directly. Who may approve is unchanged — the same approve gate, the same separation of duties — and the submitter is never an escalation recipient, since they can't approve their own submission.
+
+Each review records the rung it reached (`escalationLevel`, `escalatedAt` on `GET /nests/:id/nodes/:nodeId/reviews`). The rung is claimed in the database before anyone is notified, so no rung hears twice — not on the next tick, not after a restart, not when two server instances tick at once. The trade-off is at-most-once: if the server dies (or a send fails) between claiming a rung and notifying it, that rung's ping is lost and logged rather than repeated; the next rung still follows one window later. When nobody is left to escalate to (no eligible reviewers above, and no owner who can open the document), the review is parked at `escalationLevel: 3` without notifying anyone, and stewards added afterwards don't restart its ladder — `3` therefore means "reached the top", not necessarily "the owner was notified". Resubmitting after a rejection is a new review and starts at rung 0; editing a pending submission keeps the same review and its rung.
+
+The check runs every minute on its own loop, independent of the workflow plane. It ignores nests with the SLA off, ungoverned nests, and archived nests. Changing or clearing the SLA never un-notifies anyone; it only governs the next escalation.
+
+When a review is approved, rejected or withdrawn, its `review_requested` and `review_escalated` inbox rows are marked read for every recipient, whoever resolved it — an answered request no longer sits in anyone's queue looking open. The rows stay in the inbox history; the submitter's verdict row is unaffected.
+
+## Comment notifications
+
+A new comment notifies the document's **watchers** and its **reviewer stewards** (document, tag and nest scope) with a `comment` inbox row and, when SMTP is set up, an email with the excerpt — on top of the `mention` rows for anyone the comment names and, for a reply, the `comment_reply` rows for the thread's earlier participants. Each person hears once, by the most specific route (mention, then thread participant, then follower). The author is never notified, and nobody who can't open the document hears about it.
+
 ## Who sees what
 
 Governance gates two things: who can **approve**, and who can **read**.

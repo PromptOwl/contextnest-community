@@ -281,6 +281,49 @@ export async function setCreatorIsReviewer(
   ]);
 }
 
+/** Longest review SLA a nest may set: a year. Past that it isn't an SLA. */
+export const MAX_REVIEW_SLA_HOURS = 8760;
+
+/**
+ * Review SLA in hours, or null when off (the default). When set, a review left
+ * pending this long escalates one rung up the steward ladder — tag reviewers,
+ * then nest reviewers, then the nest owner — each rung getting the same window
+ * before the next (see governance/review-sla.ts). Off means inert: the
+ * escalation tick never reads the nest.
+ */
+export async function nestReviewSlaHours(nestId: string): Promise<number | null> {
+  const db = getDb();
+  const row = (await db.get(
+    "SELECT review_sla_hours FROM nests WHERE id = ?",
+    [nestId],
+  )) as { review_sla_hours: number | null } | undefined;
+  const hours = Number(row?.review_sla_hours);
+  return Number.isInteger(hours) && hours > 0 ? hours : null;
+}
+
+/**
+ * Set or clear the review SLA (admin-only). `null` (or 0) turns it off.
+ * Whole hours between 1 and MAX_REVIEW_SLA_HOURS; anything else throws so the
+ * route answers 400. Changing it never touches escalation already recorded —
+ * a rung that was notified stays notified.
+ */
+export async function setReviewSlaHours(
+  nestId: string,
+  hours: number | null,
+): Promise<void> {
+  if (hours !== null && hours !== 0) {
+    if (!Number.isInteger(hours) || hours < 1 || hours > MAX_REVIEW_SLA_HOURS) {
+      throw new Error(
+        `review_sla_hours must be a whole number of hours between 1 and ${MAX_REVIEW_SLA_HOURS}, or null to turn it off`,
+      );
+    }
+  }
+  await getDb().run("UPDATE nests SET review_sla_hours = ? WHERE id = ?", [
+    hours ? hours : null,
+    nestId,
+  ]);
+}
+
 /**
  * Whether reads, retrievals and exports of this nest's documents are recorded
  * in the activity log (governance/access-log.ts). On by default (migration

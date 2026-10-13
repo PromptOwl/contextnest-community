@@ -480,7 +480,7 @@ export function ConnectModal({
                       <span>
                         Connectors sign each person in, and that's off on this
                         server. An admin turns it on in{" "}
-                        <strong>Server settings → Single sign-on → Agent OAuth</strong>.
+                        <strong>Server settings → Features → Agent OAuth</strong>.
                         Until then, use Claude Code or the Desktop config below.
                       </span>
                     </div>

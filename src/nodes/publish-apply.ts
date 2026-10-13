@@ -37,6 +37,8 @@ export interface PublishDoc {
   status?: string;
   schedule?: string;
   prime?: boolean;
+  /** Custom field values — validated on replay, like any create. */
+  fields?: Record<string, unknown>;
 }
 
 export interface PublishPayload {
@@ -151,6 +153,7 @@ export async function applyPublish(
           status: doc.status,
           schedule: doc.schedule,
           prime: doc.prime,
+          ...(doc.fields !== undefined ? { fields: doc.fields } : {}),
         },
         authorEmail,
       );

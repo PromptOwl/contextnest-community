@@ -200,6 +200,7 @@ const NEST_TAB_LABELS: Record<string, string> = {
   "external-edits": "External edits",
   stewards: "Stewards",
   collaborators: "Collaborators",
+  fields: "Fields",
 };
 
 const NEST_TABS = [
@@ -209,6 +210,7 @@ const NEST_TABS = [
   "external-edits",
   "stewards",
   "collaborators",
+  "fields",
 ];
 
 type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" }>;

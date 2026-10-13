@@ -49,6 +49,7 @@ import {
   titleForNode,
 } from "./title-resolver.js";
 import { dispatchEvent } from "../notify/dispatch.js";
+import { personaHomeNests } from "../metacognition/store.js";
 import { notifyNestEvent } from "../notify/notify.js";
 import { sendEmailToRecipient } from "../notify/email.js";
 
@@ -76,6 +77,8 @@ export interface AccessRequest {
   resolved_by: string | null;
   resolved_at: string | null;
   resolution_note: string | null;
+  /** The agent run that filed it, when one did (migration 060). */
+  run_id: string | null;
   /** Human label: the document title, the folder path, or the nest name. */
   title?: string;
 }
@@ -183,6 +186,15 @@ async function canSeeTarget(
   return (await filterAccessible(nestId, userId, userEmail, inside)).length > 0;
 }
 
+/** A persona has no nest role of its own; in its home nest it may ask about
+ *  any document or folder that exists (its owner, an admin, can see them all). */
+async function personaSeesTarget(nestId: string, target: AccessTarget): Promise<boolean> {
+  const { storage } = await engineCache.get(nestId);
+  const docs = await storage.discoverDocuments();
+  if (target.type === "node") return docs.some((d) => d.id === target.id);
+  return docs.some((d) => isIdUnderFolder(d.id, target.id));
+}
+
 /** Does the caller already hold `level` on the target? Then there's nothing
  *  to ask for, and the request would only clutter an admin's inbox. */
 async function alreadyHolds(
@@ -226,6 +238,7 @@ function rowToRequest(row: any): AccessRequest {
     resolved_by: row.resolved_by ?? null,
     resolved_at: row.resolved_at ?? null,
     resolution_note: row.resolution_note ?? null,
+    run_id: row.run_id ?? null,
   };
 }
 
@@ -250,15 +263,27 @@ export async function latestAccessRequest(
   return row ? rowToRequest(row) : null;
 }
 
+/** Who is asking: a person, a metacognition persona (in `nestId`, its home),
+ *  or someone who may never ask. */
+type Requester = "person" | "persona" | null;
+
 /** Callers who may never ask: no account (open-mode anonymous / signed-out
- *  public reader) and headless access keys, which are read-only by design. */
-async function isEligibleRequester(userId: string | undefined): Promise<boolean> {
-  if (!userId || userId === ANON_USER_ID) return false;
+ *  public reader) and headless access keys, which are read-only by design. A
+ *  metacognition persona may ask, but only in the nest it lives in — that is
+ *  where an admin decides what it reaches. */
+async function requesterKind(userId: string | undefined, nestId: string): Promise<Requester> {
+  if (!userId || userId === ANON_USER_ID) return null;
   const row = (await getDb().get(
     "SELECT COALESCE(is_service, 0) AS svc FROM users WHERE id = ?",
     [userId],
   )) as { svc: number } | undefined;
-  return !!row && !row.svc;
+  if (!row) return null;
+  if (!row.svc) return "person";
+  return (await personaHomeNests(userId)).includes(nestId) ? "persona" : null;
+}
+
+async function isEligibleRequester(userId: string | undefined, nestId: string): Promise<boolean> {
+  return (await requesterKind(userId, nestId)) === "person";
 }
 
 /**
@@ -275,7 +300,7 @@ export async function accessRequestHint(params: {
   level?: AccessLevel;
 }): Promise<Record<string, unknown> | null> {
   const { nestId, userId, target } = params;
-  if (!(await isEligibleRequester(userId))) return null;
+  if (!(await isEligibleRequester(userId, nestId))) return null;
   const level = params.level ?? "write";
   const latest = await latestAccessRequest(nestId, userId!, target);
   return {
@@ -326,10 +351,21 @@ export async function createAccessRequest(params: {
       ? params.note.trim().slice(0, MAX_NOTE)
       : null;
 
-  if (!(await isEligibleRequester(requesterId))) {
+  const kind = await requesterKind(requesterId, nestId);
+  if (!kind) {
     throw new ValidationError("Sign in to request access.");
   }
-  if (!(await canSeeTarget(nestId, requesterId, requesterEmail, target))) {
+  // A persona asks for a document or a folder to work on, never the nest: a
+  // nest-wide grant would make it a collaborator, and its home nest is
+  // already where it lives.
+  if (kind === "persona" && target.type === "nest") {
+    throw new ValidationError("An agent asks for a document or a folder, not the whole nest.");
+  }
+  const visible =
+    kind === "persona"
+      ? await personaSeesTarget(nestId, target)
+      : await canSeeTarget(nestId, requesterId, requesterEmail, target);
+  if (!visible) {
     throw new NotFoundError(
       target.type === "nest" ? "Nest not found" : `${target.type === "node" ? "Node" : "Folder"} not found`,
     );

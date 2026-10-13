@@ -88,12 +88,16 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // literal). Promotion is tracked upstream in PromptOwl/ContextNest#167 — adopt the
 // descriptors and lower this by 3 if it lands there.
 //
-// Raised 48 -> 50 for the superadmin message-log tools (`message_log_search`,
-// `message_log_get`) on server-level /mcp. Same reason as context_my_drafts: not an engine
-// operation at all — the outbound message log is this server's own operational record of
-// what it sent (email, webhooks, inbox, agent comments), with no document semantics, so there
-// is no upstream descriptor to import. They mirror REST GET /admin/messages[/:id] 1:1.
-const BASELINE = 50;
+// Raised 48 -> 52 for the custom-field definition tools (`context_fields`,
+// `context_create_field`, `context_update_field`, `context_delete_field`). Same reason as
+// the access-request trio: field DEFINITIONS are nest configuration in this repo's
+// field_definitions table, not an engine operation, so there is no upstream descriptor to
+// import. Field VALUES add no tool: they live in frontmatter `metadata.fields` and travel
+// through the existing context_create/update (a `fields` arg) and come back inside the
+// catalog's own `frontmatter.metadata` on get/list/query. They mirror REST
+// /nests/:id/fields 1:1. Upstream catalog proposal: PromptOwl/ContextNest#178 — adopt the
+// descriptors and lower this by 4 if it lands there.
+const BASELINE = 52;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

@@ -84,6 +84,25 @@ export const config = {
   get PORT() {
     return parseInt(process.env.PORT || "3838", 10);
   },
+  /**
+   * Interface to listen on, e.g. `127.0.0.1` to accept only local / reverse-
+   * proxy traffic. Unset = every interface (Node's default, unchanged).
+   */
+  get HOST(): string | undefined {
+    return process.env.HOST?.trim() || undefined;
+  },
+  /**
+   * Peers whose X-Forwarded-For / X-Real-IP / X-Forwarded-Proto are believed:
+   * comma-separated IPs, CIDRs, or the keywords `loopback` / `private`.
+   * Unset = legacy behaviour, every peer is trusted (see shared/trusted-proxies.ts).
+   */
+  get TRUSTED_PROXIES(): string {
+    return process.env.TRUSTED_PROXIES?.trim() || "";
+  },
+  /** Commit this build came from (GIT_SHA, or BUILD_SHA from some CI), for the status page. */
+  get GIT_SHA(): string {
+    return process.env.GIT_SHA?.trim() || process.env.BUILD_SHA?.trim() || "";
+  },
   get DATA_ROOT() {
     return dataRoot();
   },
@@ -286,7 +305,7 @@ export const config = {
   /**
    * Manual (email + password) sign-in. Three modes, independent of
    * `PROMPTOWL_SIGN_IN_GATE` (the two methods are controlled separately):
-   *   "open"        — anyone may log in and self-register (default).
+   *   "open"        — anyone may log in and self-register (default without SSO).
    *   "invite-only" — existing + admin-invited users may log in and an invited
    *                   placeholder may set its password ("claim"), but brand-new
    *                   self-registration is refused. Use this when the admin
@@ -296,12 +315,37 @@ export const config = {
    * Enforced at POST /auth/login and POST /auth/register. The /admin/settings
    * validator refuses "disabled" while PromptOwl is also disabled, so a server
    * can never be left with no way to sign in.
+   *
+   * Unset, the default follows SSO: with OIDC enabled and configured it is
+   * "invite-only", because everyone the IdP vouches for already gets in
+   * through SSO, and an open password door would let anyone mint an account
+   * the IdP never sees (and can't disable). An explicit "open" is honoured,
+   * with a startup warning.
    */
   get MANUAL_SIGN_IN(): "open" | "invite-only" | "disabled" {
-    const v = (process.env.MANUAL_SIGN_IN || "open").trim().toLowerCase();
-    return v === "invite-only" || v === "disabled"
-      ? (v as "invite-only" | "disabled")
-      : "open";
+    const raw = (process.env.MANUAL_SIGN_IN || "").trim().toLowerCase();
+    if (raw === "invite-only" || raw === "disabled" || raw === "open") return raw;
+    return this.OIDC_CONFIGURED ? "invite-only" : "open";
+  },
+  /**
+   * OIDC enabled AND fully configured (issuer + client id + secret). Same
+   * test as auth/oidc.ts isOidcReady(), kept here so config getters can use
+   * it without importing the auth layer.
+   */
+  get OIDC_CONFIGURED(): boolean {
+    return (
+      this.OIDC_ENABLED &&
+      !!this.OIDC_ISSUER &&
+      !!this.OIDC_CLIENT_ID &&
+      !!this.OIDC_CLIENT_SECRET
+    );
+  },
+  /**
+   * Password self-registration is open while SSO is live — the setup the
+   * startup log, /admin/settings and the Settings page warn about.
+   */
+  get MANUAL_SIGN_IN_OPEN_WITH_SSO(): boolean {
+    return this.OIDC_CONFIGURED && this.MANUAL_SIGN_IN === "open";
   },
   /**
    * Generic OIDC single sign-on (Microsoft Entra ID, Google, any spec-
@@ -622,6 +666,16 @@ export const config = {
     return process.env.HOOTIE_DEBUG_LOG === "true";
   },
   /**
+   * The server's own model gateway (Enterprise, licence feature byok): a
+   * LiteLLM / Bedrock / Azure / Ollama front speaking Anthropic's
+   * /v1/messages. With ANTHROPIC_API_KEY as its key it routes Hootie AND agent
+   * runs (via the run bundle's env floor) — one setting, superadmin-editable
+   * (anthropic_base_url). Used only as a pair with the key; empty = off.
+   */
+  get ANTHROPIC_BASE_URL(): string {
+    return (process.env.ANTHROPIC_BASE_URL || "").trim().replace(/\/$/, "");
+  },
+  /**
    * Sub-agent runs: lets a run spawn nested runs (an external runner calling
    * back into POST /run for a child agent). Gated SEPARATELY from the base
    * plane because recursion is the risky surface — unbounded fan-out,
@@ -671,6 +725,19 @@ export const config = {
   get SUBAGENT_MAX_CHILDREN(): number {
     const n = parseInt(process.env.SUBAGENT_MAX_CHILDREN || "16", 10);
     return Number.isFinite(n) ? Math.min(128, Math.max(1, n)) : 16;
+  },
+  /**
+   * Agent-run retention in days (the runs + run_steps tables behind the Run
+   * Trace and the per-agent activity history). 0 = keep forever, the default:
+   * a run is the record of what an agent did, and an operator should choose to
+   * drop it. Finished runs older than this are pruned hourly; a running run is
+   * never pruned. Same [0, 3650] range as TRACE_RETENTION_DAYS. Editable at
+   * runtime from the admin Settings page (/admin/settings).
+   */
+  get RUN_RETENTION_DAYS(): number {
+    const n = parseInt(process.env.RUN_RETENTION_DAYS || "0", 10);
+    if (!Number.isFinite(n) || n < 0) return 0;
+    return Math.min(n, 3650);
   },
   /** Max steps a single run may accumulate — bounds a runaway/hostile
    *  runner's step log. Clamped to [10, 100000]. */

@@ -14,10 +14,7 @@ import {
   resolveHostedNodeId,
 } from "./service.js";
 import { ARTIFACT_NODE_TYPE, type AnnotationAnchor } from "./types.js";
-import {
-  notifyCommentMentions,
-  notifyCommentReply,
-} from "../governance/mention-notify.js";
+import { notifyComment } from "../governance/mention-notify.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 
 /**
@@ -81,7 +78,7 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
     },
     userEmail,
   );
-  await notifyCommentMentions({
+  await notifyComment({
     nestId,
     nodeId,
     body: input.body,
@@ -117,8 +114,9 @@ export async function handleAnnotationReply(
 
   // addComment also reopens the thread when it was resolved.
   const thread = await addComment(nestId, nodeId, threadId, userEmail, input.body);
-  // @mentions in the reply, plus everyone already in the thread.
-  await notifyCommentReply({
+  // @mentions in the reply, everyone already in the thread, then the
+  // document's watchers and reviewer stewards.
+  await notifyComment({
     nestId,
     nodeId,
     thread,

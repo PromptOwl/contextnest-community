@@ -494,7 +494,7 @@ export async function stewardDocumentCreator(
 }
 
 /** A unique-index conflict, from either database. */
-function isUniqueViolation(err: unknown): boolean {
+export function isUniqueViolation(err: unknown): boolean {
   const code = (err as { code?: string } | null)?.code;
   return code === "SQLITE_CONSTRAINT_UNIQUE" || code === "23505";
 }

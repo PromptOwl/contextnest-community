@@ -19,6 +19,7 @@ export const KNOWN_EVENTS = [
   "review_rejected",
   "run_failed",
   "mention",
+  "review_escalated",
 ] as const;
 
 const CHANNELS = ["slack", "teams", "webhook"] as const;

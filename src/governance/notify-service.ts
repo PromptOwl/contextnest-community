@@ -304,9 +304,10 @@ export async function listNotifications(
               rr.node_id,
               CASE WHEN dr.target_type = 'document' THEN dr.node_id END,
               CASE WHEN ar.target_type = 'node' THEN ar.target_id END,
-              -- A mention (or a reply on a thread you're in) names the
-              -- document directly; there's no request row.
-              CASE WHEN n.kind IN ('mention', 'assigned', 'comment_reply') THEN n.subject_id END
+              -- A mention, a reply on a thread you're in, or a comment on a
+              -- document you follow names the document directly; there's no
+              -- request row.
+              CASE WHEN n.kind IN ('mention', 'assigned', 'comment_reply', 'comment') THEN n.subject_id END
             ) AS node_id,
             -- Name resolved here so the inbox never fetches the nest list for it.
             COALESCE(ns.name, n.nest_id) AS nest_name
@@ -352,6 +353,21 @@ export async function markNotificationsRead(
  * what those rows were inserted with — not the resolved kind, so a stale
  * "requested" row is cleared for every recipient regardless of who acted.
  */
+/**
+ * A review that is approved, rejected or withdrawn is no longer an ask: clear
+ * every "please review this" row it produced — the original request and any
+ * SLA escalation — for every recipient, whoever resolved it. Best-effort: a
+ * failure here must never fail the resolution.
+ */
+export async function markReviewNotificationsRead(reviewId: string): Promise<void> {
+  try {
+    await markNotificationsReadBySubject(reviewId, "review_requested");
+    await markNotificationsReadBySubject(reviewId, "review_escalated");
+  } catch (err) {
+    console.error("[notify] clearing review rows failed", reviewId, err);
+  }
+}
+
 export async function markNotificationsReadBySubject(
   subjectId: string,
   kind: string,
