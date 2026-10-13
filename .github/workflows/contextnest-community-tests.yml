@@ -56,9 +56,10 @@ permissions:
   contents: read
 
 # Every run drives the same shared test accounts on the same deployed server,
-# so two runs at once delete and count each other's data (the orphan sweep at
-# the start of one run removed the live nests of another). Queue them instead:
-# one e2e run per target server at a time, never cancelling a run in progress.
+# so two runs at once collide: rate limits (429), 500s, and each deleting the
+# other's data (the orphan sweep at the start of one run removed the live nests
+# of another). Queue them instead: one e2e run per target server at a time,
+# never cancelling a run in progress.
 concurrency:
   group: e2e-${{ vars.TEST_URL || 'https://nest-dev.promptowl.ai' }}
   cancel-in-progress: false
