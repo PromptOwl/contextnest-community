@@ -1304,7 +1304,7 @@ function RunsPanel({ nestId, focusRunId }: { nestId: string; focusRunId?: string
         className={`grid gap-4 items-start ${selected ? "lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]" : "grid-cols-1"
           }`}
       >
-        <div className="rounded-lg border divide-y min-w-0">
+        <div className={`rounded-lg border divide-y min-w-0 ${selected ? PANE_SCROLL : ""}`}>
           {loading ? (
             <div className="px-3 py-6 text-center text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin inline" />
@@ -1320,7 +1320,7 @@ function RunsPanel({ nestId, focusRunId }: { nestId: string; focusRunId?: string
 
         {/* Trace / editor — right-hand pane, appears when a run is selected. */}
         {selected && (
-          <div className="rounded-lg border p-4 min-w-0 lg:sticky lg:top-20">
+          <div className={`rounded-lg border p-4 min-w-0 ${PANE_SCROLL}`}>
             <RunTrace
               run={selected}
               children={runs.filter((r) => r.parent_run_id === selected.id)}
@@ -1341,6 +1341,10 @@ function RunsPanel({ nestId, focusRunId }: { nestId: string; focusRunId?: string
     </div>
   );
 }
+
+/** Side by side, each pane scrolls on its own so a long run list never pushes
+ *  the trace off screen (and vice versa). Narrow screens keep page scroll. */
+const PANE_SCROLL = "lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto";
 
 function RunTrace({
   run,
