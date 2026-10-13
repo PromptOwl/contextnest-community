@@ -1523,7 +1523,13 @@ async function runTool(
       const relations = (await isServiceUser(ctx.userId))
         ? null
         : await listRelations({ nestId, userId: ctx.userId, userEmail }, node.id).catch(
-            () => null,
+            (err) => {
+              // Not found = no relations to show; anything else is a real fault.
+              if (!(err instanceof NotFoundError)) {
+                console.error("context_get relations failed", node.id, err);
+              }
+              return null;
+            },
           );
       const hasRelations =
         !!relations && (relations.relations.length > 0 || relations.hidden_count > 0);

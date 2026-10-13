@@ -472,6 +472,13 @@ export async function addRelation(
   const now = new Date().toISOString();
   await db.transaction(async (tx) => {
     const typeId = await ensureRelationType(tx, caller.nestId, type, caller.userEmail);
+    // Postgres runs READ COMMITTED: two concurrent adds could each pass the
+    // duplicate and loop checks below against the old rows (edges has no
+    // unique index to catch it). Locking the nest's type row serialises them;
+    // SQLite's write transaction already does.
+    if (db.dialect === "postgres") {
+      await tx.get("SELECT id FROM edge_types WHERE id = ? FOR UPDATE", [typeId]);
+    }
     const dup = (await tx.get(
       type.direction === "undirected"
         ? `SELECT id FROM edges WHERE nest_id = ? AND type_id = ?
@@ -484,12 +491,6 @@ export async function addRelation(
     )) as { id: string } | undefined;
     if (dup) throw new ConflictError("Those two are already related that way.");
     if (type === STORED.blocks) {
-      // Postgres runs READ COMMITTED: two concurrent adds could each pass the
-      // loop check against the old graph. Locking the nest's one task:blocks
-      // type row serialises them; SQLite's write transaction already does.
-      if (db.dialect === "postgres") {
-        await tx.get("SELECT id FROM edge_types WHERE id = ? FOR UPDATE", [typeId]);
-      }
       if (!(await blockingLoopFree(tx, caller.nestId, typeId, from, to))) {
         const titles = await indexedMeta(caller.nestId, [from, to]);
         const t = (n: string) => `"${titles.get(n)?.title ?? n}"`;
