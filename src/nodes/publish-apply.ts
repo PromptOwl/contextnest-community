@@ -36,6 +36,7 @@ export interface PublishDoc {
   folder?: string;
   status?: string;
   schedule?: string;
+  model?: string;
   prime?: boolean;
   /** Custom field values — validated on replay, like any create. */
   fields?: Record<string, unknown>;
@@ -152,6 +153,7 @@ export async function applyPublish(
           folder: doc.folder,
           status: doc.status,
           schedule: doc.schedule,
+          model: doc.model,
           prime: doc.prime,
           ...(doc.fields !== undefined ? { fields: doc.fields } : {}),
         },

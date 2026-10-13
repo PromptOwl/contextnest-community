@@ -192,6 +192,7 @@ nodeRoutes.post("/", async (c) => {
     scope?: string;
     status?: string;
     schedule?: string;
+    model?: string;
     folder?: string;
     prime?: boolean;
     client?: unknown;
@@ -233,6 +234,7 @@ nodeRoutes.post("/", async (c) => {
             scope: body.scope,
             status: body.status,
             schedule: body.schedule,
+            model: body.model,
             folder: body.folder,
             prime: body.prime,
             ...customFieldsFromBody(body),
@@ -253,6 +255,7 @@ nodeRoutes.post("/", async (c) => {
       scope: body.scope,
       status: body.status,
       schedule: body.schedule,
+      model: body.model,
       folder: body.folder,
       prime: body.prime,
       client: attributeRequest(c, body.client),
@@ -616,6 +619,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     title?: string;
     changeNote?: string;
     schedule?: string;
+    model?: string;
     prime?: boolean | null;
     client?: unknown;
     type?: string;
@@ -661,6 +665,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       status: body.status,
       changeNote: body.changeNote,
       schedule: body.schedule,
+      model: body.model,
       prime: body.prime,
       client: attributeRequest(c, body.client),
       type: body.type,
