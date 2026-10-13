@@ -57,13 +57,18 @@ let insertsSincePrune = 0;
 const R = "[REDACTED]";
 
 // Query params whose value is a credential: magic links (?token=), invite and
-// share links, OAuth-style codes and signatures.
-const SECRET_PARAM =
-  /([?&](?:token|t|key|code|secret|sig|signature|password|pwd|access_token|refresh_token|auth|invite_token|share_token)=)[^&#\s"'<>)]+/gi;
+// share links, OAuth-style codes and signatures. `#` covers fragments, `;`
+// covers HTML-escaped `&amp;` (Slack text is escaped before it is logged).
+const SECRET_NAMES =
+  "token|t|key|code|secret|sig|signature|password|pwd|access_token|refresh_token|auth|invite_token|share_token|api_key|apikey|client_secret";
+const SECRET_PARAM = new RegExp(`([?&#;](?:${SECRET_NAMES})=)[^&#\\s"'<>)]+`, "gi");
+// The same names as JSON string values: {"token": "…"}.
+const SECRET_JSON = new RegExp(`("(?:${SECRET_NAMES}|authorization)"\\s*:\\s*")(?:[^"\\\\]|\\\\.)*"`, "gi");
 
-// Hosts whose URL path IS the credential (incoming webhooks).
+// Hosts whose URL path IS the credential (incoming webhooks). The tail stops
+// at an escaped `&gt;`/`&lt;`/`&quot;` so the hash matches the real URL.
 const WEBHOOK_URL =
-  /https?:\/\/(hooks\.slack\.com|[a-z0-9.-]*\.webhook\.office\.com|[a-z0-9.-]*\.logic\.azure\.com|discord(?:app)?\.com\/api\/webhooks)[^\s"'<>)]*/gi;
+  /https?:\/\/(hooks\.slack\.com|[a-z0-9.-]*\.webhook\.office\.com|[a-z0-9.-]*\.logic\.azure\.com|discord(?:app)?\.com\/api\/webhooks)(?:[^\s"'<>)&]|&(?!gt;|lt;|quot;))*/gi;
 
 /**
  * Scrub credentials out of a message body. Pure; exported for tests.
@@ -77,12 +82,18 @@ export function redact(text: string, secrets: Array<string | null | undefined> =
   }
   out = out.replace(WEBHOOK_URL, (url) => webhookTarget(url));
   out = out.replace(SECRET_PARAM, `$1${R}`);
-  out = out.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/g, `Bearer ${R}`);
+  out = out.replace(SECRET_JSON, `$1${R}"`);
+  out = out.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, `Bearer ${R}`);
+  // Basic credentials are base64: an upper-case, digit or +/= past the first
+  // char spares prose ("Basic setup", "Basic Configuration").
+  out = out.replace(/\b(?:Basic|basic|BASIC)\s+(?=\S[a-z]*[A-Z0-9+/=])[A-Za-z0-9+/]{8,}={0,2}/g, `Basic ${R}`);
   out = out.replace(/\bcnst_[A-Za-z0-9_-]+/g, `cnst_${R}`);
   out = out.replace(/\bhk_[A-Za-z0-9_-]+/g, `hk_${R}`);
   // Common provider key shapes that could ride in a feed or MCP echo.
   out = out.replace(/\b(sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, `$1-${R}`);
   out = out.replace(/\bxox[abposr]-[A-Za-z0-9-]{10,}/g, `xox-${R}`);
+  out = out.replace(/\b(gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}/g, `$1_${R}`);
+  out = out.replace(/\b(AKIA|ASIA)[A-Z0-9]{16}\b/g, `$1${R}`);
   return out;
 }
 

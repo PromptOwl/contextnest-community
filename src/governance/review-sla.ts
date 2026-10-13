@@ -32,7 +32,6 @@
  * starts with FEATURE_WORKFLOW_PLANE on, and review governance doesn't depend
  * on the workflow plane.
  */
-import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { resolveStewardsForNode } from "./stewardship-service.js";
 import { canOpenNode } from "./mention-notify.js";
@@ -40,6 +39,7 @@ import { buildDocContext } from "./title-resolver.js";
 import { dispatchEvent } from "../notify/dispatch.js";
 import { notifyNestEvent } from "../notify/notify.js";
 import { sendEmailToRecipient } from "../notify/email.js";
+import { insertNotification } from "../notify/inbox.js";
 
 /** The last rung: the nest owner. Nothing escalates past it. */
 export const MAX_ESCALATION_LEVEL = 3;
@@ -163,24 +163,22 @@ async function notifyEscalation(
   recipients: string[],
   hoursWaiting: number,
 ): Promise<void> {
-  const db = getDb();
   const ctx = await buildDocContext(r.nest_id, r.node_id);
   const waited = `${hoursWaiting} hour${hoursWaiting === 1 ? "" : "s"}`;
   const nowIso = new Date().toISOString();
   for (const email of recipients) {
-    await db.run(
-      `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
-       VALUES (?, ?, ?, 'review_escalated', ?, ?, ?)`,
-      [
-        uuid(),
-        r.nest_id,
-        email,
+    await insertNotification(
+      {
+        nestId: r.nest_id,
+        userEmail: email,
+        kind: "review_escalated",
         // The review id, like review_requested rows: listNotifications joins
         // review_requests on it to link the document.
-        r.id,
-        `"${ctx.label}" has been waiting ${waited} for review (submitted by ${r.requested_by}) — escalated to you`,
-        nowIso,
-      ],
+        subjectId: r.id,
+        message: `"${ctx.label}" has been waiting ${waited} for review (submitted by ${r.requested_by}) — escalated to you`,
+        createdAt: nowIso,
+      },
+      { from: r.requested_by, nodeId: r.node_id },
     );
   }
   const line = `Review on *${ctx.label}* (v${r.version}) has waited ${waited} — escalated to ${ESCALATION_RUNG_LABELS[level]}: ${recipients.join(", ")}`;

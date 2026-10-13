@@ -45,8 +45,35 @@ describe("message log redaction", () => {
     expect(redact("https://acme.webhook.office.com/webhookb2/abc@def/IncomingWebhook/123/456")).not.toContain("IncomingWebhook");
   });
 
+  it("scrubs secrets in fragments, escaped links, JSON and other header/key shapes", () => {
+    const body = [
+      "https://h/cb#access_token=FRAGSECRET1",
+      "https://h/x?a=1&amp;token=AMPSECRET22",
+      "https://h/x?api_key=APIKEY33&client_secret=CLIENT44",
+      '{"token":"JSONTOK55","api_key": "JSONKEY66","note":"keep"}',
+      "authorization: bearer lowercasebearer77",
+      "Authorization: Basic dXNlcjpwYXNzOTk=",
+      "gh ghp_abcdefghijklmnopqrstuvwxyz0123",
+      "pat github_pat_11ABCDEFG0123456789_abcdefghij",
+      "aws AKIAIOSFODNN7EXAMPLE",
+    ].join("\n");
+    const out = redact(body);
+    for (const leak of [
+      "FRAGSECRET1", "AMPSECRET22", "APIKEY33", "CLIENT44", "JSONTOK55", "JSONKEY66",
+      "lowercasebearer77", "dXNlcjpwYXNzOTk", "abcdefghijklmnopqrstuvwxyz0123", "11ABCDEFG0123456789", "IOSFODNN7EXAMPLE",
+    ]) {
+      expect(out).not.toContain(leak);
+    }
+    expect(out).toContain('"note":"keep"');
+  });
+
+  it("hashes an escaped Slack webhook URL the same as the raw one", () => {
+    const url = "https://hooks.slack.com/services/T000/B000/XXXXSECRETXXXX";
+    expect(redact(`&lt;${url}&gt;`)).toBe(`&lt;${webhookTarget(url)}&gt;`);
+  });
+
   it("leaves ordinary text alone", () => {
-    const s = 'Alice mentioned you in "Q3 plan" — https://nest.example.com/nests/n1/doc?view=raw';
+    const s = 'Alice mentioned you in "Q3 plan" — https://nest.example.com/nests/n1/doc?view=raw. Basic setup done. Basic Configuration.';
     expect(redact(s)).toBe(s);
   });
 });

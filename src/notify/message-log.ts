@@ -1,7 +1,6 @@
 /**
- * Reading the superadmin message log — the one implementation behind both
- * surfaces: REST (GET /admin/messages, message-log-routes.ts) and MCP
- * (`message_log_search` / `message_log_get` on server-level /mcp).
+ * Reading the superadmin message log, behind REST GET /admin/messages
+ * (message-log-routes.ts).
  *
  * Access is decided by isMessageLogViewer: an effective superadmin, never in
  * open mode (where everyone is admin), never through a nest-scoped key. Every
@@ -12,8 +11,9 @@ import { v4 as uuid } from "uuid";
 import { config } from "../config.js";
 import { getDb } from "../db/client.js";
 import { isServerAdminUserId } from "../shared/access.js";
+import { pruneMessageLog } from "./outbound-log.js";
 
-export type MessageLogSurface = "rest" | "mcp";
+export type MessageLogSurface = "rest";
 
 const CHANNELS = ["email", "slack", "msteams", "webhook", "inbox", "comment"];
 const SENDER_KINDS = ["human", "persona", "system"];
@@ -188,6 +188,9 @@ export async function searchMessageLog(
   }
   const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
   const db = getDb();
+  // Sends alone prune only every PRUNE_EVERY inserts; a quiet server must not
+  // show bodies past retention.
+  await pruneMessageLog().catch(() => {});
   await audit(viewerId, "list", Object.fromEntries(Object.entries(filters).filter(([, v]) => v)), null, via);
   const totalRow = (await db.get(`SELECT COUNT(*) AS n FROM outbound_messages m${whereSql}`, args)) as
     | { n: number }

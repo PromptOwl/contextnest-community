@@ -244,6 +244,16 @@ describe("robustness and retention", () => {
     expect(await d.get("SELECT id FROM message_log_views WHERE id = 'view-mid'")).toBeTruthy();
   });
 
+  it("never shows a message past retention, even before the send-count prune", async () => {
+    const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
+    await (await db()).run(
+      "INSERT INTO outbound_messages (id, channel, recipients_json, status, created_at) VALUES ('old-2', 'inbox', '[]', 'sent', ?)",
+      [old],
+    );
+    const list = await get("/admin/messages?limit=200", superadmin.apiKey);
+    expect(list.data.messages.some((m: any) => m.id === "old-2")).toBe(false);
+  });
+
   it("a broken log never breaks a send", async () => {
     const d = await db();
     await d.exec("ALTER TABLE outbound_messages RENAME TO outbound_messages_parked");
