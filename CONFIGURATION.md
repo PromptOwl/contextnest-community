@@ -66,7 +66,7 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `MANUAL_SIGN_IN` | `open`; `invite-only` when SSO (OIDC) is on and configured | Email + password sign-in mode. `open` = anyone may log in and self-register a new account; `invite-only` = existing/invited users may log in but brand-new self-registration returns `403` (the admin provisions accounts via invite/share/steward and shares the password — there is no self-service "set password", which would be account takeover without email verification); `disabled` = no email/password sign-in at all (`POST /auth/login` and `POST /auth/register` return `403`). Independent of `PROMPTOWL_SIGN_IN_GATE`, so the two methods are controlled separately (e.g. `invite-only` manual + `admin-only` PromptOwl). Also settable from Server settings → Basic. The server refuses `disabled` while PromptOwl sign-in is also `disabled`, unless SSO (OIDC) is on and fully configured (that would leave no way to log in — see [Making SSO the only way in](#making-sso-the-only-way-in)). Unset or unknown values take the default. With SSO on, everyone your identity provider vouches for already gets in through SSO, so password self-registration is closed by default; an explicit `open` still works but logs a startup warning and shows one on the Settings page, and while `OIDC_ALLOWED_DOMAINS` is set, password self-registration is limited to those domains too. |
 | `OFFICIAL_COMMUNITY_SSO_SECRET` | `""` | **Legacy — official deployment only, leave unset on self-hosted.** Shared HMAC secret enabling the one-click "Open Community" SSO auto-login from PromptOwl. Must exactly match the same-named var on PromptOwl. Superseded by the DB-backed **Server settings → Community sites** list (`/admin/community-sites`), which supports multiple official sites each with their own name/url/secret/active flag — this env var still works as an implicit extra site for backward compatibility. When no site is configured (env var unset and no DB rows), `GET /auth/sso` returns `404` and the feature is disabled; self-hosted users keep using the manual device-code flow. See `API.md → Community sites`. |
 | `PUBLIC_BASE_URL` | `""` | This server's canonical external URL (e.g. `https://community.promptowl.ai`). Two uses. (1) Checked against the SSO ticket's `aud` claim so a ticket minted for this server can't be replayed against another — whenever a ticket-signing secret is set (`OFFICIAL_COMMUNITY_SSO_SECRET` on the official deployment, `MCP_SIGNING_SECRET` on a self-hosted one); with neither set no ticket verifies at all, so the audience check is moot. (2) **Set this whenever `OIDC_ENABLED=true`.** It's the base for the OIDC `redirect_uri` sent to your IdP and replayed at token exchange. Unset, that URI is derived from the incoming request's `Host` header — fine when your proxy overwrites `Host` with a trusted value, but a proxy that passes an attacker-supplied `Host` through would feed it straight into the redirect URI. Setting this pins the value regardless of what the proxy forwards. (Your IdP's own redirect-URI allowlist is a second line of defence, not a substitute.) (3) **Set this wherever email- or invite-gated publish links are used.** The magic link mailed by `POST /p/:slug/gate` is built from it; unset, it falls back to the request origin, so a proxy forwarding an attacker-supplied `Host` would send the recipient a one-time access token pointing at the attacker's domain — the classic reset-link poisoning. (4) **Set this wherever `POST /nests/:id/context` citations reach users.** The `url` on each node and the `_source:` line in each context block are built from it; unset, they fall back to the request origin, so a proxy forwarding an untrusted `Host` would put an attacker-influenced URL in front of both the model and the reader as a trustworthy citation. (5) It is rendered into the copy-paste setup snippets on **Server settings → Connecting agents** — a `bash` block and quoted strings in `config.toml` / `config.yaml` / `mcp.json`. Because those are pasted verbatim into other people's terminals, `PATCH /admin/settings` refuses a value that is not a plain `http(s)` URL, or that contains whitespace, quotes or shell characters (`" ' ` \ $ ; | & < > ( ) { }`). A value stored before that check is not rewritten, so re-save it if the panel shows it oddly. |
-| `MCP_OAUTH_ENABLED` | `false` | Run an OAuth 2.1 authorization server for MCP clients, so an agent (Claude, ChatGPT, Grok, Cursor) signs its user in and is issued a token scoped to **that person** instead of carrying a shared API key. This is what makes per-user nest visibility reachable from vendor-hosted surfaces: the server already gates every nest through `canRead(nestId, userId)`, but a key pasted by several people resolves all of them to the same user. **Requires `PUBLIC_BASE_URL`** — the discovery documents' `resource` must equal the URL the user types into their client, and `/admin/settings` refuses to enable this without one. Off means the surface does not exist: `/.well-known/*` keeps returning 404 and `/mcp` answers unauthenticated callers exactly as before. Superadmin-togglable at runtime (Server settings → Single sign-on → Agent OAuth). |
+| `MCP_OAUTH_ENABLED` | `false` | Run an OAuth 2.1 authorization server for MCP clients, so an agent (Claude, ChatGPT, Grok, Cursor) signs its user in and is issued a token scoped to **that person** instead of carrying a shared API key. This is what makes per-user nest visibility reachable from vendor-hosted surfaces: the server already gates every nest through `canRead(nestId, userId)`, but a key pasted by several people resolves all of them to the same user. **Requires `PUBLIC_BASE_URL`** — the discovery documents' `resource` must equal the URL the user types into their client, and `/admin/settings` refuses to enable this without one. Off means the surface does not exist: `/.well-known/*` keeps returning 404 and `/mcp` answers unauthenticated callers exactly as before. Superadmin-togglable at runtime (Server settings → Features → Agent OAuth). |
 | `OIDC_ENABLED` | `false` | Turn on generic OIDC single sign-on (`GET /auth/oidc/login` / `GET /auth/oidc/callback`). Requires `OIDC_ISSUER`, `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET` — the login-page button only appears once all three are set. Also editable from **Admin → Server settings → Single sign-on**. See the [Single sign-on (OIDC) admin guide](#single-sign-on-oidc). |
 | `OIDC_ISSUER` | `""` | OIDC issuer URL, e.g. `https://login.microsoftonline.com/<tenant>/v2.0` (Microsoft Entra ID) or `https://accounts.google.com` (Google). **`https://` only** — a non-https value is rejected with a warning and SSO stays off. Must serve `<issuer>/.well-known/openid-configuration`. |
 | `OIDC_CLIENT_ID` | `""` | Application (client) ID from your IdP app registration. |
@@ -343,13 +343,19 @@ The `/admin/settings` API names for the same fields are `oidc_enabled`,
 4. **Collect the IDs.** On the app's *Overview* page, copy the **Application
    (client) ID** and the **Directory (tenant) ID**.
 5. **Fill in ContextNest.** On **Admin → Server settings → Single sign-on**,
-   click **Microsoft Entra ID** and paste the tenant ID when asked. The issuer
-   becomes `https://login.microsoftonline.com/<tenant-id>/v2.0`. Paste the
+   click **Microsoft Entra ID** and paste the tenant ID into **Directory
+   (tenant) ID**. The issuer becomes
+   `https://login.microsoftonline.com/<tenant-id>/v2.0`. Paste the
    client ID and the secret value. You can also set **Allowed email domains**
    to your organization's domains. Turn the switch **On** and **Save**. The
    switch and the fields can go in the same save.
-6. **Test.** Open the login page in a private window. A **Sign in with
-   Microsoft** button should appear and take you through Entra.
+6. **Test.** On **Server settings → Network & status**, click **Test
+   discovery** to confirm this server can reach Entra. Then open the login
+   page in a private window. A **Sign in with Microsoft** button should appear
+   and take you through Entra.
+
+The same steps, with copy buttons for every value Entra asks for, are on
+**Server settings → Network & status → Microsoft Entra ID sign-in**.
 
 Entra-specific notes:
 
@@ -1045,6 +1051,113 @@ Same as team, plus:
 - Run N instances behind a load balancer. SQLite + a shared filesystem is not a great long-term story for the metadata DB when scaling beyond one box — switch to the **PostgreSQL / Cloud SQL** backend (see [Database backends](#database-backends)) so all instances share one consistent database. The on-disk nest vault under `$DATA_ROOT/nests/` still needs durable shared storage.
 - Set `TELEMETRY_ENABLED=true` and a valid `PROMPTOWL_KEY` so usage rolls up to PromptOwl.
 - Rotate keys regularly via `DELETE /auth/keys/:id` + `POST /auth/keys`.
+
+## Firewalls, VPNs and tunnels
+
+**Server settings → Network & status** runs these checks for you and shows the
+values for your server. It has a status checklist (database, disk, license,
+public address, email, SSO, scheduler), an inbound check of the public
+address, an outbound test of every host the server calls, and the deployment
+recipes below.
+
+### Who connects to whom
+
+| Direction | Who | Needs |
+|---|---|---|
+| Inbound | People's browsers, Claude Code, Claude Desktop (local config), the `ctx` CLI | Reach the server from their machine. A VPN works. |
+| Inbound | Hosted connectors: claude.ai, ChatGPT, Claude Desktop/Cowork *connectors* | A **public** DNS name with a **publicly trusted** certificate. They connect from the vendor's servers, not your VPN. |
+| Outbound | This server | HTTPS to PromptOwl (`PROMPTOWL_API_URL`, licensing and PromptOwl sign-in), the license's model gateway, your OIDC issuer, Slack/Teams webhooks, PostHog when telemetry is on; SMTP or SES for email; your Postgres host. The exact list for your settings is on the Network & status tab (**Copy allowlist**). |
+
+### Public with HTTPS
+
+Point a DNS name at the server, terminate TLS in front of it with a publicly
+trusted certificate, open only 443 inbound, and set `PUBLIC_BASE_URL` (or
+**Settings → Basic → Public base URL**) to `https://<name>`. Don't expose the
+app's own port (`PORT`, default 3838) to the internet.
+
+### Behind a reverse proxy
+
+A full TLS server block. Which forwarded headers the app trusts (`HOST`,
+`TRUSTED_PROXIES`) is covered in [Reverse proxies](#reverse-proxies).
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name nest.example.com;
+    ssl_certificate     /etc/letsencrypt/live/nest.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/nest.example.com/privkey.pem;
+    client_max_body_size 100m;
+
+    location / {
+        proxy_pass http://127.0.0.1:3838;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_buffering off;       # MCP streams responses
+        proxy_read_timeout 300s;
+    }
+}
+```
+
+```caddyfile
+nest.example.com {
+    reverse_proxy 127.0.0.1:3838 {
+        flush_interval -1
+    }
+}
+```
+
+Caddy obtains the certificate, sets `X-Forwarded-Proto`, and replaces any
+client-supplied `X-Forwarded-For` by default.
+
+### VPN-only
+
+Browsers, Claude Code, local Desktop configs and the CLI work over the VPN.
+Hosted connectors don't: they can't reach a private address. To support them
+anyway, either publish only `/mcp`, `/.well-known/*` and `/oauth/*` on a public
+name and allow inbound traffic only from
+[Anthropic's published IP ranges](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp),
+or use a tunnel scoped to those paths (below). The Connect dialog warns users
+when the server's address is private.
+
+### NAT and port forwarding
+
+Give the server a fixed LAN address, forward TCP 443 (and 80 if your proxy
+gets certificates over HTTP-01) to the reverse proxy on that machine, and use
+dynamic DNS if your public IP changes. Never forward straight to the app's
+port: it has no TLS of its own. If the inbound check fails from inside your
+network but the address works from outside (for example a phone on mobile
+data), the router doesn't support hairpin NAT — use split DNS internally.
+
+### Tunnels
+
+A tunnel agent (Cloudflare Tunnel, ngrok, Tailscale Funnel) connects out, so no
+inbound port is opened. Expose only what you need — for hosted connectors,
+`/mcp`, `/.well-known/*`, `/oauth/*` and `/health` — then set `PUBLIC_BASE_URL`
+to the tunnel's address.
+
+```yaml
+# cloudflared config.yml
+tunnel: <tunnel-id>
+credentials-file: /etc/cloudflared/<tunnel-id>.json
+ingress:
+  - hostname: nest.example.com
+    path: ^/(mcp|\.well-known/|oauth/|health$)
+    service: http://localhost:3838
+  - service: http_status:404
+```
+
+`ngrok http 3838 --url=<your-domain>` and `tailscale funnel --bg 3838` expose
+the whole app; add path rules in front if only the connector paths should be
+public.
+
+### Behind an egress proxy
+
+Set it up as in [Corporate egress proxy](#corporate-egress-proxy), then run
+**Test connections** on the Network & status tab: with a proxy set, HTTPS
+targets are tested through it.
 
 ---
 

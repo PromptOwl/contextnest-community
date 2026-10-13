@@ -48,6 +48,7 @@ import { modelOptions } from "@/lib/model-options";
 import { useAuth } from "../../../auth/AuthContext";
 import { AgentConnectPanel } from "./AgentConnectPanel";
 import { LicensePanel } from "./LicensePanel";
+import { NetworkStatusPanel } from "./NetworkStatusPanel";
 import { toast } from "sonner";
 
 interface SettingsPageProps {
@@ -183,6 +184,12 @@ const TABS: {
     // Docs only — nothing here persists, so no keys for the unsaved dot.
     id: "agents",
     label: "Connecting agents",
+    keys: [],
+  },
+  {
+    // Read-only health checks, probes and the deployment guide.
+    id: "network",
+    label: "Network & status",
     keys: [],
   },
   {
@@ -491,6 +498,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   // rejected field — otherwise the error banner points at fields on a tab
   // they've navigated away from.
   const [activeTab, setActiveTab] = useState<string>("basic");
+  // Entra preset clicked with no Entra issuer yet: show the tenant field.
+  const [entraTenantOpen, setEntraTenantOpen] = useState(false);
   // Switching SSO off while on its tab hides that tab — fall back to Features.
   const visibleTabs = TABS.filter((t) => !t.visible || (draft && t.visible(draft)));
   const currentTab = visibleTabs.some((t) => t.id === activeTab) ? activeTab : "features";
@@ -1279,7 +1288,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     role="alert"
                     className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive"
                   >
-                    Blocked: set the public base URL on the General tab first.
+                    Blocked: set the public base URL on the Basic tab first.
                     The discovery documents have to name this server's exact
                     address, and a guessed one fails the client's check with no
                     useful error.
@@ -1488,15 +1497,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                             variant={preset === "entra" ? "default" : "outline"}
                             size="sm"
                             aria-pressed={preset === "entra"}
-                            onClick={() => {
-                              const tenant = window.prompt(
-                                "Microsoft Entra tenant ID (Directory ID) — find it on your app registration's Overview page:",
-                              );
-                              if (tenant && tenant.trim())
-                                set({
-                                  oidc_issuer: `https://login.microsoftonline.com/${tenant.trim()}/v2.0`,
-                                });
-                            }}
+                            onClick={() => setEntraTenantOpen(true)}
                           >
                             Microsoft Entra ID
                           </Button>
@@ -1517,6 +1518,45 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                             </span>
                           )}
                         </div>
+                        {(preset === "entra" || entraTenantOpen) && (() => {
+                          const tenant =
+                            /^https:\/\/login\.microsoftonline\.com\/([^/]+)\/v2\.0$/.exec(issuer)?.[1] ?? "";
+                          const looksLikeGuid =
+                            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenant);
+                          return (
+                            <div className="mb-2 rounded-md border bg-muted/30 p-3">
+                              <label className="text-sm font-medium" htmlFor="entra-tenant">
+                                Directory (tenant) ID
+                              </label>
+                              <p className="mb-1.5 text-xs text-muted-foreground">
+                                On your app registration's Overview page in Entra. The
+                                issuer below fills in from it.
+                              </p>
+                              <Input
+                                id="entra-tenant"
+                                value={tenant}
+                                placeholder="00000000-0000-0000-0000-000000000000"
+                                autoComplete="off"
+                                spellCheck={false}
+                                onChange={(e) => {
+                                  const t = e.target.value.trim();
+                                  set({
+                                    oidc_issuer: t
+                                      ? `https://login.microsoftonline.com/${t}/v2.0`
+                                      : "",
+                                  });
+                                }}
+                              />
+                              {tenant && !looksLikeGuid && (
+                                <p role="alert" className="mt-1.5 text-xs text-amber-700 dark:text-amber-400">
+                                  Use the tenant GUID. <code>common</code>,{" "}
+                                  <code>organizations</code> or a domain name won't
+                                  match Entra's discovery document, and sign-in fails.
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })()}
                         <TextField
                           error={fieldErrors.oidc_issuer}
                           value={draft.oidc_issuer ?? ""}
@@ -2324,6 +2364,10 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               publicBaseUrl={draft.public_base_url}
               openMode={authMode === "open"}
             />
+          </TabsContent>
+
+          <TabsContent value="network" className="space-y-4">
+            {activeTab === "network" && <NetworkStatusPanel />}
           </TabsContent>
 
           <TabsContent value="license" className="space-y-4">

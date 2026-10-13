@@ -99,6 +99,10 @@ export const config = {
   get TRUSTED_PROXIES(): string {
     return process.env.TRUSTED_PROXIES?.trim() || "";
   },
+  /** Commit this build came from (GIT_SHA, or BUILD_SHA from some CI), for the status page. */
+  get GIT_SHA(): string {
+    return process.env.GIT_SHA?.trim() || process.env.BUILD_SHA?.trim() || "";
+  },
   get DATA_ROOT() {
     return dataRoot();
   },

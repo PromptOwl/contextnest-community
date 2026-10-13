@@ -169,6 +169,8 @@ import {
   modelProvider,
 } from "./shared/model-credential.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "./auth/license-copy.js";
+import { tryConsume } from "./shared/rate-limit.js";
+import { clientIp } from "./shared/request-ip.js";
 import { FREE_TIER_EXCEEDED_MESSAGE, withinFreeTier, writesAllowed } from "./auth/free-tier.js";
 import { SERVICE_VERSION } from "./shared/version.js";
 import { persistSetting } from "./db/settings.js";
@@ -1069,6 +1071,37 @@ export function createApp(): Hono<AuthEnv> {
     const result = await sendTestNotification(body.channel);
     return result.ok ? c.json({ ok: true }) : c.json({ error: result.error }, 502);
   });
+
+  // Network & status (Settings → Network & status). Admin-only, secret-free:
+  // see src/ops/status.ts. The probes only ever dial hosts derived from this
+  // server's own config (never a URL from the request), are rate-limited, and
+  // never follow redirects.
+  app.use("/admin/status", flexAuthMiddleware);
+  app.use("/admin/status/*", flexAuthMiddleware);
+  const OPS_PROBE_LIMIT = { max: 10, windowMs: 60_000 };
+  const opsProbeAllowed = (c: any) =>
+    tryConsume(`ops-probe:${c.get("userId") ?? clientIp(c)}`, OPS_PROBE_LIMIT);
+
+  app.get("/admin/status", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const { buildStatusReport } = await import("./ops/status.js");
+    return c.json(await buildStatusReport(c.req.url, (name) => c.req.header(name)));
+  });
+
+  for (const [path, run] of [
+    ["egress", async () => (await import("./ops/egress.js")).runEgressChecks()],
+    ["inbound", async () => (await import("./ops/egress.js")).runInboundCheck()],
+    ["oidc-discovery", async () => (await import("./ops/egress.js")).runOidcDiscoveryCheck()],
+  ] as const) {
+    app.post(`/admin/status/${path}`, async (c) => {
+      if (!(await serverAdminAllowed(c)))
+        return c.json({ error: "Only the server admin can do this." }, 403);
+      if (!opsProbeAllowed(c))
+        return c.json({ error: "Too many checks — wait a minute and try again." }, 429);
+      return c.json(await run());
+    });
+  }
 
   app.patch("/admin/settings", async (c) => {
     if (!(await serverAdminAllowed(c)))
