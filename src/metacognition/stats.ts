@@ -113,14 +113,19 @@ export async function agentStats(
   )) as RunRow[];
 
   // Only the steps that carry an outcome: proposals and access (write),
-  // comments (notify), and per-turn usage where a run records it.
-  const steps = (await db.all(
-    `SELECT s.run_id, s.action, s.detail FROM run_steps s
-       JOIN runs r ON r.id = s.run_id
-      WHERE r.nest_id = ? AND r.agent_node = ? AND r.started_at >= ?
-        AND s.detail IS NOT NULL`,
-    [nestId, nodeId, since],
-  )) as Array<{ run_id: string; action: string; detail: string }>;
+  // comments (notify), scope blocks (also on reads) and per-turn usage. Bounded
+  // to the runs scanned above, so the read/external bulk is never loaded.
+  const steps = runs.length
+    ? ((await db.all(
+        `SELECT s.run_id, s.action, s.detail FROM run_steps s
+           JOIN runs r ON r.id = s.run_id
+          WHERE r.nest_id = ? AND r.agent_node = ? AND r.started_at >= ?
+            AND s.detail IS NOT NULL
+            AND (s.action IN ('write', 'notify') OR s.detail LIKE '%access_needed%'
+                 OR s.detail LIKE '%"usage"%' OR s.detail LIKE '%"tokens"%')`,
+        [nestId, nodeId, runs[runs.length - 1].started_at],
+      )) as Array<{ run_id: string; action: string; detail: string }>)
+    : [];
 
   const perRun = new Map<string, { reviews: string[]; comments: number; stepTokens: number; access: number; blocked: number }>();
   const bucket = (id: string) => {

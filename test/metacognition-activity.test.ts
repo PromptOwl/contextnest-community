@@ -245,6 +245,34 @@ describe("GET /metacognition/:node/stats", () => {
     expect(s.history.find((h: any) => h.id === "run_failed_one")).toMatchObject({ outcome: "failed", tokens: 0 });
   });
 
+  it("reads only the steps that count: a scope block on a read, per-turn usage, not read noise", async () => {
+    const { getDb } = await import("../src/db/client.js");
+    const { agentStats } = await import("../src/metacognition/stats.js");
+    const db = getDb();
+    const at = new Date().toISOString();
+    await db.run(
+      `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, started_at, finished_at)
+       VALUES ('run_steps_only', ?, 'nodes/scout', 'owner@acme.com', 'failed', ?, ?)`,
+      [nestId, at, at],
+    );
+    const steps: Array<[string, Record<string, unknown>]> = [
+      ["read", { tool: "search_nest", query: "pricing" }],
+      ["read", { kind: "access_needed", tool: "read_node", level: "read" }],
+      ["external", { tool: "fetch_feed", usage: { input_tokens: 40, output_tokens: 2 } }],
+    ];
+    for (const [i, [action, detail]] of steps.entries()) {
+      await db.run("INSERT INTO run_steps (run_id, seq, action, detail, at) VALUES ('run_steps_only', ?, ?, ?, ?)", [
+        i + 1,
+        action,
+        JSON.stringify(detail),
+        at,
+      ]);
+    }
+    const s = await agentStats(nestId, "nodes/scout");
+    expect(s.blocked_by_scope).toBe(1);
+    expect(s.tokens).toBe(42);
+  });
+
   it("honours limit and refuses a bad window", async () => {
     expect((await stats(owner.apiKey, "?limit=1")).data.stats.history).toHaveLength(1);
     expect((await stats(owner.apiKey, "?days=0")).status).toBe(400);
