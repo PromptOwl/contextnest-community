@@ -23,9 +23,8 @@ import { resolveNestPermission, permissionLevel } from "../shared/access.js";
 import { isSuspended, getSuspensionReason } from "../auth/license.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requireWorkflowPlane } from "./edge-type-routes.js";
-import { cancelDescendants } from "./run-service.js";
+import { cancelDescendants, announceRunFailed } from "./run-service.js";
 import { envValues } from "./env-routes.js";
-import { dispatchEvent } from "../notify/dispatch.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "../auth/license-copy.js";
 import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
 import { SERVER_CLAIM, getAgent } from "../metacognition/store.js";
@@ -566,19 +565,7 @@ runDetailRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
   // Only once the swap above won, or a lost race would cancel the descendants
   // of a run that actually succeeded.
   if (status === "cancelled") await cancelDescendants(run.id);
-  if (status === "failed") {
-    const err =
-      body.trace && typeof body.trace === "object"
-        ? String((body.trace as any).error ?? "").slice(0, 200)
-        : "";
-    void dispatchEvent({
-      kind: "run_failed",
-      nestId: run.nest_id,
-      subjectId: run.id,
-      actor: run.triggered_by,
-      message: `Run of *${run.agent_node}* failed${err ? ` — ${err}` : ""}`,
-    });
-  }
+  if (status === "failed") announceRunFailed(run, body.trace);
   return c.json({ ok: true, status });
 });
 

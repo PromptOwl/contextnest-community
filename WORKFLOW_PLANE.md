@@ -89,8 +89,9 @@ external runners. The boundary moves only as far as it has to:
   trigger, `POST /run/:agent`, a schedule, an inbound hook), so a poll-mode
   runner never sees it, and `/runnables` leaves these agents out. Only the
   server appends its steps; a person can still cancel it.
-- **Proposals only.** The loop's tools read (within the configured folders and
-  the configuring owner's access, approved text only) and propose: an edit or
+- **Proposals only.** The loop's tools read (in the agent's own nest, within
+  its configured folders or grants given to the persona, capped by its pinned
+  owner's access; approved text only) and propose: an edit or
   a new document lands as a draft submitted for review, authored by the
   agent's persona (a service identity), never published. Comments are
   comments. Nothing approves, publishes, deletes or changes permissions.

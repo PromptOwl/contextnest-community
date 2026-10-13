@@ -31,7 +31,7 @@ import https from "node:https";
 import dns from "node:dns";
 import { Readable, Transform } from "node:stream";
 import { isIP, type LookupFunction } from "node:net";
-import { isForbiddenConnectorHost } from "../notify/dispatch.js";
+import { isForbiddenConnectorHost, embeddedIPv4 } from "../notify/dispatch.js";
 import { config } from "../config.js";
 
 export class OutboundBlockedError extends Error {
@@ -41,28 +41,16 @@ export class OutboundBlockedError extends Error {
   }
 }
 
-/** "::ffff:7f00:1" or "::ffff:127.0.0.1" → "127.0.0.1"; anything else as-is. */
-function unmapIPv4(address: string): string {
-  const a = address.toLowerCase().replace(/^\[|\]$/g, "");
-  const m = /^(?:0{0,4}:){0,5}:?ffff:(.+)$/.exec(a.startsWith("::") ? a : "");
-  if (!m) return a;
-  const tail = m[1];
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(tail)) return tail;
-  const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail);
-  if (!hex) return a;
-  const hi = parseInt(hex[1], 16);
-  const lo = parseInt(hex[2], 16);
-  return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
-}
-
-/** True for an address this server must never connect to for an agent. */
+/** True for an address this server must never connect to for an agent: the
+ *  connector fence (which also unwraps IPv4 carried in IPv6 — mapped,
+ *  compatible, NAT64, 6to4) plus carrier-grade NAT, which is not public and
+ *  often internal in clouds. */
 export function isPrivateAddress(address: string): boolean {
-  const a = unmapIPv4(address);
+  const a = address.toLowerCase().replace(/^\[|\]$/g, "");
   if (isForbiddenConnectorHost(a)) return true;
-  const m = a.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
-  // Carrier-grade NAT (100.64/10) — not public, often internal in clouds.
-  if (m && Number(m[1]) === 100 && Number(m[2]) >= 64 && Number(m[2]) <= 127) return true;
-  return a === "::" || a === "0:0:0:0:0:0:0:1";
+  const v4 = isIP(a) === 4 ? a : embeddedIPv4(a);
+  const m = v4?.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  return !!m && Number(m[1]) === 100 && Number(m[2]) >= 64 && Number(m[2]) <= 127;
 }
 
 type Resolver = (host: string) => Promise<Array<{ address: string; family: number }>>;

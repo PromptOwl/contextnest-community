@@ -39,6 +39,7 @@ interface Draft {
   propose: string;
   max_steps: number;
   max_proposals: number;
+  max_comments: number;
   max_seconds: number;
   max_tokens: number;
   feeds: string;
@@ -55,6 +56,7 @@ const EMPTY: Draft = {
   propose: "",
   max_steps: 12,
   max_proposals: 5,
+  max_comments: 5,
   max_seconds: 300,
   max_tokens: 300_000,
   feeds: "",
@@ -73,11 +75,13 @@ function toDraft(a: MetacognitionAgent): Draft {
     node_id: a.node_id,
     enabled: a.enabled,
     name: a.persona.name,
-    avatar: a.persona.avatar ?? "",
+    // A URL avatar saved before glyph-only avatars is dropped on the next save.
+    avatar: a.persona.avatar && !a.persona.avatar.includes("://") ? a.persona.avatar : "",
     read: a.scope.read.join(", "),
     propose: a.scope.propose.join(", "),
     max_steps: a.caps.max_steps,
     max_proposals: a.caps.max_proposals,
+    max_comments: a.caps.max_comments ?? 5,
     max_seconds: a.caps.max_seconds,
     max_tokens: a.caps.max_tokens,
     feeds: a.feeds.map((f) => `${f.name} ${f.url}`).join("\n"),
@@ -98,6 +102,7 @@ function toConfig(d: Draft): MetacognitionAgentConfig & { enabled: boolean } {
     caps: {
       max_steps: d.max_steps,
       max_proposals: d.max_proposals,
+      max_comments: d.max_comments,
       max_seconds: d.max_seconds,
       max_tokens: d.max_tokens,
     },
@@ -113,13 +118,13 @@ function toConfig(d: Draft): MetacognitionAgentConfig & { enabled: boolean } {
   };
 }
 
+/** A glyph, never an image: a remote image URL would be fetched by every
+ *  reviewer's browser that shows the persona. */
 function Avatar({ avatar, name }: { avatar: string | null; name: string }) {
-  if (avatar && /^https:\/\//.test(avatar)) {
-    return <img src={avatar} alt="" className="h-7 w-7 rounded-full object-cover shrink-0" />;
-  }
+  const glyph = avatar && !avatar.includes("://") ? avatar : null;
   return (
     <span className="h-7 w-7 rounded-full bg-violet-100 dark:bg-violet-950 text-violet-700 dark:text-violet-300 flex items-center justify-center text-sm shrink-0">
-      {avatar || name.slice(0, 1).toUpperCase()}
+      {glyph || name.slice(0, 1).toUpperCase()}
     </span>
   );
 }
@@ -420,7 +425,7 @@ export function MetacognitionPanel({
               <Input value={draft.name} onChange={text("name")} placeholder="Archivist" data-testid="metacognition-name" />
             </div>
             <div className="space-y-1">
-              <Label>Avatar (an emoji or an https image URL)</Label>
+              <Label>Avatar (an emoji or up to 4 letters)</Label>
               <Input value={draft.avatar} onChange={text("avatar")} placeholder="🦉" />
             </div>
             <div className="space-y-1">
@@ -440,6 +445,10 @@ export function MetacognitionPanel({
             <div className="space-y-1">
               <Label>Proposals per run</Label>
               <Input type="number" min={0} max={20} value={draft.max_proposals} onChange={num("max_proposals")} />
+            </div>
+            <div className="space-y-1">
+              <Label>Comments per run</Label>
+              <Input type="number" min={0} max={20} value={draft.max_comments} onChange={num("max_comments")} />
             </div>
             <div className="space-y-1">
               <Label>Seconds per run</Label>
