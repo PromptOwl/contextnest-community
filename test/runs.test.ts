@@ -134,6 +134,12 @@ describe("trigger → bundle", () => {
     const onDoc = await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/nodes/plain-doc`, { model: "x" }, owner.apiKey);
     expect(onDoc.status).toBe(400);
 
+    // The id goes to the runner as-is: non-strings, control characters and oversized values are refused.
+    for (const bad of [{ a: 1 }, ["x"], 123, null, "claude\n--flag", "a b", "x".repeat(129)]) {
+      const res = await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/nodes/digest-agent`, { model: bad }, owner.apiKey);
+      expect(res.status).toBe(400);
+    }
+
     await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/nodes/digest-agent`, { model: "" }, owner.apiKey);
     const cleared = await jsonRequest(app, "POST", `/nests/${nestId}/run/nodes/digest-agent`, {}, owner.apiKey);
     expect(cleared.data.agent.model).toBeNull();

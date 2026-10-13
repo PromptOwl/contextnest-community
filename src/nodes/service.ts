@@ -418,6 +418,18 @@ export function isRunnableType(type: string | undefined): boolean {
   return (RUNNABLE_NODE_TYPES as readonly string[]).includes(type || "");
 }
 
+/** A runner model id goes to an external runner as-is, so allow only plain
+ *  id characters ("" means clear and is valid). */
+const MODEL_ID_RE = /^[A-Za-z0-9._:\/@-]{1,128}$/;
+function assertModelId(model: unknown): void {
+  if (model === undefined || model === "") return;
+  if (typeof model !== "string" || !MODEL_ID_RE.test(model)) {
+    throw new ValidationError(
+      "model must be a model id: 1-128 characters of letters, digits and . _ : / @ -"
+    );
+  }
+}
+
 /**
  * Node types this server accepts on create: the engine's core NODE_TYPES plus
  * the community extensions (agent/skill runnables, artifact, table). Anything
@@ -1693,6 +1705,7 @@ async function createNodeOnce(
     throw new ValidationError(`a PDF upload creates a "pdf" node, not "${requestedType}"`);
   }
 
+  assertModelId(input.model);
   for (const field of ["schedule", "model"] as const) {
     if (input[field] !== undefined && !isRunnableType(input.type)) {
       throw new ValidationError(
@@ -2421,6 +2434,7 @@ export async function updateNode(
         };
       }
       if (patch.model !== undefined) {
+        assertModelId(patch.model);
         if (!isRunnableType(node.frontmatter.type)) {
           throw new ValidationError(
             `model is only valid for runnable node types (${RUNNABLE_NODE_TYPES.join(", ")})`
