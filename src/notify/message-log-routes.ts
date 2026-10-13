@@ -7,7 +7,7 @@
  * AUTH_MODE=open (everyone is admin there); this one never does, because the
  * log holds other people's messages across every nest. Nest admins, owners
  * and nest-scoped keys are refused. Every read is audited — see
- * message-log.ts, which the MCP tools share.
+ * message-log.ts.
  */
 import { Hono, type Context } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";

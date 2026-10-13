@@ -7,7 +7,7 @@
  */
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import {
   setupTestEnv,
   createTestApp,
@@ -84,6 +84,13 @@ describe("access", () => {
     const listRow = views.data.views.find((v: any) => v.action === "list");
     expect(listRow.viewer).toBe("root@acme.com");
     expect(listRow.filters).toMatchObject({ channel: "inbox", q: "ops" });
+  });
+
+  it("audits a lookup of an unknown id, so probing leaves a trace", async () => {
+    const before = await viewCount();
+    const res = await get("/admin/messages/no-such-id", superadmin.apiKey);
+    expect(res.status).toBe(404);
+    expect((await viewCount()) - before).toBe(1);
   });
 
   it("leaves no audit row for a refused read", async () => {
@@ -200,6 +207,29 @@ describe("what gets logged", () => {
       }
     } finally {
       server.close();
+    }
+  });
+
+  it("classifies a connector post caused by an agent persona as persona", async () => {
+    const d = await db();
+    const now = new Date().toISOString();
+    await d.run(
+      "INSERT INTO connectors (id, nest_id, channel, url, events, enabled, created_by, created_at, updated_at) VALUES ('c-persona', ?, 'webhook', 'https://example.com/hook', '[\"*\"]', 1, 'u', ?, ?)",
+      [nestId, now, now],
+    );
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok"));
+    try {
+      const { dispatchEvent } = await import("../src/notify/dispatch.js");
+      await dispatchEvent({ kind: "review_requested", nestId, message: "m", actor: "curator@agents.invalid" });
+      await vi.waitFor(async () => {
+        const row = (await d.get(
+          "SELECT sender_kind, sender_id FROM outbound_messages WHERE channel = 'webhook' AND sender_id = 'curator@agents.invalid'",
+        )) as { sender_kind: string } | undefined;
+        expect(row?.sender_kind).toBe("persona");
+      });
+    } finally {
+      fetchSpy.mockRestore();
+      await d.run("DELETE FROM connectors WHERE id = 'c-persona'");
     }
   });
 

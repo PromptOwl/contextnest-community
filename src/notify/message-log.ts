@@ -213,7 +213,7 @@ export async function searchMessageLog(
   };
 }
 
-/** One message with its redacted body, or null. Audited only when found. */
+/** One message with its redacted body, or null. Misses are audited too, so id probing leaves a trace. */
 export async function getMessageLogEntry(
   viewerId: string,
   id: string,
@@ -225,9 +225,8 @@ export async function getMessageLogEntry(
       WHERE m.id = ?`,
     [id],
   )) as MessageRow | undefined;
-  if (!row) return null;
   await audit(viewerId, "detail", null, id, via);
-  return shape(row, true);
+  return row ? shape(row, true) : null;
 }
 
 /** The access audit itself (also audited). */

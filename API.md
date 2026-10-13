@@ -2582,7 +2582,7 @@ Every message the server sends, in one place: email (SMTP/SES), Slack, Microsoft
 - `GET /admin/messages` — newest first. Query: `channel` (`email`|`slack`|`msteams`|`webhook`|`inbox`|`comment`), `sender_kind` (`human`|`persona`|`system`), `status` (`sent`|`failed`|`skipped`), `sender` (substring), `nest`, `run`, `q` (subject or recipient substring), `from`/`to` (ISO timestamps), `limit` (1–200, default 50), `offset`.
   - Response: `{ total, limit, offset, retention_days, store_bodies, messages: [...] }`.
   - List rows carry `has_body`, never the body.
-- `GET /admin/messages/:id` — one message: `{ message: { …, body } }`. `body` is the **redacted** text, or `null` when bodies aren't stored. `404` if unknown.
+- `GET /admin/messages/:id` — one message: `{ message: { …, body } }`. `body` is the **redacted** text, or `null` when bodies aren't stored. `404` if unknown; the lookup is still audited.
 - `GET /admin/messages/views` — the access audit: `{ total, limit, offset, views: [{ viewer, action: "list"|"detail"|"views", filters, message_id, at }] }`. Reading it is audited too.
 
 Row fields:

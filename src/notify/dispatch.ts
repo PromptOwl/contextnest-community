@@ -20,6 +20,7 @@ import { getDb } from "../db/client.js";
 import { envValues } from "../workflow/env-routes.js";
 import { msTeamsPayload } from "./msteams.js";
 import { escapeMrkdwn } from "./slack.js";
+import { senderFor } from "./outbound-log.js";
 import { postWebhook, resolveNestName, testWebhook } from "./webhook.js";
 
 export type ConnectorChannel = "slack" | "teams" | "webhook";
@@ -252,8 +253,7 @@ export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
   // Message-log context: who caused it, and the run when a run is the subject.
   const logCtx = {
     nestId: ev.nestId,
-    senderKind: (ev.actor ? "human" : "system") as "human" | "system",
-    senderId: ev.actor ?? null,
+    ...senderFor(ev.actor),
     runId: ev.kind.startsWith("run_") ? (ev.subjectId ?? null) : null,
   };
 
