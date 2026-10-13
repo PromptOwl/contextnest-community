@@ -1,3 +1,4 @@
+import { config } from "../config.js";
 import { getModelGateway, getOwnGateway, OWN_KEY_PROVIDERS, setOwnProviderKey, validateLicense } from "../auth/license.js";
 import { persistSetting } from "../db/settings.js";
 import { hasEntitlement } from "../auth/entitlements.js";
@@ -19,10 +20,23 @@ export const OWN_KEY_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"] as const;
 export const DIRECT_DEFAULT_MODEL = "claude-sonnet-5";
 
 /**
- * Pricing spec §6.1/§9.3: a nest's own key only with the `byok` licence
- * feature (Enterprise); otherwise PromptOwl's gateway, metered in credits.
- * The server's own keys live in PromptOwl's gateway and are picked per model
- * (ownModelRoute). Key and URL come as a pair. null = nothing to call with.
+ * The server's own model gateway (byok): ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY,
+ * both set, used as a pair. Bedrock, Azure, Ollama… sit behind a LiteLLM here.
+ * null when either half is missing or the licence lacks byok.
+ */
+export function serverGatewayCredential(): ModelCredential | null {
+  const key = process.env.ANTHROPIC_API_KEY;
+  const baseUrl = config.ANTHROPIC_BASE_URL;
+  if (!hasEntitlement("byok") || !key || !baseUrl) return null;
+  return { apiKey: key, baseUrl, source: "own", defaultModel: null };
+}
+
+/**
+ * Pricing spec §6.1/§9.3: own keys only with the `byok` licence feature
+ * (Enterprise); otherwise PromptOwl's gateway, metered in credits. Order: a
+ * nest's own key, then the server's own gateway, then PromptOwl's gateway
+ * (where own-provider keys are picked per model, ownModelRoute). Key and URL
+ * always come as a pair from one source. null = nothing to call with.
  */
 export function resolveModelCredential(
   nestEnv: Record<string, string> = {},
@@ -30,6 +44,8 @@ export function resolveModelCredential(
   if (hasEntitlement("byok") && nestEnv.ANTHROPIC_API_KEY) {
     return { apiKey: nestEnv.ANTHROPIC_API_KEY, baseUrl: nestEnv.ANTHROPIC_BASE_URL || null, source: "own", defaultModel: null };
   }
+  const server = serverGatewayCredential();
+  if (server) return server;
   const gateway = getModelGateway();
   return gateway
     ? { apiKey: gateway.key, baseUrl: gateway.baseUrl, source: "promptowl", defaultModel: gateway.defaultModel }
@@ -37,13 +53,17 @@ export function resolveModelCredential(
 }
 
 /**
- * The server-wide Anthropic key moved into PromptOwl's model gateway (an
- * own-provider key, like OpenAI). Boot hands a stored one over once, then
- * drops it here. Without byok it stays put, unused, until the licence has it.
+ * A bare server Anthropic key (no gateway URL) moved into PromptOwl's model
+ * gateway (an own-provider key, like OpenAI). Boot hands a stored one over
+ * once, then drops it here. Without byok it stays put, unused, until the
+ * licence has it.
  */
 export async function moveStoredAnthropicKey(): Promise<void> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key || !hasEntitlement("byok")) return;
+  // Paired with a gateway URL it is the server's own gateway key (often a
+  // LiteLLM virtual key): it stays here and never goes to PromptOwl.
+  if (config.ANTHROPIC_BASE_URL) return;
   const refused = await setOwnProviderKey("claude", key);
   if (refused) {
     console.warn(`[license] could not move the stored Anthropic key to the model gateway: ${refused}`);
@@ -90,7 +110,13 @@ export function ownModelRoute(callModel: string): { credential: ModelCredential;
 /** For logs: which key a call uses and why; the key only by its last 4 characters. */
 export function credentialLabel(c: ModelCredential): string {
   const via =
-    c.source === "promptowl" ? "promptowl-credits" : getOwnGateway()?.key === c.apiKey ? "own-provider(LiteLLM)" : "nest-key";
+    c.source === "promptowl"
+      ? "promptowl-credits"
+      : getOwnGateway()?.key === c.apiKey
+        ? "own-provider(LiteLLM)"
+        : c.apiKey === process.env.ANTHROPIC_API_KEY && c.baseUrl === config.ANTHROPIC_BASE_URL
+          ? "server-gateway"
+          : "nest-key";
   return `key=${via} …${c.apiKey.slice(-4)} base=${c.baseUrl || "anthropic"}`;
 }
 

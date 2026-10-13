@@ -6,6 +6,7 @@
  * projects these into a derived markdown node so the feedback flows into the
  * context/MCP path; plain documents keep their comments in SQLite only.
  */
+import { RunLink } from "./RunLink";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   MessageSquare,
@@ -268,6 +269,12 @@ export function AnnotationsPanel({
               {t.comments[0].author}
             </span>{" "}
             · {when(t.comments[0].createdAt)}
+            {t.comments[0].runId && (
+              <>
+                {" · "}
+                <RunLink nestId={nestId} runId={t.comments[0].runId} />
+              </>
+            )}
           </div>
           <CommentBody body={t.comments[0].body} members={members} />
         </div>
@@ -279,6 +286,12 @@ export function AnnotationsPanel({
               <div className="text-xs text-muted-foreground">
                 <span className="font-medium text-foreground">{c.author}</span>{" "}
                 replied · {when(c.createdAt)}
+                {c.runId && (
+                  <>
+                    {" · "}
+                    <RunLink nestId={nestId} runId={c.runId} />
+                  </>
+                )}
               </div>
               <CommentBody body={c.body} members={members} />
             </li>

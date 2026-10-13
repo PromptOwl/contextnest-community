@@ -62,6 +62,7 @@ import { RenameNestDialog } from "./RenameNestDialog";
 import { FolderDeleteDialog, type FolderDeleteTarget } from "./nest/FolderDeleteDialog";
 // Each tab is its own chunk, loaded when first opened.
 const ExternalEditsTab = lazyChunk(() => import("./nest/ExternalEditsTab").then((m) => ({ default: m.ExternalEditsTab })));
+const FieldsTab = lazyChunk(() => import("./nest/FieldsTab").then((m) => ({ default: m.FieldsTab })));
 const StewardsTab = lazyChunk(() => import("./nest/StewardsTab").then((m) => ({ default: m.StewardsTab })));
 const CollaboratorsTab = lazyChunk(() => import("./nest/CollaboratorsTab").then((m) => ({ default: m.CollaboratorsTab })));
 const ReviewTab = lazyChunk(() => import("./nest/ReviewTab").then((m) => ({ default: m.ReviewTab })));
@@ -823,6 +824,7 @@ export function NestView({
     "external-edits": !isReadOnly,
     stewards: stewardshipEnabled && canManageGovernance,
     collaborators: canManage || collabCanWrite,
+    fields: !grantOnly,
   };
   useEffect(() => {
     if (!initialLoad && !tabVisible[activeTab]) setActiveTab("overview");
@@ -1727,6 +1729,12 @@ export function NestView({
             {(canManage || collabCanWrite) && (
               <TabsTrigger value="collaborators" className={NEST_TAB}>Collaborators</TabsTrigger>
             )}
+            {/* Custom fields — readable by everyone on the nest (they explain
+              the values on its documents); the tab's own controls appear only
+              for admins and nest-wide reviewers (server-decided can_manage). */}
+            {!grantOnly && (
+              <TabsTrigger value="fields" className={NEST_TAB}>Fields</TabsTrigger>
+            )}
           </TabsList>
           {!isReadOnly && canEditDocs && (
             <div className="ml-auto flex shrink-0 items-center gap-2 pb-2 max-sm:order-first max-sm:w-full max-sm:justify-end">
@@ -2042,6 +2050,14 @@ export function NestView({
           </TabsContent>
         )}
 
+        {!grantOnly && (
+          <TabsContent value="fields" className="space-y-4">
+            <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+              <FieldsTab nestId={nestId} />
+            </Suspense>
+          </TabsContent>
+        )}
+
         {(canManage || collabCanWrite) && (
           <TabsContent value="collaborators" className="space-y-4">
             <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
@@ -2141,6 +2157,10 @@ export function NestView({
           canDisableAccessLog={isAdmin || isOwner || permission === "owner"}
           canManageStewardship={canManageGovernance}
           onClose={() => setShowSettings(false)}
+          onManageFields={() => {
+            setShowSettings(false);
+            setActiveTab("fields");
+          }}
           onChanged={(next) => {
             setShowSettings(false);
             // Flip the governance UI (Pending/AI Ready/Review Queue tiles,

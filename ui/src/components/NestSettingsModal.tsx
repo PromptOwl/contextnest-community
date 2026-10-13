@@ -27,6 +27,8 @@ import {
   ShieldCheck,
   Clock,
   Eye,
+  SlidersHorizontal,
+  ChevronRight,
 } from "lucide-react";
 import * as api from "../lib/api";
 
@@ -51,6 +53,8 @@ interface NestSettingsModalProps {
   /** False hides the stewardship section. Server still enforces. */
   canManageStewardship: boolean;
   onClose: () => void;
+  /** Jump to the nest's Fields tab (custom field definitions). */
+  onManageFields?: () => void;
   onChanged: (next: {
     stewardshipEnabled: boolean;
     allowSelfApprove: boolean;
@@ -78,6 +82,7 @@ export function NestSettingsModal({
   canDisableAccessLog = false,
   canManageStewardship,
   onClose,
+  onManageFields,
   onChanged,
 }: NestSettingsModalProps) {
   const [enabled, setEnabled] = useState(stewardshipEnabled);
@@ -266,6 +271,29 @@ export function NestSettingsModal({
               <AlertCircle className="h-4 w-4" />
               <AlertDescription>{error}</AlertDescription>
             </Alert>
+          )}
+
+          {/* Custom fields live on their own tab (a list with CRUD doesn't
+              fit this form); this row is the way there from settings. */}
+          {onManageFields && (
+            <button
+              type="button"
+              onClick={onManageFields}
+              className="flex w-full items-center justify-between gap-4 rounded-lg border p-4 text-left hover:bg-muted/40"
+              data-testid="settings-manage-fields"
+            >
+              <span className="space-y-1">
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  <SlidersHorizontal className="h-4 w-4" />
+                  Custom fields
+                </span>
+                <span className="block text-xs text-muted-foreground">
+                  Define fields like Severity, Estimate or Time in status for this
+                  nest's tasks.
+                </span>
+              </span>
+              <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+            </button>
           )}
 
           {/* Stewardship — manage-rights only. */}

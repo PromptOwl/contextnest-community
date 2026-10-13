@@ -91,6 +91,18 @@ import {
   type TaskFields,
   type TaskFieldsPatch,
 } from "./task-fields.js";
+import {
+  addComputedFields,
+  appliesTo,
+  applyFieldsPatch,
+  assertFilterKeys,
+  listFieldDefinitions,
+  matchesFieldFilter,
+  statusSince,
+  storedFieldsOf,
+  type FieldDefinition,
+  type FieldsPatch,
+} from "./custom-fields.js";
 
 /** Reverse-lookup the auth userId from a registered email. Anonymous email → ANON. */
 async function userIdFromEmail(email: string): Promise<string> {
@@ -379,6 +391,26 @@ export function bodyOnly(nodeId: string, raw: string): string {
   }
 }
 
+/**
+ * Custom field values stored in a reconstructed version's frontmatter. A read
+ * that serves an approved version takes its fields from HERE: the live file
+ * may hold an unapproved draft's values. Unparseable → no values (fail closed).
+ */
+export function fieldsOfRaw(nodeId: string, raw: string): Record<string, unknown> {
+  try {
+    return storedFieldsOf(parseDocument(`${nodeId}.md`, raw, nodeId).frontmatter.metadata);
+  } catch (err) {
+    console.error("[custom-fields] approved frontmatter unreadable", nodeId, err);
+    return {};
+  }
+}
+
+/** Replace a response's stored field values (computed ones are added later). */
+export function setStoredFields(r: { fields?: Record<string, unknown> }, fields: Record<string, unknown>): void {
+  if (Object.keys(fields).length > 0) r.fields = fields;
+  else delete r.fields;
+}
+
 export interface NodeResponse extends TaskFields {
   id: string;
   title: string;
@@ -410,6 +442,13 @@ export interface NodeResponse extends TaskFields {
   /** The `pdf:` block of a pdf node (sidecar path, sha256, size, pages,
    *  text_layer, extractor) — absent on every other type. */
   pdf?: PdfMeta;
+  /** Custom field values (src/nodes/custom-fields.ts): the stored
+   *  `metadata.fields` map plus, on list/get responses, computed fields such
+   *  as time-in-status (whole seconds). Keys are the nest's field keys. */
+  fields?: Record<string, unknown>;
+  /** When the node entered its current board column — `moved_at`, else
+   *  `created_at`. What time-in-status counts from. Tasks only. */
+  status_since?: string;
 }
 
 /** Node types an orchestrator can fetch and run; only these carry schedule. */
@@ -537,6 +576,12 @@ function assertUpdatableType(storedType: string | undefined): void {
 
 export function toNodeResponse(node: ContextNode): NodeResponse {
   const fm = node.frontmatter;
+  const taskFields = taskFieldsOf(fm.metadata);
+  const fields = storedFieldsOf(fm.metadata);
+  const since = statusSince({
+    moved_at: taskFields.moved_at,
+    created_at: fm.created_at == null ? undefined : String(fm.created_at),
+  });
   // Coerce string-ish fields. YAML parses bare values by type, so a
   // frontmatter line like `title: 123` arrives as a number — clients then
   // call `.trim()`/`.toLowerCase()` on it and crash. Normalize at the API
@@ -580,8 +625,21 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
       (fm.metadata as any)?.model != null ? String((fm.metadata as any).model) : undefined,
     prime: documentPrimeFlag(fm.metadata),
     ...(fm.type === "pdf" && fm.pdf ? { pdf: fm.pdf } : {}),
-    ...taskFieldsOf(fm.metadata),
+    ...taskFields,
+    ...(Object.keys(fields).length > 0 ? { fields } : {}),
+    ...(fm.type === TASK_NODE_TYPE && since ? { status_since: since } : {}),
   };
+}
+
+/**
+ * Responses with their computed field values filled in (time-in-status), for
+ * the read surfaces that serve single nodes outside listNodesForCaller.
+ */
+export async function withComputedFields<T extends NodeResponse>(
+  nestId: string,
+  nodes: T[],
+): Promise<T[]> {
+  return addComputedFields(nodes, await listFieldDefinitions(nestId));
 }
 
 export interface NodeAuthorship {
@@ -745,6 +803,17 @@ export interface ListNodesFilters {
    * to crawling the vault, which is the honest price.
    */
   withContent?: boolean;
+  /**
+   * Custom-field filters, field key → wanted value (see matchesFieldFilter).
+   * Every entry must match. An unknown key is a 400.
+   */
+  fields?: Record<string, unknown>;
+  /**
+   * Take custom field values (and filter on them) from each node's APPROVED
+   * version, never the live file — for callers who may only see approved
+   * content (MCP under stewardship). Implied by approvedOnly / public readers.
+   */
+  approvedFields?: boolean;
 }
 
 /**
@@ -930,10 +999,33 @@ export async function listNodesForCaller(
   // saving, since both cost per surviving document. Still applied even when
   // the engine already scoped the crawl: it is the correctness guarantee, and
   // on a scoped crawl there is nothing left for it to drop.
-  const scoped =
+  const folderScoped =
     filters.folder === undefined
       ? documents
       : documents.filter((d) => folderOfId(d.id) === filters.folder);
+  // Custom-field definitions: one query, for the filters here and the
+  // computed values (time-in-status) added to every row at the end.
+  const fieldDefs = await listFieldDefinitions(nestId);
+  const fieldFilters = filters.fields ?? {};
+  const hasFieldFilters = Object.keys(fieldFilters).length > 0;
+  if (hasFieldFilters) assertFilterKeys(fieldFilters, fieldDefs);
+  const matchesFields = (type: string | undefined, stored: Record<string, unknown>) =>
+    Object.entries(fieldFilters).every(([key, wanted]) => {
+      const def = fieldDefs.find((f) => f.key === key)!;
+      // A field that doesn't apply to this node's type can't match.
+      if (!appliesTo(def, type)) return false;
+      return matchesFieldFilter(def, stored[key], wanted);
+    });
+  const publicReader = await isPublicReader(nestId, userId);
+  // Approved-only view: what a public nest shows a stranger.
+  const approvedOnly = publicReader || filters.approvedOnly === true;
+  // A caller limited to approved content filters on APPROVED values (after
+  // the access gate, below) — filtering on the live file here would let them
+  // probe an unapproved draft's values.
+  const approvedFields = approvedOnly || filters.approvedFields === true;
+  const scoped = !hasFieldFilters || approvedFields
+    ? folderScoped
+    : folderScoped.filter((d) => matchesFields(d.frontmatter.type, storedFieldsOf(d.frontmatter.metadata)));
   const nodes: ContextNode[] = scoped.map((d) => ({
     id: d.id,
     filePath: "",
@@ -943,12 +1035,10 @@ export async function listNodesForCaller(
     // approved-only branch below serves its own from the version store.
     body: d.body ?? "",
   }));
-  const publicReader = await isPublicReader(nestId, userId);
-  // Approved-only view: what a public nest shows a stranger. ONE scan of the
-  // nest, shared by the access filter (which decides what a public reader may
-  // see) and the enrichment below (which serves each body at its approved
-  // version) — those asked the same question separately.
-  const approvedOnly = publicReader || filters.approvedOnly === true;
+  // ONE scan of the nest for the approved-only view, shared by the access
+  // filter (which decides what a public reader may see) and the enrichment
+  // below (which serves each body at its approved version) — those asked the
+  // same question separately.
   const approvedVersions = approvedOnly
     ? await versions.getApprovedVersions(nestId)
     : null;
@@ -976,6 +1066,36 @@ export async function listNodesForCaller(
   // any other caller asking for this view is narrowed here.
   if (approvedVersions && !publicReader) {
     accessible = accessible.filter((d) => approvedVersions.has(d.id));
+  }
+
+  // Approved versions, reconstructed at most once per node and shared by the
+  // approved field filter and the enrichment below. null = none / unreadable.
+  const approvedMap = approvedVersions ?? (approvedFields ? await versions.getApprovedVersions(nestId) : null);
+  const approvedRaw = new Map<string, Promise<{ raw: string; version: number } | null>>();
+  const loadApproved = (id: string) => {
+    let p = approvedRaw.get(id);
+    if (!p) {
+      const v = approvedMap?.get(id);
+      p = v == null
+        ? Promise.resolve(null)
+        : reconstructApproved(versionManager, nestId, id, v).catch((err) => {
+            console.error("reconstructVersion failed (list)", id, v, err);
+            return null;
+          });
+      approvedRaw.set(id, p);
+    }
+    return p;
+  };
+  if (approvedFields && hasFieldFilters) {
+    // ponytail: reconstructs every accessible node's approved version to
+    // filter — an approved-values index if governed nests grow large.
+    const keep = await Promise.all(
+      accessible.map(async (d) => {
+        const a = await loadApproved(d.id);
+        return !!a && matchesFields(d.frontmatter.type, fieldsOfRaw(d.id, a.raw));
+      }),
+    );
+    accessible = accessible.filter((_, i) => keep[i]);
   }
 
   // Trim to the requested count BEFORE the per-node work below. Enrichment
@@ -1029,28 +1149,15 @@ export async function listNodesForCaller(
         (r as any).myGrant = grantRoleForNode(myGrants, doc.id);
       }
 
+      // Field values from the approved version, never the live draft.
+      const approved = approvedFields ? await loadApproved(doc.id) : null;
+      if (approvedFields) setStoredFields(r, approved ? fieldsOfRaw(doc.id, approved.raw) : {});
+
       if (approvedVersions) {
-        let approved = approvedVersions.get(doc.id);
-        if (approved != null) {
-          try {
-            let raw: string;
-            ({ raw, version: approved } = await reconstructApproved(
-              versionManager,
-              nestId,
-              doc.id,
-              approved
-            ));
-            r.content = bodyOnly(doc.id, raw);
-          } catch (err) {
-            console.error(
-              "reconstructVersion failed (list)",
-              doc.id,
-              approved,
-              err
-            );
-            r.content = "";
-          }
-          r.version = approved;
+        const wanted = approvedVersions.get(doc.id);
+        if (wanted != null) {
+          r.content = approved ? bodyOnly(doc.id, approved.raw) : "";
+          r.version = approved?.version ?? wanted;
           r.status = "published";
         }
         return r;
@@ -1076,7 +1183,7 @@ export async function listNodesForCaller(
     })
   );
 
-  return enriched;
+  return addComputedFields(enriched, fieldDefs);
 }
 
 /** A folder of documents, with direct and subtree counts. */
@@ -1437,6 +1544,9 @@ export interface CreateNodeInput extends TaskFieldsPatch {
    *  of a markdown body. `content` is ignored — the body is the extracted text.
    *  Requires `type: "pdf"` (or no type). */
   pdf?: PdfUpload;
+  /** Custom field values, field key → value (see custom-fields.ts). Defaults
+   *  fill what's left out; required fields must end up set. */
+  fields?: FieldsPatch;
 }
 
 export interface UpdateNodePatch extends TaskFieldsPatch {
@@ -1461,6 +1571,9 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
    *  engine's `context_import_pdf` in place of `context_update`; governance
    *  (draft vs publish, version rows, review lock) is the same as any edit. */
   pdf?: PdfUpload;
+  /** Custom field values to set, field key → value; `null` clears one. Merged
+   *  into the stored map — keys left out are untouched. */
+  fields?: FieldsPatch;
 }
 
 /**
@@ -1787,6 +1900,24 @@ async function createNodeOnce(
       );
       // Nulls on a create mean "not set" — nothing to clear yet.
       Object.assign(metadata, withFields);
+    }
+    // Custom fields: validated against the nest's definitions, defaults
+    // filled, required enforced. Stored in frontmatter so the values are
+    // part of v1's hash. Skipped entirely (no definition read) only when the
+    // nest has none and the caller sent none.
+    {
+      const defs = await listFieldDefinitions(nestId);
+      if (defs.length > 0 || input.fields !== undefined) {
+        const { fields } = await applyFieldsPatch({
+          defs,
+          nodeType: input.type || "document",
+          current: {},
+          patch: input.fields,
+          isCreate: true,
+          roster: taskFieldsContext(nestId, storage, null).roster,
+        });
+        if (Object.keys(fields).length > 0) metadata.fields = fields;
+      }
     }
     // Creator-reviews: steward the author BEFORE deciding to publish, since v1
     // publishes on the strength of that row. A failure here fails the create
@@ -2466,10 +2597,42 @@ export async function updateNode(
         node = { ...node, frontmatter: { ...node.frontmatter, metadata: metadata as any } };
         opInput.metadata = { ...(opInput.metadata as object), ...opMetadata };
       }
+      // Custom fields — after the re-type above, so they validate against
+      // the type the node is becoming. The whole next map is handed to the
+      // engine (its metadata merge is shallow), or null when it empties.
+      let fieldDefs: FieldDefinition[] | null = null;
+      if (patch.fields !== undefined) {
+        fieldDefs = await listFieldDefinitions(nestId);
+        const current = storedFieldsOf(node.frontmatter.metadata);
+        const { fields, changed } = await applyFieldsPatch({
+          defs: fieldDefs,
+          nodeType: node.frontmatter.type || "document",
+          current,
+          patch: patch.fields,
+          isCreate: false,
+          roster: taskFieldsContext(nestId, storage, nodeId).roster,
+        });
+        if (changed) {
+          const empty = Object.keys(fields).length === 0;
+          const metadata = { ...(node.frontmatter.metadata as any) };
+          if (empty) delete metadata.fields;
+          else metadata.fields = fields;
+          node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+          opInput.metadata = { ...(opInput.metadata as object), fields: empty ? null : fields };
+        }
+      }
+      // A time-in-status field can apply to any type, not just tasks; a node
+      // it covers gets the same moved_at stamp a task does.
+      const tracksMoves =
+        node.frontmatter.type === TASK_NODE_TYPE ||
+        (!!patch.tags &&
+          (fieldDefs ??= await listFieldDefinitions(nestId)).some(
+            (d) => d.type === "time_in_status" && appliesTo(d, node.frontmatter.type),
+          ));
       // A task whose tag set changed moved column on a board. Compared as
       // sets: the editor resends the same tags on every save, which isn't a
       // move.
-      if (patch.tags && node.frontmatter.type === TASK_NODE_TYPE) {
+      if (patch.tags && tracksMoves) {
         const norm = (t: unknown) => String(t).toLowerCase().replace(/^#/, "");
         const before = new Set(priorTags.map(norm));
         const after = ((node.frontmatter.tags || []) as string[]).map(norm);
@@ -2487,6 +2650,15 @@ export async function updateNode(
           node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
           opInput.metadata = { ...(opInput.metadata as object), ...stamps };
         }
+      }
+
+      // A fields-only PATCH that changes nothing (a client echoing values
+      // back) is not an edit: no version, no review, no hash move.
+      const onlyFields = Object.entries(patch).every(
+        ([k, v]) => v === undefined || k === "fields" || k === "client" || k === "changeNote",
+      );
+      if (patch.fields !== undefined && onlyFields && Object.keys(opInput).length === 0) {
+        return { node, version: Number(node.frontmatter.version) || 1 };
       }
 
       const hasStewards = await isStewardshipEnabled(nestId);

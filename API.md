@@ -665,7 +665,40 @@ Named Board views of a nest (columns, filters, card order). A board is a view, n
 
 **DELETE** `/nests/:nestId/boards/:boardId` (write+) — the creator, or a nest owner/admin → `{ "deleted": true }`.
 
-Limits (`400` when exceeded): 100 boards per nest; `name` ≤ 80 characters; config ≤ 256 KB; ≤ 500 layout/rank keys; ≤ 2000 ids per list, each ≤ 600 characters; `config.dimension` ∈ `folder` / `status` / `tag`. A body that isn't a JSON object → `400`. Boards are deleted with their nest.
+Limits (`400` when exceeded): 100 boards per nest; `name` ≤ 80 characters; config ≤ 256 KB; ≤ 500 layout/rank keys; ≤ 2000 ids per list, each ≤ 600 characters; `config.dimension` ∈ `folder` / `status` / `tag` / `assignee` / `priority` / `field`. A body that isn't a JSON object → `400`. Boards are deleted with their nest.
+
+Custom-field boards: `"dimension": "field"` with `"fieldKey": "severity"` makes the field's values the columns (layout key `field:severity`); `"swimlane": "field"` with `"swimlaneField"` makes them lanes; `"filterFields": { "severity": "high", "blocked": "true" }` keeps only matching cards (same matching as the node list's `field.<key>` filter). Keys must look like field keys; a board naming a field that was later deleted still loads.
+
+### Custom fields — `/nests/:nestId/fields`
+Structured properties the nest defines once and every applicable node carries. **Definitions** live here; **values** live on each node in frontmatter `metadata.fields`, so a value change is an ordinary governed edit — a new version, a new link in the hash chain, the usual draft/review rules. Estimates and time-in-status are presets of this model, not separate features.
+
+Types: `text` (≤ 2000 chars), `number` (with an optional scale `unit`, e.g. `points` / `hours`), `select` (one of `options`), `multi_select` (any of `options`, stored in option order), `date` (`YYYY-MM-DD`), `user` (an email on the nest's roster, stored lower-cased), `url` (`http(s)`), `checkbox` (`true`/`false`) — and the computed `time_in_status`.
+
+**GET** `/nests/:nestId/fields` (read+, including document/folder grantees):
+```json
+{ "fields": [{
+  "id": "…", "nest_id": "…", "key": "severity", "label": "Severity", "type": "select",
+  "options": ["low", "high"], "required": false, "default_value": null,
+  "applies_to": ["task"], "unit": null, "preset": null, "position": 0,
+  "created_by": "<userId>", "created_at": "…", "updated_at": "…"
+}], "can_manage": true, "types": […], "presets": ["estimate", "time_in_status"], "estimate_units": ["points", "hours"] }
+```
+
+**POST** `/nests/:nestId/fields` → `201 { "field": … }`. Body: `key` (`^[a-z][a-z0-9_]{0,39}$`, unique per nest), `label` (≤ 60), `type`, `options` (select / multi_select only, 1–100, each ≤ 60, no duplicates), `required`, `default_value` (validated against the type), `applies_to` (node types; default `["task"]`, `["*"]` = every type), `unit` (number only). Or a **preset**: `{ "preset": "estimate", "unit": "hours" }` (a number field keyed `estimate`, unit default `points`) or `{ "preset": "time_in_status" }` (computed, read-only; one per nest). At most 50 fields per nest.
+
+**PATCH** `/nests/:nestId/fields/:key` (key or id) — `label`, `options`, `required`, `default_value`, `applies_to`, `unit`, `position` → `{ "field": … }`. `key` and `type` are fixed (`400`): values on documents are stored under the key and were validated as that type.
+
+**DELETE** `/nests/:nestId/fields/:key` → `{ "deleted": true, "field": … }`. Values already on documents stay in their frontmatter and history; they stop being interpreted, and defining the same key again brings them back.
+
+**Who may write:** the nest owner, a nest admin, the server license-admin, or a **reviewer steward scoped to the whole nest** (`403` for everyone else, including write collaborators and editor stewards). Writes are admitted at read tier by the nest middleware so a read-collaborator reviewer reaches the handler; the handler is the gate. Archived nest → `403`. MCP: `context_fields`, `context_create_field`, `context_update_field`, `context_delete_field` (same rules — see [§9 MCP](#9-mcp)).
+
+**GET** `/nests/:nestId/fields/history?limit=100` (read+) — the audit trail of definition changes, newest first: `{ "events": [{ "field_key", "action": "create"|"update"|"delete", "actor_id", "actor_email", "before", "after", "at" }] }`. Definitions are config rows, not documents, so this is their history. MCP: `context_fields` with `history: true`.
+
+A PATCH answers `invalid_values` (and up to 50 `invalid_nodes`) when narrowing `options` or `applies_to` left documents holding a value that no longer fits; the values stay in their history, and the next edit of that field must fix them. Re-creating a deleted key as a type its leftover values don't fit → `409`.
+
+**Values on nodes** — see [§4](#4-nodes-documents): `fields` on create/update, `fields` + `status_since` on responses, `field.<key>` list filters.
+
+**Time in status** is whole seconds since the node entered its current board column: `moved_at` (stamped when a task's tag set changes — and, once a time-in-status field covers another node type, that type's moves too), else `created_at`. It is returned inside `fields` under the definition's key on list/get/create/update responses, alongside `status_since` so a client can tick it live. Writing it → `400`.
 
 ---
 
@@ -788,7 +821,7 @@ The UI turns that body into a "Request edit access?" prompt over whatever the pe
 - Notifies the owner and nest admins: inbox row (`access_requested`), email, nest channels.
 
 ### GET `/nests/:nestId/access-requests?status=pending|approved|denied|all`
-`{ requests: [...], can_decide }`. Deciders see the nest's queue; anyone else sees only their own requests. Each row: `id, nest_id, requester_id, requested_by, target_type, target_id, level, note, status, created_at, resolved_by, resolved_at, resolution_note, title`.
+`{ requests: [...], can_decide }`. Deciders see the nest's queue; anyone else sees only their own requests. Each row: `id, nest_id, requester_id, requested_by, target_type, target_id, level, note, status, created_at, resolved_by, resolved_at, resolution_note, run_id, title` (`run_id`: the agent run that filed it, else `null`).
 
 ### GET `/nests/:nestId/access-requests/mine?target_type=&target_id=`
 `{ request }` — the caller's latest request for one target, any status (with `can_ask_again_at`), or `null`.
@@ -948,6 +981,7 @@ Optional query params, applied before the per-node enrichment:
 | `limit` | Max nodes to return. A non-numeric value is ignored, not an error. |
 | `folder` | Present (even as `""`) → that one folder level only, for a lazily-expanded document tree. Absent → the whole nest. |
 | `content` | `1`/`true` — include document bodies. **Off by default:** the listing is served from the nest's document index, which holds metadata only, so bodies cost a vault crawl and are opt-in. |
+| `field.<key>` | Custom-field filter, repeatable (every one must match). select / user / date / url / number match exactly (case-insensitive), `multi_select` matches when the option is one of its values, `text` matches a substring, `checkbox` takes `true`/`false` (unset counts as `false`), and `none` matches an unset field. A node whose type the field doesn't apply to never matches. An unknown key → `400`. |
 ```json
 {
   "count": 1,
@@ -968,6 +1002,7 @@ Optional query params, applied before the per-node enrichment:
 }
 ```
 - `schedule` and `model` are present only on runnable nodes (`type` `agent`/`skill`) that set them; omitted otherwise.
+- `fields` — custom field values, key → value (see [Custom fields](#custom-fields--nestsnestidfields)): the stored values plus computed ones (time in status, in seconds). Omitted when the node has none. `status_since` (tasks) — when the node entered its current board column.
 - `author` = the doc's creator (frontmatter author, else the first version's author); `null` for old imports with neither. `collaborators` = distinct version authors ∪ document-scope grant holders, minus the author, sorted. Both also appear on the single-node GET below.
 - Public readers (callers who reach a `visibility: public` or `visibility: org` nest without being its owner or a collaborator) do **not** receive `collaborators` — the field is omitted, and `author` falls back to the frontmatter value only, never to a version author. The roster is treated as private to the nest's members, like draft content.
 
@@ -993,6 +1028,7 @@ Optional query params, applied before the per-node enrichment:
 - Optional `prime` (boolean) flags the document as **prime** — it then always requires steward approval, whoever writes it. Owner/admin only; any other caller sending the field gets `403`. Omit to inherit from the nest's `prime_tags`; `false` exempts this document from an otherwise-prime tag. Echoed back on every node response as `prime` (absent when inherited). See `STEWARDSHIP.md → Prime documents`.
 - If stewardship enabled → status defaults `draft`. Else `approved`.
 - Optional `client` — caller attribution, recorded on the version this create seals. See [Caller attribution](#caller-attribution-client).
+- Optional `fields` — custom field values, `{ "severity": "high", "estimate": 3 }`. Validated against the nest's definitions: an unknown key, a field that doesn't apply to this node type, a value of the wrong shape, or a computed field → `400` naming the field. Defaults fill fields left out; a required field still empty after that → `400`.
 - Auto-syncs tag index for steward resolution.
 
 Response (201): `{ "node": { ... }, "stewards": [...] }`.
@@ -1066,6 +1102,7 @@ Requires nest write permission.
 - `model` — the runner model for this agent; same rules as `schedule` (runnable types only, `""` clears it).
 - `type` — re-type the node in place (the editor's "Turn into…"): `document`, `artifact`, `table`, `agent`, `skill`, `tool`, or any other engine type. Same gate as create — the artifact/table feature flags and the accepted set (`400` otherwise). The body is kept as-is. Converting to `skill` defaults the trigger from the title; converting away from a runnable type drops its `schedule` and `model`.
 - `prime` — owner/admin only (`403` otherwise). `true`/`false` set the document-scope flag, `null` clears it back to tag/nest inheritance. An edit that makes the document prime is itself gated, so it lands as a draft awaiting approval.
+- `fields` — custom field values to set, merged into the stored ones (keys left out are untouched; `null` clears one; clearing a required field → `400`). Same validation as create. A value change seals a version like any edit; a `fields`-only PATCH that changes nothing seals none.
 
 ### DELETE `/nests/:nestId/nodes/:nodeId`
 Write permission. Hidden in UI for reviewer/viewer; server still enforces.
@@ -1255,11 +1292,13 @@ Returns ALL reviews for the nest (server does not gate by reviewer scope).
     "requestedAt": "...",
     "status": "pending",
     "priority": "normal",
-    "requestNote": "..."
+    "requestNote": "...",
+    "runId": "run_…"
   }],
   "total": 1
 }
 ```
+`runId` is present only when an agent run filed the request (see Metacognition agents).
 
 **UI filtering** (recent change) — the React layer hides:
 - Items the caller submitted (separation of duties).
@@ -2049,7 +2088,7 @@ Deterministic fact lookup against a **table** node (CSV body): fetch the exact r
 Same operation over MCP: `context_table_query`.
 
 ### POST `/nests/:nestId/chat`
-Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (**off by default** — off → `404`); needs a model credential (missing → `503` with `reason: "no_api_key"`): with the `byok` feature (Enterprise), the licence's own key for the model's provider (Settings → Hootie → Model keys, see below), otherwise the PromptOwl model gateway the licence check provides, metered in PromptOwl credits. Answers with `HOOTIE_MODEL`, a plain model name (on the PromptOwl gateway the server adds the instance prefix, e.g. `default-claude/`, per call) — unset, the gateway's default model or `claude-sonnet-5` on an own key; all editable in Settings → General. `GET /admin/models` (server admin) lists the models the current credential can reach, by plain name — `{ models, current, source, providers }`, where `providers` maps each name to its provider (`openai`, `claude`, `gemini`, `grok`, `groq`, `perplexity`, `other`) so the Settings picker can group them — if the list can't be fetched it answers `models: []` with an `error`, and a name can still be typed. Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
+Hootie in the nest — ask a question about the nest and get a streamed, cited answer. Read tier, like `/context`: retrieval runs through the same `/context` path **as the caller**, so the answer can only draw on documents this person may read. Gated by `HOOTIE_ENABLED` (**off by default** — off → `404`); needs a model credential (missing → `503` with `reason: "no_api_key"`): with the `byok` feature (Enterprise), the server's own model gateway when one is set (`ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`, every model goes there as named), else the licence's own key for the model's provider (Settings → Hootie → Model keys, see below), otherwise the PromptOwl model gateway the licence check provides, metered in PromptOwl credits. Answers with `HOOTIE_MODEL`, a plain model name (on the PromptOwl gateway the server adds the instance prefix, e.g. `default-claude/`, per call) — unset, the gateway's default model or `claude-sonnet-5` on an own key; all editable in Settings → General. `GET /admin/models` (server admin) lists the models the current credential can reach, by plain name — `{ models, current, source, providers }`, where `providers` maps each name to its provider (`openai`, `claude`, `gemini`, `grok`, `groq`, `perplexity`, `other`) so the Settings picker can group them — if the list can't be fetched it answers `models: []` with an `error`, and a name can still be typed. Rate-limited per user across all nests — the budget guards the one server-wide key (`429`).
 
 Request:
 
@@ -2355,13 +2394,16 @@ Archived nests are skipped by the scheduler tick; restoring the nest resumes the
 
 Every route `404`s unless both `FEATURE_WORKFLOW_PLANE` and `FEATURE_METACOGNITION` are on. See [`WORKFLOW_PLANE.md`](./WORKFLOW_PLANE.md#the-one-exception-metacognition-agents).
 
-- `GET /nests/:nestId/metacognition` (write) — `{ agents: [{ node_id, enabled, persona{name,avatar,email}, scope{read[],propose[]}, caps{max_steps,max_tokens,max_seconds,max_proposals}, feeds[], mcp_servers[], model, configured_by, updated_at }] }`.
+- `GET /nests/:nestId/metacognition` (write) — `{ agents: [{ node_id, enabled, persona{name,avatar,email}, scope{read[],propose[]}, caps{max_steps,max_tokens,max_seconds,max_proposals,max_comments}, feeds[], mcp_servers[], model, configured_by, updated_at }] }`. `configured_by` is the agent's **owner**.
 - `GET /nests/:nestId/metacognition/:node` (write) — one agent.
-- `PUT /nests/:nestId/metacognition/:node` (owner/admin, else `403`) — make an **agent** document a metacognition agent, or update it. Body: `{ persona: { name, avatar? }, scope?: { read?: string[], propose?: string[] }, caps?: {…}, feeds?: [{ name, url }], mcp_servers?: [{ name, url, allowed_tools: string[], auth_env? }], model?, enabled? }`. Folders are under `nodes/`. `read`: empty = the whole nest. `propose`: empty = **no proposals** (fail closed), `["*"]` = anywhere it may read, otherwise folders inside `read`. Caps are clamped to server ceilings (turns ≤ 50, tokens ≤ 2M, seconds ≤ 1800, proposals ≤ 20). Tokens and seconds are **soft** caps: checked between turns (a turn's output is limited to what's left, but its input is only known afterwards), and the wall-clock cap aborts the model call and feed/MCP requests but lets a proposal already being written finish. Every turn re-sends the conversation, so re-read (cached) input counts toward the token cap too — long runs reach it sooner than their output alone suggests. Folder names are matched exactly, case included. Manual, `/run` and hook starts are limited to 30 per agent per hour (schedules are bounded by their interval). Feed and MCP URLs must be public `https` (`400` otherwise); an MCP server must list `allowed_tools`. `auth_env` names a nest env value sent as a bearer token; it must start `MCP_`, so a config can't send the model key or another secret out. The first save creates the persona — a service identity (`persona-…@agents.invalid`) that can't sign in and isn't listed as a person. The saver becomes `configured_by`: their access bounds the agent's.
+- `PUT /nests/:nestId/metacognition/:node` (owner/admin, else `403`) — make an **agent** document a metacognition agent, or update it. Body: `{ persona: { name, avatar? }, scope?: { read?: string[], propose?: string[] }, caps?: {…}, feeds?: [{ name, url }], mcp_servers?: [{ name, url, allowed_tools: string[], auth_env? }], model?, enabled? }`. Folders are under `nodes/`. `read`: empty = the whole nest. `propose`: empty = **no proposals** (fail closed), `["*"]` = anywhere it may read, otherwise folders inside `read`. `avatar` is a glyph — an emoji or up to 4 letters; a URL is `400` (a remote image would be fetched by every reviewer's browser). Caps are clamped to server ceilings (turns ≤ 50, tokens ≤ 2M, seconds ≤ 1800, proposals ≤ 20, comments ≤ 20; comments default 5). Tokens and seconds are **soft** caps: checked between turns (a turn's output is limited to what's left, but its input is only known afterwards), and the wall-clock cap aborts the model call and feed/MCP requests but lets a proposal already being written finish. Every turn re-sends the conversation, so re-read (cached) input counts toward the token cap too — long runs reach it sooner than their output alone suggests. Folder names are matched exactly, case included. Manual, `/run` and hook starts are limited to 30 per agent per hour (schedules are bounded by their interval). Feed and MCP URLs must be public `https` (`400` otherwise); an MCP server must list `allowed_tools`. `auth_env` names a nest env value sent as a bearer token; it must start `MCP_`, so a config can't send the model key or another secret out. The first save creates the persona — a service identity (`persona-…@agents.invalid`) that can't sign in and isn't listed as a person. The first saver becomes the **owner** (`configured_by`) and stays it: a later save — a server admin's included — does not change it. Only when the owner can no longer run the agent (gone, or below `write` on the nest) does the admin saving it take it over; the response then has `owner_changed: true`. The owner's access is a ceiling, never a source of reach: the persona works only in its own nest, within its configured folders, widened only by grants given to the persona itself (an approved access request it filed with `request_access`).
 - `DELETE /nests/:nestId/metacognition/:node` (owner/admin) — stop treating the document as a metacognition agent. The document and the persona's history stay.
+- `GET /nests/:nestId/metacognition/:node/stats?days=30&limit=50` (write; `404` if the document isn't a metacognition agent) — what the agent did over the last `days` (1–365, default 30): `{ stats: { node_id, window_days, runs{total,running,succeeded,failed,timeout,skipped,cancelled}, tokens, est_cost_usd, proposals{made,approved,rejected,pending,withdrawn,approval_rate}, comments, access_requests, blocked_by_scope, last_run_at, last_error{run_id,at,message}|null, history: [{ id, outcome, triggered_by, started_at, finished_at, duration_ms, tokens, est_cost_usd, proposals, approved, rejected, comments, error }] } }`. `history` is the newest `limit` runs (1–200, default 50). Outcomes: `timeout` = stopped by its `max_seconds` cap; `skipped` = cancelled before it could start (no key, agent off, owner lost access). Tokens come from the run's trace total, or its per-turn step records if it ended before writing one. Proposal verdicts come from the review queue (`withdrawn` = a rejected draft the agent took back, or a request cancelled). `approval_rate` = approved ÷ (approved + rejected), `null` until one is decided. Non-integer or `< 1` `days`/`limit` → `400`. MCP: `workflow_runs_list { agent: "<node>", agent_stats: true, days?, limit? }` returns the same `{ stats }`, behind the same gate (metacognition on, write tier, a configured agent).
 - `POST /nests/:nestId/metacognition/:node/run` (write) — start a run now → `202 { run_id, executes: "server" }`; `409` while one is running. `POST /nests/:nestId/run/:node` does the same for a metacognition agent (no bundle is handed out), as do its schedules and inbound hooks.
 
-The run is an ordinary run (`GET /runs/:id`): `claimed_by: "server:metacognition"`, steps `read` (search/list/read), `write` (`detail.kind: "proposal"`, `"access_needed"`, `"withdrew_rejected_draft"`), `notify` (comment), `external` (feed/MCP), `branch` (`detail.kind: "reasoning"`). Its `trace` is `{ persona, model, billing: "promptowl_credits"|"own_key", usage{input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens}, est_cost_usd, proposals, stopped_by: end_turn|max_steps|max_tokens|max_seconds|refusal|turn_max_tokens, summary }`, or `{ persona, skipped }` (status `cancelled`) when it couldn't start. `POST /runs/:id/steps` on a metacognition run → `409`; `PATCH /runs/:id` accepts only `cancelled`.
+The run is an ordinary run (`GET /runs/:id`): `claimed_by: "server:metacognition"`, steps `read` (search/list/read), `write` (`detail.kind: "proposal"`, `"access_needed"`, `"withdrew_rejected_draft"`), `notify` (comment; `detail.kind: "access_request"` with `access_request_id` for an access request it filed), `external` (feed/MCP), `branch` (`detail.kind: "reasoning"`, and `"turn"` — one per model turn with that turn's `usage` and `est_cost_usd`, written as it happens so a crash keeps what was spent). Its `trace` is `{ persona, model, billing: "promptowl_credits"|"own_key", usage{input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens}, est_cost_usd, proposals, stopped_by: end_turn|max_steps|max_tokens|timeout|crashed|refusal|turn_max_tokens, summary }`, or `{ persona, skipped }` (status `cancelled`) when it couldn't start or had nothing to do. A run its wall clock cut off is **`failed`** with `stopped_by: "timeout"` and an `error`; a run the server lost (restart, crash) is `failed` with `stopped_by: "crashed"` and the usage its turns recorded. Every `failed` run — these, and any runner's — fires the `run_failed` connector event. A **scheduled** run is skipped (`cancelled`, no model call) when the agent has no feeds or MCP servers and nothing changed since its last successful run: no document version and no verdict on its proposals. A person pressing Run, a hook or a trigger always runs. The agent does not propose a change that is still waiting for review, or one a reviewer rejected in the last 7 days (it's told to comment instead), and files at most 3 access requests per run. `POST /runs/:id/steps` on a metacognition run → `409`; `PATCH /runs/:id` accepts only `cancelled`.
+
+What a run produced links back to it: the review request a `proposal` step filed carries `runId` (`GET /nests/:id/review-queue`, `GET /me/work` → `run_id`), each comment in a thread a `comment` step opened carries `runId` (`GET /nests/:id/nodes/:node/annotations`), and an access request a step filed (`detail.access_request_id`) carries `run_id`. The link is only ever set on a row in the run's own nest that has no run yet. The UI opens it at `/nest/:id/workflows?run=:runId`. Finished runs are kept forever unless `RUN_RETENTION_DAYS` is set; after a run is pruned, the id stays on the row but `GET /runs/:id` is `404`.
 
 ### Inbound hooks — let the outside world trigger a run
 
@@ -2376,7 +2418,7 @@ The run is an ordinary run (`GET /runs/:id`): `claimed_by: "server:metacognition
 - `PUT /nests/:nestId/env` (write+) — `{ key, value }` creates or replaces.
 - `DELETE /nests/:nestId/env/:key` (write+).
 
-Values ride to the runner inside the run bundle. With `byok`, `ANTHROPIC_API_KEY` (and `ANTHROPIC_BASE_URL`) here are the nest's own key for agent runs; without one, runs use the PromptOwl model gateway on credits.
+Values ride to the runner inside the run bundle. With `byok`, `ANTHROPIC_API_KEY` (and `ANTHROPIC_BASE_URL`) here are the nest's own key for agent runs; without one, runs use the server's own model gateway if set, else the PromptOwl model gateway on credits.
 
 ### Connectors — governance events out to a channel
 
@@ -2417,6 +2459,8 @@ Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually;
 Both are **read-tier**, matching REST (`isAnnotationAction` in `app.ts`): a reviewer who can see the document may comment on it. The transport is read-tier too, so each tool re-checks `canReadNode` itself — that check is the real gate. Deliberately *not* gated on an approved version: a reviewer comments on drafts, and writing a comment discloses nothing (the caller supplies the text), whereas *reading* threads stays gated because anchors quote draft body text. Both run the same side effects the REST routes do — the `@mention` fan-out (so tagging a human notifies them) and the derived `— Annotations` re-projection for artifacts, so an agent's comment doesn't leave that node stale. A `thread` that belongs to another document is refused by name rather than silently opening a new thread.
 
 `context_comments` is also available on the **server-level** endpoint (nest-parameterised, read-only). Comment visibility matches UI node visibility: collaborators/stewards who can read the node may read its threads even before approval; public readers remain blocked until the document is approved. Comment *writes* stay per-nest with the other write tools.
+
+**Custom fields.** `context_fields` lists the nest's definitions (any reader). `context_create_field`, `context_update_field` and `context_delete_field` mirror `POST` / `PATCH` / `DELETE /nests/:id/fields` — same validation, same gate (owner, nest admin, license admin, nest-wide reviewer steward; anyone else gets `UNAUTHORIZED_ACTION`). Values ride the existing tools: `context_create` and `context_update` take `fields` (key → value, `null` clears; a refused value is a `VALIDATION_FAILED` tool error naming the field), `context_list` takes a `fields` filter (same matching as REST `field.<key>`), and `context_get` / `context_list` / `context_query` return values in their prose and, structured, in the catalog's own `frontmatter.metadata.fields` — where they are stored — including computed time in status (seconds).
 
 **`context_my_drafts`** mirrors `GET /me/drafts`, nest-scoped: the caller's own unsubmitted (or rejected) documents in this nest, with their path and version. Capped at the 100 most recent; the reply says so explicitly when there are more, so an agent can't read a capped page as the whole set. Self-scoped by construction — it only ever returns rows the caller authored, in a nest they already hold read on, so it needs no permission check of its own. It exists because an agent otherwise cannot see its own unsubmitted work: a draft has no review request, so `context_review_queue` never lists it, and `context_query` skips it (only approved versions are AI-readable). The response names `context_submit_review` as the next step.
 
@@ -2482,7 +2526,9 @@ Hootie fields: `hootie_enabled` (default `false`), `hootie_brand` — `{ name, l
 `hootie_name` (one line, ≤40 chars), `hootie_logo_url` (`https://` image: `.png`/`.jpg`/`.gif`/`.webp`), `hootie_accent_color` (hex, normalised to `#rrggbb`), `hootie_greeting` (one line, ≤200 chars). `""` resets a field to the default. GET returns the stored values plus `hootie_branding_available`. "Enterprise licence" here means the licence carries the `hootie_branding` feature (PromptOwl's licence check returns the licence's `features`; an Enterprise licence has it by default, and PromptOwl can grant or revoke it per licence). A PATCH that would **change** any of these without it is refused as a whole — `403 { code: "enterprise_required" }` (the code name is kept for wire compatibility; it means the licence lacks `hootie_branding`), nothing written, including the request's other fields. Sending back the stored values unchanged is allowed (they are ignored). Invalid values → `400` with `fieldErrors` keyed by field. `hootie_enabled` is written explicitly (`true`/`false`), so a UI choice beats the deploy env.
 
 ### Own model providers — `/admin/settings` fields (Enterprise, `byok`)
-A server admin can add their own key for Anthropic (`claude`), OpenAI, Google Gemini, xAI Grok or Groq. The former `anthropic_api_key` and `anthropic_base_url` settings are gone: a stored Anthropic key is handed over to the gateway at boot. PATCH `provider_keys` with provider → key to set, or `null` to clear:
+A server admin can add their own key for Anthropic (`claude`), OpenAI, Google Gemini, xAI Grok or Groq. A bare `anthropic_api_key` (no gateway URL) is handed over to PromptOwl's gateway as the Anthropic key at boot.
+
+The server's own model gateway (`byok`): PATCH `anthropic_base_url` (an http(s) URL; `""` turns it off and clears its key) and `anthropic_api_key` (write-only; the gateway's key, checked with one `/v1/models` call — a 401/403 is `400` with `fieldErrors.anthropic_api_key`; a key with no URL is refused). GET returns `anthropic_base_url` and `anthropic_api_key_masked` (last 4 only). Set, it routes Hootie and agent runs ahead of own-provider keys and credits, and `GET /admin/models` lists the gateway's models without `own_models`. Without `byok`, setting either → `403 { code: "byok_required" }`. PATCH `provider_keys` with provider → key to set, or `null` to clear:
 
 ```json
 { "provider_keys": { "openai": "sk-…", "groq": null } }
@@ -2497,7 +2543,7 @@ Each key goes to PromptOwl, which checks it with the provider and keeps it in it
 }
 ```
 
-`model_source`: `own` (the server's Anthropic key), `promptowl` (PromptOwl's virtual key on the plan's credits) or `null` (no key at all). Setting a provider key without `byok` → `403 { code: "byok_required" }`. An unknown provider, or a key the provider refuses → `400` with `fieldErrors["provider_keys.<provider>"]`. Keys are sent one at a time, after the other settings in the request are saved, so a refused key never undoes them; when a later provider is refused, the earlier ones in the same request stay saved. Without `byok` nothing is sent (there is no own key to clear). With `byok`, `GET /admin/models` adds the licence's own-provider models (named `community-<licence>-<provider>/<model>`) to `models` and lists them in `own_models`. Hootie (`hootie_model`) runs on the own key for any model of a provider with an own key (picking `gpt-4o` from the PromptOwl list counts, since the own model is a provider wildcard); other models keep the key above.
+`model_source`: `own` (the server's own model gateway), `promptowl` (PromptOwl's virtual key on the plan's credits) or `null` (no key at all). Setting a provider key without `byok` → `403 { code: "byok_required" }`. An unknown provider, or a key the provider refuses → `400` with `fieldErrors["provider_keys.<provider>"]`. Keys are sent one at a time, after the other settings in the request are saved, so a refused key never undoes them; when a later provider is refused, the earlier ones in the same request stay saved. Without `byok` nothing is sent (there is no own key to clear). With `byok`, `GET /admin/models` adds the licence's own-provider models (named `community-<licence>-<provider>/<model>`) to `models` and lists them in `own_models`. Hootie (`hootie_model`) runs on the own key for any model of a provider with an own key (picking `gpt-4o` from the PromptOwl list counts, since the own model is a provider wildcard); other models keep the key above.
 
 ### Superadmins — GET/POST `/admin/super-admins`, DELETE `/admin/super-admins/:email` (server-admin only)
 Grant and revoke **superadmins** (server-wide admins) from the API/UI instead of only via `access.yaml`. The effective superadmin set is the union of three sources, surfaced per row as `source`:
@@ -2614,6 +2660,33 @@ The per-nest steward slice of the activity trace. Same response shape, paginatio
 Authorization mirrors the grants / steward-roster rule (`canManageStewards`): the nest owner, an `admin` collaborator, the license admin, or an `access.yaml` `super_admin` (open mode: always allowed). Read/write collaborators get `403`; callers with no access to the nest get `404`.
 
 Surfaced in the UI from the nest view's overflow menu → **Activity trace** (owner/nest-admin only), which renders `ActivityTracePage` in nest-scoped mode (nest column hidden).
+
+### GET `/admin/status` (server admin)
+Health and network report behind **Settings → Network & status**. Server admin only (license admin or superadmin; anyone in open mode) — `401` without credentials, `403` otherwise. Never returns a secret: connection strings lose their userinfo, webhooks and SMTP are reported as host and port only.
+
+```json
+{
+  "generatedAt": "2026-10-08T09:12:00.000Z",
+  "version": "1.28.0",
+  "build": null,
+  "listenPort": 3838,
+  "checks": [
+    { "id": "db", "group": "data", "label": "Database", "state": "green", "detail": "SQLite at /data/community.db — answered in 1 ms" },
+    { "id": "base-url", "group": "network", "label": "Public address", "state": "amber", "detail": "Not set — …", "fix": "Set the public base URL in Settings → Basic …" }
+  ],
+  "address": { "effectiveBaseUrl": "https://nest.example.com", "pinned": true, "requestOrigin": "https://nest.example.com", "forwarded": { "proto": "https", "host": null, "for": "present" }, "privateHost": false },
+  "egress": [ { "id": "promptowl", "purpose": "License checks, PromptOwl sign-in, team import", "host": "app.promptowl.ai", "port": 443, "protocol": "https", "configuredBy": "PROMPTOWL_API_URL", "required": true } ]
+}
+```
+
+`state` is `green`, `amber`, `red` or `off` (feature not in use); every `amber`/`red` check carries a `fix`. Check ids: `db`, `migrations`, `db-size` (SQLite), `disk`, `storage`, `license`, `base-url`, `email`, `oidc`, `scheduler`, `version`. `build` is `GIT_SHA` / `BUILD_SHA` from the environment when set. `egress` lists every host the current configuration calls — the firewall/proxy allowlist.
+
+### POST `/admin/status/egress`, `/admin/status/inbound`, `/admin/status/oidc-discovery` (server admin)
+Active probes. They take **no input**: targets come from server configuration only, so a request can't aim them anywhere. 5-second timeouts, redirects never followed, at most 10 probe calls per admin per minute (`429` beyond).
+
+- **egress** — dials each `egress` target: DNS → TCP → TLS (certificate must verify) → one `GET /` on the origin (any HTTP status counts as reachable; webhook paths are never requested). SMTP is checked with the transport's own verify; Postgres stops at TCP. With `HTTPS_PROXY` set, HTTPS targets are fetched through the proxy instead (one `http` stage). Returns `{ ranAt, proxy, results: [{ id, host, port, ok, stages: [{ stage, ok, ms, detail }], hint? }], clockSkewSeconds }`; `clockSkewSeconds` comes from PromptOwl's `Date` header.
+- **inbound** — resolves the saved `PUBLIC_BASE_URL` and fetches its `/health` with certificate verification, checking the answer is this server and version. Returns `{ ranAt, url, ok, stages, privateAddresses, note, hint? }`. Runs **from this server**, so it can't prove the internet can reach it.
+- **oidc-discovery** — fetches `<OIDC_ISSUER>/.well-known/openid-configuration` and checks the document names the same issuer. Returns `{ ranAt, issuer, ok, ms, detail, endpointHosts, hint? }`.
 
 ---
 

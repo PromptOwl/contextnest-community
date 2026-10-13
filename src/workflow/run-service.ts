@@ -390,6 +390,53 @@ export async function appendRunStep(
   return { seq };
 }
 
+/**
+ * Stamp the run's id on what a step produced, so the review, comment or access
+ * request can link back to its trace. Keys read from the step detail:
+ * `review_id`, `thread_id` (every comment in that new thread) and
+ * `access_request_id`. Only rows in the run's own nest that carry no run yet
+ * are touched, so a step can't claim someone else's row or re-point one.
+ * Best-effort: the link is a convenience, never a reason to fail the step.
+ */
+export async function linkRunArtifacts(runId: string, detail: unknown): Promise<void> {
+  if (!detail || typeof detail !== "object") return;
+  const d = detail as Record<string, unknown>;
+  const id = (v: unknown) => (typeof v === "string" && v.length > 0 && v.length <= 200 ? v : null);
+  const reviewId = id(d.review_id);
+  const threadId = id(d.thread_id);
+  const accessId = id(d.access_request_id);
+  if (!reviewId && !threadId && !accessId) return;
+  const db = getDb();
+  try {
+    const run = (await db.get("SELECT nest_id FROM runs WHERE id = ?", [runId])) as
+      | { nest_id: string }
+      | undefined;
+    if (!run) return;
+    if (reviewId) {
+      await db.run(
+        "UPDATE review_requests SET run_id = ? WHERE id = ? AND nest_id = ? AND run_id IS NULL",
+        [runId, reviewId, run.nest_id],
+      );
+    }
+    if (threadId) {
+      await db.run(
+        `UPDATE annotation_comments SET run_id = ?
+          WHERE thread_id = ? AND run_id IS NULL
+            AND thread_id IN (SELECT id FROM annotation_threads WHERE id = ? AND nest_id = ?)`,
+        [runId, threadId, threadId, run.nest_id],
+      );
+    }
+    if (accessId) {
+      await db.run(
+        "UPDATE access_requests SET run_id = ? WHERE id = ? AND nest_id = ? AND run_id IS NULL",
+        [runId, accessId, run.nest_id],
+      );
+    }
+  } catch (err) {
+    console.warn(`[runs] could not link artifacts to run ${runId}:`, err);
+  }
+}
+
 const RUN_STATUSES = ["running", "succeeded", "failed", "cancelled"];
 
 /**
@@ -458,7 +505,36 @@ export async function closeRun(
     throw new ConflictError("Run already terminal — status can't be changed");
   }
   if (status === "cancelled") await cancelDescendants(runId);
+  if (status === "failed") {
+    const run = await loadRun(runId);
+    if (run) announceRunFailed(run, input.trace);
+  }
   return { status };
+}
+
+/**
+ * Tell the nest's channels a run failed. Every way a run can fail goes
+ * through here — a runner's PATCH, the MCP close tool, and runs the server
+ * executes itself (metacognition), which used to fail silently.
+ * Fire-and-forget: an outage in a channel never fails the close.
+ */
+export function announceRunFailed(
+  run: { id: string; nest_id: string; agent_node: string; triggered_by: string },
+  trace: unknown,
+): void {
+  const err =
+    trace && typeof trace === "object" ? String((trace as { error?: unknown }).error ?? "").slice(0, 200) : "";
+  void import("../notify/dispatch.js")
+    .then(({ dispatchEvent }) =>
+      dispatchEvent({
+        kind: "run_failed",
+        nestId: run.nest_id,
+        subjectId: run.id,
+        actor: run.triggered_by,
+        message: `Run of *${run.agent_node}* failed${err ? ` — ${err}` : ""}`,
+      }),
+    )
+    .catch((e) => console.warn("[runs] run_failed notification failed", (e as Error)?.message));
 }
 
 /**

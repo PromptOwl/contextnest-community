@@ -1,6 +1,7 @@
 /**
  * MyWorkPage — My Work (/my-work): the cross-nest review inbox, what you are waiting on, and watcher notifications.
  */
+import { RunLink } from "../../../components/RunLink";
 import { Fragment, useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import * as api from "../../../lib/api";
@@ -568,6 +569,7 @@ export default function MyWorkPage() {
                             {w.reason ? ` · "${w.reason}"` : ""}
                           </span>
                         </button>
+                        <RunLink nestId={w.nest_id} runId={w.run_id} className="shrink-0" />
                         <div className="flex items-center gap-2 shrink-0">
                           {w.type === "access" ? (
                             <>

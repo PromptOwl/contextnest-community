@@ -29,7 +29,7 @@ const NOW = "to_char((now() AT TIME ZONE 'utc'), 'YYYY-MM-DD HH24:MI:SS')";
 // Historical SQLite migration ids — seeded as already-applied so any FUTURE
 // incremental Postgres migration can reuse the same hasMigration/recordMigration
 // gating without re-running schema that's already baked into the DDL below.
-const HISTORICAL_MIGRATIONS = [
+export const HISTORICAL_MIGRATIONS = [
   "002_steward_parity",
   "003_sessions_and_single_api_key",
   "004_license_cache_owner_email",
@@ -86,6 +86,8 @@ const HISTORICAL_MIGRATIONS = [
   "055_access_requests",
   "056_mcp_oauth",
   "057_review_sla_escalation",
+  "060_run_links",
+  "062_field_definitions",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -998,6 +1000,46 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
         ON runs(nest_id, agent_node) WHERE status = 'running' AND claimed_by = 'server:metacognition';
   `);
 
+  // Migration 062 parity: nest-level custom field definitions (see
+  // migrations.ts). Values live on the nodes, not here.
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS field_definitions (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      field_key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      type TEXT NOT NULL,
+      options_json TEXT NOT NULL DEFAULT '[]',
+      required INTEGER NOT NULL DEFAULT 0,
+      default_json TEXT,
+      applies_to_json TEXT NOT NULL DEFAULT '["task"]',
+      unit TEXT,
+      preset TEXT,
+      position INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      updated_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_key
+      ON field_definitions(nest_id, field_key);
+    -- One time-in-status field per nest, enforced atomically.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_one_tis
+      ON field_definitions(nest_id) WHERE type = 'time_in_status';
+    -- Audit trail of definition changes (who, what, before → after).
+    CREATE TABLE IF NOT EXISTS field_definition_events (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      field_key TEXT NOT NULL,
+      action TEXT NOT NULL CHECK (action IN ('create', 'update', 'delete')),
+      actor_id TEXT,
+      before_json TEXT,
+      after_json TEXT,
+      at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_field_definition_events_nest
+      ON field_definition_events(nest_id, at);
+  `);
+
   // Migration 056 parity: MCP OAuth (CU-wdqcq02p06). Kept in lockstep with
   // migrations.ts — same columns, same constraints. Created unconditionally
   // so turning MCP_OAUTH_ENABLED on needs no migration, inert while it is off.
@@ -1056,6 +1098,16 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS review_sla_hours INTEGER;
     ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS escalation_level INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS escalated_at TEXT;
+  `);
+
+  // Migration 060 parity: run back-links (see migrations.ts).
+  await db.exec(`
+    ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS run_id TEXT;
+    ALTER TABLE annotation_comments ADD COLUMN IF NOT EXISTS run_id TEXT;
+    ALTER TABLE access_requests ADD COLUMN IF NOT EXISTS run_id TEXT;
+    CREATE INDEX IF NOT EXISTS idx_reviews_run ON review_requests(run_id) WHERE run_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_annot_comments_run ON annotation_comments(run_id) WHERE run_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_access_requests_run ON access_requests(run_id) WHERE run_id IS NOT NULL;
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.
