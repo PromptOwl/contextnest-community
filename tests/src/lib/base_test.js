@@ -28,6 +28,8 @@ import AppShellPage from '../page_factory/app/app_shell_page.js';
 import NestsPage from '../page_factory/app/nests_page.js';
 import MyWorkPage from '../page_factory/app/my_work_page.js';
 import MyDraftsPage from '../page_factory/app/my_drafts_page.js';
+import TeamsPage from '../page_factory/app/teams_page.js';
+import ApiKeysPage from '../page_factory/app/api_keys_page.js';
 
 // REST helper used to arrange dashboard preconditions (nests, pins, sharing)
 import DashboardApi from './dashboard_api.js';
@@ -37,6 +39,12 @@ import MyWorkApi from './my_work_api.js';
 
 // REST helper used to arrange My Drafts preconditions (drafts, rejections)
 import MyDraftsApi from './my_drafts_api.js';
+
+// REST helper used to arrange Teams preconditions (teams, members)
+import TeamsApi from './teams_api.js';
+
+// REST helper used to arrange API keys preconditions (keys, scoped nests)
+import ApiKeysApi from './api_keys_api.js';
 
 /**
  * Global fixtures available to all tests
@@ -230,6 +238,30 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
        */
       get myDraftsApi() {
         return new MyDraftsApi(this.page);
+      },
+
+      // Workspace → Teams
+      get teamsPage() {
+        return new TeamsPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Teams suite. One instance per role and test, so
+       * the teams it remembers for cleanup belong to that test alone.
+       */
+      get teamsApi() {
+        if (!this._teamsApi) this._teamsApi = new TeamsApi(this.page);
+        return this._teamsApi;
+      },
+
+      // Workspace → API keys
+      get apiKeysPage() {
+        return new ApiKeysPage(this.page, role.alias);
+      },
+
+      /** REST helper for the API keys suite — keys and scoped nests. */
+      get apiKeysApi() {
+        return new ApiKeysApi(this.page);
       },
 
       /**

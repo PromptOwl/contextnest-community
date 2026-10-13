@@ -44,6 +44,7 @@ const EVENT_EMOJI: Record<string, string> = {
   review_requested: ":memo:",
   review_approved: ":white_check_mark:",
   review_rejected: ":x:",
+  review_escalated: ":alarm_clock:",
   run_failed: ":rotating_light:",
   deletion_requested: ":wastebasket:",
   deletion_deleted: ":wastebasket:",
@@ -58,6 +59,7 @@ const EVENT_EMOJI: Record<string, string> = {
  *  receives via that path. See the server-msteams block in dispatchEvent. */
 const DIGEST_DELIVERED_KINDS = new Set([
   "review_requested",
+  "review_escalated",
   "review_approved",
   "review_rejected",
   "deletion_requested",

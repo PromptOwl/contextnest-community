@@ -4,8 +4,8 @@
  * Kept to a single streaming function with a plain-text contract so the route
  * (and its tests) never touch the SDK: tests replace this module with a
  * scripted generator and exercise everything else for real. The key is the
- * route's (PromptOwl's gateway, or the licence's own-provider key); there is
- * no per-user key.
+ * route's (the server's own gateway, PromptOwl's gateway, or the licence's
+ * own-provider key); there is no per-user key.
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { config } from "../config.js";
@@ -174,6 +174,34 @@ export function describeModelError(
     return `${provider} is having trouble right now. Try again in a moment.`;
   }
   return "Hootie couldn't reach the model. Try again in a moment.";
+}
+
+/**
+ * Does this key work on this gateway? Called when an admin saves the server's
+ * own gateway key, so a bad one is refused at the box that sets it rather than
+ * surfacing as a failed answer later.
+ *
+ * `models.list` is the cheapest call that proves the credential: no tokens,
+ * no model named, one round trip. Only an auth rejection (401/403) is a
+ * verdict — anything else (gateway down, no /v1/models on it, a timeout) says
+ * nothing about the key, so the save goes through.
+ *
+ * @returns an error to show the admin, or null when there's nothing against it.
+ */
+export async function verifyModelKey(apiKey: string, baseUrl: string | null): Promise<string | null> {
+  try {
+    await clientFor(apiKey, baseUrl).models.list({ limit: 1 }, { signal: AbortSignal.timeout(10_000) });
+    return null;
+  } catch (err: any) {
+    const status = err?.status;
+    if (status === 401 || status === 403) {
+      return baseUrl
+        ? `The model gateway rejected that key (${status}). Check the key and the gateway URL.`
+        : "Anthropic rejected that key. Check it and paste it again.";
+    }
+    console.warn("[hootie] key check inconclusive, saving anyway", status ?? err?.message);
+    return null;
+  }
 }
 
 /**

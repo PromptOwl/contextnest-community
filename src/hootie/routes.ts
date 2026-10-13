@@ -95,7 +95,7 @@ hootieRoutes.post("/chat", async (c) => {
     return c.json(
       {
         error: hasEntitlement("byok")
-          ? "Hootie needs a model key. A server admin can add one under Settings → Hootie → Model keys."
+          ? "Hootie needs a model key. A server admin can add one, or a model gateway, under Settings → Hootie."
           : "Hootie runs on PromptOwl models, which arrive with this server's next licence check. If it persists, ask your administrator.",
         reason: "no_api_key",
       },
@@ -106,7 +106,8 @@ hootieRoutes.post("/chat", async (c) => {
   const picked = hootieModel(baseCredential);
   const gatewayModel = await resolveGatewayModel(baseCredential, picked);
   // With byok, a provider the admin added their own key for runs on that key.
-  const own = ownModelRoute(gatewayModel);
+  // Only on PromptOwl's gateway: the server's own gateway keeps every call.
+  const own = baseCredential.source === "promptowl" ? ownModelRoute(gatewayModel) : null;
   const credential = own?.credential ?? baseCredential;
   const callModel = own?.model ?? gatewayModel;
   console.log(`[hootie] model=${picked} call=${callModel} ${credentialLabel(credential)}`);

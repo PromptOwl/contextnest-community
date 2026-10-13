@@ -126,13 +126,28 @@ export async function schedulerTick(now: number = Date.now()): Promise<string[]>
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
+let lastTickAt: string | null = null;
+let lastTickError: string | null = null;
+
+/** Loop state for the admin Network & status page. */
+export function schedulerState(): { running: boolean; lastTickAt: string | null; lastTickError: string | null } {
+  return { running: timer !== null, lastTickAt, lastTickError };
+}
 
 /** Start the background loop. No-op unless the workflow plane is enabled. */
 export function startScheduler(): void {
   if (!config.FEATURE_WORKFLOW_PLANE || timer) return;
   timer = setInterval(() => {
-    void schedulerTick().catch((err) =>
-      console.error("[scheduler] tick failed", err),
+    void schedulerTick().then(
+      () => {
+        lastTickAt = new Date().toISOString();
+        lastTickError = null;
+      },
+      (err) => {
+        lastTickAt = new Date().toISOString();
+        lastTickError = err instanceof Error ? err.message : String(err);
+        console.error("[scheduler] tick failed", err);
+      },
     );
   }, 60_000);
   // Never hold the process open just for the scheduler (tests, ctrl-c).

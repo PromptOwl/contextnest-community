@@ -99,6 +99,11 @@ export interface ReviewRequest {
   priority: ReviewRequestPriority;
   /** The agent run that filed this proposal, when one did (migration 060). */
   runId?: string;
+  /** Review SLA escalation: the last rung this pending review was escalated
+   *  to (0 = none; 1 tag reviewers, 2 nest reviewers, 3 nest owner). */
+  escalationLevel: number;
+  /** When it reached that rung; absent until the first escalation. */
+  escalatedAt?: string;
 }
 
 // Comment status — comments are standalone annotations, not version states.

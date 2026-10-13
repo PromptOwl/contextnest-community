@@ -293,6 +293,8 @@ export const DEFAULT_HOOTIE_BRAND: HootieBrand = {
 export interface AdminSettings {
   promptowl_sign_in_gate: SignInGate;
   manual_sign_in: ManualSignIn;
+  /** Password self-registration is open while SSO is live (warned about). */
+  manual_sign_in_open_with_sso?: boolean;
   community_name: string | null;
   logo_url: string | null;
   telemetry_enabled: boolean;
@@ -384,6 +386,15 @@ export interface AdminSettings {
   notify_email_to: string;
   /** Own-provider keys PromptOwl holds for this licence (byok): masked tails only. */
   own_providers?: Record<string, { masked: string; updatedAt: string | null }>;
+  /** The server's own model gateway (byok): LiteLLM / Bedrock / Azure / Ollama
+   *  speaking /v1/messages. "" = off (PromptOwl's gateway). */
+  anthropic_base_url?: string;
+  /** Masked tail of the gateway's key; never the value. */
+  anthropic_api_key_masked?: string | null;
+  /** Write-only: the gateway's key to set, or null to clear. */
+  anthropic_api_key?: string | null;
+  /** Which key Hootie's calls use: own (the server's gateway) or promptowl (credits). */
+  model_source?: "own" | "promptowl" | null;
   /** Write-only: provider → key to set, or null to clear. Sent to PromptOwl, never stored here. */
   provider_keys?: Record<string, string | null>;
 }
@@ -409,6 +420,97 @@ export async function sendTestNotification(channel: "slack" | "teams") {
     method: "POST",
     body: JSON.stringify({ channel }),
   });
+}
+
+// ─── Network & status (admin) ──────────────────────────────────────────
+// Mirrors src/ops/status.ts and src/ops/egress.ts.
+
+export type CheckState = "green" | "amber" | "red" | "off";
+
+export interface StatusCheck {
+  id: string;
+  group: "data" | "license" | "network" | "services" | "runtime";
+  label: string;
+  state: CheckState;
+  detail: string;
+  fix?: string;
+}
+
+export interface EgressTarget {
+  id: string;
+  purpose: string;
+  host: string;
+  port: number;
+  protocol: "https" | "smtp" | "postgres";
+  configuredBy: string;
+  required: boolean;
+}
+
+export interface StatusReport {
+  generatedAt: string;
+  version: string;
+  build: string | null;
+  listenPort: number;
+  checks: StatusCheck[];
+  address: {
+    effectiveBaseUrl: string;
+    pinned: boolean;
+    requestOrigin: string;
+    forwarded: { proto: string | null; host: string | null; for: string | null };
+    privateHost: boolean;
+  };
+  egress: EgressTarget[];
+}
+
+export interface ProbeStage {
+  stage: "dns" | "tcp" | "tls" | "http" | "smtp";
+  ok: boolean;
+  ms: number;
+  detail: string;
+}
+
+export interface EgressReport {
+  ranAt: string;
+  proxy: string | null;
+  proxyProblem: string | null;
+  results: { id: string; purpose: string; host: string; port: number; ok: boolean; stages: ProbeStage[]; hint?: string }[];
+  clockSkewSeconds: number | null;
+}
+
+export interface InboundReport {
+  ranAt: string;
+  url: string | null;
+  ok: boolean;
+  stages: ProbeStage[];
+  privateAddresses: boolean;
+  note: string;
+  hint?: string;
+}
+
+export interface DiscoveryReport {
+  ranAt: string;
+  issuer: string | null;
+  ok: boolean;
+  ms: number;
+  detail: string;
+  endpointHosts: string[];
+  hint?: string;
+}
+
+export async function getServerStatus() {
+  return request<StatusReport>("/admin/status");
+}
+
+export async function runEgressCheck() {
+  return request<EgressReport>("/admin/status/egress", { method: "POST", body: "{}" });
+}
+
+export async function runInboundCheck() {
+  return request<InboundReport>("/admin/status/inbound", { method: "POST", body: "{}" });
+}
+
+export async function runOidcDiscoveryCheck() {
+  return request<DiscoveryReport>("/admin/status/oidc-discovery", { method: "POST", body: "{}" });
 }
 
 // ─── License ───────────────────────────────────────────────────────────
@@ -798,6 +900,8 @@ export interface NestSettings {
   require_push_confirmation: boolean;
   /** The person who creates a document becomes its reviewer; v1 publishes. */
   creator_is_reviewer: boolean;
+  /** Review SLA in hours; null = off. Overdue reviews escalate one rung. */
+  review_sla_hours?: number | null;
   /** Reads, pulls and exports are recorded in the activity log (default on).
    *  Only the owner or server admin may turn it off. */
   access_log_enabled?: boolean;
@@ -817,6 +921,7 @@ export async function updateNestSettings(
     /** Superadmin-only — a per-field 403 is returned to anyone else. */
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
+    review_sla_hours?: number | null;
     /** Owner / server admin only to turn OFF; any nest admin may turn on. */
     access_log_enabled?: boolean;
   },
@@ -1404,6 +1509,8 @@ export async function createNode(
     due?: string | null;
     priority?: string | null;
     parent?: string | null;
+    /** Custom field values, key → value (see lib/custom-fields.ts). */
+    fields?: Record<string, unknown>;
   },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
@@ -1489,6 +1596,8 @@ export async function updateNode(
     due?: string | null;
     priority?: string | null;
     parent?: string | null;
+    /** Custom field values to set; `null` clears one, omitted keys stay. */
+    fields?: Record<string, unknown>;
   },
   baseVersion?: number,
 ) {
@@ -3541,6 +3650,79 @@ export async function rankBoardColumn(
 
 export async function deleteBoard(nestId: string, boardId: string) {
   return request<{ deleted: boolean }>(`/nests/${nestId}/boards/${boardId}`, {
+    method: "DELETE",
+  });
+}
+
+// ─── Custom fields ─────────────────────────────────────────────────────────
+
+export type FieldType =
+  | "text"
+  | "number"
+  | "select"
+  | "multi_select"
+  | "date"
+  | "user"
+  | "url"
+  | "checkbox"
+  | "time_in_status";
+
+/** A nest's field definition (src/nodes/custom-fields.ts FieldDefinition). */
+export interface FieldDefinition {
+  id: string;
+  nest_id: string;
+  key: string;
+  label: string;
+  type: FieldType;
+  options: string[];
+  required: boolean;
+  default_value: unknown;
+  /** Node types it applies to; ["*"] = every type. */
+  applies_to: string[];
+  unit: string | null;
+  preset: "estimate" | "time_in_status" | null;
+  position: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FieldDefinitionInput {
+  key?: string;
+  label?: string;
+  type?: FieldType;
+  options?: string[];
+  required?: boolean;
+  default_value?: unknown;
+  applies_to?: string[];
+  unit?: string | null;
+  preset?: "estimate" | "time_in_status";
+  position?: number;
+}
+
+export async function listFields(nestId: string) {
+  return request<{ fields: FieldDefinition[]; can_manage: boolean }>(`/nests/${nestId}/fields`);
+}
+
+export async function createField(nestId: string, data: FieldDefinitionInput) {
+  return request<{ field: FieldDefinition }>(`/nests/${nestId}/fields`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateField(nestId: string, key: string, data: FieldDefinitionInput) {
+  return request<{ field: FieldDefinition; invalid_values?: number; invalid_nodes?: string[] }>(
+    `/nests/${nestId}/fields/${encodeURIComponent(key)}`,
+    {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  },
+  );
+}
+
+export async function deleteField(nestId: string, key: string) {
+  return request<{ deleted: boolean }>(`/nests/${nestId}/fields/${encodeURIComponent(key)}`, {
     method: "DELETE",
   });
 }
