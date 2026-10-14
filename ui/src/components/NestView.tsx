@@ -2295,7 +2295,7 @@ export function NestView({
           ) : newFolderCheck.rewritten && newFolderCheck.path ? (
             <p className="text-xs text-muted-foreground" data-testid="new-folder-preview">
               Will be created as{" "}
-              <code className="font-mono">{newFolderCheck.path}</code>
+              <code className="font-mono">{newFolderCheck.label}</code>
             </p>
           ) : null}
           <DialogFooter>
