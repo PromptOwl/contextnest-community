@@ -102,6 +102,9 @@ type View =
       /** Which of NestView's own tabs is open, mirrored to ?tab= so a link
        *  to the Review Queue lands on the Review Queue. Absent = overview. */
       tab?: string;
+      /** Open the nest settings dialog on arrival (a document's "turn on
+       *  self-approve" link). Not mirrored to the URL. */
+      openSettings?: boolean;
       /** Public Docs Reader Mode is on for this nest AND the caller is
        *  read-only — the shell hides the board/graph/definitions tabs and
        *  NestView renders the stripped ReaderView. */
@@ -1599,6 +1602,7 @@ export default function App() {
             initialTags={view.initialTags}
             initialFolder={view.initialFolder}
             initialTab={view.tab}
+            initialSettings={view.openSettings}
             initialDoc={view.readerDoc ?? null}
             onReaderDocChange={(nodeId) => setView({ ...view, readerDoc: nodeId ?? undefined })}
             onManageKeys={() => setView({ page: "dashboard", tab: "api-keys" })}
@@ -1659,6 +1663,7 @@ export default function App() {
             initialTags?: string[];
             initialFolder?: string;
             tab?: string;
+            openSettings?: boolean;
           }) =>
             setView({
               page: "nest",
@@ -1717,6 +1722,7 @@ export default function App() {
                 openDocument({ ...entry, breadcrumb: stack.slice(0, index) });
               }}
               onReviewed={doc.returnTo ? () => setView(doc.returnTo!) : undefined}
+              onOpenNestSettings={() => openNest({ openSettings: true })}
               onSaved={() => {
                 // A fresh "new" doc has nowhere to stay open on, so land back
                 // on the nest; saving an EXISTING document must leave the

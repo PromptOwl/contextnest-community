@@ -70,7 +70,7 @@ const NEST_POST = new Set(["/context", "/query", "/table-query"]);
  *  test/headless-reader-verdict.test.ts fails when a node sub-route is
  *  registered that this list doesn't cover. */
 const NODE_SUBRESOURCE =
-  /\/(versions(\/\d+)?|comments|annotations(\/.*)?|activity|reviews|stewards|watchers|relations|hosted|pdf|can-access|can-approve|can-edit|external-edits(\/[^/]+)?)$/;
+  /\/(versions(\/\d+)?|comments|annotations(\/.*)?|activity|reviews|stewards|watchers|relations|hosted|pdf|can-access|can-approve|can-edit|approvers|external-edits(\/[^/]+)?)$/;
 
 function segmentMatches(seg: string, nestId: string): boolean {
   if (seg === nestId) return true;

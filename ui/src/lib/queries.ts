@@ -97,6 +97,8 @@ export const keys = {
     [...keys.node(nestId, nodeId), "reviews"] as const,
   nodeStewards: (nestId: string, nodeId: string) =>
     [...keys.node(nestId, nodeId), "stewards"] as const,
+  nodeApprovers: (nestId: string, nodeId: string) =>
+    [...keys.node(nestId, nodeId), "approvers"] as const,
   nodeWatchers: (nestId: string, nodeId: string) =>
     [...keys.node(nestId, nodeId), "watchers"] as const,
   nodeRelations: (nestId: string, nodeId: string) =>
@@ -703,6 +705,12 @@ export const reads = {
       queryKey: keys.nodeStewards(nestId, nodeId),
       queryFn: () => api.getNodeStewards(nestId, nodeId),
       staleTime: STALE.reference,
+    }),
+  nodeApprovers: (nestId: string, nodeId: string) =>
+    queryOptions({
+      queryKey: keys.nodeApprovers(nestId, nodeId),
+      queryFn: () => api.getNodeApprovers(nestId, nodeId),
+      staleTime: STALE.governance,
     }),
   nodeWatchers: (nestId: string, nodeId: string) =>
     queryOptions({

@@ -4,7 +4,25 @@
  * summary under "Contents" says (the stat cards it replaces).
  */
 import { describe, it, expect } from "vitest";
-import { capFolderDocs, emptyStateActions, folderCollapsed, foldersToPrefetch, groupNodesByFolder, overviewFacts } from "./nest-overview";
+import { capFolderDocs, emptyStateActions, folderCollapsed, foldersToPrefetch, groupNodesByFolder, overviewFacts, queueBreakdown } from "./nest-overview";
+
+describe("queueBreakdown (why pending reviews aren't yours to approve)", () => {
+  it("names your own submission instead of 'outside your scope' (CU-wdqcq02t1r)", () => {
+    expect(queueBreakdown({ pending: 1, reviewable: 0, ownBlocked: 1 })).toBe(
+      "1 you submitted — someone else must approve it",
+    );
+    expect(queueBreakdown({ pending: 3, reviewable: 0, ownBlocked: 2 })).toBe(
+      "2 you submitted — someone else must approve them · 1 assigned to other reviewers",
+    );
+  });
+  it("says nothing when every pending review is yours to act on", () => {
+    expect(queueBreakdown({ pending: 2, reviewable: 2, ownBlocked: 0 })).toBeNull();
+    expect(queueBreakdown({ pending: 0, reviewable: 0, ownBlocked: 0 })).toBeNull();
+  });
+  it("counts the rest as other reviewers' work", () => {
+    expect(queueBreakdown({ pending: 4, reviewable: 1, ownBlocked: 0 })).toBe("3 assigned to other reviewers");
+  });
+});
 
 describe("groupNodesByFolder (the Overview / reader index)", () => {
   const nodes = [

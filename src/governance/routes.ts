@@ -10,7 +10,13 @@ import { Hono } from "hono";
 import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import { isPublicReader } from "../shared/access.js";
-import { ValidationError, ConflictError } from "../shared/errors.js";
+import {
+  ValidationError,
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+} from "../shared/errors.js";
+import { canSeeRoster, listNestPeople } from "../nests/people-service.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { attributeRequest, readClient } from "../shared/client-metadata.js";
@@ -1202,6 +1208,45 @@ governanceNodeRoutes.get("/:nodeId{.+}/can-approve", async (c) => {
   const nodeId = c.req.param("nodeId")!;
   const userEmail = await getUserEmail(c);
   return c.json(await stewardship.canUserApprove(nestId, nodeId, userEmail));
+});
+
+/** Most roster members checked by /approvers — one approval check each. */
+const MAX_APPROVER_CANDIDATES = 200;
+
+// GET /nests/:nestId/nodes/:nodeId/approvers
+//
+// Who besides the caller could approve the caller's submission of this
+// document, so an author learns who to wait for — or that nobody can
+// (CU-wdqcq02t1r). Each roster member goes through canUserApprove with the
+// caller as the submitter, so the list is exactly what approve would allow.
+// Same roster gate as /mentionable: a visibility-only reader can't enumerate.
+governanceNodeRoutes.get("/:nodeId{.+}/approvers", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const userId = c.get("userId");
+  const me = (await resolveCallerEmail(userId)).toLowerCase();
+  const people = await listNestPeople(nestId);
+  if (!(await canSeeRoster(nestId, userId, me, people))) {
+    throw new ForbiddenError("Only people on this nest can see who approves");
+  }
+  if (!(await canReadNode(nestId, nodeId, userId, me))) {
+    throw new NotFoundError("Document not found");
+  }
+  // ponytail: one check per member, capped; batch like canUserApproveMany if
+  // nests grow past a few hundred people.
+  const candidates = people
+    .filter((p) => p.email.toLowerCase() !== me)
+    .slice(0, MAX_APPROVER_CANDIDATES);
+  const verdicts = await Promise.all(
+    candidates.map((p) =>
+      stewardship.canUserApprove(nestId, nodeId, p.email, { requestedBy: me }),
+    ),
+  );
+  return c.json({
+    approvers: candidates
+      .filter((_, i) => verdicts[i]!.allowed)
+      .map((p) => ({ email: p.email, name: p.name })),
+  });
 });
 
 // GET /nests/:nestId/nodes/:nodeId/can-edit

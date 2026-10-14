@@ -228,7 +228,13 @@ interface DocumentEditorProps {
   /** The page's index rail is hidden; the top bar offers to bring it back. */
   sidebarCollapsed?: boolean;
   onToggleSidebar?: () => void;
+  /** Open the nest's settings dialog (the self-approve switch). */
+  onOpenNestSettings?: () => void;
 }
+
+/** Shown when nobody but the submitter could approve (CU-wdqcq02t1r). */
+const NO_APPROVER_COPY =
+  "No one else can approve this. Add a reviewer steward, or turn on “Auto-publish owner & admin edits” in Nest settings.";
 
 export function DocumentEditor({
   nestId,
@@ -250,6 +256,7 @@ export function DocumentEditor({
   onJumpBreadcrumb,
   sidebarCollapsed = false,
   onToggleSidebar,
+  onOpenNestSettings,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
   // Type picker: one tab stop, arrows between the choices (see the radiogroup).
@@ -1707,6 +1714,14 @@ export function DocumentEditor({
     await api.submitForReview(nestId, nodeId, note, priority);
     setShowSubmitModal(false);
     toast.success(saveFirst ? "Saved and submitted for review." : "Submitted for review.");
+    // Warn when the submission has nobody to go to — the single-user nest case.
+    if (!(isOwner && allowSelfApprove)) {
+      qc.fetchQuery({ ...reads.nodeApprovers(nestId, nodeId), staleTime: 0 })
+        .then(({ approvers: who }) => {
+          if (who.length === 0) toast.warning(NO_APPROVER_COPY);
+        })
+        .catch(() => {});
+    }
     // Reload → status flips to pending_review, button hides.
     await loadNode();
   };
@@ -1784,6 +1799,13 @@ export function DocumentEditor({
     status === "pending_review" &&
     canApproveCapability &&
     (!isOwnSubmission || (isOwner && allowSelfApprove));
+  // Your own pending submission that you can't approve: say why and who can
+  // (CU-wdqcq02t1r). The list is the server's approve gate, caller excluded.
+  const blockedOnOthers = isOwnPendingReview && !canReviewHere;
+  const approvers = useQuery({
+    ...reads.nodeApprovers(nestId, nodeId),
+    enabled: blockedOnOthers && !isNew,
+  }).data?.approvers;
 
   // A pending-review doc opens read-only for a reviewer, and the comment box
   // otherwise sits behind an easy-to-miss "turn on comment mode" affordance.
@@ -2664,9 +2686,43 @@ export function DocumentEditor({
                     <AlertCircle className="h-4 w-4" />
                     <AlertDescription className="flex flex-wrap items-center gap-x-3 gap-y-2">
                       <span className="flex-1 min-w-[16rem]">
+                        {blockedOnOthers && (
+                          <>
+                            <strong>You can't approve your own changes.</strong> A steward
+                            or admin on this nest must approve.{" "}
+                          </>
+                        )}
                         This is still under review. Your edits update the same pending
                         submission — no need to withdraw and resubmit — and the steward
                         reviews your latest version.
+                        {blockedOnOthers && approvers && (
+                          approvers.length > 0 ? (
+                            <span className="mt-1 block" data-testid="document-editor-approvers">
+                              Can approve:{" "}
+                              {approvers.slice(0, 5).map((a) => a.name || a.email).join(", ")}
+                              {approvers.length > 5 && ` and ${approvers.length - 5} more`}
+                            </span>
+                          ) : (
+                            <span
+                              className="mt-1 block font-medium text-amber-700 dark:text-amber-400"
+                              data-testid="document-editor-no-approver"
+                            >
+                              {NO_APPROVER_COPY}
+                            </span>
+                          )
+                        )}
+                        {/* Self-approve never applies to prime documents. */}
+                        {blockedOnOthers && isOwner && !allowSelfApprove && !effectivePrime && onOpenNestSettings && (
+                          <Button
+                            variant="link"
+                            size="sm"
+                            className="h-auto p-0"
+                            onClick={onOpenNestSettings}
+                            data-testid="document-editor-open-settings"
+                          >
+                            Open Nest settings
+                          </Button>
+                        )}
                       </span>
                       {/* Withdraw belongs with the sentence explaining the state, not
                     in the header's action row (CU-wdqcq007pe). */}

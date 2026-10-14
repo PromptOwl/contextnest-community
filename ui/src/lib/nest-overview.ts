@@ -77,6 +77,21 @@ export function overviewFacts(input: {
   return facts;
 }
 
+/**
+ * Why pending reviews aren't in the caller's queue, in plain words — the old
+ * "N outside your scope" told an author nothing (CU-wdqcq02t1r). `ownBlocked`
+ * is the caller's own submissions they may not approve (separation of duties).
+ */
+export function queueBreakdown(input: { pending: number; reviewable: number; ownBlocked: number }): string | null {
+  const others = Math.max(0, input.pending - input.reviewable - input.ownBlocked);
+  const parts: string[] = [];
+  if (input.ownBlocked > 0) {
+    parts.push(`${input.ownBlocked} you submitted — someone else must approve ${input.ownBlocked === 1 ? "it" : "them"}`);
+  }
+  if (others > 0) parts.push(`${others} assigned to other reviewers`);
+  return parts.length ? parts.join(" · ") : null;
+}
+
 export type EmptyStateAction = "new" | "import" | "ai";
 
 /**

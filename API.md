@@ -1246,6 +1246,13 @@ Same shape. Allowed iff the caller has a matched steward row with `role: reviewe
 ### GET `/nests/:nestId/nodes/:nodeId/can-edit`
 Same shape. Reflects nest collaborator permission OR steward `editor` role.
 
+### GET `/nests/:nestId/nodes/:nodeId/approvers`
+Who besides the caller could approve the caller's submission of this document — each person on the nest run through the same check as `can-approve`, with the caller as the submitter. So the caller never appears, and a bare owner appears only while `allow_self_approve` is on. An empty list means nobody else can approve. Same roster gate as `/mentionable`: callers who reach the nest only through its visibility get `403`; a document the caller can't read is `404`. At most 200 people are checked.
+
+```json
+{ "approvers": [{ "email": "rex@acme.com", "name": "Rex" }] }
+```
+
 ---
 
 ## 6. Review workflow

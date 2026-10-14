@@ -1868,6 +1868,13 @@ export async function getNodeStewards(nestId: string, nodeId: string) {
   );
 }
 
+/** Who besides the caller could approve the caller's submission of this node. */
+export async function getNodeApprovers(nestId: string, nodeId: string) {
+  return request<{ approvers: Array<{ email: string; name: string | null }> }>(
+    `/nests/${nestId}/nodes/${nodeId}/approvers`,
+  );
+}
+
 // ── Deletion requests ─────────────────────────────────────────────────────
 // Flagging is open to anyone who can read the node; resolving needs the same
 // write permission a direct delete does (server-enforced).
