@@ -11,7 +11,7 @@ import {
   listSharedTeamMembers,
   listTeamsForUser,
 } from "../governance/teams-service.js";
-import { isServerAdminUserId } from "../shared/access.js";
+import { isServerAdminUserId, resolveNestAccess, permissionLevel } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { config } from "../config.js";
 import { resolveMention } from "../shared/mentions.js";
@@ -106,6 +106,24 @@ export async function listNestPeople(nestId: string): Promise<NestPerson[]> {
     });
   }
   return people;
+}
+
+/**
+ * May this caller see who is on the nest? Yes if they are on the roster
+ * themselves, or hold write access (who can read the fuller roster anyway). A
+ * caller who reaches the nest only through its visibility ('public', 'org') is
+ * not on the roster and may not enumerate it.
+ */
+export async function canSeeRoster(
+  nestId: string,
+  userId: string,
+  callerEmail: string,
+  people: NestPerson[],
+): Promise<boolean> {
+  const me = callerEmail.toLowerCase();
+  if (people.some((p) => p.email.toLowerCase() === me)) return true;
+  const access = await resolveNestAccess(nestId, userId);
+  return permissionLevel(access.permission) >= permissionLevel("write");
 }
 
 /**

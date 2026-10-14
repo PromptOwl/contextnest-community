@@ -293,6 +293,8 @@ export const DEFAULT_HOOTIE_BRAND: HootieBrand = {
 export interface AdminSettings {
   promptowl_sign_in_gate: SignInGate;
   manual_sign_in: ManualSignIn;
+  /** Password self-registration is open while SSO is live (warned about). */
+  manual_sign_in_open_with_sso?: boolean;
   community_name: string | null;
   logo_url: string | null;
   telemetry_enabled: boolean;
@@ -335,6 +337,11 @@ export interface AdminSettings {
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
+  /** Superadmin message log: retention in days (0 = forever) and whether redacted bodies are kept. */
+  message_log_retention_days: number;
+  message_log_store_bodies: boolean;
+  /** Agent-run retention (runs + steps); 0 keeps every run. */
+  run_retention_days: number;
   /** OIDC SSO. The client secret is write-only — only its presence comes back. */
   oidc_enabled: boolean;
   oidc_issuer: string;
@@ -382,6 +389,15 @@ export interface AdminSettings {
   notify_email_to: string;
   /** Own-provider keys PromptOwl holds for this licence (byok): masked tails only. */
   own_providers?: Record<string, { masked: string; updatedAt: string | null }>;
+  /** The server's own model gateway (byok): LiteLLM / Bedrock / Azure / Ollama
+   *  speaking /v1/messages. "" = off (PromptOwl's gateway). */
+  anthropic_base_url?: string;
+  /** Masked tail of the gateway's key; never the value. */
+  anthropic_api_key_masked?: string | null;
+  /** Write-only: the gateway's key to set, or null to clear. */
+  anthropic_api_key?: string | null;
+  /** Which key Hootie's calls use: own (the server's gateway) or promptowl (credits). */
+  model_source?: "own" | "promptowl" | null;
   /** Write-only: provider → key to set, or null to clear. Sent to PromptOwl, never stored here. */
   provider_keys?: Record<string, string | null>;
 }
@@ -407,6 +423,97 @@ export async function sendTestNotification(channel: "slack" | "teams") {
     method: "POST",
     body: JSON.stringify({ channel }),
   });
+}
+
+// ─── Network & status (admin) ──────────────────────────────────────────
+// Mirrors src/ops/status.ts and src/ops/egress.ts.
+
+export type CheckState = "green" | "amber" | "red" | "off";
+
+export interface StatusCheck {
+  id: string;
+  group: "data" | "license" | "network" | "services" | "runtime";
+  label: string;
+  state: CheckState;
+  detail: string;
+  fix?: string;
+}
+
+export interface EgressTarget {
+  id: string;
+  purpose: string;
+  host: string;
+  port: number;
+  protocol: "https" | "smtp" | "postgres";
+  configuredBy: string;
+  required: boolean;
+}
+
+export interface StatusReport {
+  generatedAt: string;
+  version: string;
+  build: string | null;
+  listenPort: number;
+  checks: StatusCheck[];
+  address: {
+    effectiveBaseUrl: string;
+    pinned: boolean;
+    requestOrigin: string;
+    forwarded: { proto: string | null; host: string | null; for: string | null };
+    privateHost: boolean;
+  };
+  egress: EgressTarget[];
+}
+
+export interface ProbeStage {
+  stage: "dns" | "tcp" | "tls" | "http" | "smtp";
+  ok: boolean;
+  ms: number;
+  detail: string;
+}
+
+export interface EgressReport {
+  ranAt: string;
+  proxy: string | null;
+  proxyProblem: string | null;
+  results: { id: string; purpose: string; host: string; port: number; ok: boolean; stages: ProbeStage[]; hint?: string }[];
+  clockSkewSeconds: number | null;
+}
+
+export interface InboundReport {
+  ranAt: string;
+  url: string | null;
+  ok: boolean;
+  stages: ProbeStage[];
+  privateAddresses: boolean;
+  note: string;
+  hint?: string;
+}
+
+export interface DiscoveryReport {
+  ranAt: string;
+  issuer: string | null;
+  ok: boolean;
+  ms: number;
+  detail: string;
+  endpointHosts: string[];
+  hint?: string;
+}
+
+export async function getServerStatus() {
+  return request<StatusReport>("/admin/status");
+}
+
+export async function runEgressCheck() {
+  return request<EgressReport>("/admin/status/egress", { method: "POST", body: "{}" });
+}
+
+export async function runInboundCheck() {
+  return request<InboundReport>("/admin/status/inbound", { method: "POST", body: "{}" });
+}
+
+export async function runOidcDiscoveryCheck() {
+  return request<DiscoveryReport>("/admin/status/oidc-discovery", { method: "POST", body: "{}" });
 }
 
 // ─── License ───────────────────────────────────────────────────────────
@@ -658,6 +765,89 @@ export async function getAdminTrace(params: {
   }>(`/admin/trace${suffix}`);
 }
 
+// ─── Superadmin message log ────────────────────────────────────────────────
+
+export type MessageChannel = "email" | "slack" | "msteams" | "webhook" | "inbox" | "comment";
+export type MessageSenderKind = "human" | "persona" | "system";
+export type MessageStatus = "sent" | "failed" | "skipped";
+
+export interface OutboundMessageRow {
+  id: string;
+  channel: MessageChannel;
+  sender_kind: MessageSenderKind;
+  sender: string | null;
+  recipients: string[];
+  subject: string | null;
+  status: MessageStatus;
+  provider_id: string | null;
+  error: string | null;
+  nest_id: string | null;
+  nest_name: string | null;
+  node_id: string | null;
+  run_id: string | null;
+  /** Left through the egress proxy (HTTPS_PROXY); null when not applicable. */
+  via_proxy: boolean | null;
+  created_at: string;
+  has_body?: boolean;
+  /** Detail view only: the redacted body (null when bodies aren't stored). */
+  body?: string | null;
+}
+
+export interface MessageLogFilters {
+  channel?: MessageChannel;
+  sender_kind?: MessageSenderKind;
+  status?: MessageStatus;
+  sender?: string;
+  nest?: string;
+  run?: string;
+  q?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+}
+
+// Superadmin only — the server refuses everyone else, including open mode.
+// Every call is recorded in the access log.
+export async function getMessageLog(params: MessageLogFilters = {}) {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== "") qs.set(k, String(v));
+  }
+  const suffix = qs.toString() ? `?${qs}` : "";
+  return request<{
+    total: number;
+    limit: number;
+    offset: number;
+    retention_days: number;
+    store_bodies: boolean;
+    messages: OutboundMessageRow[];
+  }>(`/admin/messages${suffix}`);
+}
+
+export async function getMessageLogEntry(id: string) {
+  return request<{ message: OutboundMessageRow }>(`/admin/messages/${encodeURIComponent(id)}`);
+}
+
+export interface MessageLogView {
+  id: string;
+  viewer: string | null;
+  action: "list" | "detail" | "views";
+  filters: Record<string, string> | null;
+  message_id: string | null;
+  at: string;
+}
+
+export async function getMessageLogViews(params: { limit?: number; offset?: number } = {}) {
+  const qs = new URLSearchParams();
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  if (params.offset != null) qs.set("offset", String(params.offset));
+  const suffix = qs.toString() ? `?${qs}` : "";
+  return request<{ total: number; limit: number; offset: number; views: MessageLogView[] }>(
+    `/admin/messages/views${suffix}`,
+  );
+}
+
 // Per-nest activity trace — same rows/shape as getAdminTrace but always
 // scoped server-side to one nest. Owner / nest-admin only.
 export async function getNestTrace(
@@ -796,6 +986,8 @@ export interface NestSettings {
   require_push_confirmation: boolean;
   /** The person who creates a document becomes its reviewer; v1 publishes. */
   creator_is_reviewer: boolean;
+  /** Review SLA in hours; null = off. Overdue reviews escalate one rung. */
+  review_sla_hours?: number | null;
   /** Reads, pulls and exports are recorded in the activity log (default on).
    *  Only the owner or server admin may turn it off. */
   access_log_enabled?: boolean;
@@ -815,6 +1007,7 @@ export async function updateNestSettings(
     /** Superadmin-only — a per-field 403 is returned to anyone else. */
     require_push_confirmation?: boolean;
     creator_is_reviewer?: boolean;
+    review_sla_hours?: number | null;
     /** Owner / server admin only to turn OFF; any nest admin may turn on. */
     access_log_enabled?: boolean;
   },
@@ -1402,6 +1595,8 @@ export async function createNode(
     due?: string | null;
     priority?: string | null;
     parent?: string | null;
+    /** Custom field values, key → value (see lib/custom-fields.ts). */
+    fields?: Record<string, unknown>;
   },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
@@ -1487,6 +1682,8 @@ export async function updateNode(
     due?: string | null;
     priority?: string | null;
     parent?: string | null;
+    /** Custom field values to set; `null` clears one, omitted keys stay. */
+    fields?: Record<string, unknown>;
   },
   baseVersion?: number,
 ) {
@@ -1668,6 +1865,17 @@ export async function updateSteward(
 export async function getNodeStewards(nestId: string, nodeId: string) {
   return request<{ stewards: any[] }>(
     `/nests/${nestId}/nodes/${nodeId}/stewards`,
+  );
+}
+
+/** Who besides the caller could approve the caller's submission of this node. */
+export async function getNodeApprovers(nestId: string, nodeId: string) {
+  return request<{
+    approvers: Array<{ email: string; name: string | null }>;
+    /** The roster passed the server's cap — an empty list proves nothing. */
+    truncated?: boolean;
+  }>(
+    `/nests/${nestId}/nodes/${nodeId}/approvers`,
   );
 }
 
@@ -2032,6 +2240,18 @@ export async function approveNode(
   });
 }
 
+/** Reviewer edits someone's pending submission and approves it in one step. */
+export async function approveWithEdits(
+  nestId: string,
+  nodeId: string,
+  edit: { title?: string; content?: string; tags?: string[]; note?: string; baseVersion?: number },
+) {
+  return request(`/nests/${nestId}/nodes/${nodeId}/approve-with-edits`, {
+    method: "POST",
+    body: JSON.stringify(edit),
+  });
+}
+
 export async function rejectNode(
   nestId: string,
   nodeId: string,
@@ -2128,6 +2348,8 @@ export interface AnnotationComment {
   author: string;
   body: string;
   createdAt: string;
+  /** Set when an agent run posted it: links to its trace. */
+  runId?: string;
 }
 
 export interface AnnotationThread {
@@ -2875,6 +3097,8 @@ export interface WorkItem {
   target_type?: "document" | "folder" | "nest" | "nest_archive" | "node";
   /** Access items only: the level asked for. */
   level?: "read" | "write";
+  /** Review and access items: the agent run that filed it, if one did. */
+  run_id?: string | null;
 }
 
 export interface WatcherNotification {
@@ -2908,6 +3132,8 @@ export interface AssignedItem {
   due: string | null;
   priority: string | null;
   assigned_at: string | null;
+  /** Open blockers (task relations); absent when nothing open blocks it. */
+  open_blockers?: number;
 }
 
 export async function getMyWork(opts?: { limit?: number; offset?: number }) {
@@ -3146,6 +3372,56 @@ export async function updateSchedule(
 
 export async function deleteSchedule(nestId: string, id: string) {
   return request(`/nests/${nestId}/schedules/${id}`, { method: "DELETE" });
+}
+
+// Task relations — blocks / blocked by / relates to / duplicates.
+export type RelationKind =
+  | "blocks"
+  | "blocked_by"
+  | "relates_to"
+  | "duplicates"
+  | "duplicated_by";
+
+export interface TaskRelation {
+  id: string;
+  type: RelationKind;
+  node: { id: string; title: string; type: string; done: boolean };
+  created_by: string;
+  created_at: string;
+}
+
+export interface TaskRelations {
+  node_id: string;
+  relations: TaskRelation[];
+  /** Related documents the caller can't read, per kind — never named. */
+  hidden: Partial<Record<RelationKind, number>>;
+  hidden_count: number;
+  open_blockers: number;
+  blocked: boolean;
+}
+
+export async function listRelations(nestId: string, nodeId: string) {
+  return request<TaskRelations>(`/nests/${nestId}/nodes/${nodeId}/relations`);
+}
+
+export async function addRelation(
+  nestId: string,
+  nodeId: string,
+  type: RelationKind,
+  node: string,
+) {
+  const r = await request<{ relation: TaskRelation; relations: TaskRelations }>(
+    `/nests/${nestId}/nodes/${nodeId}/relations`,
+    { method: "POST", body: JSON.stringify({ type, node }) },
+  );
+  return r.relations;
+}
+
+export async function removeRelation(nestId: string, nodeId: string, relationId: string) {
+  return request<TaskRelations>(
+    `/nests/${nestId}/nodes/${nodeId}/relations/${encodeURIComponent(relationId)}`,
+    { method: "DELETE" },
+  );
 }
 
 // Watchers — tag a person to a node (usually an agent) for HITL notifications.
@@ -3548,12 +3824,85 @@ export async function deleteBoard(nestId: string, boardId: string) {
   });
 }
 
+// ─── Custom fields ─────────────────────────────────────────────────────────
+
+export type FieldType =
+  | "text"
+  | "number"
+  | "select"
+  | "multi_select"
+  | "date"
+  | "user"
+  | "url"
+  | "checkbox"
+  | "time_in_status";
+
+/** A nest's field definition (src/nodes/custom-fields.ts FieldDefinition). */
+export interface FieldDefinition {
+  id: string;
+  nest_id: string;
+  key: string;
+  label: string;
+  type: FieldType;
+  options: string[];
+  required: boolean;
+  default_value: unknown;
+  /** Node types it applies to; ["*"] = every type. */
+  applies_to: string[];
+  unit: string | null;
+  preset: "estimate" | "time_in_status" | null;
+  position: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FieldDefinitionInput {
+  key?: string;
+  label?: string;
+  type?: FieldType;
+  options?: string[];
+  required?: boolean;
+  default_value?: unknown;
+  applies_to?: string[];
+  unit?: string | null;
+  preset?: "estimate" | "time_in_status";
+  position?: number;
+}
+
+export async function listFields(nestId: string) {
+  return request<{ fields: FieldDefinition[]; can_manage: boolean }>(`/nests/${nestId}/fields`);
+}
+
+export async function createField(nestId: string, data: FieldDefinitionInput) {
+  return request<{ field: FieldDefinition }>(`/nests/${nestId}/fields`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateField(nestId: string, key: string, data: FieldDefinitionInput) {
+  return request<{ field: FieldDefinition; invalid_values?: number; invalid_nodes?: string[] }>(
+    `/nests/${nestId}/fields/${encodeURIComponent(key)}`,
+    {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  },
+  );
+}
+
+export async function deleteField(nestId: string, key: string) {
+  return request<{ deleted: boolean }>(`/nests/${nestId}/fields/${encodeURIComponent(key)}`, {
+    method: "DELETE",
+  });
+}
+
 // ─── Metacognition agents (CU-wdqcq041jm) ─────────────────────────────────
 
 export interface MetacognitionAgentConfig {
   persona: { name: string; avatar: string | null };
   scope: { read: string[]; propose: string[] };
-  caps: { max_steps: number; max_tokens: number; max_seconds: number; max_proposals: number };
+  caps: { max_steps: number; max_tokens: number; max_seconds: number; max_proposals: number; max_comments?: number };
   feeds: Array<{ name: string; url: string }>;
   mcp_servers: Array<{ name: string; url: string; allowed_tools: string[]; auth_env?: string }>;
   model: string | null;
@@ -3605,6 +3954,54 @@ export async function saveMetacognitionAgent(
 
 export async function deleteMetacognitionAgent(nestId: string, nodeId: string) {
   return request<{ deleted: boolean }>(`/nests/${nestId}/metacognition/${nodeId}`, { method: "DELETE" });
+}
+
+export type AgentRunOutcome = "running" | "succeeded" | "failed" | "timeout" | "skipped" | "cancelled";
+
+export interface AgentRunSummary {
+  id: string;
+  outcome: AgentRunOutcome;
+  triggered_by: string;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  tokens: number;
+  est_cost_usd: number | null;
+  proposals: number;
+  approved: number;
+  rejected: number;
+  comments: number;
+  error: string | null;
+}
+
+/** GET /nests/:id/metacognition/:node/stats — what one agent did over a window. */
+export interface AgentStats {
+  node_id: string;
+  window_days: number;
+  runs: { total: number } & Record<AgentRunOutcome, number>;
+  tokens: number;
+  est_cost_usd: number;
+  proposals: {
+    made: number;
+    approved: number;
+    rejected: number;
+    pending: number;
+    withdrawn: number;
+    approval_rate: number | null;
+  };
+  comments: number;
+  access_requests: number;
+  blocked_by_scope: number;
+  last_run_at: string | null;
+  last_error: { run_id: string; at: string; message: string } | null;
+  history: AgentRunSummary[];
+}
+
+export async function getMetacognitionStats(nestId: string, nodeId: string, days = 30, limit = 25) {
+  const r = await request<{ stats: AgentStats }>(
+    `/nests/${nestId}/metacognition/${nodeId}/stats?days=${days}&limit=${limit}`,
+  );
+  return r.stats;
 }
 
 export async function runMetacognitionAgent(nestId: string, nodeId: string) {

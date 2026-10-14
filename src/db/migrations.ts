@@ -1982,6 +1982,151 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("064_task_activity");
   }
+
+  // 057: review SLA escalation (056 is MCP OAuth).
+  //   `nests.review_sla_hours` is the per-nest SLA
+  //   (NULL = off, the default — the escalation tick never looks at the nest).
+  //   `review_requests.escalation_level` is the last rung a pending review was
+  //   escalated to (0 = none yet; 1 tag reviewers, 2 nest reviewers, 3 nest
+  //   owner) and `escalated_at` when that happened. Persisted on the request
+  //   row so a restart never re-notifies a rung, and a resubmission (a new
+  //   row) starts the ladder over. Plain ADD COLUMNs — no CHECK changes, so no
+  //   table rebuild.
+  if (!hasMigration("057_review_sla_escalation")) {
+    db.transaction(() => {
+      const nestCols = (
+        db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!nestCols.includes("review_sla_hours")) {
+        db.exec("ALTER TABLE nests ADD COLUMN review_sla_hours INTEGER");
+      }
+      const reviewCols = (
+        db.prepare("PRAGMA table_info(review_requests)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!reviewCols.includes("escalation_level")) {
+        db.exec(
+          "ALTER TABLE review_requests ADD COLUMN escalation_level INTEGER NOT NULL DEFAULT 0",
+        );
+      }
+      if (!reviewCols.includes("escalated_at")) {
+        db.exec("ALTER TABLE review_requests ADD COLUMN escalated_at TEXT");
+      }
+    })();
+    recordMigration("057_review_sla_escalation");
+  }
+
+  // 060: run back-links. A proposal (review_requests), comment
+  //   (annotation_comments) or access request an agent run produced carries
+  //   that run's id, so the UI can say "agent run <id>" and open the trace.
+  //   Nullable: people's rows have no run.
+  if (!hasMigration("060_run_links")) {
+    db.transaction(() => {
+      const hasRunId = (table: string) =>
+        (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === "run_id");
+      if (!hasRunId("review_requests")) db.exec("ALTER TABLE review_requests ADD COLUMN run_id TEXT");
+      if (!hasRunId("annotation_comments")) db.exec("ALTER TABLE annotation_comments ADD COLUMN run_id TEXT");
+      if (!hasRunId("access_requests")) db.exec("ALTER TABLE access_requests ADD COLUMN run_id TEXT");
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_reviews_run ON review_requests(run_id) WHERE run_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_annot_comments_run ON annotation_comments(run_id) WHERE run_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_access_requests_run ON access_requests(run_id) WHERE run_id IS NOT NULL;
+      `);
+    })();
+    recordMigration("060_run_links");
+  }
+
+  // 061: superadmin message log. Every message the server sends — email,
+  //   Slack/Teams/connector webhooks, in-app notifications, persona comments —
+  //   is recorded once at its choke point (notify/outbound-log.ts). Bodies are
+  //   redacted and capped at write time; MESSAGE_LOG_STORE_BODIES=false keeps
+  //   metadata only. message_log_views is the append-only audit of who read
+  //   the log.
+  if (!hasMigration("061_outbound_messages")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS outbound_messages (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL,           -- email | slack | msteams | webhook | inbox | comment
+        sender_kind TEXT NOT NULL DEFAULT 'system'
+          CHECK(sender_kind IN ('human', 'persona', 'system')),
+        sender_id TEXT,                  -- email / user id, or null for system
+        recipients_json TEXT NOT NULL DEFAULT '[]',
+        subject TEXT,
+        body_redacted TEXT,
+        status TEXT NOT NULL DEFAULT 'sent'
+          CHECK(status IN ('sent', 'failed', 'skipped')),
+        provider_id TEXT,
+        error TEXT,
+        nest_id TEXT,
+        node_id TEXT,
+        run_id TEXT,
+        via_proxy INTEGER,               -- 1/0 when it left through HTTPS_PROXY; null = n/a
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_created ON outbound_messages(created_at);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_channel ON outbound_messages(channel, created_at);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_status ON outbound_messages(status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_sender ON outbound_messages(sender_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_nest ON outbound_messages(nest_id, created_at);
+      CREATE TABLE IF NOT EXISTS message_log_views (
+        id TEXT PRIMARY KEY,
+        viewer_id TEXT NOT NULL,
+        action TEXT NOT NULL,            -- list | detail | views
+        filters_json TEXT,
+        message_id TEXT,
+        at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_message_log_views_at ON message_log_views(at);
+    `);
+    recordMigration("061_outbound_messages");
+  }
+
+  // 062: nest-level custom field definitions (056–061 are reserved by open
+  //   branches). One row per field a nest admin or steward defines; the VALUES
+  //   live on each node, in frontmatter `metadata.fields`, so they are
+  //   versioned and hash-chained with the document (src/nodes/custom-fields.ts).
+  //   options/default/applies_to are JSON. applies_to '["task"]' is the default;
+  //   '["*"]' means every node type.
+  if (!hasMigration("062_field_definitions")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS field_definitions (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        field_key TEXT NOT NULL,
+        label TEXT NOT NULL,
+        type TEXT NOT NULL,
+        options_json TEXT NOT NULL DEFAULT '[]',
+        required INTEGER NOT NULL DEFAULT 0,
+        default_json TEXT,
+        applies_to_json TEXT NOT NULL DEFAULT '["task"]',
+        unit TEXT,
+        preset TEXT,
+        position INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_key
+        ON field_definitions(nest_id, field_key);
+      -- One time-in-status field per nest, enforced atomically.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_one_tis
+        ON field_definitions(nest_id) WHERE type = 'time_in_status';
+      -- Audit trail of definition changes (who, what, before → after).
+      -- Definitions are plain config rows, so this is their history.
+      CREATE TABLE IF NOT EXISTS field_definition_events (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        field_key TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('create', 'update', 'delete')),
+        actor_id TEXT,
+        before_json TEXT,
+        after_json TEXT,
+        at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_field_definition_events_nest
+        ON field_definition_events(nest_id, at);
+    `);
+    recordMigration("062_field_definitions");
+  }
 }
 
 /**

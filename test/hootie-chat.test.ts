@@ -966,7 +966,7 @@ describe("/admin/settings — Hootie model", () => {
 
     const before = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
     expect(before.data.hootie_model).toBe("claude-sonnet-5");
-    expect(before.data).not.toHaveProperty("anthropic_base_url");
+    expect(before.data.anthropic_base_url).toBe("");
 
     // The default model, on PromptOwl's gateway with its prefix added.
     scriptedAnswer = "default";
@@ -1059,5 +1059,37 @@ describe("POST /nests/:id/chat — the model's provider picks the key (byok)", (
     const call = await askWith("gpt-4o");
     expect(call.apiKey).toBe("sk-own-key");
     expect(call.model).toBe("community-lic1-openai/gpt-4o");
+  });
+
+  it("with the server's own gateway set, every call goes there as named, even a provider with an own key", async () => {
+    setupTestEnv();
+    process.env.HOOTIE_ENABLED = "true";
+    process.env.HOOTIE_MODEL = "openai/gpt-4o";
+    const app = await createTestApp("key", {
+      features: ["byok"],
+      gateway: { baseUrl: "https://llm.promptowl.ai", key: "sk-po-credits", defaultModel: "default-openai/gpt-4o" },
+      ownGateway: {
+        baseUrl: "https://llm.promptowl.ai",
+        key: "sk-own-key",
+        models: ["community-lic1-openai/gpt-5.6-sol"],
+        providers: { openai: { masked: "9876", updatedAt: null } },
+      },
+    });
+    process.env.ANTHROPIC_BASE_URL = "http://litellm:4000";
+    process.env.ANTHROPIC_API_KEY = "sk-litellm-virtual";
+    try {
+      const user = await registerUser(app, "gw@acme.com");
+      const { data } = await jsonRequest(app, "POST", "/nests", { name: "Gateway" }, user.apiKey);
+      scriptedAnswer = "ok";
+      lastModelCall = null;
+      const { status } = await chatRaw(app, data.nest.id, { message: "hi" }, user.apiKey);
+      expect(status).toBe(200);
+      expect(lastModelCall!.apiKey).toBe("sk-litellm-virtual");
+      expect(lastModelCall!.baseUrl).toBe("http://litellm:4000");
+      expect(lastModelCall!.model).toBe("openai/gpt-4o");
+    } finally {
+      delete process.env.ANTHROPIC_BASE_URL;
+      delete process.env.ANTHROPIC_API_KEY;
+    }
   });
 });

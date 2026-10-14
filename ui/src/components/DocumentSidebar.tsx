@@ -113,7 +113,7 @@ export function DocumentSidebar({
 }: Props) {
   // Only inside a nest — the dashboard rail is app pages, not nests.
   const nests = useQuery({ ...reads.nestList(), enabled: nestId !== null });
-  const { isAdmin, workflowPlaneEnabled } = useAuth();
+  const { isAdmin, authMode, workflowPlaneEnabled } = useAuth();
   // Which nests are unfolded. The current one always is; others open on click
   // and load their tree on demand.
   const [openNests, setOpenNests] = useState<Set<string>>(
@@ -206,6 +206,7 @@ export function DocumentSidebar({
           <AppPagesNav
             active={dashboardTab}
             isAdmin={isAdmin}
+            isSuperadmin={isAdmin && authMode !== "open"}
             onOpen={onOpenDashboardTab}
           />
         )}
@@ -299,14 +300,16 @@ export function DocumentSidebar({
 function AppPagesNav({
   active,
   isAdmin,
+  isSuperadmin,
   onOpen,
 }: {
   active: string | null;
   isAdmin: boolean;
+  isSuperadmin: boolean;
   onOpen?: (id: string) => void;
 }) {
   const { mcpOauthEnabled } = useAuth();
-  const rail = appRail({ isAdmin, mcpOauthEnabled });
+  const rail = appRail({ isAdmin, isSuperadmin, mcpOauthEnabled });
   const [closed, setClosedState] = useState<string[]>(
     () => readDocPagePrefs(localStorage).closedGroups,
   );

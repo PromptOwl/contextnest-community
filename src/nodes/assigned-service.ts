@@ -11,6 +11,7 @@
 import { getDb } from "../db/client.js";
 import { canReadNode } from "../governance/access-guard.js";
 import { taskFieldsOf } from "./task-fields.js";
+import { openBlockerCounts } from "./relations.js";
 
 export interface AssignedItem {
   nest_id: string;
@@ -21,6 +22,8 @@ export interface AssignedItem {
   due: string | null;
   priority: string | null;
   assigned_at: string | null;
+  /** Open blockers (task relations); absent when nothing open blocks it. */
+  open_blockers?: number;
 }
 
 const MAX_ITEMS = 100;
@@ -74,6 +77,20 @@ export async function listAssignedTo(
     if (!(await canReadNode(c.nest_id, c.node_id, userId, me))) continue;
     out.push(c);
     if (out.length >= MAX_ITEMS) break;
+  }
+  // "Blocked" for the My Work rows — one edges query per nest that has rows.
+  const byNest = new Map<string, AssignedItem[]>();
+  for (const item of out) {
+    const list = byNest.get(item.nest_id) ?? [];
+    list.push(item);
+    byNest.set(item.nest_id, list);
+  }
+  for (const [nestId, items] of byNest) {
+    const counts = await openBlockerCounts(nestId, items.map((i) => i.node_id));
+    for (const i of items) {
+      const n = counts.get(i.node_id);
+      if (n) i.open_blockers = n;
+    }
   }
   return out;
 }

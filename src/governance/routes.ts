@@ -10,7 +10,13 @@ import { Hono } from "hono";
 import { recordNodeAccess } from "./access-log.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import { isPublicReader } from "../shared/access.js";
-import { ValidationError, ConflictError } from "../shared/errors.js";
+import {
+  ValidationError,
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+} from "../shared/errors.js";
+import { canSeeRoster, listNestPeople } from "../nests/people-service.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { attributeRequest, readClient } from "../shared/client-metadata.js";
@@ -24,7 +30,9 @@ import * as externalEdits from "./external-edit-service.js";
 import { loadStewardsConfig } from "./stewards-parser.js";
 import { isSuperAdmin } from "./access-service.js";
 import { engineCache } from "../nodes/engine.js";
+import { isPrimeDocument } from "./prime-service.js";
 import {
+  updateNode,
   bodyOnly,
   deleteNode,
   deleteFolder,
@@ -42,7 +50,7 @@ import {
   canRequestDeletion,
 } from "./access-guard.js";
 import { handleAnnotationReply } from "../annotations/routes.js";
-import { notifyCommentMentions } from "./mention-notify.js";
+import { notifyComment } from "./mention-notify.js";
 
 // ═════════════════════════════════════════════════════════════════════════
 // Nest-level routes (mounted at /:nestId)
@@ -896,11 +904,12 @@ governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
     );
   }
   // Tagging someone in a comment reaches them: inbox row + configured
-  // channels. Outside the try above, whose catch turns anything thrown into a
+  // channels; the document's watchers and reviewer stewards get a "new
+  // comment" row too (never the author). Outside the try above, whose catch turns anything thrown into a
   // 400 — the fan-out swallows its own failures, and a notification problem is
   // not a bad request. Awaited like the document-save fan-out: a local insert
   // is cheaper than returning before it lands.
-  await notifyCommentMentions({
+  await notifyComment({
     nestId,
     nodeId,
     body: comment.body,
@@ -1194,6 +1203,106 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
   }
 });
 
+// POST /nests/:nestId/nodes/:nodeId/approve-with-edits
+//   { title?, content?, tags?, changeNote?, note? }
+//
+// A reviewer fixes a small problem and approves in one step instead of
+// rejecting it back (CU-wdqcq04wnw). Only for someone who can already both
+// edit and approve the document. The edit lands as a new version under the
+// reviewer's name and the open review repoints to it — the submitter stays the
+// author, so separation of duties is unchanged. Refused on prime documents
+// (before or after the edit): prime means every change is seen by two people,
+// and the reviewer's own edit would be seen by one.
+governanceNodeRoutes.post("/:nodeId{.+}/approve-with-edits", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const body = await c.req
+    .json<{
+      title?: string;
+      content?: string;
+      tags?: string[];
+      changeNote?: string;
+      note?: string;
+      /** The version the reviewer opened — refuses a write over a newer author edit. */
+      baseVersion?: number;
+      client?: unknown;
+    }>()
+    .catch(() => {
+      throw new ValidationError("Request body must be JSON");
+    });
+  for (const k of ["title", "content", "changeNote", "note"] as const) {
+    if (body[k] !== undefined && typeof body[k] !== "string") {
+      throw new ValidationError(`${k} must be a string`);
+    }
+  }
+  if (body.tags !== undefined && !(Array.isArray(body.tags) && body.tags.every((t) => typeof t === "string"))) {
+    throw new ValidationError("tags must be an array of strings");
+  }
+  if (body.baseVersion !== undefined && !Number.isInteger(body.baseVersion)) {
+    throw new ValidationError("baseVersion must be an integer");
+  }
+  const userEmail = await getUserEmail(c);
+
+  const pending = await reviews.getPendingReview(nestId, nodeId);
+  if (!pending) throw new ConflictError("No pending review for this document");
+  if (pending.requestedBy.toLowerCase() === userEmail.toLowerCase()) {
+    throw new ForbiddenError("This is your own submission — save your edits instead");
+  }
+  const [edit, approval] = await Promise.all([
+    stewardship.canUserEdit(nestId, nodeId, userEmail),
+    stewardship.canUserApprove(nestId, nodeId, userEmail, { requestedBy: pending.requestedBy }),
+  ]);
+  if (!edit.allowed || !approval.allowed) {
+    throw new ForbiddenError("Edit & approve needs both edit and approve rights on this document");
+  }
+  const { storage } = await engineCache.get(nestId);
+  const before = await storage.readDocument(nodeId);
+  const tagsBefore = (before.frontmatter.tags || []) as string[];
+  const metadata = before.frontmatter.metadata;
+  if (
+    (await isPrimeDocument(nestId, tagsBefore, metadata)) ||
+    (body.tags !== undefined && (await isPrimeDocument(nestId, body.tags, metadata)))
+  ) {
+    throw new ForbiddenError(
+      "Prime documents can't be edited and approved in one step — approve or reject it, and leave edits to the author",
+    );
+  }
+
+  // Same contract as PATCH's X-Base-Version: the author may still be revising
+  // their submission, and the reviewer's text must not silently replace that.
+  if (body.baseVersion !== undefined) {
+    const conflict = await versions.checkConflict(nestId, nodeId, body.baseVersion);
+    if (conflict.conflict) {
+      throw new ConflictError(
+        `The author changed this document since you opened it (now v${conflict.currentVersion}). Reload to see their latest version.`,
+      );
+    }
+  }
+  const client = attributeRequest(c, body.client);
+  await updateNode(
+    nestId,
+    nodeId,
+    {
+      ...(body.title !== undefined ? { title: body.title } : {}),
+      ...(body.content !== undefined ? { content: body.content } : {}),
+      ...(body.tags !== undefined ? { tags: body.tags } : {}),
+      changeNote: body.changeNote || "Reviewer edit before approval",
+      client,
+    },
+    userEmail,
+    { reviewerEdit: true },
+  );
+  const review = await reviews.approve({
+    nestId,
+    nodeId,
+    approvedBy: userEmail,
+    note: body.note || "Approved with reviewer edits",
+    baseUrl: requestBaseUrl(c.req.url),
+    client,
+  });
+  return c.json({ review });
+});
+
 // POST /nests/:nestId/nodes/:nodeId/reject
 governanceNodeRoutes.post("/:nodeId{.+}/reject", async (c) => {
   const nestId = c.req.param("nestId")!;
@@ -1240,6 +1349,46 @@ governanceNodeRoutes.get("/:nodeId{.+}/can-approve", async (c) => {
   const nodeId = c.req.param("nodeId")!;
   const userEmail = await getUserEmail(c);
   return c.json(await stewardship.canUserApprove(nestId, nodeId, userEmail));
+});
+
+/** Most roster members checked by /approvers — one approval check each. */
+const MAX_APPROVER_CANDIDATES = 200;
+
+// GET /nests/:nestId/nodes/:nodeId/approvers
+//
+// Who besides the caller could approve the caller's submission of this
+// document, so an author learns who to wait for — or that nobody can
+// (CU-wdqcq02t1r). Each roster member goes through canUserApprove with the
+// caller as the submitter, so the list is exactly what approve would allow.
+// Same roster gate as /mentionable: a visibility-only reader can't enumerate.
+governanceNodeRoutes.get("/:nodeId{.+}/approvers", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const userId = c.get("userId");
+  const me = (await resolveCallerEmail(userId)).toLowerCase();
+  const people = await listNestPeople(nestId);
+  if (!(await canSeeRoster(nestId, userId, me, people))) {
+    throw new ForbiddenError("Only people on this nest can see who approves");
+  }
+  if (!(await canReadNode(nestId, nodeId, userId, me))) {
+    throw new NotFoundError("Document not found");
+  }
+  // ponytail: one check per member, capped; batch like canUserApproveMany if
+  // nests grow past a few hundred people.
+  const others = people.filter((p) => p.email.toLowerCase() !== me);
+  const candidates = others.slice(0, MAX_APPROVER_CANDIDATES);
+  const verdicts = await Promise.all(
+    candidates.map((p) =>
+      stewardship.canUserApprove(nestId, nodeId, p.email, { requestedBy: me }),
+    ),
+  );
+  return c.json({
+    approvers: candidates
+      .filter((_, i) => verdicts[i]!.allowed)
+      .map((p) => ({ email: p.email, name: p.name })),
+    // Past the cap the list is partial — an empty one then proves nothing.
+    truncated: others.length > MAX_APPROVER_CANDIDATES,
+  });
 });
 
 // GET /nests/:nestId/nodes/:nodeId/can-edit
