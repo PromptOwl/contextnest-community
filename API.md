@@ -402,6 +402,7 @@ When a nest has `require_push_confirmation` on, a document written by an agent o
 | `POST /nests/:id/publish` (bulk) | Yes — on any credential → `202`. |
 | Edits to existing documents (`context_update`, `PATCH /nodes/:id`) | **No** — use stewardship review, which is built for changes to documents that already exist. |
 | `context_delete`, `context_move` | **No.** |
+| `context_bulk_update`, `POST /nodes/bulk-update` | **No** — edits only, and anything that would need review is skipped rather than drafted. |
 
 So the gate is a checkpoint on documents an agent *creates*, not a general write lock on the nest. Pair it with stewardship if every change needs review.
 
@@ -663,11 +664,57 @@ Named Board views of a nest (columns, filters, card order). A board is a view, n
 
 **POST** `/nests/:nestId/boards/:boardId/rank` (write+) — `{ "key": "tag:::todo", "order": ["nodes/b", "nodes/a"] }` → `{ "board": … }`. Sets one column's card order, merged into the stored ranks under a row lock, so people reordering different columns don't overwrite each other. Past the size limits, the least recently ranked columns are dropped.
 
+**GET** `/nests/:nestId/boards/:boardId/items` (read+) — the board as a list (its List view). Rows are the board's own slice — `tasksOnly`, `filterTags`, `hideDoneAfterDays` — grouped by its columns in board order (a node in several tag columns is a row in each section), drawn from the caller-gated node listing.
+
+Query: `sort` = `rank` (board card order, default) · `title` · `status` · `assignee` · `priority` · `due` · `parent` · `updated` · `created`; `dir` = `asc` | `desc` (empty values sort last either way); `assignee` = comma list of emails, `unassigned` for nobody; `q` = title substring; `limit` (default 100, max 500); `offset`. An unknown `sort` → `400`.
+```json
+{
+  "board": { "id": "…", "name": "Sprint", "dimension": "tag" },
+  "sort": "rank", "dir": "asc", "total": 42, "offset": 0, "limit": 100,
+  "groups": [{ "key": "todo", "label": "todo", "count": 12 }, …],
+  "items": [{
+    "id": "nodes/ship-pricing", "title": "Ship pricing", "type": "task", "status": "published",
+    "tags": ["#todo", "#launch"], "group": "todo", "columns": ["todo"],
+    "assignee": "ann@acme.com", "priority": "high", "due": "2026-10-31",
+    "parent": "nodes/launch", "parent_title": "Launch",
+    "completed_at": null, "created_at": "…", "updated_at": "…"
+  }]
+}
+```
+
 **DELETE** `/nests/:nestId/boards/:boardId` (write+) — the creator, or a nest owner/admin → `{ "deleted": true }`.
 
 Limits (`400` when exceeded): 100 boards per nest; `name` ≤ 80 characters; config ≤ 256 KB; ≤ 500 layout/rank keys; ≤ 2000 ids per list, each ≤ 600 characters; `config.dimension` ∈ `folder` / `status` / `tag` / `assignee` / `priority` / `field`. A body that isn't a JSON object → `400`. Boards are deleted with their nest.
 
 Custom-field boards: `"dimension": "field"` with `"fieldKey": "severity"` makes the field's values the columns (layout key `field:severity`); `"swimlane": "field"` with `"swimlaneField"` makes them lanes; `"filterFields": { "severity": "high", "blocked": "true" }` keeps only matching cards (same matching as the node list's `field.<key>` filter). Keys must look like field keys; a board naming a field that was later deleted still loads.
+
+### Bulk update — `POST /nests/:nestId/nodes/bulk-update`
+One change applied to many nodes (the board List view's bulk actions; MCP `context_bulk_update`). Write tier at the nest; then **per node**: a node the caller can't read reports `not_found` (a `selector` only ever targets — and counts toward the cap — nodes the caller can read), one they can't edit is `skipped` (`forbidden`), and the write runs through the normal governed update — its own version, its own `moved_at` / `completed_at` stamps. It is **publish or nothing**: a node whose change would land as a draft for a reviewer (a prime document, a governed document without a self-approve/prime-only/task bypass, or the caller's own open review) is `skipped` with `needs_review` and left untouched — a bulk edit never creates drafts. A node under someone else's open review is `skipped` (`locked`). A node the patch wouldn't change is `unchanged` and not written. The change is computed from the head the call read; if someone saves the node in between, that row is `skipped` with `conflict` rather than overwriting their edit. Tags the patch doesn't touch are passed back as stored. Like `PATCH /nodes/:id`, the board fields (priority, assignee, due) can be set on any node type, not only tasks — narrow `ids`/`selector` if you mean tasks only.
+
+```json
+{
+  "ids": ["nodes/a", "nodes/b"],            // or "selector": "#sprint-12"
+  "patch": {
+    "board_id": "…", "column": "done",      // move into a board column
+    "add_tags": ["q4"], "remove_tags": ["sprint"],
+    "priority": "high",                     // urgent|high|medium|low|null
+    "assignee": "ann@acme.com",             // on the nest's roster, or null
+    "due": "2026-10-31",                    // or null
+    "change_note": "Sprint close-out"       // recorded on each version
+  }
+}
+```
+`column` needs `board_id`. On a tag board it swaps the column tag — under a namespace every `ns:*` tag is replaced; on a curated board the other listed column tags are dropped; on an auto board (every tag a column) it only adds — so moving a task into a done column (nest `done_tags`) stamps `completed_at`, and out of one clears it. On an assignee/priority board it sets that field. Status and folder boards → `400`.
+
+→ `200`
+```json
+{ "requested": 2, "updated": 1, "unchanged": 0, "skipped": 1, "failed": 0,
+  "results": [
+    { "id": "nodes/a", "title": "A", "outcome": "updated", "version": 4, "status": "published", "completed_at": "…" },
+    { "id": "nodes/b", "title": "B", "outcome": "skipped", "code": "needs_review", "reason": "This document goes through review — …" }
+  ] }
+```
+`400`: no ids/selector, both, more than **100** nodes (split the batch or narrow the selector), an empty patch, an unknown patch field, a bad priority/date, an assignee not on the nest. `403`: read-only callers (nest middleware), or a caller who can edit none of the targets. The batch is not a transaction — rows written before a failure stay written, and the response names every row.
 
 ### Custom fields — `/nests/:nestId/fields`
 Structured properties the nest defines once and every applicable node carries. **Definitions** live here; **values** live on each node in frontmatter `metadata.fields`, so a value change is an ordinary governed edit — a new version, a new link in the hash chain, the usual draft/review rules. Estimates and time-in-status are presets of this model, not separate features.
@@ -2487,6 +2534,8 @@ Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually;
 Both are **read-tier**, matching REST (`isAnnotationAction` in `app.ts`): a reviewer who can see the document may comment on it. The transport is read-tier too, so each tool re-checks `canReadNode` itself — that check is the real gate. Deliberately *not* gated on an approved version: a reviewer comments on drafts, and writing a comment discloses nothing (the caller supplies the text), whereas *reading* threads stays gated because anchors quote draft body text. Both run the same side effects the REST routes do — the `@mention` fan-out (so tagging a human notifies them) and the derived `— Annotations` re-projection for artifacts, so an agent's comment doesn't leave that node stale. A `thread` that belongs to another document is refused by name rather than silently opening a new thread.
 
 `context_comments` is also available on the **server-level** endpoint (nest-parameterised, read-only). Comment visibility matches UI node visibility: collaborators/stewards who can read the node may read its threads even before approval; public readers remain blocked until the document is approved. Comment *writes* stay per-nest with the other write tools.
+
+**Boards and bulk edit.** `context_boards` mirrors `GET /boards` (id, name, column dimension, swimlane, filters). `context_board_items` mirrors `GET /boards/:id/items` — `board` is an id or name; `sort`, `dir`, `assignee` (array), `q`, `limit`, `offset` as on REST; the prose groups rows under the board's columns and `structuredContent` is the REST body. `context_bulk_update` mirrors `POST /nodes/bulk-update` — `{ ids | selector, patch }`, max 100 nodes, the same per-node permission and publish-or-nothing governance, per-node `results` in `structuredContent`. A caller who can edit none of the targets gets an `UNAUTHORIZED_ACTION` tool error naming `context_request_access`; validation problems are `VALIDATION_FAILED`. All three are on the server-level endpoint too (with `nest`); the two reads are allowed on a `nests:read` OAuth grant, the bulk update needs `nests:write`. Headless access keys can't call any of them.
 
 **Custom fields.** `context_fields` lists the nest's definitions (any reader). `context_create_field`, `context_update_field` and `context_delete_field` mirror `POST` / `PATCH` / `DELETE /nests/:id/fields` — same validation, same gate (owner, nest admin, license admin, nest-wide reviewer steward; anyone else gets `UNAUTHORIZED_ACTION`). Values ride the existing tools: `context_create` and `context_update` take `fields` (key → value, `null` clears; a refused value is a `VALIDATION_FAILED` tool error naming the field), `context_list` takes a `fields` filter (same matching as REST `field.<key>`), and `context_get` / `context_list` / `context_query` return values in their prose and, structured, in the catalog's own `frontmatter.metadata.fields` — where they are stored — including computed time in status (seconds).
 

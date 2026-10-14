@@ -3809,6 +3809,47 @@ export async function rankBoardColumn(
   });
 }
 
+/** One change over many nodes (src/nodes/bulk-update.ts). Max 100 ids. */
+export interface BulkPatch {
+  board_id?: string;
+  column?: string;
+  add_tags?: string[];
+  remove_tags?: string[];
+  priority?: string | null;
+  assignee?: string | null;
+  due?: string | null;
+  change_note?: string;
+}
+
+export interface BulkRowResult {
+  id: string;
+  title?: string;
+  outcome: "updated" | "unchanged" | "skipped" | "failed";
+  code?: "needs_review" | "locked" | "forbidden" | "not_found" | "conflict" | "invalid" | "error";
+  reason?: string;
+  version?: number;
+  status?: string;
+  completed_at?: string | null;
+}
+
+export interface BulkUpdateResult {
+  requested: number;
+  updated: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+  results: BulkRowResult[];
+}
+
+export const BULK_UPDATE_MAX = 100;
+
+export async function bulkUpdateNodes(nestId: string, ids: string[], patch: BulkPatch) {
+  return request<BulkUpdateResult>(`/nests/${nestId}/nodes/bulk-update`, {
+    method: "POST",
+    body: JSON.stringify({ ids, patch }),
+  });
+}
+
 export async function deleteBoard(nestId: string, boardId: string) {
   return request<{ deleted: boolean }>(`/nests/${nestId}/boards/${boardId}`, {
     method: "DELETE",
