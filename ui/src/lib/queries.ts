@@ -58,6 +58,8 @@ export const keys = {
   mentionable: (nestId: string) =>
     [...keys.nest(nestId), "mentionable"] as const,
   definitions: (nestId: string) => [...keys.nest(nestId), "definitions"] as const,
+  // Custom field definitions — what a document's `fields` values mean.
+  fields: (nestId: string) => [...keys.nest(nestId), "fields"] as const,
   commentCounts: (nestId: string) =>
     [...keys.nest(nestId), "comment-counts"] as const,
   overview: (nestId: string) => [...keys.nest(nestId), "overview"] as const,
@@ -95,8 +97,12 @@ export const keys = {
     [...keys.node(nestId, nodeId), "reviews"] as const,
   nodeStewards: (nestId: string, nodeId: string) =>
     [...keys.node(nestId, nodeId), "stewards"] as const,
+  nodeApprovers: (nestId: string, nodeId: string) =>
+    [...keys.node(nestId, nodeId), "approvers"] as const,
   nodeWatchers: (nestId: string, nodeId: string) =>
     [...keys.node(nestId, nodeId), "watchers"] as const,
+  nodeRelations: (nestId: string, nodeId: string) =>
+    [...keys.node(nestId, nodeId), "relations"] as const,
   nodeAnnotations: (nestId: string, nodeId: string) =>
     [...keys.node(nestId, nodeId), "annotations"] as const,
   nodePendingEdit: (nestId: string, nodeId: string) =>
@@ -218,6 +224,12 @@ const NEST_WRITE_SCOPES: Array<{
       [...keys.nest(n), "feed"],
     ],
   },
+  // Task relations. Both ends' panels and every card's "Blocked" badge read
+  // them, so drop the whole listing (which holds every node key) and My Work.
+  {
+    match: /^\/nodes\/(.+)\/relations(?:\/|$)/,
+    affects: (n) => [keys.nodes(n), keys.me],
+  },
   // Who gets notified about a document — nothing else reads it.
   {
     match: /^\/nodes\/(.+)\/watchers(?:\/|$|\?)/,
@@ -326,6 +338,9 @@ const NEST_WRITE_SCOPES: Array<{
   // shell's header/footer both read.
   { match: /^\/branding/, affects: (n) => [keys.nest(n)] },
   { match: /^\/definitions/, affects: (n) => [keys.definitions(n)] },
+  // A definition change re-labels or hides values on every listed document,
+  // and a time-in-status field changes what the listing computes.
+  { match: /^\/fields/, affects: (n) => [keys.fields(n), keys.nodes(n)] },
   { match: /^\/edges/, affects: (n) => [keys.edges(n), keys.graph(n)] },
   { match: /^\/edge-types/, affects: (n) => [keys.edgeTypes(n), keys.edges(n)] },
   { match: /^\/env/, affects: (n) => [keys.env(n)] },
@@ -534,6 +549,12 @@ export const reads = {
       queryFn: () => api.suggestPeople(q),
       staleTime: STALE.reference,
     }),
+  fields: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.fields(nestId),
+      queryFn: () => api.listFields(nestId),
+      staleTime: STALE.reference,
+    }),
   definitions: (nestId: string) =>
     queryOptions({
       queryKey: keys.definitions(nestId),
@@ -685,11 +706,23 @@ export const reads = {
       queryFn: () => api.getNodeStewards(nestId, nodeId),
       staleTime: STALE.reference,
     }),
+  nodeApprovers: (nestId: string, nodeId: string) =>
+    queryOptions({
+      queryKey: keys.nodeApprovers(nestId, nodeId),
+      queryFn: () => api.getNodeApprovers(nestId, nodeId),
+      staleTime: STALE.governance,
+    }),
   nodeWatchers: (nestId: string, nodeId: string) =>
     queryOptions({
       queryKey: keys.nodeWatchers(nestId, nodeId),
       queryFn: () => api.listNodeWatchers(nestId, nodeId),
       staleTime: STALE.reference,
+    }),
+  nodeRelations: (nestId: string, nodeId: string) =>
+    queryOptions({
+      queryKey: keys.nodeRelations(nestId, nodeId),
+      queryFn: () => api.listRelations(nestId, nodeId),
+      staleTime: STALE.listing,
     }),
   nodeAnnotations: (nestId: string, nodeId: string) =>
     queryOptions({

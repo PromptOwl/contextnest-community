@@ -191,6 +191,13 @@ async function columnOp(nestId: string, userId: string, boardId: string, column:
       );
     case "folder":
       throw new ValidationError("Folder boards move documents between folders — use context_move per document.");
+    case "field":
+      // ponytail: refused, not mapped — a multi-select move swaps the one
+      // option per node. Set custom fields per document with context_update
+      // `fields`; map it here if bulk field moves are asked for.
+      throw new ValidationError(
+        "Custom-field boards aren't a bulk move target yet — set the field per document (context_update `fields`).",
+      );
     case "tag": {
       const ns = (c.tagNamespace ?? "").trim().split(":")[0]!.trim();
       const cols = resolvedColumns(c);

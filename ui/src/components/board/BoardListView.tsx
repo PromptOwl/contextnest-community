@@ -83,6 +83,7 @@ const DIMENSION_NAMES: Record<DimensionKind, string> = {
   tag: "Column",
   assignee: "Assignee",
   priority: "Priority",
+  field: "Field",
 };
 
 interface Props {
@@ -90,6 +91,8 @@ interface Props {
   /** The saved board — needed to move rows into one of its columns. */
   boardId?: string;
   dimension: DimensionKind;
+  /** A field board's field label — the column header instead of "Field". */
+  fieldLabel?: string;
   /** The board's columns with their cards, in board order. */
   sections: ListSection[];
   /** The board's columns (move targets). */
@@ -150,6 +153,7 @@ export function BoardListView({
   nestId,
   boardId,
   dimension,
+  fieldLabel,
   sections,
   boardColumns,
   allNodes,
@@ -167,6 +171,7 @@ export function BoardListView({
   onChanged,
 }: Props) {
   const today = localToday();
+  const columnName = dimension === "field" && fieldLabel ? fieldLabel : DIMENSION_NAMES[dimension];
   const titles = useMemo(() => new Map(allNodes.map((n) => [n.id, n.title])), [allNodes]);
   const ctx: ListContext = useMemo(
     () => ({ titleOf: (id) => titles.get(id), columnsOf, columnLabel }),
@@ -301,7 +306,7 @@ export function BoardListView({
     const label = personLabel(email);
     return label.toLowerCase() === email.toLowerCase() ? email.split("@")[0]! : label;
   };
-  const headerFor = (c: ListColumn) => (c.id === "column" ? DIMENSION_NAMES[dimension] : c.label);
+  const headerFor = (c: ListColumn) => (c.id === "column" ? columnName : c.label);
 
   const renderCell = (c: ListColumn, n: BoardNode) => {
     switch (c.id) {
@@ -538,7 +543,7 @@ export function BoardListView({
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" side="top" className="w-52">
                   <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
-                    {DIMENSION_NAMES[dimension]}
+                    {columnName}
                   </DropdownMenuLabel>
                   {moveTargets.map((c) => {
                     const done = dimension === "tag" && doneTags.includes(c.key.toLowerCase());

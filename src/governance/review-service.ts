@@ -13,6 +13,7 @@ import {
   notifyReviewRequested,
   notifyReviewResolved,
   markNotificationsReadBySubject,
+  markReviewNotificationsRead,
 } from "./notify-service.js";
 import { dispatchEvent } from "../notify/dispatch.js";
 import { notifyNestEvent } from "../notify/notify.js";
@@ -40,6 +41,7 @@ import type {
   ReviewRequestStatus,
   ResolvedSteward,
 } from "./types.js";
+import { insertNotification } from "../notify/inbox.js";
 
 // ─── Submit for Review ──────────────────────────────────────────────────
 // Ported from PromptOwl submitForReview()
@@ -506,6 +508,9 @@ async function markApproved(p: {
      WHERE id = ?`,
     [p.approvedBy, p.note || null, p.override ? 1 : 0, p.reviewId],
   );
+  // The request (and any SLA escalation of it) is answered — single and bulk
+  // approve both land here.
+  await markReviewNotificationsRead(p.reviewId);
 
   // Update version status. We write 'published' (not 'approved') so the DB
   // mirrors the engine's terminal status — history.yaml/frontmatter record
@@ -673,6 +678,7 @@ export async function reject(params: {
      WHERE id = ?`,
       [params.rejectedBy, params.note, pending.id],
     );
+    await markReviewNotificationsRead(pending.id);
 
     await db.run(
       "UPDATE node_versions SET status = 'rejected' WHERE nest_id = ? AND node_id = ? AND version = ?",
@@ -778,6 +784,7 @@ export async function cancelReview(params: {
      WHERE id = ?`,
       [params.cancelledBy, pending.id],
     );
+    await markReviewNotificationsRead(pending.id);
 
     await db.run(
       "UPDATE node_versions SET status = 'draft' WHERE nest_id = ? AND node_id = ? AND version = ?",
@@ -1012,11 +1019,7 @@ export async function inboxInsert(
   const now = new Date().toISOString();
   for (const email of recipients) {
     try {
-      await db.run(
-        `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [uuid(), nestId, email.toLowerCase(), kind, subjectId, message, now],
-      );
+      await insertNotification({ nestId, userEmail: email, kind, subjectId, message, createdAt: now });
     } catch (err) {
       console.error(`[notify] ${kind} inbox insert failed`, nestId, email, err);
     }
@@ -1498,5 +1501,8 @@ function rowToReviewRequest(row: any): ReviewRequest {
     resolvedAt: row.resolved_at || undefined,
     resolutionNote: row.resolution_note || undefined,
     priority: row.priority,
+    ...(row.run_id ? { runId: row.run_id } : {}),
+    escalationLevel: Number(row.escalation_level ?? 0),
+    escalatedAt: row.escalated_at || undefined,
   };
 }

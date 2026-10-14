@@ -50,7 +50,9 @@ export function CollaboratorsTab({
             <strong className="font-medium text-foreground">Stewardship</strong> — sharing
             does not make anyone a steward.
             {stewardshipEnabled ? (
-              " Stewards are assigned on the Stewards tab."
+              canManageGovernance
+                ? " Use the Reviewer switch to let someone approve documents across the nest; narrower stewards (a tag or one document) are on the Stewards tab."
+                : " Stewards are assigned on the Stewards tab."
             ) : canManageGovernance ? (
               // Naming the setting without a way to reach it left the reader
               // hunting through a menu (CU-wdqcq01e75). Only owner/admin can
@@ -95,6 +97,7 @@ export function CollaboratorsTab({
           currentUserEmail={currentUserEmail}
           callerPermission={callerPermission}
           showTeams
+          reviewers={stewardshipEnabled && canManageGovernance}
         />
       </CardContent>
     </Card>

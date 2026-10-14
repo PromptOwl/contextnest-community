@@ -7,8 +7,9 @@
  * board's columns in the board's column order. A node in several tag columns
  * is a row in each section, exactly as it is a card in each column.
  *
- * The column rules mirror ui/src/lib/board-dimensions.ts, which owns them for
- * the board UI (test/board-dimensions.test.ts). The UI's list view renders
+ * The column rules mirror ui/src/lib/board-dimensions.ts and, for custom-field
+ * boards, ui/src/lib/custom-fields.ts, which own them for the board UI
+ * (test/board-dimensions.test.ts). The UI's list view renders
  * from the same in-memory nodes the board does, so the two views can't
  * disagree; this module is the same slice for agents and scripts, and
  * test/board-list.test.ts pins the two to the same answers.
@@ -19,7 +20,17 @@ import {
   type NodeResponse,
 } from "../nodes/service.js";
 import { ValidationError } from "../shared/errors.js";
-import { getBoard, type Board, type BoardConfig } from "./board-service.js";
+import {
+  appliesTo,
+  listFieldDefinitions,
+  matchesFieldFilter,
+  type FieldDefinition,
+} from "../nodes/custom-fields.js";
+import { getBoard, type Board, type BoardConfig as SavedBoardConfig } from "./board-service.js";
+
+/** A saved board's config plus the custom-field definitions it names: the
+ *  field a "field" board groups by, and every definition for filterFields. */
+export type BoardConfig = SavedBoardConfig & { field?: FieldDefinition; fieldDefs?: FieldDefinition[] };
 
 export const UNCATEGORIZED = "__uncategorized__";
 const STATUS_ORDER = ["draft", "pending_review", "approved", "published", "rejected", "external_edit_pending"];
@@ -59,9 +70,29 @@ const stripHash = (t: string) => (t.startsWith("#") ? t.slice(1) : t);
 const namespaceOf = (c: { tagNamespace?: string }) =>
   (c.tagNamespace ?? "").trim().split(":")[0]!.trim();
 
-/** layouts[] key — "tag:<ns>" for tag boards, the dimension otherwise. */
+/** layouts[] key — "tag:<ns>" / "field:<key>", the dimension otherwise. */
 export function layoutKeyOf(c: BoardConfig): string {
+  if (c.dimension === "field") return `field:${c.fieldKey ?? ""}`;
   return c.dimension === "tag" ? `tag:${namespaceOf(c)}` : c.dimension;
+}
+
+/** A field board's default order: the options as defined; checkbox off first. */
+function fieldColumnOrder(def: FieldDefinition | undefined): string[] | undefined {
+  if (def?.type === "select" || def?.type === "multi_select") return [...def.options];
+  if (def?.type === "checkbox") return ["false", "true"];
+  return undefined;
+}
+
+/** The columns a field value sits in (custom-fields.ts fieldColumnKeys). */
+function fieldColumnKeys(def: FieldDefinition, value: unknown): string[] {
+  if (def.type === "checkbox") return [value === true ? "true" : "false"];
+  if (value === undefined || value === null || value === "") return [UNCATEGORIZED];
+  if (def.type === "multi_select") {
+    const list = Array.isArray(value) ? value.map(String) : [String(value)];
+    return list.length > 0 ? list : [UNCATEGORIZED];
+  }
+  if (def.type === "user") return [String(value).toLowerCase()];
+  return [String(value)];
 }
 
 /** The active dimension's column order / hidden set / explicitness. */
@@ -75,7 +106,13 @@ export function resolvedColumns(c: BoardConfig): {
     a && (c.dimension === "tag" ? [...new Set(a.map(stripHash))] : a);
   const order =
     keys(layout.columnOrder) ??
-    (c.dimension === "status" ? STATUS_ORDER : c.dimension === "priority" ? PRIORITY_ORDER : undefined);
+    (c.dimension === "status"
+      ? STATUS_ORDER
+      : c.dimension === "priority"
+        ? PRIORITY_ORDER
+        : c.dimension === "field"
+          ? fieldColumnOrder(c.field)
+          : undefined);
   return {
     order,
     hidden: new Set(keys(layout.hiddenColumns) ?? []),
@@ -100,6 +137,9 @@ export function columnKeysOf(n: NodeResponse, c: BoardConfig): string[] {
       return [n.assignee ? n.assignee.toLowerCase() : UNCATEGORIZED];
     case "priority":
       return [n.priority || UNCATEGORIZED];
+    case "field":
+      // A board on a deleted field keeps loading, as one "no value" column.
+      return c.field ? fieldColumnKeys(c.field, n.fields?.[c.field.key]) : [UNCATEGORIZED];
     case "tag": {
       const ns = namespaceOf(c);
       const tags = (n.tags ?? []).map(stripHash);
@@ -122,6 +162,12 @@ function shownKeys(n: NodeResponse, c: BoardConfig, cols: ReturnType<typeof reso
 }
 
 export function columnLabel(key: string, c: BoardConfig): string {
+  const f = c.dimension === "field" ? c.field : undefined;
+  if (f) {
+    if (key === UNCATEGORIZED) return f.type === "user" ? "Unassigned" : `No ${f.label.toLowerCase()}`;
+    if (f.type === "checkbox") return key === "true" ? f.label : `Not ${f.label.toLowerCase()}`;
+    return key;
+  }
   if (key === UNCATEGORIZED) {
     return c.dimension === "assignee" ? "Unassigned" : c.dimension === "priority" ? "No priority" : "Uncategorized";
   }
@@ -161,6 +207,13 @@ export function filterForBoard(
     }
     const tags = (n.tags ?? []).map((t) => stripHash(t).toLowerCase());
     if (!(c.filterTags ?? []).every((t) => tags.includes(t.toLowerCase()))) return false;
+    // Same rule as the board's matchesFieldFilters: a deleted field's filter
+    // no longer narrows; a field the node's type can't carry fails it.
+    for (const [key, wanted] of Object.entries(c.filterFields ?? {})) {
+      const def = c.fieldDefs?.find((d) => d.key === key);
+      if (!def) continue;
+      if (!appliesTo(def, n.type) || !matchesFieldFilter(def, n.fields?.[key], wanted)) return false;
+    }
     if (q && !String(n.title ?? "").toLowerCase().includes(q)) return false;
     return true;
   });
@@ -274,7 +327,7 @@ export interface BoardListRow {
 }
 
 export interface BoardListResult {
-  board: { id: string; name: string; dimension: BoardConfig["dimension"]; tag_namespace?: string };
+  board: { id: string; name: string; dimension: BoardConfig["dimension"]; tag_namespace?: string; field_key?: string };
   sort: ListSort;
   dir: "asc" | "desc";
   total: number;
@@ -318,7 +371,13 @@ export async function listBoardItems(
 ): Promise<BoardListResult> {
   const { sort, dir, limit, offset, filters } = parseListQuery(query);
   const board: Board = await getBoard(nestId, boardId, userId);
-  const c = board.config;
+  const usesFields = board.config.dimension === "field" || !!board.config.filterFields;
+  const fieldDefs = usesFields ? await listFieldDefinitions(nestId) : undefined;
+  const c: BoardConfig = {
+    ...board.config,
+    fieldDefs,
+    field: board.config.dimension === "field" ? fieldDefs?.find((d) => d.key === board.config.fieldKey) : undefined,
+  };
   // The caller-gated listing the board UI reads (metadata only, no bodies).
   const all = await listNodesForCaller(nestId, userId);
   const titles = new Map(all.map((n) => [n.id, n.title]));
@@ -353,6 +412,7 @@ export async function listBoardItems(
       name: board.name,
       dimension: c.dimension,
       ...(c.tagNamespace ? { tag_namespace: c.tagNamespace } : {}),
+      ...(c.fieldKey ? { field_key: c.fieldKey } : {}),
     },
     sort,
     dir,

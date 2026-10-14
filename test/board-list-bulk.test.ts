@@ -245,6 +245,46 @@ describe("governance: nodes that need review are skipped, never drafted", () => 
   });
 });
 
+describe("custom-field boards", () => {
+  it("groups by the field, applies filterFields, and refuses a bulk move", async () => {
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Fields" }, owner.apiKey);
+    const f = data.nest.id;
+    const sev = await jsonRequest(app, "POST", `/nests/${f}/fields`, {
+      key: "severity", label: "Severity", type: "select", options: ["low", "high"],
+    }, owner.apiKey);
+    expect(sev.status).toBe(201);
+    await jsonRequest(app, "POST", `/nests/${f}/fields`, { key: "blocked", label: "Blocked", type: "checkbox" }, owner.apiKey);
+    await create(owner, { title: "s1", type: "task", fields: { severity: "high" } }, f);
+    await create(owner, { title: "s2", type: "task", fields: { severity: "low", blocked: true } }, f);
+    await create(owner, { title: "s3", type: "task" }, f);
+
+    const board = await jsonRequest(app, "POST", `/nests/${f}/boards`, {
+      name: "By severity", config: { dimension: "field", fieldKey: "severity" },
+    }, owner.apiKey);
+    const bid = board.data.board.id;
+    const list = await jsonRequest(app, "GET", `/nests/${f}/boards/${bid}/items`, undefined, owner.apiKey);
+    expect(list.status).toBe(200);
+    expect(list.data.board.field_key).toBe("severity");
+    // Option order, then the no-value column, labelled like the board.
+    expect(list.data.groups).toEqual([
+      { key: "low", label: "low", count: 1 },
+      { key: "high", label: "high", count: 1 },
+      { key: "__uncategorized__", label: "No severity", count: 1 },
+    ]);
+
+    const filtered = await jsonRequest(app, "POST", `/nests/${f}/boards`, {
+      name: "Blocked only", config: { dimension: "field", fieldKey: "blocked", filterFields: { blocked: "true" } },
+    }, owner.apiKey);
+    const only = await jsonRequest(app, "GET", `/nests/${f}/boards/${filtered.data.board.id}/items`, undefined, owner.apiKey);
+    expect(only.data.items.map((r: any) => r.title)).toEqual(["s2"]);
+    expect(only.data.groups).toEqual([{ key: "true", label: "Blocked", count: 1 }]);
+
+    const move = await bulk(owner, { ids: ["nodes/s3"], patch: { board_id: bid, column: "high" } }, f);
+    expect(move.status).toBe(400);
+    expect(move.data.error).toMatch(/Custom-field boards/);
+  }, 30_000);
+});
+
 describe("MCP — context_boards, context_board_items, context_bulk_update", () => {
   it("lists boards and a board's rows", async () => {
     const boards = await mcp(owner.apiKey, "context_boards", {});

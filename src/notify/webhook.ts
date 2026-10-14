@@ -5,6 +5,13 @@
  * fire-and-forget with a short timeout, warning once per target on failure.
  */
 import { getDb } from "../db/client.js";
+import {
+  recordOutbound,
+  viaProxy,
+  webhookTarget,
+  type OutboundChannel,
+  type OutboundContext,
+} from "./outbound-log.js";
 
 /**
  * Nest's human name for message prefixes; falls back to the id. Cosmetic — a
@@ -45,20 +52,43 @@ async function rawPost(
 
 const warned = new Set<string>();
 
+/** Which log channel a `who` label belongs to (slack, server-slack, connector:…). */
+function channelFor(who: string): OutboundChannel {
+  if (who.includes("slack")) return "slack";
+  if (who.includes("msteams") || who.includes("teams")) return "msteams";
+  return "webhook";
+}
+
 /**
  * Fire-and-forget POST of a JSON body. Short abort timeout so a webhook outage
  * or a bad URL never slows the governance action that triggered it; failures
- * warn once per `who`, then go quiet. An HTTP error status is deliberately
- * ignored here — same fire-and-forget contract as before.
+ * warn once per `who`, then go quiet. The caller never sees an HTTP error
+ * status (same fire-and-forget contract as before), but the message log
+ * records it — a 4xx/5xx is a failed delivery there.
  */
 export async function postWebhook(
   url: string,
   body: unknown,
   who: string,
+  ctx: OutboundContext & { channel?: OutboundChannel } = {},
 ): Promise<void> {
+  const log = (status: "sent" | "failed", error?: string) =>
+    recordOutbound({
+      channel: ctx.channel ?? channelFor(who),
+      ...ctx,
+      // The URL is the credential: log host + hash, never the path.
+      recipients: [webhookTarget(url)],
+      subject: who,
+      body: typeof body === "string" ? body : JSON.stringify(body),
+      status,
+      error,
+      viaProxy: viaProxy(url),
+    });
   try {
-    await rawPost(url, body, 3000);
+    const res = await rawPost(url, body, 3000);
+    await log(res.ok ? "sent" : "failed", res.ok ? undefined : `Webhook responded ${res.status} ${res.statusText}`.trim());
   } catch (err) {
+    await log("failed", err instanceof Error ? err.message : String(err));
     if (!warned.has(who)) {
       warned.add(who);
       console.warn(

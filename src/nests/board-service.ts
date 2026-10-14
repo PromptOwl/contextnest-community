@@ -17,8 +17,12 @@ import type { NestPermission } from "../shared/access.js";
 import type { Querier, SqlParam } from "../db/adapter.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
 
-const DIMENSIONS = ["folder", "status", "tag", "assignee", "priority"] as const;
-const SWIMLANES = ["assignee", "priority", "parent"] as const;
+const DIMENSIONS = ["folder", "status", "tag", "assignee", "priority", "field"] as const;
+const SWIMLANES = ["assignee", "priority", "parent", "field"] as const;
+/** A custom field key (src/nodes/custom-fields.ts KEY_RE). Whether the field
+ *  still exists is the UI's concern — a deleted field's board shows one
+ *  "No value" column rather than failing to load. */
+const FIELD_KEY_RE = /^[a-z][a-z0-9_]{0,39}$/;
 
 export interface BoardConfig {
   dimension: (typeof DIMENSIONS)[number];
@@ -26,6 +30,13 @@ export interface BoardConfig {
   swimlane?: (typeof SWIMLANES)[number];
   /** Hide cards completed more than N days ago (Linear's "completed issues"). */
   hideDoneAfterDays?: number;
+  /** dimension "field": the custom field whose values are the columns. */
+  fieldKey?: string;
+  /** swimlane "field": the custom field whose values are the lanes. */
+  swimlaneField?: string;
+  /** Only cards whose custom fields match, field key → value (custom-fields
+   *  matchesFieldFilter semantics: "none" = unset, checkbox "true"/"false"). */
+  filterFields?: Record<string, string>;
   tagNamespace?: string;
   layouts?: Record<string, { columnOrder?: string[]; hiddenColumns?: string[] }>;
   tasksOnly?: boolean;
@@ -96,6 +107,31 @@ export function cleanConfig(raw: unknown): BoardConfig {
       throw new ValidationError(`config.swimlane must be one of ${SWIMLANES.join(", ")}`);
     }
     out.swimlane = r.swimlane as BoardConfig["swimlane"];
+  }
+  const fieldKey = (v: unknown, what: string) => {
+    if (typeof v !== "string" || !FIELD_KEY_RE.test(v)) {
+      throw new ValidationError(`${what} must be a custom field key`);
+    }
+    return v;
+  };
+  if (out.dimension === "field") out.fieldKey = fieldKey(r.fieldKey, "config.fieldKey");
+  if (out.swimlane === "field") out.swimlaneField = fieldKey(r.swimlaneField, "config.swimlaneField");
+  if (r.filterFields !== undefined && r.filterFields !== null) {
+    const f = r.filterFields;
+    if (typeof f !== "object" || Array.isArray(f)) {
+      throw new ValidationError("config.filterFields must be an object of field key → value");
+    }
+    const entries = Object.entries(f as Record<string, unknown>);
+    if (entries.length > 20) throw new ValidationError("config.filterFields has too many entries");
+    const clean: Record<string, string> = {};
+    for (const [k, v] of entries) {
+      fieldKey(k, "config.filterFields key");
+      if (typeof v !== "string" || v.length > 200) {
+        throw new ValidationError("config.filterFields values must be strings");
+      }
+      clean[k] = v;
+    }
+    if (entries.length > 0) out.filterFields = clean;
   }
   if (r.hideDoneAfterDays !== undefined && r.hideDoneAfterDays !== null) {
     const d = r.hideDoneAfterDays;

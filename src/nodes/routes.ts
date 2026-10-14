@@ -59,7 +59,16 @@ import {
   resolveAuthorship,
   toNodeResponse,
   bodyOnly,
+  withComputedFields,
+  fieldsOfRaw,
+  setStoredFields,
 } from "./service.js";
+import {
+  addRelation,
+  listRelations,
+  openBlockerCounts,
+  removeRelation,
+} from "./relations.js";
 
 /** Board fields off a request body, keeping "absent" (leave alone) distinct
  *  from null (clear). Anything that isn't a string or null is refused rather
@@ -75,6 +84,27 @@ function taskFieldsFromBody(body: Record<string, unknown>): TaskFieldsPatch {
     out[k] = v;
   }
   return out;
+}
+
+/** Custom field values off a body: absent stays absent; anything that isn't
+ *  an object is refused here rather than half-applied. Values themselves are
+ *  validated against the nest's definitions in the service. */
+function customFieldsFromBody(body: Record<string, unknown>): { fields?: Record<string, unknown> } {
+  const v = body.fields;
+  if (v === undefined) return {};
+  if (v === null || typeof v !== "object" || Array.isArray(v)) {
+    throw new ValidationError("fields must be an object of field key → value");
+  }
+  return { fields: v as Record<string, unknown> };
+}
+
+/** `?field.<key>=<value>` query params → the list's field filters. */
+function fieldFiltersFromQuery(q: Record<string, string>): Record<string, string> | undefined {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(q)) {
+    if (k.startsWith("field.") && k.length > "field.".length) out[k.slice("field.".length)] = v;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export const nodeRoutes = new Hono<AuthEnv>();
@@ -150,6 +180,8 @@ nodeRoutes.get("/", async (c) => {
     // holds metadata only. Opt back in and the listing crawls the vault for
     // them; kept for any client that was reading `content` off this route.
     ...(q.content === "1" || q.content === "true" ? { withContent: true } : {}),
+    // Custom fields: ?field.<key>=<value>, every one must match.
+    ...(fieldFiltersFromQuery(q) ? { fields: fieldFiltersFromQuery(q) } : {}),
   });
   // The nest-wide shape is NOT bundled here: it describes the whole nest
   // whatever level was asked for, so bundling recomputed it on every folder
@@ -186,6 +218,7 @@ nodeRoutes.post("/", async (c) => {
     scope?: string;
     status?: string;
     schedule?: string;
+    model?: string;
     folder?: string;
     prime?: boolean;
     client?: unknown;
@@ -193,6 +226,7 @@ nodeRoutes.post("/", async (c) => {
     due?: string | null;
     priority?: string | null;
     parent?: string | null;
+    fields?: Record<string, unknown>;
   }>();
 
   if (!body.title || !body.content) {
@@ -226,8 +260,10 @@ nodeRoutes.post("/", async (c) => {
             scope: body.scope,
             status: body.status,
             schedule: body.schedule,
+            model: body.model,
             folder: body.folder,
             prime: body.prime,
+            ...customFieldsFromBody(body),
           },
         ],
       },
@@ -245,10 +281,12 @@ nodeRoutes.post("/", async (c) => {
       scope: body.scope,
       status: body.status,
       schedule: body.schedule,
+      model: body.model,
       folder: body.folder,
       prime: body.prime,
       client: attributeRequest(c, body.client),
       ...taskFieldsFromBody(body),
+      ...customFieldsFromBody(body),
     },
     authorEmail,
   );
@@ -257,7 +295,7 @@ nodeRoutes.post("/", async (c) => {
   const resolved = await stewardship.resolveStewardsForNode(nestId, node.id);
 
   return c.json({
-    node: toNodeResponse(node),
+    node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
     stewards: resolved.length > 0
       ? resolved.map((r) => ({
         email: r.steward.userEmail,
@@ -411,6 +449,41 @@ nodeRoutes.delete("/:nodeId{.+}/watchers", async (c) => {
   return c.json({ watchers: await listWatchers(nestId, nodeId) });
 });
 
+// Relations — blocks / blocked_by / relates_to / duplicates (src/nodes/
+// relations.ts). Not behind FEATURE_WORKFLOW_PLANE: relations are core task
+// UX. Reads are read-tier; POST/DELETE are write-tier via the nest
+// middleware, the same tier as editing the task.
+
+// GET /nests/:nestId/nodes/:nodeId/relations
+nodeRoutes.get("/:nodeId{.+}/relations", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const caller = { nestId, userId, userEmail: await resolveCallerEmail(userId) };
+  return c.json(await listRelations(caller, c.req.param("nodeId")!));
+});
+
+// POST /nests/:nestId/nodes/:nodeId/relations { type, node }
+nodeRoutes.post("/:nodeId{.+}/relations", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const body = await c.req
+    .json<Record<string, unknown>>()
+    .catch(() => ({}) as Record<string, unknown>);
+  const caller = { nestId, userId, userEmail: await resolveCallerEmail(userId) };
+  const out = await addRelation(caller, c.req.param("nodeId")!, body.type, body.node);
+  return c.json(out, 201);
+});
+
+// DELETE /nests/:nestId/nodes/:nodeId/relations/:relationId
+nodeRoutes.delete("/:nodeId{.+}/relations/:relationId", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const caller = { nestId, userId, userEmail: await resolveCallerEmail(userId) };
+  return c.json(
+    await removeRelation(caller, c.req.param("nodeId")!, c.req.param("relationId")),
+  );
+});
+
 // GET /nests/:nestId/nodes/:nodeId — the greedy catch-all. Safe ONLY because
 // createApp pins LinearRouter: it matches in registration order with
 // per-route backtracking, so the suffix action routes above (and the
@@ -461,7 +534,10 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       console.error("[external-edit] reconstruct-latest failed:", err);
     }
   }
-  const response = toNodeResponse(node);
+  const [response] = await withComputedFields(nestId, [toNodeResponse(node)]);
+  // Open blockers (task relations) — the "Blocked" badge's source.
+  const blockers = (await openBlockerCounts(nestId, [node.id])).get(node.id);
+  if (blockers) response.open_blockers = blockers;
   // The read got past every gate — record it for the admin activity log
   // (fire-and-forget, throttled; never slows or fails the read).
   recordNodeAccess({
@@ -512,6 +588,8 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       // Kept for the raw path: frontmatter=1 must serve the APPROVED
       // snapshot's stored frontmatter, never the live working copy's.
       let approvedRaw = "";
+      // Field values are the approved version's too, never the live draft's.
+      setStoredFields(response, {});
       try {
         ({ raw: approvedRaw, version: approved } = await reconstructApproved(
           versionManager,
@@ -520,6 +598,8 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
           approved,
         ));
         response.content = bodyOnly(nodeId, approvedRaw);
+        setStoredFields(response, fieldsOfRaw(nodeId, approvedRaw));
+        await withComputedFields(nestId, [response]);
         // A pdf node's `pdf:` block must describe the same version as the
         // body — the approved one, whose binary is what /pdf serves here —
         // not the live draft's.
@@ -603,6 +683,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     title?: string;
     changeNote?: string;
     schedule?: string;
+    model?: string;
     prime?: boolean | null;
     client?: unknown;
     type?: string;
@@ -610,6 +691,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     due?: string | null;
     priority?: string | null;
     parent?: string | null;
+    fields?: Record<string, unknown>;
   }>();
   if (body.type !== undefined && typeof body.type !== "string") {
     throw new ValidationError("type must be a string");
@@ -647,15 +729,20 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       status: body.status,
       changeNote: body.changeNote,
       schedule: body.schedule,
+      model: body.model,
       prime: body.prime,
       client: attributeRequest(c, body.client),
       type: body.type,
       ...taskFieldsFromBody(body),
+      ...customFieldsFromBody(body),
     },
     authorEmail,
   );
 
-  return c.json({ node: toNodeResponse(node), version: responseVersion });
+  return c.json({
+    node: (await withComputedFields(nestId, [toNodeResponse(node)]))[0],
+    version: responseVersion,
+  });
 });
 
 // DELETE /nests/:nestId/nodes/:nodeId — greedy catch-all; see the

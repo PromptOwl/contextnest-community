@@ -15,7 +15,9 @@ import {
   createTestApp,
   registerUser,
   jsonRequest,
+  seedPeople,
 } from "./helpers.js";
+import { FREE_TIER_MAX_USERS } from "../src/auth/free-tier.js";
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -725,6 +727,8 @@ describe("license gate — the allowlist is licensed, releasing a held push is n
     const dbClient = await import("../src/db/client.js");
     await dbClient.resetDb();
     await dbClient.initDb();
+    // Past the Free tier, so the unlicensed gate closes.
+    await seedPeople(FREE_TIER_MAX_USERS + 1);
     const { createApp } = await import("../src/app.js");
     unlicensed = createApp();
   });
