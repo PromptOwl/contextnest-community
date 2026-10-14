@@ -45,6 +45,8 @@ import {
 /** Most nodes one call may touch. Each is a full governed write (lock, engine
  *  write, version row), so this bounds a request to seconds, not minutes. */
 export const BULK_UPDATE_MAX = 100;
+/** Most raw selector matches one call will permission-check. */
+const BULK_SELECTOR_SCAN_MAX = 2000;
 const MAX_TAGS = 50;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -224,11 +226,23 @@ async function resolveTargets(
     }
     const { query } = await engineCache.get(nestId);
     const res = await query.query(input.selector.trim(), { hops: 0 });
+    // Each match costs a permission check, so a selector over a whole nest is
+    // refused before the loop instead of checked match by match. No count in
+    // the message: it would include matches the caller can't read.
+    if (res.documents.length > BULK_SELECTOR_SCAN_MAX) {
+      throw new ValidationError("This selector matches too many documents for a bulk update. Narrow the selector.");
+    }
     // Only what the caller can read: matches they can't see are neither
     // targeted nor counted (the over-cap message below must not leak them).
+    // One past the cap is enough to refuse, so the loop stops there.
     ids = [];
     for (const d of res.documents) {
       if (await canReadNode(nestId, d.id, caller.userId, caller.userEmail)) ids.push(d.id);
+      if (ids.length > BULK_UPDATE_MAX) {
+        throw new ValidationError(
+          `A bulk update takes at most ${BULK_UPDATE_MAX} nodes; this selector matches more. Narrow the selector.`,
+        );
+      }
     }
   } else {
     if (!Array.isArray(input.ids) || input.ids.some((x) => typeof x !== "string" || !x)) {

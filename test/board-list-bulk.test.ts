@@ -196,6 +196,14 @@ describe("POST /nodes/bulk-update", () => {
     expect(data.error).toMatch(/at most 100/);
   });
 
+  it("caps a selector at the first match past the limit", async () => {
+    const { data: n } = await jsonRequest(app, "POST", "/nests", { name: "Many" }, owner.apiKey);
+    for (let i = 0; i < 101; i++) await create(owner, { title: `many ${i}`, tags: ["many"] }, n.nest.id);
+    const { status, data } = await bulk(owner, { selector: "#many", patch: { priority: "low" } }, n.nest.id);
+    expect(status).toBe(400);
+    expect(data.error).toMatch(/at most 100.*selector matches more/);
+  }, 60_000);
+
   it("refuses a read-only collaborator's key", async () => {
     const { status } = await bulk(rita, { ids: ["nodes/alpha"], patch: { priority: "high" } });
     expect(status).toBe(403);
@@ -247,6 +255,21 @@ describe("MCP — context_boards, context_board_items, context_bulk_update", () 
     expect(list.content[0].text).toContain("## todo");
     const missing = await mcp(owner.apiKey, "context_board_items", { board: "No such board" });
     expect(missing.isError).toBe(true);
+  });
+
+  it("refuses a board name that matches several boards, and takes the id", async () => {
+    const twin = await jsonRequest(app, "POST", `/nests/${nestId}/boards`, { name: "Sprint board", private: true }, owner.apiKey);
+    const twinId = twin.data.board.id;
+    try {
+      const byName = await mcp(owner.apiKey, "context_board_items", { board: "sprint board" });
+      expect(byName.isError).toBe(true);
+      expect(byName.content[0].text).toContain(boardId);
+      expect(byName.content[0].text).toContain(twinId);
+      const byId = await mcp(owner.apiKey, "context_board_items", { board: boardId });
+      expect(byId.isError).toBeUndefined();
+    } finally {
+      await jsonRequest(app, "DELETE", `/nests/${nestId}/boards/${twinId}`, undefined, owner.apiKey);
+    }
   });
 
   it("bulk-updates with per-node results and stamps done", async () => {

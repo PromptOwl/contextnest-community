@@ -2105,9 +2105,16 @@ async function runTool(
       const ref = String(args.board ?? "").trim();
       if (!ref) return toolError("board is required — an id or name from context_boards.", "VALIDATION_FAILED");
       const boards = await listBoards(nestId, userId);
-      const board =
-        boards.find((b) => b.id === ref) ??
-        boards.find((b) => b.name.toLowerCase() === ref.toLowerCase());
+      // Board names aren't unique (a shared and a private board can share
+      // one), so a name that matches several boards is refused, not guessed.
+      const byName = boards.filter((b) => b.name.toLowerCase() === ref.toLowerCase());
+      if (!boards.some((b) => b.id === ref) && byName.length > 1) {
+        return toolError(
+          `Several boards are named "${ref}": ${byName.map((b) => `\`${b.id}\``).join(", ")}. Pass the board id.`,
+          "VALIDATION_FAILED",
+        );
+      }
+      const board = boards.find((b) => b.id === ref) ?? byName[0];
       if (!board) return toolError(`Board not found: ${ref}`, "DOCUMENT_NOT_FOUND");
       try {
         const res = await listBoardItems(nestId, board.id, userId, {

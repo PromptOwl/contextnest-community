@@ -243,10 +243,15 @@ export function BoardListView({
       const ids = selectedNodes.map((n) => n.id);
       setRunning(true);
       const total: api.BulkUpdateResult = { requested: 0, updated: 0, unchanged: 0, skipped: 0, failed: 0, results: [] };
+      // Ids of the chunks that did not complete (the one that threw and every
+      // one after it). They stay selected, so nothing drops out unreported.
+      const notDone = new Set(ids);
+      let failed = false;
       try {
         // The endpoint takes 100 per call; a bigger selection is several calls.
         for (const part of chunk(ids, api.BULK_UPDATE_MAX)) {
           const r = await api.bulkUpdateNodes(nestId, part, p.patch);
+          for (const id of part) notDone.delete(id);
           total.requested += r.requested;
           total.updated += r.updated;
           total.unchanged += r.unchanged;
@@ -255,7 +260,12 @@ export function BoardListView({
           total.results.push(...r.results);
         }
       } catch (e: any) {
-        toast.error(e?.message || "Bulk edit failed");
+        failed = true;
+        toast.error(
+          total.requested > 0
+            ? `${e?.message || "Bulk edit failed"} — ${notDone.size} not attempted, still selected`
+            : e?.message || "Bulk edit failed",
+        );
       } finally {
         setRunning(false);
       }
@@ -263,11 +273,13 @@ export function BoardListView({
       await onChanged();
       // What landed leaves the selection; what didn't stays, so it can be
       // looked at (or retried) without hunting for it again.
-      const leftover = new Set(
-        total.results.filter((r) => r.outcome === "skipped" || r.outcome === "failed").map((r) => r.id),
-      );
+      const leftover = new Set([
+        ...total.results.filter((r) => r.outcome === "skipped" || r.outcome === "failed").map((r) => r.id),
+        ...notDone,
+      ]);
       setSelected(leftover);
       if (total.skipped + total.failed > 0) setReport(total);
+      else if (failed) return;
       else toast.success(`${p.action} — ${bulkResultLine(total)}`);
     },
     [selectedNodes, nestId, onChanged],
