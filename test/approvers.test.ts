@@ -66,6 +66,8 @@ describe("GET /approvers", () => {
     const { status, data } = await approvers(alice, nestId, "nodes/plan");
     expect(status).toBe(200);
     expect(data.approvers).toEqual([{ email: rex.email, name: "Rex" }]);
+    // Well under the candidate cap, so the list is complete.
+    expect(data.truncated).toBe(false);
   });
 
   it("is computed for the caller as submitter: the reviewer asking hears nobody else can", async () => {

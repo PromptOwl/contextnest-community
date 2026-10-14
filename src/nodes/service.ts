@@ -2714,6 +2714,11 @@ export async function updateNode(
         !!pendingReview &&
         (pendingReview.requestedBy.toLowerCase() === userEmail.toLowerCase() ||
           !!opts.reviewerEdit);
+      // The review resolved between the caller's check and this write: the
+      // reviewer's edit must not land as an ordinary draft or publish.
+      if (opts.reviewerEdit && !pendingReview) {
+        throw new ConflictError("The review was resolved before your edit landed — nothing was saved. Reload the document.");
+      }
       if (pendingReview && !isAuthorEditingOwnReview) {
         throw new LockedError(
           "This document is awaiting steward review and is locked. Approve or reject the pending review before editing."

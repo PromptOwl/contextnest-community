@@ -1177,14 +1177,31 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
 governanceNodeRoutes.post("/:nodeId{.+}/approve-with-edits", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const body = await c.req.json<{
-    title?: string;
-    content?: string;
-    tags?: string[];
-    changeNote?: string;
-    note?: string;
-    client?: unknown;
-  }>();
+  const body = await c.req
+    .json<{
+      title?: string;
+      content?: string;
+      tags?: string[];
+      changeNote?: string;
+      note?: string;
+      /** The version the reviewer opened — refuses a write over a newer author edit. */
+      baseVersion?: number;
+      client?: unknown;
+    }>()
+    .catch(() => {
+      throw new ValidationError("Request body must be JSON");
+    });
+  for (const k of ["title", "content", "changeNote", "note"] as const) {
+    if (body[k] !== undefined && typeof body[k] !== "string") {
+      throw new ValidationError(`${k} must be a string`);
+    }
+  }
+  if (body.tags !== undefined && !(Array.isArray(body.tags) && body.tags.every((t) => typeof t === "string"))) {
+    throw new ValidationError("tags must be an array of strings");
+  }
+  if (body.baseVersion !== undefined && !Number.isInteger(body.baseVersion)) {
+    throw new ValidationError("baseVersion must be an integer");
+  }
   const userEmail = await getUserEmail(c);
 
   const pending = await reviews.getPendingReview(nestId, nodeId);
@@ -1212,6 +1229,16 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve-with-edits", async (c) => {
     );
   }
 
+  // Same contract as PATCH's X-Base-Version: the author may still be revising
+  // their submission, and the reviewer's text must not silently replace that.
+  if (body.baseVersion !== undefined) {
+    const conflict = await versions.checkConflict(nestId, nodeId, body.baseVersion);
+    if (conflict.conflict) {
+      throw new ConflictError(
+        `The author changed this document since you opened it (now v${conflict.currentVersion}). Reload to see their latest version.`,
+      );
+    }
+  }
   const client = attributeRequest(c, body.client);
   await updateNode(
     nestId,
@@ -1309,9 +1336,8 @@ governanceNodeRoutes.get("/:nodeId{.+}/approvers", async (c) => {
   }
   // ponytail: one check per member, capped; batch like canUserApproveMany if
   // nests grow past a few hundred people.
-  const candidates = people
-    .filter((p) => p.email.toLowerCase() !== me)
-    .slice(0, MAX_APPROVER_CANDIDATES);
+  const others = people.filter((p) => p.email.toLowerCase() !== me);
+  const candidates = others.slice(0, MAX_APPROVER_CANDIDATES);
   const verdicts = await Promise.all(
     candidates.map((p) =>
       stewardship.canUserApprove(nestId, nodeId, p.email, { requestedBy: me }),
@@ -1321,6 +1347,8 @@ governanceNodeRoutes.get("/:nodeId{.+}/approvers", async (c) => {
     approvers: candidates
       .filter((_, i) => verdicts[i]!.allowed)
       .map((p) => ({ email: p.email, name: p.name })),
+    // Past the cap the list is partial — an empty one then proves nothing.
+    truncated: others.length > MAX_APPROVER_CANDIDATES,
   });
 });
 

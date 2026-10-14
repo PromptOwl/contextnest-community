@@ -1247,10 +1247,10 @@ Same shape. Allowed iff the caller has a matched steward row with `role: reviewe
 Same shape. Reflects nest collaborator permission OR steward `editor` role.
 
 ### GET `/nests/:nestId/nodes/:nodeId/approvers`
-Who besides the caller could approve the caller's submission of this document — each person on the nest run through the same check as `can-approve`, with the caller as the submitter. So the caller never appears, and a bare owner appears only while `allow_self_approve` is on. An empty list means nobody else can approve. Same roster gate as `/mentionable`: callers who reach the nest only through its visibility get `403`; a document the caller can't read is `404`. At most 200 people are checked.
+Who besides the caller could approve the caller's submission of this document — each person on the nest run through the same check as `can-approve`, with the caller as the submitter. So the caller never appears, and a bare owner appears only while `allow_self_approve` is on. An empty list means nobody else can approve. Same roster gate as `/mentionable`: callers who reach the nest only through its visibility get `403`; a document the caller can't read is `404`. At most 200 people are checked; `truncated: true` says the roster was larger, so an empty list then doesn't mean nobody can approve.
 
 ```json
-{ "approvers": [{ "email": "rex@acme.com", "name": "Rex" }] }
+{ "approvers": [{ "email": "rex@acme.com", "name": "Rex" }], "truncated": false }
 ```
 
 ---
@@ -1275,9 +1275,9 @@ Response: `{ "review": { "id": "...", "status": "approved", ... } }`.
 
 ### POST `/nests/:nestId/nodes/:nodeId/approve-with-edits`
 ```json
-{ "content": "fixed text", "title": "…", "tags": ["…"], "changeNote": "…", "note": "Approved with reviewer edits" }
+{ "content": "fixed text", "title": "…", "tags": ["…"], "changeNote": "…", "note": "Approved with reviewer edits", "baseVersion": 3 }
 ```
-Edit someone else's pending submission and approve it in one step. Every field is optional; `note` (default "Approved with reviewer edits") goes to the author with the approval notification.
+Edit someone else's pending submission and approve it in one step. Every field is optional; `note` (default "Approved with reviewer edits") goes to the author with the approval notification. `baseVersion` is the version the reviewer opened — same contract as PATCH's `X-Base-Version`, so a newer edit by the author is refused (**409**) rather than overwritten. A malformed body is **400**.
 - The caller needs **both** edit rights (`can-edit`) and approve rights (`can-approve`, with the author as submitter). **403** otherwise, and **403** on your own submission (save your edits instead).
 - **403** on a prime document, or when `tags` would make it prime.
 - **409** when the document has no pending review.

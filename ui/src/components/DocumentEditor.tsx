@@ -1726,8 +1726,8 @@ export function DocumentEditor({
     // Warn when the submission has nobody to go to — the single-user nest case.
     if (!(isOwner && allowSelfApprove)) {
       qc.fetchQuery({ ...reads.nodeApprovers(nestId, nodeId), staleTime: 0 })
-        .then(({ approvers: who }) => {
-          if (who.length === 0) toast.warning(NO_APPROVER_COPY);
+        .then(({ approvers: who, truncated }) => {
+          if (who.length === 0 && !truncated) toast.warning(NO_APPROVER_COPY);
         })
         .catch(() => {});
     }
@@ -1749,7 +1749,12 @@ export function DocumentEditor({
     setSaving(true);
     setError(null);
     try {
-      await api.approveWithEdits(nestId, nodeId, { title: title.trim(), content, tags });
+      await api.approveWithEdits(nestId, nodeId, {
+        title: title.trim(),
+        content,
+        tags,
+        ...(baseVersion !== undefined && baseVersion !== null ? { baseVersion } : {}),
+      });
       clearDraft(nestId, nodeId);
       setTouched(false);
       setReviewerEditing(false);
@@ -1839,10 +1844,15 @@ export function DocumentEditor({
   // Your own pending submission that you can't approve: say why and who can
   // (CU-wdqcq02t1r). The list is the server's approve gate, caller excluded.
   const blockedOnOthers = isOwnPendingReview && !canReviewHere;
-  const approvers = useQuery({
+  const approversData = useQuery({
     ...reads.nodeApprovers(nestId, nodeId),
     enabled: blockedOnOthers && !isNew,
-  }).data?.approvers;
+  }).data;
+  // A list cut at the server's cap can't prove that nobody can approve.
+  const approvers =
+    approversData && !(approversData.truncated && approversData.approvers.length === 0)
+      ? approversData.approvers
+      : undefined;
 
   // A pending-review doc opens read-only for a reviewer, and the comment box
   // otherwise sits behind an easy-to-miss "turn on comment mode" affordance.

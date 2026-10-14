@@ -102,6 +102,41 @@ describe("POST /approve-with-edits", () => {
     expect((await editApprove(adam, id, { content: "twice" })).status).toBe(409);
   });
 
+  it("400 on a malformed body, before anything is written", async () => {
+    const id = await submit("bad-body");
+    expect((await editApprove(adam, id, { tags: "prime-document" })).status).toBe(400);
+    expect((await editApprove(adam, id, { content: 42 })).status).toBe(400);
+    const node = await jsonRequest(app, "GET", `${base()}/${id}`, undefined, alice.apiKey);
+    expect(node.data.node.status).toBe("pending_review");
+  });
+
+  it("409 when the author changed the document after the reviewer opened it", async () => {
+    const id = await submit("moving");
+    const seen = (await jsonRequest(app, "GET", `${base()}/${id}`, undefined, adam.apiKey)).data.node.version;
+    // The author keeps revising their own pending submission.
+    const revise = await jsonRequest(app, "PATCH", `${base()}/${id}`, { content: "author's newer text" }, alice.apiKey);
+    expect(revise.status).toBe(200);
+    const res = await editApprove(adam, id, { content: "reviewer text", baseVersion: seen });
+    expect(res.status).toBe(409);
+    const node = await jsonRequest(app, "GET", `${base()}/${id}`, undefined, alice.apiKey);
+    expect(node.data.node.status).toBe("pending_review");
+    expect(node.data.node.content ?? node.data.node.body).toContain("author's newer text");
+  });
+
+  it("still goes through review when the admin would otherwise auto-publish (self-approve on)", async () => {
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/settings`, { allow_self_approve: true }, owner.apiKey);
+    try {
+      const id = await submit("self-approve-on");
+      // An auto-published edit would leave nothing pending, and approve would fail.
+      expect((await editApprove(adam, id, { content: "fixed under self-approve" })).status).toBe(200);
+      const node = await jsonRequest(app, "GET", `${base()}/${id}`, undefined, alice.apiKey);
+      expect(node.data.node.status).toBe("published");
+      expect(node.data.node.content ?? node.data.node.body).toContain("fixed under self-approve");
+    } finally {
+      await jsonRequest(app, "PATCH", `/nests/${nestId}/settings`, { allow_self_approve: false }, owner.apiKey);
+    }
+  });
+
   it("refuses prime documents, and an edit that would make one prime", async () => {
     const prime = await submit("prime-doc", ["prime-document"]);
     expect((await editApprove(adam, prime, { content: "x" })).status).toBe(403);
