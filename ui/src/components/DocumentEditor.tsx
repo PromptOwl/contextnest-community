@@ -1292,7 +1292,10 @@ export function DocumentEditor({
     !!pendingReviewBy &&
     !!currentEmail &&
     pendingReviewBy.toLowerCase() === currentEmail;
-  const isLocked = status === "pending_review" && !isOwnPendingReview;
+  // A reviewer who can also edit may unlock someone's pending submission to
+  // fix it and approve in one step (CU-wdqcq04wnw).
+  const [reviewerEditing, setReviewerEditing] = useState(false);
+  const isLocked = status === "pending_review" && !isOwnPendingReview && !reviewerEditing;
   // Existing document: the Type control is the Turn into entry point.
   const canTurnIntoHere = !isNew && !isLocked && !isPdfNode && turnIntoOptions.length > 0;
   const currentTypeValue = isNew ? newType : (nodeType ?? "document");
@@ -1585,6 +1588,12 @@ export function DocumentEditor({
 
   // Single save path; afterSave continuation feeds onSaved or stashed intent.
   const runSave = async (afterSave: (savedId: string) => void) => {
+    // A plain save of someone else's pending submission is refused (locked);
+    // the reviewer's edits only land through Save & approve.
+    if (reviewerEditing) {
+      setError("Use Save & approve to publish your edits, or Cancel to drop them.");
+      return;
+    }
     if (!canSave) {
       setError(
         isNew
@@ -1735,6 +1744,30 @@ export function DocumentEditor({
       onReviewed();
     } else await loadNode();
   };
+  const handleEditAndApprove = async () => {
+    if (isNew) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api.approveWithEdits(nestId, nodeId, { title: title.trim(), content, tags });
+      clearDraft(nestId, nodeId);
+      setTouched(false);
+      setReviewerEditing(false);
+      toast.success("Edited and approved — the author is notified");
+      // The edits are on the server; leaving must not ask about them.
+      bypassNavGuard(() => (onReviewed ? onReviewed() : void loadNode()));
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const cancelReviewerEdit = async () => {
+    clearDraft(nestId, nodeId);
+    setTouched(false);
+    setReviewerEditing(false);
+    await loadNode();
+  };
   const handleReject = async (note: string) => {
     if (isNew) return;
     await api.rejectNode(nestId, nodeId, note);
@@ -1799,6 +1832,10 @@ export function DocumentEditor({
     status === "pending_review" &&
     canApproveCapability &&
     (!isOwnSubmission || (isOwner && allowSelfApprove));
+  // Edit & approve: someone else's submission, a caller who can both edit and
+  // approve, never on prime documents (server-enforced too).
+  const canEditAndApprove =
+    canReviewHere && !isOwnPendingReview && canEditContent && !isViewOnly && !isReviewerOnly && !effectivePrime;
   // Your own pending submission that you can't approve: say why and who can
   // (CU-wdqcq02t1r). The list is the server's approve gate, caller excluded.
   const blockedOnOthers = isOwnPendingReview && !canReviewHere;
@@ -2403,13 +2440,33 @@ export function DocumentEditor({
               hid Approve/Reject from every reviewer who was not also an editor,
               leaving the document page with no way to resolve a review.
               canReviewHere already carries the full approval check. */}
-          {canReviewHere && (
-            <ReviewActions
-              documentTitle={title}
-              version={baseVersion ?? 1}
-              onApprove={handleApprove}
-              onReject={handleReject}
-            />
+          {/* While a reviewer edits, Save & approve (bottom bar) is the way out —
+              a plain Approve here would publish without their edits. */}
+          {canReviewHere && !reviewerEditing && (
+            <>
+              {canEditAndApprove && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() => {
+                    setCommentMode(false);
+                    setReviewerEditing(true);
+                  }}
+                  title="Fix it yourself, then approve — instead of sending it back"
+                  data-testid="document-editor-review-edit"
+                >
+                  <Pencil className="h-4 w-4 sm:mr-1.5" />
+                  <span className="hidden sm:inline">Edit</span>
+                </Button>
+              )}
+              <ReviewActions
+                documentTitle={title}
+                version={baseVersion ?? 1}
+                onApprove={handleApprove}
+                onReject={handleReject}
+              />
+            </>
           )}
           {visibilityControl}
           {canShare && !isArchived && (
@@ -2677,6 +2734,17 @@ export function DocumentEditor({
                     <AlertDescription>
                       This document is locked while it awaits steward review. Editing
                       is disabled until the review is approved or rejected.
+                    </AlertDescription>
+                  </Alert>
+                )}
+
+                {reviewerEditing && (
+                  <Alert data-testid="document-editor-review-edit-banner">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>
+                      You're editing a submission that's waiting for review. Save &amp; approve
+                      publishes your edits with the author's; the history shows your edit and
+                      the author is notified. Cancel drops your edits.
                     </AlertDescription>
                   </Alert>
                 )}
@@ -3896,6 +3964,35 @@ export function DocumentEditor({
               {(() => {
                 const canWrite = !isViewOnly && !isReviewerOnly && !isLocked;
                 const showSubmit = !isViewOnly && canSubmitForReview;
+                if (reviewerEditing) {
+                  return (
+                    <>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-8"
+                        disabled={saving}
+                        onClick={() => void cancelReviewerEdit()}
+                        data-testid="document-editor-review-edit-cancel"
+                      >
+                        Cancel
+                      </Button>
+                      <span className="inline-flex" title={isDirty ? "Publishes your edits with theirs; the author is notified." : "No changes yet — use Approve if it's fine as is."}>
+                        <Button
+                          size="sm"
+                          className="h-8"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => void handleEditAndApprove()}
+                          disabled={saving || !isDirty}
+                          data-testid="document-editor-save-approve"
+                        >
+                          {saving ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Check className="h-4 w-4 mr-1.5" />}
+                          Save &amp; approve
+                        </Button>
+                      </span>
+                    </>
+                  );
+                }
                 return (
                   <>
                     {/* Discard only where there is unreviewed work to throw away —

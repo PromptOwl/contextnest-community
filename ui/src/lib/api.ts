@@ -2236,6 +2236,18 @@ export async function approveNode(
   });
 }
 
+/** Reviewer edits someone's pending submission and approves it in one step. */
+export async function approveWithEdits(
+  nestId: string,
+  nodeId: string,
+  edit: { title?: string; content?: string; tags?: string[]; note?: string },
+) {
+  return request(`/nests/${nestId}/nodes/${nodeId}/approve-with-edits`, {
+    method: "POST",
+    body: JSON.stringify(edit),
+  });
+}
+
 export async function rejectNode(
   nestId: string,
   nodeId: string,

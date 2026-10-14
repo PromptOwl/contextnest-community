@@ -1273,6 +1273,18 @@ Sets node status → `pending_review`. UI locks editing.
 
 Response: `{ "review": { "id": "...", "status": "approved", ... } }`.
 
+### POST `/nests/:nestId/nodes/:nodeId/approve-with-edits`
+```json
+{ "content": "fixed text", "title": "…", "tags": ["…"], "changeNote": "…", "note": "Approved with reviewer edits" }
+```
+Edit someone else's pending submission and approve it in one step. Every field is optional; `note` (default "Approved with reviewer edits") goes to the author with the approval notification.
+- The caller needs **both** edit rights (`can-edit`) and approve rights (`can-approve`, with the author as submitter). **403** otherwise, and **403** on your own submission (save your edits instead).
+- **403** on a prime document, or when `tags` would make it prime.
+- **409** when the document has no pending review.
+- The edit is a new version authored by the caller, the open review moves onto it and its submitter stays the author; then the normal approve runs (publish, notifications).
+
+Response: same as `/approve`.
+
 ### POST `/nests/:nestId/nodes/:nodeId/reject`
 ```json
 { "note": "needs change X" }

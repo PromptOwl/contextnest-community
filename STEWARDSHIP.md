@@ -24,7 +24,9 @@ A **steward** is a person (identified by email) who governs a subset of the nest
 |---|---|---|---|
 | **Viewer** | yes | no | no |
 | **Editor** | yes | yes | no |
-| **Reviewer** | yes | yes | **yes** |
+| **Reviewer** | yes | no | **yes** |
+
+A reviewer approves or rejects; editing needs the editor role or write access too. Someone who holds both can **Edit & approve** a pending submission (below).
 
 > **Authors can't approve their own work.** Even a reviewer-level steward can't approve a version they themselves authored. Separation of duties, enforced server-side.
 
@@ -44,7 +46,7 @@ If nothing matches and no steward resolves, the **nest owner** is the implicit s
 
 1. **Author** creates or edits a doc. In governed mode it saves as a **draft**.
 2. **Author** clicks **Submit for Review**. The doc becomes **pending** and appears in the review queue for anyone whose scope resolves to that doc — and in their **My Work** page across nests. Until someone acts the author can withdraw it back to draft.
-3. A **Reviewer steward** opens the review queue (or My Work), reads the doc, clicks **Approve** or **Reject**. Rejecting requires a note.
+3. A **Reviewer steward** opens the review queue (or My Work), reads the doc, clicks **Approve** or **Reject**. Rejecting requires a note. A reviewer who can also edit may instead click **Edit**, fix the document and **Save & approve**: the fix becomes its own version under the reviewer's name, the submission still belongs to the author (so the author still can't approve it themselves), and the author is notified. Not offered on prime documents — prime means every change is seen by two people.
 4. On approve, the doc becomes **approved** and is now AI-readable. The approved version number is pinned (`approvedVersion`), so subsequent drafts don't automatically replace it — AI keeps getting the last blessed version until a new one is approved.
 
 ### Auto-publish owner & admin edits (`allow_self_approve`)

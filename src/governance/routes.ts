@@ -30,7 +30,9 @@ import * as externalEdits from "./external-edit-service.js";
 import { loadStewardsConfig } from "./stewards-parser.js";
 import { isSuperAdmin } from "./access-service.js";
 import { engineCache } from "../nodes/engine.js";
+import { isPrimeDocument } from "./prime-service.js";
 import {
+  updateNode,
   bodyOnly,
   deleteNode,
   deleteFolder,
@@ -1160,6 +1162,79 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
   } catch (err: any) {
     return c.json({ error: err.message }, 403);
   }
+});
+
+// POST /nests/:nestId/nodes/:nodeId/approve-with-edits
+//   { title?, content?, tags?, changeNote?, note? }
+//
+// A reviewer fixes a small problem and approves in one step instead of
+// rejecting it back (CU-wdqcq04wnw). Only for someone who can already both
+// edit and approve the document. The edit lands as a new version under the
+// reviewer's name and the open review repoints to it — the submitter stays the
+// author, so separation of duties is unchanged. Refused on prime documents
+// (before or after the edit): prime means every change is seen by two people,
+// and the reviewer's own edit would be seen by one.
+governanceNodeRoutes.post("/:nodeId{.+}/approve-with-edits", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const body = await c.req.json<{
+    title?: string;
+    content?: string;
+    tags?: string[];
+    changeNote?: string;
+    note?: string;
+    client?: unknown;
+  }>();
+  const userEmail = await getUserEmail(c);
+
+  const pending = await reviews.getPendingReview(nestId, nodeId);
+  if (!pending) throw new ConflictError("No pending review for this document");
+  if (pending.requestedBy.toLowerCase() === userEmail.toLowerCase()) {
+    throw new ForbiddenError("This is your own submission — save your edits instead");
+  }
+  const [edit, approval] = await Promise.all([
+    stewardship.canUserEdit(nestId, nodeId, userEmail),
+    stewardship.canUserApprove(nestId, nodeId, userEmail, { requestedBy: pending.requestedBy }),
+  ]);
+  if (!edit.allowed || !approval.allowed) {
+    throw new ForbiddenError("Edit & approve needs both edit and approve rights on this document");
+  }
+  const { storage } = await engineCache.get(nestId);
+  const before = await storage.readDocument(nodeId);
+  const tagsBefore = (before.frontmatter.tags || []) as string[];
+  const metadata = before.frontmatter.metadata;
+  if (
+    (await isPrimeDocument(nestId, tagsBefore, metadata)) ||
+    (body.tags !== undefined && (await isPrimeDocument(nestId, body.tags, metadata)))
+  ) {
+    throw new ForbiddenError(
+      "Prime documents can't be edited and approved in one step — approve or reject it, and leave edits to the author",
+    );
+  }
+
+  const client = attributeRequest(c, body.client);
+  await updateNode(
+    nestId,
+    nodeId,
+    {
+      ...(body.title !== undefined ? { title: body.title } : {}),
+      ...(body.content !== undefined ? { content: body.content } : {}),
+      ...(body.tags !== undefined ? { tags: body.tags } : {}),
+      changeNote: body.changeNote || "Reviewer edit before approval",
+      client,
+    },
+    userEmail,
+    { reviewerEdit: true },
+  );
+  const review = await reviews.approve({
+    nestId,
+    nodeId,
+    approvedBy: userEmail,
+    note: body.note || "Approved with reviewer edits",
+    baseUrl: requestBaseUrl(c.req.url),
+    client,
+  });
+  return c.json({ review });
 });
 
 // POST /nests/:nestId/nodes/:nodeId/reject
