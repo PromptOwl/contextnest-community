@@ -70,7 +70,8 @@ export function overviewFacts(input: {
   if (g) {
     // The green dot only on a real count — "0 AI ready" must not look healthy.
     facts.push({ key: "ai-ready", text: `${g.approved} AI ready`, ...(g.approved > 0 ? { tone: "ok" as const } : {}) });
-    if (g.pending > 0) facts.push({ key: "pending", text: `${g.pending} pending review`, tone: "warn" });
+    // Opens the queue too — a count you can't click reads as a dead end (CU-wdqcq04wnu).
+    if (g.pending > 0) facts.push({ key: "pending", text: `${g.pending} pending review`, tone: "warn", action: "review" });
     if (g.reviewable > 0) facts.push({ key: "review", text: `${g.reviewable} waiting on your review`, action: "review" });
   }
   return facts;

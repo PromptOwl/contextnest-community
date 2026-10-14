@@ -101,6 +101,11 @@ describe("overviewFacts (the summary line that replaces the stat cards)", () => 
     expect(some[some.length - 1]).toMatchObject({ text: "1 waiting on your review", action: "review" });
   });
 
+  it("the pending count opens the review queue too (CU-wdqcq04wnu)", () => {
+    const facts = overviewFacts({ total: 5, folderCount: 0, editedThisWeek: 0, governance: { pending: 2, approved: 3, reviewable: 0 } });
+    expect(facts.find((f) => f.key === "pending")).toMatchObject({ text: "2 pending review", tone: "warn", action: "review" });
+  });
+
   it("no green dot on zero: a governed nest with nothing approved yet must not look healthy", () => {
     const facts = overviewFacts({ total: 5, folderCount: 0, editedThisWeek: 0, governance: { pending: 0, approved: 0, reviewable: 0 } });
     expect(facts.find((f) => f.key === "ai-ready")).toMatchObject({ text: "0 AI ready" });

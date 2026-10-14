@@ -829,6 +829,22 @@ export function NestView({
   useEffect(() => {
     if (!initialLoad && !tabVisible[activeTab]) setActiveTab("overview");
   }, [initialLoad, activeTab, tabVisible[activeTab]]);
+  // The governance stat cards open the queue they count (CU-wdqcq04wnu).
+  const reviewCardProps = tabVisible.review
+    ? {
+      role: "button",
+      tabIndex: 0,
+      title: "Open the review queue",
+      onClick: () => setActiveTab("review"),
+      onKeyDown: (e: React.KeyboardEvent) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        setActiveTab("review");
+      },
+      className:
+        "cursor-pointer transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+    }
+    : {};
 
   // Computed here so the Review Queue card binds to reviewableQueue.length
   // (what the user can actually act on) instead of reviewQueue.length
@@ -1826,7 +1842,7 @@ export function NestView({
             </Card>
             {stewardshipEnabled && (
               <>
-                <Card>
+                <Card {...reviewCardProps} data-testid="nest-stat-pending">
                   <CardHeader className="pb-2">
                     <CardDescription>Pending Approvals</CardDescription>
                     <CardTitle className="text-3xl text-amber-600">
@@ -1868,7 +1884,7 @@ export function NestView({
                     </div>
                   </CardContent>
                 </Card>
-                <Card>
+                <Card {...reviewCardProps} data-testid="nest-stat-review">
                   <CardHeader className="pb-2">
                     <CardDescription>Your Review Queue</CardDescription>
                     <CardTitle className="text-3xl text-blue-600">
