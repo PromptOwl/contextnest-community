@@ -1868,6 +1868,17 @@ export async function getNodeStewards(nestId: string, nodeId: string) {
   );
 }
 
+/** Who besides the caller could approve the caller's submission of this node. */
+export async function getNodeApprovers(nestId: string, nodeId: string) {
+  return request<{
+    approvers: Array<{ email: string; name: string | null }>;
+    /** The roster passed the server's cap — an empty list proves nothing. */
+    truncated?: boolean;
+  }>(
+    `/nests/${nestId}/nodes/${nodeId}/approvers`,
+  );
+}
+
 // ── Deletion requests ─────────────────────────────────────────────────────
 // Flagging is open to anyone who can read the node; resolving needs the same
 // write permission a direct delete does (server-enforced).
@@ -2226,6 +2237,18 @@ export async function approveNode(
   return request(`/nests/${nestId}/nodes/${nodeId}/approve`, {
     method: "POST",
     body: JSON.stringify({ note }),
+  });
+}
+
+/** Reviewer edits someone's pending submission and approves it in one step. */
+export async function approveWithEdits(
+  nestId: string,
+  nodeId: string,
+  edit: { title?: string; content?: string; tags?: string[]; note?: string; baseVersion?: number },
+) {
+  return request(`/nests/${nestId}/nodes/${nodeId}/approve-with-edits`, {
+    method: "POST",
+    body: JSON.stringify(edit),
   });
 }
 

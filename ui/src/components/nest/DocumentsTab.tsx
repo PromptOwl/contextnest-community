@@ -1965,7 +1965,7 @@ export function DocumentsTab({
               ) : moveNewFolderCheck.rewritten && moveNewFolderCheck.path ? (
                 <p className="text-xs text-muted-foreground">
                   Will be created as{" "}
-                  <code className="font-mono">{moveNewFolderCheck.path}</code>
+                  <code className="font-mono">{moveNewFolderCheck.label}</code>
                 </p>
               ) : (
                 <p className="text-xs text-muted-foreground">

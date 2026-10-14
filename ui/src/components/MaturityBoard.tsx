@@ -548,9 +548,19 @@ export function MaturityBoard({
     [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, config.filterFields, fieldDefs, config.hideDoneAfterDays, assigneeFilter, hideBlocked],
   );
 
+  // Folders with nothing in them — the sidebar's census read (shared cache), so
+  // the folder board lists the same folders the tree does.
+  const census = useQuery({
+    ...reads.census(nestId),
+    enabled: effectiveConfig.dimension === "folder",
+  });
+  const emptyFolders = useMemo(
+    () => (census.data?.census.folders ?? []).filter((f) => !f.total).map((f) => f.path),
+    [census.data],
+  );
   const { columns, byColumn } = useMemo(
-    () => groupByColumn(visibleNodes, effectiveConfig),
-    [visibleNodes, effectiveConfig],
+    () => groupByColumn(visibleNodes, effectiveConfig, emptyFolders),
+    [visibleNodes, effectiveConfig, emptyFolders],
   );
 
   // Each column in the active board's saved order (Linear/Jira stack rank).
@@ -1019,18 +1029,16 @@ export function MaturityBoard({
    * Add a column that holds no cards yet.
    *
    * For tags that is a tag value; for folders it is a folder path, and the
-   * folder itself is created by the first card dropped into it (moveNode
-   * writes the path server-side) — so a nest whose documents all sit in Root
-   * has somewhere to drag them, which is the one interaction the board's own
-   * instructions describe. It is layout-only until then, and removable with
-   * the × while it holds no cards.
+   * folder is created right away (the same empty-folder write as New folder)
+   * so it shows in the sidebar tree too — a layout-only column read as a
+   * folder the tree had lost (CU-wdqcq04wnz). The × only hides the column.
    *
    * The folder key is slugified here because the server slugifies the path it
    * writes: keyed on the typed text, "New Folder" would sit empty next to the
    * `new-folder` column the dropped card actually created.
    */
   const addColumn = useCallback(
-    (value: string) => {
+    async (value: string) => {
       const v =
         effectiveConfig.dimension === "folder"
           ? slugifyFolderPath(value)
@@ -1064,6 +1072,12 @@ export function MaturityBoard({
           toast(`Folders may nest at most ${MAX_FOLDER_DEPTH} levels deep.`);
           return;
         }
+        try {
+          await api.createFolder(nestId, v);
+        } catch (e: any) {
+          toast.error(e?.message || "Failed to create folder");
+          return;
+        }
       }
       updateLayout({
         // Append to the order (a key in columnOrder shows even with no cards)
@@ -1076,6 +1090,7 @@ export function MaturityBoard({
       setNewColumn("");
     },
     [
+      nestId,
       orderedKeys,
       effectiveConfig.dimension,
       effectiveConfig.hiddenColumns,
@@ -1576,7 +1591,7 @@ export function MaturityBoard({
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                addColumn(newColumn);
+                void addColumn(newColumn);
               }}
               className="flex items-center gap-1"
             >
@@ -1862,7 +1877,7 @@ export function MaturityBoard({
             </li>
             <li>
               <span className="font-medium text-foreground">new folder</span>{" "}
-              adds a column; it sticks once a card lands in it.
+              creates an empty folder and its column.
             </li>
           </>
         )}

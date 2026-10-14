@@ -1627,6 +1627,14 @@ export interface WriteOptions {
    * a proposal by definition, so no bypass that exists for people applies.
    */
   alwaysDraft?: boolean;
+  /**
+   * A reviewer's edit to someone else's pending submission, made on the way
+   * to approving it (POST …/approve-with-edits, CU-wdqcq04wnw). Lifts the
+   * pending-review lock exactly as an author's own edit does: drafts a new
+   * version and repoints the open review, whose submitter stays the author.
+   * The caller has already checked edit + approve rights.
+   */
+  reviewerEdit?: boolean;
 }
 
 /** Refuse the write if the node's head moved past what the caller saw.
@@ -2701,9 +2709,16 @@ export async function updateNode(
       const pendingReview = hasStewards
         ? await getPendingReview(nestId, nodeId)
         : null;
+      // A reviewer's approve-with-edits revises the submission the same way.
       const isAuthorEditingOwnReview =
         !!pendingReview &&
-        pendingReview.requestedBy.toLowerCase() === userEmail.toLowerCase();
+        (pendingReview.requestedBy.toLowerCase() === userEmail.toLowerCase() ||
+          !!opts.reviewerEdit);
+      // The review resolved between the caller's check and this write: the
+      // reviewer's edit must not land as an ordinary draft or publish.
+      if (opts.reviewerEdit && !pendingReview) {
+        throw new ConflictError("The review was resolved before your edit landed — nothing was saved. Reload the document.");
+      }
       if (pendingReview && !isAuthorEditingOwnReview) {
         throw new LockedError(
           "This document is awaiting steward review and is locked. Approve or reject the pending review before editing."

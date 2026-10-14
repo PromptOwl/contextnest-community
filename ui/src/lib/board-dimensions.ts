@@ -417,6 +417,9 @@ function titleFor(key: string, config: BoardConfig): string {
 export function buildColumns(
   nodes: BoardNode[],
   config: BoardConfig,
+  /** Folders holding nothing yet — columns on the folder board, as in the
+   *  sidebar tree, so an empty folder exists in both or neither (CU-wdqcq04wnz). */
+  emptyFolders: string[] = [],
 ): BoardColumn[] {
   const hidden = new Set(config.hiddenColumns ?? []);
   // Explicit-column board: the columns ARE columnOrder (minus hidden), in that
@@ -438,6 +441,9 @@ export function buildColumns(
   const present = new Set<string>();
   for (const n of nodes) {
     for (const key of shownKeys(n, config, hidden)) present.add(key);
+  }
+  if (config.dimension === "folder") {
+    for (const f of emptyFolders) if (f && !hidden.has(f)) present.add(f);
   }
   // On a field board "Unassigned"/"No priority" is a value you drag TO, so it
   // stays as a drop target even when nothing is in it.
@@ -476,9 +482,10 @@ export function buildColumns(
 export function groupByColumn(
   nodes: BoardNode[],
   config: BoardConfig,
+  emptyFolders: string[] = [],
 ): { columns: BoardColumn[]; byColumn: Record<string, BoardNode[]> } {
   const hidden = new Set(config.hiddenColumns ?? []);
-  const columns = buildColumns(nodes, config);
+  const columns = buildColumns(nodes, config, emptyFolders);
   const byColumn: Record<string, BoardNode[]> = {};
   for (const col of columns) byColumn[col.key] = [];
   for (const n of nodes) {

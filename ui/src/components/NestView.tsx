@@ -30,7 +30,7 @@ import { prettyFolderPath } from "./FolderTree";
 export { NodeTypeIcon } from "./nest/NodeTypeIcon";
 import { folderOfNode } from "./nest/node-display";
 import { GenerateContextModal } from "./GenerateContextModal";
-import { groupNodesByFolder } from "@/lib/nest-overview";
+import { groupNodesByFolder, queueBreakdown } from "@/lib/nest-overview";
 import { useMediaQuery } from "@/lib/use-media-query";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { PushConfirmationModal } from "./PushConfirmationModal";
@@ -135,6 +135,8 @@ interface NestViewProps {
   initialTab?: string;
   /** Reports tab changes up so App can mirror them into ?tab=. */
   onTabChange?: (tab: string) => void;
+  /** Open the settings dialog once the nest has loaded (deep link). */
+  initialSettings?: boolean;
 }
 
 /** Nest tab strip, in the reader's text-tab style (CU-wdqcq02qb1). */
@@ -158,6 +160,7 @@ export function NestView({
   initialFolder,
   initialTab,
   onTabChange,
+  initialSettings,
 }: NestViewProps) {
   const { isAdmin, adminStatus, authMode, sharedDeployment } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
@@ -829,6 +832,30 @@ export function NestView({
   useEffect(() => {
     if (!initialLoad && !tabVisible[activeTab]) setActiveTab("overview");
   }, [initialLoad, activeTab, tabVisible[activeTab]]);
+  // Deep link from a document: open settings only after the first load, so the
+  // dialog never seeds itself from the pre-load defaults (stewardship "off").
+  const settingsOpenedRef = useRef(false);
+  useEffect(() => {
+    if (!initialSettings || initialLoad || settingsOpenedRef.current) return;
+    settingsOpenedRef.current = true;
+    if (!isReadOnly && canManageGovernance) setShowSettings(true);
+  }, [initialSettings, initialLoad, isReadOnly, canManageGovernance]);
+  // The governance stat cards open the queue they count (CU-wdqcq04wnu).
+  const reviewCardProps = tabVisible.review
+    ? {
+      role: "button",
+      tabIndex: 0,
+      title: "Open the review queue",
+      onClick: () => setActiveTab("review"),
+      onKeyDown: (e: React.KeyboardEvent) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        setActiveTab("review");
+      },
+      className:
+        "cursor-pointer transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+    }
+    : {};
 
   // Computed here so the Review Queue card binds to reviewableQueue.length
   // (what the user can actually act on) instead of reviewQueue.length
@@ -844,6 +871,11 @@ export function NestView({
     reviewQueue: reviewQueue.length,
     reviewable: reviewableQueue.length,
   };
+  const queueNote = queueBreakdown({
+    pending: stats.reviewQueue,
+    reviewable: stats.reviewable,
+    ownBlocked: myPendingSubmissions.filter((r) => !reviewableQueue.includes(r)).length,
+  });
 
   // Overview/index landing (CU-wdqcpztgwp): a grouped table-of-contents +
   // recently-edited, so opening a nest presents an index rather than only the
@@ -1826,7 +1858,7 @@ export function NestView({
             </Card>
             {stewardshipEnabled && (
               <>
-                <Card>
+                <Card {...reviewCardProps} data-testid="nest-stat-pending">
                   <CardHeader className="pb-2">
                     <CardDescription>Pending Approvals</CardDescription>
                     <CardTitle className="text-3xl text-amber-600">
@@ -1868,7 +1900,7 @@ export function NestView({
                     </div>
                   </CardContent>
                 </Card>
-                <Card>
+                <Card {...reviewCardProps} data-testid="nest-stat-review">
                   <CardHeader className="pb-2">
                     <CardDescription>Your Review Queue</CardDescription>
                     <CardTitle className="text-3xl text-blue-600">
@@ -1884,11 +1916,9 @@ export function NestView({
                       <Shield className="h-4 w-4" />
                       <span>
                         Need your review
-                        {stats.reviewQueue > stats.reviewable && (
-                          <span className="ml-1 text-xs">
-                            ({stats.reviewQueue} pending total,
-                            {" "}
-                            {stats.reviewQueue - stats.reviewable} outside your scope)
+                        {queueNote && (
+                          <span className="ml-1 text-xs" data-testid="nest-stat-review-note">
+                            ({queueNote})
                           </span>
                         )}
                       </span>
@@ -2295,7 +2325,7 @@ export function NestView({
           ) : newFolderCheck.rewritten && newFolderCheck.path ? (
             <p className="text-xs text-muted-foreground" data-testid="new-folder-preview">
               Will be created as{" "}
-              <code className="font-mono">{newFolderCheck.path}</code>
+              <code className="font-mono">{newFolderCheck.label}</code>
             </p>
           ) : null}
           <DialogFooter>

@@ -228,7 +228,13 @@ interface DocumentEditorProps {
   /** The page's index rail is hidden; the top bar offers to bring it back. */
   sidebarCollapsed?: boolean;
   onToggleSidebar?: () => void;
+  /** Open the nest's settings dialog (the self-approve switch). */
+  onOpenNestSettings?: () => void;
 }
+
+/** Shown when nobody but the submitter could approve (CU-wdqcq02t1r). */
+const NO_APPROVER_COPY =
+  "No one else can approve this. Add a reviewer steward, or turn on “Auto-publish owner & admin edits” in Nest settings.";
 
 export function DocumentEditor({
   nestId,
@@ -250,6 +256,7 @@ export function DocumentEditor({
   onJumpBreadcrumb,
   sidebarCollapsed = false,
   onToggleSidebar,
+  onOpenNestSettings,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
   // Type picker: one tab stop, arrows between the choices (see the radiogroup).
@@ -1285,7 +1292,10 @@ export function DocumentEditor({
     !!pendingReviewBy &&
     !!currentEmail &&
     pendingReviewBy.toLowerCase() === currentEmail;
-  const isLocked = status === "pending_review" && !isOwnPendingReview;
+  // A reviewer who can also edit may unlock someone's pending submission to
+  // fix it and approve in one step (CU-wdqcq04wnw).
+  const [reviewerEditing, setReviewerEditing] = useState(false);
+  const isLocked = status === "pending_review" && !isOwnPendingReview && !reviewerEditing;
   // Existing document: the Type control is the Turn into entry point.
   const canTurnIntoHere = !isNew && !isLocked && !isPdfNode && turnIntoOptions.length > 0;
   const currentTypeValue = isNew ? newType : (nodeType ?? "document");
@@ -1578,6 +1588,12 @@ export function DocumentEditor({
 
   // Single save path; afterSave continuation feeds onSaved or stashed intent.
   const runSave = async (afterSave: (savedId: string) => void) => {
+    // A plain save of someone else's pending submission is refused (locked);
+    // the reviewer's edits only land through Save & approve.
+    if (reviewerEditing) {
+      setError("Use Save & approve to publish your edits, or Cancel to drop them.");
+      return;
+    }
     if (!canSave) {
       setError(
         isNew
@@ -1707,6 +1723,14 @@ export function DocumentEditor({
     await api.submitForReview(nestId, nodeId, note, priority);
     setShowSubmitModal(false);
     toast.success(saveFirst ? "Saved and submitted for review." : "Submitted for review.");
+    // Warn when the submission has nobody to go to — the single-user nest case.
+    if (!(isOwner && allowSelfApprove)) {
+      qc.fetchQuery({ ...reads.nodeApprovers(nestId, nodeId), staleTime: 0 })
+        .then(({ approvers: who, truncated }) => {
+          if (who.length === 0 && !truncated) toast.warning(NO_APPROVER_COPY);
+        })
+        .catch(() => {});
+    }
     // Reload → status flips to pending_review, button hides.
     await loadNode();
   };
@@ -1719,6 +1743,35 @@ export function DocumentEditor({
       toast.success("Approved");
       onReviewed();
     } else await loadNode();
+  };
+  const handleEditAndApprove = async () => {
+    if (isNew) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api.approveWithEdits(nestId, nodeId, {
+        title: title.trim(),
+        content,
+        tags,
+        ...(baseVersion !== undefined && baseVersion !== null ? { baseVersion } : {}),
+      });
+      clearDraft(nestId, nodeId);
+      setTouched(false);
+      setReviewerEditing(false);
+      toast.success("Edited and approved — the author is notified");
+      // The edits are on the server; leaving must not ask about them.
+      bypassNavGuard(() => (onReviewed ? onReviewed() : void loadNode()));
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const cancelReviewerEdit = async () => {
+    clearDraft(nestId, nodeId);
+    setTouched(false);
+    setReviewerEditing(false);
+    await loadNode();
   };
   const handleReject = async (note: string) => {
     if (isNew) return;
@@ -1784,6 +1837,22 @@ export function DocumentEditor({
     status === "pending_review" &&
     canApproveCapability &&
     (!isOwnSubmission || (isOwner && allowSelfApprove));
+  // Edit & approve: someone else's submission, a caller who can both edit and
+  // approve, never on prime documents (server-enforced too).
+  const canEditAndApprove =
+    canReviewHere && !isOwnPendingReview && canEditContent && !isViewOnly && !isReviewerOnly && !effectivePrime;
+  // Your own pending submission that you can't approve: say why and who can
+  // (CU-wdqcq02t1r). The list is the server's approve gate, caller excluded.
+  const blockedOnOthers = isOwnPendingReview && !canReviewHere;
+  const approversData = useQuery({
+    ...reads.nodeApprovers(nestId, nodeId),
+    enabled: blockedOnOthers && !isNew,
+  }).data;
+  // A list cut at the server's cap can't prove that nobody can approve.
+  const approvers =
+    approversData && !(approversData.truncated && approversData.approvers.length === 0)
+      ? approversData.approvers
+      : undefined;
 
   // A pending-review doc opens read-only for a reviewer, and the comment box
   // otherwise sits behind an easy-to-miss "turn on comment mode" affordance.
@@ -2381,13 +2450,33 @@ export function DocumentEditor({
               hid Approve/Reject from every reviewer who was not also an editor,
               leaving the document page with no way to resolve a review.
               canReviewHere already carries the full approval check. */}
-          {canReviewHere && (
-            <ReviewActions
-              documentTitle={title}
-              version={baseVersion ?? 1}
-              onApprove={handleApprove}
-              onReject={handleReject}
-            />
+          {/* While a reviewer edits, Save & approve (bottom bar) is the way out —
+              a plain Approve here would publish without their edits. */}
+          {canReviewHere && !reviewerEditing && (
+            <>
+              {canEditAndApprove && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() => {
+                    setCommentMode(false);
+                    setReviewerEditing(true);
+                  }}
+                  title="Fix it yourself, then approve — instead of sending it back"
+                  data-testid="document-editor-review-edit"
+                >
+                  <Pencil className="h-4 w-4 sm:mr-1.5" />
+                  <span className="hidden sm:inline">Edit</span>
+                </Button>
+              )}
+              <ReviewActions
+                documentTitle={title}
+                version={baseVersion ?? 1}
+                onApprove={handleApprove}
+                onReject={handleReject}
+              />
+            </>
           )}
           {visibilityControl}
           {canShare && !isArchived && (
@@ -2659,14 +2748,59 @@ export function DocumentEditor({
                   </Alert>
                 )}
 
+                {reviewerEditing && (
+                  <Alert data-testid="document-editor-review-edit-banner">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>
+                      You're editing a submission that's waiting for review. Save &amp; approve
+                      publishes your edits with the author's; the history shows your edit and
+                      the author is notified. Cancel drops your edits.
+                    </AlertDescription>
+                  </Alert>
+                )}
+
                 {isOwnPendingReview && (
                   <Alert>
                     <AlertCircle className="h-4 w-4" />
                     <AlertDescription className="flex flex-wrap items-center gap-x-3 gap-y-2">
                       <span className="flex-1 min-w-[16rem]">
+                        {blockedOnOthers && (
+                          <>
+                            <strong>You can't approve your own changes.</strong> A steward
+                            or admin on this nest must approve.{" "}
+                          </>
+                        )}
                         This is still under review. Your edits update the same pending
                         submission — no need to withdraw and resubmit — and the steward
                         reviews your latest version.
+                        {blockedOnOthers && approvers && (
+                          approvers.length > 0 ? (
+                            <span className="mt-1 block" data-testid="document-editor-approvers">
+                              Can approve:{" "}
+                              {approvers.slice(0, 5).map((a) => a.name || a.email).join(", ")}
+                              {approvers.length > 5 && ` and ${approvers.length - 5} more`}
+                            </span>
+                          ) : (
+                            <span
+                              className="mt-1 block font-medium text-amber-700 dark:text-amber-400"
+                              data-testid="document-editor-no-approver"
+                            >
+                              {NO_APPROVER_COPY}
+                            </span>
+                          )
+                        )}
+                        {/* Self-approve never applies to prime documents. */}
+                        {blockedOnOthers && isOwner && !allowSelfApprove && !effectivePrime && onOpenNestSettings && (
+                          <Button
+                            variant="link"
+                            size="sm"
+                            className="h-auto p-0"
+                            onClick={onOpenNestSettings}
+                            data-testid="document-editor-open-settings"
+                          >
+                            Open Nest settings
+                          </Button>
+                        )}
                       </span>
                       {/* Withdraw belongs with the sentence explaining the state, not
                     in the header's action row (CU-wdqcq007pe). */}
@@ -3840,6 +3974,35 @@ export function DocumentEditor({
               {(() => {
                 const canWrite = !isViewOnly && !isReviewerOnly && !isLocked;
                 const showSubmit = !isViewOnly && canSubmitForReview;
+                if (reviewerEditing) {
+                  return (
+                    <>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-8"
+                        disabled={saving}
+                        onClick={() => void cancelReviewerEdit()}
+                        data-testid="document-editor-review-edit-cancel"
+                      >
+                        Cancel
+                      </Button>
+                      <span className="inline-flex" title={isDirty ? "Publishes your edits with theirs; the author is notified." : "No changes yet — use Approve if it's fine as is."}>
+                        <Button
+                          size="sm"
+                          className="h-8"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => void handleEditAndApprove()}
+                          disabled={saving || !isDirty}
+                          data-testid="document-editor-save-approve"
+                        >
+                          {saving ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Check className="h-4 w-4 mr-1.5" />}
+                          Save &amp; approve
+                        </Button>
+                      </span>
+                    </>
+                  );
+                }
                 return (
                   <>
                     {/* Discard only where there is unreviewed work to throw away —
