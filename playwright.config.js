@@ -110,6 +110,14 @@ const testRun = [
     independent: true, // Reads the real directory; arranges its own nest
   },
   {
+    // Admin → Server settings (CN-SET-001 … CN-SET-014). Serial: every case
+    // reads the same server-wide settings. All writes are stubbed.
+    file: 'server-settings/server_settings.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Reads the real settings; writes nothing to the server
+  },
+  {
     // Request access on a denied write (CN-ACCESS-001 … CN-ACCESS-004).
     // Serial: the cases share one seeded nest and build on each other's
     // requests (ask → approve → deny → refused save).
@@ -218,7 +226,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'access-requests'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'access-requests'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -412,6 +420,17 @@ export default defineConfig({
           name: 'teammates',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/teammates/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'server-settings',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/server-settings/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],

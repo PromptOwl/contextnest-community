@@ -31,6 +31,7 @@ import MyDraftsPage from '../page_factory/app/my_drafts_page.js';
 import TeamsPage from '../page_factory/app/teams_page.js';
 import ApiKeysPage from '../page_factory/app/api_keys_page.js';
 import TeammatesPage from '../page_factory/app/teammates_page.js';
+import ServerSettingsPage from '../page_factory/app/server_settings_page.js';
 
 // REST helper used to arrange dashboard preconditions (nests, pins, sharing)
 import DashboardApi from './dashboard_api.js';
@@ -276,6 +277,11 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
       /** REST helper for the Teammates suite — read-only directory lookups. */
       get teammatesApi() {
         return new TeammatesApi(this.page);
+      },
+
+      // Admin → Server settings
+      get serverSettingsPage() {
+        return new ServerSettingsPage(this.page, role.alias);
       },
 
       /**
