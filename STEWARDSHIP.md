@@ -126,6 +126,14 @@ In key mode, when stewardship is enabled on a nest:
 - A non-steward gets an empty list or a 403 on the node they asked for
 - The nest **owner** and any resolved **steward (any role)** can read; **super admins** bypass the check
 
+## Structure rules — who edits them
+
+A nest's structure rules (folders, node types, name formats, templates; see `API.md → Structure rules`) are a nest setting, not a stewardship role:
+
+- **Editing** the rules (`PUT /nests/:id/structure`, the Structure page) is for the nest's **owners and admins** (`canManageStewards`), never a nest-scoped API key. Stewards, editors and reviewers read them like everyone else.
+- **Enforcing** them binds every writer the same way: owners, stewards, editors, agents and `ctx`. Rules have no per-role bypass. An approval publishes only what the rules allow, so a reviewer can't approve a change that breaks them.
+- **The compliance report** lists documents of every status, so it is for callers who read the whole nest. Readers limited by this page's read gate, or by public or org visibility, get the rules but not the report.
+
 ## Server super-admins
 
 Super-admins administer **every** nest on the server without being added per-nest. The effective set is the union of three sources:

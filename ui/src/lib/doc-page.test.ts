@@ -179,7 +179,7 @@ describe("nestSidebarViews — the nest's views under its name in the sidebar", 
 
   it("gives an editor every view, workflows only when the plane is on", () => {
     expect(ids(nestSidebarViews(full, governed))).toEqual([
-      "overview", "review", "board", "graph", "definitions", "workflows",
+      "overview", "review", "board", "graph", "definitions", "workflows", "structure",
     ]);
     expect(ids(nestSidebarViews(full, { ...governed, workflowPlaneEnabled: false }))).not.toContain("workflows");
   });
@@ -194,7 +194,7 @@ describe("nestSidebarViews — the nest's views under its name in the sidebar", 
 
   it("hides the review queue and workflows from a read-only caller", () => {
     const v = ids(nestSidebarViews({ ...full, isReadOnly: true, canEditDocs: false }, governed));
-    expect(v).toEqual(["overview", "board", "graph", "definitions"]);
+    expect(v).toEqual(["overview", "board", "graph", "definitions", "structure"]);
   });
 
   it("leaves a public reader in reader mode with the overview only", () => {
@@ -208,7 +208,7 @@ describe("nestSidebarViews — the nest's views under its name in the sidebar", 
     const v = nestSidebarViews(full, governed);
     expect(v.filter((x) => !x.group).map((x) => x.id)).toEqual(["overview", "review"]);
     expect(v.filter((x) => x.group === "views").map((x) => x.id)).toEqual([
-      "board", "graph", "definitions", "workflows",
+      "board", "graph", "definitions", "workflows", "structure",
     ]);
   });
 

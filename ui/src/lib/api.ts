@@ -1257,6 +1257,114 @@ export async function deleteDefinition(nestId: string, id: string) {
   );
 }
 
+// ─── Structure rules ───────────────────────────────────────────────────
+// One nest's folder layout, naming and template rules, kept in that nest's
+// own vault. The server (the engine) judges everything: this module only
+// carries rules and verdicts.
+
+/** One folder rule as written in the nest's config (its key is the pattern). */
+export interface StructureFolderConfig {
+  description?: string;
+  types?: string[];
+  folder_name?: string;
+  file_name?: string;
+  template?: string;
+  required?: boolean;
+  files?: Record<string, { template?: string; type?: string } | null>;
+}
+
+export interface StructureTemplateConfig {
+  body?: string;
+  required_sections?: string[];
+}
+
+/** The three config blocks a nest's rules live in. */
+export interface StructureRules {
+  structure?: { enforce?: boolean; closed?: boolean };
+  folders?: Record<string, StructureFolderConfig | null>;
+  templates?: Record<string, StructureTemplateConfig | null>;
+}
+
+export interface StructureViolation {
+  code: string;
+  /** Content-relative path (no `nodes/`) of the folder or document at fault. */
+  path: string;
+  rule?: string;
+  message: string;
+}
+
+export interface StructureFolderRule extends StructureFolderConfig {
+  pattern: string;
+  required: boolean;
+  files: Record<string, { template?: string; type?: string }>;
+}
+
+export interface StructureResponse {
+  enforce: boolean;
+  closed: boolean;
+  folders: StructureFolderRule[];
+  templates: Record<string, { body: string; required_sections: string[] }>;
+  warnings?: string[];
+  /** The saved rules do not compile (hand-edited config): why. */
+  error?: string;
+  /** With `folder`: the rule that governs it, or null. */
+  resolved?: (StructureFolderRule & { template_body?: string; required_sections?: string[] }) | null;
+  /** With `report`: existing content that breaks the rules. */
+  violations?: StructureViolation[];
+  /** The saved blocks as written — what the editor starts from. */
+  rules: StructureRules;
+  yaml: string;
+  /** Node types this server accepts. */
+  types: string[];
+}
+
+export interface StructureCheckResult {
+  fieldErrors: Record<string, string>;
+  error?: string;
+  warnings: string[];
+  /** `generated`: the title has no a-z letters or digits, so the name is generated (document-1, …). */
+  results: Array<{ ok: boolean; slug: string; generated?: boolean; violations: StructureViolation[] }>;
+  folders: Array<{
+    folder: string;
+    violations: StructureViolation[];
+    creates: { folders: string[]; files: Array<{ path: string }> };
+  }>;
+  report?: { violations: StructureViolation[] };
+}
+
+export async function getStructure(nestId: string, opts: { folder?: string; report?: boolean } = {}) {
+  const q = new URLSearchParams();
+  if (opts.folder !== undefined) q.set("folder", opts.folder);
+  if (opts.report) q.set("report", "1");
+  const qs = q.toString();
+  return request<StructureResponse>(`/nests/${nestId}/structure${qs ? `?${qs}` : ""}`);
+}
+
+/** Owner/admin. A 400 carries `fieldErrors` keyed like `folders.<pattern>.file_name`. */
+export async function saveStructure(nestId: string, rules: StructureRules) {
+  return request<Omit<StructureResponse, "rules" | "yaml" | "types" | "violations"> & { violations: number | null }>(
+    `/nests/${nestId}/structure`,
+    { method: "PUT", body: JSON.stringify(rules) },
+  );
+}
+
+/** Judge titles and folders against the saved rules, or (owner/admin) a draft. */
+export async function checkStructure(
+  nestId: string,
+  body: {
+    rules?: StructureRules;
+    report?: boolean;
+    /** With `file_name` / `folder_name`, the name is tried against that format alone. */
+    tests?: Array<{ folder?: string; title?: string; name?: string; type?: string; body?: string; file_name?: string; folder_name?: string }>;
+    folders?: string[];
+  },
+) {
+  return request<StructureCheckResult>(`/nests/${nestId}/structure/check`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 // ─── Nodes ──────────────────────────────────────────────────────────────
 
 // Upload an image or video into the nest's assets folder. Multipart (not
