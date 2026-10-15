@@ -1,5 +1,139 @@
 # @promptowl/contextnest-community
 
+## 2.0.0
+
+### Major Changes
+
+- v2.0.0 — custom fields, MCP OAuth connectors, structure rules, superadmin message log, Free tier, and an Enterprise-only SSO split.
+
+  ### Breaking
+
+  - **Enterprise single sign-on needs the `sso` licence feature.** Switching SSO to Entra ID, Okta or a custom OIDC issuer, or turning one back on, now needs an Enterprise key; `PATCH /admin/settings` answers `403 { code: "sso_required" }`. Google sign-in stays on every plan, and servers already signing in through an enterprise provider keep working.
+  - **`MANUAL_SIGN_IN` defaults to `invite-only` when SSO is on.** Password self-registration is closed by default on SSO servers; set `MANUAL_SIGN_IN=open` explicitly to keep the old behaviour (the server then warns at startup and in Settings).
+
+  ### Structure
+
+  - **Structure rules** — per-nest folder and template rules with a Structure page (rules, templates, compliance report), enforced on writes (`src/structure/`). The compliance report is shown only to callers who can read the whole nest. See `docs/prds/structure-rules.md` and `STEWARDSHIP.md`.
+
+### Minor Changes
+
+- 5253db6: Agents can name the model their runner should use.
+
+  - **`model` on agent and skill nodes.** Set it on create or update (REST), the same way as `schedule`: runnable types only, `""` clears it, and converting away from a runnable type drops it. It's stored in frontmatter `metadata.model` and echoed on node responses and `GET /runnables`.
+  - **`agent.model` in the run bundle.** `POST /run/:agent`, `GET /runs/:id/bundle` and MCP `workflow_run` return it (`null` when unset), so a runner can put each agent on its own model instead of one global default.
+
+- 53d29ff: A new comment now notifies the document's watchers and its reviewer stewards (a `comment` inbox row, plus an email when SMTP is configured) — never the comment's author, never anyone who can't open the document, and never twice: someone the comment @mentions, or a thread participant notified of a reply, hears once.
+- 7a76091: Reviewers can fix a submission and approve it in one step instead of sending it back. On a document waiting for review, someone who can both edit and approve it gets an **Edit** button next to Approve / Reject; editing switches Save to **Save & approve**, which publishes the reviewer's fix together with the author's change. The fix is its own version under the reviewer's name, the submission still belongs to the author (separation of duties is unchanged), and the author gets the usual approval notification with the note "Approved with reviewer edits". Not offered on prime documents.
+
+  New endpoint `POST /nests/:nestId/nodes/:nodeId/approve-with-edits` (see API.md). STEWARDSHIP.md no longer says the reviewer role can edit — it never could.
+
+- f57ca70: An unlicensed server now accepts writes while it has 10 or fewer users, matching the published Free tier ("free for up to 10 users, on our cloud or your servers"). A small internal deployment can be stood up and trialled without installing a PromptOwl key first. Users are counted exactly as a Free key counts them (nest owners, admins, reviewers, server admins). Viewers are free and never count, so sign-ups alone can never close the gate. Teammate invites and the teammates list follow the same rule.
+
+  Past 10 users with no valid license, the gate is unchanged: reads work and writes return 503. A server admin is told why: "This server has more than 10 users and no valid PromptOwl license, so writes are disabled. Install a license (POST /license/install) or bring the server back to 10 or fewer users." Everyone else still gets the neutral read-only line. A suspension by PromptOwl still blocks writes regardless of user count.
+
+  One helper, `writesAllowed()` in `src/auth/free-tier.ts`, decides this for every write path: REST nest routes (including the governance views behind the same gate), server-level and per-nest MCP, and workflow run writes.
+
+- 4487267: MCP clients can now sign a person in, instead of carrying a shared API key. Off by default (`MCP_OAUTH_ENABLED`, also a runtime toggle under Settings → Single sign-on → Agent OAuth). It requires `PUBLIC_BASE_URL`, and `/admin/settings` refuses to enable it without one. With the flag off, `/.well-known/*` and `/oauth/*` return 404 and `/mcp` answers unauthenticated callers as before.
+
+  The server has always decided what an MCP caller may read on a per-user basis — `buildNestIndex` gates every nest through `canRead(nestId, userId)`. What was missing was identity at the door. An API key pasted into Claude, ChatGPT or Cursor by four people resolves all four to the same user, so they all see whatever that key's owner can see. Turning this on means each person arrives as themselves and sees their own nests.
+
+  The flow is the standard one. An unauthenticated `/mcp` request gets a `401` whose `WWW-Authenticate` header points at the discovery documents (`/.well-known/oauth-protected-resource/mcp`, RFC 9728, and `/.well-known/oauth-authorization-server`, RFC 8414). The client registers (`POST /oauth/register`, RFC 7591), sends the person to `/oauth/authorize`, and exchanges the resulting code at `/oauth/token` for an access token and, when `offline_access` was granted, a refresh token. A signed-out person sees the app's normal login page at the authorize URL — password, SSO and PromptOwl sign-in all work — and lands on the consent page once signed in. Tokens can be revoked at `/oauth/revoke`. Clients register through DCR; Client ID Metadata Documents are not advertised yet.
+
+  Security properties, each covered by a test:
+
+  - PKCE S256 is required, with RFC 7636 value shapes. Client, redirect and verifier are checked before a code is spent, so someone who only saw a code cannot burn it or revoke the grant.
+  - A code is single-use. One redeemed twice by a presenter holding the verifier revokes the whole grant, including tokens minted by a racing exchange. A rotated refresh token presented again also revokes the grant.
+  - The consent page shows where the approval goes, cannot be framed, and is not cached. Its CSRF token binds the client, redirect, scope, state, challenge and resource it showed, so an approval cannot differ from the page. Control and bidi characters are removed from client names.
+  - Scopes are a real boundary. `nests:read` is refused every write tool, `/index` and the read tools need read scope, and `nests:write` implies read and says so on the consent page. Read-only tools are an allow-list, so a new tool requires write by default.
+  - An expired or revoked token gets `401` with `error="invalid_token"`, so clients refresh or re-authorize. A password change, an admin password reset or removing the user revokes every grant.
+  - A **Connected apps** page (Workspace → Connected apps, shown while the flag is on) lists the agents you connected, with their scopes, destination and last use. **Disconnect** revokes that app's tokens at once (`GET /oauth/connected`, `DELETE /oauth/connected/:clientId`).
+  - Every credential is stored as a SHA-256 hash. Token responses carry `Cache-Control: no-store`. Registration, token and revocation are rate-limited per IP, and idle clients, expired codes and dead tokens are purged hourly.
+
+  Existing API keys and MCP tickets are untouched and keep working exactly as before; this only adds a way in. An OAuth grant is never narrowed to a single nest, so one connection reads across every nest that person can see.
+
+- 8e3643b: Activity tracking for metacognition agents. Workflows → Agents → Activity shows each agent's track record over 7/30/90 days: run outcomes (succeeded, failed, timed out, skipped), tokens and estimated cost, how reviewers judged its proposals (approval rate, pending), comments, the last error, and its recent runs with a link into each trace (`GET /nests/:id/metacognition/:node/stats`). A proposal, comment or access request an agent run produced now carries that run's id (migration 060) and shows "agent run <id>" in the review queue, comment threads and the inbox, opening the trace at `/nest/:id/workflows?run=<id>`. New `RUN_RETENTION_DAYS` (default 0 = keep every run; also in Server settings → Basic) prunes finished runs hourly.
+- 16bd129: Metacognition agents: tighter reach, honest failures, less noise.
+
+  - **Owner pinned (security).** An agent's owner (`configured_by`) is the person who first set it up and no longer moves to whoever saves the settings. Before, a server admin who changed a cap silently became the owner. The persona's reach is its own: its nest, its configured folders, and grants given to the persona itself. The owner's access is only a ceiling. Ownership moves only when the owner can no longer run the agent, and the save reports `owner_changed: true`.
+  - **Access requests from agents.** A new `request_access` tool lets a persona ask for read or propose access to a document or folder in its own nest, at most 3 per run. An admin decides it from the inbox. Approving grants the persona, never its owner, and takes no seat: service identities never count against the plan's seat limits, so a full plan doesn't block the approval. Personas can't ask for a whole nest, or in a nest they don't live in.
+  - **Failures alert.** A run cut off by its wall clock is now `failed` with `stopped_by: "timeout"` instead of `succeeded`. A run lost to a restart is `failed` with `stopped_by: "crashed"`. Every failed run fires `run_failed` to the nest's connectors, including server-executed runs and runs closed over MCP, which never alerted before.
+  - **Cost survives a crash.** Each model turn writes its usage and estimated cost as a `branch` step (`detail.kind: "turn"`), and a crashed run's trace is rebuilt from them.
+  - **Less noise.** An agent can't propose a change that is still waiting for review, or one rejected in the last 7 days. Comments get their own cap, `caps.max_comments` (default 5). A scheduled run with no feeds or MCP servers is skipped without calling the model when nothing changed since its last successful run. Its own proposals don't count as a change. Someone else's edit, a verdict, an access grant to the persona, or a settings save does.
+  - **Learns where it lands.** Its memory now carries its overall approval rate and per-folder verdicts.
+  - **SSRF fence.** Address literals are judged by range, including IPv4 carried in IPv6 (mapped, compatible, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`), plus `198.18.0.0/15`, multicast, reserved and Teredo. A name like `fd-feeds.com` is no longer mistaken for an IPv6 prefix.
+  - **Avatar is a glyph.** An emoji or up to 4 letters. URLs are refused, since a remote image would be fetched by every reviewer's browser.
+  - **Prompt caching** now also covers the run's memory message, not just the system prompt.
+
+- 2b93a70: Custom fields, administered per nest. A nest admin, the owner or a nest-wide reviewer steward defines fields once — text, number, select, multi-select, date, person, link or checkbox — for the nest's tasks (or every node type). Values are stored in each node's frontmatter, so every change is versioned and hash-chained with the document and goes through the usual review rules; one validator covers REST, MCP and the web UI.
+
+  Estimate (a number on a points or hours scale) and Time in status (computed from when a task entered its current column) are one-click presets. Boards group, lane and filter by select, person and checkbox fields; cards show field values and an open document gets a Fields panel. Agents get `context_fields` / `context_create_field` / `context_update_field` / `context_delete_field`, `fields` on `context_create` / `context_update`, a `fields` filter on `context_list`, and values on get / list / query. Migration 062 adds `field_definitions`.
+
+- 2f4c2dd: Run behind firewalls and proxies:
+
+  - **Corporate egress proxy.** `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` now route outbound HTTP(S) through the proxy. This covers licensing, PromptOwl sign-in, models, OIDC, webhooks and telemetry. The proxy needs Node's `NODE_USE_ENV_PROXY=1`, which the Docker image sets. Startup logs the proxy in use with credentials masked, or explains why a configured proxy isn't used (set only in `.env`, flag off, or Node too old). SMTP, PostgreSQL and SES connect directly. Metacognition feed/MCP fetches deliberately do too: they use their own agents so the connect-time SSRF check (resolve, refuse private, pin) still runs. Under a proxy, the proxy would resolve the host and skip that check.
+  - **`NODE_EXTRA_CA_CERTS`** for TLS-inspecting proxies is documented. Startup reports whether it's set and warns if the file is missing.
+  - **`HOST`** binds the listener, e.g. `127.0.0.1`. Unset still listens on every interface.
+  - **`TRUSTED_PROXIES`** (IPs, CIDRs, `loopback`, `private`) limits who can set `X-Forwarded-For`, `X-Real-IP` and `X-Forwarded-Proto`. The client IP is the nearest untrusted hop. Unset keeps the old trust-every-peer behaviour, with a startup warning except on Cloud Run. A malformed value refuses to boot.
+  - `CONFIGURATION.md` gains Reverse proxies (with an nginx/Caddy and port-forwarding guide) and Corporate egress proxy (outbound allowlist) sections, and no longer tells you to "bind to 127.0.0.1" without a way to do it.
+
+- ae24d67: New **Server settings → Network & status** tab for admins running a self-hosted server behind a firewall, VPN, proxy or tunnel:
+
+  - **Server status checklist**: database, migrations, disk, nest storage, license, public address, email, SSO, workflow scheduler and version. Every amber or red item says how to fix it. The migration check also warns when a newer version has already migrated the database (a rolled-back image).
+  - **Reachability**: checks the public address from this server, and tests every outbound host the server calls (DNS → TCP → TLS → HTTP) with a copyable allowlist. HTTPS goes through the egress proxy exactly when the server's own traffic does, honouring `NO_PROXY`. If a proxy is configured but Node isn't using it, the tab says why. Also checks OIDC discovery and clock skew.
+  - **Deployment guide** with copyable recipes for public HTTPS, reverse proxy, VPN-only, NAT, tunnels and corporate egress proxy, plus a Microsoft Entra ID sign-in walkthrough.
+  - The probes are admin-only and rate-limited. Their targets come only from server configuration, and no secret appears in any response.
+
+- 868548f: Bring back the server's own model gateway (Enterprise, licence feature `byok`). Set `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY`, or use Settings → Hootie → Model gateway, to route Hootie and agent runs through your own LiteLLM in front of Bedrock, Azure, Ollama or any provider. Calls and nest content then stay on your network. This was retired by mistake along with the server Anthropic key.
+
+  The URL and key are used as a pair, ahead of PromptOwl's gateway and own-provider keys. The key is checked against the gateway on save and is never returned. A key paired with a gateway URL is never handed to PromptOwl at boot, and clearing the URL clears its key.
+
+- 29aab23: New nest setting "Review SLA (hours)" (`review_sla_hours`, off by default). In a governed nest, a review left pending past the SLA escalates one rung — tag reviewers, then nest reviewers, then the nest owner — with each rung notified once — and only people who can open the document — through the inbox, connectors (`review_escalated`) and email. The rung is recorded on the review (`escalationLevel`, `escalatedAt`) so restarts and concurrent instances never re-notify. Approval rights and separation of duties are unchanged.
+
+  Escalations post to Slack/Teams like review requests: the server-wide webhooks by default (digest), and per-nest connectors subscribed to `review_escalated` ("review overdue" in the connector event picker) or `"*"`. Approving (singly or in bulk), rejecting or withdrawing a review now marks its `review_requested` and `review_escalated` inbox rows read for every recipient.
+
+- b5b9d1a: Enterprise single sign-on is Enterprise only; Google sign-in stays on every plan.
+
+  - **New licence feature `sso`.** Included with Enterprise. Without it, Settings won't switch SSO to Entra ID, Okta or another custom OIDC issuer, or turn one on — `PATCH /admin/settings` answers `403 { code: "sso_required" }` and writes nothing. The Google preset works on every plan.
+  - **No lockouts.** A server already signing in through an enterprise provider keeps working; only changing it, or turning SSO back on after turning it off, needs Enterprise.
+  - **Settings → Single sign-on** splits into a **Google sign-in** card (every plan) and an **Enterprise single sign-on** card (Entra ID tenant or any issuer URL), locked as a whole without `sso`. `GET /admin/settings` returns `sso_available`.
+  - **Docs** (README, LICENSING, CONFIGURATION) list which features every plan gets and which need Enterprise; Enterprise features are on by default with an Enterprise key.
+
+- c9fa1bc: With single sign-on (OIDC) on and configured, `MANUAL_SIGN_IN` now defaults to `invite-only` instead of `open`. Everyone the identity provider vouches for already gets in through SSO, and an open password door let anyone create an account the IdP never sees and can't disable. An explicit `MANUAL_SIGN_IN=open` still works, but the server logs a startup warning, `/admin/settings` reports `manual_sign_in_open_with_sso: true`, and the Settings page shows a warning. While `OIDC_ALLOWED_DOMAINS` is set, password self-registration is limited to those domains as well. Servers without SSO are unchanged.
+- 872bc6f: Tasks over MCP: `context_create` / `context_update` set `assignee`, `due`, `priority` and `parent` with REST's validation; `context_get` / `context_list` / `context_query` return them; `context_list` and `GET /nodes` filter by `assignee`, `priority` and `due_before`. New `context_task_log` tool (and `POST/GET /nodes/:id/task-log`) registers an agent's interaction on a task, attributed to the user plus the API key and client agent, and shows it in the task's activity timeline. Migration `064_task_activity`.
+
+### Patch Changes
+
+- deda245: The Activity panel's rows are easier to scan: the document title leads in bold with the version as a badge, then who read or changed it with the agent as a small chip, then one muted line with the action ("Pulled into search"), where it came from and when. Long titles clamp to two lines and long names truncate, with the full text on hover.
+- 5134b1b: When a reviewer uses Edit & approve, the author's approval notification (and the Slack/Teams message) now says the document was "edited and approved" instead of just "approved", so the author knows changes were made during review.
+- 49cd814: Authors can fix their own drafts from every surface, including while their draft is awaiting review.
+
+  - **Documents list and artifact viewer.** The person who submitted a document for review now gets Edit there too. Both screens used to lock everyone out, while the server and the document editor already let the submitter revise (the open review moves to the new version). Everyone else is still locked until the review resolves.
+  - **Read your draft back over MCP.** `context_my_drafts` takes an optional `id`/`title` and returns _your_ unapproved working copy, so an agent fixing a draft can see what it is fixing. Only the author of the current draft (or whoever submitted its review) with edit rights gets it — owners and stewards are refused. `context_get`, search and query stay approved-only for everyone, the author included, so an agent running on the author's key keeps answering from approved text.
+
+- 54cc21a: Folders on the Board and in the sidebar now match. Adding a folder column on the folder Board creates a real, empty folder (the same write as New folder), so it appears in the sidebar tree straight away instead of existing only as a Board column until a card was dropped in. The folder Board also shows empty folders created anywhere else as columns. Hiding a column with × still only hides it.
+- 624ea67: Make someone a reviewer from the Collaborators tab. On a nest with stewardship on, owners and admins get a Reviewer switch on every person row, and an "Also make them a reviewer" checkbox when adding someone — so adding a user and letting them approve documents happens in one place instead of a trip to the Stewards tab. The switch manages a nest-wide reviewer steward; it is disabled (with a pointer to the Stewards tab) for someone who already holds a different nest-wide steward role, so it never silently replaces it. Tag- and document-scoped stewards are still managed on the Stewards tab.
+- 959de08: Update `hono` to 4.13.13 and `@hono/node-server` to 1.19.17 (upstream security fix), and move every `@tiptap/*` package to 3.31.4 together so the editor's peer dependencies stay in sync.
+- e1b140c: Update `@promptowl/contextnest-engine` to 3.0.0. Community picks up the engine's structure rules (enforced folder layout, naming and templates when a nest owner turns them on), stricter document ids (no new documents under a root `packs/` folder, no `\` or control characters, ids up to 1024 characters), safer imported forgets, vaults that keep working when one file is unreadable, and large documents that no longer stall the server on publish. The one breaking engine API (`applyImportedTombstones`) isn't used here, so no Community code changes were needed.
+- 2a534bf: Update `@promptowl/contextnest-engine` to 3.1.0. An imported document with a fractional `version` (e.g. `1.1`) no longer fails the whole import on Postgres; the engine repairs it to a whole number and reports a warning. Large imports and whole-vault scans keep all their I/O slots busy, which helps most on network-mounted storage. No Community code changes were needed.
+- d8b90fa: The New folder and Move dialogs preview a folder the way the tree names it. Typing `A` used to show "Will be created as `a`" — the lowercase storage path — while the folder appeared as "A" everywhere else. The preview now shows the display name ("Q3 Plans", "Gtm / Deals") and only appears when that name differs from what was typed beyond letter case.
+- 39ab419: Pending review counts open the Review Queue. On the nest Overview, "N pending review" is now a link like "N waiting on your review" next to it, and on the other nest tabs the Pending Approvals and Your Review Queue cards are clickable (mouse or keyboard). Both only act as links when the Review Queue tab is available to the viewer.
+- 5f10334: The nest Activity panel now shows which version an agent read for REST `/search`, `/query` and `/context` reads too (Claude Desktop, Hootie, "Connect all my nests"), not only for MCP reads and single-document fetches. A public reader's `/context` read records the approved version it was served.
+- 638ab20: Dropdown menus no longer stretch across the page when an option is long. The API key nest-scope picker (and every other dropdown) now caps its menu width and wraps long names such as nest titles.
+- e875046: Authors now learn why they can't approve their own submission, and who can.
+
+  - **Your own pending document.** The banner says "You can't approve your own changes. A steward or admin on this nest must approve." and names who can approve it. When nobody else can (the common single-user nest), it says so and points to adding a reviewer steward or turning on "Auto-publish owner & admin edits". A nest owner gets a link that opens Nest settings directly; it isn't offered on prime documents, where self-approve never applies.
+  - **Submitting with no approver.** Submit for review warns when nobody else can approve the document.
+  - **Review Queue card.** "(1 pending total, 1 outside your scope)" now reads "(1 you submitted — someone else must approve it)", and other reviewers' items read "N assigned to other reviewers".
+  - **New endpoint.** `GET /nests/:nestId/nodes/:nodeId/approvers` lists who besides the caller could approve the caller's submission, using the same check as approve. See API.md.
+
+- 9f7ea06: Superadmins can now see every message the server sends in one place: **Admin → Message log**.
+
+  - **What is logged.** Email (with the SMTP/SES message id, and failures recorded as `failed` instead of being swallowed), Slack, Teams and per-nest webhooks (with HTTP status and whether the request went through the egress proxy), in-app inbox notifications (review escalations included), and comments posted by agents.
+  - **Redacted before storage.** Temporary passwords, sign-in and credential links (query string, fragment, or HTML-escaped), JSON credential fields, Bearer/Basic credentials, `hk_`/`cnst_`/provider/GitHub/AWS keys, and webhook URLs (kept as host plus hash) never reach the table. Bodies are capped at 4 KB.
+  - **Superadmin only, and audited.** `GET /admin/messages`, `/:id` and `/views` refuse nest owners, nest admins, nest-scoped keys, and every caller in open mode. Each read writes an access-audit row first; if that write fails, the read fails.
+  - **Settings.** `MESSAGE_LOG_RETENTION_DAYS` (default 30, `0` keeps forever) and `MESSAGE_LOG_STORE_BODIES` (default on), both editable under Settings → Basic → Message log. Messages past retention are pruned whenever the log is read, so they never show after their window.
+  - Inbox notification emails are now stored lowercased on every path, so a mixed-case address no longer misses its notifications.
+
 ## 1.29.1
 
 ### Patch Changes
