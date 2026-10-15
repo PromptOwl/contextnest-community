@@ -54,11 +54,12 @@ export async function logTaskInteraction(params: {
       throw new NotFoundError(`Node not found: ${params.nodeId}`);
     }
   };
-  let task = await readTask();
+  // Permission before existence, so a caller without access can't probe ids.
   const edit = await stewardship.canUserEdit(params.nestId, params.nodeId, params.userEmail);
   if (!edit.allowed) {
     throw new ForbiddenError(`You don't have permission to log activity on this task: ${edit.reason}`);
   }
+  let task = await readTask();
 
   const entry = await recordTaskActivity({
     nestId: params.nestId,
@@ -103,7 +104,10 @@ export async function logTaskInteraction(params: {
       }
     } catch (err) {
       // No entry for a claim that failed: the caller will see the error and retry.
-      await deleteTaskActivity(entry.id);
+      // A failed cleanup must not hide the claim's own error.
+      await deleteTaskActivity(entry.id).catch((e) =>
+        console.error("[task-log] could not remove entry after failed claim", entry.id, e),
+      );
       throw err;
     }
   }
