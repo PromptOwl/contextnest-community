@@ -351,6 +351,8 @@ export interface AdminSettings {
   oidc_auto_provision: boolean;
   /** Tag new documents with the creator's directory department (dept:<slug>). */
   oidc_department_tagging: boolean;
+  /** Enterprise identity providers allowed (licence feature sso). Google is on every plan. */
+  sso_available?: boolean;
   /** Offer every registered account in the add-a-person pickers. Default OFF:
    *  a server holding several unrelated customers would otherwise hand one
    *  customer's staff another customer's email addresses. */
