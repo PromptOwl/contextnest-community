@@ -351,3 +351,49 @@ export function mcpHttpConfig(
     2,
   );
 }
+
+/**
+ * Whether a server URL is obviously private — loopback, RFC 1918, link-local,
+ * CGNAT/Tailscale, or an internal-only name (.local, .internal, .lan, .corp,
+ * .home.arpa, or a bare hostname with no dot). Such a host is unreachable
+ * from a hosted connector (claude.ai, Claude Desktop/Cowork connectors,
+ * ChatGPT): those connect from the vendor's servers, not from the person's
+ * machine, so a VPN on the laptop doesn't help. A public name that merely
+ * resolves to a private address behind a VPN can't be detected here — the
+ * Connect panel says so in words for that case.
+ *
+ * Must match src/shared/private-host.ts on the server (the Network & status
+ * checks use that copy); test/private-host.test.ts compares the two.
+ */
+export function isPrivateHost(serverUrl: string): boolean {
+  let host: string;
+  try {
+    host = new URL(serverUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  host = host.replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (!host.includes(".") && !host.includes(":")) return true; // bare intranet name
+  if (/\.(local|internal|lan|corp|intranet|home\.arpa)$/.test(host)) return true;
+  if (host === "::1" || /^f[cd][0-9a-f]{2}:/.test(host) || host.startsWith("fe80:")) return true;
+  // IPv4-mapped IPv6: URL writes [::ffff:10.0.0.1] as ::ffff:a00:1.
+  const mapped = host.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (mapped) {
+    const [hi, lo] = [parseInt(mapped[1], 16), parseInt(mapped[2], 16)];
+    host = `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+  }
+  // Decimal, octal and hex IPv4 forms need nothing here: URL already
+  // normalizes them to dotted decimal (167772161 and 012.0.0.1 → 10.0.0.1).
+  const m = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (!m) return false;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  return (
+    a === 10 ||
+    a === 127 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254) ||
+    (a === 100 && b >= 64 && b <= 127)
+  );
+}

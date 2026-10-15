@@ -48,6 +48,7 @@ import { modelOptions } from "@/lib/model-options";
 import { useAuth } from "../../../auth/AuthContext";
 import { AgentConnectPanel } from "./AgentConnectPanel";
 import { LicensePanel } from "./LicensePanel";
+import { NetworkStatusPanel } from "./NetworkStatusPanel";
 import { toast } from "sonner";
 
 interface SettingsPageProps {
@@ -56,6 +57,8 @@ interface SettingsPageProps {
     patch: Partial<AdminSettings>,
   ) => void | Promise<void>;
 }
+
+const GOOGLE_ISSUER = "https://accounts.google.com";
 
 const GATE_OPTIONS: { value: SignInGate; label: string; hint: string }[] = [
   { value: "open", label: "Everyone", hint: "Anyone can sign in with PromptOwl." },
@@ -95,6 +98,9 @@ const TABS: {
       "posthog_host",
       "max_body_bytes",
       "trace_retention_days",
+      "message_log_retention_days",
+      "message_log_store_bodies",
+      "run_retention_days",
     ],
   },
   {
@@ -137,6 +143,7 @@ const TABS: {
       "ms_tenant_id",
       "google_token_exchange_enabled",
       "google_client_id",
+      "mcp_oauth_enabled",
     ],
   },
   {
@@ -145,6 +152,8 @@ const TABS: {
     label: "Hootie",
     keys: [
       "provider_keys",
+      "anthropic_base_url",
+      "anthropic_api_key",
       "hootie_enabled",
       "hootie_model",
       "hootie_name",
@@ -180,6 +189,12 @@ const TABS: {
     // Docs only — nothing here persists, so no keys for the unsaved dot.
     id: "agents",
     label: "Connecting agents",
+    keys: [],
+  },
+  {
+    // Read-only health checks, probes and the deployment guide.
+    id: "network",
+    label: "Network & status",
     keys: [],
   },
   {
@@ -488,6 +503,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   // rejected field — otherwise the error banner points at fields on a tab
   // they've navigated away from.
   const [activeTab, setActiveTab] = useState<string>("basic");
+  // SSO provider picked before an issuer is typed (enterprise with no issuer yet).
+  const [oidcPick, setOidcPick] = useState<"google" | "enterprise" | null>(null);
   // Switching SSO off while on its tab hides that tab — fall back to Features.
   const visibleTabs = TABS.filter((t) => !t.visible || (draft && t.visible(draft)));
   const currentTab = visibleTabs.some((t) => t.id === activeTab) ? activeTab : "features";
@@ -604,6 +621,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
       // there's no value to diff against — "staged" means a non-empty string
       // (set) or null (clear). Everything else diffs by value like normal.
       if (
+        k === "anthropic_api_key" ||
         k === "oidc_client_secret" ||
         k === "mcp_signing_secret" ||
         k === "ses_secret_access_key"
@@ -655,6 +673,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   };
   const discard = () => {
     if (settings) setDraft(settings);
+    setOidcPick(null);
     setSaveError(null);
     setFieldErrors({});
   };
@@ -864,6 +883,14 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     );
                   })}
                 </div>
+                {draft.manual_sign_in === "open" && draft.oidc_ready && (
+                  <p className="mt-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                    Single sign-on is on, but anyone can still create a
+                    password account here that your identity provider never
+                    sees and can't disable. Everyone in your directory already
+                    gets in through SSO — choose Invite only.
+                  </p>
+                )}
               </CardContent>
             </Card>
 
@@ -984,6 +1011,79 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   </div>
                   <p className="text-xs text-muted-foreground mt-1">
                     0–3650 — 0 disables pruning entirely.
+                  </p>
+                </CardContent>
+              </Card>
+
+              {/* Superadmin message log (outbound_messages) */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Message log</CardTitle>
+                  <CardDescription>
+                    Every email, Slack and Teams post, webhook, inbox
+                    notification and agent comment this server sends is logged
+                    for superadmins (Admin → Message log). Passwords, sign-in
+                    links, keys and webhook URLs are redacted before storage.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <NumField
+                        value={draft.message_log_retention_days}
+                        min={0}
+                        max={3650}
+                        onChange={(n) => set({ message_log_retention_days: n })}
+                      />
+                      <span className="text-sm text-muted-foreground shrink-0">
+                        days
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      How long to keep messages. 0 keeps them forever. Who
+                      viewed the log is kept for a year regardless.
+                    </p>
+                  </div>
+                  <div className="flex items-start justify-between gap-4 pt-4 border-t">
+                    <div className="pr-4">
+                      <div className="text-sm font-medium">Store message bodies</div>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        Off keeps only who, when, where and whether it was
+                        delivered — no second copy of what people wrote.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={draft.message_log_store_bodies}
+                      onCheckedChange={(v) => set({ message_log_store_bodies: v })}
+                    />
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Agent-run retention (runs + run_steps) */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Agent run retention</CardTitle>
+                  <CardDescription>
+                    How many days of finished agent runs, and their step-by-step
+                    traces, to keep. Proposals and comments an agent made stay;
+                    only their link to the trace stops resolving. Pruned hourly.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex items-center gap-2">
+                    <NumField
+                      value={draft.run_retention_days}
+                      min={0}
+                      max={3650}
+                      onChange={(n) => set({ run_retention_days: n })}
+                    />
+                    <span className="text-sm text-muted-foreground shrink-0">
+                      days
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    0–3650 — 0 (the default) keeps every run.
                   </p>
                 </CardContent>
               </Card>
@@ -1218,9 +1318,10 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   Single sign-on (OIDC)
                 </CardTitle>
                 <CardDescription>
-                  Let teammates sign in with your identity provider — Microsoft
-                  Entra ID, Google, or any OpenID Connect issuer. Turn it on,
-                  then configure it on the Single sign-on tab.
+                  Let teammates sign in with your identity provider. Google
+                  works on every plan; Microsoft Entra ID, Okta and other
+                  OpenID Connect issuers need an Enterprise licence. Turn it
+                  on, then configure it on the Single sign-on tab.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -1233,6 +1334,53 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     onCheckedChange={(v) => set({ oidc_enabled: v })}
                   />
                 </div>
+              </CardContent>
+            </Card>
+
+            {/* Agent OAuth — the authorization server MCP clients sign into.
+                Default off; refuses to turn on without a public base URL,
+                because the metadata must name this server's exact address. */}
+            <Card>
+              <CardHeader>
+                <CardTitle>Agent OAuth — sign-in for MCP clients</CardTitle>
+                <CardDescription>
+                  Let Claude, ChatGPT, Grok or Cursor sign a person in to this
+                  server and receive a token scoped to <em>them</em>, instead
+                  of being handed a shared API key. This is what makes each
+                  person see their own nests: a key pasted by several people
+                  makes all of them the same user here, so they all see
+                  whatever its owner can see.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.mcp_oauth_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.mcp_oauth_enabled}
+                    onCheckedChange={(v) => set({ mcp_oauth_enabled: v })}
+                  />
+                </div>
+
+                {!draft.public_base_url?.trim() && (
+                  <div
+                    role="alert"
+                    className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+                  >
+                    Blocked: set the public base URL on the Basic tab first.
+                    The discovery documents have to name this server's exact
+                    address, and a guessed one fails the client's check with no
+                    useful error.
+                  </div>
+                )}
+
+                <p className="text-xs text-muted-foreground">
+                  While this is on, an MCP client that arrives without a
+                  credential is answered with a sign-in challenge rather than a
+                  flat refusal. Existing API keys keep working exactly as
+                  before.
+                </p>
               </CardContent>
             </Card>
 
@@ -1357,121 +1505,39 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
           {/* Single sign-on — config for the two SSO switches on Features.
               The tab only shows while one of them is on. */}
           <TabsContent value="sso" className="space-y-4">
-            {draft.oidc_enabled && (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-base">
-                    <KeyRound className="h-4 w-4 text-muted-foreground" />
-                    Single sign-on (OIDC)
-                  </CardTitle>
-                  <CardDescription>Your identity provider's issuer and app credentials.</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  {/* "On with a dead flow" is legal server state (e.g. the
-                      secret was cleared while enabled stayed true) — the login
-                      button simply hides. Make that legible instead of silent.
-                      Mirrors the server's readiness rule (isOidcReady) against
-                      the DRAFT rather than reading the saved `oidc_ready`, so it
-                      warns live while the admin is staging the change. */}
-                  {(() => {
-                    const secretPresent =
-                      draft.oidc_client_secret === null
-                        ? false
-                        : typeof draft.oidc_client_secret === "string" &&
-                            draft.oidc_client_secret.trim() !== ""
-                          ? true
-                          : !!settings?.oidc_client_secret_set;
-                    const ready =
-                      draft.oidc_enabled &&
-                      !!draft.oidc_issuer?.trim() &&
-                      !!draft.oidc_client_id?.trim() &&
-                      secretPresent;
-                    if (!draft.oidc_enabled || ready) return null;
-                    return (
-                      <div
-                        role="alert"
-                        className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
-                      >
-                        Enabled but not configured — the SSO sign-in button stays
-                        hidden until the issuer, client ID, and client secret are
-                        all set.
-                      </div>
-                    );
-                  })()}
-
-                  {/* Presets — prefill the issuer for the two common IdPs, and
-                      reflect which one the current issuer matches so the buttons
-                      read as a selector rather than two identical actions. The
-                      match is derived from draft.oidc_issuer, so it also lights
-                      up when the issuer was typed/pasted by hand or loaded from
-                      the server. Anything else (a custom IdP, or blank) leaves
-                      both unselected. */}
-                  {(() => {
-                    const issuer = draft.oidc_issuer?.trim() ?? "";
-                    const preset: "entra" | "google" | null =
-                      /^https:\/\/login\.microsoftonline\.com\/[^/]+\/v2\.0$/.test(
-                        issuer,
-                      )
-                        ? "entra"
-                        : issuer === "https://accounts.google.com"
-                          ? "google"
-                          : null;
-                    return (
-                      <div>
-                        <div className="text-sm font-medium mb-1">Issuer URL</div>
-                        <div
-                          className="flex gap-2 mb-2"
-                          role="group"
-                          aria-label="Identity provider preset"
-                        >
-                          <Button
-                            type="button"
-                            variant={preset === "entra" ? "default" : "outline"}
-                            size="sm"
-                            aria-pressed={preset === "entra"}
-                            onClick={() => {
-                              const tenant = window.prompt(
-                                "Microsoft Entra tenant ID (Directory ID) — find it on your app registration's Overview page:",
-                              );
-                              if (tenant && tenant.trim())
-                                set({
-                                  oidc_issuer: `https://login.microsoftonline.com/${tenant.trim()}/v2.0`,
-                                });
-                            }}
-                          >
-                            Microsoft Entra ID
-                          </Button>
-                          <Button
-                            type="button"
-                            variant={preset === "google" ? "default" : "outline"}
-                            size="sm"
-                            aria-pressed={preset === "google"}
-                            onClick={() =>
-                              set({ oidc_issuer: "https://accounts.google.com" })
-                            }
-                          >
-                            Google
-                          </Button>
-                          {preset === null && issuer !== "" && (
-                            <span className="self-center text-xs text-muted-foreground">
-                              Custom issuer
-                            </span>
-                          )}
-                        </div>
-                        <TextField
-                          error={fieldErrors.oidc_issuer}
-                          value={draft.oidc_issuer ?? ""}
-                          placeholder="https://login.microsoftonline.com/{tenant}/v2.0"
-                          onChange={(v) => set({ oidc_issuer: v })}
-                        />
-                        <p className="text-xs text-muted-foreground mt-1">
-                          https:// only. Must serve
-                          /.well-known/openid-configuration.
-                        </p>
-                      </div>
-                    );
-                  })()}
-
+            {draft.oidc_enabled && (() => {
+              // One OIDC config, two cards: Google (every plan) and enterprise
+              // IdPs (licence feature sso). The issuer decides which card is on.
+              const issuer = draft.oidc_issuer?.trim() ?? "";
+              const provider: "google" | "enterprise" | null =
+                issuer === GOOGLE_ISSUER ? "google" : issuer !== "" ? "enterprise" : oidcPick;
+              const locked = settings?.sso_available === false;
+              const savedIssuer = settings?.oidc_issuer ?? "";
+              const grandfathered = locked && savedIssuer !== "" && savedIssuer !== GOOGLE_ISSUER;
+              const pick = (p: "google" | "enterprise" | null) => {
+                setOidcPick(p);
+                set({ oidc_issuer: p === "google" ? GOOGLE_ISSUER : "" });
+              };
+              const setEnterpriseIssuer = (v: string) => {
+                setOidcPick("enterprise");
+                set({ oidc_issuer: v });
+              };
+              // "On with a dead flow" is legal server state — the login button
+              // just hides. Mirrors isOidcReady against the draft.
+              const secretPresent =
+                draft.oidc_client_secret === null
+                  ? false
+                  : typeof draft.oidc_client_secret === "string" &&
+                      draft.oidc_client_secret.trim() !== ""
+                    ? true
+                    : !!settings?.oidc_client_secret_set;
+              const ready = !!issuer && !!draft.oidc_client_id?.trim() && secretPresent;
+              const tenant =
+                /^https:\/\/login\.microsoftonline\.com\/([^/]+)\/v2\.0$/.exec(issuer)?.[1] ?? "";
+              const looksLikeGuid =
+                /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenant);
+              const credentials = (
+                <>
                   <div>
                     <div className="text-sm font-medium mb-1">Client ID</div>
                     <TextField
@@ -1567,9 +1633,129 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                       Authorized redirect URIs).
                     </p>
                   </div>
-                </CardContent>
-              </Card>
-            )}
+                </>
+              );
+              return (
+                <>
+                  {!ready && (
+                    <div
+                      role="alert"
+                      className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+                    >
+                      Enabled but not configured — the SSO sign-in button stays
+                      hidden until a provider is picked and its client ID and
+                      client secret are set.
+                    </div>
+                  )}
+
+                  <Card data-testid="settings-sso-google">
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2 text-base">
+                        <KeyRound className="h-4 w-4 text-muted-foreground" />
+                        Google sign-in
+                      </CardTitle>
+                      <CardDescription>
+                        Sign in with Google accounts. Available on every plan.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium">Google</span>
+                        <Switch
+                          aria-label="Use Google sign-in"
+                          checked={provider === "google"}
+                          onCheckedChange={(v) => pick(v ? "google" : null)}
+                        />
+                      </div>
+                      {provider === "google" && credentials}
+                    </CardContent>
+                  </Card>
+
+                  <Card data-testid="settings-sso-enterprise">
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2 text-base">
+                        <Shield className="h-4 w-4 text-muted-foreground" />
+                        Enterprise single sign-on
+                        <Badge variant="secondary" className="gap-1">
+                          {locked && <Lock className="h-3 w-3" />}
+                          Enterprise
+                        </Badge>
+                      </CardTitle>
+                      <CardDescription>
+                        Microsoft Entra ID, Okta or any OpenID Connect issuer.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      {locked && (
+                        <p
+                          className={`text-xs ${grandfathered ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}
+                          data-testid="settings-sso-locked"
+                        >
+                          {grandfathered
+                            ? "Sign-in with your current identity provider keeps working. Changing it, or turning it back on after turning it off, needs an Enterprise licence."
+                            : "Needs an Enterprise licence. Google sign-in above works on every plan."}
+                        </p>
+                      )}
+                      <fieldset disabled={locked} className="space-y-4 disabled:opacity-60">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-medium">Enterprise identity provider</span>
+                          <Switch
+                            aria-label="Use an enterprise identity provider"
+                            checked={provider === "enterprise"}
+                            onCheckedChange={(v) => pick(v ? "enterprise" : null)}
+                          />
+                        </div>
+                        {provider === "enterprise" && (
+                          <>
+                            <div>
+                              <label className="text-sm font-medium" htmlFor="entra-tenant">
+                                Microsoft Entra ID — Directory (tenant) ID
+                              </label>
+                              <p className="mb-1.5 text-xs text-muted-foreground">
+                                On your app registration's Overview page in Entra. Fills
+                                in the issuer below.
+                              </p>
+                              <Input
+                                id="entra-tenant"
+                                value={tenant}
+                                placeholder="00000000-0000-0000-0000-000000000000"
+                                autoComplete="off"
+                                spellCheck={false}
+                                onChange={(e) => {
+                                  const t = e.target.value.trim();
+                                  setEnterpriseIssuer(t ? `https://login.microsoftonline.com/${t}/v2.0` : "");
+                                }}
+                              />
+                              {tenant && !looksLikeGuid && (
+                                <p role="alert" className="mt-1.5 text-xs text-amber-700 dark:text-amber-400">
+                                  Use the tenant GUID. <code>common</code>,{" "}
+                                  <code>organizations</code> or a domain name won't
+                                  match Entra's discovery document, and sign-in fails.
+                                </p>
+                              )}
+                            </div>
+                            <div>
+                              <div className="text-sm font-medium mb-1">Issuer URL</div>
+                              <TextField
+                                error={fieldErrors.oidc_issuer}
+                                value={draft.oidc_issuer ?? ""}
+                                placeholder="https://login.microsoftonline.com/{tenant}/v2.0 or https://acme.okta.com"
+                                onChange={setEnterpriseIssuer}
+                              />
+                              <p className="text-xs text-muted-foreground mt-1">
+                                Okta or another provider: paste its issuer. https:// only.
+                                Must serve /.well-known/openid-configuration.
+                              </p>
+                            </div>
+                            {credentials}
+                          </>
+                        )}
+                      </fieldset>
+                    </CardContent>
+                  </Card>
+                </>
+              );
+            })()}
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
@@ -1893,6 +2079,78 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               </CardContent>
             </Card>
 
+            {/* Model gateway — the server's own LiteLLM / Bedrock / Azure /
+                Ollama front (byok). URL + key are a pair; the key is
+                write-only (masked tail back), staged on the global Save. */}
+            {settings?.byok_available !== false && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Model gateway</CardTitle>
+                  <CardDescription>
+                    Route every model call (Hootie and agent runs) through your
+                    own gateway: LiteLLM in front of Bedrock, Azure, Ollama or
+                    any provider, speaking Anthropic's /v1/messages. Calls and
+                    nest content then stay on your network, under your budgets
+                    and spend logs. When set, it takes over from the model keys
+                    above and PromptOwl credits. The key is checked against the
+                    gateway when you save, and it stays on this server.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="anthropic-base-url">Gateway URL</Label>
+                    <TextField
+                      id="anthropic-base-url"
+                      error={fieldErrors.anthropic_base_url}
+                      value={draft.anthropic_base_url ?? ""}
+                      placeholder="http://litellm:4000 (empty turns the gateway off)"
+                      onChange={(v) => set({ anthropic_base_url: v })}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="anthropic-api-key">Gateway key</Label>
+                    <div className="text-xs text-muted-foreground" data-testid="settings-gateway-status">
+                      {draft.anthropic_api_key === null
+                        ? "Will be cleared when you save."
+                        : settings?.anthropic_api_key_masked
+                          ? `Current: ${settings.anthropic_api_key_masked}${
+                              settings.model_source === "own" ? " (in use)" : ""
+                            }`
+                          : settings?.anthropic_base_url
+                            ? "No key yet: the gateway isn't used until it has one."
+                            : "Not set."}
+                    </div>
+                    <TextField
+                      id="anthropic-api-key"
+                      error={fieldErrors.anthropic_api_key}
+                      type="password"
+                      value={typeof draft.anthropic_api_key === "string" ? draft.anthropic_api_key : ""}
+                      placeholder="sk-… (the gateway's virtual key; paste to set or replace)"
+                      onChange={(v) => set({ anthropic_api_key: v })}
+                    />
+                    {settings?.anthropic_api_key_masked && draft.anthropic_api_key !== null && (
+                      <button
+                        type="button"
+                        className="mt-2 text-xs text-destructive hover:underline"
+                        onClick={() => set({ anthropic_api_key: null })}
+                      >
+                        Clear key
+                      </button>
+                    )}
+                    {draft.anthropic_api_key === null && (
+                      <button
+                        type="button"
+                        className="mt-2 text-xs text-muted-foreground hover:underline"
+                        onClick={() => set({ anthropic_api_key: undefined })}
+                      >
+                        Keep current key
+                      </button>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
             {/* Hootie in the nest — the assistant on every page. Sits under
                 the key it depends on: switching it on without a key gives
                 everyone a panel that explains what's missing, not a broken
@@ -1906,8 +2164,9 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   can read in the nest, cites the documents it used, and lets
                   them @tag a colleague — which posts the exchange as a comment
                   and notifies them. Off until you turn it on. Runs on your
-                  own key for the model's provider, or on PromptOwl models with
-                  your plan's credits; without either the panel says so.
+                  model gateway, your own key for the model's provider, or
+                  PromptOwl models with your plan's credits; without any of
+                  them the panel says so.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -1930,7 +2189,11 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   value={draft.hootie_model ?? ""}
                   error={fieldErrors.hootie_model}
                   onChange={(v) => set({ hootie_model: v })}
-                  reloadKey={JSON.stringify(settings?.own_providers ?? {})}
+                  reloadKey={JSON.stringify([
+                    settings?.own_providers ?? {},
+                    settings?.anthropic_base_url ?? "",
+                    settings?.anthropic_api_key_masked ?? null,
+                  ])}
                 />
               </CardContent>
             </Card>
@@ -2188,6 +2451,10 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               publicBaseUrl={draft.public_base_url}
               openMode={authMode === "open"}
             />
+          </TabsContent>
+
+          <TabsContent value="network" className="space-y-4">
+            {activeTab === "network" && <NetworkStatusPanel />}
           </TabsContent>
 
           <TabsContent value="license" className="space-y-4">

@@ -23,6 +23,7 @@ import {
   renderEmail,
   type EmailEventDetails,
 } from "./email-render.js";
+import { recordOutbound, type OutboundContext } from "./outbound-log.js";
 
 let transporterPromise: Promise<any> | null = null;
 let configuredKey: string | null = null;
@@ -199,16 +200,17 @@ export async function notifyEmailForNest(
   nestId: string,
   message: string,
   details?: EmailEventDetails,
+  ctx: OutboundContext = {},
 ): Promise<void> {
   const from = config.NOTIFY_EMAIL_FROM;
   const to = config.NOTIFY_EMAIL_TO;
   if (!transportSettings() || !from || !to) return;
+  let subject = "";
+  let text = "";
   try {
     const transporter = await getTransporter();
     if (!transporter) return;
 
-    let subject: string;
-    let text: string;
     let html: string;
     if (details) {
       // Structured event → rich, per-event email (title, details, link).
@@ -232,7 +234,7 @@ export async function notifyEmailForNest(
     }
 
     // Multipart: plain-text fallback + branded HTML.
-    await transporter.sendMail({
+    const info = await transporter.sendMail({
       from,
       to,
       subject,
@@ -241,7 +243,29 @@ export async function notifyEmailForNest(
       disableFileAccess: true,
       disableUrlAccess: true,
     });
+    await recordOutbound({
+      channel: "email",
+      ...ctx,
+      nestId: ctx.nestId ?? nestId,
+      recipients: [to],
+      subject,
+      body: text,
+      status: "sent",
+      providerId: info?.messageId ?? null,
+      secrets: [details?.tempPassword],
+    });
   } catch (err) {
+    await recordOutbound({
+      channel: "email",
+      ...ctx,
+      nestId: ctx.nestId ?? nestId,
+      recipients: [to],
+      subject,
+      body: text,
+      status: "failed",
+      error: err instanceof Error ? err.message : String(err),
+      secrets: [details?.tempPassword],
+    });
     if (!warnedOnce) {
       warnedOnce = true;
       console.warn(
@@ -343,16 +367,34 @@ export function deliverableRecipients(to: string | string[]): string[] {
 export async function sendEmailToRecipient(
   rawTo: string | string[],
   details: EmailEventDetails,
+  ctx: OutboundContext = {},
 ): Promise<void> {
   const from = config.NOTIFY_EMAIL_FROM;
   const to = deliverableRecipients(rawTo);
   const hasRecipient = to.length > 0;
-  if (!transportSettings() || !from || !hasRecipient) return;
+  if (!transportSettings() || !from) return;
+  const secrets = [details.tempPassword];
+  if (!hasRecipient) {
+    // Every address was a service identity (.invalid) — nothing to deliver,
+    // but the log should still show the message was addressed and dropped.
+    await recordOutbound({
+      channel: "email",
+      ...ctx,
+      recipients: Array.isArray(rawTo) ? rawTo : [rawTo],
+      subject: details.docTitle,
+      status: "skipped",
+      error: "No deliverable recipient (service identities only).",
+      secrets,
+    });
+    return;
+  }
+  let rendered: { subject: string; text: string } = { subject: details.docTitle, text: "" };
   try {
     const transporter = await getTransporter();
     if (!transporter) return;
     const { subject, text, html } = renderEmail(details);
-    await sendMailWithRetry(transporter, {
+    rendered = { subject, text };
+    const info = await sendMailWithRetry(transporter, {
       from,
       ...recipientEnvelope(to, from),
       subject,
@@ -361,7 +403,27 @@ export async function sendEmailToRecipient(
       disableFileAccess: true,
       disableUrlAccess: true,
     });
+    await recordOutbound({
+      channel: "email",
+      ...ctx,
+      recipients: to,
+      subject,
+      body: text,
+      status: "sent",
+      providerId: info?.messageId ?? null,
+      secrets,
+    });
   } catch (err) {
+    await recordOutbound({
+      channel: "email",
+      ...ctx,
+      recipients: to,
+      subject: rendered.subject,
+      body: rendered.text,
+      status: "failed",
+      error: err instanceof Error ? err.message : String(err),
+      secrets,
+    });
     if (!warnedOnce) {
       warnedOnce = true;
       console.warn(

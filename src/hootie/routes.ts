@@ -48,6 +48,7 @@ import {
 } from "./model.js";
 import { effectiveHootieBrand } from "./brand.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
+import { recordOutbound } from "../notify/outbound-log.js";
 
 export const hootieRoutes = new Hono<AuthEnv>();
 
@@ -95,7 +96,7 @@ hootieRoutes.post("/chat", async (c) => {
     return c.json(
       {
         error: hasEntitlement("byok")
-          ? "Hootie needs a model key. A server admin can add one under Settings → Hootie → Model keys."
+          ? "Hootie needs a model key. A server admin can add one, or a model gateway, under Settings → Hootie."
           : "Hootie runs on PromptOwl models, which arrive with this server's next licence check. If it persists, ask your administrator.",
         reason: "no_api_key",
       },
@@ -106,7 +107,8 @@ hootieRoutes.post("/chat", async (c) => {
   const picked = hootieModel(baseCredential);
   const gatewayModel = await resolveGatewayModel(baseCredential, picked);
   // With byok, a provider the admin added their own key for runs on that key.
-  const own = ownModelRoute(gatewayModel);
+  // Only on PromptOwl's gateway: the server's own gateway keeps every call.
+  const own = baseCredential.source === "promptowl" ? ownModelRoute(gatewayModel) : null;
   const credential = own?.credential ?? baseCredential;
   const callModel = own?.model ?? gatewayModel;
   console.log(`[hootie] model=${picked} call=${callModel} ${credentialLabel(credential)}`);
@@ -465,6 +467,19 @@ async function deliverMentions(params: {
       userEmail,
     );
     threadId = thread.id;
+    // Hootie writes under the asker's identity, but the words are the model's:
+    // log it as a persona message so the superadmin log can tell them apart.
+    await recordOutbound({
+      channel: "comment",
+      senderKind: "persona",
+      senderId: `${name} (for ${userEmail})`,
+      recipients: [`document:${anchor.id}`],
+      subject: `${name} answer on ${anchor.id}`,
+      body,
+      status: "sent",
+      nestId,
+      nodeId: anchor.id,
+    });
   } catch (err) {
     console.error("[hootie] mention comment failed", nestId, anchor.id, err);
     return { status: "undeliverable", reason: "post_failed" };

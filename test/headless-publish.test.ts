@@ -290,6 +290,38 @@ describe("a key reads approved content over MCP (what ctx uses)", () => {
   });
 });
 
+describe("task relations stay closed to a key", () => {
+  it("context_get leaves relations off, so a related draft is never named", async () => {
+    const add = await jsonRequest(
+      app, "POST", `/nests/${nestId}/nodes/nodes/guide/relations`,
+      { type: "relates_to", node: "nodes/secretfolder/unreviewed" }, owner.apiKey,
+    );
+    expect(add.status, JSON.stringify(add.data)).toBe(201);
+    // The fixture is real: the owner sees the relation on context_get.
+    expect((await tool(owner.apiKey, "context_get", { id: "nodes/guide" })).text).toMatch(/Unreviewed/);
+
+    const { text, isError } = await tool(readerKey, "context_get", { id: "nodes/guide" });
+    expect(isError).toBe(false);
+    expect(text).toContain("Approved text");
+    expect(text).not.toMatch(/Unreviewed|Relations/);
+  });
+
+  it("refuses the relation tools and the REST relations route", async () => {
+    for (const [name, args] of [
+      ["context_relations", { id: "nodes/guide" }],
+      ["context_add_relation", { id: "nodes/guide", type: "relates_to", node: "nodes/secretfolder/unreviewed" }],
+      ["context_remove_relation", { id: "nodes/guide", relation: "x" }],
+    ] as const) {
+      const r = await tool(readerKey, name, args as any);
+      expect(r.isError, name).toBe(true);
+      expect(r.text, name).not.toMatch(/Unreviewed/);
+    }
+    const rest = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/guide/relations`, undefined, readerKey);
+    expect(rest.status).toBe(403);
+    expect(rest.data.code).toBe("headless_reader");
+  });
+});
+
 describe("a key over REST", () => {
   it("reads the nest, the approved list and an approved node", async () => {
     expect((await jsonRequest(app, "GET", `/nests/${nestId}`, undefined, readerKey)).status).toBe(200);

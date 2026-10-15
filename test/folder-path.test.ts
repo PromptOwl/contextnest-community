@@ -11,29 +11,41 @@ describe("checkFolderPath", () => {
   it("normalizes stray and repeated slashes and segment whitespace", () => {
     expect(checkFolderPath("/ gtm // deals /")).toMatchObject({
       path: "gtm/deals",
+      label: "Gtm / Deals",
       error: null,
-      rewritten: true,
     });
   });
 
-  it("previews the slugified path for a name that needs one", () => {
+  it("previews the name the tree will show, not the lowercase storage path", () => {
+    // CU-wdqcq027ft: "A" is stored as "a" but shown as "A" everywhere else.
+    expect(checkFolderPath("A")).toEqual({ path: "a", label: "A", error: null, rewritten: false });
     expect(checkFolderPath("UPPER Spaces")).toMatchObject({
       path: "upper-spaces",
-      error: null,
+      label: "Upper Spaces",
+      rewritten: false,
+    });
+  });
+
+  it("previews when slugifying changes more than case", () => {
+    expect(checkFolderPath("Q3 Plans!")).toMatchObject({
+      path: "q3-plans",
+      label: "Q3 Plans",
       rewritten: true,
     });
+    expect(checkFolderPath("my_folder")).toMatchObject({ label: "My Folder", rewritten: true });
   });
 
   it("leaves an already-canonical path alone", () => {
     expect(checkFolderPath("gtm/deals")).toEqual({
       path: "gtm/deals",
+      label: "Gtm / Deals",
       error: null,
       rewritten: false,
     });
   });
 
   it("treats an empty path as the nest root, not an error", () => {
-    expect(checkFolderPath("   ")).toEqual({ path: "", error: null, rewritten: false });
+    expect(checkFolderPath("   ")).toEqual({ path: "", label: "", error: null, rewritten: false });
   });
 
   it("refuses reserved dot segments", () => {

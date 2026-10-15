@@ -7,7 +7,8 @@
  * Reads (nest_index) stay open when unlicensed/suspended, matching REST.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import { setupTestEnv } from "./helpers";
+import { setupTestEnv, seedPeople } from "./helpers";
+import { FREE_TIER_MAX_USERS } from "../src/auth/free-tier.js";
 
 const MCP_HEADERS = {
   "Content-Type": "application/json",
@@ -63,11 +64,13 @@ async function buildApp(licenseMock?: () => Record<string, unknown>) {
   const dbClient = await import("../src/db/client.js");
   await dbClient.resetDb();
   await dbClient.initDb();
+  // Past the Free tier, so the unlicensed gate closes.
+  await seedPeople(FREE_TIER_MAX_USERS + 1);
   const { createApp } = await import("../src/app.js");
   return createApp();
 }
 
-describe("server-level /mcp write gate — unlicensed", () => {
+describe("server-level /mcp write gate — unlicensed, past the Free tier", () => {
   let env: ReturnType<typeof setupTestEnv>;
   let app: any;
 
@@ -80,6 +83,7 @@ describe("server-level /mcp write gate — unlicensed", () => {
   it("blocks nest_create with the license message", async () => {
     const out = await callServerTool(app, "nest_create", { name: "X" });
     expect(out).toContain("no valid PromptOwl license");
+    expect(out).toContain("more than 10 users");
   });
 
   it("blocks context_create with the license message", async () => {

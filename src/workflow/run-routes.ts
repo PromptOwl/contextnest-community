@@ -20,13 +20,13 @@ import { config } from "../config.js";
 import { ValidationError, NotFoundError, ConflictError, ForbiddenError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { resolveNestPermission, permissionLevel } from "../shared/access.js";
-import { isSuspended, getSuspensionReason, getCurrentLicense } from "../auth/license.js";
+import { isSuspended, getSuspensionReason } from "../auth/license.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requireWorkflowPlane } from "./edge-type-routes.js";
-import { cancelDescendants } from "./run-service.js";
+import { cancelDescendants, announceRunFailed } from "./run-service.js";
 import { envValues } from "./env-routes.js";
-import { dispatchEvent } from "../notify/dispatch.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "../auth/license-copy.js";
+import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
 import { SERVER_CLAIM, getAgent } from "../metacognition/store.js";
 
 const RUNNABLE_TYPES = ["agent", "skill"];
@@ -188,6 +188,11 @@ async function buildRunBundle(nestId: string, agentNode: string) {
       title: String(doc.frontmatter.title ?? agentNode),
       type: nodeType,
       schedule: (doc.frontmatter.metadata as any)?.schedule ?? null,
+      // The runner model this agent asked for; null → the runner's default.
+      model:
+        (doc.frontmatter.metadata as any)?.model != null
+          ? String((doc.frontmatter.metadata as any).model)
+          : null,
       content: doc.body || "",
     },
     edges,
@@ -444,11 +449,9 @@ async function loadRunWithPermission(
     // Mirror the nest gate's message so scoped keys fail the same way everywhere.
     throw new ForbiddenError("API key not authorized for this nest");
   }
-  if (required === "write") {
-    if (
-      (isSuspended() || !getCurrentLicense()?.valid) &&
-      !(await canSeeLicenseDetail(c.get("userId")))
-    ) {
+  // Same rule as every other write path: writesAllowed (license or Free tier).
+  if (required === "write" && !(await writesAllowed())) {
+    if (!(await canSeeLicenseDetail(c.get("userId")))) {
       throw new ForbiddenError(NEUTRAL_READ_ONLY);
     }
     if (isSuspended()) {
@@ -456,11 +459,7 @@ async function loadRunWithPermission(
         `Server suspended by PromptOwl: ${getSuspensionReason()}`,
       );
     }
-    if (!getCurrentLicense()?.valid) {
-      throw new ForbiddenError(
-        "A valid PromptOwl license is required to write runs.",
-      );
-    }
+    throw new ForbiddenError(FREE_TIER_EXCEEDED_MESSAGE);
   }
 
   const perm =
@@ -571,19 +570,7 @@ runDetailRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
   // Only once the swap above won, or a lost race would cancel the descendants
   // of a run that actually succeeded.
   if (status === "cancelled") await cancelDescendants(run.id);
-  if (status === "failed") {
-    const err =
-      body.trace && typeof body.trace === "object"
-        ? String((body.trace as any).error ?? "").slice(0, 200)
-        : "";
-    void dispatchEvent({
-      kind: "run_failed",
-      nestId: run.nest_id,
-      subjectId: run.id,
-      actor: run.triggered_by,
-      message: `Run of *${run.agent_node}* failed${err ? ` — ${err}` : ""}`,
-    });
-  }
+  if (status === "failed") announceRunFailed(run, body.trace);
   return c.json({ ok: true, status });
 });
 
