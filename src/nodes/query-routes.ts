@@ -541,9 +541,14 @@ queryRoutes.get("/export", async (c) => {
   // `?includeDrafts=1` also exports unapproved drafts; default is approved only.
   if (c.req.query("format") === "bundle") {
     const draftsParam = c.req.query("includeDrafts");
-    const includeDrafts = draftsParam === "1" || draftsParam === "true";
-    const zip = await exportNestBundle(nestId, includeDrafts);
     const bundleUser = c.get("userId");
+    // Drafts are for collaborators. A caller who reaches the nest only through
+    // org/public visibility gets the approved bundle whatever they ask for
+    // (CU-wdqcq0538j).
+    const includeDrafts =
+      (draftsParam === "1" || draftsParam === "true") &&
+      !(await isPublicReader(nestId, bundleUser));
+    const zip = await exportNestBundle(nestId, includeDrafts);
     recordNodeAccess({
       nestId,
       wholeNest: true,
