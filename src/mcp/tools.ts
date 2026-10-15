@@ -98,7 +98,9 @@ import {
   type ClientMetadata,
 } from "../shared/client-metadata.js";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
-import { HEADLESS_READER_TOOLS, headlessToolRefusal, isServiceUser } from "../auth/headless.js";
+import { HEADLESS_READER_TOOLS, headlessToolRefusal, isHeadlessIdentity } from "../auth/headless.js";
+import * as headless from "../auth/headless.js";
+import * as systems from "../auth/systems.js";
 import {
   accessRequestHint,
   accessTargetTitle,
@@ -402,6 +404,13 @@ export const MCP_READ_TOOLS = new Set<string>([
   "workflow_edges_list",
   "workflow_edge_types_list",
 ]);
+
+/** Nest-admin tools (CU-wdqcq0538g): headless publishing and named systems at
+ *  UI/REST parity. Advertised only to a person who owns/administers the nest
+ *  and holds a full credential (mcp/routes.ts), and re-checked on every call
+ *  by the same service layer the REST routes use. Not in MCP_READ_TOOLS or
+ *  HEADLESS_READER_TOOLS, so read-only and access keys can never call them. */
+export const MCP_ADMIN_TOOLS = new Set<string>(["context_headless", "context_systems"]);
 
 export const TOOL_DEFINITIONS = [
   {
@@ -1296,6 +1305,56 @@ export const TOOL_DEFINITIONS = [
       required: ["name"],
     },
   },
+
+  // ─── Nest admin: headless publishing + named systems (CU-wdqcq0538g) ───
+
+  {
+    name: "context_headless",
+    description:
+      "Nest owners/admins: manage HEADLESS publishing — the nest handed out API-only through read-only access keys that read its approved content (never drafts, history or people) over ctx / MCP / the read API. Only a private nest can be headless. action: status | enable | disable (pauses every key) | create_key (label) | revoke_key (key_id). The access key's token is returned once, on create_key.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        action: {
+          type: "string",
+          enum: ["status", "enable", "disable", "create_key", "revoke_key"],
+          description: "What to do.",
+        },
+        label: { type: "string", description: "Who the key is for (create_key), e.g. the buyer." },
+        key_id: { type: "string", description: "Access key id (revoke_key), from status." },
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "context_systems",
+    description:
+      'Nest owners/admins: manage named SYSTEMS (machine identities such as "GitHub sync") — non-human principals with a cnst_sys_ key that read or write the nests you grant. Their writes are attributed to the system and go through the same review/approval rules as an editor. action: list | create (name, capability read|write, nest_ids — defaults to this nest) | rotate (system_id) | revoke (system_id) | add_nest (system_id, nest_id) | remove_nest (system_id, nest_id). Rotate/revoke need admin on every nest the system works in. The plaintext key is returned once, on create/rotate.',
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        action: {
+          type: "string",
+          enum: ["list", "create", "rotate", "revoke", "add_nest", "remove_nest"],
+          description: "What to do.",
+        },
+        name: { type: "string", description: 'System name (create), e.g. "GitHub sync".' },
+        capability: {
+          type: "string",
+          enum: ["read", "write"],
+          description: "read = viewer, write = editor (create). Default read.",
+        },
+        nest_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Nests to grant (create). Defaults to this nest. You must admin each.",
+        },
+        system_id: { type: "string", description: "System id, from list." },
+        nest_id: { type: "string", description: "Nest to add/remove (add_nest / remove_nest)." },
+      },
+      required: ["action"],
+    },
+  },
 ];
 
 // Resolve the LLM-visible body for a node. When the nest enforces
@@ -1502,7 +1561,7 @@ export async function handleToolCall(
   // Headless access keys (CU-wdqcq0314u) read and nothing else. Checked here,
   // the one seam both MCP surfaces share, so no tool — including one added
   // later — is reachable with an access key unless it is on the read list.
-  if (!HEADLESS_READER_TOOLS.has(toolName) && (await isServiceUser(ctx.userId))) {
+  if (!HEADLESS_READER_TOOLS.has(toolName) && (await isHeadlessIdentity(ctx.userId))) {
     void logTraceEvent({
       kind: "mcp",
       tool: toolName,
@@ -1613,6 +1672,155 @@ async function resolveTargetNode(
   return matches[0] ?? `Node not found: ${args.title}`;
 }
 
+/** Service result → MCP tool result (prose + structuredContent). */
+function serviceToTool<T extends object>(
+  r: { ok: true } & T | { ok: false; status: number; error: string },
+  text: (ok: T) => string,
+  data: (ok: T) => unknown,
+): ToolResult {
+  if (!r.ok) {
+    return toolError(
+      r.error,
+      r.status === 404 ? "DOCUMENT_NOT_FOUND" : r.status === 400 || r.status === 409 ? "VALIDATION_FAILED" : "UNAUTHORIZED_ACTION",
+    );
+  }
+  const ok = r as unknown as T;
+  return { text: text(ok), data: data(ok) };
+}
+
+/** The gate every admin tool call passes, whatever was advertised: a person,
+ *  on a full credential, who owns or administers this nest. */
+async function nestAdminRefusal(ctx: McpToolContext): Promise<ToolResult | null> {
+  const bad = await systems.checkActor(ctx.userId, ctx.capability);
+  if (bad) return toolError(bad.error, "UNAUTHORIZED_ACTION");
+  if (!(await systems.isNestAdmin(ctx.nestId, ctx.userId))) {
+    return toolError("Only a nest owner or admin can manage this.", "UNAUTHORIZED_ACTION");
+  }
+  return null;
+}
+
+async function runHeadlessTool(
+  args: Record<string, any>,
+  ctx: McpToolContext,
+): Promise<ToolResult> {
+  const refused = await nestAdminRefusal(ctx);
+  if (refused) return refused;
+  const nestId = ctx.nestId;
+  switch (args.action) {
+    case "status": {
+      const enabled = await headless.isNestHeadless(nestId);
+      const keys = await headless.listHeadlessKeys(nestId);
+      const shared_with = await headless.headlessSharedWith(nestId);
+      const lines = keys.map(
+        (k) => `- **${k.label}** (id: ${k.id}, ${k.key_prefix}) — created ${k.created_at}; last used ${k.last_used_at ?? "never"}`,
+      );
+      return {
+        text: `Headless publishing is ${enabled ? "ON" : "OFF"} for this nest.${
+          keys.length ? `\n\nAccess keys:\n${lines.join("\n")}` : "\n\nNo access keys."
+        }`,
+        data: { enabled, keys, shared_with },
+      };
+    }
+    case "enable":
+    case "disable":
+      return serviceToTool(
+        await headless.setNestHeadless(nestId, args.action === "enable"),
+        (r) =>
+          r.enabled
+            ? "This nest is now published API-only. Mint access keys with create_key."
+            : "Headless publishing is off. Every access key is paused until you turn it back on.",
+        (r) => ({ enabled: r.enabled }),
+      );
+    case "create_key":
+      return serviceToTool(
+        await headless.createHeadlessKey(nestId, args.label, ctx.userId),
+        (r) =>
+          `Created access key "${r.key.label}" (id: ${r.key.id}). It reads only this nest's approved content. Copy it now — it is not shown again:\n\n${r.apiKey}`,
+        (r) => ({ key: r.key, api_key: r.apiKey }),
+      );
+    case "revoke_key": {
+      const ok = await headless.revokeHeadlessKey(nestId, String(args.key_id ?? ""));
+      if (!ok) return toolError("Access key not found", "DOCUMENT_NOT_FOUND");
+      return { text: "Access key revoked. It stopped working immediately.", data: { revoked: true } };
+    }
+    default:
+      return toolError(
+        "action must be one of: status, enable, disable, create_key, revoke_key.",
+        "VALIDATION_FAILED",
+      );
+  }
+}
+
+async function runSystemsTool(
+  args: Record<string, any>,
+  ctx: McpToolContext,
+): Promise<ToolResult> {
+  const actor = { actorId: ctx.userId, actorCapability: ctx.capability };
+  const describe = (s: systems.SystemInfo) =>
+    `**${s.name}** (id: ${s.id}, ${s.capability}, ${s.key_prefix ?? "no key"}) — nests: ${
+      s.nests.map((n) => n.name).join(", ") || "none you admin"
+    }${s.other_nest_count ? ` (+${s.other_nest_count} other)` : ""}; created by ${
+      s.created_by_email ?? s.created_by ?? "unknown"
+    }; last used ${s.last_used_at ?? "never"}`;
+  switch (args.action) {
+    case "list":
+      // Same admin gate as the REST nest listing: this nest's systems.
+      return serviceToTool(
+        await systems.listSystems({ actorId: ctx.userId, capability: ctx.capability, nestId: ctx.nestId }),
+        (r) =>
+          r.systems.length
+            ? `Systems working in this nest:\n\n${r.systems.map((s) => `- ${describe(s)}`).join("\n")}`
+            : "No systems work in this nest.",
+        (r) => ({ systems: r.systems }),
+      );
+    case "create": {
+      const nestIds =
+        Array.isArray(args.nest_ids) && args.nest_ids.length ? args.nest_ids : [ctx.nestId];
+      return serviceToTool(
+        await systems.createSystem({ ...actor, name: args.name, capability: args.capability, nestIds }),
+        (r) => `Created system ${describe(r.system)}. Copy its key now — it is not shown again:\n\n${r.api_key}`,
+        (r) => ({ ...r.system, api_key: r.api_key }),
+      );
+    }
+    case "rotate":
+      return serviceToTool(
+        await systems.rotateSystem({ ...actor, systemId: String(args.system_id ?? "") }),
+        (r) => `Rotated ${r.system.name}. The old key stopped working. New key (shown once):\n\n${r.api_key}`,
+        (r) => ({ ...r.system, api_key: r.api_key }),
+      );
+    case "revoke":
+      return serviceToTool(
+        await systems.revokeSystem({ ...actor, systemId: String(args.system_id ?? "") }),
+        () => "System revoked. Its key stopped working immediately.",
+        () => ({ deleted: true }),
+      );
+    case "add_nest":
+      return serviceToTool(
+        await systems.addSystemNest({ ...actor, systemId: String(args.system_id ?? ""), nestId: args.nest_id }),
+        (r) => `Added. ${describe(r.system)}`,
+        (r) => r.system,
+      );
+    case "remove_nest":
+      return serviceToTool(
+        await systems.removeSystemNest({
+          ...actor,
+          systemId: String(args.system_id ?? ""),
+          nestId: String(args.nest_id ?? ""),
+        }),
+        (r) =>
+          r.system_deleted
+            ? "Removed — that was its last nest, so the system was retired and its key revoked."
+            : "Removed from that nest.",
+        (r) => ({ removed: true, system_deleted: r.system_deleted }),
+      );
+    default:
+      return toolError(
+        "action must be one of: list, create, rotate, revoke, add_nest, remove_nest.",
+        "VALIDATION_FAILED",
+      );
+  }
+}
+
 /**
  * SECURITY INVARIANT — new mutating tools MUST self-gate. The /mcp transport
  * admits READ-tier callers (MCP is always POST, so the route can't
@@ -1640,6 +1848,11 @@ async function runTool(
   }
 
   switch (toolName) {
+    case "context_headless":
+      return runHeadlessTool(args, ctx);
+    case "context_systems":
+      return runSystemsTool(args, ctx);
+
     case "context_init": {
       const { context_md } = await engineApi.run<{ context_md: string | null }>(
         "context_init",
@@ -1930,7 +2143,7 @@ async function runTool(
       // second call — gated per related node like the relations tool. Not for
       // a headless access key: it reads approved content only, and a related
       // node's title could name a draft (context_relations is closed to it too).
-      const relations = (await isServiceUser(ctx.userId))
+      const relations = (await isHeadlessIdentity(ctx.userId))
         ? null
         : await listRelations({ nestId, userId: ctx.userId, userEmail }, node.id).catch(
             (err) => {

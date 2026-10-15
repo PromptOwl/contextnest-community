@@ -11,6 +11,12 @@ import type { NestPermission } from "../shared/access.js";
  *  key, blocked server-side from every write/governance mutation. */
 export type KeyCapability = "read" | "write";
 
+/** Who is behind the credential. 'human' = a person (every session, every
+ *  ordinary key). 'system' = a named system (CU-wdqcq0538g). 'service' = any
+ *  other service identity — a headless access key (CU-wdqcq0314u) or a
+ *  metacognition persona. Unset is treated as 'human'. */
+export type PrincipalKind = "human" | "system" | "service";
+
 export type AuthEnv = {
   Variables: {
     userId: string;
@@ -27,6 +33,8 @@ export type AuthEnv = {
      *  minted read-only is 'read'. Enforced at the REST guard (app.ts) and the
      *  MCP tool dispatch (mcp/tools.ts). */
     keyCapability: KeyCapability;
+    /** Kind of principal behind the credential (see PrincipalKind). */
+    principalKind?: PrincipalKind;
     nestPermission: NestPermission;
     // The API key the request authenticated with, when it used a Bearer key
     // (null for cookie/session requests and open mode). Lets pending-push rows
@@ -74,6 +82,7 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
       // user's own nest roles. Read-only is a property of external KEYS, not of
       // the person logged into the UI.
       c.set("keyCapability", "write");
+      c.set("principalKind", "human");
       return next();
     }
   }
@@ -83,7 +92,10 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   if (key) {
     const keyHash = hashApiKey(key);
     const record = await db.get(
-      "SELECT id, label, user_id, nest_id, capability FROM api_keys WHERE key_hash = ?",
+      `SELECT k.id, k.label, k.user_id, k.nest_id, k.capability, u.is_service,
+              (SELECT 1 FROM system_accounts sa WHERE sa.user_id = k.user_id) AS is_system
+         FROM api_keys k LEFT JOIN users u ON u.id = k.user_id
+        WHERE k.key_hash = ?`,
       [keyHash],
     ) as
       | {
@@ -92,6 +104,8 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
           user_id: string;
           nest_id: string | null;
           capability: string | null;
+          is_service: number | null;
+          is_system: number | null;
         }
       | undefined;
 
@@ -110,6 +124,10 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
       // pre-capability row (or an unrecognised value) fails SAFE for existing
       // integrations rather than locking them out.
       c.set("keyCapability", record.capability === "read" ? "read" : "write");
+      c.set(
+        "principalKind",
+        record.is_system ? "system" : record.is_service ? "service" : "human",
+      );
       return next();
     }
   }

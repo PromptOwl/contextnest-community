@@ -444,7 +444,7 @@ authRoutes.post("/login", async (c) => {
 
   const db = getDb();
   const user = await db.get(
-    "SELECT id, email, name, password_hash, is_admin, is_invited FROM users WHERE LOWER(email) = ?",
+    "SELECT id, email, name, password_hash, is_admin, is_invited, is_service FROM users WHERE LOWER(email) = ?",
     [emailLower],
   ) as
     | {
@@ -454,10 +454,14 @@ authRoutes.post("/login", async (c) => {
       password_hash: string;
       is_admin: number;
       is_invited: number;
+      is_service?: number | null;
     }
     | undefined;
 
-  const check = user
+  // Service identities (systems, access keys, personas) never sign in. Their
+  // placeholder hash can't verify anyway; this says so explicitly, with the
+  // same answer as a wrong password — no oracle for "this is a system".
+  const check = user && !user.is_service
     ? await verifyPassword(body.password, user.password_hash)
     : { ok: false, needsRehash: false };
   if (!user || !check.ok) {
@@ -1267,10 +1271,16 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
   const targetId = c.req.param("userId");
   const db = getDb();
   const target = await db.get(
-    "SELECT id, email FROM users WHERE id = ?",
+    "SELECT id, email, is_service FROM users WHERE id = ?",
     [targetId],
-  ) as { id: string; email: string } | undefined;
+  ) as { id: string; email: string; is_service?: number | null } | undefined;
   if (!target) return c.json({ error: "User not found" }, 404);
+  if (target.is_service) {
+    return c.json(
+      { error: "This is a system, not a person — it has no password. Rotate its key instead." },
+      400,
+    );
+  }
 
   // Peer protection: one server admin must not be able to password-hijack
   // another (license/config/granted alike). Own password goes through
@@ -1343,10 +1353,16 @@ authRoutes.delete("/users/:userId", async (c) => {
 
   const db = getDb();
   const target = await db.get(
-    "SELECT id, email FROM users WHERE id = ?",
+    "SELECT id, email, is_service FROM users WHERE id = ?",
     [targetId],
-  ) as { id: string; email: string } | undefined;
+  ) as { id: string; email: string; is_service?: number | null } | undefined;
   if (!target) return c.json({ error: "User not found" }, 404);
+  if (target.is_service) {
+    return c.json(
+      { error: "This is a system, not a person — it has no password. Rotate its key instead." },
+      400,
+    );
+  }
 
   // Peer protection: a server admin can't delete another server admin
   // (license/config/granted alike). Revoke their superadmin grant first
@@ -1382,6 +1398,16 @@ authRoutes.delete("/users/:userId", async (c) => {
     await tx.run("DELETE FROM nest_collaborators WHERE user_id = ?", [
       target.id,
     ]);
+    // Grants this user MADE outlive them (granted_by is a FK to users): hand
+    // the attribution to the nest owner so removing a person never fails on,
+    // or cascades into, access they gave others — including the systems they
+    // created, which belong to the nest, not to them (CU-wdqcq0538g).
+    await tx.run(
+      `UPDATE nest_collaborators
+          SET granted_by = (SELECT n.user_id FROM nests n WHERE n.id = nest_collaborators.nest_id)
+        WHERE granted_by = ?`,
+      [target.id],
+    );
     await tx.run("DELETE FROM api_keys WHERE user_id = ?", [target.id]);
     // Pins cascade on user_id, but stay explicit like the rows above — and a
     // database created by an earlier build of migration 039 has the FK without

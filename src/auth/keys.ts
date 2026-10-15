@@ -13,9 +13,14 @@ const BCRYPT_ROUNDS = process.env.VITEST ? 4 : 12;
 // the secret is high-entropy, plain SHA-256 is a safe, fast storage hash —
 // bcrypt would add cost with no security benefit for random inputs.
 
-export function generateApiKey(): string {
-  return KEY_PREFIX + randomBytes(32).toString("hex");
+export function generateApiKey(prefix: string = KEY_PREFIX): string {
+  return prefix + randomBytes(32).toString("hex");
 }
+
+/** Named system keys (CU-wdqcq0538g). A recognisable prefix so a `cnst_sys_`
+ *  string in a CI secret store is obviously a machine identity, not a leaked
+ *  person's key. Still starts with `cnst_`, so every Bearer parser accepts it. */
+export const SYSTEM_KEY_PREFIX = "cnst_sys_";
 
 export function hashApiKey(key: string): string {
   return createHash("sha256").update(key).digest("hex");
@@ -144,7 +149,9 @@ export function parseCapability(
  *  platform handing out per-nest endpoints never eats the user's own budget. */
 export const MAX_EXCHANGE_KEYS_PER_NEST = 20;
 
-export type KeyOrigin = "manual" | "exchange";
+/** 'service' = the key of a named system, minted by a nest admin through
+ *  /systems rather than by the principal itself. */
+export type KeyOrigin = "manual" | "exchange" | "service";
 
 /**
  * The one place a key row is minted: generate the secret, store only its
@@ -160,9 +167,11 @@ export async function insertApiKey(
     label: string | null;
     capability: "read" | "write";
     origin: KeyOrigin;
+    /** Secret prefix; defaults to the plain `cnst_`. */
+    prefix?: string;
   },
 ): Promise<{ apiKey: string; keyPrefix: string }> {
-  const apiKey = generateApiKey();
+  const apiKey = generateApiKey(opts.prefix);
   const keyPrefix = getKeyPrefix(apiKey);
   await db.run(
     "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, nest_id, label, capability, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

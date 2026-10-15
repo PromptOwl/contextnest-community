@@ -2,6 +2,7 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import type { Querier } from "../db/adapter.js";
 import { generateApiKey, getKeyPrefix, hashApiKey } from "./keys.js";
+import { parseSharedTeams } from "../governance/teams-service.js";
 
 /**
  * Headless publishing (CU-wdqcq0314u): a private nest handed out as API-only
@@ -124,7 +125,26 @@ export async function isServiceUser(userId: string | null | undefined): Promise<
   return !!row?.is_service;
 }
 
-/** Number of real people on this server — every account except access-key
+/**
+ * Is this a service identity that gets the headless-reader clamp — an access
+ * key's identity (or a metacognition persona) — as opposed to a named SYSTEM
+ * (CU-wdqcq0538g)? Systems are service identities too (no login, not a seat),
+ * but they work inside their granted nests through ordinary collaborator rows,
+ * so the headless allowlists must not narrow them. One definition, used by
+ * every place that used to read `is_service` as "headless".
+ */
+export async function isHeadlessIdentity(userId: string | null | undefined): Promise<boolean> {
+  if (!userId) return false;
+  const row = (await getDb().get(
+    `SELECT u.is_service,
+            (SELECT 1 FROM system_accounts sa WHERE sa.user_id = u.id) AS is_system
+       FROM users u WHERE u.id = ?`,
+    [userId],
+  )) as { is_service: number | null; is_system: number | null } | undefined;
+  return !!row?.is_service && !row?.is_system;
+}
+
+/** Number of real people on this server/** Number of real people on this server — every account except access-key
  *  service identities. */
 export async function countPeople(): Promise<number> {
   const row = (await getDb().get(
@@ -228,4 +248,90 @@ async function removeServiceIdentities(db: Querier, userIds: string[]): Promise<
     await db.run("DELETE FROM api_keys WHERE user_id = ?", [id]);
     await db.run("DELETE FROM users WHERE id = ? AND is_service = 1", [id]);
   }
+}
+
+// ─── Owner controls, shared by REST (nests/headless-routes.ts) and MCP
+//     (context_headless in mcp/tools.ts) so the two surfaces can't drift. ───
+
+export const MAX_HEADLESS_LABEL = 80;
+
+export type HeadlessResult<T> =
+  | ({ ok: true } & T)
+  | { ok: false; status: 400 | 404 | 409; error: string };
+
+/** Who keeps access regardless of headless — counted so the owner sees it
+ *  before publishing. */
+export async function headlessSharedWith(nestId: string) {
+  const db = getDb();
+  const count = async (sql: string) =>
+    Number(((await db.get(sql, [nestId])) as { c: number | string }).c);
+  const row = (await db.get("SELECT shared_teams FROM nests WHERE id = ?", [nestId])) as
+    | { shared_teams: string | null }
+    | undefined;
+  return {
+    collaborators: await count("SELECT COUNT(*) AS c FROM nest_collaborators WHERE nest_id = ?"),
+    teams: parseSharedTeams(row?.shared_teams ?? null).length,
+    grants: await count("SELECT COUNT(DISTINCT user_id) AS c FROM grants WHERE nest_id = ?"),
+  };
+}
+
+/** Publish API-only (enabled) or stop (pauses every key). Only a private nest
+ *  can be headless: an org or public nest is already readable by people
+ *  without a key, which is the opposite of the promise. */
+export async function setNestHeadless(
+  nestId: string,
+  enabled: unknown,
+): Promise<HeadlessResult<{ enabled: boolean }>> {
+  if (typeof enabled !== "boolean") {
+    return { ok: false, status: 400, error: "enabled must be a boolean" };
+  }
+  const db = getDb();
+  const nest = (await db.get("SELECT visibility FROM nests WHERE id = ?", [nestId])) as
+    | { visibility: string }
+    | undefined;
+  if (!nest) return { ok: false, status: 404, error: "Nest not found" };
+  if (enabled && nest.visibility !== "private") {
+    return {
+      ok: false,
+      status: 409,
+      error: `Only a private nest can be published API-only — this one is ${nest.visibility}. Make it private first.`,
+    };
+  }
+  // Conditional on still being private, so a visibility change racing this
+  // request can't leave a nest both public and headless.
+  const res = enabled
+    ? await db.run("UPDATE nests SET headless = 1 WHERE id = ? AND visibility = 'private'", [nestId])
+    : await db.run("UPDATE nests SET headless = 0 WHERE id = ?", [nestId]);
+  if (enabled && res.changes === 0) {
+    return { ok: false, status: 409, error: "The nest is no longer private — make it private first." };
+  }
+  return { ok: true, enabled };
+}
+
+/** Validate a label and mint one access key on a headless nest. */
+export async function createHeadlessKey(
+  nestId: string,
+  rawLabel: unknown,
+  createdBy: string,
+): Promise<HeadlessResult<{ key: HeadlessKeySummary; apiKey: string }>> {
+  const label = typeof rawLabel === "string" ? rawLabel.trim() : "";
+  if (!label) {
+    return {
+      ok: false,
+      status: 400,
+      error: "label is required — name who the key is for (e.g. the buyer)",
+    };
+  }
+  if (label.length > MAX_HEADLESS_LABEL) {
+    return { ok: false, status: 400, error: `label must be ${MAX_HEADLESS_LABEL} characters or fewer` };
+  }
+  if (!(await isNestHeadless(nestId))) {
+    return {
+      ok: false,
+      status: 409,
+      error: "Publish this nest API-only first — access keys only work on a headless nest.",
+    };
+  }
+  const { key, apiKey } = await mintHeadlessKey(nestId, label, createdBy);
+  return { ok: true, key, apiKey };
 }

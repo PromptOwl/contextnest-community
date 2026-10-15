@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { isSystemUser } from "../auth/systems.js";
 import { getDb } from "../db/client.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import {
@@ -32,7 +33,10 @@ sharingRoutes.get("/collaborators", async (c) => {
   const db = getDb();
   const nestId = c.req.param("nestId")!;
   const collabs = (await db.all(
-    `SELECT nc.*, u.email FROM nest_collaborators nc
+    `SELECT nc.*, u.email,
+            CASE WHEN EXISTS (SELECT 1 FROM system_accounts sa WHERE sa.user_id = nc.user_id)
+                 THEN 'system' ELSE 'human' END AS principal_kind
+       FROM nest_collaborators nc
        LEFT JOIN users u ON nc.user_id = u.id
        WHERE nc.nest_id = ?
        ORDER BY nc.granted_at`,
@@ -98,6 +102,10 @@ sharingRoutes.patch("/collaborators/:collabId", async (c) => {
     "SELECT user_id FROM nest_collaborators WHERE id = ? AND nest_id = ?",
     [c.req.param("collabId")!, c.req.param("nestId")!],
   )) as { user_id: string } | undefined;
+  // A system stays a viewer or editor — never a nest admin (CU-wdqcq0538g).
+  if (row && body.permission === "admin" && (await isSystemUser(row.user_id))) {
+    throw new ValidationError("A system can be a viewer or an editor, never a nest admin.");
+  }
   if (row) await assertCanGrant([{ userId: row.user_id, next: permissionClass(body.permission) }]);
   // Scope to the nest in the URL — the guard authorised the caller against
   // THIS nest, so the row we touch must belong to it (a bare `id =` match

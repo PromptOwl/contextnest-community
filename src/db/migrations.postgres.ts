@@ -91,6 +91,7 @@ export const HISTORICAL_MIGRATIONS = [
   "062_field_definitions",
   "065_api_key_capability",
   "066_api_key_origin",
+  "067_system_accounts",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1155,6 +1156,18 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_reviews_run ON review_requests(run_id) WHERE run_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_annot_comments_run ON annotation_comments(run_id) WHERE run_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_access_requests_run ON access_requests(run_id) WHERE run_id IS NOT NULL;
+  `);
+
+  // Migration 067 parity: named systems (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS system_accounts (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      capability TEXT NOT NULL CHECK(capability IN ('read', 'write')),
+      created_by TEXT,
+      created_by_email TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW}
+    );
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

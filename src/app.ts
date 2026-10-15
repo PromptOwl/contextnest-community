@@ -116,6 +116,7 @@ import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
 import { nestScopedKeyGuard } from "./auth/nest-scope-guard.js";
 import { isValidTicketSub } from "./auth/sso-token.js";
 import { resolveMcpTicketUser, mcpTicketSecrets } from "./auth/mcp-ticket.js";
+import { systemRoutes, nestSystemRoutes } from "./auth/system-routes.js";
 import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
@@ -269,6 +270,34 @@ const openModeMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   c.set("keyCapability", "write");
   await next();
 });
+
+/** Nest surfaces a named system key (CU-wdqcq0538g) never reaches, whatever
+ *  its collaborator standing: people, sharing, settings, publishing,
+ *  credentials and automation wiring. A system syncs content; it doesn't
+ *  administer the nest (and can't confirm its own held pushes). */
+const SYSTEM_DENIED_RESOURCES = new Set([
+  "collaborators",
+  "teams",
+  "visibility",
+  "settings",
+  "reader-mode",
+  "grants",
+  "systems",
+  "headless",
+  "publications",
+  "branding",
+  "metacognition",
+  "schedules",
+  "hooks",
+  "env",
+  "connectors",
+  "trace",
+  "stewards",
+  "archive",
+  "restore",
+  "push-allowlist",
+  "pending-pushes",
+]);
 
 // Unauth GETs in key mode: allow read-only access to a specific nest
 // (/nests/:id and its sub-routes) so public nests work without login.
@@ -2513,6 +2542,13 @@ export function createApp(): Hono<AuthEnv> {
   app.use("/mcp", mcpOAuthBearer);
   app.route("/mcp", serverMcpRoutes);
 
+  // Named systems (CU-wdqcq0538g). Admin-gated in the service layer
+  // (owner/admin of the nests involved); a system or headless key never gets
+  // here (the nest-scope guard fences those out).
+  app.use("/systems", flexAuthMiddleware);
+  app.use("/systems/*", flexAuthMiddleware);
+  app.route("/systems", systemRoutes);
+
   // === All /nests routes ===
   const nestsApp = new Hono<AuthEnv>();
 
@@ -2812,6 +2848,19 @@ export function createApp(): Hono<AuthEnv> {
     // stewards, sharing, sync — is a mutation and is denied. This sits BEFORE
     // the per-route permission resolution below because a read-only credential
     // is denied regardless of how much nest permission the underlying user has.
+    // Named system keys never touch the nest's people/settings/credential/
+    // automation surfaces, even when their collaborator standing would allow
+    // it (CU-wdqcq0538g).
+    if (
+      c.get("principalKind") === "system" &&
+      SYSTEM_DENIED_RESOURCES.has(parts[1])
+    ) {
+      return deny(
+        403,
+        "A system key can't manage this nest's people, settings, publishing, keys or automation.",
+      );
+    }
+
     if (c.get("keyCapability") === "read") {
       const isPureRead =
         c.req.method === "GET" || isReadQuery || isMcpTransport;
@@ -3390,6 +3439,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/hooks", hookNestRoutes);
   nestsApp.route("/:nestId/definitions", definitionRoutes);
   nestsApp.route("/:nestId/assets", assetRoutes);
+  nestsApp.route("/:nestId/systems", nestSystemRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
 
   app.route("/nests", nestsApp);

@@ -2129,6 +2129,29 @@ export function runMigrations(db: Database.Database): void {
     }
     recordMigration("066_api_key_origin");
   }
+
+  // 067: named systems (CU-wdqcq0538g). A system is a SERVICE identity
+  // (users.is_service = 1, the same no-login identity headless access keys and
+  // metacognition personas use, so every "people only" filter — seats,
+  // teammates, people search, sessions, OIDC, PromptOwl tickets — already
+  // excludes it). This table is what tells a system apart from those: its
+  // display name, its capability on the nests it is granted (read → viewer,
+  // write → editor collaborator rows) and who created it. created_by is
+  // deliberately NOT a foreign key: the system belongs to its nest(s), so
+  // removing the creator must neither cascade into it nor be blocked by it.
+  if (!hasMigration("067_system_accounts")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS system_accounts (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        capability TEXT NOT NULL CHECK(capability IN ('read', 'write')),
+        created_by TEXT,
+        created_by_email TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    recordMigration("067_system_accounts");
+  }
 }
 
 /**

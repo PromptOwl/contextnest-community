@@ -65,7 +65,8 @@ import { isDerivedAnnotationsNode } from "../nodes/service.js";
 import type { Nest } from "../shared/types.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "../auth/license-copy.js";
 import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
-import { HEADLESS_READER_SERVER_TOOLS, isServiceUser } from "../auth/headless.js";
+import { HEADLESS_READER_SERVER_TOOLS, isHeadlessIdentity } from "../auth/headless.js";
+import { isSystemUser } from "../auth/systems.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
 // suspend/license middleware (unlike the per-nest access guard), so the
@@ -430,6 +431,11 @@ async function handleServerToolCall(
     if (nestScope) {
       return "This credential is scoped to a single nest and cannot create new ones.";
     }
+    // A named system works inside the nests it was granted; it never creates
+    // (and so never owns) one (CU-wdqcq0538g).
+    if (await isSystemUser(userId)) {
+      return "A system key cannot create nests. Ask a nest admin to grant this system the nest it needs.";
+    }
     try {
       const nest = await createNest(
         userId,
@@ -665,7 +671,7 @@ serverMcpRoutes.all("/", async (c) => {
     c.get("apiKeyId") ?? null,
     c.get("apiKeyLabel") ?? null,
     c,
-    await isServiceUser(userId),
+    await isHeadlessIdentity(userId),
     c.get("keyCapability") ?? "write",
   );
 
