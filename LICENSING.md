@@ -34,7 +34,14 @@ Setting the key up for the first time is covered in [README.md → License setup
 | **Viewers** | Unlimited, free | Unlimited, free | Unlimited, free |
 | **Model credits** per user, per month | 1,000 | 5,000 | 5,000 |
 | **Your own model key** (BYOK) | No | No | Yes |
+| **Sign-in** with email or Google | Yes | Yes | Yes |
+| **Enterprise single sign-on** (Entra ID, Okta, any OIDC provider; licence feature `sso`) | No | No | Yes |
+| **Custom assistant name and branding** (licence feature `hootie_branding`) | No | No | Yes |
 | Storage | Your own servers, no limit | Same | Same |
+
+Enterprise features (`byok`, `sso`, `hootie_branding`) are **on by default** with an Enterprise key: nothing to enable on the server or in the license console. PromptOwl can still grant one to, or remove one from, a single license. A server picks up a change on its next license check (about a minute).
+
+A server that already signs in through an enterprise provider keeps working without `sso`; only switching providers or turning SSO back on needs Enterprise.
 
 A **trial** key behaves like Self-Hosted until it ends.
 
@@ -185,6 +192,7 @@ When the license stops being valid, a server with more than 10 users goes **read
 | Upgrade or change plan | **Settings → License → Manage plan**, or app.promptowl.ai → Community License |
 | Pick the Hootie model | **Settings → Hootie** |
 | Set your own model key (Enterprise) | **Settings → Hootie → Model keys**, or a nest's env settings |
+| Turn on Google sign-in (every plan) or Entra / Okta SSO (Enterprise) | **Settings → Features → Single sign-on**, then the **Single sign-on** tab |
 | Read the same data from a script | `GET /admin/license` (server admin), `GET /license/status` (public, no counts) |
 
 ## Questions

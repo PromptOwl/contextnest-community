@@ -184,7 +184,7 @@ import {
 } from "./auth/oauth-metadata.js";
 import { oauthRoutes } from "./auth/oauth-routes.js";
 import { resolveAccessToken } from "./auth/oauth-store.js";
-import { isOidcReady } from "./auth/oidc.js";
+import { isEnterpriseIssuer, isOidcReady } from "./auth/oidc.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
@@ -983,6 +983,8 @@ export function createApp(): Hono<AuthEnv> {
     oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
     oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
+    // Enterprise identity providers allowed (licence feature sso). Google is on every plan.
+    sso_available: hasEntitlement("sso"),
     nest_creation: config.NEST_CREATION,
     people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
     shared_deployment: config.SHARED_DEPLOYMENT,
@@ -1171,6 +1173,26 @@ export function createApp(): Hono<AuthEnv> {
         },
         403,
       );
+    }
+
+    // Enterprise IdPs (Entra, Okta, custom OIDC): Enterprise only (licence
+    // feature sso). Only switching to one or turning it on is refused, so a
+    // server already on one keeps signing in. Google is on every plan.
+    if (!hasEntitlement("sso")) {
+      const issuer =
+        "oidc_issuer" in body ? String(body.oidc_issuer ?? "").trim().replace(/\/$/, "") : config.OIDC_ISSUER;
+      const turningOn = "oidc_enabled" in body && !!body.oidc_enabled && !config.OIDC_ENABLED;
+      if (isEnterpriseIssuer(issuer) && (issuer !== config.OIDC_ISSUER || turningOn)) {
+        return c.json(
+          {
+            error:
+              "Single sign-on with Entra ID, Okta or another identity provider is an Enterprise feature. Google sign-in works on every plan.",
+            code: "sso_required",
+            settings: currentServerSettings(),
+          },
+          403,
+        );
+      }
     }
 
     if ("promptowl_sign_in_gate" in body) {
