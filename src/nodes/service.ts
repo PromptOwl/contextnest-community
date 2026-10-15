@@ -21,6 +21,7 @@ import { rename, mkdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { serializeNodeSafe } from "../governance/safe-publish.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
+import { withIoStats } from "./io-stats.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import {
   AppError,
@@ -2195,6 +2196,14 @@ export async function stageImportedFiles(
   files: Array<{ path: string; content: string }>,
   userEmail: string
 ): Promise<{ written: number; rejected: string[] }> {
+  return withIoStats(nestId, "stage", () => stageImportedFilesInner(nestId, files, userEmail));
+}
+
+async function stageImportedFilesInner(
+  nestId: string,
+  files: Array<{ path: string; content: string }>,
+  userEmail: string
+): Promise<{ written: number; rejected: string[] }> {
   // `_suggestions` is a vault's OWN staged-suggestion store — derived
   // governance state, not content. Carried in, another vault's copy surfaces as
   // phantom external edits against doc ids that don't resolve here. Dropped
@@ -2290,6 +2299,14 @@ export async function registerImportedDocuments(
   userEmail: string,
   /** Caller attribution for the import (§9.4) — recorded on every version row
    *  this registration seeds, so a folder an agent imported says so. */
+  client?: ClientMetadata,
+): Promise<number> {
+  return withIoStats(nestId, "register", () => registerImportedDocumentsInner(nestId, userEmail, client));
+}
+
+async function registerImportedDocumentsInner(
+  nestId: string,
+  userEmail: string,
   client?: ClientMetadata,
 ): Promise<number> {
   const startedAt = Date.now();

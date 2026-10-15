@@ -13,6 +13,7 @@ import type { ContextNode } from "@promptowl/contextnest-engine";
 import { resolveNestPath, isImportedNest } from "../nests/service.js";
 import { FlatNestStorage } from "./flat-storage.js";
 import { syncIndexedNode, markIndexStale } from "./node-index.js";
+import { instrumentStorage, timed } from "./io-stats.js";
 import { isMetaFile } from "./meta-files.js";
 
 /**
@@ -172,7 +173,7 @@ function withDiscoveryCache<S extends NestStorage>(
    */
   const desync = async (): Promise<void> => {
     invalidate();
-    await markIndexStale(nestId);
+    await timed(nestId, "db:markIndexStale", () => markIndexStale(nestId));
   };
 
   /**
@@ -219,7 +220,7 @@ function withDiscoveryCache<S extends NestStorage>(
     }
     // Mirror the same fact into the DB index: `node` is the document as it now
     // stands on disk, or null when the write removed it.
-    await syncIndexedNode(nestId, id, node);
+    await timed(nestId, "db:syncIndexedNode", () => syncIndexedNode(nestId, id, node));
     for (const [key, entry] of entries) {
       const docs = entry.docs.filter((d) => d.id !== id);
       // "all" keeps everything; "live" drops rejected documents, matching the
@@ -416,9 +417,12 @@ class NestEngineCache {
       // default nests keep the engine's structured (nodes/) layout.
       const { storage, invalidate, desync, cachedDocument } = withDiscoveryCache(
         nestId,
-        (await isImportedNest(nestId))
-          ? new FlatNestStorage(nestPath)
-          : new NestStorage(nestPath),
+        instrumentStorage(
+          nestId,
+          (await isImportedNest(nestId))
+            ? new FlatNestStorage(nestPath)
+            : new NestStorage(nestPath),
+        ),
       );
       const histories = withHistoryCache(storage);
       const query = new GraphQueryEngine(storage as any);
