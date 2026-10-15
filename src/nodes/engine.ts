@@ -469,6 +469,9 @@ export async function opContext(
   const { storage, query, versions } = await engineCache.get(nestId);
   // Host-set upload ceilings: the engine enforces them too, so a PDF the
   // route admitted can never be larger than this server's PDF_MAX_MB.
-  const limits = { pdfMaxBytes: config.PDF_MAX_BYTES };
+  const limits = {
+    pdfMaxBytes: config.PDF_MAX_BYTES,
+    ioConcurrency: config.IMPORT_IO_CONCURRENCY,
+  };
   return { storage, query, versions, actor, onProgress, limits };
 }
