@@ -97,6 +97,14 @@ function versionOf(e: AccessEvent, nodeId: string | null): number | null {
   return typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null;
 }
 
+/** `versions` for a read that served each document's working copy (same
+ *  number GET /nodes/:id reports). */
+export function liveVersions(
+  nodes: Array<{ id: string; frontmatter: { version?: unknown } }>,
+): Record<string, number> {
+  return Object.fromEntries(nodes.map((n) => [n.id, Number(n.frontmatter.version) || 1]));
+}
+
 function throttleKey(actor: string, e: AccessEvent, nodeId: string | null): string {
   return `${actor}|${e.nestId}|${nodeId ?? "*"}|${e.action}|${e.surface}|${agentOf(e) ?? ""}|${versionOf(e, nodeId) ?? ""}`;
 }

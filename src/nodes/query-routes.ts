@@ -44,7 +44,7 @@ import {
 import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
-import { recordNodeAccess } from "../governance/access-log.js";
+import { liveVersions, recordNodeAccess } from "../governance/access-log.js";
 import { serverRunNodeIds } from "../metacognition/store.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
@@ -336,6 +336,7 @@ queryRoutes.post("/query", async (c) => {
     userId,
     userEmail,
     client: readClient(c),
+    versions: liveVersions(accessible),
     detail: "query",
   });
 
@@ -376,6 +377,7 @@ queryRoutes.get("/search", async (c) => {
     userId,
     userEmail,
     client: readClient(c),
+    versions: liveVersions(accessible),
     detail: "search",
   });
 
