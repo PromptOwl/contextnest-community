@@ -110,6 +110,14 @@ export function isOidcReady(): boolean {
   return config.OIDC_CONFIGURED;
 }
 
+export const GOOGLE_ISSUER = "https://accounts.google.com";
+
+/** Any issuer but Google's is an enterprise IdP (licence feature sso). */
+export function isEnterpriseIssuer(issuer: string): boolean {
+  const i = issuer.trim().replace(/\/$/, "");
+  return i !== "" && i !== GOOGLE_ISSUER;
+}
+
 export async function discover(issuer: string): Promise<{
   doc: DiscoveryDoc;
   jwks: ReturnType<typeof createRemoteJWKSet>;
