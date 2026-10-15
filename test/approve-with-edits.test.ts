@@ -87,6 +87,14 @@ describe("POST /approve-with-edits", () => {
     expect(authors).toContain(alice.email);
   });
 
+  it("the author's approval notification says the reviewer edited it", async () => {
+    const id = await submit("notified");
+    expect((await editApprove(adam, id, { content: "fixed" })).status).toBe(200);
+    const inbox = await jsonRequest(app, "GET", "/me/notifications", undefined, alice.apiKey);
+    const row = inbox.data.notifications.find((n: any) => n.kind === "review_approved" && n.node_id === id);
+    expect(row?.message).toContain(`edited and approved by ${adam.email}`);
+  });
+
   it("refuses a reviewer who can't edit, and the author themselves", async () => {
     const id = await submit("second");
     expect((await editApprove(rex, id, { content: "x" })).status).toBe(403);

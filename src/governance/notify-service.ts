@@ -201,8 +201,11 @@ export async function notifyReviewResolved(params: {
   reviewId: string;
   /** The document's describeNode label, when the caller already resolved it. */
   label?: string;
+  /** The resolver edited the document before approving it. */
+  withEdits?: boolean;
 }): Promise<number> {
   const { nestId, nodeId, status, resolvedBy, requestedBy, reviewId } = params;
+  const verdict = params.withEdits ? `edited and ${status}` : status;
   const db = getDb();
   try {
     const rows = (await db.all(
@@ -232,7 +235,7 @@ export async function notifyReviewResolved(params: {
           userEmail: email,
           kind: `review_${status}`,
           subjectId: reviewId,
-          message: `"${label}" was ${status} by ${resolvedBy}`,
+          message: `"${label}" was ${verdict} by ${resolvedBy}`,
           createdAt: now,
         },
         { from: resolvedBy, nodeId },
