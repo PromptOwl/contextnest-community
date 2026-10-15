@@ -184,7 +184,7 @@ describe("structure rules per nest", () => {
   it("a malformed check or save is a 400, never a 500, and never clears the rules", async () => {
     const raw = (method: string, path: string, body: string) =>
       app.request(path, { method, headers: { "Content-Type": "application/json", Authorization: `Bearer ${owner.apiKey}` }, body });
-    for (const body of ["null", "[]", '"x"', '{"tests":[null]}', '{"tests":[1]}', '{"tests":[{"title":"x","body":5}]}', '{"rules":"x"}']) {
+    for (const body of ["null", "not json", "[]", '"x"', '{"tests":[null]}', '{"tests":[1]}', '{"tests":[{"title":"x","body":5}]}', '{"rules":"x"}']) {
       const res = await raw("POST", `/nests/${nestId}/structure/check`, body);
       expect(res.status, body).toBe(400);
     }

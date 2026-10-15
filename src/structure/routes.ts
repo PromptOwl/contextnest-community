@@ -206,7 +206,7 @@ function tryFormat(t: CheckTest) {
 
 structureRoutes.post("/check", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const body = objectBody(await c.req.json().catch(() => ({}))) as CheckBody;
+  const body = objectBody(await c.req.json().catch(() => undefined)) as CheckBody;
   const tests = body.tests ?? [];
   const folders = body.folders ?? [];
   if (!Array.isArray(tests) || !Array.isArray(folders)) throw new ValidationError("tests and folders must be lists");
