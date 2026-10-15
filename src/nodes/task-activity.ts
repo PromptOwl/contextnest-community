@@ -136,6 +136,11 @@ export async function recordTaskActivity(params: {
   return rowToActivity(row);
 }
 
+/** Undo a recordTaskActivity whose claim then failed (see task-log.ts). */
+export async function deleteTaskActivity(id: string): Promise<void> {
+  await getDb().run("DELETE FROM task_activity WHERE id = ?", [id]);
+}
+
 export async function listTaskActivity(params: {
   nestId: string;
   nodeId?: string;

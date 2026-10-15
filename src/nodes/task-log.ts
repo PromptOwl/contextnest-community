@@ -8,12 +8,14 @@
  * key are all refused.
  */
 import * as stewardship from "../governance/stewardship-service.js";
-import { ForbiddenError, NotFoundError } from "../shared/errors.js";
+import * as versions from "../governance/version-service.js";
+import { ConflictError, ForbiddenError, NotFoundError } from "../shared/errors.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
 import { engineCache } from "./engine.js";
 import { updateNode } from "./service.js";
 import { settableTaskFields, taskFieldsOf } from "./task-fields.js";
 import {
+  deleteTaskActivity,
   parseTaskLogInput,
   recordTaskActivity,
   type TaskActivity,
@@ -41,34 +43,21 @@ export async function logTaskInteraction(params: {
 }): Promise<TaskLogResult> {
   const { note, status } = parseTaskLogInput({ note: params.note, status: params.status });
   const { storage } = await engineCache.get(params.nestId);
-  let metadata: unknown;
-  try {
-    metadata = (await storage.readDocument(params.nodeId)).frontmatter.metadata;
-  } catch {
-    throw new NotFoundError(`Node not found: ${params.nodeId}`);
-  }
+  // Version before metadata: a write in between makes the claim's expectHead
+  // stale, so it conflicts instead of overwriting.
+  const readTask = async () => {
+    const head = await versions.getCurrentVersion(params.nestId, params.nodeId);
+    try {
+      const metadata = (await storage.readDocument(params.nodeId)).frontmatter.metadata;
+      return { head, assignee: taskFieldsOf(metadata).assignee };
+    } catch {
+      throw new NotFoundError(`Node not found: ${params.nodeId}`);
+    }
+  };
+  let task = await readTask();
   const edit = await stewardship.canUserEdit(params.nestId, params.nodeId, params.userEmail);
   if (!edit.allowed) {
     throw new ForbiddenError(`You don't have permission to log activity on this task: ${edit.reason}`);
-  }
-
-  let claim: TaskLogResult["claim"];
-  let assignee = taskFieldsOf(metadata).assignee;
-  if (params.claim) {
-    const me = params.userEmail.toLowerCase();
-    if (!assignee) {
-      // Same path (and roster check) as setting the assignee by hand.
-      const { node } = await updateNode(
-        params.nestId,
-        params.nodeId,
-        { assignee: me, client: params.client },
-        params.userEmail,
-      );
-      assignee = settableTaskFields(node.frontmatter.metadata).assignee;
-      claim = "assigned";
-    } else {
-      claim = assignee.toLowerCase() === me ? "already_yours" : "assigned_to_other";
-    }
   }
 
   const entry = await recordTaskActivity({
@@ -82,5 +71,41 @@ export async function logTaskInteraction(params: {
     apiKeyId: params.apiKeyId ?? null,
     client: params.client,
   });
+
+  let claim: TaskLogResult["claim"];
+  let assignee = task.assignee;
+  if (params.claim) {
+    const me = params.userEmail.toLowerCase();
+    try {
+      // Two tries: a conflict means someone wrote the task since we read it —
+      // re-read, and claim again only if it is still unassigned.
+      for (let attempt = 0; !claim; attempt++) {
+        if (assignee) {
+          claim = assignee.toLowerCase() === me ? "already_yours" : "assigned_to_other";
+          break;
+        }
+        try {
+          // Same path (and roster check) as setting the assignee by hand.
+          const { node } = await updateNode(
+            params.nestId,
+            params.nodeId,
+            { assignee: me, client: params.client },
+            params.userEmail,
+            { expectHead: task.head },
+          );
+          assignee = settableTaskFields(node.frontmatter.metadata).assignee;
+          claim = "assigned";
+        } catch (err) {
+          if (!(err instanceof ConflictError) || attempt > 0) throw err;
+          task = await readTask();
+          assignee = task.assignee;
+        }
+      }
+    } catch (err) {
+      // No entry for a claim that failed: the caller will see the error and retry.
+      await deleteTaskActivity(entry.id);
+      throw err;
+    }
+  }
   return { entry, ...(claim ? { claim } : {}), ...(assignee ? { assignee } : {}) };
 }

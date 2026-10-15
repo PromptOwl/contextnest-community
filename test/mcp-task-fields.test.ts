@@ -390,6 +390,31 @@ describeTask("context_task_log", () => {
     expect(other.text).toContain(`Not claimed — it is assigned to ${editor.email}`);
   });
 
+  it("two simultaneous claims: exactly one wins, the other is told who has it", async () => {
+    const made = await mcp(owner.apiKey, "context_create", {
+      title: "Race task",
+      content: "Up for grabs.",
+      type: "task",
+    });
+    expect(made.isError).toBe(false);
+    const claim = (key: string) =>
+      jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes/${made.data.id}/task-log`,
+        { note: "mine", claim: true },
+        key,
+      );
+    const results = await Promise.all([claim(owner.apiKey), claim(editor.apiKey)]);
+    expect(results.map((r) => r.status)).toEqual([201, 201]);
+    const outcomes = results.map((r) => r.data.claim).sort();
+    expect(outcomes).toEqual(["assigned", "assigned_to_other"]);
+    const winner = results.find((r) => r.data.claim === "assigned")!.data.assignee;
+    // Both callers are told the same assignee, and that is what was stored.
+    expect(results.every((r) => r.data.assignee === winner)).toBe(true);
+    expect((await mcp(owner.apiKey, "context_get", { id: made.data.id })).data.assignee).toBe(winner);
+  });
+
   it("is on the server-level /mcp endpoint too, with a nest argument", async () => {
     const r = await mcp(
       owner.apiKey,
