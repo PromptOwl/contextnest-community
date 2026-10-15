@@ -3,6 +3,7 @@
  * disk + DB stay in lockstep across both surfaces. Handlers stay thin
  * (auth, parse, response shape); this module owns create/update/list.
  */
+import { assertFolderCreatable, assertMovable, folderDeleteOrder, ruleRefusal, scaffold } from "../structure/writes.js";
 import {
   parseDocument,
   normalizeStatus,
@@ -209,15 +210,19 @@ const slugify = (s: string) =>
     .replace(/^-|-$/g, "");
 
 /**
- * The id `createNode` will derive for a title at the nest root, or null when
- * the title slugifies to nothing (createNode generates an id at write time,
- * so it cannot be known in advance). Preview-only — the confirm modal uses it
- * to label a staged document New vs Update.
+ * The id `createNode` will derive for a title in `folder` (the nest root by
+ * default), or null when the title slugifies to nothing (createNode generates
+ * an id at write time, so it cannot be known in advance). Preview-only — the
+ * confirm modal labels a staged document New vs Update with it, and the
+ * structure check names the file a title will be saved as.
  */
-export function derivedNodeId(title: string): string | null {
+export function derivedNodeId(title: string, folder = ""): string | null {
   const slug = slugify(title).slice(0, 100).replace(/-+$/, "");
-  return slug ? `nodes/${slug}` : null;
+  return slug ? `nodes/${[...folderToSegments(folder), slug].join("/")}` : null;
 }
+
+/** The first name a title with no a-z letters or digits gets (`document-N`, below). */
+export const FIRST_GENERATED_NAME = "document-1";
 
 /**
  * The id for a title that carries no ASCII at all: document-1, document-2, …,
@@ -297,7 +302,7 @@ export async function storagePrefix(nestId: string): Promise<string> {
  * defense (each segment slugified independently — "../" collapses to "-",
  * empty segments drop).
  */
-function folderToSegments(folder: string): string[] {
+export function folderToSegments(folder: string): string[] {
   const segments = folder.split("/").map(slugify).filter(Boolean);
   // A folder named "!!!" or "..." slugifies away entirely, and an empty segment
   // list means "the nest root" — so the doc lands at nodes/<title> instead, and
@@ -366,6 +371,10 @@ async function departmentTagFor(userEmail: string): Promise<string | null> {
 // reach the API response OR the MCP result (both share this service).
 function toSafeError(err: unknown, context: string, message: string): AppError {
   if (err instanceof AppError) return err;
+  // A structure rule (or another engine validation) refusing the write: the
+  // caller can fix it, and "reload and try again" never would.
+  const refusal = ruleRefusal(err);
+  if (refusal) return refusal;
   // The engine refuses to write a document that would stay rejected. That is a
   // state the caller can act on, not an internal fault, so it keeps its meaning
   // instead of being flattened into a generic 500 the user cannot interpret.
@@ -1269,7 +1278,11 @@ export async function createEmptyFolder(
     .replace(/-/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
   const { storage } = await engineCache.get(nestId);
+  // Under enforced rules: a folder they allow, named as they say, created
+  // with its required subfolders and files.
+  const plan = await assertFolderCreatable(storage, path, vaultPath);
   await storage.writeIndexMd(vaultPath, generateIndexMd(vaultPath, title, []));
+  await scaffold(storage, plan);
   return path;
 }
 
@@ -1806,7 +1819,9 @@ export async function createNode(
       return await createNodeOnce(nestId, input, userEmail, opts);
     } catch (err) {
       if (!generatedId || attempt >= 3 || !(err instanceof ConflictError)) {
-        throw err;
+        // A rule refusing the document is the caller's to fix — kept as a 400
+        // naming the rule, also where only an AppError's message is shown (a push).
+        throw ruleRefusal(err) ?? err;
       }
     }
   }
@@ -3124,6 +3139,9 @@ export async function moveNode(
         updated_at: new Date().toISOString(),
       },
     };
+    // Under enforced rules a move is judged as a delete there and a create
+    // here — before anything is written.
+    const plan = await assertMovable(storage, nodeId, newId, moved);
     // serializeNodeSafe, not serializeDocument: `moved` came from
     // readDocument, so an empty `tags: []` on disk is back as
     // `tags: undefined` and the YAML dumper throws on it. Only published docs
@@ -3149,6 +3167,7 @@ export async function moveNode(
     }
 
     await storage.deleteDocument(nodeId);
+    await scaffold(storage, plan);
 
     // Repoint every node-keyed table for the source doc and its derived
     // annotations node, plus the run traces delete keeps. One transaction: a
@@ -3411,8 +3430,9 @@ export async function deleteNode(
       { id: nodeId },
       await opContext(nestId, userEmail),
     );
-  } catch {
-    throw new NotFoundError(`Node not found: ${nodeId}`);
+  } catch (err) {
+    // A structure rule refusing the delete (a required file) is not "missing".
+    throw ruleRefusal(err) ?? new NotFoundError(`Node not found: ${nodeId}`);
   }
 
   await removeNodeFromTagIndex(nestId, nodeId);
@@ -3479,7 +3499,13 @@ export async function deleteFolder(
 
   const { storage } = await engineCache.get(nestId);
   const docs = await storage.discoverDocuments();
-  const targets = docs.map((d) => d.id).filter((id) => isIdUnderFolder(id, rel));
+  // A required folder is not deleted alone; the rest go deepest first, each
+  // folder's required files last (see folderDeleteOrder).
+  const targets = await folderDeleteOrder(
+    storage,
+    rel,
+    docs.map((d) => d.id).filter((id) => isIdUnderFolder(id, rel)),
+  );
   if (targets.length === 0) {
     // A folder holding no document is still a directory in the vault (an
     // explicitly created one, or the remains of a folder whose documents have

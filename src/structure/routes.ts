@@ -1,0 +1,283 @@
+/**
+ * Structure rules for one nest (docs/prds/structure-rules.md §6): which
+ * folders may exist, what goes in them, how files are named and which
+ * template they start from. Each nest keeps its own rules in its own vault
+ * (`.context/config.yaml`), so they travel with a bundle export and bind MCP
+ * and `ctx` writes too. Every rule is the engine's: these routes only read,
+ * save and check them — nothing here parses or matches a rule.
+ *
+ *   GET  /nests/:id/structure?folder=&report=1   read tier
+ *   PUT  /nests/:id/structure                    owner or admin
+ *   POST /nests/:id/structure/check              read tier; owner or admin with `rules`
+ */
+import { Hono, type Context } from "hono";
+import yaml from "js-yaml";
+import {
+  checkDocument,
+  checkFolder,
+  compileStructure,
+  ContextNestError,
+  describeStructure,
+  scaffoldPlan,
+  setStructure,
+  structureReport,
+  type CompiledStructure,
+  type StructureConfig,
+} from "@promptowl/contextnest-engine";
+import type { AuthEnv } from "../auth/middleware.js";
+import { ForbiddenError, ValidationError } from "../shared/errors.js";
+import { readsWholeNest, resolveCallerEmail } from "../governance/access-guard.js";
+import { canManageStewards } from "../governance/stewardship-service.js";
+import { engineApi, opContext } from "../nodes/engine.js";
+import { ACCEPTED_NODE_TYPES, derivedNodeId, FIRST_GENERATED_NAME, folderToSegments } from "../nodes/service.js";
+
+export const structureRoutes = new Hono<AuthEnv>();
+
+/** Most titles or folders one check may judge. */
+const MAX_CHECKS = 50;
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** A request body that must be a JSON object: anything else is a 400, never an empty value. */
+function objectBody(body: unknown): Record<string, unknown> {
+  if (!isObject(body)) throw new ValidationError("The request body must be a JSON object.");
+  return body;
+}
+
+/** The fields of a check test that are text, when given. */
+const TEST_TEXT_FIELDS = ["folder", "title", "name", "type", "body", "file_name", "folder_name"] as const;
+
+/** The three config blocks the rules live in; every other key is the vault's own. */
+const RULE_BLOCKS = ["structure", "folders", "templates"] as const;
+
+function rulesOf(body: unknown): StructureConfig {
+  const b = (body ?? {}) as Record<string, unknown>;
+  const rules: Record<string, unknown> = {};
+  for (const key of RULE_BLOCKS) {
+    if (b[key] !== undefined && b[key] !== null) rules[key] = b[key];
+  }
+  return rules as StructureConfig;
+}
+
+/** `folders.x.types: unknown node type…` → { "folders.x.types": "unknown node type…" }. */
+function fieldError(message: string): Record<string, string> {
+  const at = message.indexOf(": ");
+  return at > 0 ? { [message.slice(0, at)]: message.slice(at + 2) } : { _: message };
+}
+
+/** Compile, or the engine's reason as a field error. */
+function compile(rules: StructureConfig): { rules: CompiledStructure } | { fieldErrors: Record<string, string>; error: string } {
+  try {
+    return { rules: compileStructure(rules) };
+  } catch (err) {
+    if (err instanceof ContextNestError && err.code === "CONFIG_ERROR") {
+      return { fieldErrors: fieldError(err.message), error: err.message };
+    }
+    throw err;
+  }
+}
+
+async function context(c: { get: (k: "userId") => string }, nestId: string) {
+  return opContext(nestId, (await resolveCallerEmail(c.get("userId"))) ?? "anonymous");
+}
+
+/** Owners and admins manage a nest's rules — never a key scoped to the nest. */
+async function assertCanManage(c: Context<AuthEnv>, nestId: string): Promise<void> {
+  if (c.get("nestScope")) throw new ForbiddenError("A nest-scoped API key cannot change structure rules.");
+  if (!(await canManageStewards(nestId, c.get("userId")))) {
+    throw new ForbiddenError("Only the nest's owners and admins can change its structure rules.");
+  }
+}
+
+/**
+ * The compliance report names every document that breaks a rule, drafts
+ * included, so it goes only to callers who read the whole nest. Never to a
+ * visibility-only reader (approved content only) or one a governed nest
+ * narrows: the rules themselves stay readable to them.
+ */
+async function assertReadsWholeNest(c: Context<AuthEnv>, nestId: string): Promise<void> {
+  const userId = c.get("userId");
+  if (!(await readsWholeNest(nestId, userId, (await resolveCallerEmail(userId)) ?? ""))) {
+    throw new ForbiddenError("The compliance report lists every document in the nest, so it needs read access to the whole nest.");
+  }
+}
+
+/** The saved rule blocks as YAML, for the read-only "View YAML" panel. */
+function asYaml(rules: StructureConfig): string {
+  return Object.keys(rules).length === 0 ? "" : yaml.dump(rules, { lineWidth: -1, noRefs: true });
+}
+
+structureRoutes.get("/", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const ctx = await context(c, nestId);
+  const folder = c.req.query("folder");
+  const report = ["1", "true"].includes(c.req.query("report") ?? "");
+  if (report) await assertReadsWholeNest(c, nestId);
+  const out = await engineApi.run<Record<string, unknown>>(
+    "context_structure",
+    { ...(folder !== undefined ? { folder } : {}), ...(report ? { report: true } : {}) },
+    ctx,
+  );
+  const saved = rulesOf(await ctx.storage.readConfig());
+  // `rules` is what the editor starts from — the saved blocks as written, so
+  // a save sends back the owner's own spellings; `types` are the node types
+  // this server accepts, for the editor's checkboxes.
+  return c.json({ ...out, rules: saved, yaml: asYaml(saved), types: [...ACCEPTED_NODE_TYPES] });
+});
+
+structureRoutes.put("/", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  await assertCanManage(c, nestId);
+  // Unparseable, or a key that is no rule block (a typo), is refused — never
+  // read as empty rules: that would clear them. `{}` clears them on purpose.
+  const body = objectBody(await c.req.json().catch(() => undefined));
+  const unknown = Object.keys(body).filter((k) => !(RULE_BLOCKS as readonly string[]).includes(k));
+  if (unknown.length > 0) {
+    throw new ValidationError(`Unknown key${unknown.length > 1 ? "s" : ""} ${unknown.join(", ")}: rules live under structure, folders and templates.`);
+  }
+  const rules = rulesOf(body);
+  const compiled = compile(rules);
+  if ("error" in compiled) return c.json({ error: compiled.error, fieldErrors: compiled.fieldErrors }, 400);
+  const ctx = await context(c, nestId);
+  if (!(await ctx.storage.readConfig())) {
+    throw new ValidationError("This nest has no settings file to keep rules in yet. Re-import or recreate the nest, then try again.");
+  }
+  await setStructure(ctx.storage, rules);
+  // The rules are saved: a count that fails now must not read as a failed save.
+  const violations = await structureReport(ctx.storage, compiled.rules).then(
+    (v) => v.length,
+    (err) => {
+      console.error(`[structure] nest=${nestId}: rules saved, but counting violations failed:`, err);
+      return null;
+    },
+  );
+  return c.json({ ...describeStructure(compiled.rules), violations });
+});
+
+interface CheckTest {
+  folder?: string;
+  title?: string;
+  name?: string;
+  type?: string;
+  body?: string;
+  /** Try the name against this file-name format alone (the editor's "Try a title"). */
+  file_name?: string;
+  /** Try the name against this folder-name format alone ("Try a folder name"). */
+  folder_name?: string;
+}
+
+interface CheckBody {
+  rules?: unknown;
+  report?: boolean;
+  tests?: CheckTest[];
+  folders?: string[];
+}
+
+/**
+ * A name judged against one format, by the engine: a one-rule set holding
+ * just that format, so the verdict does not depend on finding a folder the
+ * rest of the rules would accept. It leans on the engine's id shape and
+ * violation codes; an engine name-format checker would replace it (a
+ * follow-up in docs/prds/structure-rules.md §6.4).
+ */
+function tryFormat(t: CheckTest) {
+  const folderFormat = t.folder_name !== undefined;
+  const format = String((folderFormat ? t.folder_name : t.file_name) ?? "").trim();
+  // A title with no a-z letters or digits is saved under a generated name.
+  const derived = derivedNodeId(String(t.name ?? t.title ?? ""))?.split("/").pop();
+  const slug = derived ?? FIRST_GENERATED_NAME;
+  const generated = derived === undefined ? { generated: true } : {};
+  if (!format) return { ok: true, slug, ...generated, violations: [] };
+  const compiled = compile({ folders: folderFormat ? { "try/{name}": { folder_name: format } } : { try: { file_name: format } } });
+  if ("error" in compiled) {
+    return { ok: false, slug, violations: [{ code: "CONFIG_ERROR", path: slug, message: Object.values(compiled.fieldErrors)[0] }] };
+  }
+  const violations = folderFormat
+    ? checkFolder(compiled.rules, `try/${slug}`)
+    : checkDocument(compiled.rules, { id: `nodes/try/${slug}`, type: "document" }).filter((v) => v.code === "FILE_NAME");
+  const what = folderFormat ? "Folder names" : "File names";
+  return {
+    ok: violations.length === 0,
+    slug,
+    ...generated,
+    violations: violations.map((v) => ({ ...v, path: slug, message: `${what} here must look like ${format}; "${slug}" does not.` })),
+  };
+}
+
+structureRoutes.post("/check", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const body = objectBody(await c.req.json().catch(() => undefined)) as CheckBody;
+  const tests = body.tests ?? [];
+  const folders = body.folders ?? [];
+  if (!Array.isArray(tests) || !Array.isArray(folders)) throw new ValidationError("tests and folders must be lists");
+  for (const [i, t] of tests.entries()) {
+    if (!isObject(t)) throw new ValidationError(`tests[${i}] must be an object`);
+    for (const key of TEST_TEXT_FIELDS) {
+      if (t[key] !== undefined && typeof t[key] !== "string") throw new ValidationError(`tests[${i}].${key} must be text`);
+    }
+  }
+  if (body.rules !== undefined && !isObject(body.rules)) throw new ValidationError("rules must be an object");
+  if (tests.length > MAX_CHECKS || folders.length > MAX_CHECKS) {
+    throw new ValidationError(`A check judges at most ${MAX_CHECKS} titles and ${MAX_CHECKS} folders.`);
+  }
+  if (body.report === true) await assertReadsWholeNest(c, nestId);
+  const ctx = await context(c, nestId);
+
+  // A draft is judged only for the people who could save it.
+  let draft: StructureConfig;
+  if (body.rules !== undefined) {
+    await assertCanManage(c, nestId);
+    draft = rulesOf(body.rules);
+  } else {
+    draft = rulesOf(await ctx.storage.readConfig());
+  }
+  const compiled = compile(draft);
+  if ("error" in compiled) {
+    return c.json({ fieldErrors: compiled.fieldErrors, error: compiled.error, warnings: [], results: [], folders: [] });
+  }
+  const rules = compiled.rules;
+
+  const results = tests.map((t) => {
+    if (t.file_name !== undefined || t.folder_name !== undefined) return tryFormat(t);
+    let id: string | null;
+    let generated = false;
+    try {
+      id = derivedNodeId(String(t.name ?? t.title ?? ""), String(t.folder ?? ""));
+      if (!id) {
+        generated = true;
+        id = derivedNodeId(FIRST_GENERATED_NAME, String(t.folder ?? ""));
+      }
+    } catch (err) {
+      return { ok: false, slug: "", violations: [{ code: "FOLDER_NAME", path: String(t.folder ?? ""), message: (err as Error).message }] };
+    }
+    if (!id) return { ok: true, slug: "", violations: [] };
+    // Sections are judged only on a body the caller sends: a title check has none yet.
+    const violations = checkDocument(rules, { id, type: t.type ?? "document", body: t.body ?? "" }).filter(
+      (v) => t.body !== undefined || v.code !== "MISSING_SECTION",
+    );
+    return { ok: violations.length === 0, slug: id.split("/").pop()!, ...(generated ? { generated: true } : {}), violations };
+  });
+
+  const folderResults = folders.map((raw) => {
+    let folder: string;
+    try {
+      folder = folderToSegments(String(raw)).join("/");
+    } catch (err) {
+      return { folder: String(raw), violations: [{ code: "FOLDER_NAME", path: String(raw), message: (err as Error).message }], creates: { folders: [], files: [] } };
+    }
+    const plan = scaffoldPlan(rules, [folder]);
+    return {
+      folder,
+      violations: checkFolder(rules, folder),
+      creates: { folders: plan.folders, files: plan.documents.map((d) => ({ path: d.path })) },
+    };
+  });
+
+  return c.json({
+    fieldErrors: {},
+    warnings: describeStructure(rules).warnings ?? [],
+    results,
+    folders: folderResults,
+    ...(body.report === true ? { report: { violations: await structureReport(ctx.storage, rules) } } : {}),
+  });
+});

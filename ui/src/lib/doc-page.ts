@@ -142,7 +142,7 @@ export interface NestSidebarView {
    *  collapsed "Views" group so the sidebar reads as nest → docs. */
   group?: "views";
   /** App view page to open. */
-  page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows";
+  page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure";
   /** Nest-page tab, for views that are tabs of the nest page. */
   tab?: "overview" | "review";
 }

@@ -1,6 +1,6 @@
 {
   "name": "@promptowl/contextnest-community",
-  "version": "1.29.1",
+  "version": "2.0.0",
   "description": "ContextNest Community Edition — self-hosted context governance server for AI workflows. Commercial software by Promptowl LLC.",
   "private": false,
   "type": "module",
@@ -81,6 +81,7 @@
     "dotenv": "^16.6.1",
     "hono": "4.13.13",
     "jose": "^6.2.3",
+    "js-yaml": "^4.3.2",
     "jszip": "^3.10.1",
     "markdown-it": "^14.2.0",
     "nodemailer": "9.0.3",
@@ -132,6 +133,7 @@
     "@types/bcryptjs": "^3.0.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/d3-force": "^3.0.10",
+    "@types/js-yaml": "^4.0.9",
     "@types/markdown-it": "^13.0.9",
     "@types/nodemailer": "8.0.1",
     "@types/pg": "^8.11.10",

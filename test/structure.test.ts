@@ -1,0 +1,375 @@
+/**
+ * Structure rules per nest (docs/prds/structure-rules.md §6): read, save and
+ * check a nest's folder layout, naming and template rules. Each nest keeps its
+ * own rules in its own vault; owners and admins save them, anyone who can read
+ * the nest can read and check them.
+ */
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
+
+let env: ReturnType<typeof setupTestEnv>;
+let app: any;
+let owner: { apiKey: string; userId: string; email: string };
+let writer: { apiKey: string; userId: string; email: string };
+let reader: { apiKey: string; userId: string; email: string };
+let nestId: string;
+let otherNestId: string;
+
+const RULES = {
+  structure: { enforce: false, closed: false },
+  folders: {
+    "clients/{client}": {
+      folder_name: "/[a-z]+-[0-9]{3}/",
+      types: ["document"],
+      files: { overview: { template: "client-overview" } },
+    },
+    "clients/{client}/meetings": {
+      required: true,
+      types: ["document"],
+      file_name: "{date}-{slug}",
+      template: "meeting-note",
+    },
+  },
+  templates: {
+    "meeting-note": { body: "## Attendees\n\n## Decisions\n", required_sections: ["Decisions"] },
+    "client-overview": { body: "## Summary\n", required_sections: [] },
+  },
+};
+
+beforeAll(async () => {
+  env = setupTestEnv();
+  app = await createTestApp("key");
+  owner = await registerUser(app, "owner@acme.com", "Owner");
+  writer = await registerUser(app, "writer@acme.com", "Writer");
+  reader = await registerUser(app, "reader@acme.com", "Reader");
+  nestId = (await jsonRequest(app, "POST", "/nests", { name: "Clients" }, owner.apiKey)).data.nest.id;
+  otherNestId = (await jsonRequest(app, "POST", "/nests", { name: "Runbooks" }, owner.apiKey)).data.nest.id;
+  for (const [u, permission] of [[writer, "write"], [reader, "read"]] as const) {
+    await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: u.email, permission }, owner.apiKey);
+  }
+});
+
+afterAll(() => env.cleanup());
+
+describe("structure rules per nest", () => {
+  it("a new nest has no rules", async () => {
+    const res = await jsonRequest(app, "GET", `/nests/${nestId}/structure`, undefined, reader.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data).toMatchObject({ enforce: false, closed: false, folders: [], templates: {} });
+  });
+
+  it("an owner saves the rules into the nest's own vault and reads them back", async () => {
+    const put = await jsonRequest(app, "PUT", `/nests/${nestId}/structure`, RULES, owner.apiKey);
+    expect(put.status, JSON.stringify(put.data)).toBe(200);
+    expect(put.data.folders.map((f: { pattern: string }) => f.pattern)).toEqual([
+      "clients/{client}",
+      "clients/{client}/meetings",
+    ]);
+    expect(put.data.violations).toBe(0);
+    const get = await jsonRequest(app, "GET", `/nests/${nestId}/structure?folder=clients/acme-042/meetings`, undefined, reader.apiKey);
+    expect(get.data.resolved).toMatchObject({ pattern: "clients/{client}/meetings", file_name: "{date}-{slug}", template: "meeting-note" });
+    expect(get.data.yaml).toContain("clients/{client}/meetings");
+    const config = join(env.dataDir, "nests", nestId, ".context", "config.yaml");
+    expect(existsSync(config)).toBe(true);
+    expect(readFileSync(config, "utf-8")).toContain("{date}-{slug}");
+  });
+
+  it("another nest keeps its own rules: saving one never touches the other", async () => {
+    const other = await jsonRequest(app, "GET", `/nests/${otherNestId}/structure`, undefined, owner.apiKey);
+    expect(other.data.folders).toEqual([]);
+    const own = { folders: { runbooks: { types: ["document"], file_name: "rb-{n}-{slug}" } } };
+    expect((await jsonRequest(app, "PUT", `/nests/${otherNestId}/structure`, own, owner.apiKey)).status).toBe(200);
+    const first = await jsonRequest(app, "GET", `/nests/${nestId}/structure`, undefined, owner.apiKey);
+    expect(first.data.folders.map((f: { pattern: string }) => f.pattern)).toEqual(["clients/{client}", "clients/{client}/meetings"]);
+    const second = await jsonRequest(app, "GET", `/nests/${otherNestId}/structure`, undefined, owner.apiKey);
+    expect(second.data.folders.map((f: { pattern: string }) => f.pattern)).toEqual(["runbooks"]);
+  });
+
+  it("only owners and admins save rules: a write or read collaborator is refused", async () => {
+    expect((await jsonRequest(app, "PUT", `/nests/${nestId}/structure`, RULES, writer.apiKey)).status).toBe(403);
+    expect((await jsonRequest(app, "PUT", `/nests/${nestId}/structure`, RULES, reader.apiKey)).status).toBe(403);
+  });
+
+  it("rules that cannot work are refused with the field at fault", async () => {
+    const bad = { folders: { "clients/{client}": { folder_name: "/(a+)+/" } } };
+    const res = await jsonRequest(app, "PUT", `/nests/${nestId}/structure`, bad, owner.apiKey);
+    expect(res.status).toBe(400);
+    expect(Object.keys(res.data.fieldErrors)).toEqual(["folders.clients/{client}.folder_name"]);
+    expect(res.data.error).toMatch(/repeats a group/);
+  });
+
+  it("anyone who reads the nest can check a title against the saved rules", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/structure/check`,
+      {
+        tests: [
+          { folder: "clients/acme-042/meetings", title: "Kickoff with Acme", type: "document" },
+          { folder: "clients/acme-042/meetings", title: "2026-10-07 Kickoff with Acme", type: "document" },
+        ],
+        folders: ["clients/acme", "clients/acme-042"],
+      },
+      reader.apiKey,
+    );
+    expect(res.status, JSON.stringify(res.data)).toBe(200);
+    expect(res.data.results[0]).toMatchObject({ ok: false, slug: "kickoff-with-acme" });
+    expect(res.data.results[0].violations[0].code).toBe("FILE_NAME");
+    expect(res.data.results[1], JSON.stringify(res.data.results[1])).toMatchObject({ ok: true, slug: "2026-10-07-kickoff-with-acme", violations: [] });
+    expect(res.data.folders[0].violations[0].code).toBe("FOLDER_NAME");
+    expect(res.data.folders[1]).toMatchObject({
+      folder: "clients/acme-042",
+      violations: [],
+      creates: { folders: ["clients/acme-042/meetings"], files: [{ path: "clients/acme-042/overview" }] },
+    });
+  });
+
+  it("checking a draft is for owners and admins, and reports its problems without saving", async () => {
+    const draft = { ...RULES, folders: { ...RULES.folders, decisions: { file_name: "adr-{n}-{slug}", template: "nope" } } };
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/structure/check`, { rules: draft }, reader.apiKey)).status).toBe(403);
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/structure/check`,
+      { rules: draft, tests: [{ folder: "decisions", title: "ADR 7 Use Postgres" }], report: true },
+      owner.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.fieldErrors).toEqual({});
+    expect(res.data.warnings.join(" ")).toMatch(/nope/);
+    expect(res.data.results[0]).toMatchObject({ ok: true, slug: "adr-7-use-postgres" });
+    expect(Array.isArray(res.data.report.violations)).toBe(true);
+    const bad = await jsonRequest(app, "POST", `/nests/${nestId}/structure/check`, { rules: { folders: { x: { types: ["nope"] } } } }, owner.apiKey);
+    expect(bad.status).toBe(200);
+    expect(Object.keys(bad.data.fieldErrors)).toEqual(["folders.x.types"]);
+    const saved = await jsonRequest(app, "GET", `/nests/${nestId}/structure`, undefined, owner.apiKey);
+    expect(saved.data.folders.map((f: { pattern: string }) => f.pattern)).not.toContain("decisions");
+  });
+
+  it("a title or folder name is tried against a format alone, whatever folder it is for", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/structure/check`,
+      {
+        tests: [
+          { title: "Kickoff with Acme", file_name: "{date}-{slug}" },
+          { title: "2026-10-07 Kickoff", file_name: "{date}-{slug}" },
+          { name: "acme", folder_name: "/[a-z]+-[0-9]{3}/" },
+          { name: "acme-042", folder_name: "/[a-z]+-[0-9]{3}/" },
+          { title: "Anything", file_name: "" },
+          { title: "x", file_name: "/(a+)+/" },
+        ],
+      },
+      reader.apiKey,
+    );
+    expect(res.status, JSON.stringify(res.data)).toBe(200);
+    const r = res.data.results;
+    expect(r[0]).toMatchObject({ ok: false, slug: "kickoff-with-acme" });
+    expect(r[0].violations[0].message).toMatch(/\{date\}-\{slug\}/);
+    expect(r[1]).toMatchObject({ ok: true, slug: "2026-10-07-kickoff" });
+    expect(r[2]).toMatchObject({ ok: false, slug: "acme" });
+    expect(r[3]).toMatchObject({ ok: true, slug: "acme-042" });
+    expect(r[4]).toMatchObject({ ok: true, slug: "anything" });
+    expect(r[5].ok).toBe(false);
+    expect(r[5].violations[0].message).toMatch(/repeats a group/);
+  });
+
+  // Review of #403: a body that parses but is no object (`null`), a test
+  // that is no object, or a field that is no text threw from the handler —
+  // a 500 any reader could cause. And PUT took an unparseable body as empty
+  // rules, clearing the nest's saved rules.
+  it("a malformed check or save is a 400, never a 500, and never clears the rules", async () => {
+    const raw = (method: string, path: string, body: string) =>
+      app.request(path, { method, headers: { "Content-Type": "application/json", Authorization: `Bearer ${owner.apiKey}` }, body });
+    for (const body of ["null", "not json", "[]", '"x"', '{"tests":[null]}', '{"tests":[1]}', '{"tests":[{"title":"x","body":5}]}', '{"rules":"x"}']) {
+      const res = await raw("POST", `/nests/${nestId}/structure/check`, body);
+      expect(res.status, body).toBe(400);
+    }
+    const before = await jsonRequest(app, "GET", `/nests/${nestId}/structure`, undefined, owner.apiKey);
+    for (const body of ["null", "not json", "[]"]) {
+      const res = await raw("PUT", `/nests/${nestId}/structure`, body);
+      expect(res.status, body).toBe(400);
+    }
+    const after = await jsonRequest(app, "GET", `/nests/${nestId}/structure`, undefined, owner.apiKey);
+    expect(after.data.rules).toEqual(before.data.rules);
+  });
+
+  it("a save naming a key that is not a rule block is refused, never read as no rules", async () => {
+    const before = await jsonRequest(app, "GET", `/nests/${nestId}/structure`, undefined, owner.apiKey);
+    expect(Object.keys(before.data.rules)).not.toEqual([]);
+    const typo = await jsonRequest(app, "PUT", `/nests/${nestId}/structure`, { folder: { clients: { types: ["document"] } } }, owner.apiKey);
+    expect(typo.status, JSON.stringify(typo.data)).toBe(400);
+    expect(typo.data.error).toMatch(/folder/);
+    const after = await jsonRequest(app, "GET", `/nests/${nestId}/structure`, undefined, owner.apiKey);
+    expect(after.data.rules).toEqual(before.data.rules);
+  });
+
+  it("only report=1 or report=true asks for the compliance report", async () => {
+    for (const off of ["0", "false"]) {
+      const res = await jsonRequest(app, "GET", `/nests/${nestId}/structure?report=${off}`, undefined, reader.apiKey);
+      expect(res.status).toBe(200);
+      expect(res.data.violations, off).toBeUndefined();
+    }
+    for (const on of ["1", "true"]) {
+      const res = await jsonRequest(app, "GET", `/nests/${nestId}/structure?report=${on}`, undefined, reader.apiKey);
+      expect(Array.isArray(res.data.violations), on).toBe(true);
+    }
+  });
+
+  it("caps a check at 50 tests", async () => {
+    const tests = Array.from({ length: 51 }, () => ({ title: "x" }));
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/structure/check`, { tests }, reader.apiKey)).status).toBe(400);
+  });
+
+  it("once enforced, a document that breaks a rule is refused with a 400 naming the rule", async () => {
+    await jsonRequest(app, "PUT", `/nests/${nestId}/structure`, { ...RULES, structure: { enforce: true, closed: false } }, owner.apiKey);
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Kickoff", content: "## Decisions\nShip.\n", folder: "clients/acme-042/meetings" },
+      owner.apiKey,
+    );
+    expect(res.status).toBe(400);
+    expect(res.data.error).toMatch(/\{date\}-\{slug\}/);
+    const ok = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "2026-10-07 Kickoff", content: "## Decisions\nShip.\n", folder: "clients/acme-042/meetings" },
+      owner.apiKey,
+    );
+    expect(ok.status, JSON.stringify(ok.data)).toBe(201);
+  });
+});
+
+describe("structure rules on every write the app makes (UX review)", () => {
+  let nest: string;
+  const enforced = {
+    structure: { enforce: true, closed: true },
+    folders: {
+      "clients/{client}": { folder_name: "/[a-z]+-[0-9]{3}/", types: ["document"], files: { overview: { template: "client-overview" } } },
+      "clients/{client}/meetings": { required: true, types: ["document"], file_name: "{date}-{slug}", template: "meeting-note" },
+      decisions: { types: ["document"], file_name: "adr-{n}-{slug}" },
+    },
+    templates: {
+      "meeting-note": { body: "## Decisions\n", required_sections: ["Decisions"] },
+      "client-overview": { body: "## Summary\n", required_sections: [] },
+    },
+  };
+  const create = (title: string, folder: string, content = "## Decisions\nShip.\n") =>
+    jsonRequest(app, "POST", `/nests/${nest}/nodes`, { title, content, folder }, owner.apiKey);
+
+  beforeAll(async () => {
+    nest = (await jsonRequest(app, "POST", "/nests", { name: "Enforced" }, owner.apiKey)).data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${nest}/collaborators`, { email: writer.email, permission: "write" }, owner.apiKey);
+    await jsonRequest(app, "PUT", `/nests/${nest}/structure`, enforced, owner.apiKey);
+    expect((await create("Overview", "clients/acme-042", "## Summary\nAcme.\n")).status).toBe(201);
+    expect((await create("2026-10-07 Kickoff", "clients/acme-042/meetings")).status).toBe(201);
+  });
+
+  it("an update that removes a required heading is a 400 naming it, never a 500", async () => {
+    const id = "nodes/clients/acme-042/meetings/2026-10-07-kickoff";
+    const res = await jsonRequest(app, "PATCH", `/nests/${nest}/nodes/${id}`, { content: "No decisions here.\n" }, writer.apiKey);
+    expect(res.status, JSON.stringify(res.data)).toBe(400);
+    expect(res.data.error).toMatch(/Decisions/);
+    expect(res.data.error).not.toMatch(/ctx structure/);
+    expect(res.data.error).toMatch(/Structure page/);
+  });
+
+  it("deleting a required file while its folder holds others is a 400 naming the rule, never 'not found'", async () => {
+    const res = await jsonRequest(app, "DELETE", `/nests/${nest}/nodes/nodes/clients/acme-042/overview`, undefined, owner.apiKey);
+    expect(res.status, JSON.stringify(res.data)).toBe(400);
+    expect(res.data.error).toMatch(/overview/);
+    expect(res.data.error).not.toMatch(/not found/i);
+  });
+
+  it("asking to delete a required file is refused when asked, not later at approval", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nest}/nodes/nodes/clients/acme-042/overview/request-deletion`,
+      { reason: "tidy" },
+      writer.apiKey,
+    );
+    expect(res.status, JSON.stringify(res.data)).toBe(400);
+    expect(res.data.error).toMatch(/overview/);
+  });
+
+  it("moving a document into a folder whose names it does not fit is refused", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nest}/nodes/nodes/clients/acme-042/meetings/2026-10-07-kickoff/move`,
+      { folder: "decisions" },
+      owner.apiKey,
+    );
+    expect(res.status, JSON.stringify(res.data)).toBe(400);
+    expect(res.data.error).toMatch(/adr-\{n\}-\{slug\}/);
+  });
+
+  it("moving a required file out of its folder is refused", async () => {
+    const res = await jsonRequest(app, "POST", `/nests/${nest}/nodes/nodes/clients/acme-042/overview/move`, { folder: "decisions" }, owner.apiKey);
+    expect(res.status, JSON.stringify(res.data)).toBe(400);
+  });
+
+  it("a new folder must fit the rules, and brings its required children", async () => {
+    const bad = await jsonRequest(app, "POST", `/nests/${nest}/folders`, { folder: "clients/Acme" }, owner.apiKey);
+    expect(bad.status, JSON.stringify(bad.data)).toBe(400);
+    expect(bad.data.error).toMatch(/\[a-z\]\+-\[0-9\]\{3\}/);
+    const closed = await jsonRequest(app, "POST", `/nests/${nest}/folders`, { folder: "misc" }, owner.apiKey);
+    expect(closed.status).toBe(400);
+    const ok = await jsonRequest(app, "POST", `/nests/${nest}/folders`, { folder: "clients/globex-117" }, owner.apiKey);
+    expect(ok.status, JSON.stringify(ok.data)).toBe(201);
+    const docs = await jsonRequest(app, "GET", `/nests/${nest}/structure?report=1`, undefined, owner.apiKey);
+    expect(docs.data.violations.filter((v: { path: string }) => v.path.startsWith("clients/globex-117"))).toEqual([]);
+  });
+
+  it("a required folder cannot be deleted alone, but its parent can be deleted whole", async () => {
+    const alone = await jsonRequest(app, "POST", `/nests/${nest}/delete-folder`, { folder: "clients/acme-042/meetings" }, owner.apiKey);
+    expect(alone.status, JSON.stringify(alone.data)).toBe(400);
+    const whole = await jsonRequest(app, "POST", `/nests/${nest}/delete-folder`, { folder: "clients/acme-042" }, owner.apiKey);
+    expect(whole.status, JSON.stringify(whole.data)).toBe(200);
+  });
+
+  it("a title with no a-z letters or digits is checked as the name it will get", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nest}/structure/check`,
+      { tests: [{ title: "会议记录", file_name: "{date}-{slug}" }, { title: "会议记录", folder: "clients/acme-042/meetings" }] },
+      writer.apiKey,
+    );
+    expect(res.data.results[0]).toMatchObject({ ok: false, slug: "document-1", generated: true });
+    expect(res.data.results[1]).toMatchObject({ ok: false, slug: "document-1", generated: true });
+  });
+});
+
+describe("the compliance report lists only what the caller may read whole", () => {
+  it("a visibility-only reader of a public nest gets the rules, never the report's paths", async () => {
+    // `writer` has no role on this new nest: its public visibility is all that lets them in.
+    const stranger = writer;
+    const nest = (await jsonRequest(app, "POST", "/nests", { name: "Public rules" }, owner.apiKey)).data.nest.id;
+    expect((await jsonRequest(app, "PUT", `/nests/${nest}/structure`, RULES, owner.apiKey)).status).toBe(200);
+    // A draft that breaks a rule: its path is in the report, and a stranger may not see it.
+    const draft = await jsonRequest(app, "POST", `/nests/${nest}/nodes`, { title: "Secret plan", content: "x\n", folder: "clients/acme-042/meetings" }, owner.apiKey);
+    expect(draft.status, JSON.stringify(draft.data)).toBe(201);
+    const pub = await jsonRequest(app, "PATCH", `/nests/${nest}/visibility`, { visibility: "public", acknowledge_public: true }, owner.apiKey);
+    expect(pub.status, JSON.stringify(pub.data)).toBe(200);
+
+    const rules = await jsonRequest(app, "GET", `/nests/${nest}/structure`, undefined, stranger.apiKey);
+    expect(rules.status, JSON.stringify(rules.data)).toBe(200);
+    for (const res of [
+      await jsonRequest(app, "GET", `/nests/${nest}/structure?report=1`, undefined, stranger.apiKey),
+      await jsonRequest(app, "POST", `/nests/${nest}/structure/check`, { report: true }, stranger.apiKey),
+    ]) {
+      expect(res.status, JSON.stringify(res.data)).toBe(403);
+      expect(JSON.stringify(res.data)).not.toMatch(/secret-plan/);
+    }
+    const own = await jsonRequest(app, "GET", `/nests/${nest}/structure?report=1`, undefined, owner.apiKey);
+    expect(JSON.stringify(own.data.violations)).toMatch(/secret-plan/);
+  });
+});
