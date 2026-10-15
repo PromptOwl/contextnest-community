@@ -28,6 +28,7 @@ import {
   ValidationError,
   ConflictError,
   ForbiddenError,
+  ReviewRequiredError,
   VaultBusyError,
   isVaultLockTimeout,
 } from "../shared/errors.js";
@@ -1637,6 +1638,18 @@ export interface WriteOptions {
    */
   alwaysDraft?: boolean;
   /**
+   * The opposite guarantee: this write must publish, or not happen at all.
+   * When the nest's rules would land it as a draft for a reviewer (a prime
+   * document, a governed document without a self-approve bypass, or the
+   * author's own open review), it is refused with ReviewRequiredError BEFORE
+   * anything is written. Bulk board edits use it, so one confirmation can't
+   * quietly turn into a pile of drafts — those documents are reported and
+   * left for someone to change one at a time, through the review they need.
+   * Decided inside the node's write lock, by the same autoPublishReason the
+   * write itself uses, so it can't disagree with what would have happened.
+   */
+  publishOnly?: boolean;
+  /**
    * A reviewer's edit to someone else's pending submission, made on the way
    * to approving it (POST …/approve-with-edits, CU-wdqcq04wnw). Lifts the
    * pending-review lock exactly as an author's own edit does: drafts a new
@@ -2731,6 +2744,14 @@ export async function updateNode(
       if (pendingReview && !isAuthorEditingOwnReview) {
         throw new LockedError(
           "This document is awaiting steward review and is locked. Approve or reject the pending review before editing."
+        );
+      }
+
+      if (opts.publishOnly && (publishReason === null || isAuthorEditingOwnReview)) {
+        throw new ReviewRequiredError(
+          isAuthorEditingOwnReview
+            ? "This document has your own review open — the change would be a new draft for that review."
+            : "This document goes through review — the change would be saved as a draft for a reviewer.",
         );
       }
 

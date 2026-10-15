@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import { parseDocument } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
+import { bulkUpdateNodes } from "./bulk-update.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 // SECURITY: `:nodeId` params on these routes become filesystem paths in the
 // engine's storage layer (join(nestRoot, id + ".md"), no containment). A `../`
@@ -176,6 +177,25 @@ nodeRoutes.get("/", async (c) => {
   // whatever level was asked for, so bundling recomputed it on every folder
   // expand. It has its own endpoint and its own cache entry.
   return c.json({ count: nodes.length, nodes });
+});
+
+// POST /nests/:nestId/nodes/bulk-update — one patch over many nodes (the
+// board List view's bulk actions; MCP context_bulk_update). Write-tier at the
+// nest middleware like every POST; each node is then permission-checked and
+// governed on its own (src/nodes/bulk-update.ts). Registered before the
+// /:nodeId{.+} routes so "bulk-update" is never read as a node id.
+nodeRoutes.post("/bulk-update", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new ValidationError("request body must be a JSON object");
+  }
+  const result = await bulkUpdateNodes(
+    c.req.param("nestId")!,
+    { userId: c.get("userId"), userEmail: await getUserEmail(c) },
+    { ids: body.ids, selector: body.selector, patch: body.patch },
+    { client: attributeRequest(c, body.client) },
+  );
+  return c.json(result);
 });
 
 // POST /nests/:nestId/nodes

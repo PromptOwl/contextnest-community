@@ -60,7 +60,8 @@ import {
   headlessToolError,
   type ToolResult,
 } from "./tools.js";
-import { isDerivedAnnotationsNode } from "../nodes/service.js";
+import { DERIVED_ANNOTATIONS_SUFFIX } from "../nodes/service.js";
+import { suffixOf } from "../db/sql.js";
 import type { Nest } from "../shared/types.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "../auth/license-copy.js";
 import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
@@ -80,6 +81,7 @@ const SERVER_WRITE_TOOLS = new Set([
   "context_submit_review",
   "context_request_access",
   "context_task_log",
+  "context_bulk_update",
 ]);
 
 // Read tools that support fan-out when `nest` is omitted — search/list/query/overview
@@ -177,6 +179,34 @@ export async function buildNestIndex(
     seen.add(n.id);
     rows.push(n);
   }
+  // Doc counts in one grouped query, the same one the dashboard's GET /nests
+  // uses. Counting by a filesystem scan per nest (every document read off the
+  // bucket mount) made this index slower with every nest a user could reach,
+  // until callers like The Owl's chat page timed out on it. The derived
+  // `— Annotations` projections are left out, like every listing does.
+  // Scoped to the caller's nests. Best-effort, like the scan it replaced: a
+  // failed count reads as unknown (null), never takes the index down.
+  const db = getDb();
+  let docsByNest: Map<string, number> | null = new Map();
+  if (rows.length) {
+    try {
+      const countRows = (await db.all(
+        `SELECT nest_id,
+                COUNT(DISTINCT CASE
+                  WHEN ${suffixOf(db, "node_id", DERIVED_ANNOTATIONS_SUFFIX.length)} <> ?
+                  THEN node_id END) AS c
+           FROM node_versions
+          WHERE nest_id IN (${rows.map(() => "?").join(", ")})
+          GROUP BY nest_id`,
+        [DERIVED_ANNOTATIONS_SUFFIX, ...rows.map((n) => n.id)],
+      )) as Array<{ nest_id: string; c: number }>;
+      // Number(): Postgres returns COUNT as a string.
+      docsByNest = new Map(countRows.map((r) => [r.nest_id, Number(r.c)]));
+    } catch (err) {
+      console.error("[index] document counts unavailable:", err);
+      docsByNest = null;
+    }
+  }
   return Promise.all(
     rows.map(async (n) => {
       let permission: NestPermission = "read";
@@ -188,28 +218,14 @@ export async function buildNestIndex(
       } catch {
         /* keep the conservative default */
       }
-      // Doc count is best-effort — a nest with a broken vault folder should
-      // not take the whole index down.
-      let document_count: number | null = null;
-      try {
-        const { storage } = await engineCache.get(n.id);
-        // Excludes the derived `— Annotations` projections, like every
-        // listing does: this number is what an agent is told a nest holds
-        // before it decides what to read, so it has to match what
-        // context_list will actually return.
-        document_count = (await storage.discoverDocuments()).filter(
-          (d) => !isDerivedAnnotationsNode(d.id),
-        ).length;
-      } catch {
-        /* count unavailable */
-      }
       return {
         id: n.id,
         name: n.name,
         description: n.description,
         visibility: n.visibility,
         permission,
-        document_count,
+        // No version rows = an empty nest, so 0; null only when the count failed.
+        document_count: docsByNest ? (docsByNest.get(n.id) ?? 0) : null,
       };
     }),
   );
@@ -285,6 +301,9 @@ const SERVER_NEST_TOOLS = [
   "context_relations",
   "context_add_relation",
   "context_remove_relation",
+  "context_boards",
+  "context_board_items",
+  "context_bulk_update",
 ];
 
 function withNestArg(tool: (typeof TOOL_DEFINITIONS)[number]) {
@@ -351,6 +370,8 @@ const READ_ONLY_SERVER_TOOLS = new Set([
   "context_resolve",
   "context_comments",
   "context_versions",
+  "context_boards",
+  "context_board_items",
 ]);
 
 /** Exported so a test can assert every defined tool is classified. */
@@ -797,15 +818,18 @@ Streamable HTTP, stateless. Two endpoints:
   Tools: \`nest_index\` (call first), then:
   - Fan-out reads (omit \`nest\` to search/list ALL nests): \`context_search\`,
     \`context_list\`, \`context_query\`, \`context_overview\`
-  - Targeted reads (\`nest\` required): \`context_get\`, \`context_resolve\`, \`context_comments\`, \`context_versions\`
+  - Targeted reads (\`nest\` required): \`context_get\`, \`context_resolve\`, \`context_comments\`, \`context_versions\`,
+    \`context_boards\`, \`context_board_items\`
   - Writes (\`nest\` required): \`nest_create\`, \`context_create\`, \`context_update\`,
     \`context_delete\`, \`context_move\`, \`context_submit_review\`,
     \`context_request_access\` (ask for write access when a write is refused),
     \`context_task_log\` (log what you did on a task: working / done / blocked)
+    \`context_bulk_update\` (one change over up to 100 nodes)
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, the full toolset. Same names as the
   server-level tools without the \`nest\` argument, plus:
   - read: \`context_init\` (operating instructions — call first), \`context_export\`, \`context_table_query\`, \`context_versions\`
-  - write: \`context_update\`, \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`, \`context_task_log\`
+  - write: \`context_update\`, \`context_delete\`, \`context_move\`, \`context_request_deletion\`, \`context_request_access\`, \`context_bulk_update\`
+  - boards: \`context_boards\`, \`context_board_items\` (a board as a sortable, grouped list)
   - review: \`context_submit_review\`, \`context_approve\`, \`context_reject\`, \`context_review_queue\`, \`context_my_drafts\`
   - comments: \`context_comment\`, \`context_resolve_comment\`
   - people: \`context_stewards\`, \`context_assign_steward\`, \`context_share_nest\`, \`context_grant\`

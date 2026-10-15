@@ -351,6 +351,8 @@ export interface AdminSettings {
   oidc_auto_provision: boolean;
   /** Tag new documents with the creator's directory department (dept:<slug>). */
   oidc_department_tagging: boolean;
+  /** Enterprise identity providers allowed (licence feature sso). Google is on every plan. */
+  sso_available?: boolean;
   /** Offer every registered account in the add-a-person pickers. Default OFF:
    *  a server holding several unrelated customers would otherwise hand one
    *  customer's staff another customer's email addresses. */
@@ -3815,6 +3817,47 @@ export async function rankBoardColumn(
   return request<{ board: SavedBoard }>(`/nests/${nestId}/boards/${boardId}/rank`, {
     method: "POST",
     body: JSON.stringify({ key, order }),
+  });
+}
+
+/** One change over many nodes (src/nodes/bulk-update.ts). Max 100 ids. */
+export interface BulkPatch {
+  board_id?: string;
+  column?: string;
+  add_tags?: string[];
+  remove_tags?: string[];
+  priority?: string | null;
+  assignee?: string | null;
+  due?: string | null;
+  change_note?: string;
+}
+
+export interface BulkRowResult {
+  id: string;
+  title?: string;
+  outcome: "updated" | "unchanged" | "skipped" | "failed";
+  code?: "needs_review" | "locked" | "forbidden" | "not_found" | "conflict" | "invalid" | "error";
+  reason?: string;
+  version?: number;
+  status?: string;
+  completed_at?: string | null;
+}
+
+export interface BulkUpdateResult {
+  requested: number;
+  updated: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+  results: BulkRowResult[];
+}
+
+export const BULK_UPDATE_MAX = 100;
+
+export async function bulkUpdateNodes(nestId: string, ids: string[], patch: BulkPatch) {
+  return request<BulkUpdateResult>(`/nests/${nestId}/nodes/bulk-update`, {
+    method: "POST",
+    body: JSON.stringify({ ids, patch }),
   });
 }
 

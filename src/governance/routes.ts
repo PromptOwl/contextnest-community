@@ -1299,6 +1299,7 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve-with-edits", async (c) => {
     note: body.note || "Approved with reviewer edits",
     baseUrl: requestBaseUrl(c.req.url),
     client,
+    withEdits: true,
   });
   return c.json({ review });
 });

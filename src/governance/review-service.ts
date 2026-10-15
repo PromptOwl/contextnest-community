@@ -285,6 +285,8 @@ export async function approve(params: {
   /** Caller attribution for the approval (§9.4). An approval publishes, so
    *  when the engine bumps the version it seals, the new row carries it. */
   client?: ClientMetadata;
+  /** The reviewer edited the document just before approving (approve-with-edits). */
+  withEdits?: boolean;
 }): Promise<ReviewRequest> {
   // Serialize against a concurrent author edit of the same node. Authors can
   // now revise their own pending submission, so an autosave/save and this
@@ -378,6 +380,7 @@ export async function approve(params: {
     baseUrl: params.baseUrl,
     pending,
     version,
+    withEdits: params.withEdits,
   });
 
   return (await getReviewRequest(pending.id))!;
@@ -585,14 +588,16 @@ async function notifyApproved(p: {
   baseUrl?: string;
   pending: { id: string; requested_by: string };
   version: number;
+  withEdits?: boolean;
 }): Promise<void> {
   const ctx = await buildDocContext(p.nestId, p.nodeId, p.baseUrl);
+  const verdict = p.withEdits ? "edited and approved" : "approved";
   void dispatchEvent({
     kind: "review_approved",
     nestId: p.nestId,
     subjectId: p.nodeId,
     actor: p.approvedBy,
-    message: `*${ctx.label}* v${p.version} approved by ${p.approvedBy}`,
+    message: `*${ctx.label}* v${p.version} ${verdict} by ${p.approvedBy}`,
   });
 
   // Verdict fan-out: submitter + watchers hear the approval. Best-effort.
@@ -604,11 +609,12 @@ async function notifyApproved(p: {
     requestedBy: p.pending.requested_by,
     reviewId: p.pending.id,
     label: ctx.label,
+    withEdits: p.withEdits,
   });
 
   void notifyNestEvent(
     p.nestId,
-    `:white_check_mark: *${ctx.label}* v${p.version} approved by ${p.approvedBy}`,
+    `:white_check_mark: *${ctx.label}* v${p.version} ${verdict} by ${p.approvedBy}`,
     {
       status: "approved",
       docTitle: ctx.docTitle,

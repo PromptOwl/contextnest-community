@@ -63,6 +63,18 @@ export class ConflictError extends AppError {
   }
 }
 
+/**
+ * The write would land as a draft for a reviewer, and the caller asked for
+ * publish-or-nothing (WriteOptions.publishOnly — bulk board edits). 409: the
+ * document's governance, not the request, is what stands in the way.
+ */
+export class ReviewRequiredError extends AppError {
+  constructor(message: string) {
+    super(409, message);
+    this.name = "ReviewRequiredError";
+  }
+}
+
 export class LockedError extends AppError {
   constructor(message = "Locked") {
     super(423, message);

@@ -12,8 +12,20 @@ import { engineCache } from "./engine.js";
 import { bodyOnly } from "./service.js";
 import { isPublicReader } from "../shared/access.js";
 import { isStewardshipEnabled } from "../nests/service.js";
-import { getApprovedVersion } from "../governance/version-service.js";
+import { getApprovedVersion, getApprovedVersions } from "../governance/version-service.js";
 import { reconstructApproved } from "../governance/approved-body.js";
+import { liveVersions } from "../governance/access-log.js";
+
+/** The version resolveReadableBody serves each node at, for the activity log. */
+export async function readableVersions(
+  nestId: string,
+  userId: string,
+  nodes: Array<{ id: string; frontmatter: { version?: unknown } }>,
+): Promise<Record<string, number | null>> {
+  if (!(await isPublicReader(nestId, userId))) return liveVersions(nodes);
+  const approved = await getApprovedVersions(nestId);
+  return Object.fromEntries(nodes.map((n) => [n.id, approved.get(n.id) ?? null]));
+}
 
 export async function resolveReadableBody(
   nestId: string,
