@@ -6,6 +6,7 @@
  */
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
+import { insertNotification } from "../notify/inbox.js";
 
 export async function notifyAssigned(params: {
   nestId: string;
@@ -18,17 +19,15 @@ export async function notifyAssigned(params: {
   // Assigning yourself is not news.
   if (assignee.toLowerCase() === actorEmail.toLowerCase()) return;
   try {
-    await getDb().run(
-      `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
-       VALUES (?, ?, ?, 'assigned', ?, ?, ?)`,
-      [
-        uuid(),
+    await insertNotification(
+      {
         nestId,
-        assignee.toLowerCase(),
-        nodeId,
-        `${actorEmail} assigned you "${title}"`,
-        new Date().toISOString(),
-      ],
+        userEmail: assignee,
+        kind: "assigned",
+        subjectId: nodeId,
+        message: `${actorEmail} assigned you "${title}"`,
+      },
+      { from: actorEmail, nodeId },
     );
   } catch (err) {
     console.error("[notify] assignment inbox insert failed", nestId, nodeId, err);

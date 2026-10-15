@@ -54,10 +54,13 @@ export async function createTurn(params: {
   const base = {
     model: request.model,
     max_tokens: request.max_tokens,
-    // The instructions and the agent's memory open every request of a run
-    // unchanged, so they are worth caching across its turns.
+    // Two cache breakpoints. The system prompt (persona + instructions) and
+    // the tool list open every request unchanged; the run's first user
+    // message — its memory of past runs and verdicts — follows them and is
+    // also fixed for the run. Caching through it means each later turn pays
+    // full price only for the conversation since.
     system: [{ type: "text" as const, text: request.system, cache_control: { type: "ephemeral" as const } }],
-    messages: request.messages,
+    messages: withMemoryBreakpoint(request.messages),
     tools: request.tools,
   };
   if (!plainModels.has(key)) {
@@ -80,6 +83,17 @@ export async function createTurn(params: {
     }
   }
   return (await client.messages.create(base, { signal })) as TurnResult;
+}
+
+/** Mark the end of the first (memory) message as a cache breakpoint. The
+ *  caller's array is left as it was. */
+export function withMemoryBreakpoint(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
+  const [first, ...rest] = messages;
+  if (!first || first.role !== "user" || typeof first.content !== "string") return messages;
+  return [
+    { role: "user", content: [{ type: "text", text: first.content, cache_control: { type: "ephemeral" } }] },
+    ...rest,
+  ];
 }
 
 let cached: { apiKey: string; baseUrl: string | null; client: Anthropic } | null = null;

@@ -13,7 +13,7 @@ import {
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { addCollaborator } from "./sharing-service.js";
 import { assertCanGrant, permissionClass } from "../auth/seats.js";
-import { listNestPeople, withDirectory } from "./people-service.js";
+import { canSeeRoster, listNestPeople, withDirectory } from "./people-service.js";
 import { setReaderMode } from "./service.js";
 import { isNestHeadless } from "../auth/headless.js";
 import {
@@ -143,16 +143,10 @@ sharingRoutes.get("/mentionable", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
   const people = await listNestPeople(nestId);
-  const callerEmail = (await resolveCallerEmail(userId)).toLowerCase();
-  const onRoster = people.some((p) => p.email.toLowerCase() === callerEmail);
-  if (!onRoster) {
-    // A server admin (and any write-tier caller, who can read the fuller
-    // roster anyway) is not necessarily a listed person — don't lock them out
-    // of their own nest's picker.
-    const access = await resolveNestAccess(nestId, userId);
-    if (permissionLevel(access.permission) < permissionLevel("write")) {
-      throw new ForbiddenError("Only people on this nest can see its roster");
-    }
+  // A server admin (and any write-tier caller) is not necessarily a listed
+  // person — canSeeRoster doesn't lock them out of their own nest's picker.
+  if (!(await canSeeRoster(nestId, userId, await resolveCallerEmail(userId), people))) {
+    throw new ForbiddenError("Only people on this nest can see its roster");
   }
   // Name + email only: the picker shows a person and inserts their address.
   // `source` (owner/collaborator/team/steward/grant) stays out — how someone

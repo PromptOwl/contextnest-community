@@ -1,4 +1,5 @@
 import { MAX_FOLDER_DEPTH } from "./constants";
+import { prettyFolderPath } from "../components/FolderTree";
 
 /**
  * Shared checks for a typed folder path ("gtm/deals"), used by every surface
@@ -27,9 +28,11 @@ const MAX_SEGMENT_LENGTH = 100;
 export interface FolderPathCheck {
   /** The folder as it will be created — slugified, separators normalized. */
   path: string;
+  /** The folder as the tree will name it ("Gtm / Deals") — what to preview. */
+  label: string;
   /** Blocking problem, or null when the path is usable. */
   error: string | null;
-  /** True when the result differs from what was typed (worth showing). */
+  /** True when `label` differs from what was typed beyond case (worth showing). */
   rewritten: boolean;
 }
 
@@ -39,11 +42,14 @@ export function checkFolderPath(raw: string): FolderPathCheck {
     .map((s) => s.trim())
     .filter(Boolean);
   const path = typed.map(slugify).filter(Boolean).join("/");
-  const rewritten = path !== raw.trim();
-  const fail = (error: string): FolderPathCheck => ({ path, error, rewritten });
+  // Compared against the display name, not the stored path: "A" is stored as
+  // "a" but shown as "A", so previewing "a" contradicted the tree (CU-wdqcq027ft).
+  const label = path ? prettyFolderPath(path) : "";
+  const rewritten = label.toLowerCase() !== typed.join(" / ").toLowerCase();
+  const fail = (error: string): FolderPathCheck => ({ path, label, error, rewritten });
 
   // Empty = "nest root", never an error.
-  if (typed.length === 0) return { path: "", error: null, rewritten: false };
+  if (typed.length === 0) return { path: "", label: "", error: null, rewritten: false };
 
   if (typed.some((s) => s === "." || s === "..")) {
     return fail('"." and ".." don\'t name a folder — use a name.');
@@ -65,5 +71,5 @@ export function checkFolderPath(raw: string): FolderPathCheck {
       `Each folder level must be at most ${MAX_SEGMENT_LENGTH} characters.`,
     );
   }
-  return { path, error: null, rewritten };
+  return { path, label, error: null, rewritten };
 }

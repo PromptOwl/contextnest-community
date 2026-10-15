@@ -13,7 +13,19 @@
  * a menu item would also open the document.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { CalendarDays, ListTree, UserRound, X } from "lucide-react";
+import {
+  Ban,
+  Bot,
+  CalendarDays,
+  Database,
+  FileText,
+  FileType,
+  ListTodo,
+  ListTree,
+  UserRound,
+  X,
+  Zap,
+} from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -61,6 +73,17 @@ function Isolate({ children }: { children: ReactNode }) {
       {children}
     </span>
   );
+}
+
+/** A node's type, as a small coloured glyph (cards and list rows). */
+export function TypeIcon({ type }: { type: string }) {
+  const cls = "h-3.5 w-3.5 shrink-0";
+  if (type === "skill") return <Zap className={`${cls} text-blue-500`} />;
+  if (type === "agent") return <Bot className={`${cls} text-violet-500`} />;
+  if (type === "table") return <Database className={`${cls} text-emerald-500`} />;
+  if (type === "pdf") return <FileType className={`${cls} text-rose-500`} />;
+  if (type === "task") return <ListTodo className={`${cls} text-indigo-500`} />;
+  return <FileText className={`${cls} text-muted-foreground`} />;
 }
 
 // ── Priority ────────────────────────────────────────────────────────────────
@@ -329,6 +352,27 @@ export function AssigneeMenu({
         </DropdownMenuContent>
       </DropdownMenu>
     </Isolate>
+  );
+}
+
+// ── Blocked ─────────────────────────────────────────────────────────────────
+
+/**
+ * Linear's "Blocked" flag: shown while any `blocks` relation points at this
+ * task from something not yet done. Read-only — relations are edited on the
+ * task itself. The count only appears past one blocker.
+ */
+export function BlockedBadge({ count, className = "" }: { count: number; className?: string }) {
+  if (count <= 0) return null;
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1 py-0.5 text-[10px] font-medium bg-red-500/10 text-red-700 dark:text-red-300 ${className}`}
+      title={`Blocked by ${count} open task${count === 1 ? "" : "s"}`}
+      data-testid="blocked-badge"
+    >
+      <Ban className="h-3 w-3" />
+      Blocked{count > 1 ? ` · ${count}` : ""}
+    </span>
   );
 }
 

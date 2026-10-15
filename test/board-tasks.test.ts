@@ -4,7 +4,9 @@ import {
   assigneesOnBoard,
   dueState,
   matchesAssigneeFilter,
+  matchesBlockedFilter,
   moveNeedsReview,
+  openBlockers,
   priorityRank,
   subItemsByParent,
   timestampsTooltip,
@@ -136,5 +138,21 @@ describe("newCardPlacement — + Add task lands in its column", () => {
   });
   it("status board: no + (governance decides status)", () => {
     expect(newCardPlacement("draft", cfg({ dimension: "status", layouts: {} }))).toBeNull();
+  });
+});
+
+describe("blocked badge (task relations)", () => {
+  it("counts open blockers, and none once the card itself is done", () => {
+    expect(openBlockers({})).toBe(0);
+    expect(openBlockers({ open_blockers: 2 })).toBe(2);
+    expect(openBlockers({ open_blockers: 2, completed_at: "2026-10-09T00:00:00Z" })).toBe(0);
+    expect(openBlockers({ open_blockers: -1 })).toBe(0);
+  });
+
+  it("hide blocked keeps unblocked and done cards", () => {
+    expect(matchesBlockedFilter({ open_blockers: 1 }, false)).toBe(true);
+    expect(matchesBlockedFilter({ open_blockers: 1 }, true)).toBe(false);
+    expect(matchesBlockedFilter({}, true)).toBe(true);
+    expect(matchesBlockedFilter({ open_blockers: 1, completed_at: "2026-10-09T00:00:00Z" }, true)).toBe(true);
   });
 });

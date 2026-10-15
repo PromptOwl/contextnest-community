@@ -18,6 +18,23 @@ import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { safeJson } from "../shared/json.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { assertFlowGraphAcyclic } from "./flow-graph.js";
+import { RELATION_TYPE_PREFIX, isRelationTypeName } from "../nodes/relations.js";
+
+/**
+ * SQL fragment keeping the reserved task-relation types (`task:*`, see
+ * src/nodes/relations.ts) out of registry reads: they are built in, not
+ * steward vocabulary, and the canvas must not offer them as connections.
+ */
+export const NOT_RELATION_TYPE_SQL = `LOWER(name) NOT LIKE '${RELATION_TYPE_PREFIX}%'`;
+
+/** Refuse a registry/edge write aimed at a reserved task-relation type. */
+export function assertNotRelationType(t: { name: string } | undefined | null): void {
+  if (t && isRelationTypeName(t.name)) {
+    throw new ValidationError(
+      `"${t.name}" is a built-in task relation — manage it with the task relations API (POST /nests/:nestId/nodes/:nodeId/relations, or the context_add_relation MCP tool).`,
+    );
+  }
+}
 
 export const requireWorkflowPlane = async (c: any, next: any) => {
   if (!config.FEATURE_WORKFLOW_PLANE) {
@@ -63,10 +80,12 @@ export interface EdgeTypeRow {
 export async function seedDefaultEdgeTypes(nestId: string): Promise<void> {
   const db = getDb();
   const existing = (await db.get(
-    "SELECT COUNT(*) as c FROM edge_types WHERE nest_id = ?",
+    // Task-relation types are created lazily by src/nodes/relations.ts and
+    // can exist with the plane off — they must not count as "already seeded".
+    `SELECT COUNT(*) as c FROM edge_types WHERE nest_id = ? AND ${NOT_RELATION_TYPE_SQL}`,
     [nestId],
   )) as { c: number };
-  if (existing.c > 0) return;
+  if (Number(existing.c) > 0) return;
   const owner = (await db.get(
     "SELECT u.email FROM nests n JOIN users u ON u.id = n.user_id WHERE n.id = ?",
     [nestId],
@@ -132,7 +151,7 @@ edgeTypeRoutes.get("/", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   await seedDefaultEdgeTypes(nestId);
   const rows = (await getDb().all(
-    "SELECT * FROM edge_types WHERE nest_id = ? ORDER BY LOWER(name)",
+    `SELECT * FROM edge_types WHERE nest_id = ? AND ${NOT_RELATION_TYPE_SQL} ORDER BY LOWER(name)`,
     [nestId],
   )) as EdgeTypeRow[];
   return c.json({ count: rows.length, edge_types: rows.map(edgeTypeToResponse) });
@@ -223,11 +242,12 @@ edgeTypeRoutes.delete("/:id", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const id = c.req.param("id")!;
   await getDb().transaction(async (tx) => {
-    const row = await tx.get(
-      "SELECT id FROM edge_types WHERE id = ? AND nest_id = ?",
+    const row = (await tx.get(
+      "SELECT id, name FROM edge_types WHERE id = ? AND nest_id = ?",
       [id, nestId],
-    );
+    )) as { id: string; name: string } | undefined;
     if (!row) throw new NotFoundError("Edge type not found");
+    assertNotRelationType(row);
     const inUse = (await tx.get(
       "SELECT COUNT(*) as c FROM edges WHERE type_id = ?",
       [id],

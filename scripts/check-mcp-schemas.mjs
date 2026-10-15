@@ -87,7 +87,40 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // server-level `context_request_access` derives from the per-nest definition (no new
 // literal). Promotion is tracked upstream in PromptOwl/ContextNest#167 — adopt the
 // descriptors and lower this by 3 if it lands there.
-const BASELINE = 48;
+//
+// Raised 48 -> 51 for the task-relation trio (`context_relations`,
+// `context_add_relation`, `context_remove_relation`). Same reason as comments and access
+// requests: relations are not an engine operation — they are rows in this repo's `edges`
+// table (the workflow plane's typed edges, reused with reserved `task:*` types), outside the
+// engine's version/hash chain. The upstream catalog (PromptOwl/ContextNest, engine
+// packages/engine) was checked and has no relation/edge-write operation to import; its
+// `RelationshipEdge` is the read-side wikilink graph. They mirror REST
+// /nodes/:nodeId/relations 1:1; the server-level variants derive from these (no new literal).
+//
+// Raised 51 -> 55 for the custom-field definition tools (`context_fields`,
+// `context_create_field`, `context_update_field`, `context_delete_field`). Same reason as
+// the access-request trio: field DEFINITIONS are nest configuration in this repo's
+// field_definitions table, not an engine operation, so there is no upstream descriptor to
+// import. Field VALUES add no tool: they live in frontmatter `metadata.fields` and travel
+// through the existing context_create/update (a `fields` arg) and come back inside the
+// catalog's own `frontmatter.metadata` on get/list/query. They mirror REST
+// /nests/:id/fields 1:1. Upstream catalog proposal: PromptOwl/ContextNest#178 — adopt the
+// descriptors and lower this by 4 if it lands there.
+//
+// Raised 55 -> 58 for `context_boards`, `context_board_items` and `context_bulk_update`
+// (board List view + bulk edit). Same reason as the access-request trio: saved boards are
+// this repo's own table and a bulk edit is a loop over the existing governed update — none
+// is an engine operation, so there is no upstream descriptor to import. They mirror REST
+// GET /boards, GET /boards/:id/items and POST /nodes/bulk-update 1:1; the server-level
+// variants derive from these definitions (no new literal).
+//
+// Raised 58 -> 59 for `context_task_log` (agent interaction log on tasks). Same reason as
+// the comment tools: a logged interaction is collaboration metadata kept OUTSIDE the
+// engine's version/hash chain (src/nodes/task-activity.ts), so there is no upstream
+// operation to import. It mirrors REST POST /nests/:id/nodes/:nodeId/task-log 1:1. The
+// task FIELDS added to context_create / context_update / context_list are properties on
+// existing literals (TASK_FIELD_PROPERTIES), not new schemas.
+const BASELINE = 59;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

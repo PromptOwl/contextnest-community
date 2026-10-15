@@ -13,6 +13,7 @@ import {
   rankColumn,
   updateBoard,
 } from "./board-service.js";
+import { listBoardItems } from "./board-items.js";
 import { permissionLevel } from "../shared/access.js";
 import { ValidationError } from "../shared/errors.js";
 
@@ -35,6 +36,20 @@ boardRoutes.get("/", async (c) => {
     for (const b of boards) b.created_by_email = null;
   }
   return c.json({ boards });
+});
+
+// The board as a list (its List view): the board's filters and grouping,
+// sortable and paged. Read tier, like GET / — rows come from the caller-gated
+// node listing, so nobody sees a row they couldn't open.
+boardRoutes.get("/:boardId/items", async (c) => {
+  const q = c.req.query();
+  const result = await listBoardItems(
+    c.req.param("nestId")!,
+    c.req.param("boardId")!,
+    c.get("userId"),
+    { ...q, assignee: c.req.queries("assignee")?.join(",") },
+  );
+  return c.json(result);
 });
 
 boardRoutes.post("/", async (c) => {

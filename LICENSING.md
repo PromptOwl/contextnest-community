@@ -14,7 +14,7 @@ Setting the key up for the first time is covered in [README.md → License setup
 
 ## The short version
 
-- Every server runs on a **PromptOwl Community License key** (`pk_...`). The key decides the **plan**.
+- Every server runs on a **PromptOwl Community License key** (`pk_...`). The key decides the **plan**. A server with no key behaves like **Free**: it accepts writes while it has 10 or fewer users, and goes read-only past that until a key is installed.
 - The plan sets how many **users**, **editors** and **Account Owners** the server may have. **Viewers are always free.**
 - Each person is counted **once**, at their **highest role on any nest**.
 - When a change would take the server past its plan, that change is refused. **Nothing you already have is ever taken away.**
@@ -34,7 +34,14 @@ Setting the key up for the first time is covered in [README.md → License setup
 | **Viewers** | Unlimited, free | Unlimited, free | Unlimited, free |
 | **Model credits** per user, per month | 1,000 | 5,000 | 5,000 |
 | **Your own model key** (BYOK) | No | No | Yes |
+| **Sign-in** with email or Google | Yes | Yes | Yes |
+| **Enterprise single sign-on** (Entra ID, Okta, any OIDC provider; licence feature `sso`) | No | No | Yes |
+| **Custom assistant name and branding** (licence feature `hootie_branding`) | No | No | Yes |
 | Storage | Your own servers, no limit | Same | Same |
+
+Enterprise features (`byok`, `sso`, `hootie_branding`) are **on by default** with an Enterprise key: nothing to enable on the server or in the license console. PromptOwl can still grant one to, or remove one from, a single license. A server picks up a change on its next license check (about a minute).
+
+A server that already signs in through an enterprise provider keeps working without `sso`; only switching providers or turning SSO back on needs Enterprise.
 
 A **trial** key behaves like Self-Hosted until it ends.
 
@@ -48,6 +55,7 @@ A **trial** key behaves like Self-Hosted until it ends.
 
 - **Trial ends:** the key carries on as a **Free** key. The server keeps working within the Free limits.
 - **Paid plan ends:** the server gets a **14-day grace period**, and Settings → License shows the date it ends. If the plan isn't renewed by then, the server becomes **read-only** (see [When the license stops being valid](#when-the-license-stops-being-valid)).
+- **Small servers fall back to Free.** If the license ends, is revoked, or can't be validated, a server with **10 or fewer users** keeps writing as Free. Read-only applies past 10 users. Only a suspension by PromptOwl blocks writes at any size.
 
 ---
 
@@ -109,9 +117,11 @@ Hootie (the in-nest assistant) and workflow agent runs need an AI model. The ser
 Does the license include "byok" (Enterprise)?
 ├── yes → does the nest have its own model key?
 │         ├── yes → use the nest's key (and the nest's base URL, if it set one)
-│         └── no  → Hootie: is there an own key for the model's provider?
-│                   ├── yes → use that key (kept in PromptOwl's model gateway)
-│                   └── no  → use PromptOwl credits (agent runs always do)
+│         └── no  → has the server set its own model gateway (URL + key)?
+│                   ├── yes → use it, for every model (Hootie and agent runs)
+│                   └── no  → Hootie: is there an own key for the model's provider?
+│                             ├── yes → use that key (kept in PromptOwl's model gateway)
+│                             └── no  → use PromptOwl credits (agent runs always do)
 └── no  → use PromptOwl credits (any own key is kept but ignored)
 ```
 
@@ -125,8 +135,9 @@ Does the license include "byok" (Enterprise)?
 
 - Add your keys for Anthropic, OpenAI, Google Gemini, xAI Grok or Groq in **Settings → Hootie → Model keys**. PromptOwl checks each key and keeps it in its model gateway; this server only shows the last 4 characters. A single nest can also have its own Anthropic key for agent runs, in its env settings.
 - Your own key is used for its provider. Calls with no own key still use PromptOwl credits.
+- Or run every call through **your own model gateway** (LiteLLM in front of Bedrock, Azure, Ollama or any provider): set its URL and key in **Settings → Hootie → Model gateway** (`ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`). Hootie and agent runs then never use PromptOwl's gateway, so prompts and nest content stay on your network. The key is checked against your gateway when you save and stays on this server.
 - A nest's key and base URL always come **as a pair**. If a nest sets only a base URL, no key is sent there.
-- On other plans the Model keys card is hidden, and the server refuses to save a key (`403`).
+- On other plans the Model keys and Model gateway cards are hidden, and the server refuses to save a key or gateway URL (`403`).
 
 ### Choosing the model
 
@@ -162,7 +173,7 @@ It **never** sends document content or names of people. This happens whether or 
 | PromptOwl **suspends** the key | After **2 suspended answers within an hour**, so about 1 minute |
 | PromptOwl answers "valid" again | On the next check. Nothing to reinstall. |
 
-When the license stops being valid, the server goes **read-only**:
+When the license stops being valid, a server with more than 10 users goes **read-only** (10 or fewer keep writing as Free):
 
 - **Reading keeps working:** browsing nests, search, documents and MCP reads.
 - **Writing is refused** (`503`): documents, and nest create, rename and delete.
@@ -181,21 +192,17 @@ When the license stops being valid, the server goes **read-only**:
 | Upgrade or change plan | **Settings → License → Manage plan**, or app.promptowl.ai → Community License |
 | Pick the Hootie model | **Settings → Hootie** |
 | Set your own model key (Enterprise) | **Settings → Hootie → Model keys**, or a nest's env settings |
+| Turn on Google sign-in (every plan) or Entra / Okta SSO (Enterprise) | **Settings → Features → Single sign-on**, then the **Single sign-on** tab |
 | Read the same data from a script | `GET /admin/license` (server admin), `GET /license/status` (public, no counts) |
 
 ## Questions
 
-**We hit the user limit. Can existing people still work?**
-Yes. Only new role raises are refused. Everyone keeps their current role, and viewers can still be added.
+**We hit the user limit. Can existing people still work?** Yes. Only new role raises are refused. Everyone keeps their current role, and viewers can still be added.
 
-**We moved to a smaller plan and are now over it. What happens?**
-Nothing is removed. New raises are refused until enough roles are lowered to bring the count under the limit.
+**We moved to a smaller plan and are now over it. What happens?** Nothing is removed. New raises are refused until enough roles are lowered to bring the count under the limit.
 
-**PromptOwl is down. Does our server stop?**
-No. It keeps running on the last answer it saved, models included. It catches up when PromptOwl is back.
+**PromptOwl is down. Does our server stop?** No. It keeps running on the last answer it saved, models included. It catches up when PromptOwl is back.
 
-**Does turning off telemetry stop the license check?**
-No. The license check is separate from analytics, and it sends only the counts listed above.
+**Does turning off telemetry stop the license check?** No. The license check is separate from analytics, and it sends only the counts listed above.
 
-**We're on Free. Why can't I add a second server admin?**
-Free includes one Account Owner, and the license owner already fills it. Upgrade to add more.
+**We're on Free. Why can't I add a second server admin?** Free includes one Account Owner, and the license owner already fills it. Upgrade to add more.

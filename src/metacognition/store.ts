@@ -84,29 +84,47 @@ export async function serverRunNodeIds(nestId: string): Promise<Set<string>> {
   return new Set(rows.map((r) => r.node_id));
 }
 
+/**
+ * Save an agent. The OWNER (`created_by`) is pinned at creation: saving the
+ * settings later — even as a server admin — does not make the saver the
+ * owner. It used to, and since the run gate checks the owner, an admin
+ * tweaking a cap silently became the person the agent answered to.
+ *
+ * The one exception is an owner who can no longer stand behind the agent
+ * (`ownerUsable` false: gone, or lost write on the nest). Then the agent
+ * cannot run at all, and the admin saving it takes it over — reported back
+ * as `ownerChanged` so the UI can say so.
+ *
+ * Ownership never widens what the persona can do: its reach is its own
+ * scope and grants (tools.ts), never its owner's role.
+ */
 export async function upsertAgent(input: {
   nestId: string;
   nodeId: string;
   config: MetacognitionConfig;
   enabled: boolean;
-  createdBy: string;
-}): Promise<MetacognitionAgent> {
+  savedBy: string;
+  /** Can the current owner still run this agent? Only asked on an update. */
+  ownerUsable?: (ownerEmail: string) => Promise<boolean>;
+}): Promise<MetacognitionAgent & { ownerChanged: boolean }> {
   const db = getDb();
   const existing = await getAgent(input.nestId, input.nodeId);
   const now = new Date().toISOString();
   const json = JSON.stringify(input.config);
+  let ownerChanged = false;
   if (existing) {
+    const keep = input.ownerUsable ? await input.ownerUsable(existing.created_by) : true;
+    const owner = keep ? existing.created_by : input.savedBy;
+    ownerChanged = owner.toLowerCase() !== existing.created_by.toLowerCase();
     await db.transaction(async (tx) => {
       await tx.run("UPDATE users SET name = ? WHERE id = ? AND is_service = 1", [
         input.config.persona.name,
         existing.persona.user_id,
       ]);
-      // created_by moves to whoever saved it last: their access is what bounds
-      // the persona from here on, so it has to be someone who can still grant it.
       await tx.run(
         `UPDATE metacognition_agents SET config_json = ?, enabled = ?, created_by = ?, updated_at = ?
           WHERE nest_id = ? AND node_id = ?`,
-        [json, input.enabled ? 1 : 0, input.createdBy, now, input.nestId, input.nodeId],
+        [json, input.enabled ? 1 : 0, owner, now, input.nestId, input.nodeId],
       );
     });
   } else {
@@ -119,11 +137,21 @@ export async function upsertAgent(input: {
       await tx.run(
         `INSERT INTO metacognition_agents (nest_id, node_id, persona_user_id, config_json, enabled, created_by, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [input.nestId, input.nodeId, personaId, json, input.enabled ? 1 : 0, input.createdBy, now, now],
+        [input.nestId, input.nodeId, personaId, json, input.enabled ? 1 : 0, input.savedBy, now, now],
       );
     });
   }
-  return (await getAgent(input.nestId, input.nodeId))!;
+  return { ...(await getAgent(input.nestId, input.nodeId))!, ownerChanged };
+}
+
+/** Is this user a metacognition persona (as opposed to an access key's
+ *  service identity)? Returns the nests it lives in — its only home. */
+export async function personaHomeNests(userId: string): Promise<string[]> {
+  const rows = (await getDb().all(
+    "SELECT DISTINCT nest_id FROM metacognition_agents WHERE persona_user_id = ?",
+    [userId],
+  )) as Array<{ nest_id: string }>;
+  return rows.map((r) => r.nest_id);
 }
 
 /** Remove the agent. The persona identity stays: it authored versions and

@@ -19,7 +19,7 @@ import {
 } from "../governance/access-guard.js";
 import { compilePrompt, scorePrompt, tokenizePrompt } from "./prompt-compiler.js";
 import { resolveNodeUrl } from "../governance/title-resolver.js";
-import { resolveReadableBody } from "./readable-body.js";
+import { readableVersions, resolveReadableBody } from "./readable-body.js";
 import { extractContextTargets, extractWikiTargets } from "./graph-service.js";
 import { recordNodeAccess } from "../governance/access-log.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
@@ -366,6 +366,7 @@ export async function resolveContext(params: {
     userId,
     userEmail,
     client,
+    versions: await readableVersions(nestId, userId, included),
     detail: "context",
   });
 

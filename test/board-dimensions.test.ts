@@ -97,6 +97,23 @@ describe("capitalizeColumnHeader", () => {
 });
 
 describe("buildColumns", () => {
+  it("adds empty folders as folder-board columns, like the sidebar tree (CU-wdqcq04wnz)", () => {
+    const cfg: BoardConfig = { dimension: "folder" };
+    const docs = [node({ id: "nodes/gtm/deals/a" })];
+    expect(buildColumns(docs, cfg, ["organizational-knowledge"]).map((c) => c.key)).toEqual([
+      "gtm/deals",
+      "organizational-knowledge",
+    ]);
+    // A hidden column stays hidden; a folder that holds cards isn't doubled.
+    expect(
+      buildColumns(docs, { ...cfg, hiddenColumns: ["organizational-knowledge"] }, ["organizational-knowledge"]).map((c) => c.key),
+    ).toEqual(["gtm/deals"]);
+    expect(buildColumns(docs, cfg, ["gtm/deals"]).map((c) => c.key)).toEqual(["gtm/deals"]);
+  });
+  it("ignores empty folders on any other dimension", () => {
+    const cols = buildColumns([node({ id: "a", status: "draft" })], { dimension: "status" }, ["empty"]);
+    expect(cols.map((c) => c.key)).toEqual(["draft"]);
+  });
   it("returns distinct column keys present in the data", () => {
     const cfg: BoardConfig = { dimension: "status" };
     const cols = buildColumns(

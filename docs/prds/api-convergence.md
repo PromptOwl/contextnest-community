@@ -1,7 +1,6 @@
 # PRD: API Convergence — One CLI, One MCP Across ContextNest OSS and Community
 
-**Status:** Proposed · **Date:** 2026-07-12 · **Owner:** Qaish
-**Governing rules:** Plumbing-Down-Policy-Stays · The AGPL↔Commercial Line · Engine Versioning Discipline
+**Status:** Proposed · **Date:** 2026-07-12 · **Owner:** Qaish **Governing rules:** Plumbing-Down-Policy-Stays · The AGPL↔Commercial Line · Engine Versioning Discipline
 
 ## 1. Problem
 
