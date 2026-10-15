@@ -223,7 +223,6 @@ The Software injects content into large language models. AI output may be inaccu
 
 ---
 
-**Copyright © 2026 Promptowl LLC.** All rights reserved.
-"ContextNest" and "PromptOwl" are trademarks of Promptowl LLC.
+**Copyright © 2026 Promptowl LLC.** All rights reserved. "ContextNest" and "PromptOwl" are trademarks of Promptowl LLC.
 
 Promptowl LLC · 3060 Mercer University Dr Ste 110 · Atlanta, GA 30341 · USA

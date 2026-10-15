@@ -141,14 +141,7 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 
 ## Microsoft Teams notifications
 
-Set `MSTEAMS_WEBHOOK_URL` (or paste the URL into **Server settings → Notifications →
-Microsoft Teams notifications**) and the server posts the same governance
-events the Slack connector covers — review requested / approved / rejected,
-collaborator added, plus per-nest burst digests — to one Teams channel as
-[Adaptive Cards](https://adaptivecards.io/). Leave it empty to turn the
-connector off. Delivery is fire-and-forget with a short timeout: a Teams
-outage or a bad URL never slows down or fails the action that triggered the
-message.
+Set `MSTEAMS_WEBHOOK_URL` (or paste the URL into **Server settings → Notifications → Microsoft Teams notifications**) and the server posts the same governance events the Slack connector covers — review requested / approved / rejected, collaborator added, plus per-nest burst digests — to one Teams channel as [Adaptive Cards](https://adaptivecards.io/). Leave it empty to turn the connector off. Delivery is fire-and-forget with a short timeout: a Teams outage or a bad URL never slows down or fails the action that triggered the message.
 
 > Naming note: the setting is `msteams_webhook_url` / `MSTEAMS_WEBHOOK_URL`
 > because "teams" in this product means user groups (the `/teams` API), not
@@ -156,150 +149,65 @@ message.
 
 ### Create the incoming webhook in a Teams channel
 
-Microsoft retired the classic Office 365 "Incoming Webhook" connectors;
-webhooks are now created with the **Workflows** (Power Automate) app:
+Microsoft retired the classic Office 365 "Incoming Webhook" connectors; webhooks are now created with the **Workflows** (Power Automate) app:
 
-1. In Microsoft Teams, open the channel that should receive notifications,
-   click **⋯ (More options) → Workflows**.
-2. Pick the template **"Post to a channel when a webhook request is
-   received"** (searching for "webhook" finds it), sign in if prompted, and
-   confirm the team + channel.
-3. Create the flow and **copy the HTTP POST URL** it shows (a
-   `https://….logic.azure.com/…` or `https://….powerplatform.com/…` address).
-4. Paste that URL into **Server settings → Notifications → Microsoft Teams
-   notifications** (or set `MSTEAMS_WEBHOOK_URL`).
-5. Save, then click **Send test** on the card to post a test message and
-   confirm the channel receives it. (The button tests the *saved* URL — save
-   first, then test. The Slack card has the same button.)
+1. In Microsoft Teams, open the channel that should receive notifications, click **⋯ (More options) → Workflows**.
+2. Pick the template **"Post to a channel when a webhook request is received"** (searching for "webhook" finds it), sign in if prompted, and confirm the team + channel.
+3. Create the flow and **copy the HTTP POST URL** it shows (a `https://….logic.azure.com/…` or `https://….powerplatform.com/…` address).
+4. Paste that URL into **Server settings → Notifications → Microsoft Teams notifications** (or set `MSTEAMS_WEBHOOK_URL`).
+5. Save, then click **Send test** on the card to post a test message and confirm the channel receives it. (The button tests the *saved* URL — save first, then test. The Slack card has the same button.)
 
-If your tenant still has a legacy Office 365 connector webhook, it is expected
-to accept the same payload envelope (legacy connectors documented support for
-Adaptive Card attachments, though we have not verified one end-to-end — the
-card's plain-text `fallbackText` is the safety net) — but create new hooks via
-Workflows.
+If your tenant still has a legacy Office 365 connector webhook, it is expected to accept the same payload envelope (legacy connectors documented support for Adaptive Card attachments, though we have not verified one end-to-end — the card's plain-text `fallbackText` is the safety net) — but create new hooks via Workflows.
 
-The URL embeds a secret — anyone holding it can post to the channel, so treat
-it like a password (it is why the setting requires `https://`). The server
-sends the standard envelope Workflows expects:
-`{"type": "message", "attachments": [{"contentType":
-"application/vnd.microsoft.card.adaptive", "content": {…card…}}]}` with a
-plain-text `fallbackText` for clients that cannot render cards.
+The URL embeds a secret — anyone holding it can post to the channel, so treat it like a password (it is why the setting requires `https://`). The server sends the standard envelope Workflows expects: `{"type": "message", "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "content": {…card…}}]}` with a plain-text `fallbackText` for clients that cannot render cards.
 
-Per-nest connector rows post the same Adaptive Card format to a nest-specific
-webhook, with per-event filtering: `POST /nests/:id/connectors` with a JSON
-body like `{"channel": "teams", "url": "https://…", "events":
-["review_requested", "review_rejected"]}` (`events` is any of `review_requested`,
-`review_approved`, `review_rejected`, `run_failed`, `mention`, `review_escalated`
-— a review passed the nest's review SLA and moved up a rung — or `["*"]`;
-subscription is explicit, so list `review_escalated` next to `review_requested`
-to hear escalations on that row; the server-wide webhook above posts review
-requests and escalations with no row at all; the
-`url` may be an `env:KEY` reference into the nest's env store). Manage rows
-with `GET`/`PATCH`/`DELETE` on the same path.
+Per-nest connector rows post the same Adaptive Card format to a nest-specific webhook, with per-event filtering: `POST /nests/:id/connectors` with a JSON body like `{"channel": "teams", "url": "https://…", "events": ["review_requested", "review_rejected"]}` (`events` is any of `review_requested`, `review_approved`, `review_rejected`, `run_failed`, `mention`, `review_escalated` — a review passed the nest's review SLA and moved up a rung — or `["*"]`; subscription is explicit, so list `review_escalated` next to `review_requested` to hear escalations on that row; the server-wide webhook above posts review requests and escalations with no row at all; the `url` may be an `env:KEY` reference into the nest's env store). Manage rows with `GET`/`PATCH`/`DELETE` on the same path.
 
 ---
 
 ## Single sign-on (OIDC)
 
-This section is the admin guide to single sign-on. It covers what SSO does,
-how to set it up for each identity provider, what happens to existing accounts,
-API keys and agents, and how to fix each sign-in error.
+This section is the admin guide to single sign-on. It covers what SSO does, how to set it up for each identity provider, what happens to existing accounts, API keys and agents, and how to fix each sign-in error.
 
-**In this section:** [Overview](#overview) ·
-[Prerequisites](#prerequisites) · [Settings reference](#settings-reference) ·
-[Microsoft Entra ID](#connect-microsoft-entra-id) · [Google](#connect-google) ·
-[Okta](#connect-okta) · [Keycloak](#connect-keycloak) ·
-[Any other OIDC provider](#connect-any-other-oidc-provider) ·
-[User lifecycle](#user-lifecycle) ·
-[API keys, agents and MCP](#how-sso-relates-to-api-keys-agents-and-mcp) ·
-[Shared deployments](#hosted-and-shared-deployments) ·
-[Department auto-tagging](#department-auto-tagging) ·
-[Troubleshooting](#troubleshooting-sso-sign-in)
+**In this section:** [Overview](#overview) · [Prerequisites](#prerequisites) · [Settings reference](#settings-reference) · [Microsoft Entra ID](#connect-microsoft-entra-id) · [Google](#connect-google) · [Okta](#connect-okta) · [Keycloak](#connect-keycloak) · [Any other OIDC provider](#connect-any-other-oidc-provider) · [User lifecycle](#user-lifecycle) · [API keys, agents and MCP](#how-sso-relates-to-api-keys-agents-and-mcp) · [Shared deployments](#hosted-and-shared-deployments) · [Department auto-tagging](#department-auto-tagging) · [Troubleshooting](#troubleshooting-sso-sign-in)
 
 ### Overview
 
-With SSO turned on, the login page shows one more button. Someone clicks it,
-signs in at your identity provider (IdP), and comes back signed in to
-ContextNest. The session is the same one a password login creates: an httpOnly
-cookie that lasts 30 days.
+With SSO turned on, the login page shows one more button. Someone clicks it, signs in at your identity provider (IdP), and comes back signed in to ContextNest. The session is the same one a password login creates: an httpOnly cookie that lasts 30 days.
 
-- **Protocol:** OpenID Connect, authorization-code flow with PKCE (S256).
-  `GET /auth/oidc/login` sends the browser to your IdP.
-  `GET /auth/oidc/callback` gets the code back, redeems it, checks the ID token
-  (signature against the issuer's JWKS, issuer, audience, expiry, nonce) and
-  starts the session. Endpoint details are in `API.md → GET /auth/oidc/login`.
-- **Providers:** any OIDC provider that meets the
-  [requirements below](#connect-any-other-oidc-provider). The settings page
-  has one-click presets for **Microsoft Entra ID** and **Google**. **Okta** and
-  **Keycloak** work as a custom issuer. SAML is not supported.
-- **Button label:** "Sign in with Microsoft" when the issuer host is
-  `login.microsoftonline.com`, "Sign in with Google" for
-  `accounts.google.com`, and "Sign in with SSO" for anything else. The button
-  only appears when SSO is on **and** the issuer, client ID and client secret
-  are all set.
-- **Where to configure:** **Admin → Server settings** in the left rail: switch
-  Single sign-on on under **Features**, then fill in the **Single sign-on** tab
-  that appears — or set the `OIDC_*` environment variables. Changes made in the UI take
-  effect at once, without a restart.
-- **Who can configure:** a server admin. That is the license admin or a
-  superadmin (granted on **Admin → Teammates**, or listed under `super_admins`
-  in `access.yaml`). In `AUTH_MODE=open` nobody signs in, so SSO has no effect
-  there. SSO is for `AUTH_MODE=key`, the default.
-- **One setup per server:** there is a single issuer, client and domain
-  allowlist for the whole server. See
-  [Hosted and shared deployments](#hosted-and-shared-deployments).
+- **Protocol:** OpenID Connect, authorization-code flow with PKCE (S256). `GET /auth/oidc/login` sends the browser to your IdP. `GET /auth/oidc/callback` gets the code back, redeems it, checks the ID token (signature against the issuer's JWKS, issuer, audience, expiry, nonce) and starts the session. Endpoint details are in `API.md → GET /auth/oidc/login`.
+- **Providers:** any OIDC provider that meets the [requirements below](#connect-any-other-oidc-provider). The settings page has one-click presets for **Microsoft Entra ID** and **Google**. **Okta** and **Keycloak** work as a custom issuer. SAML is not supported.
+- **Button label:** "Sign in with Microsoft" when the issuer host is `login.microsoftonline.com`, "Sign in with Google" for `accounts.google.com`, and "Sign in with SSO" for anything else. The button only appears when SSO is on **and** the issuer, client ID and client secret are all set.
+- **Where to configure:** **Admin → Server settings** in the left rail: switch Single sign-on on under **Features**, then fill in the **Single sign-on** tab that appears — or set the `OIDC_*` environment variables. Changes made in the UI take effect at once, without a restart.
+- **Who can configure:** a server admin. That is the license admin or a superadmin (granted on **Admin → Teammates**, or listed under `super_admins` in `access.yaml`). In `AUTH_MODE=open` nobody signs in, so SSO has no effect there. SSO is for `AUTH_MODE=key`, the default.
+- **One setup per server:** there is a single issuer, client and domain allowlist for the whole server. See [Hosted and shared deployments](#hosted-and-shared-deployments).
 
 SSO is separate from three other features with similar names:
 
 - **Sign in with PromptOwl**, the device flow (`PROMPTOWL_SIGN_IN_GATE`).
-- **One-click "Open Community" login** from PromptOwl (`GET /auth/sso`,
-  **Server settings → Community sites**).
+- **One-click "Open Community" login** from PromptOwl (`GET /auth/sso`, **Server settings → Community sites**).
 - **Agent SSO** token exchange ([below](#agent-sso-token-exchange)).
 
 Each has its own settings.
 
 ### Prerequisites
 
-1. **An https address.** The issuer must be `https://` (the server refuses
-   anything else). Your ContextNest server should also be on https: the session
-   and flow cookies get the `Secure` flag on https, and most IdPs only accept an
-   `http://` redirect URI for `localhost`.
-2. **`PUBLIC_BASE_URL` set to that address.** Set it on
-   **Server settings → Basic → Public base URL**, or in the environment, e.g.
-   `https://nest.acme.com`, with no trailing path. The redirect URI is built
-   from it. If it is unset, the server uses the origin of the incoming request,
-   which behind a reverse proxy is whatever `Host` header the proxy forwards.
-   See the `PUBLIC_BASE_URL` row in the env var table for why you should always
-   pin it.
+1. **An https address.** The issuer must be `https://` (the server refuses anything else). Your ContextNest server should also be on https: the session and flow cookies get the `Secure` flag on https, and most IdPs only accept an `http://` redirect URI for `localhost`.
+2. **`PUBLIC_BASE_URL` set to that address.** Set it on **Server settings → Basic → Public base URL**, or in the environment, e.g. `https://nest.acme.com`, with no trailing path. The redirect URI is built from it. If it is unset, the server uses the origin of the incoming request, which behind a reverse proxy is whatever `Host` header the proxy forwards. See the `PUBLIC_BASE_URL` row in the env var table for why you should always pin it.
 3. **The redirect URI registered at your IdP, exactly:**
 
    ```
    <PUBLIC_BASE_URL>/auth/oidc/callback
    ```
 
-   The Single sign-on tab shows this value with a **Copy** button. Before you
-   save, it is built from the Public base URL you have typed, or from this
-   browser's address if that field is empty. People must reach ContextNest at
-   this same address. The flow cookies are set on the host where sign-in
-   starts, so starting on a different host fails with `state_mismatch`.
-4. **Outbound access from the server to the IdP.** The server fetches
-   `<issuer>/.well-known/openid-configuration`, the JWKS and the token
-   endpoint. Each call times out after 10 seconds.
-5. **A server clock that is correct (NTP).** ID-token expiry is checked with
-   no clock tolerance.
-6. **A second way in while you test.** Keep password or PromptOwl sign-in on
-   until an SSO login has worked. The server will not let you turn off
-   password and PromptOwl sign-in unless SSO is on and fully configured, so
-   there is always a way in.
+   The Single sign-on tab shows this value with a **Copy** button. Before you save, it is built from the Public base URL you have typed, or from this browser's address if that field is empty. People must reach ContextNest at this same address. The flow cookies are set on the host where sign-in starts, so starting on a different host fails with `state_mismatch`.
+4. **Outbound access from the server to the IdP.** The server fetches `<issuer>/.well-known/openid-configuration`, the JWKS and the token endpoint. Each call times out after 10 seconds.
+5. **A server clock that is correct (NTP).** ID-token expiry is checked with no clock tolerance.
+6. **A second way in while you test.** Keep password or PromptOwl sign-in on until an SSO login has worked. The server will not let you turn off password and PromptOwl sign-in unless SSO is on and fully configured, so there is always a way in.
 
 ### Settings reference
 
-All of these are on **Admin → Server settings → Single sign-on**, in the
-**Single sign-on (OIDC)** card. The exception is `PUBLIC_BASE_URL`, which is on
-the **General** tab. One **Save** button, next to the page title, saves every
-tab. If a value is set both in the environment and in the UI, see
-[Runtime settings persistence](#runtime-settings-persistence) for which one
-wins.
+All of these are on **Admin → Server settings → Single sign-on**, in the **Single sign-on (OIDC)** card. The exception is `PUBLIC_BASE_URL`, which is on the **General** tab. One **Save** button, next to the page title, saves every tab. If a value is set both in the environment and in the UI, see [Runtime settings persistence](#runtime-settings-persistence) for which one wins.
 
 | Env var | UI field | Default | What it does |
 |---|---|---|---|
@@ -316,205 +224,98 @@ The following are **fixed** and cannot be configured:
 
 - Scopes: `openid email profile`.
 - Response type: `code`, with PKCE `S256`.
-- Client authentication: `client_secret_post`. `client_secret_basic` and
-  `private_key_jwt` are not supported.
+- Client authentication: `client_secret_post`. `client_secret_basic` and `private_key_jwt` are not supported.
 - ID-token algorithm: `RS256` only.
 - Flow cookies (state, nonce, PKCE verifier) last 10 minutes.
 - Discovery documents are cached for 5 minutes.
 - Calls to the IdP time out after 10 seconds.
 - Sessions last 30 days.
-- Rate limit: 100 requests per 15 minutes per client IP, counted separately for
-  `/auth/oidc/login` and `/auth/oidc/callback`.
+- Rate limit: 100 requests per 15 minutes per client IP, counted separately for `/auth/oidc/login` and `/auth/oidc/callback`.
 
-The `/admin/settings` API names for the same fields are `oidc_enabled`,
-`oidc_issuer`, `oidc_client_id`, `oidc_client_secret`, `oidc_allowed_domains`,
-`oidc_auto_provision` and `oidc_department_tagging` (see `API.md`).
+The `/admin/settings` API names for the same fields are `oidc_enabled`, `oidc_issuer`, `oidc_client_id`, `oidc_client_secret`, `oidc_allowed_domains`, `oidc_auto_provision` and `oidc_department_tagging` (see `API.md`).
 
 ### Connect Microsoft Entra ID
 
-1. **Register an app.** In the Entra admin center, go to *Identity →
-   Applications → App registrations → New registration*. Name it, e.g.
-   "ContextNest", and leave the account type at *Accounts in this
-   organizational directory only* (single tenant).
-2. **Add the redirect URI.** In the registration, go to *Authentication → Add
-   a platform → Web* and paste the redirect URI from the Single sign-on tab
-   (`https://<your-server>/auth/oidc/callback`).
-3. **Create a client secret.** Go to *Certificates & secrets → New client
-   secret*. Copy the secret **Value**, not the Secret ID. It is shown only
-   once. Note when it expires: after that date, sign-in fails with
-   `exchange_failed` until you paste a new secret.
-4. **Collect the IDs.** On the app's *Overview* page, copy the **Application
-   (client) ID** and the **Directory (tenant) ID**.
-5. **Fill in ContextNest.** On **Admin → Server settings → Single sign-on**,
-   click **Microsoft Entra ID** and paste the tenant ID into **Directory
-   (tenant) ID**. The issuer becomes
-   `https://login.microsoftonline.com/<tenant-id>/v2.0`. Paste the
-   client ID and the secret value. You can also set **Allowed email domains**
-   to your organization's domains. Turn the switch **On** and **Save**. The
-   switch and the fields can go in the same save.
-6. **Test.** On **Server settings → Network & status**, click **Test
-   discovery** to confirm this server can reach Entra. Then open the login
-   page in a private window. A **Sign in with Microsoft** button should appear
-   and take you through Entra.
+1. **Register an app.** In the Entra admin center, go to *Identity → Applications → App registrations → New registration*. Name it, e.g. "ContextNest", and leave the account type at *Accounts in this organizational directory only* (single tenant).
+2. **Add the redirect URI.** In the registration, go to *Authentication → Add a platform → Web* and paste the redirect URI from the Single sign-on tab (`https://<your-server>/auth/oidc/callback`).
+3. **Create a client secret.** Go to *Certificates & secrets → New client secret*. Copy the secret **Value**, not the Secret ID. It is shown only once. Note when it expires: after that date, sign-in fails with `exchange_failed` until you paste a new secret.
+4. **Collect the IDs.** On the app's *Overview* page, copy the **Application (client) ID** and the **Directory (tenant) ID**.
+5. **Fill in ContextNest.** On **Admin → Server settings → Single sign-on**, click **Microsoft Entra ID** and paste the tenant ID into **Directory (tenant) ID**. The issuer becomes `https://login.microsoftonline.com/<tenant-id>/v2.0`. Paste the client ID and the secret value. You can also set **Allowed email domains** to your organization's domains. Turn the switch **On** and **Save**. The switch and the fields can go in the same save.
+6. **Test.** On **Server settings → Network & status**, click **Test discovery** to confirm this server can reach Entra. Then open the login page in a private window. A **Sign in with Microsoft** button should appear and take you through Entra.
 
-The same steps, with copy buttons for every value Entra asks for, are on
-**Server settings → Network & status → Microsoft Entra ID sign-in**.
+The same steps, with copy buttons for every value Entra asks for, are on **Server settings → Network & status → Microsoft Entra ID sign-in**.
 
 Entra-specific notes:
 
-- **Use the tenant ID (a GUID), not `common`, `organizations` or a domain
-  name.** The server requires the discovery document's `issuer` to match the
-  configured issuer exactly. For the multi-tenant endpoints, Entra's document
-  contains the placeholder `{tenantid}`, so the check fails and sign-in stops
-  with `discovery_failed`. Only single-tenant sign-in is supported.
-- **Email claim.** Entra v2 ID tokens often have no `email` claim. The server
-  then uses `preferred_username` (the UPN). The address people sign in with
-  may therefore be their UPN, which may differ from their mail address.
-  Account matching uses this address (see [User lifecycle](#user-lifecycle)).
-- **Only let assigned users in (optional).** Go to *Enterprise applications →
-  (your app) → Properties → Assignment required? → Yes*, then assign users or
-  groups. Entra then refuses anyone else. Depending on where Entra stops the
-  sign-in, the user sees either Entra's own error page or `provider_error`.
-- **Sign-out:** Entra publishes an `end_session_endpoint`, so ContextNest
-  signs the user out of Entra as well (see
-  [Offboarding and sign-out](#revoking-access-offboarding)).
+- **Use the tenant ID (a GUID), not `common`, `organizations` or a domain name.** The server requires the discovery document's `issuer` to match the configured issuer exactly. For the multi-tenant endpoints, Entra's document contains the placeholder `{tenantid}`, so the check fails and sign-in stops with `discovery_failed`. Only single-tenant sign-in is supported.
+- **Email claim.** Entra v2 ID tokens often have no `email` claim. The server then uses `preferred_username` (the UPN). The address people sign in with may therefore be their UPN, which may differ from their mail address. Account matching uses this address (see [User lifecycle](#user-lifecycle)).
+- **Only let assigned users in (optional).** Go to *Enterprise applications → (your app) → Properties → Assignment required? → Yes*, then assign users or groups. Entra then refuses anyone else. Depending on where Entra stops the sign-in, the user sees either Entra's own error page or `provider_error`.
+- **Sign-out:** Entra publishes an `end_session_endpoint`, so ContextNest signs the user out of Entra as well (see [Offboarding and sign-out](#revoking-access-offboarding)).
 
 ### Connect Google
 
-1. **Choose the project.** In the Google Cloud console, pick (or create) the
-   project that will own the sign-in client.
-2. **Set up the consent screen.** Go to *APIs & Services → OAuth consent
-   screen*. Newer consoles call this *Google Auth Platform → Branding /
-   Audience*.
-   - **Internal:** only accounts in your Google Workspace organization can
-     sign in. This is the right choice for a company server.
-   - **External:** any Google account can sign in. While the app is in
-     *Testing*, only the test users you list can sign in.
-3. **Create the client.** Go to *APIs & Services → Credentials → Create
-   credentials → OAuth client ID* (newer consoles: *Google Auth Platform →
-   Clients → Create client*). Choose **Application type: Web application**.
-4. **Add the redirect URI.** Under **Authorized redirect URIs**, add the
-   redirect URI from the Single sign-on tab exactly, then click **Create**.
+1. **Choose the project.** In the Google Cloud console, pick (or create) the project that will own the sign-in client.
+2. **Set up the consent screen.** Go to *APIs & Services → OAuth consent screen*. Newer consoles call this *Google Auth Platform → Branding / Audience*.
+   - **Internal:** only accounts in your Google Workspace organization can sign in. This is the right choice for a company server.
+   - **External:** any Google account can sign in. While the app is in *Testing*, only the test users you list can sign in.
+3. **Create the client.** Go to *APIs & Services → Credentials → Create credentials → OAuth client ID* (newer consoles: *Google Auth Platform → Clients → Create client*). Choose **Application type: Web application**.
+4. **Add the redirect URI.** Under **Authorized redirect URIs**, add the redirect URI from the Single sign-on tab exactly, then click **Create**.
 5. **Copy the credentials.** Copy the **Client ID** and **Client secret**.
-6. **Fill in ContextNest.** On **Admin → Server settings → Single sign-on**,
-   click **Google**. The issuer becomes `https://accounts.google.com`. Paste
-   the client ID and secret, and **set Allowed email domains** to your
-   Workspace domains. Turn the switch **On**, **Save**, and test in a private
-   window. A **Sign in with Google** button should appear.
+6. **Fill in ContextNest.** On **Admin → Server settings → Single sign-on**, click **Google**. The issuer becomes `https://accounts.google.com`. Paste the client ID and secret, and **set Allowed email domains** to your Workspace domains. Turn the switch **On**, **Save**, and test in a private window. A **Sign in with Google** button should appear.
 
 Google-specific notes:
 
-- **Set Allowed email domains.** `accounts.google.com` will sign in *any*
-  Google account. With auto-provision on and no domain list, anyone with a
-  Google account gets an account on your server. The Single sign-on tab shows
-  a warning when that combination is set.
-- **Sign-out:** Google has no `end_session_endpoint`. Signing out of
-  ContextNest ends the ContextNest session only. The user stays signed in to
-  Google.
+- **Set Allowed email domains.** `accounts.google.com` will sign in *any* Google account. With auto-provision on and no domain list, anyone with a Google account gets an account on your server. The Single sign-on tab shows a warning when that combination is set.
+- **Sign-out:** Google has no `end_session_endpoint`. Signing out of ContextNest ends the ContextNest session only. The user stays signed in to Google.
 
 ### Connect Okta
 
-These are the standard steps in the Okta Admin Console. The Okta-side behavior
-noted at the end has not been tested against a live Okta org, so check it on
-yours.
+These are the standard steps in the Okta Admin Console. The Okta-side behavior noted at the end has not been tested against a live Okta org, so check it on yours.
 
-1. **Create the app integration.** Go to *Applications → Applications → Create
-   App Integration*. Choose **Sign-in method: OIDC - OpenID Connect** and
-   **Application type: Web Application**, then **Next**.
-2. **General settings.** Name it, e.g. "ContextNest". Under **Grant type**,
-   keep **Authorization Code** checked.
-   - **Sign-in redirect URIs:** the redirect URI from the Single sign-on tab,
-     e.g. `https://nest.acme.com/auth/oidc/callback`.
-   - **Sign-out redirect URIs:** your base URL with a trailing slash, e.g.
-     `https://nest.acme.com/`. This is the address ContextNest asks Okta to
-     return to after sign-out.
-   - **Assignments:** choose who may use the app (everyone, or selected
-     groups). **Save**.
-3. **Copy the credentials.** On the app's **General** tab, copy the **Client
-   ID** and a **Client secret**. **Client authentication** should be **Client
-   secret**, not *Public key / Private key*.
+1. **Create the app integration.** Go to *Applications → Applications → Create App Integration*. Choose **Sign-in method: OIDC - OpenID Connect** and **Application type: Web Application**, then **Next**.
+2. **General settings.** Name it, e.g. "ContextNest". Under **Grant type**, keep **Authorization Code** checked.
+   - **Sign-in redirect URIs:** the redirect URI from the Single sign-on tab, e.g. `https://nest.acme.com/auth/oidc/callback`.
+   - **Sign-out redirect URIs:** your base URL with a trailing slash, e.g. `https://nest.acme.com/`. This is the address ContextNest asks Okta to return to after sign-out.
+   - **Assignments:** choose who may use the app (everyone, or selected groups). **Save**.
+3. **Copy the credentials.** On the app's **General** tab, copy the **Client ID** and a **Client secret**. **Client authentication** should be **Client secret**, not *Public key / Private key*.
 4. **Find the issuer.** It is one of these:
-   - Your Okta org URL, e.g. `https://acme.okta.com`. This is the org
-     authorization server.
-   - A custom authorization server, e.g. `https://acme.okta.com/oauth2/default`
-     (*Security → API → Authorization Servers → Issuer URI*).
+   - Your Okta org URL, e.g. `https://acme.okta.com`. This is the org authorization server.
+   - A custom authorization server, e.g. `https://acme.okta.com/oauth2/default` (*Security → API → Authorization Servers → Issuer URI*).
 
-   Either works, as long as the value you enter matches the `issuer` in
-   `<issuer>/.well-known/openid-configuration`. Open that URL in a browser to
-   check. If you use a custom domain, use the issuer the discovery document
-   shows.
-5. **Fill in ContextNest.** On **Admin → Server settings → Single sign-on**,
-   paste the issuer into **Issuer URL**. There is no preset, and the page
-   shows *Custom issuer*. Paste the **Client ID** and **Client secret**, set
-   **Allowed email domains** if you want, turn it **On** and **Save**. The
-   login page shows **Sign in with SSO**.
+   Either works, as long as the value you enter matches the `issuer` in `<issuer>/.well-known/openid-configuration`. Open that URL in a browser to check. If you use a custom domain, use the issuer the discovery document shows.
+5. **Fill in ContextNest.** On **Admin → Server settings → Single sign-on**, paste the issuer into **Issuer URL**. There is no preset, and the page shows *Custom issuer*. Paste the **Client ID** and **Client secret**, set **Allowed email domains** if you want, turn it **On** and **Save**. The login page shows **Sign in with SSO**.
 
 Okta notes that were **not verified against a live Okta org:**
 
-- **Client authentication method.** ContextNest sends the secret in the
-  request body (`client_secret_post`). If sign-in fails with `exchange_failed`
-  and the server log shows `[oidc] token exchange failed with status 401`,
-  check the app's `token_endpoint_auth_method`. The Admin Console may not show
-  it, so use Okta's Apps API to set it to `client_secret_post` and try again.
-- **Sign-out.** ContextNest sends `post_logout_redirect_uri` and `client_id`
-  to Okta's logout endpoint, but not `id_token_hint`. If Okta shows an error
-  page on sign-out, the ContextNest session has **already** ended (it is
-  deleted before the redirect). Only the Okta session is left open.
+- **Client authentication method.** ContextNest sends the secret in the request body (`client_secret_post`). If sign-in fails with `exchange_failed` and the server log shows `[oidc] token exchange failed with status 401`, check the app's `token_endpoint_auth_method`. The Admin Console may not show it, so use Okta's Apps API to set it to `client_secret_post` and try again.
+- **Sign-out.** ContextNest sends `post_logout_redirect_uri` and `client_id` to Okta's logout endpoint, but not `id_token_hint`. If Okta shows an error page on sign-out, the ContextNest session has **already** ended (it is deleted before the redirect). Only the Okta session is left open.
 
 ### Connect Keycloak
 
 These steps are for the current admin console (Keycloak 19 and later).
 
-1. **Create the client.** In your realm, go to *Clients → Create client*.
-   Choose **Client type: OpenID Connect** and enter a **Client ID**, e.g.
-   `contextnest`. **Next**.
-2. **Capability config.** Turn **Client authentication** **On**. This makes it
-   a confidential client, which ContextNest requires. Keep **Standard flow**
-   checked. **Next**.
+1. **Create the client.** In your realm, go to *Clients → Create client*. Choose **Client type: OpenID Connect** and enter a **Client ID**, e.g. `contextnest`. **Next**.
+2. **Capability config.** Turn **Client authentication** **On**. This makes it a confidential client, which ContextNest requires. Keep **Standard flow** checked. **Next**.
 3. **Login settings.**
    - **Valid redirect URIs:** the redirect URI from the Single sign-on tab.
-   - **Valid post logout redirect URIs:** your base URL with a trailing slash,
-     e.g. `https://nest.acme.com/`.
+   - **Valid post logout redirect URIs:** your base URL with a trailing slash, e.g. `https://nest.acme.com/`.
 
    **Save**.
-4. **Copy the secret.** On the client's **Credentials** tab, keep **Client
-   Authenticator: Client Id and Secret** and copy the **Client Secret**.
-5. **Find the issuer.** It is `https://<keycloak-host>/realms/<realm>`. Older
-   Keycloak versions (before 17) add `/auth`:
-   `https://<keycloak-host>/auth/realms/<realm>`. Open
-   `<issuer>/.well-known/openid-configuration` and use its `issuer` value
-   exactly. If Keycloak runs behind a proxy without a correct hostname
-   setting, the document may show an internal or `http://` issuer. That fails
-   with `discovery_failed`, so fix Keycloak's hostname configuration first.
-6. **Fill in ContextNest.** Paste the issuer, client ID and client secret on
-   **Admin → Server settings → Single sign-on**, turn it **On** and **Save**.
-   The login page shows **Sign in with SSO**.
+4. **Copy the secret.** On the client's **Credentials** tab, keep **Client Authenticator: Client Id and Secret** and copy the **Client Secret**.
+5. **Find the issuer.** It is `https://<keycloak-host>/realms/<realm>`. Older Keycloak versions (before 17) add `/auth`: `https://<keycloak-host>/auth/realms/<realm>`. Open `<issuer>/.well-known/openid-configuration` and use its `issuer` value exactly. If Keycloak runs behind a proxy without a correct hostname setting, the document may show an internal or `http://` issuer. That fails with `discovery_failed`, so fix Keycloak's hostname configuration first.
+6. **Fill in ContextNest.** Paste the issuer, client ID and client secret on **Admin → Server settings → Single sign-on**, turn it **On** and **Save**. The login page shows **Sign in with SSO**.
 
 Keycloak-specific notes:
 
-- **Verified email is required.** Keycloak includes `email_verified` in the ID
-  token, and ContextNest refuses a token where it is `false`
-  (`email_not_verified`). Users created in the admin console start with
-  *Email verified* **off**. Turn it on for each user, or have users verify
-  their address.
-- **Users need an email address.** A user without one produces a token
-  ContextNest cannot use (`invalid_token`).
-- **Lock down open registration.** If the realm allows self-registration,
-  anyone can create a Keycloak account with any address. Turn off *User
-  registration* or set **Allowed email domains**. See the
-  [trust assumption](#email-verification-trust-assumption).
-- **Signature algorithm.** Keep the realm's default `RS256`. If the client's
-  *ID token signature algorithm* is set to anything else (`ES256`, `PS256`,
-  …), every login fails with `invalid_token`.
-- **Department (optional).** For [department auto-tagging](#department-auto-tagging),
-  add a *User Attribute* mapper to the client's dedicated scope. Set the token
-  claim name to `department`, the claim type to String, and turn on *Add to
-  ID token*.
+- **Verified email is required.** Keycloak includes `email_verified` in the ID token, and ContextNest refuses a token where it is `false` (`email_not_verified`). Users created in the admin console start with *Email verified* **off**. Turn it on for each user, or have users verify their address.
+- **Users need an email address.** A user without one produces a token ContextNest cannot use (`invalid_token`).
+- **Lock down open registration.** If the realm allows self-registration, anyone can create a Keycloak account with any address. Turn off *User registration* or set **Allowed email domains**. See the [trust assumption](#email-verification-trust-assumption).
+- **Signature algorithm.** Keep the realm's default `RS256`. If the client's *ID token signature algorithm* is set to anything else (`ES256`, `PS256`, …), every login fails with `invalid_token`.
+- **Department (optional).** For [department auto-tagging](#department-auto-tagging), add a *User Attribute* mapper to the client's dedicated scope. Set the token claim name to `department`, the claim type to String, and turn on *Add to ID token*.
 
 ### Connect any other OIDC provider
 
-Any provider that meets all of these requirements works. Each one is checked by
-the server, and a failure shows up as the error code given.
+Any provider that meets all of these requirements works. Each one is checked by the server, and a failure shows up as the error code given.
 
 | Requirement | Error if not met |
 |---|---|
@@ -526,127 +327,59 @@ the server, and a failure shows up as the error code given.
 | The ID token has an email-shaped `email` claim, or failing that a `preferred_username` claim | `invalid_token` |
 | `email_verified` is not `false`. A missing claim is accepted. | `email_not_verified` |
 
-Optional claims the server uses: `name` (display name for new accounts) and
-`department` (see [Department auto-tagging](#department-auto-tagging)). If the
-discovery document has an `end_session_endpoint`, sign-out also ends the IdP
-session.
+Optional claims the server uses: `name` (display name for new accounts) and `department` (see [Department auto-tagging](#department-auto-tagging)). If the discovery document has an `end_session_endpoint`, sign-out also ends the IdP session.
 
-Enter the issuer in **Issuer URL** (the page shows *Custom issuer*), fill in the
-client ID and secret, and register the redirect URI with the provider.
+Enter the issuer in **Issuer URL** (the page shows *Custom issuer*), fill in the client ID and secret, and register the redirect URI with the provider.
 
 ### User lifecycle
 
-**How accounts are matched.** ContextNest links an SSO login to an account
-**by email address only**. It does not store the IdP's subject ID (`sub`). The
-address comes from `email`, or from `preferred_username` if `email` is missing.
-It is trimmed and lowercased, and matched against existing accounts without
-regard to case. As a result:
+**How accounts are matched.** ContextNest links an SSO login to an account **by email address only**. It does not store the IdP's subject ID (`sub`). The address comes from `email`, or from `preferred_username` if `email` is missing. It is trimmed and lowercased, and matched against existing accounts without regard to case. As a result:
 
-- **An existing password account with the same email is the same account.**
-  The first SSO login signs into it, with the same nests, teams, stewardship
-  roles, API keys and admin rights. SSO does not change or remove the
-  password, so the person can still sign in with it, unless you turn password
-  sign-in off (see [Making SSO the only way in](#making-sso-the-only-way-in)).
-- **Invited people can use SSO straight away.** An invite (Teammates, a nest
-  share, a team, a steward assignment) creates the account and sends a
-  temporary password. If the invited email matches their IdP email, they can
-  click the SSO button instead. Any first sign-in clears the account's
-  *Invited* badge.
-- **A changed email is a new account.** If someone's email or UPN changes at
-  the IdP, their next SSO login does not match the old account. With
-  auto-provision on, they get a new, empty account. With it off, they get
-  `not_invited`. Share their nests with the new address again, and remove the
-  old account on Teammates.
-- **Admin rights belong to the account,** not to how it signed in. A
-  superadmin listed by email in `access.yaml` or granted on Teammates is still
-  an admin when signing in with SSO.
+- **An existing password account with the same email is the same account.** The first SSO login signs into it, with the same nests, teams, stewardship roles, API keys and admin rights. SSO does not change or remove the password, so the person can still sign in with it, unless you turn password sign-in off (see [Making SSO the only way in](#making-sso-the-only-way-in)).
+- **Invited people can use SSO straight away.** An invite (Teammates, a nest share, a team, a steward assignment) creates the account and sends a temporary password. If the invited email matches their IdP email, they can click the SSO button instead. Any first sign-in clears the account's *Invited* badge.
+- **A changed email is a new account.** If someone's email or UPN changes at the IdP, their next SSO login does not match the old account. With auto-provision on, they get a new, empty account. With it off, they get `not_invited`. Share their nests with the new address again, and remove the old account on Teammates.
+- **Admin rights belong to the account,** not to how it signed in. A superadmin listed by email in `access.yaml` or granted on Teammates is still an admin when signing in with SSO.
 
-**Auto-provision on (the default).** The first successful SSO login by an
-unknown email creates an account. The display name comes from the `name`
-claim, and the password is random and unusable. A new account sees only
-nests shared with it (directly or through a team) and nests whose visibility
-is *Organization* or *Public*. The account
-can sign in only through SSO, unless an admin sets a password with **Reset
-password** on Teammates. Auto-provision also applies when **Manual sign-in**
-is *Invite only*, because that setting governs email-and-password
-registration, not SSO. Limit who can get in with **Allowed email domains**, or
-by assigning the app to specific users or groups at the IdP.
+**Auto-provision on (the default).** The first successful SSO login by an unknown email creates an account. The display name comes from the `name` claim, and the password is random and unusable. A new account sees only nests shared with it (directly or through a team) and nests whose visibility is *Organization* or *Public*. The account can sign in only through SSO, unless an admin sets a password with **Reset password** on Teammates. Auto-provision also applies when **Manual sign-in** is *Invite only*, because that setting governs email-and-password registration, not SSO. Limit who can get in with **Allowed email domains**, or by assigning the app to specific users or groups at the IdP.
 
-**Auto-provision off (invite-only SSO).** Only emails that already have an
-account can sign in. Everyone else is sent back with `not_invited`. Add people
-first with **Admin → Teammates → Invite Teammate**, or by sharing a nest or
-document with their email. They can then use the SSO button.
+**Auto-provision off (invite-only SSO).** Only emails that already have an account can sign in. Everyone else is sent back with `not_invited`. Add people first with **Admin → Teammates → Invite Teammate**, or by sharing a nest or document with their email. They can then use the SSO button.
 
-**Allowed email domains** apply to every SSO login, new and existing
-accounts alike. An existing account whose domain is not on the list gets
-`domain_not_allowed`. It can still use password or PromptOwl sign-in if those
-are on.
+**Allowed email domains** apply to every SSO login, new and existing accounts alike. An existing account whose domain is not on the list gets `domain_not_allowed`. It can still use password or PromptOwl sign-in if those are on.
 
 #### Making SSO the only way in
 
-On **Server settings → Basic**, set **Manual sign-in** to **Off** and
-**Sign in with PromptOwl** to **Off**. The login page then shows only the SSO
-button, and `POST /auth/login` / `POST /auth/register` return `403`. The server
-refuses this combination unless SSO is on and has an issuer, client ID and
-secret. It also refuses to turn SSO off or clear its settings while SSO is the
-only way in.
+On **Server settings → Basic**, set **Manual sign-in** to **Off** and **Sign in with PromptOwl** to **Off**. The login page then shows only the SSO button, and `POST /auth/login` / `POST /auth/register` return `403`. The server refuses this combination unless SSO is on and has an issuer, client ID and secret. It also refuses to turn SSO off or clear its settings while SSO is the only way in.
 
-Consider a break-glass option: set **Sign in with PromptOwl** to **Admins
-only**. The license admin can then still sign in through `?admin=1` on the
-login page if the IdP is down.
+Consider a break-glass option: set **Sign in with PromptOwl** to **Admins only**. The license admin can then still sign in through `?admin=1` on the login page if the IdP is down.
 
-API keys keep working either way. They are not a sign-in method (see
-[below](#how-sso-relates-to-api-keys-agents-and-mcp)).
+API keys keep working either way. They are not a sign-in method (see [below](#how-sso-relates-to-api-keys-agents-and-mcp)).
 
 ### Revoking access (offboarding)
 
-**Disabling someone at the IdP only blocks new SSO logins.** It does not
-affect:
+**Disabling someone at the IdP only blocks new SSO logins.** It does not affect:
 
-- ContextNest sessions they already have. These stay valid until they expire,
-  up to 30 days after login.
+- ContextNest sessions they already have. These stay valid until they expire, up to 30 days after login.
 - Their **API keys**. These do not expire and never contact the IdP.
-- Their password, if the account had one or an admin has set one, while
-  password sign-in is on.
+- Their password, if the account had one or an admin has set one, while password sign-in is on.
 
-To cut access completely, **remove the user in ContextNest**: go to
-**Admin → Teammates**, find the person and click **Remove**. This deletes their
-account, all their API keys, their active sessions, their stewardship roles
-and their nest-collaborator grants in one step. Documents they wrote stay in
-their nests. A few limits apply:
+To cut access completely, **remove the user in ContextNest**: go to **Admin → Teammates**, find the person and click **Remove**. This deletes their account, all their API keys, their active sessions, their stewardship roles and their nest-collaborator grants in one step. Documents they wrote stay in their nests. A few limits apply:
 
-- Removal is refused while the user **owns** nests. Transfer or delete those
-  nests first.
+- Removal is refused while the user **owns** nests. Transfer or delete those nests first.
 - A server admin cannot be removed until their superadmin access is revoked.
 - Nobody can remove their own account.
 
 The full procedure has two steps:
 
-1. **Disable the user at the IdP.** Do this first. With auto-provision on, a
-   user who is still active at the IdP can sign in again after removal and
-   get a new, empty account.
-2. **Remove the user on Admin → Teammates.** This ends their sessions and
-   revokes their keys.
+1. **Disable the user at the IdP.** Do this first. With auto-provision on, a user who is still active at the IdP can sign in again after removal and get a new, empty account.
+2. **Remove the user on Admin → Teammates.** This ends their sessions and revokes their keys.
 
-Bearers minted by [Agent SSO](#agent-sso-token-exchange) look up the user by
-email on every request, so they stop working once the user is removed.
+Bearers minted by [Agent SSO](#agent-sso-token-exchange) look up the user by email on every request, so they stop working once the user is removed.
 
-**Sign-out (RP-initiated logout).** When someone who signed in with SSO clicks
-**Log out**, the app goes to `GET /auth/oidc/logout`. This deletes the
-ContextNest session and cookies. Then, if the IdP publishes an
-`end_session_endpoint` (Entra, Okta and Keycloak do; Google does not), it sends
-the browser there with `post_logout_redirect_uri=<PUBLIC_BASE_URL>/` and
-`client_id`, so the IdP session ends too. Without that, the next click on the
-SSO button would sign the person straight back in. Register `<base URL>/` as a
-sign-out / post-logout redirect URI at IdPs that require it (Okta, Keycloak).
-If the IdP has no logout endpoint, or cannot be reached, the local session is
-still cleared and the user lands on the login page.
+**Sign-out (RP-initiated logout).** When someone who signed in with SSO clicks **Log out**, the app goes to `GET /auth/oidc/logout`. This deletes the ContextNest session and cookies. Then, if the IdP publishes an `end_session_endpoint` (Entra, Okta and Keycloak do; Google does not), it sends the browser there with `post_logout_redirect_uri=<PUBLIC_BASE_URL>/` and `client_id`, so the IdP session ends too. Without that, the next click on the SSO button would sign the person straight back in. Register `<base URL>/` as a sign-out / post-logout redirect URI at IdPs that require it (Okta, Keycloak). If the IdP has no logout endpoint, or cannot be reached, the local session is still cleared and the user lands on the login page.
 
 ### How SSO relates to API keys, agents and MCP
 
-SSO controls how **people sign in to the web app**. It does not control how
-programs connect. Turning SSO on changes nothing for existing keys or agent
-connections.
+SSO controls how **people sign in to the web app**. It does not control how programs connect. Turning SSO on changes nothing for existing keys or agent connections.
 
 | Way in | Effect of turning on SSO |
 |---|---|
@@ -660,47 +393,21 @@ connections.
 
 ### Hosted and shared deployments
 
-The SSO settings apply to the **whole server**: one issuer, one client, one
-domain list and one auto-provision setting for every user. There is no
-per-organization or per-nest IdP. On a server that hosts several
-organizations (`SHARED_DEPLOYMENT=true`, such as the PromptOwl-hosted service):
+The SSO settings apply to the **whole server**: one issuer, one client, one domain list and one auto-provision setting for every user. There is no per-organization or per-nest IdP. On a server that hosts several organizations (`SHARED_DEPLOYMENT=true`, such as the PromptOwl-hosted service):
 
-- Turning on SSO puts the same button in front of **every** user of the
-  server, and it signs in against one organization's IdP.
-- With auto-provision on, anyone that IdP signs in (and the domain list allows)
-  gets an account on the shared server. That account can read every nest
-  whose visibility is *Organization* or *Public*, which on a shared server
-  means nests belonging to other customers.
-- Only a server admin, meaning the operator, can change these settings.
-  Customers of a shared server cannot bring their own IdP.
+- Turning on SSO puts the same button in front of **every** user of the server, and it signs in against one organization's IdP.
+- With auto-provision on, anyone that IdP signs in (and the domain list allows) gets an account on the shared server. That account can read every nest whose visibility is *Organization* or *Public*, which on a shared server means nests belonging to other customers.
+- Only a server admin, meaning the operator, can change these settings. Customers of a shared server cannot bring their own IdP.
 
-An organization that needs its own IdP should run its own ContextNest server.
-Per-organization identity (SAML / SCIM, a multi-tenant admin console) is in the
-Enterprise edition (see `README.md`).
+An organization that needs its own IdP should run its own ContextNest server. Per-organization identity (SAML / SCIM, a multi-tenant admin console) is in the Enterprise edition (see `README.md`).
 
 ### Department auto-tagging
 
-With `OIDC_DEPARTMENT_TAGGING` on (**Admin → Server settings → Single sign-on →
-Department auto-tagging**), every document a user **creates** is tagged
-`dept:<slugified-department>` from their directory department. For example, a
-user in *Customer Success* creates documents tagged `dept:customer-success`.
-It applies to new documents only: edits never add or change the tag, and
-existing documents are never tagged afterwards. Users without a department
-(password accounts, or an IdP that does not send the claim) create untagged
-documents, with no error.
+With `OIDC_DEPARTMENT_TAGGING` on (**Admin → Server settings → Single sign-on → Department auto-tagging**), every document a user **creates** is tagged `dept:<slugified-department>` from their directory department. For example, a user in *Customer Success* creates documents tagged `dept:customer-success`. It applies to new documents only: edits never add or change the tag, and existing documents are never tagged afterwards. Users without a department (password accounts, or an IdP that does not send the claim) create untagged documents, with no error.
 
-The department comes from the **`department` claim** in the OIDC ID token. It
-is saved on the user at every SSO login. A new value replaces the old one and a
-missing claim clears it, so directory moves take effect at the user's next
-sign-in. Whitespace is trimmed and collapsed, and the value is cut to 120
-characters.
+The department comes from the **`department` claim** in the OIDC ID token. It is saved on the user at every SSO login. A new value replaces the old one and a missing claim clears it, so directory moves take effect at the user's next sign-in. Whitespace is trimmed and collapsed, and the value is cut to 120 characters.
 
-Microsoft Entra ID does **not** send the claim by default. Add it to the app
-registration: *Token configuration → Add optional claim → Token type: **ID** →
-select **department** → Add*. Grant the suggested Microsoft Graph permission if
-asked, and make sure users' *Department* field is filled in in Entra. Other
-IdPs work too, as long as they send a string `department` claim in the ID token
-(e.g. a Keycloak user-attribute mapper, see [Keycloak](#connect-keycloak)).
+Microsoft Entra ID does **not** send the claim by default. Add it to the app registration: *Token configuration → Add optional claim → Token type: **ID** → select **department** → Add*. Grant the suggested Microsoft Graph permission if asked, and make sure users' *Department* field is filled in in Entra. Other IdPs work too, as long as they send a string `department` claim in the ID token (e.g. a Keycloak user-attribute mapper, see [Keycloak](#connect-keycloak)).
 
 > **Privacy note:** the `dept:<slug>` tag is part of the document's visible
 > metadata. Anyone who can read the document (collaborators, shared nests,
@@ -711,27 +418,13 @@ IdPs work too, as long as they send a string `department` claim in the ID token
 
 ### Email-verification trust assumption
 
-An ID token whose `email_verified` claim is **explicitly `false`** (the boolean
-or the string `"false"`) is refused with `?sso_error=email_not_verified`. If
-the claim is **missing**, the server trusts the email claim. Microsoft Entra ID
-v2 tokens often leave it out, and both Entra and Google guarantee address
-ownership, so refusing when it is missing would break the main providers.
+An ID token whose `email_verified` claim is **explicitly `false`** (the boolean or the string `"false"`) is refused with `?sso_error=email_not_verified`. If the claim is **missing**, the server trusts the email claim. Microsoft Entra ID v2 tokens often leave it out, and both Entra and Google guarantee address ownership, so refusing when it is missing would break the main providers.
 
-This is a deliberate trust assumption. **If your IdP allows unverified,
-self-registered emails (e.g. an open Keycloak realm), set Allowed email domains
-and turn off self-registration at the IdP.** Otherwise anyone who can claim an
-arbitrary email at your IdP can sign in as the local account with that email,
-including an admin's.
+This is a deliberate trust assumption. **If your IdP allows unverified, self-registered emails (e.g. an open Keycloak realm), set Allowed email domains and turn off self-registration at the IdP.** Otherwise anyone who can claim an arbitrary email at your IdP can sign in as the local account with that email, including an admin's.
 
 ### Troubleshooting SSO sign-in
 
-When an SSO sign-in fails, the browser lands on `/?sso_error=<code>`. The app
-shows the message below as a toast, removes the parameter from the address bar
-and shows the normal sign-in options. For the codes that involve the IdP, the
-server log has the details: `[oidc] discovery failed: …`,
-`[oidc] token exchange failed with status <n>`,
-`[oidc] ID token validation failed: …` and
-`[oidc] provisioning/session failed: …`.
+When an SSO sign-in fails, the browser lands on `/?sso_error=<code>`. The app shows the message below as a toast, removes the parameter from the address bar and shows the normal sign-in options. For the codes that involve the IdP, the server log has the details: `[oidc] discovery failed: …`, `[oidc] token exchange failed with status <n>`, `[oidc] ID token validation failed: …` and `[oidc] provisioning/session failed: …`.
 
 | `sso_error` | Message the user sees | Cause | Fix |
 |---|---|---|---|
@@ -748,135 +441,62 @@ server log has the details: `[oidc] discovery failed: …`,
 | `not_invited` | No account exists for your email on this server. Ask your admin for an invite. | **Auto-provision new users** is off, and no account has this email. The email may also have changed at the IdP (see [User lifecycle](#user-lifecycle)). | Invite the person on **Admin → Teammates**, or share a nest with their email, or turn auto-provision on. |
 | `service_error` | Something went wrong signing you in. Please try again. | A database error while finding or creating the account or starting the session. | Check the server log (`[oidc] provisioning/session failed`) and the database connection. |
 
-**Errors that appear at the IdP, not in ContextNest.** Some failures stop at
-the IdP's own error page, and the browser never comes back. The most common
-one is a redirect URI that is not registered exactly: Entra `AADSTS50011`,
-Google `Error 400: redirect_uri_mismatch`, or Okta and Keycloak "invalid
-redirect uri". Google also blocks, on its own page, users outside an *Internal*
-consent screen's organization, and users who are not on the test list while
-the app is in *Testing*. Copy the redirect URI from the Single sign-on tab again and
-compare it character by character: scheme, host, port, path, and no trailing
-slash. Check that it matches `PUBLIC_BASE_URL`.
+**Errors that appear at the IdP, not in ContextNest.** Some failures stop at the IdP's own error page, and the browser never comes back. The most common one is a redirect URI that is not registered exactly: Entra `AADSTS50011`, Google `Error 400: redirect_uri_mismatch`, or Okta and Keycloak "invalid redirect uri". Google also blocks, on its own page, users outside an *Internal* consent screen's organization, and users who are not on the test list while the app is in *Testing*. Copy the redirect URI from the Single sign-on tab again and compare it character by character: scheme, host, port, path, and no trailing slash. Check that it matches `PUBLIC_BASE_URL`.
 
-**No SSO button on the login page.** The button appears only when SSO is on
-*and* the issuer, client ID and secret are all set. The Single sign-on tab
-warns *Enabled but not configured* when one is missing. The page reads this
-state from `GET /health` (`oidc_enabled`, `oidc_issuer`).
+**No SSO button on the login page.** The button appears only when SSO is on *and* the issuer, client ID and secret are all set. The Single sign-on tab warns *Enabled but not configured* when one is missing. The page reads this state from `GET /health` (`oidc_enabled`, `oidc_issuer`).
 
-**Other `sso_error` codes.** `not_supported`, `missing_ticket`,
-`invalid_ticket`, `bad_audience`, `ticket_used` and `sign_in_restricted` come
-from the PromptOwl one-click login (`GET /auth/sso`), not from OIDC. See
-`API.md → GET /auth/sso` and **Server settings → Community sites**.
-`rate_limited` and `service_error` are used by both flows.
+**Other `sso_error` codes.** `not_supported`, `missing_ticket`, `invalid_ticket`, `bad_audience`, `ticket_used` and `sign_in_restricted` come from the PromptOwl one-click login (`GET /auth/sso`), not from OIDC. See `API.md → GET /auth/sso` and **Server settings → Community sites**. `rate_limited` and `service_error` are used by both flows.
 
 ---
 
 ## Agent SSO (token exchange)
 
-`POST /auth/token-exchange` lets an external agent, acting for a user your IdP
-(Microsoft Entra / Google) has **already** authenticated, exchange that IdP's ID
-token for a short-lived MCP bearer — no second login, no static API key.
-RFC 8693-shaped. **Off by default and security-critical**: it trusts a token
-minted elsewhere and hands back access, so read this section before enabling it.
+`POST /auth/token-exchange` lets an external agent, acting for a user your IdP (Microsoft Entra / Google) has **already** authenticated, exchange that IdP's ID token for a short-lived MCP bearer — no second login, no static API key. RFC 8693-shaped. **Off by default and security-critical**: it trusts a token minted elsewhere and hands back access, so read this section before enabling it.
 
-Configure it with the `SSO_TOKEN_EXCHANGE_ENABLED` / `MCP_SIGNING_SECRET` /
-`MS_*` / `GOOGLE_*` vars above, or from **Admin → Server settings → Single sign-on →
-Agent SSO — token exchange** (server admins). It reuses `OIDC_ALLOWED_DOMAINS` and `OIDC_AUTO_PROVISION` — the
-same who-may-sign-in policy as browser login.
+Configure it with the `SSO_TOKEN_EXCHANGE_ENABLED` / `MCP_SIGNING_SECRET` / `MS_*` / `GOOGLE_*` vars above, or from **Admin → Server settings → Single sign-on → Agent SSO — token exchange** (server admins). It reuses `OIDC_ALLOWED_DOMAINS` and `OIDC_AUTO_PROVISION` — the same who-may-sign-in policy as browser login.
 
-**Who this is for — and who it is not.** The minted bearer is short-lived by
-design (`MCP_TOKEN_TTL_SECONDS`, default 300s, hard ceiling 3600s), and there is
-no refresh token: renewal means calling `POST /auth/token-exchange` again with
-the IdP token. So this fits a **programmatic** client — an agent runtime, a
-backend service, a desktop app that already did an MSAL/Google sign-in — that
-can re-exchange in code before a session or on a `401`, with no human involved.
+**Who this is for — and who it is not.** The minted bearer is short-lived by design (`MCP_TOKEN_TTL_SECONDS`, default 300s, hard ceiling 3600s), and there is no refresh token: renewal means calling `POST /auth/token-exchange` again with the IdP token. So this fits a **programmatic** client — an agent runtime, a backend service, a desktop app that already did an MSAL/Google sign-in — that can re-exchange in code before a session or on a `401`, with no human involved.
 
-It does **not** fit a client whose credential is typed once into a config file
-(Claude Desktop, Cursor, any `mcpServers` JSON block): nothing here rewrites that
-file, and the ceiling is an hour, so the connection would break repeatedly. Those
-clients keep using a long-lived API key (`cnst_…`) — this endpoint is additive
-and changes nothing about API-key or browser sign-in.
+It does **not** fit a client whose credential is typed once into a config file (Claude Desktop, Cursor, any `mcpServers` JSON block): nothing here rewrites that file, and the ceiling is an hour, so the connection would break repeatedly. Those clients keep using a long-lived API key (`cnst_…`) — this endpoint is additive and changes nothing about API-key or browser sign-in.
 
 **What is verified** on the inbound `subject_token`, before anything is minted:
 
 - **signature** against the provider's JWKS, algorithm pinned to `RS256`
 - **issuer** — exact per provider (the tenant-scoped Entra issuer, or Google's)
-- **audience** — your configured client id, so a token minted for *another*
-  application cannot be replayed here
+- **audience** — your configured client id, so a token minted for *another* application cannot be replayed here
 - **expiry** (30s clock tolerance)
-- the same `email_verified` + domain-allowlist policy as browser login
-  (see [Email-verification trust assumption](#email-verification-trust-assumption))
+- the same `email_verified` + domain-allowlist policy as browser login (see [Email-verification trust assumption](#email-verification-trust-assumption))
 
-**Trust model / documented tradeoff.** Unlike the browser flow there is no
-session to bind, so the OIDC `nonce` binding is intentionally dropped; trust
-rests on signature + issuer + audience + expiry + `email_verified`. That is the
-standard token-exchange model, and it is why the audience check (and a
-correctly scoped IdP app registration) carries the weight here.
+**Trust model / documented tradeoff.** Unlike the browser flow there is no session to bind, so the OIDC `nonce` binding is intentionally dropped; trust rests on signature + issuer + audience + expiry + `email_verified`. That is the standard token-exchange model, and it is why the audience check (and a correctly scoped IdP app registration) carries the weight here.
 
-**Provisioning fails closed.** JIT-provisioning from a token minted elsewhere is
-only allowed when `OIDC_ALLOWED_DOMAINS` bounds who may self-create. With
-auto-provision on and an empty allowlist, every exchange for an unknown email is
-refused with `no_account`, and the Settings page refuses to save that
-combination — otherwise any account at a public IdP (Google = the whole
-internet) could sign itself up and mint a bearer.
+**Provisioning fails closed.** JIT-provisioning from a token minted elsewhere is only allowed when `OIDC_ALLOWED_DOMAINS` bounds who may self-create. With auto-provision on and an empty allowlist, every exchange for an unknown email is refused with `no_account`, and the Settings page refuses to save that combination — otherwise any account at a public IdP (Google = the whole internet) could sign itself up and mint a bearer.
 
-**Entra caveat (`preferred_username`).** Entra v2 tokens often omit `email` and
-carry the address in `preferred_username`, which is a directory attribute — in a
-tenant where guests or external identities can set their own mail attribute, a
-token can assert an address that matches an existing local account. Pinning
-`MS_TENANT_ID` to your own directory bounds that to identities your tenant
-admits; treat inviting a guest as granting whatever that email address owns here.
+**Entra caveat (`preferred_username`).** Entra v2 tokens often omit `email` and carry the address in `preferred_username`, which is a directory attribute — in a tenant where guests or external identities can set their own mail attribute, a token can assert an address that matches an existing local account. Pinning `MS_TENANT_ID` to your own directory bounds that to identities your tenant admits; treat inviting a guest as granting whatever that email address owns here.
 
-**Rate limiting.** The per-IP cap on this endpoint reads the client IP from
-`X-Forwarded-For`, so it is only a real cap behind a proxy that overwrites that
-header. Deploy accordingly — an internet-facing server with a pass-through
-header can be sprayed from a single host.
+**Rate limiting.** The per-IP cap on this endpoint reads the client IP from `X-Forwarded-For`, so it is only a real cap behind a proxy that overwrites that header. Deploy accordingly — an internet-facing server with a pass-through header can be sprayed from a single host.
 
-**Scope.** The minted bearer carries `scope: "mcp"`. That is a *route*
-allowlist, not a reduced permission set: it reaches `/index`, `/mcp`, and the
-ticket-eligible `/nests/:id/*` routes (including MCP write tools) with the
-user's full stewardship rights. Keep `MCP_TOKEN_TTL_SECONDS` short.
+**Scope.** The minted bearer carries `scope: "mcp"`. That is a *route* allowlist, not a reduced permission set: it reaches `/index`, `/mcp`, and the ticket-eligible `/nests/:id/*` routes (including MCP write tools) with the user's full stewardship rights. Keep `MCP_TOKEN_TTL_SECONDS` short.
 
-**Revocation.** Turning the master flag off stops *minting* but does not revoke
-bearers already issued — they remain valid until they expire (≤ 1h). Clear
-`MCP_SIGNING_SECRET` to invalidate every outstanding bearer at once.
+**Revocation.** Turning the master flag off stops *minting* but does not revoke bearers already issued — they remain valid until they expire (≤ 1h). Clear `MCP_SIGNING_SECRET` to invalidate every outstanding bearer at once.
 
-Error codes returned by the endpoint: `disabled` (404), `rate_limited` (429),
-`bad_request`, `provider_disabled`, `provider_misconfigured` (400),
-`invalid_subject_token` (401), `email_not_verified`, `domain_not_allowed`,
-`no_account` (403), `server_error` (500).
+Error codes returned by the endpoint: `disabled` (404), `rate_limited` (429), `bad_request`, `provider_disabled`, `provider_misconfigured` (400), `invalid_subject_token` (401), `email_not_verified`, `domain_not_allowed`, `no_account` (403), `server_error` (500).
 
 ---
 
 ## Database backends
 
-The governance/auth metadata (users, sessions, nests registry, stewards, reviews,
-versions index, comments, telemetry) is stored in a relational database. Two
-backends are supported:
+The governance/auth metadata (users, sessions, nests registry, stewards, reviews, versions index, comments, telemetry) is stored in a relational database. Two backends are supported:
 
-- **SQLite (default).** A single file at `DATABASE_PATH`. Zero-config, ideal for
-  single-box and local deployments. Nothing changes for existing installs.
-- **PostgreSQL / Cloud SQL.** For deployments where local disk isn't durable
-  (e.g. Google Cloud Run, where the container filesystem is ephemeral). Selected
-  by setting `DB_DRIVER=postgres`, `DATABASE_URL`, or `CLOUD_SQL_CONNECTION_NAME`.
+- **SQLite (default).** A single file at `DATABASE_PATH`. Zero-config, ideal for single-box and local deployments. Nothing changes for existing installs.
+- **PostgreSQL / Cloud SQL.** For deployments where local disk isn't durable (e.g. Google Cloud Run, where the container filesystem is ephemeral). Selected by setting `DB_DRIVER=postgres`, `DATABASE_URL`, or `CLOUD_SQL_CONNECTION_NAME`.
 
-On first connect the server creates its schema automatically (idempotent) — no
-manual migration step. There is no built-in SQLite→Postgres data migration; a new
-Postgres backend starts empty.
+On first connect the server creates its schema automatically (idempotent) — no manual migration step. There is no built-in SQLite→Postgres data migration; a new Postgres backend starts empty.
 
 ### First-boot upgrade passes
 
-Some upgrades carry a one-shot data pass that runs at startup, before the server
-accepts requests, and records itself in `schema_migrations` so it never repeats.
-Two exist today: the `node_versions` backfill from `history.yaml`, and the
-version-chain repair added in 1.13 (re-anchors documents whose version chain was
-grafted by an older import, and moves inline patches into `v{N}.diff` files).
+Some upgrades carry a one-shot data pass that runs at startup, before the server accepts requests, and records itself in `schema_migrations` so it never repeats. Two exist today: the `node_versions` backfill from `history.yaml`, and the version-chain repair added in 1.13 (re-anchors documents whose version chain was grafted by an older import, and moves inline patches into `v{N}.diff` files).
 
-Both walk every document in every nest, so on a large vault the **first** boot
-after upgrading can take noticeably longer than usual — reads of the on-disk
-vault, not database work, so an install on network/FUSE storage feels it most.
-Every subsequent boot skips the pass entirely. Progress and a per-pass summary
-are printed to the server log.
+Both walk every document in every nest, so on a large vault the **first** boot after upgrading can take noticeably longer than usual — reads of the on-disk vault, not database work, so an install on network/FUSE storage feels it most. Every subsequent boot skips the pass entirely. Progress and a per-pass summary are printed to the server log.
 
 > ⚠️ **Cloud Run durability — read this.** Cloud SQL persists only the *metadata
 > database*. The actual **document content and version history** live on the
@@ -888,60 +508,26 @@ are printed to the server log.
 
 ### Runtime settings persistence
 
-Settings you change at runtime — everything on **Admin → Server settings** (`/admin/settings`:
-sign-in gate, logo, base URL, upload limit, feature flags, OIDC SSO, Slack/Teams/SMTP connectors)
-plus the **installed license key** — are stored in the database (`server_settings`
-table), **not** in a `.env` file. This is deliberate: on Cloud Run the container
-filesystem is ephemeral, so a file-based value was wiped by every rebuild, and each
-horizontally-scaled instance had its own filesystem, so a change on one never
-reached the others. The database (Cloud SQL in production) is durable **and** shared,
-so a UI change persists across rebuilds and is seen by every instance. Rows are
-loaded into the process environment at boot.
+Settings you change at runtime — everything on **Admin → Server settings** (`/admin/settings`: sign-in gate, logo, base URL, upload limit, feature flags, OIDC SSO, Slack/Teams/SMTP connectors) plus the **installed license key** — are stored in the database (`server_settings` table), **not** in a `.env` file. This is deliberate: on Cloud Run the container filesystem is ephemeral, so a file-based value was wiped by every rebuild, and each horizontally-scaled instance had its own filesystem, so a change on one never reached the others. The database (Cloud SQL in production) is durable **and** shared, so a UI change persists across rebuilds and is seen by every instance. Rows are loaded into the process environment at boot.
 
-**Precedence between the deploy environment and a UI change.** Each stored row
-remembers the deploy-env value in effect when it was written. At boot:
+**Precedence between the deploy environment and a UI change.** Each stored row remembers the deploy-env value in effect when it was written. At boot:
 
-- If the deploy env value for that key is **unchanged**, the stored UI change wins
-  (your Settings-page edit survives an identical rebuild).
-- If the deploy env value **changed** (you redeployed with a new value for that
-  variable), the deploy env wins and the stored row is re-synced to it.
+- If the deploy env value for that key is **unchanged**, the stored UI change wins (your Settings-page edit survives an identical rebuild).
+- If the deploy env value **changed** (you redeployed with a new value for that variable), the deploy env wins and the stored row is re-synced to it.
 
-So you can always override any setting from the deploy config, while UI edits made
-to keys you don't set in the environment stay put. Clearing a setting in the UI
-writes a tombstone, so a value you removed is not resurrected from the environment
-on the next boot.
+So you can always override any setting from the deploy config, while UI edits made to keys you don't set in the environment stay put. Clearing a setting in the UI writes a tombstone, so a value you removed is not resurrected from the environment on the next boot.
 
-**Credentials are encrypted at rest.** The secret rows — `ANTHROPIC_API_KEY` (until it is handed over),
-`OIDC_CLIENT_SECRET`, `MCP_SIGNING_SECRET`, `SMTP_URL`, `SLACK_WEBHOOK_URL`,
-`MSTEAMS_WEBHOOK_URL`, `SES_SECRET_ACCESS_KEY`, `PROMPTOWL_KEY` — and every value in a
-nest's Tool environment (`nest_env`) are stored AES-256-GCM encrypted, so a row read in
-isolation is not the credential. Non-secret settings stay readable: what a server is
-configured to do is worth being able to see. One known exception: the license
-validation cache (`license_cache`) is still keyed by the license key itself.
+**Credentials are encrypted at rest.** The secret rows — `ANTHROPIC_API_KEY` (until it is handed over), `OIDC_CLIENT_SECRET`, `MCP_SIGNING_SECRET`, `SMTP_URL`, `SLACK_WEBHOOK_URL`, `MSTEAMS_WEBHOOK_URL`, `SES_SECRET_ACCESS_KEY`, `PROMPTOWL_KEY` — and every value in a nest's Tool environment (`nest_env`) are stored AES-256-GCM encrypted, so a row read in isolation is not the credential. Non-secret settings stay readable: what a server is configured to do is worth being able to see. One known exception: the license validation cache (`license_cache`) is still keyed by the license key itself.
 
-The master key needs nothing configured: on first use the server generates one and
-stores it in the database (`server_settings`, key `SECRETS_MASTER_KEY`), so it survives
-redeploys, is shared by every instance, and travels with your database backups. That row
-is not a setting — it is never loaded into the process environment and never returned by
-the settings API.
+The master key needs nothing configured: on first use the server generates one and stores it in the database (`server_settings`, key `SECRETS_MASTER_KEY`), so it survives redeploys, is shared by every instance, and travels with your database backups. That row is not a setting — it is never loaded into the process environment and never returned by the settings API.
 
-Set **`SECRETS_KEY`** in the deploy environment to supply the key yourself instead; it
-takes precedence over the stored one, and any string works (it is hashed to 32 bytes).
-This is the stronger arrangement, because the key then lives somewhere the database is
-not: a database dump alone cannot open the values. With the stored key, a dump that
-includes that row includes the key — the encryption protects against a value being read
-or logged incidentally, not against an attacker holding the whole database. If you set
-`SECRETS_KEY` on a server that already wrote values under the stored key, it cannot read
-them: the server still boots, logs which settings it could not open, and treats each as
-unset so an admin can re-enter it.
+Set **`SECRETS_KEY`** in the deploy environment to supply the key yourself instead; it takes precedence over the stored one, and any string works (it is hashed to 32 bytes). This is the stronger arrangement, because the key then lives somewhere the database is not: a database dump alone cannot open the values. With the stored key, a dump that includes that row includes the key — the encryption protects against a value being read or logged incidentally, not against an attacker holding the whole database. If you set `SECRETS_KEY` on a server that already wrote values under the stored key, it cannot read them: the server still boots, logs which settings it could not open, and treats each as unset so an admin can re-enter it.
 
-Values written before any of this existed are read back as plaintext and re-encrypted the
-next time they are saved — nothing to migrate.
+Values written before any of this existed are read back as plaintext and re-encrypted the next time they are saved — nothing to migrate.
 
 ### Cloud Run + Cloud SQL (PostgreSQL)
 
-Attach the Cloud SQL instance to the service (`--add-cloudsql-instances`) so the
-Auth Proxy unix socket appears at `/cloudsql/<connection-name>`, then:
+Attach the Cloud SQL instance to the service (`--add-cloudsql-instances`) so the Auth Proxy unix socket appears at `/cloudsql/<connection-name>`, then:
 
 ```bash
 DB_DRIVER=postgres \
@@ -954,8 +540,7 @@ PROMPTOWL_KEY=pk_... \
 node dist/index.js
 ```
 
-Or with a plain TCP connection string (e.g. the Cloud SQL Proxy running on
-localhost, or a private IP):
+Or with a plain TCP connection string (e.g. the Cloud SQL Proxy running on localhost, or a private IP):
 
 ```bash
 DATABASE_URL=postgres://contextnest:***@127.0.0.1:5432/contextnest \
@@ -1057,11 +642,7 @@ Same as team, plus:
 
 ## Firewalls, VPNs and tunnels
 
-**Server settings → Network & status** runs these checks for you and shows the
-values for your server. It has a status checklist (database, disk, license,
-public address, email, SSO, scheduler), an inbound check of the public
-address, an outbound test of every host the server calls, and the deployment
-recipes below.
+**Server settings → Network & status** runs these checks for you and shows the values for your server. It has a status checklist (database, disk, license, public address, email, SSO, scheduler), an inbound check of the public address, an outbound test of every host the server calls, and the deployment recipes below.
 
 ### Who connects to whom
 
@@ -1073,15 +654,11 @@ recipes below.
 
 ### Public with HTTPS
 
-Point a DNS name at the server, terminate TLS in front of it with a publicly
-trusted certificate, open only 443 inbound, and set `PUBLIC_BASE_URL` (or
-**Settings → Basic → Public base URL**) to `https://<name>`. Don't expose the
-app's own port (`PORT`, default 3838) to the internet.
+Point a DNS name at the server, terminate TLS in front of it with a publicly trusted certificate, open only 443 inbound, and set `PUBLIC_BASE_URL` (or **Settings → Basic → Public base URL**) to `https://<name>`. Don't expose the app's own port (`PORT`, default 3838) to the internet.
 
 ### Behind a reverse proxy
 
-A full TLS server block. Which forwarded headers the app trusts (`HOST`,
-`TRUSTED_PROXIES`) is covered in [Reverse proxies](#reverse-proxies).
+A full TLS server block. Which forwarded headers the app trusts (`HOST`, `TRUSTED_PROXIES`) is covered in [Reverse proxies](#reverse-proxies).
 
 ```nginx
 server {
@@ -1112,34 +689,19 @@ nest.example.com {
 }
 ```
 
-Caddy obtains the certificate, sets `X-Forwarded-Proto`, and replaces any
-client-supplied `X-Forwarded-For` by default.
+Caddy obtains the certificate, sets `X-Forwarded-Proto`, and replaces any client-supplied `X-Forwarded-For` by default.
 
 ### VPN-only
 
-Browsers, Claude Code, local Desktop configs and the CLI work over the VPN.
-Hosted connectors don't: they can't reach a private address. To support them
-anyway, either publish only `/mcp`, `/.well-known/*` and `/oauth/*` on a public
-name and allow inbound traffic only from
-[Anthropic's published IP ranges](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp),
-or use a tunnel scoped to those paths (below). The Connect dialog warns users
-when the server's address is private.
+Browsers, Claude Code, local Desktop configs and the CLI work over the VPN. Hosted connectors don't: they can't reach a private address. To support them anyway, either publish only `/mcp`, `/.well-known/*` and `/oauth/*` on a public name and allow inbound traffic only from [Anthropic's published IP ranges](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp), or use a tunnel scoped to those paths (below). The Connect dialog warns users when the server's address is private.
 
 ### NAT and port forwarding
 
-Give the server a fixed LAN address, forward TCP 443 (and 80 if your proxy
-gets certificates over HTTP-01) to the reverse proxy on that machine, and use
-dynamic DNS if your public IP changes. Never forward straight to the app's
-port: it has no TLS of its own. If the inbound check fails from inside your
-network but the address works from outside (for example a phone on mobile
-data), the router doesn't support hairpin NAT — use split DNS internally.
+Give the server a fixed LAN address, forward TCP 443 (and 80 if your proxy gets certificates over HTTP-01) to the reverse proxy on that machine, and use dynamic DNS if your public IP changes. Never forward straight to the app's port: it has no TLS of its own. If the inbound check fails from inside your network but the address works from outside (for example a phone on mobile data), the router doesn't support hairpin NAT — use split DNS internally.
 
 ### Tunnels
 
-A tunnel agent (Cloudflare Tunnel, ngrok, Tailscale Funnel) connects out, so no
-inbound port is opened. Expose only what you need — for hosted connectors,
-`/mcp`, `/.well-known/*`, `/oauth/*` and `/health` — then set `PUBLIC_BASE_URL`
-to the tunnel's address.
+A tunnel agent (Cloudflare Tunnel, ngrok, Tailscale Funnel) connects out, so no inbound port is opened. Expose only what you need — for hosted connectors, `/mcp`, `/.well-known/*`, `/oauth/*` and `/health` — then set `PUBLIC_BASE_URL` to the tunnel's address.
 
 ```yaml
 # cloudflared config.yml
@@ -1152,15 +714,11 @@ ingress:
   - service: http_status:404
 ```
 
-`ngrok http 3838 --url=<your-domain>` and `tailscale funnel --bg 3838` expose
-the whole app; add path rules in front if only the connector paths should be
-public.
+`ngrok http 3838 --url=<your-domain>` and `tailscale funnel --bg 3838` expose the whole app; add path rules in front if only the connector paths should be public.
 
 ### Behind an egress proxy
 
-Set it up as in [Corporate egress proxy](#corporate-egress-proxy), then run
-**Test connections** on the Network & status tab: with a proxy set, HTTPS
-targets are tested through it.
+Set it up as in [Corporate egress proxy](#corporate-egress-proxy), then run **Test connections** on the Network & status tab: with a proxy set, HTTPS targets are tested through it.
 
 ---
 

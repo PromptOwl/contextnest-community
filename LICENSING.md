@@ -189,17 +189,12 @@ When the license stops being valid, a server with more than 10 users goes **read
 
 ## Questions
 
-**We hit the user limit. Can existing people still work?**
-Yes. Only new role raises are refused. Everyone keeps their current role, and viewers can still be added.
+**We hit the user limit. Can existing people still work?** Yes. Only new role raises are refused. Everyone keeps their current role, and viewers can still be added.
 
-**We moved to a smaller plan and are now over it. What happens?**
-Nothing is removed. New raises are refused until enough roles are lowered to bring the count under the limit.
+**We moved to a smaller plan and are now over it. What happens?** Nothing is removed. New raises are refused until enough roles are lowered to bring the count under the limit.
 
-**PromptOwl is down. Does our server stop?**
-No. It keeps running on the last answer it saved, models included. It catches up when PromptOwl is back.
+**PromptOwl is down. Does our server stop?** No. It keeps running on the last answer it saved, models included. It catches up when PromptOwl is back.
 
-**Does turning off telemetry stop the license check?**
-No. The license check is separate from analytics, and it sends only the counts listed above.
+**Does turning off telemetry stop the license check?** No. The license check is separate from analytics, and it sends only the counts listed above.
 
-**We're on Free. Why can't I add a second server admin?**
-Free includes one Account Owner, and the license owner already fills it. Upgrade to add more.
+**We're on Free. Why can't I add a second server admin?** Free includes one Account Owner, and the license owner already fills it. Upgrade to add more.
