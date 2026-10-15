@@ -34,7 +34,14 @@ Setting the key up for the first time is covered in [README.md → License setup
 | **Viewers** | Unlimited, free | Unlimited, free | Unlimited, free |
 | **Model credits** per user, per month | 1,000 | 5,000 | 5,000 |
 | **Your own model key** (BYOK) | No | No | Yes |
+| **Sign-in** with email or Google | Yes | Yes | Yes |
+| **Enterprise single sign-on** (Entra ID, Okta, any OIDC provider; licence feature `sso`) | No | No | Yes |
+| **Custom assistant name and branding** (licence feature `hootie_branding`) | No | No | Yes |
 | Storage | Your own servers, no limit | Same | Same |
+
+Enterprise features (`byok`, `sso`, `hootie_branding`) are **on by default** with an Enterprise key: nothing to enable on the server or in the license console. PromptOwl can still grant one to, or remove one from, a single license. A server picks up a change on its next license check (about a minute).
+
+A server that already signs in through an enterprise provider keeps working without `sso`; only switching providers or turning SSO back on needs Enterprise.
 
 A **trial** key behaves like Self-Hosted until it ends.
 
@@ -185,21 +192,17 @@ When the license stops being valid, a server with more than 10 users goes **read
 | Upgrade or change plan | **Settings → License → Manage plan**, or app.promptowl.ai → Community License |
 | Pick the Hootie model | **Settings → Hootie** |
 | Set your own model key (Enterprise) | **Settings → Hootie → Model keys**, or a nest's env settings |
+| Turn on Google sign-in (every plan) or Entra / Okta SSO (Enterprise) | **Settings → Features → Single sign-on**, then the **Single sign-on** tab |
 | Read the same data from a script | `GET /admin/license` (server admin), `GET /license/status` (public, no counts) |
 
 ## Questions
 
-**We hit the user limit. Can existing people still work?**
-Yes. Only new role raises are refused. Everyone keeps their current role, and viewers can still be added.
+**We hit the user limit. Can existing people still work?** Yes. Only new role raises are refused. Everyone keeps their current role, and viewers can still be added.
 
-**We moved to a smaller plan and are now over it. What happens?**
-Nothing is removed. New raises are refused until enough roles are lowered to bring the count under the limit.
+**We moved to a smaller plan and are now over it. What happens?** Nothing is removed. New raises are refused until enough roles are lowered to bring the count under the limit.
 
-**PromptOwl is down. Does our server stop?**
-No. It keeps running on the last answer it saved, models included. It catches up when PromptOwl is back.
+**PromptOwl is down. Does our server stop?** No. It keeps running on the last answer it saved, models included. It catches up when PromptOwl is back.
 
-**Does turning off telemetry stop the license check?**
-No. The license check is separate from analytics, and it sends only the counts listed above.
+**Does turning off telemetry stop the license check?** No. The license check is separate from analytics, and it sends only the counts listed above.
 
-**We're on Free. Why can't I add a second server admin?**
-Free includes one Account Owner, and the license owner already fills it. Upgrade to add more.
+**We're on Free. Why can't I add a second server admin?** Free includes one Account Owner, and the license owner already fills it. Upgrade to add more.

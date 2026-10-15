@@ -119,6 +119,8 @@ Keys are minted in the app (Workspace → API keys, or the Connect dialog) — o
 
 ## What you get
 
+The **Community Edition** column is the Free and Self-Hosted plans. Enterprise features turn on by themselves when an Enterprise licence key is installed — nothing to enable. See [LICENSING.md](./LICENSING.md#plans).
+
 | Feature | Community Edition | Enterprise |
 |---|:---:|:---:|
 | Self-hosted context server | ✅ | ✅ |
@@ -151,7 +153,10 @@ Keys are minted in the app (Workspace → API keys, or the Connect dialog) — o
 | Activity trace — every governance action, per nest and server-wide | ✅ | ✅ |
 | Notifications — Slack, Microsoft Teams, email | ✅ | ✅ |
 | Centralized multi-tenant admin console | — | ✅ |
-| Single sign-on (OIDC — Entra ID, Google, Okta, Keycloak) — [admin guide](./CONFIGURATION.md#single-sign-on-oidc) | ✅ | ✅ |
+| Sign-in with email, Google, or Sign in with PromptOwl — [admin guide](./CONFIGURATION.md#single-sign-on-oidc) | ✅ | ✅ |
+| Enterprise single sign-on (OIDC — Entra ID, Okta, Keycloak, any issuer) — licence feature `sso` | — | ✅ |
+| Own model keys or LLM gateway (BYOK) — licence feature `byok` | — | ✅ |
+| Custom assistant name and branding — licence feature `hootie_branding` | — | ✅ |
 | SAML / SCIM provisioning | — | ✅ |
 | Audit log streaming | — | ✅ |
 | Policy transforms (redaction, summarization) | — | ✅ |
@@ -165,7 +170,7 @@ For Enterprise pricing and features, contact **hoot@promptowl.ai** or visit <htt
 
 - **Hootie is a side panel now, and off by default.** It opens from a slim tab on the right edge and slides in beside the page: on wide screens it pushes the page over instead of covering it, and you can drag its left edge to resize it (the width is remembered). Existing servers that never switched it on explicitly will find it **off** after upgrading; turn it on under Settings → General, or set `HOOTIE_ENABLED=true`.
 - **Custom assistant name and branding (Enterprise).** Admins can rename Hootie and give it a logo, accent colour and greeting under Settings → General. The name also goes into the assistant's instructions and the comments it posts. Without the branding feature on the licence (included with Enterprise) everyone sees Hootie, and the server refuses the settings.
-- **Licence features.** Enterprise capabilities are unlocked by named features on your licence, set by PromptOwl, rather than by the tier alone. Custom assistant branding (`hootie_branding`) and own model keys or gateway (`byok`) come with Enterprise and can also be granted to, or removed from, a single licence. Without `byok`, Hootie and agent runs use the PromptOwl model gateway on credits. The server picks up a change on its next licence check (about a minute).
+- **Licence features.** Enterprise capabilities are unlocked by named features on your licence, set by PromptOwl, rather than by the tier alone. Custom assistant branding (`hootie_branding`), own model keys or gateway (`byok`) and enterprise single sign-on (`sso`: Entra ID, Okta or any OIDC issuer; Google sign-in is on every plan) come with Enterprise and can also be granted to, or removed from, a single licence. Without `byok`, Hootie and agent runs use the PromptOwl model gateway on credits. The server picks up a change on its next licence check (about a minute).
 
 Full release notes live in [CHANGELOG.md](./CHANGELOG.md).
 
@@ -223,7 +228,6 @@ The Software injects content into large language models. AI output may be inaccu
 
 ---
 
-**Copyright © 2026 Promptowl LLC.** All rights reserved.
-"ContextNest" and "PromptOwl" are trademarks of Promptowl LLC.
+**Copyright © 2026 Promptowl LLC.** All rights reserved. "ContextNest" and "PromptOwl" are trademarks of Promptowl LLC.
 
 Promptowl LLC · 3060 Mercer University Dr Ste 110 · Atlanta, GA 30341 · USA

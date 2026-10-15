@@ -351,6 +351,8 @@ export interface AdminSettings {
   oidc_auto_provision: boolean;
   /** Tag new documents with the creator's directory department (dept:<slug>). */
   oidc_department_tagging: boolean;
+  /** Enterprise identity providers allowed (licence feature sso). Google is on every plan. */
+  sso_available?: boolean;
   /** Offer every registered account in the add-a-person pickers. Default OFF:
    *  a server holding several unrelated customers would otherwise hand one
    *  customer's staff another customer's email addresses. */
@@ -2508,7 +2510,8 @@ export type ActivityType =
   | "edit"
   | "edit_proposed"
   | "review_requested"
-  | "review_resolved";
+  | "review_resolved"
+  | "task_activity";
 
 export interface ActivityEntry {
   type: ActivityType;
@@ -2517,6 +2520,14 @@ export interface ActivityEntry {
   at: string;
   detail?: string;
   refId?: string;
+  /** task_activity only: working | done | blocked. */
+  status?: string;
+  /** task_activity only: the agent the caller reported (§9.4 client.agent). */
+  agent?: string;
+  /** task_activity only: the API key the call came in on. */
+  key?: { label?: string; prefix?: string; scoped: boolean };
+  /** task_activity only: the server's one-line description. */
+  summary?: string;
 }
 
 export async function getNodeComments(

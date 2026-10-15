@@ -231,6 +231,23 @@ describe("agent read log — ungoverned nest", () => {
     expect(data.items[0].version).toBe(q.data.version ?? undefined);
   });
 
+  it("records the version served on REST /search, /query and /context", async () => {
+    const reads = [
+      ["search", () => jsonRequest(app, "GET", `/nests/${nestId}/search?q=heron`, undefined, editor.apiKey)],
+      ["query", () => jsonRequest(app, "POST", `/nests/${nestId}/query`, { query: "type:document", hops: 0 }, editor.apiKey)],
+      ["context", () => jsonRequest(app, "POST", `/nests/${nestId}/context`, { selector: "[[Runbook]]", hops: 0 }, editor.apiKey)],
+    ] as const;
+    const current = (await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${runbookId}`, undefined, owner.apiKey)).data
+      .node.version;
+    expect(current).toBeGreaterThan(0);
+    for (const [detail, read] of reads) {
+      resetAccessThrottle();
+      expect((await read()).status).toBe(200);
+      const { data } = await nodeLog(runbookId, "&type=retrieved");
+      expect(data.items[0]).toEqual(expect.objectContaining({ detail, version: current }));
+    }
+  });
+
   it("answers 'what did agent X read' across the nest, case-insensitively", async () => {
     resetAccessThrottle();
     await callTool(app, nestId, editor.apiKey, "context_get", { id: pricingId, client: { agent: "Hootie-Bot" } });

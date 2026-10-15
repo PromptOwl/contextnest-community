@@ -58,6 +58,8 @@ interface SettingsPageProps {
   ) => void | Promise<void>;
 }
 
+const GOOGLE_ISSUER = "https://accounts.google.com";
+
 const GATE_OPTIONS: { value: SignInGate; label: string; hint: string }[] = [
   { value: "open", label: "Everyone", hint: "Anyone can sign in with PromptOwl." },
   { value: "admin-only", label: "Admins only", hint: "Only the server admin can use PromptOwl sign-in." },
@@ -501,8 +503,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   // rejected field — otherwise the error banner points at fields on a tab
   // they've navigated away from.
   const [activeTab, setActiveTab] = useState<string>("basic");
-  // Entra preset clicked with no Entra issuer yet: show the tenant field.
-  const [entraTenantOpen, setEntraTenantOpen] = useState(false);
+  // SSO provider picked before an issuer is typed (enterprise with no issuer yet).
+  const [oidcPick, setOidcPick] = useState<"google" | "enterprise" | null>(null);
   // Switching SSO off while on its tab hides that tab — fall back to Features.
   const visibleTabs = TABS.filter((t) => !t.visible || (draft && t.visible(draft)));
   const currentTab = visibleTabs.some((t) => t.id === activeTab) ? activeTab : "features";
@@ -671,6 +673,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
   };
   const discard = () => {
     if (settings) setDraft(settings);
+    setOidcPick(null);
     setSaveError(null);
     setFieldErrors({});
   };
@@ -1315,9 +1318,10 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   Single sign-on (OIDC)
                 </CardTitle>
                 <CardDescription>
-                  Let teammates sign in with your identity provider — Microsoft
-                  Entra ID, Google, or any OpenID Connect issuer. Turn it on,
-                  then configure it on the Single sign-on tab.
+                  Let teammates sign in with your identity provider. Google
+                  works on every plan; Microsoft Entra ID, Okta and other
+                  OpenID Connect issuers need an Enterprise licence. Turn it
+                  on, then configure it on the Single sign-on tab.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -1501,152 +1505,39 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
           {/* Single sign-on — config for the two SSO switches on Features.
               The tab only shows while one of them is on. */}
           <TabsContent value="sso" className="space-y-4">
-            {draft.oidc_enabled && (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-base">
-                    <KeyRound className="h-4 w-4 text-muted-foreground" />
-                    Single sign-on (OIDC)
-                  </CardTitle>
-                  <CardDescription>Your identity provider's issuer and app credentials.</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  {/* "On with a dead flow" is legal server state (e.g. the
-                      secret was cleared while enabled stayed true) — the login
-                      button simply hides. Make that legible instead of silent.
-                      Mirrors the server's readiness rule (isOidcReady) against
-                      the DRAFT rather than reading the saved `oidc_ready`, so it
-                      warns live while the admin is staging the change. */}
-                  {(() => {
-                    const secretPresent =
-                      draft.oidc_client_secret === null
-                        ? false
-                        : typeof draft.oidc_client_secret === "string" &&
-                            draft.oidc_client_secret.trim() !== ""
-                          ? true
-                          : !!settings?.oidc_client_secret_set;
-                    const ready =
-                      draft.oidc_enabled &&
-                      !!draft.oidc_issuer?.trim() &&
-                      !!draft.oidc_client_id?.trim() &&
-                      secretPresent;
-                    if (!draft.oidc_enabled || ready) return null;
-                    return (
-                      <div
-                        role="alert"
-                        className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
-                      >
-                        Enabled but not configured — the SSO sign-in button stays
-                        hidden until the issuer, client ID, and client secret are
-                        all set.
-                      </div>
-                    );
-                  })()}
-
-                  {/* Presets — prefill the issuer for the two common IdPs, and
-                      reflect which one the current issuer matches so the buttons
-                      read as a selector rather than two identical actions. The
-                      match is derived from draft.oidc_issuer, so it also lights
-                      up when the issuer was typed/pasted by hand or loaded from
-                      the server. Anything else (a custom IdP, or blank) leaves
-                      both unselected. */}
-                  {(() => {
-                    const issuer = draft.oidc_issuer?.trim() ?? "";
-                    const preset: "entra" | "google" | null =
-                      /^https:\/\/login\.microsoftonline\.com\/[^/]+\/v2\.0$/.test(
-                        issuer,
-                      )
-                        ? "entra"
-                        : issuer === "https://accounts.google.com"
-                          ? "google"
-                          : null;
-                    return (
-                      <div>
-                        <div className="text-sm font-medium mb-1">Issuer URL</div>
-                        <div
-                          className="flex gap-2 mb-2"
-                          role="group"
-                          aria-label="Identity provider preset"
-                        >
-                          <Button
-                            type="button"
-                            variant={preset === "entra" ? "default" : "outline"}
-                            size="sm"
-                            aria-pressed={preset === "entra"}
-                            onClick={() => setEntraTenantOpen(true)}
-                          >
-                            Microsoft Entra ID
-                          </Button>
-                          <Button
-                            type="button"
-                            variant={preset === "google" ? "default" : "outline"}
-                            size="sm"
-                            aria-pressed={preset === "google"}
-                            onClick={() =>
-                              set({ oidc_issuer: "https://accounts.google.com" })
-                            }
-                          >
-                            Google
-                          </Button>
-                          {preset === null && issuer !== "" && (
-                            <span className="self-center text-xs text-muted-foreground">
-                              Custom issuer
-                            </span>
-                          )}
-                        </div>
-                        {(preset === "entra" || entraTenantOpen) && (() => {
-                          const tenant =
-                            /^https:\/\/login\.microsoftonline\.com\/([^/]+)\/v2\.0$/.exec(issuer)?.[1] ?? "";
-                          const looksLikeGuid =
-                            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenant);
-                          return (
-                            <div className="mb-2 rounded-md border bg-muted/30 p-3">
-                              <label className="text-sm font-medium" htmlFor="entra-tenant">
-                                Directory (tenant) ID
-                              </label>
-                              <p className="mb-1.5 text-xs text-muted-foreground">
-                                On your app registration's Overview page in Entra. The
-                                issuer below fills in from it.
-                              </p>
-                              <Input
-                                id="entra-tenant"
-                                value={tenant}
-                                placeholder="00000000-0000-0000-0000-000000000000"
-                                autoComplete="off"
-                                spellCheck={false}
-                                onChange={(e) => {
-                                  const t = e.target.value.trim();
-                                  set({
-                                    oidc_issuer: t
-                                      ? `https://login.microsoftonline.com/${t}/v2.0`
-                                      : "",
-                                  });
-                                }}
-                              />
-                              {tenant && !looksLikeGuid && (
-                                <p role="alert" className="mt-1.5 text-xs text-amber-700 dark:text-amber-400">
-                                  Use the tenant GUID. <code>common</code>,{" "}
-                                  <code>organizations</code> or a domain name won't
-                                  match Entra's discovery document, and sign-in fails.
-                                </p>
-                              )}
-                            </div>
-                          );
-                        })()}
-                        <TextField
-                          error={fieldErrors.oidc_issuer}
-                          value={draft.oidc_issuer ?? ""}
-                          placeholder="https://login.microsoftonline.com/{tenant}/v2.0"
-                          onChange={(v) => set({ oidc_issuer: v })}
-                        />
-                        <p className="text-xs text-muted-foreground mt-1">
-                          https:// only. Must serve
-                          /.well-known/openid-configuration.
-                        </p>
-                      </div>
-                    );
-                  })()}
-
+            {draft.oidc_enabled && (() => {
+              // One OIDC config, two cards: Google (every plan) and enterprise
+              // IdPs (licence feature sso). The issuer decides which card is on.
+              const issuer = draft.oidc_issuer?.trim() ?? "";
+              const provider: "google" | "enterprise" | null =
+                issuer === GOOGLE_ISSUER ? "google" : issuer !== "" ? "enterprise" : oidcPick;
+              const locked = settings?.sso_available === false;
+              const savedIssuer = settings?.oidc_issuer ?? "";
+              const grandfathered = locked && savedIssuer !== "" && savedIssuer !== GOOGLE_ISSUER;
+              const pick = (p: "google" | "enterprise" | null) => {
+                setOidcPick(p);
+                set({ oidc_issuer: p === "google" ? GOOGLE_ISSUER : "" });
+              };
+              const setEnterpriseIssuer = (v: string) => {
+                setOidcPick("enterprise");
+                set({ oidc_issuer: v });
+              };
+              // "On with a dead flow" is legal server state — the login button
+              // just hides. Mirrors isOidcReady against the draft.
+              const secretPresent =
+                draft.oidc_client_secret === null
+                  ? false
+                  : typeof draft.oidc_client_secret === "string" &&
+                      draft.oidc_client_secret.trim() !== ""
+                    ? true
+                    : !!settings?.oidc_client_secret_set;
+              const ready = !!issuer && !!draft.oidc_client_id?.trim() && secretPresent;
+              const tenant =
+                /^https:\/\/login\.microsoftonline\.com\/([^/]+)\/v2\.0$/.exec(issuer)?.[1] ?? "";
+              const looksLikeGuid =
+                /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenant);
+              const credentials = (
+                <>
                   <div>
                     <div className="text-sm font-medium mb-1">Client ID</div>
                     <TextField
@@ -1742,9 +1633,129 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                       Authorized redirect URIs).
                     </p>
                   </div>
-                </CardContent>
-              </Card>
-            )}
+                </>
+              );
+              return (
+                <>
+                  {!ready && (
+                    <div
+                      role="alert"
+                      className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+                    >
+                      Enabled but not configured — the SSO sign-in button stays
+                      hidden until a provider is picked and its client ID and
+                      client secret are set.
+                    </div>
+                  )}
+
+                  <Card data-testid="settings-sso-google">
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2 text-base">
+                        <KeyRound className="h-4 w-4 text-muted-foreground" />
+                        Google sign-in
+                      </CardTitle>
+                      <CardDescription>
+                        Sign in with Google accounts. Available on every plan.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium">Google</span>
+                        <Switch
+                          aria-label="Use Google sign-in"
+                          checked={provider === "google"}
+                          onCheckedChange={(v) => pick(v ? "google" : null)}
+                        />
+                      </div>
+                      {provider === "google" && credentials}
+                    </CardContent>
+                  </Card>
+
+                  <Card data-testid="settings-sso-enterprise">
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2 text-base">
+                        <Shield className="h-4 w-4 text-muted-foreground" />
+                        Enterprise single sign-on
+                        <Badge variant="secondary" className="gap-1">
+                          {locked && <Lock className="h-3 w-3" />}
+                          Enterprise
+                        </Badge>
+                      </CardTitle>
+                      <CardDescription>
+                        Microsoft Entra ID, Okta or any OpenID Connect issuer.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      {locked && (
+                        <p
+                          className={`text-xs ${grandfathered ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}
+                          data-testid="settings-sso-locked"
+                        >
+                          {grandfathered
+                            ? "Sign-in with your current identity provider keeps working. Changing it, or turning it back on after turning it off, needs an Enterprise licence."
+                            : "Needs an Enterprise licence. Google sign-in above works on every plan."}
+                        </p>
+                      )}
+                      <fieldset disabled={locked} className="space-y-4 disabled:opacity-60">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-medium">Enterprise identity provider</span>
+                          <Switch
+                            aria-label="Use an enterprise identity provider"
+                            checked={provider === "enterprise"}
+                            onCheckedChange={(v) => pick(v ? "enterprise" : null)}
+                          />
+                        </div>
+                        {provider === "enterprise" && (
+                          <>
+                            <div>
+                              <label className="text-sm font-medium" htmlFor="entra-tenant">
+                                Microsoft Entra ID — Directory (tenant) ID
+                              </label>
+                              <p className="mb-1.5 text-xs text-muted-foreground">
+                                On your app registration's Overview page in Entra. Fills
+                                in the issuer below.
+                              </p>
+                              <Input
+                                id="entra-tenant"
+                                value={tenant}
+                                placeholder="00000000-0000-0000-0000-000000000000"
+                                autoComplete="off"
+                                spellCheck={false}
+                                onChange={(e) => {
+                                  const t = e.target.value.trim();
+                                  setEnterpriseIssuer(t ? `https://login.microsoftonline.com/${t}/v2.0` : "");
+                                }}
+                              />
+                              {tenant && !looksLikeGuid && (
+                                <p role="alert" className="mt-1.5 text-xs text-amber-700 dark:text-amber-400">
+                                  Use the tenant GUID. <code>common</code>,{" "}
+                                  <code>organizations</code> or a domain name won't
+                                  match Entra's discovery document, and sign-in fails.
+                                </p>
+                              )}
+                            </div>
+                            <div>
+                              <div className="text-sm font-medium mb-1">Issuer URL</div>
+                              <TextField
+                                error={fieldErrors.oidc_issuer}
+                                value={draft.oidc_issuer ?? ""}
+                                placeholder="https://login.microsoftonline.com/{tenant}/v2.0 or https://acme.okta.com"
+                                onChange={setEnterpriseIssuer}
+                              />
+                              <p className="text-xs text-muted-foreground mt-1">
+                                Okta or another provider: paste its issuer. https:// only.
+                                Must serve /.well-known/openid-configuration.
+                              </p>
+                            </div>
+                            {credentials}
+                          </>
+                        )}
+                      </fieldset>
+                    </CardContent>
+                  </Card>
+                </>
+              );
+            })()}
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">

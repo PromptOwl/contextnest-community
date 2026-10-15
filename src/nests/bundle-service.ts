@@ -17,7 +17,7 @@ import { readdirSync, readFileSync, statSync } from "fs";
 import { join, sep } from "path";
 import JSZip from "jszip";
 import { getDb } from "../db/client.js";
-import { serializeDocument } from "@promptowl/contextnest-engine";
+import { serializeDocument, type ContextNode } from "@promptowl/contextnest-engine";
 import { engineCache } from "../nodes/engine.js";
 import { resolveExportBody } from "../nodes/readable-body.js";
 import { resolveNestPath } from "../shared/paths.js";
@@ -47,10 +47,14 @@ function walkFiles(root: string): string[] {
  * Build the export .zip for a nest. Caller must have already gated the request
  * (any nest reader — viewer and up). `includeDrafts` adds unapproved draft
  * documents; when false, only approved/published documents are exported.
+ * `narrow` is for a caller without whole-nest read: it cuts the documents to
+ * the ones they can read, and `.versions/**` is left out because that history
+ * holds every version of every document, drafts too.
  */
 export async function exportNestBundle(
   nestId: string,
   includeDrafts: boolean,
+  narrow?: (docs: ContextNode[]) => Promise<ContextNode[]>,
 ): Promise<ArrayBuffer> {
   const db = getDb();
   const approvedRows = (await db.all(
@@ -62,7 +66,8 @@ export async function exportNestBundle(
   );
 
   const { storage } = await engineCache.get(nestId);
-  const docs = await storage.discoverDocuments();
+  const discovered = await storage.discoverDocuments();
+  const docs = narrow ? await narrow(discovered) : discovered;
 
   const zip = new JSZip();
   let count = 0;
@@ -119,7 +124,7 @@ export async function exportNestBundle(
   for (const rel of walkFiles(nestPath)) {
     const segs = rel.split("/");
     const keep =
-      segs.includes(".versions") ||
+      (!narrow && segs.includes(".versions")) ||
       rel === ".context/config.yaml" ||
       rel === "CONTEXT.md";
     if (!keep) continue;

@@ -1,8 +1,6 @@
 # Test IDs Reference
 
-All interactive UI elements used by Playwright tests carry `data-testid`
-attributes. Naming convention: kebab-case, hierarchical —
-`{area}-{component}-{element}` (e.g. `login-email-input`).
+All interactive UI elements used by Playwright tests carry `data-testid` attributes. Naming convention: kebab-case, hierarchical — `{area}-{component}-{element}` (e.g. `login-email-input`).
 
 Add a row here whenever you add a `data-testid` to the UI.
 
@@ -89,9 +87,7 @@ Add a row here whenever you add a `data-testid` to the UI.
 | `metacognition-save` | Save button |
 | `run-trace-metacognition` | Persona, cost and summary atop a run's trace — `WorkflowsView.tsx` |
 
-Many more test IDs already exist across `ui/src/` (governance dialogs,
-document editor, nest tabs, …) — grep for `data-testid` and document them
-here as page objects start using them.
+Many more test IDs already exist across `ui/src/` (governance dialogs, document editor, nest tabs, …) — grep for `data-testid` and document them here as page objects start using them.
 
 ## Annotations (`ui/src/components/ArtifactViewer.tsx`, `HighlightedTextarea.tsx`)
 
