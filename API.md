@@ -913,6 +913,9 @@ Optional query params, applied before the per-node enrichment:
 | `limit` | Max nodes to return. A non-numeric value is ignored, not an error. |
 | `folder` | Present (even as `""`) → that one folder level only, for a lazily-expanded document tree. Absent → the whole nest. |
 | `content` | `1`/`true` — include document bodies. **Off by default:** the listing is served from the nest's document index, which holds metadata only, so bodies cost a vault crawl and are opt-in. |
+| `assignee` | Board field filter: only nodes assigned to this email (case-insensitive). `none` = unassigned. |
+| `priority` | `urgent` \| `high` \| `medium` \| `low` \| `none`. Anything else → `400`. |
+| `due_before` | `YYYY-MM-DD`, inclusive. Nodes with no `due` are left out. A malformed date → `400`. |
 | `field.<key>` | Custom-field filter, repeatable (every one must match). select / user / date / url / number match exactly (case-insensitive), `multi_select` matches when the option is one of its values, `text` matches a substring, `checkbox` takes `true`/`false` (unset counts as `false`), and `none` matches an unset field. A node whose type the field doesn't apply to never matches. An unknown key → `400`. |
 ```json
 {
@@ -1630,7 +1633,45 @@ The *stream* of them is bounded too: per nest per 5 minutes, one person may caus
 Mark a comment resolved. Records `resolvedBy` + `resolvedAt`. Returns `{ comment }`.
 
 ### GET `/nests/:nestId/nodes/:nodeId/activity` · GET `/nests/:nestId/activity`
-Per-node (or nest-wide) activity log — "who did what". A read-only aggregation over comments + committed edits (`node_versions`) + pending external-edit suggestions ("proposed an edit", read from nest storage) + reviews (`review_requests`); newest first, `?limit=` (default 100). Each entry: `{ type, nodeId, actor, at, detail?, refId? }` where `type` ∈ `comment | comment_resolved | edit | edit_proposed | review_requested | review_resolved`.
+Per-node (or nest-wide) activity log — "who did what". A read-only aggregation
+over comments + committed edits (`node_versions`) + pending external-edit
+suggestions ("proposed an edit", read from nest storage) + reviews
+(`review_requests`); newest first, `?limit=` (default 100). Each entry:
+`{ type, nodeId, actor, at, detail?, refId? }` where `type` ∈
+`comment | comment_resolved | edit | edit_proposed | review_requested | review_resolved | task_activity`.
+A `task_activity` entry (see below) also carries `status?`, `agent?` (the caller's
+`client.agent`), `key?` (`{ label?, prefix?, scoped }`) and `summary` — the
+one-line description the task's timeline shows.
+
+### POST `/nests/:nestId/nodes/:nodeId/task-log` (write+)
+Register an interaction on a task — the simple way for an agent to say what it
+did. Same operation as MCP `context_task_log` and `ctx task log`.
+```json
+{ "note": "drafted the hero section", "status": "working", "claim": true,
+  "client": { "agent": "Claude Code" } }
+```
+- `note` required (max 2000 chars). `status` optional: `working` | `done` | `blocked`.
+- `claim: true` makes the caller the assignee **only if the task is unassigned**
+  (same roster check as setting `assignee`); it never takes a task from someone else.
+- Attributed to the authenticated user. A call on an API key also records the key
+  — its label, prefix and whether it was **scoped** to this nest — read from the key
+  row, not from the request. `client` (see [Caller attribution](#caller-attribution-client))
+  is recorded as on a version write; omitted, the key's label is the derived agent.
+- Needs edit access to the node (`403` for a read-only collaborator, their key, or a
+  headless access key). Writes no version: it is collaboration metadata, like a comment.
+
+Response (201):
+```json
+{ "entry": { "id": "…", "nodeId": "nodes/write-copy", "actor": "misha@x.com",
+    "status": "working", "note": "drafted the hero section", "surface": "api",
+    "key": { "label": "ctx CLI (laptop)", "prefix": "cnst_1a2b3c4…", "scoped": true },
+    "client": { "agent": "Claude Code" }, "at": "2026-10-09T12:00:00.000Z" },
+  "claim": "assigned" | "already_yours" | "assigned_to_other", "assignee": "misha@x.com" }
+```
+
+### GET `/nests/:nestId/nodes/:nodeId/task-log`
+The logged interactions alone, newest first (`?limit=`, default 100): `{ entries: [...] }`.
+The task's full timeline (edits, reviews, comments too) is `…/activity` above.
 
 
 ### Annotations — anchored threads the editor's Comment mode shows
@@ -2180,6 +2221,13 @@ Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually;
 **Titles are unique on this surface.** `context_get`, `context_update`, `context_versions`, `context_delete`, and `context_move` each resolve a document by title or by id (an id wins when both are sent, and an ambiguous title refuses rather than guessing). Title addressing is what makes uniqueness matter, so `context_create` refuses a title already used anywhere in the nest — including in another folder — and answers with the existing node's id plus what to do instead (`context_update` to change it, `context_move` to refile it). A duplicate would otherwise be unreachable by every tool here. REST `POST /nodes` keeps the looser rule (same title in a different folder is fine); both surfaces refuse a create whose id is already taken.
 
 **`context_search` is the REST search.** The tool runs the same index-backed match as `GET /nests/:id/search` — terms against the cached discovery set (title, body, type, tags), title hits first — and gates the *hits* with the same `filterAccessible` rule (public readers: approved-only; governed nests: steward coverage or a share grant), so the two surfaces return the same documents in the same order. It takes an optional `limit` (default 20, max 200) and answers `{ results, count }`: `count` is everything found, `results` the first `limit` hits, each with its LLM-visible body (approved version under stewardship; a hit with no approved version yet is listed but carries no body). It used to resolve every document's gated body *before* matching — one permission lookup plus one version reconstruction per node — which is what timed out `ctx search --vault <remote>` on large governed nests.
+
+**Tasks read AND write.** Board fields — `assignee` (an email on the nest's roster), `due` (`YYYY-MM-DD`), `priority` (`urgent` | `high` | `medium` | `low`) and `parent` (a node id in this nest) — are stored as frontmatter `metadata` on any node, the same store REST and the board use:
+- `context_create` and `context_update` accept all four, validated exactly as REST validates them (off-roster assignee, malformed date, unknown priority, missing parent or a parent cycle → `VALIDATION_FAILED`, nothing written). On update, `null` or `""` clears a field and an absent one is left alone. Both echo the fields they left set.
+- `context_get`, `context_list` and `context_query` return them (structured and in prose) when set.
+- `context_list` filters by `assignee` (`none` = unassigned), `priority` (`none` = unset) and `due_before` (inclusive).
+- `context_task_log` — `{ id | title, note, status?: working|done|blocked, claim? }` — registers what the agent did on a task, attributed to the caller plus the API key and `client.agent` (see `POST …/task-log`). It shows in the task's activity timeline in the UI, e.g. *Claude Code (key ctx CLI (laptop)) on behalf of Misha · working · drafted the hero section*. Also on the server-level `/mcp` endpoint (with `nest`).
+Every write here needs edit access; a read-only collaborator's key gets `UNAUTHORIZED_ACTION`, and a headless access key is refused like any other write.
 
 **Deletion requests** mirror the REST + UI flow, so an agent isn't left at a dead end when `context_delete` refuses:
 - `context_request_deletion` — flag a document (by title/id), a `folder`, or the whole `nest` with a required `reason`. Read-tier: anyone who can see a thing may ask for its deletion. Nothing is removed; a refused `context_delete` now names this tool.

@@ -80,6 +80,7 @@ const SERVER_WRITE_TOOLS = new Set([
   "context_move",
   "context_submit_review",
   "context_request_access",
+  "context_task_log",
   "context_bulk_update",
 ]);
 
@@ -296,6 +297,7 @@ const SERVER_NEST_TOOLS = [
   "context_move",
   "context_submit_review",
   "context_request_access",
+  "context_task_log",
   "context_relations",
   "context_add_relation",
   "context_remove_relation",
@@ -821,6 +823,7 @@ Streamable HTTP, stateless. Two endpoints:
   - Writes (\`nest\` required): \`nest_create\`, \`context_create\`, \`context_update\`,
     \`context_delete\`, \`context_move\`, \`context_submit_review\`,
     \`context_request_access\` (ask for write access when a write is refused),
+    \`context_task_log\` (log what you did on a task: working / done / blocked),
     \`context_bulk_update\` (one change over up to 100 nodes)
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, the full toolset. Same names as the
   server-level tools without the \`nest\` argument, plus:

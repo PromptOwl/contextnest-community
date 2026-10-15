@@ -87,7 +87,10 @@ import { notifyAssigned } from "../governance/assign-notify.js";
 import {
   TASK_NODE_TYPE,
   applyTaskFields,
+  hasTaskFieldsFilter,
   hasTaskFieldsPatch,
+  matchesTaskFieldsFilter,
+  type TaskFieldsFilter,
   taskFieldsOf,
   type TaskFields,
   type TaskFieldsPatch,
@@ -808,6 +811,9 @@ export interface ListNodesFilters {
    * to crawling the vault, which is the honest price.
    */
   withContent?: boolean;
+  /** Board-field filters (assignee / priority / due_before), applied before
+   *  the access gate and `limit` so a filtered page is a full page. */
+  task?: TaskFieldsFilter;
   /**
    * Custom-field filters, field key → wanted value (see matchesFieldFilter).
    * Every entry must match. An unknown key is a 400.
@@ -1004,10 +1010,13 @@ export async function listNodesForCaller(
   // saving, since both cost per surviving document. Still applied even when
   // the engine already scoped the crawl: it is the correctness guarantee, and
   // on a scoped crawl there is nothing left for it to drop.
-  const folderScoped =
+  const folderDocs =
     filters.folder === undefined
       ? documents
       : documents.filter((d) => folderOfId(d.id) === filters.folder);
+  const folderScoped = hasTaskFieldsFilter(filters.task)
+    ? folderDocs.filter((d) => matchesTaskFieldsFilter(d.frontmatter.metadata, filters.task!))
+    : folderDocs;
   // Custom-field definitions: one query, for the filters here and the
   // computed values (time-in-status) added to every row at the end.
   const fieldDefs = await listFieldDefinitions(nestId);
@@ -2971,6 +2980,8 @@ export const NODE_KEYED_TABLES = [
   // A metacognition agent's config (CU-wdqcq041jm): it runs the agent node, so
   // a delete must stop it and a move must take it along.
   ["metacognition_agents", "node_id"],
+  // Agent/person interactions logged on a task (migration 064).
+  ["task_activity", "node_id"],
 ] as const;
 
 /** Drop every row keyed to a node id. Caller supplies the transaction. */
