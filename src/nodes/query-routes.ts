@@ -535,27 +535,32 @@ queryRoutes.get("/export", async (c) => {
   const nestId = c.req.param("nestId")!;
 
   // Portability bundle (?format=bundle): the nest's documents as a .zip that
-  // the existing folder importer (POST /nests/import) ingests. Gated the same
-  // as the markdown export above — the nest access middleware already 404s
-  // callers with no access at all, so any reader (viewer and up) may export.
+  // the existing folder importer (POST /nests/import) ingests. Any reader may
+  // export, but only what they can read: a caller without whole-nest read
+  // (public/org reader, scoped steward, share grantee) gets the
+  // filterAccessible set and no version history.
   // `?includeDrafts=1` also exports unapproved drafts; default is approved only.
   if (c.req.query("format") === "bundle") {
     const draftsParam = c.req.query("includeDrafts");
     const bundleUser = c.get("userId");
+    const bundleEmail = await resolveCallerEmail(bundleUser);
     // Drafts are for collaborators. A caller who reaches the nest only through
     // org/public visibility gets the approved bundle whatever they ask for
     // (CU-wdqcq0538j).
     const includeDrafts =
       (draftsParam === "1" || draftsParam === "true") &&
       !(await isPublicReader(nestId, bundleUser));
-    const zip = await exportNestBundle(nestId, includeDrafts);
+    const narrow = (await readsWholeNest(nestId, bundleUser, bundleEmail))
+      ? undefined
+      : (docs: ContextNode[]) => filterAccessible(nestId, bundleUser, bundleEmail, docs);
+    const zip = await exportNestBundle(nestId, includeDrafts, narrow);
     recordNodeAccess({
       nestId,
-      wholeNest: true,
+      wholeNest: !narrow,
       action: "export",
       surface: "api",
       userId: bundleUser,
-      userEmail: await resolveCallerEmail(bundleUser),
+      userEmail: bundleEmail,
       client: readClient(c),
       detail: includeDrafts ? "bundle export (incl. drafts)" : "bundle export",
     });
