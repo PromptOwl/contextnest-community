@@ -183,17 +183,29 @@ export async function buildNestIndex(
   // bucket mount) made this index slower with every nest a user could reach,
   // until callers like The Owl's chat page timed out on it. The derived
   // `— Annotations` projections are left out, like every listing does.
+  // Scoped to the caller's nests. Best-effort, like the scan it replaced: a
+  // failed count reads as unknown (null), never takes the index down.
   const db = getDb();
-  const countRows = (await db.all(
-    `SELECT nest_id,
-            COUNT(DISTINCT CASE
-              WHEN ${suffixOf(db, "node_id", DERIVED_ANNOTATIONS_SUFFIX.length)} <> ?
-              THEN node_id END) AS c
-       FROM node_versions GROUP BY nest_id`,
-    [DERIVED_ANNOTATIONS_SUFFIX],
-  )) as Array<{ nest_id: string; c: number }>;
-  // Number(): Postgres returns COUNT as a string.
-  const docsByNest = new Map(countRows.map((r) => [r.nest_id, Number(r.c)]));
+  let docsByNest: Map<string, number> | null = new Map();
+  if (rows.length) {
+    try {
+      const countRows = (await db.all(
+        `SELECT nest_id,
+                COUNT(DISTINCT CASE
+                  WHEN ${suffixOf(db, "node_id", DERIVED_ANNOTATIONS_SUFFIX.length)} <> ?
+                  THEN node_id END) AS c
+           FROM node_versions
+          WHERE nest_id IN (${rows.map(() => "?").join(", ")})
+          GROUP BY nest_id`,
+        [DERIVED_ANNOTATIONS_SUFFIX, ...rows.map((n) => n.id)],
+      )) as Array<{ nest_id: string; c: number }>;
+      // Number(): Postgres returns COUNT as a string.
+      docsByNest = new Map(countRows.map((r) => [r.nest_id, Number(r.c)]));
+    } catch (err) {
+      console.error("[index] document counts unavailable:", err);
+      docsByNest = null;
+    }
+  }
   return Promise.all(
     rows.map(async (n) => {
       let permission: NestPermission = "read";
@@ -211,7 +223,8 @@ export async function buildNestIndex(
         description: n.description,
         visibility: n.visibility,
         permission,
-        document_count: docsByNest.get(n.id) ?? 0,
+        // No version rows = an empty nest, so 0; null only when the count failed.
+        document_count: docsByNest ? (docsByNest.get(n.id) ?? 0) : null,
       };
     }),
   );
