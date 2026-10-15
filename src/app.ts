@@ -114,12 +114,8 @@ import {
 } from "./governance/access-request-service.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
 import { nestScopedKeyGuard } from "./auth/nest-scope-guard.js";
-import {
-  verifySsoTicket,
-  isValidTicketSub,
-  SsoTokenError,
-  type SsoTicketClaims,
-} from "./auth/sso-token.js";
+import { isValidTicketSub } from "./auth/sso-token.js";
+import { resolveMcpTicketUser, mcpTicketSecrets } from "./auth/mcp-ticket.js";
 import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
@@ -270,6 +266,7 @@ const openModeMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   const anonId = await ensureAnonymousUser();
   c.set("userId", anonId);
   c.set("nestScope", null);
+  c.set("keyCapability", "write");
   await next();
 });
 
@@ -373,6 +370,9 @@ const mcpOAuthBearer = createMiddleware<AuthEnv>(async (c, next) => {
   // OAuth grants are never narrowed to one nest: the whole point is that one
   // connection reads across everything the person can see.
   c.set("nestScope", null);
+  // OAuth grants are narrowed by oauthScope at tool dispatch, not by a key
+  // capability: the credential itself is the person's (full tier).
+  c.set("keyCapability", "write");
   // What the person actually consented to. Enforced at tool dispatch — a
   // consent screen that says "read" while write tools still work is a lie.
   c.set("oauthScope", grant.scope.split(" ").filter(Boolean));
@@ -389,6 +389,7 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
     const anonId = await ensureAnonymousUser();
     c.set("userId", anonId);
     c.set("nestScope", null);
+    c.set("keyCapability", "write");
     return next();
   }
 
@@ -396,6 +397,7 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
     const anonId = await ensureAnonymousUser();
     c.set("userId", anonId);
     c.set("nestScope", null);
+    c.set("keyCapability", "write");
     return next();
   }
 
@@ -440,80 +442,29 @@ const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
     // under EITHER — each attempt is an independent constant-time HMAC check,
     // and a ticket matching neither is rejected. Order is irrelevant: a forged
     // token fails both; a genuine one matches exactly the secret that signed it.
-    const secrets = [
-      config.OFFICIAL_COMMUNITY_SSO_SECRET,
-      config.MCP_SIGNING_SECRET,
-    ].filter(Boolean);
+    const secrets = mcpTicketSecrets();
     const looksLikeJwt =
       !!token && !token.startsWith("cnst_") && token.split(".").length === 3;
     if (!looksLikeJwt || secrets.length === 0) {
       return flexAuthMiddleware(c, next);
     }
 
-    let claims: SsoTicketClaims | null = null;
-    // A signature check can only find "expired" once it's already matched the
-    // signing secret, so seeing that reason from ANY candidate means this was
-    // a genuine ticket that aged out — not a forged/malformed one — even if a
-    // later candidate in the loop fails differently.
-    let expired = false;
-    for (const secret of secrets) {
-      try {
-        claims = verifySsoTicket(token, secret);
-        break;
-      } catch (err) {
-        if (err instanceof SsoTokenError && err.message === "Ticket expired") {
-          expired = true;
-        }
-        // Wrong secret (or malformed) — try the next candidate.
-      }
-    }
-    if (!claims) {
-      if (expired) {
-        return c.json(
-          { error: "Service ticket expired — reconnect to refresh.", code: "ticket_expired" },
-          401,
-        );
-      }
-      return c.json({ error: "Invalid service ticket" }, 401);
-    }
-    // Require the MCP scope AND reject a present jti. A one-time-use jti is the
-    // mark of an SSO *login* ticket (redeemable at GET /auth/sso for a browser
-    // session); an MCP bearer must carry neither, so we don't rely on the
-    // issuer keeping scope and jti mutually exclusive — this side enforces it,
-    // and /auth/sso rejects scope "mcp" for the symmetric guarantee.
-    if (claims.scope !== "mcp" || claims.jti) {
-      return c.json({ error: "Invalid service ticket" }, 401);
-    }
-    // Audience binding — same policy as GET /auth/sso: enforced when
-    // PUBLIC_BASE_URL is set (official deployments), so a ticket minted for
-    // another server can't be replayed against this one.
-    const expectedAud = config.PUBLIC_BASE_URL;
-    if (expectedAud && (claims.aud || "").replace(/\/$/, "") !== expectedAud) {
-      return c.json({ error: "Invalid service ticket" }, 401);
-    }
-
-    // Same sub-shape guard as GET /auth/sso (shared helper so the two
-    // ticket-consuming paths can't drift): a whitespace/garbage sub must never
-    // resolve a user here either.
-    const sub = claims.sub.trim();
-    if (!isValidTicketSub(sub)) {
-      return c.json({ error: "Invalid service ticket" }, 401);
-    }
-    const db = getDb();
-    // Access-key identities (CU-wdqcq0314u) are never a ticket's user.
-    const user = (await db.get(
-      "SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND COALESCE(is_service, 0) = 0",
-      [sub],
-    )) as { id: string } | undefined;
-    if (!user) {
+    // Verification (either secret, expiry code, scope:"mcp", no jti,
+    // audience, existing person) lives in auth/mcp-ticket.ts, shared with
+    // POST /auth/keys/exchange so the two ticket consumers can't drift.
+    const resolved = await resolveMcpTicketUser(token, secrets);
+    if (!resolved.ok) {
       return c.json(
-        { error: "No ContextNest account exists for this PromptOwl user" },
-        404,
+        resolved.code ? { error: resolved.error, code: resolved.code } : { error: resolved.error },
+        resolved.status,
       );
     }
+    const { claims, sub } = resolved;
 
-    c.set("userId", user.id);
+    c.set("userId", resolved.userId);
     c.set("nestScope", null);
+    // PromptOwl service tickets act as the full user (never read-only).
+    c.set("keyCapability", "write");
     // Shared agent driven by someone else: label held pushes with who asked.
     const act = typeof claims.act === "string" ? claims.act.trim() : "";
     if (isValidTicketSub(act) && act.toLowerCase() !== sub.toLowerCase()) {
@@ -2851,6 +2802,32 @@ export function createApp(): Hono<AuthEnv> {
       parts.length === 2 &&
       ["context", "query", "search", "export", "chat"].includes(parts[1]);
 
+    // CAPABILITY GATE (read-only keys). A key minted read-only must never reach
+    // a write or governance mutation on ANY nest — enforced HERE, server-side,
+    // not by UI filtering. A "pure read" is a GET, a read-tier query POST
+    // (context/query/search/export, above), or the MCP transport (always POST;
+    // its per-tool capability gate in mcp/tools.ts blocks the write tools while
+    // leaving reads working). Everything else — node create/update/delete,
+    // approve/reject/submit-review, comments, annotations, deletion requests,
+    // stewards, sharing, sync — is a mutation and is denied. This sits BEFORE
+    // the per-route permission resolution below because a read-only credential
+    // is denied regardless of how much nest permission the underlying user has.
+    if (c.get("keyCapability") === "read") {
+      const isPureRead =
+        c.req.method === "GET" || isReadQuery || isMcpTransport;
+      if (!isPureRead) {
+        return deny(
+          403,
+          "This API key is read-only and cannot perform write or governance actions.",
+          {
+            reason:
+              "Mint a read-write key (or use a session) for changes. Read-only keys may only read, query, search, and export.",
+            capability: "read",
+          },
+        );
+      }
+    }
+
     // MCP transport is read-tier (isMcpTransport, declared above with the
     // deny helper): the Streamable HTTP protocol is ALWAYS POST — even
     // initialize and tools/list — so the generic non-GET 'write' bump below
@@ -3235,12 +3212,22 @@ export function createApp(): Hono<AuthEnv> {
     // caller acting purely via a grant (nest permission "none"), or a viewer
     // holding a write share on this node — so node handlers treat them
     // correctly.
-    c.set(
-      "nestPermission",
+    let effectivePermission: NestPermission =
       grantRole && permissionLevel(grantRole) > permissionLevel(permission)
         ? grantRole
-        : permission,
-    );
+        : permission;
+    // A read-only key caps the effective permission at 'read', so any handler
+    // that keys off nestPermission (and GET /nests/:id, which reports it to the
+    // UI) sees the truth: this credential cannot write here. Defense in depth —
+    // the pure-read gate above already blocked the mutation; this keeps the
+    // reported permission honest and closes any handler that gates on it.
+    if (
+      c.get("keyCapability") === "read" &&
+      permissionLevel(effectivePermission) > permissionLevel("read")
+    ) {
+      effectivePermission = "read";
+    }
+    c.set("nestPermission", effectivePermission);
     return next();
   });
 

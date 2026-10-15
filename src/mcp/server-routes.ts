@@ -58,6 +58,7 @@ import {
   toCallToolResult,
   TOOL_DEFINITIONS,
   headlessToolError,
+  MCP_READ_TOOLS,
   type ToolResult,
 } from "./tools.js";
 import { isDerivedAnnotationsNode } from "../nodes/service.js";
@@ -387,12 +388,20 @@ async function handleServerToolCall(
   apiKeyLabel: string | null,
   client?: ClientMetadata,
   headless = false,
+  capability: "read" | "write" = "write",
 ): Promise<ToolResult> {
   // Headless access keys (CU-wdqcq0314u): nest_create and every other
   // server-only tool are refused here; per-nest tools are re-checked in
   // handleToolCall.
   if (headless && !HEADLESS_READER_SERVER_TOOLS.has(toolName)) {
     return headlessToolError(toolName);
+  }
+  // CAPABILITY GATE (read-only keys) for the server tools handled inline here
+  // (nest_index is read; nest_create is a write). The nest-parameterized tools
+  // route through handleToolCall → runTool, whose own capability gate covers
+  // them (incl. the context_create bootstrap write).
+  if (capability === "read" && !MCP_READ_TOOLS.has(toolName)) {
+    return `This API key is read-only and cannot call "${toolName}". Read-only keys may only read, query, search, and export. Mint a read-write key for changes.`;
   }
   if (toolName === "nest_index") {
     const nests = await buildNestIndex(userId, nestScope);
@@ -566,6 +575,7 @@ async function handleServerToolCall(
     apiKeyId,
     apiKeyLabel,
     client,
+    capability,
   });
 }
 
@@ -578,6 +588,7 @@ function createServerMcp(
   apiKeyLabel: string | null,
   c: Context<AuthEnv>,
   headless = false,
+  capability: "read" | "write" = "write",
 ): McpServer {
   const server = new McpServer(
     { name: "contextnest-server", version: "1.0.0" },
@@ -588,6 +599,9 @@ function createServerMcp(
     ? SERVER_TOOL_DEFINITIONS.filter((t) => HEADLESS_READER_SERVER_TOOLS.has(t.name))
     : SERVER_TOOL_DEFINITIONS;
   for (const tool of toolDefs) {
+    // Read-only keys see only the read tools (handleServerToolCall still
+    // refuses the writes on its own).
+    if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
     const props = (tool.inputSchema as any).properties || {};
     const required = (tool.inputSchema as any).required || [];
     const shape: Record<string, z.ZodTypeAny> = {};
@@ -628,6 +642,7 @@ function createServerMcp(
         apiKeyLabel,
         attributeRequest(c, undefined, connectionClient(server)),
         headless,
+        capability,
       );
       return toCallToolResult(out);
     });
@@ -651,6 +666,7 @@ serverMcpRoutes.all("/", async (c) => {
     c.get("apiKeyLabel") ?? null,
     c,
     await isServiceUser(userId),
+    c.get("keyCapability") ?? "write",
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({

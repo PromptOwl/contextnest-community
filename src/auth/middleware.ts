@@ -6,6 +6,11 @@ import { getSessionIdFromRequest, resolveSession } from "./sessions.js";
 
 import type { NestPermission } from "../shared/access.js";
 
+/** A key's capability tier. 'write' is the full/historic behaviour (and what
+ *  every browser session and unscoped legacy key gets); 'read' is a read-only
+ *  key, blocked server-side from every write/governance mutation. */
+export type KeyCapability = "read" | "write";
+
 export type AuthEnv = {
   Variables: {
     userId: string;
@@ -17,6 +22,11 @@ export type AuthEnv = {
      * by scope and keep whatever the user themselves can do.
      */
     oauthScope?: string[];
+    /** Capability of the credential that authenticated THIS request. Cookie
+     *  sessions and unscoped legacy keys are 'write'; only a key explicitly
+     *  minted read-only is 'read'. Enforced at the REST guard (app.ts) and the
+     *  MCP tool dispatch (mcp/tools.ts). */
+    keyCapability: KeyCapability;
     nestPermission: NestPermission;
     // The API key the request authenticated with, when it used a Bearer key
     // (null for cookie/session requests and open mode). Lets pending-push rows
@@ -60,6 +70,10 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
       // Cookie sessions carry no API key — a pending row raised by the browser
       // is attributed to the user, not a key (key_id null = all their keys).
       c.set("apiKeyId", null);
+      // A browser session acts AS the user — full capability, gated only by the
+      // user's own nest roles. Read-only is a property of external KEYS, not of
+      // the person logged into the UI.
+      c.set("keyCapability", "write");
       return next();
     }
   }
@@ -69,10 +83,16 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   if (key) {
     const keyHash = hashApiKey(key);
     const record = await db.get(
-      "SELECT id, label, user_id, nest_id FROM api_keys WHERE key_hash = ?",
+      "SELECT id, label, user_id, nest_id, capability FROM api_keys WHERE key_hash = ?",
       [keyHash],
     ) as
-      | { id: string; label: string | null; user_id: string; nest_id: string | null }
+      | {
+          id: string;
+          label: string | null;
+          user_id: string;
+          nest_id: string | null;
+          capability: string | null;
+        }
       | undefined;
 
     if (record) {
@@ -86,6 +106,10 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
       // rows record who pushed and the allowlist can key on the credential.
       c.set("apiKeyId", record.id);
       if (record.label) c.set("apiKeyLabel", record.label);
+      // Anything other than an explicit 'read' is full write — so a NULL from a
+      // pre-capability row (or an unrecognised value) fails SAFE for existing
+      // integrations rather than locking them out.
+      c.set("keyCapability", record.capability === "read" ? "read" : "write");
       return next();
     }
   }

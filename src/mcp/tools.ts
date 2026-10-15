@@ -353,7 +353,55 @@ export interface McpToolContext {
    * call by handleToolCall.
    */
   servedVersions?: Map<string, number>;
+  /** Capability of the credential driving this call. 'read' (a read-only key)
+   *  is blocked from every tool not in MCP_READ_TOOLS. Defaults to full write
+   *  when unset (cookie sessions, unscoped legacy keys, open mode). */
+  capability?: "read" | "write";
 }
+
+/**
+ * The ALLOWLIST of MCP tools a read-only key may call — everything that only
+ * reads/queries the vault. A read-only key is DENIED any tool not listed here.
+ *
+ * Allowlist, not blocklist, on purpose: it matches the "new mutating tools MUST
+ * self-gate" invariant on runTool. A newly added tool is write-blocked for
+ * read-only keys by DEFAULT until someone deliberately adds it here, so a
+ * forgotten classification fails safe (denied) rather than open (writable).
+ * Covers per-nest tools, the nest-parameterized server tools, and the
+ * read-tier workflow-plane tools.
+ */
+export const MCP_READ_TOOLS = new Set<string>([
+  // per-nest read tools
+  "context_init",
+  "context_overview",
+  "context_search",
+  "context_query",
+  "context_table_query",
+  "context_get",
+  "context_list",
+  "context_resolve",
+  "context_export",
+  "context_comments",
+  "context_stewards",
+  "context_review_queue",
+  "context_my_drafts",
+  "context_versions",
+  "context_deletion_queue",
+  "context_unsynced_list",
+  "context_relations",
+  "context_boards",
+  "context_board_items",
+  "context_fields",
+  "context_access_requests",
+  "context_verify",
+  // server-level read tool
+  "nest_index",
+  // workflow-plane read tools (only advertised when the feature flag is on)
+  "workflow_run_get",
+  "workflow_runs_list",
+  "workflow_edges_list",
+  "workflow_edge_types_list",
+]);
 
 export const TOOL_DEFINITIONS = [
   {
@@ -1581,6 +1629,15 @@ async function runTool(
   ctx: McpToolContext,
 ): Promise<ToolResult> {
   const { storage, queryEngine, versionManager, nestId, userId, userEmail } = ctx;
+
+  // CAPABILITY GATE (read-only keys). The MCP transport is always POST, so the
+  // route can't tell a read from a write — this is the ONE server-side gate for
+  // read-only keys on the MCP surface. A read-only key may call only the
+  // allowlisted read tools; every write/governance tool (and any unrecognised
+  // one, fail-safe) is refused in prose, before the tool does any work.
+  if (ctx.capability === "read" && !MCP_READ_TOOLS.has(toolName)) {
+    return `This API key is read-only and cannot call "${toolName}". Read-only keys may only read, query, search, and export. Mint a read-write key for changes.`;
+  }
 
   switch (toolName) {
     case "context_init": {

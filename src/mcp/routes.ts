@@ -5,7 +5,12 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
-import { TOOL_DEFINITIONS, handleToolCall, toCallToolResult } from "./tools.js";
+import {
+  TOOL_DEFINITIONS,
+  MCP_READ_TOOLS,
+  handleToolCall,
+  toCallToolResult,
+} from "./tools.js";
 import { HEADLESS_READER_TOOLS } from "../auth/headless.js";
 import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
 import { requestBaseUrl } from "../shared/base-url.js";
@@ -37,6 +42,7 @@ function createMcpServerForNest(
   apiKeyLabel: string | null,
   c: Context<AuthEnv>,
   headless = false,
+  capability: "read" | "write" = "write",
 ): McpServer {
   const server = new McpServer(
     { name: `contextnest-${nestId}`, version: "1.0.0" },
@@ -57,6 +63,10 @@ function createMcpServerForNest(
     : allDefs;
 
   for (const tool of toolDefs) {
+    // A read-only key is only ADVERTISED the read tools, so tools/list tells
+    // the agent the truth. runTool still refuses a write tool on its own
+    // (the SDK answers an unregistered name with an error before that).
+    if (capability === "read" && !MCP_READ_TOOLS.has(tool.name)) continue;
     const props = (tool.inputSchema as any).properties || {};
     const required = (tool.inputSchema as any).required || [];
     const shape: Record<string, z.ZodTypeAny> = {};
@@ -103,6 +113,7 @@ function createMcpServerForNest(
         apiKeyId,
         apiKeyLabel,
         client,
+        capability,
       });
       return toCallToolResult(out);
     });
@@ -126,6 +137,7 @@ mcpRoutes.all("/", async (c) => {
     c.get("apiKeyLabel") ?? null,
     c,
     caller.headless,
+    c.get("keyCapability") ?? "write",
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({

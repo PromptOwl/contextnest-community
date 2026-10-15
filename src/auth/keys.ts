@@ -105,11 +105,85 @@ export interface ApiKeyRow {
   key_prefix: string;
   nest_id: string | null;
   label: string | null;
+  capability: string;
+  /** 'manual' (minted by the user via /auth/keys) or 'exchange' (minted for
+   *  them by PromptOwl via /auth/keys/exchange). */
+  origin?: string;
   created_at: string;
   last_used_at: string | null;
 }
 
-export type KeyRequestAction = "generate" | "fetch" | "update";
+/**
+ * Normalise a caller-supplied capability into the two allowed values. Anything
+ * that isn't the exact string "read" resolves to "write" — including undefined
+ * (the historic default) — so an omitted or malformed field yields a full key,
+ * never a silently-broken read-only one, and a read-only key is only ever
+ * created when the caller explicitly asked for it.
+ */
+export function normalizeCapability(raw: unknown): "read" | "write" {
+  return raw === "read" ? "read" : "write";
+}
+
+/**
+ * Strict counterpart to normalizeCapability for request bodies: absent →
+ * `fallback`, exactly 'read' / 'write' → itself, anything else → null (the
+ * route 400s). A typo like "readonly" must never silently mint a write key.
+ */
+export function parseCapability(
+  raw: unknown,
+  fallback: "read" | "write",
+): "read" | "write" | null {
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  return raw === "read" || raw === "write" ? raw : null;
+}
+
+/** Ceiling on LIVE keys PromptOwl may mint for one user on one nest via
+ *  /auth/keys/exchange. Past it the exchange answers 429 — the caller should
+ *  reuse a key it already holds (or the user revokes old ones). Exchange keys
+ *  are counted here instead of against MAX_API_KEYS_PER_USER, so an agent
+ *  platform handing out per-nest endpoints never eats the user's own budget. */
+export const MAX_EXCHANGE_KEYS_PER_NEST = 20;
+
+export type KeyOrigin = "manual" | "exchange";
+
+/**
+ * The one place a key row is minted: generate the secret, store only its
+ * hash, and hand the plaintext back exactly once. POST /auth/keys and
+ * POST /auth/keys/exchange both go through here.
+ */
+export async function insertApiKey(
+  db: { run(sql: string, params?: unknown[]): Promise<unknown> },
+  opts: {
+    id: string;
+    userId: string;
+    nestId: string | null;
+    label: string | null;
+    capability: "read" | "write";
+    origin: KeyOrigin;
+  },
+): Promise<{ apiKey: string; keyPrefix: string }> {
+  const apiKey = generateApiKey();
+  const keyPrefix = getKeyPrefix(apiKey);
+  await db.run(
+    "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, nest_id, label, capability, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    [
+      opts.id,
+      opts.userId,
+      hashApiKey(apiKey),
+      keyPrefix,
+      opts.nestId,
+      opts.label,
+      opts.capability,
+      opts.origin,
+    ],
+  );
+  return { apiKey, keyPrefix };
+}
+
+/** 'exchange' is 'generate' for a key PromptOwl mints on the user's behalf:
+ *  same label rules, but the per-user ceiling is replaced by the caller's
+ *  per-nest MAX_EXCHANGE_KEYS_PER_NEST check. */
+export type KeyRequestAction = "generate" | "exchange" | "fetch" | "update";
 
 export type KeyRequestCheck =
   | { ok: true; label: string | null; key: ApiKeyRow | null }
@@ -149,12 +223,15 @@ export async function verifyKeyRequest(
   if (opts.action === "fetch") return { ok: true, label, key: null };
 
   const rows = (await db.all(
-    "SELECT id, key_prefix, nest_id, label, created_at, last_used_at FROM api_keys WHERE user_id = ? ORDER BY created_at ASC, id ASC",
+    "SELECT id, key_prefix, nest_id, label, capability, origin, created_at, last_used_at FROM api_keys WHERE user_id = ? ORDER BY created_at ASC, id ASC",
     [userId],
   )) as ApiKeyRow[];
 
-  if (opts.action === "generate") {
-    if (rows.length >= MAX_API_KEYS_PER_USER) {
+  if (opts.action === "generate" || opts.action === "exchange") {
+    // Exchange-minted keys have their own per-nest ceiling
+    // (MAX_EXCHANGE_KEYS_PER_NEST) and don't count against the user's own.
+    const ownKeys = rows.filter((r) => r.origin !== "exchange");
+    if (opts.action === "generate" && ownKeys.length >= MAX_API_KEYS_PER_USER) {
       return {
         ok: false,
         status: 409,

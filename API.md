@@ -183,6 +183,31 @@ Response (201):
 ```
 **Plaintext shown once.** Omit `nest_id` for a **user-level key** (works on every nest the user can access — what the whole-brain Connect flow mints). With `nest_id` the key is **nest-scoped** — see [Nest-scoped API keys](#nest-scoped-api-keys) for exactly what it can reach. The caller must be able to reach that nest: an unknown nest, or one the caller has no access to, is **404** (the same answer for both, so this is no existence oracle). A nest-scoped key calling this endpoint gets **403 `nest_scoped_key`**.
 
+**Capability (read-only keys).** Optional `capability`: `"write"` (default — full access, the historic behaviour) or `"read"`. A read key may only read: GETs, the read-tier query POSTs (`/context`, `/query`, `/search`, `/export`) and the MCP transport, where `tools/list` advertises only the read tools and any write/governance tool is refused. Every other write is **403**, and the effective nest permission is capped at `read`.
+```json
+{ "label": "agent-ro", "nest_id": "<nest id>", "capability": "read" }
+```
+Response (201) also reports `"nest_id"` and `"capability"`. **400** if `capability` is anything other than `"read"`/`"write"`, or if a read key has no `nest_id` (read keys are always nest-scoped). **403** if the caller is itself authenticated with a read-only key — a read key can't mint or rotate any key.
+
+### POST `/auth/keys/exchange` (PromptOwl MCP ticket)
+Trades a PromptOwl MCP service ticket for a durable, nest-scoped key — how PromptOwl hands a signed-in user a "predefined nest endpoint". Auth is the ticket itself, as `Authorization: Bearer <jwt>`: the same short-lived HS256 ticket the per-nest MCP transport accepts (signed with `OFFICIAL_COMMUNITY_SSO_SECRET`, `scope: "mcp"`, no `jti`, `aud` = `PUBLIC_BASE_URL` when set, `sub` = the email of an **existing** user — never auto-provisions).
+```json
+{ "nest_id": "<nest id>", "label": "optional", "capability": "read" }
+```
+`capability` defaults to `"read"`. The key is minted only if the ticket's user already holds at least that permission on the nest (the exchange narrows access, it never grants it). Response (201):
+```json
+{
+  "key": "cnst_...",
+  "id": "uuid",
+  "key_prefix": "cnst_abc123...",
+  "label": "PromptOwl read key 1a2b3c4d",
+  "nest_id": "<nest id>",
+  "capability": "read",
+  "mcp_url": "https://<PUBLIC_BASE_URL>/nests/<nest id>/mcp"
+}
+```
+**Plaintext shown once.** Without `label` a unique default is generated. **401** missing/invalid ticket (bad signature, expired, wrong scope/audience, login-style `jti`, or a `cnst_` key); **404** no account for the ticket email; **400** missing `nest_id` or bad `capability`; **403** insufficient permission on the nest (an unknown nest id answers the same 403); **409** duplicate `label`; **429** the user already holds 20 live exchange-issued keys for that nest (revoke some, or reuse one); **503** ticket exchange not configured (`OFFICIAL_COMMUNITY_SSO_SECRET` unset). Exchange-issued keys appear in `GET /auth/keys` with `"origin": "exchange"` and don't count toward the per-user ceiling of 20 manual keys.
+
 ### POST `/auth/keys/rotate` (auth required)
 Replaces **one** key and returns its new plaintext; the caller's other keys are untouched.
 
@@ -192,9 +217,10 @@ Scope resolution on the optional `nest_id` field: **absent** → keep the prior 
 ```json
 { "key_id": "uuid", "label": "optional", "nest_id": "optional" }
 ```
+A rotate keeps the key's `capability` (a read key stays read; clearing a read key's `nest_id` is **400**). The response also reports `nest_id` and `capability`. A caller on a read-only key gets **403**.
 
 ### GET `/auth/keys` (auth required)
-Lists the caller's keys — id, prefix, label, `nest_id`, `created_at`, `last_used_at` — oldest first. Never returns plaintext.
+Lists the caller's keys — id, prefix, label, `nest_id`, `capability` (`read`/`write`), `origin` (`manual`/`exchange`), `created_at`, `last_used_at` — oldest first. Never returns plaintext.
 
 ### DELETE `/auth/keys/:keyId` (auth required)
 Revoke one key. 404 if the id isn't the caller's. Anything still using it stops working immediately.
