@@ -16,7 +16,7 @@ import {
   FileText, Plus, ArrowLeft, Shield, Upload, Sparkles,
   Clock, CheckCircle2, Loader2, Link2, Settings as SettingsIcon,
   Pencil, Trash2, Globe, Lock, Building2, FolderInput, Users,
-  FileStack, FolderPlus, X, FolderTree,
+  FileStack, FolderPlus, X, ListChecks,
   Activity, BookOpen, Archive, Eye, Palette, History,
   KeyRound,
 } from "lucide-react";
@@ -1640,7 +1640,7 @@ export function NestView({
           if (canManageGovernance && onOpenStructure && !nestArchived)
             actions.push({
               label: "Structure rules",
-              icon: FolderTree,
+              icon: ListChecks,
               onSelect: () => onOpenStructure(),
             });
           // Gate on canManageGovernance (owner/admin on THIS nest), not the

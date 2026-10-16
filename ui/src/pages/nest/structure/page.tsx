@@ -8,7 +8,7 @@ export default function StructurePage() {
       nestId={nest.nestId}
       nestName={nest.nestName}
       isArchived={nest.isArchived}
-      onBack={nest.leaveNest}
+      onBack={() => nest.openNest()}
       openDocument={nest.openDocument}
       openFolder={nest.openFolder}
       initialFolder={nest.folder}
