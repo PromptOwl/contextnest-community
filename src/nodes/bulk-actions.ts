@@ -54,7 +54,7 @@ async function runBulk(
   caller: Caller,
   rawIds: unknown,
   verb: "move" | "delete",
-  act: (id: string) => Promise<Partial<BulkActionRow>>,
+  act: (id: string) => Promise<Pick<BulkActionRow, "outcome"> & Partial<BulkActionRow>>,
 ): Promise<BulkActionResult> {
   const ids = cleanIds(rawIds);
   const { storage } = await engineCache.get(nestId);
