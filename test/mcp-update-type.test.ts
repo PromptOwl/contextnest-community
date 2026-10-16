@@ -46,6 +46,9 @@ afterAll(() => env.cleanup());
 describe("context_update type", () => {
   it("re-types in place on the per-nest endpoint, keeping content and history", async () => {
     expect((await seed("Per Nest Retype")).status).toBe(201);
+    const versionsUrl = `/nests/${nestId}/nodes/nodes/per-nest-retype/versions`;
+    const before = await jsonRequest(app, "GET", versionsUrl, undefined, owner.apiKey);
+    const statusBefore = (await read("nodes/per-nest-retype")).status;
     const res = await callTool(`/nests/${nestId}/mcp`, "context_update", {
       title: "Per Nest Retype",
       type: "agent",
@@ -54,8 +57,12 @@ describe("context_update type", () => {
     const node = await read("nodes/per-nest-retype");
     expect(node.type).toBe("agent");
     expect(node.content).toContain("# Per Nest Retype");
-    const versions = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/per-nest-retype/versions`, undefined, owner.apiKey);
-    expect(versions.status).toBe(200);
+    // Governance: the re-type neither skips nor resets the node's status.
+    expect(node.status).toBe(statusBefore);
+    // History survives: earlier versions are still there, none dropped.
+    const after = await jsonRequest(app, "GET", versionsUrl, undefined, owner.apiKey);
+    expect(after.status).toBe(200);
+    expect(after.data.versions.length).toBeGreaterThanOrEqual(before.data.versions.length);
   });
 
   it("re-types through the server-level /mcp endpoint with nest", async () => {
