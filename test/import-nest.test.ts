@@ -648,6 +648,23 @@ describe("imported vault: discovery + registration", () => {
     expect(got.node.collaborators ?? []).toEqual([]);
   });
 
+  it("drops an exported nest's .context/ settings instead of reporting them rejected", async () => {
+    const files: FileEntry[] = [
+      mdFile("notes/doc.md", "title: Doc\nstatus: published", "body"),
+      { path: ".context/config.yaml", content: "name: source\n" },
+    ];
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Exported Settings", files },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
+    expect(data.documents).toBe(1);
+    expect(data.rejected).toEqual([]);
+  });
+
   it("does not import a vault's _suggestions store (no phantom external edits)", async () => {
     const meta =
       "suggestion_id: sug-1\n" +

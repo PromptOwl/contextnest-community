@@ -2208,10 +2208,13 @@ async function stageImportedFilesInner(
   // governance state, not content. Carried in, another vault's copy surfaces as
   // phantom external edits against doc ids that don't resolve here. Dropped
   // server-side, not in the browser: the endpoint can't trust its caller.
+  // `.context/` is the source vault's own settings, which the engine refuses
+  // to import; dropped too, so an exported nest doesn't report it as a failure.
   // Everything else travels verbatim, `.versions/` history included.
-  const carried = files.filter(
-    (f) => !String(f?.path || "").split(/[\\/]/).includes("_suggestions")
-  );
+  const carried = files.filter((f) => {
+    const segs = String(f?.path || "").split(/[\\/]/);
+    return !segs.includes("_suggestions") && !segs.includes(".context");
+  });
   if (!carried.length) return { written: 0, rejected: [] };
   const startedAt = Date.now();
   const result = await engineApi.run<{
