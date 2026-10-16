@@ -275,24 +275,39 @@ describe("POST /auth/keys/exchange", () => {
     expect(r2.status).toBe(403);
   });
 
-  it("403s a write key for a read-only collaborator; owner gets one", async () => {
-    const denied = await exchange(ticket({ sub: reader.email }), {
-      nest_id: nestA,
-      capability: "write",
-    });
-    expect(denied.status).toBe(403);
+  it("refuses to exchange a ticket for a write key (400), even for the owner", async () => {
+    for (const email of [reader.email, owner.email]) {
+      const r = await exchange(ticket({ sub: email }), { nest_id: nestA, capability: "write" });
+      expect(r.status).toBe(400);
+    }
+  });
 
-    const ok = await exchange(ticket(), { nest_id: nestA, capability: "write" });
-    expect(ok.status).toBe(201);
-    expect(ok.data.capability).toBe("write");
-    const write = await jsonRequest(
-      app,
-      "POST",
-      `/nests/${nestA}/nodes`,
-      { title: "Exchanged owner write", content: "ok" },
-      ok.data.key,
-    );
-    expect(write.status).toBe(201);
+  it("rejects a ticket signed with MCP_SIGNING_SECRET (401)", async () => {
+    process.env.MCP_SIGNING_SECRET = "server-mcp-signing-secret";
+    try {
+      const r = await exchange(ticket({}, "server-mcp-signing-secret"), { nest_id: nestA });
+      expect(r.status).toBe(401);
+    } finally {
+      delete process.env.MCP_SIGNING_SECRET;
+    }
+  });
+
+  it("serialises concurrent exchanges for one user and nest", async () => {
+    const t = ticket({ sub: reader.email });
+    const rs = await Promise.all([1, 2, 3].map(() => exchange(t, { nest_id: nestA })));
+    const codes = rs.map((r) => r.status);
+    expect(codes.filter((s) => s === 201).length).toBeGreaterThanOrEqual(1);
+    expect(codes.every((s) => s === 201 || s === 429)).toBe(true);
+  });
+
+  it("rate-limits exchange attempts per IP (429)", async () => {
+    await resetAuthRateLimit();
+    let last = 0;
+    for (let i = 0; i < 121; i++) {
+      last = (await exchange("not-a-ticket", { nest_id: nestA })).status;
+    }
+    expect(last).toBe(429);
+    await resetAuthRateLimit();
   });
 
   it("400s without nest_id or with a bad capability", async () => {
@@ -381,6 +396,11 @@ describe("MCP transport with a read key", () => {
     const { body } = await mcp(`/nests/${nestA}/mcp`, "tools/list", {}, owner.apiKey);
     const names: string[] = body.result.tools.map((t: any) => t.name);
     expect(names).toContain("context_create");
+  });
+
+  it("a read key cannot POST /nests/:id/chat (403)", async () => {
+    const r = await jsonRequest(app, "POST", `/nests/${nestA}/chat`, { message: "hi" }, roKey);
+    expect(r.status).toBe(403);
   });
 
   it("calling a write tool with a read key errors and writes nothing", async () => {

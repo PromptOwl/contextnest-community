@@ -15,7 +15,7 @@ import {
   insertApiKey,
   MAX_EXCHANGE_KEYS_PER_NEST,
 } from "./keys.js";
-import { resolveMcpTicketUser, looksLikeTicket, mcpTicketSecrets } from "./mcp-ticket.js";
+import { resolveMcpTicketUser, looksLikeTicket } from "./mcp-ticket.js";
 import { authMiddleware, type AuthEnv } from "./middleware.js";
 import { NEST_SCOPED_KEY_CODE } from "./nest-scope-guard.js";
 import {
@@ -653,8 +653,19 @@ authRoutes.post("/keys", authMiddleware, async (c) => {
 // permission on that nest — the exchange never grants access, it only narrows
 // what the user already has into a credential. Capped at
 // MAX_EXCHANGE_KEYS_PER_NEST live keys per (user, nest); past that, 429.
+// Exchange mints a DURABLE credential, so only PromptOwl's secret
+// (OFFICIAL_COMMUNITY_SSO_SECRET) is accepted — never the server's own
+// MCP_SIGNING_SECRET — and only read keys.
+const EXCHANGE_LIMIT = { max: 120, windowMs: 60_000 }; // per IP
+const exchangesInFlight = new Set<string>();
+
 authRoutes.post("/keys/exchange", async (c) => {
-  const secrets = mcpTicketSecrets();
+  if (!tryConsume(`key-exchange:ip:${clientIp(c)}`, EXCHANGE_LIMIT)) {
+    return c.json({ error: "Too many exchange attempts, try again later" }, 429);
+  }
+  const secrets = config.OFFICIAL_COMMUNITY_SSO_SECRET
+    ? [config.OFFICIAL_COMMUNITY_SSO_SECRET]
+    : [];
   if (secrets.length === 0) {
     return c.json(
       { error: "PromptOwl ticket exchange is not configured on this server." },
@@ -684,6 +695,9 @@ authRoutes.post("/keys/exchange", async (c) => {
   if (!capability) {
     return c.json({ error: 'capability must be "read" or "write".' }, 400);
   }
+  if (capability !== "read") {
+    return c.json({ error: "Ticket exchange only issues read keys." }, 400);
+  }
 
   // Same resolver the /nests access gate uses. A missing nest resolves to
   // "none", so an unknown id and a forbidden one answer the same 403.
@@ -697,6 +711,14 @@ authRoutes.post("/keys/exchange", async (c) => {
     );
   }
 
+  // The count and insert below span awaits; serialise per (user, nest) so
+  // concurrent exchanges can't slip past the cap.
+  const lockKey = `${userId}:${nestId}`;
+  if (exchangesInFlight.has(lockKey)) {
+    return c.json({ error: "Another exchange for this nest is in progress." }, 429);
+  }
+  exchangesInFlight.add(lockKey);
+  try {
   const db = getDb();
   const live = (await db.get(
     "SELECT COUNT(*) AS n FROM api_keys WHERE user_id = ? AND nest_id = ? AND origin = 'exchange'",
@@ -744,6 +766,9 @@ authRoutes.post("/keys/exchange", async (c) => {
     },
     201,
   );
+  } finally {
+    exchangesInFlight.delete(lockKey);
+  }
 });
 
 // POST /auth/keys/rotate — replace ONE key, leaving the caller's others alone.

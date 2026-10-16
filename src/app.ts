@@ -2886,7 +2886,10 @@ export function createApp(): Hono<AuthEnv> {
 
     if (c.get("keyCapability") === "read") {
       const isPureRead =
-        c.req.method === "GET" || isReadQuery || isMcpTransport;
+        c.req.method === "GET" ||
+        // chat can post a mention comment and spends model credits — not a read.
+        (isReadQuery && parts[1] !== "chat") ||
+        isMcpTransport;
       if (!isPureRead) {
         return deny(
           403,
