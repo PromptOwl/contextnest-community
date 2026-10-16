@@ -114,12 +114,19 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // GET /boards, GET /boards/:id/items and POST /nodes/bulk-update 1:1; the server-level
 // variants derive from these definitions (no new literal).
 //
-// Raised 58 -> 60 for `context_headless` and `context_systems` (CU-wdqcq0538g): MCP parity
+// Raised 58 -> 59 for `context_task_log` (agent interaction log on tasks). Same reason as
+// the comment tools: a logged interaction is collaboration metadata kept OUTSIDE the
+// engine's version/hash chain (src/nodes/task-activity.ts), so there is no upstream
+// operation to import. It mirrors REST POST /nests/:id/nodes/:nodeId/task-log 1:1. The
+// task FIELDS added to context_create / context_update / context_list are properties on
+// existing literals (TASK_FIELD_PROPERTIES), not new schemas.
+//
+// Raised 59 -> 61 for `context_headless` and `context_systems` (CU-wdqcq0538g): MCP parity
 // for headless publishing (CU-wdqcq0314u) and named systems. Same reason as move and the
 // deletion trio: access keys and service identities are not an engine operation at all —
 // they live in this repo's auth tables — so there is no upstream descriptor to import. They
 // mirror the REST surface (/nests/:id/headless, /systems) 1:1, per the MCP-at-UI-parity rule.
-const BASELINE = 60;
+const BASELINE = 61;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 
