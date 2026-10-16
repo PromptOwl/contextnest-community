@@ -14,7 +14,7 @@ import {
   forceCollide,
   type SimulationNodeDatum,
 } from "d3-force";
-import { AlertTriangle, Info, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, Copy, Check, FolderTree } from "lucide-react";
+import { AlertTriangle, Info, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, Copy, Check, ListChecks } from "lucide-react";
 import { getNestGraph, type NestGraph } from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
 import { categoryCoverageEmpty } from "../lib/coverage-gaps";
@@ -472,7 +472,7 @@ export function OntologyGraphView({
         <div className="flex items-center gap-3 text-sm">
           {(
             [
-              ["structure", "Structure", FolderTree, true],
+              ["structure", "Structure", ListChecks, true],
               ["links", "Links", Link2, hasLinks],
               ["stewardship", "Stewardship", Users, hasStewards],
               ["categories", "Categories", Tag, hasTags],

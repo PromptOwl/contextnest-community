@@ -2026,6 +2026,14 @@ export async function deleteFolder(nestId: string, folder: string) {
   );
 }
 
+/** Rename or move a folder (`to` is its new full path) with everything in it. Owner/admin only. */
+export async function moveFolder(nestId: string, folder: string, to: string) {
+  return request<{ folder: string; moved: Array<{ id: string; previousId: string }> }>(
+    `/nests/${nestId}/folders/move`,
+    { method: "POST", body: JSON.stringify({ folder, to }) },
+  );
+}
+
 /** Flag a whole folder ("api/limits") or the nest itself. "nest_archive" asks
  *  for the nest to be archived rather than destroyed — same queue, same
  *  reviewers, different outcome when it is honoured. */
@@ -3962,10 +3970,39 @@ export interface BulkUpdateResult {
 
 export const BULK_UPDATE_MAX = 100;
 
-export async function bulkUpdateNodes(nestId: string, ids: string[], patch: BulkPatch) {
+export async function bulkUpdateNodes(
+  nestId: string,
+  ids: string[],
+  patch: BulkPatch,
+  opts: { allowDraft?: boolean } = {},
+) {
   return request<BulkUpdateResult>(`/nests/${nestId}/nodes/bulk-update`, {
     method: "POST",
-    body: JSON.stringify({ ids, patch }),
+    body: JSON.stringify({ ids, patch, ...(opts.allowDraft ? { allow_draft: true } : {}) }),
+  });
+}
+
+/** Move / delete over a selection (src/nodes/bulk-actions.ts). Per-document rows. */
+export interface BulkActionResult {
+  requested: number;
+  done: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+  results: (BulkRowResult & { new_id?: string })[];
+}
+
+export async function bulkMoveNodes(nestId: string, ids: string[], folder: string) {
+  return request<BulkActionResult>(`/nests/${nestId}/nodes/bulk-move`, {
+    method: "POST",
+    body: JSON.stringify({ ids, folder }),
+  });
+}
+
+export async function bulkDeleteNodes(nestId: string, ids: string[]) {
+  return request<BulkActionResult>(`/nests/${nestId}/nodes/bulk-delete`, {
+    method: "POST",
+    body: JSON.stringify({ ids }),
   });
 }
 

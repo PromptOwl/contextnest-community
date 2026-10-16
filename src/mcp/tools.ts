@@ -35,6 +35,7 @@ import {
 import { listBoards } from "../nests/board-service.js";
 import { listBoardItems } from "../nests/board-items.js";
 import { bulkUpdateNodes } from "../nodes/bulk-update.js";
+import { bulkMoveNodes, bulkDeleteNodes, type BulkActionResult } from "../nodes/bulk-actions.js";
 import {
   addRelation,
   callerCanRead,
@@ -66,6 +67,7 @@ import {
   deleteNode,
   deleteFolder,
   moveNode,
+  moveFolder,
   listNodesForCallerByEmail,
   getNodeForCaller,
   isIdUnderFolder,
@@ -264,6 +266,29 @@ async function writeRefusal(
       ? `You already asked for this access (request ${pending.id}); it is waiting on a nest owner or admin.`
       : `Use context_request_access to ask a nest owner or admin for write access${target.type === "node" ? " to it" : ""} — say why in \`note\`.`;
   return toolError(`${text}\n\n${next}`, "UNAUTHORIZED_ACTION", fields);
+}
+
+/** Reply for a multi-document move/delete: a line per document that wasn't
+ *  done, the per-document results as structured data. */
+async function bulkActionReply(
+  ctx: McpToolContext,
+  verb: "Moved" | "Deleted",
+  run: () => Promise<BulkActionResult>,
+): Promise<ToolResult> {
+  try {
+    const res = await run();
+    const notDone = res.results
+      .filter((r) => r.outcome === "skipped" || r.outcome === "failed")
+      .map((r) => `- ${r.title ?? r.id}: ${r.outcome} (${r.code}) — ${r.reason}`);
+    const text =
+      `${verb} ${res.done} of ${res.requested}: ${res.unchanged} unchanged, ${res.skipped} skipped, ${res.failed} failed.` +
+      (notDone.length ? `\n\n${notDone.join("\n")}` : "");
+    return { text, data: res };
+  } catch (err) {
+    if (err instanceof ForbiddenError) return writeRefusal(ctx, err.message, { type: "nest", id: ctx.nestId });
+    if (err instanceof ValidationError) return toolError(err.message, "VALIDATION_FAILED");
+    throw err;
+  }
 }
 
 /** What a headless access key gets for a tool it may not call (CU-wdqcq0314u)
@@ -784,6 +809,11 @@ export const TOOL_DEFINITIONS = [
           description:
             "New lifecycle status: draft | pending_review | approved | published | rejected. Aliases are normalized.",
         },
+        type: {
+          type: "string",
+          description:
+            "Re-type the node in place (e.g. document → glossary). Same accepted set as context_create; unknown types are rejected. Version history and review state are kept.",
+        },
         changeNote: {
           type: "string",
           description: "Why this changed — recorded in version history",
@@ -819,6 +849,12 @@ export const TOOL_DEFINITIONS = [
           description:
             'Node id / path (e.g. "nodes/gtm/deals/win-loss-log"). Use instead of title when two nodes share a title or the title is unknown.',
         },
+        ids: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Delete several nodes at once (max 100 ids) instead of title/id. Each is its own governed delete; one you can't delete or that is under review is skipped and reported, and the rest still go. Returns a result per node.",
+        },
       },
     },
   },
@@ -830,7 +866,7 @@ export const TOOL_DEFINITIONS = [
     // new concept, so the surfaces agree. If move is ever promoted to a core
     // operation upstream, adopt that descriptor and drop this schema.
     description:
-      "Move a node to a different folder. The id changes; version history, review state, annotations, comments, watchers, schedules, links, and document grants all follow. The title and its [[wiki-link]] stay valid. A node under open review is frozen unless you can approve it (owner, admin, or its reviewer).",
+      "Move a node to a different folder — or, with from_folder, rename or move a whole folder (owner/admin only; sub-folders and every document under it follow, ids change, history and review state survive). Moving a node: the id changes; version history, review state, annotations, comments, watchers, schedules, links, and document grants all follow. The title and its [[wiki-link]] stay valid. A node under open review is frozen unless you can approve it (owner, admin, or its reviewer).",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -843,7 +879,18 @@ export const TOOL_DEFINITIONS = [
         folder: {
           type: "string",
           description:
-            'Destination folder under nodes/ (e.g. "gtm/deals"); segments are slugified. Use "" to move to the nest root.',
+            'Destination folder under nodes/ (e.g. "gtm/deals"); segments are slugified. Use "" to move to the nest root. With from_folder: the folder\'s NEW full path ("archive/acme" to move projects/acme there, "projects/acme-2" to rename it).',
+        },
+        ids: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Move several nodes into `folder` at once (max 100 ids) instead of title/id. Each is its own governed move; one you can't edit or that is under review is skipped and reported, and the rest still move. Returns a result per node.",
+        },
+        from_folder: {
+          type: "string",
+          description:
+            'Rename or move a whole folder instead of a node: the folder\'s current path (e.g. "projects/acme"). Leave title and id unset.',
         },
       },
       required: ["folder"],
@@ -2884,6 +2931,7 @@ async function runTool(
             append: args.append,
             tags: args.tags,
             status: args.status,
+            ...(args.type !== undefined ? { type: args.type } : {}),
             changeNote: args.changeNote,
             client: ctx.client,
             ...taskFields,
@@ -3058,6 +3106,11 @@ async function runTool(
     }
 
     case "context_delete": {
+      if (Array.isArray(args.ids)) {
+        return bulkActionReply(ctx, "Deleted", () =>
+          bulkDeleteNodes(nestId, { userId, userEmail }, { ids: args.ids }, { client: ctx.client }),
+        );
+      }
       const node = await resolveTargetNode(storage, args);
       if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
       // PRIMARY write gate — the /mcp transport admits read-tier callers, so
@@ -3087,6 +3140,30 @@ async function runTool(
     case "context_move": {
       if (typeof args.folder !== "string") {
         return 'folder is required — a path like "gtm/deals", or "" for the nest root.';
+      }
+      if (Array.isArray(args.ids)) {
+        return bulkActionReply(ctx, "Moved", () =>
+          bulkMoveNodes(nestId, { userId, userEmail }, { ids: args.ids, folder: args.folder }),
+        );
+      }
+      if (typeof args.from_folder === "string" && args.from_folder.trim()) {
+        // Owner/admin, like the REST route and deleting a folder: many ids change at once.
+        const roles = await stewardship.resolveUserRoles(nestId, userEmail);
+        if (!roles.includes("owner") && !roles.includes("admin")) {
+          return writeRefusal(
+            ctx,
+            "You don't have permission to rename or move a folder — only a nest owner or admin can.",
+            { type: "nest", id: nestId },
+          );
+        }
+        const { folder, moved } = await moveFolder(nestId, args.from_folder, args.folder, userEmail);
+        const data = { folder, previous_folder: args.from_folder, moved };
+        return {
+          text: moved.length
+            ? `Moved folder \`${args.from_folder}\` → \`${folder}\` (${moved.length} document(s) followed).`
+            : `Folder \`${args.from_folder}\` is now \`${folder}\`.`,
+          data,
+        };
       }
       const node = await resolveTargetNode(storage, args);
       if (typeof node === "string") return node;

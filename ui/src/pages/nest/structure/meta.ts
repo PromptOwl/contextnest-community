@@ -1,10 +1,10 @@
-import { FolderTree } from "lucide-react";
+import { ListChecks } from "lucide-react";
 import type { NestPageMeta } from "../../../lib/nest-pages";
 
 export const meta: NestPageMeta = {
   path: "structure",
   label: "Structure",
-  icon: FolderTree,
+  icon: ListChecks,
   order: 5,
   viewPage: "structure",
   // Each nest has its own rules. Everyone who works in the nest can see them

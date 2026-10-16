@@ -3,7 +3,7 @@
  * disk + DB stay in lockstep across both surfaces. Handlers stay thin
  * (auth, parse, response shape); this module owns create/update/list.
  */
-import { assertFolderCreatable, assertMovable, folderDeleteOrder, ruleRefusal, scaffold } from "../structure/writes.js";
+import { assertFolderCreatable, assertFolderMovable, assertMovable, folderDeleteOrder, ruleRefusal, scaffold } from "../structure/writes.js";
 import {
   parseDocument,
   normalizeStatus,
@@ -3537,6 +3537,72 @@ export async function deleteFolder(
   // in the tree after the user deleted it.
   await removeVaultFolder(nestId, rel);
   return deleted;
+}
+
+/**
+ * Rename or move a folder: everything under `folder` (sub-folders included,
+ * empty ones too) lands under `newFolder`. A rename is a move to a path with
+ * the same parent, so there is one operation. Each document goes through
+ * moveNode, which keeps ids' history, review state and links, enforces the
+ * structure rules, and refuses a document under open review. Returns the old
+ * and new id of every document moved.
+ */
+export async function moveFolder(
+  nestId: string,
+  folder: string,
+  newFolder: string,
+  userEmail: string,
+): Promise<{ folder: string; moved: Array<{ id: string; previousId: string }> }> {
+  const from = folderToSegments(folder).join("/");
+  const to = folderToSegments(newFolder).join("/");
+  if (!from || !to) throw new ValidationError("folder and new folder are required");
+  if (from === to) return { folder: to, moved: [] };
+  if (to.startsWith(`${from}/`)) {
+    throw new ValidationError("A folder can't be moved into itself.");
+  }
+
+  const { storage } = await engineCache.get(nestId);
+  const all = (await storage.discoverDocuments()).map((d) => d.id);
+  const inside = all.filter((id) => isIdUnderFolder(id, from) && !isDerivedAnnotationsNode(id));
+  const subfolders = [
+    from,
+    ...(await vaultFolderPaths(nestId, { folder: from })).filter((p) => p.startsWith(`${from}/`)),
+  ];
+  if (inside.length === 0 && !(await vaultFolderExists(nestId, from))) {
+    throw new NotFoundError(`No folder found: ${folder}`);
+  }
+  if (await vaultFolderExists(nestId, to)) {
+    // Merging into a folder that is there would be a silent, partial overwrite
+    // of its INDEX and rules; say so instead.
+    throw new ConflictError(`A folder already exists at "${to}"`);
+  }
+  const targets = await assertFolderMovable(storage, from, to, inside);
+
+  const destOf = (id: string) => `${to}${folderOfId(id).slice(from.length)}`;
+  const taken = new Set(all);
+  const clash = targets.find((id) => taken.has(`nodes/${destOf(id)}/${id.split("/").pop()}`));
+  if (clash) throw new ConflictError(`A document already exists where "${clash}" would go.`);
+
+  // Sequential, like deleteFolder: a failure names how far it got, and what
+  // moved stays coherent (each move is atomic).
+  const moved: Array<{ id: string; previousId: string }> = [];
+  for (const id of targets) {
+    try {
+      const r = await moveNode(nestId, id, destOf(id), userEmail);
+      moved.push({ id: r.node.id, previousId: r.previousId });
+    } catch (err) {
+      const detail = moved.length > 0 ? ` (${moved.length} of ${targets.length} already moved)` : "";
+      throw new Error(`Failed to move "${id}"${detail}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  // Folders that held no document have nothing to carry them: recreate each at
+  // the new path, then drop the old directory tree.
+  for (const sub of subfolders) {
+    await createEmptyFolder(nestId, `${to}${sub.slice(from.length)}`);
+  }
+  await removeVaultFolder(nestId, from);
+  await trackEvent("folder.move", { nestId, from, to });
+  return { folder: to, moved };
 }
 
 /**

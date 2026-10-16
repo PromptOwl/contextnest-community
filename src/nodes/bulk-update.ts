@@ -267,7 +267,7 @@ async function resolveTargets(
   return ids;
 }
 
-const reasonOf = (err: unknown): { code: BulkReasonCode; reason: string; outcome: BulkOutcome } => {
+export const reasonOf = (err: unknown): { code: BulkReasonCode; reason: string; outcome: BulkOutcome } => {
   const reason = err instanceof Error ? err.message : String(err);
   if (err instanceof ReviewRequiredError) return { code: "needs_review", reason, outcome: "skipped" };
   if (err instanceof LockedError) return { code: "locked", reason, outcome: "skipped" };
@@ -285,7 +285,13 @@ export async function bulkUpdateNodes(
   nestId: string,
   caller: { userId: string; userEmail: string },
   input: { ids?: unknown; selector?: unknown; patch?: unknown },
-  opts: { client?: ClientMetadata } = {},
+  opts: {
+    client?: ClientMetadata;
+    /** Save as a draft for review where the document needs one (what a single
+     *  edit does), instead of skipping it. Document-list tagging sets this; a
+     *  document under someone else's open review is still locked. */
+    allowDraft?: boolean;
+  } = {},
 ): Promise<BulkUpdateResult> {
   const patch = cleanBulkPatch(input.patch);
   const ids = await resolveTargets(nestId, caller, input);
@@ -387,7 +393,7 @@ export async function bulkUpdateNodes(
           client: opts.client,
         },
         caller.userEmail,
-        { publishOnly: true, expectHead: head },
+        { publishOnly: !opts.allowDraft, expectHead: head },
       );
       results.push({
         id,
