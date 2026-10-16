@@ -277,6 +277,28 @@ Response (201): `{ "nest": { ... } }`
 
 With `NEST_CREATION=admins` (the default) only a server admin may create or import a nest; anyone else gets `403` ("Only a server admin can create nests on this server…"). The same rule covers `POST /nests/import` and the MCP `nest_create` tool. `GET /health` reports it as `nest_creation`.
 
+### POST `/nests/import`
+Imports a folder the browser read, as `{ path, content }` files. Large folders upload in chunks: `{ name, files, partial: true }` creates the nest and stages the first chunk, `{ nestId, files }` stages each further chunk, `{ nestId, finalize: true }` registers the documents. `{ name, files }` with no flags is a one-shot import.
+
+Response (201 one-shot, 200 finalize):
+```json
+{
+  "nest": { ... },
+  "documents": 293,
+  "rejected": ["../escape.md"],
+  "problems": [
+    "../escape.md: path escapes the vault",
+    "notes/broken: kept as a draft — its version chain no longer reconstructs",
+    "notes/bad: not imported — <reason>"
+  ],
+  "warnings": ["notes/odd: version \"1.1\" is not a whole number of at least 1; imported as 1"]
+}
+```
+- `documents` — how many were imported. `rejected` — paths refused at upload (kept for compatibility); `problems` gives each with its reason, plus documents kept as a draft or not imported. `warnings` — repairs made on the way in (a derived title, a coerced type, a dropped tag, a whole-number version).
+- A chunk response carries `rejected`, `problems` and `warnings` for that chunk.
+- A step that fails outright returns `{ "error": "Import stopped while uploading files: …" }` (or `… while publishing documents: …`) instead of a generic error; a vault-lock timeout stays `503` with `Retry-After`, and an engine validation refusal stays `400`.
+- `.context/` (the source vault's own settings) and `_suggestions/` are dropped before staging and never reported.
+
 ### GET `/nests/:nestId`
 ```json
 { "nest": { ... }, "permission": "owner" | "admin" | "write" | "read" }

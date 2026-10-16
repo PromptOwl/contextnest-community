@@ -161,6 +161,7 @@ type ImportOpResult = {
   published: { id: string; version: number }[];
   failed: { id?: string; title?: string; error: string }[];
   checkpoint: number | null;
+  warnings?: string[];
 };
 
 /** Max characters in a human-readable title. The id/slug bound (100 per
@@ -2195,7 +2196,7 @@ export async function stageImportedFiles(
   nestId: string,
   files: Array<{ path: string; content: string }>,
   userEmail: string
-): Promise<{ written: number; rejected: string[] }> {
+): Promise<{ written: number; rejected: string[]; problems: string[]; warnings: string[] }> {
   return withIoStats(nestId, "stage", () => stageImportedFilesInner(nestId, files, userEmail));
 }
 
@@ -2203,7 +2204,7 @@ async function stageImportedFilesInner(
   nestId: string,
   files: Array<{ path: string; content: string }>,
   userEmail: string
-): Promise<{ written: number; rejected: string[] }> {
+): Promise<{ written: number; rejected: string[]; problems: string[]; warnings: string[] }> {
   // `_suggestions` is a vault's OWN staged-suggestion store — derived
   // governance state, not content. Carried in, another vault's copy surfaces as
   // phantom external edits against doc ids that don't resolve here. Dropped
@@ -2215,11 +2216,12 @@ async function stageImportedFilesInner(
     const segs = String(f?.path || "").split(/[\\/]/);
     return !segs.includes("_suggestions") && !segs.includes(".context");
   });
-  if (!carried.length) return { written: 0, rejected: [] };
+  if (!carried.length) return { written: 0, rejected: [], problems: [], warnings: [] };
   const startedAt = Date.now();
   const result = await engineApi.run<{
     written?: number;
     failed: Array<{ id?: string; error: string }>;
+    warnings?: string[];
   }>(
     "context_import",
     { files: carried, publish: false },
@@ -2237,7 +2239,11 @@ async function stageImportedFilesInner(
       (result.failed ?? []).map((f) => `${f.id}: ${f.error}`).join(", ")
     );
   }
-  return { written: result.written ?? 0, rejected };
+  // The reason travels too, as a readable `path: reason` line for the user.
+  const problems = (result.failed ?? []).map((f) =>
+    f.id && !f.error.startsWith(f.id) ? `${f.id}: ${f.error}` : f.error
+  );
+  return { written: result.written ?? 0, rejected, problems, warnings: result.warnings ?? [] };
 }
 
 /**
@@ -2297,13 +2303,17 @@ export async function alignOnDiskStatus(
   }
 }
 
+/** What registration reports: documents recorded, readable `path: reason`
+ *  lines for any that were not (or only as drafts), and the engine's repairs. */
+export type ImportRegistration = { documents: number; problems: string[]; warnings: string[] };
+
 export async function registerImportedDocuments(
   nestId: string,
   userEmail: string,
   /** Caller attribution for the import (§9.4) — recorded on every version row
    *  this registration seeds, so a folder an agent imported says so. */
   client?: ClientMetadata,
-): Promise<number> {
+): Promise<ImportRegistration> {
   return withIoStats(nestId, "register", () => registerImportedDocumentsInner(nestId, userEmail, client));
 }
 
@@ -2311,7 +2321,7 @@ async function registerImportedDocumentsInner(
   nestId: string,
   userEmail: string,
   client?: ClientMetadata,
-): Promise<number> {
+): Promise<ImportRegistration> {
   const startedAt = Date.now();
   const tracked = await versions.getTrackedNodeIds(nestId);
   // Registration reconciles the governance DB against what is on disk, and the
@@ -2332,9 +2342,7 @@ async function registerImportedDocumentsInner(
     // swallowing: this used to return 0, which reported a broken vault as a
     // successful import of an empty folder with the cause only in the log.
     console.error("[import] register failed", nestId, err);
-    throw new Error(
-      `Failed to import documents: ${(err as Error)?.message ?? String(err)}`
-    );
+    throw err;
   }
 
   const docs = result.documents ?? [];
@@ -2348,9 +2356,9 @@ async function registerImportedDocumentsInner(
   // One transaction: a retry skips docs that already have a version row, so a
   // half-written batch would leave them unapproved for good.
   const tagged = docs.map((d) => ({ d, tags: d.tags.map((t) => storedTag(String(t))) }));
-  await getDb().transaction(async (tx) => {
+  const record = (rows: typeof tagged) => getDb().transaction(async (tx) => {
     await versions.createVersions(
-      tagged.map(({ d, tags }) => ({
+      rows.map(({ d, tags }) => ({
         nestId,
         nodeId: d.id,
         version: d.version,
@@ -2368,27 +2376,46 @@ async function registerImportedDocumentsInner(
     );
     await versions.setApprovedVersions(
       nestId,
-      docs.filter((d) => d.status === "published").map((d) => ({ nodeId: d.id, version: d.version })),
+      rows.filter(({ d }) => d.status === "published").map(({ d }) => ({ nodeId: d.id, version: d.version })),
       userEmail,
       tx
     );
-    await syncNodeTagsMany(nestId, tagged.map(({ d, tags }) => ({ nodeId: d.id, tags })), tx);
+    await syncNodeTagsMany(nestId, rows.map(({ d, tags }) => ({ nodeId: d.id, tags })), tx);
   });
+  // One bad row must not sink the batch: on failure, record one document at a
+  // time so the rest land and each refused one is named with its reason.
+  const problems: string[] = [];
+  let recorded = tagged;
+  try {
+    await record(tagged);
+  } catch (err) {
+    console.warn("[import] batch record failed, isolating documents", nestId, err);
+    recorded = [];
+    for (const row of tagged) {
+      try {
+        await record([row]);
+        recorded.push(row);
+      } catch (e) {
+        problems.push(`${row.d.id}: not imported — ${(e as Error)?.message ?? String(e)}`);
+      }
+    }
+  }
   // Only a failed publish can leave `published` on disk; the engine already
   // stamped every held document, so checking those too cost a read each.
   const failedIds = new Set(result.failed.map((f) => f.id));
+  const kept = recorded.map(({ d }) => d);
   await Promise.all(
-    docs
+    kept
       .filter((d) => d.status !== "published" && failedIds.has(d.id))
       .map((d) => alignOnDiskStatus(nestId, d.id, d.status))
   );
 
-  const published = docs.filter((d) => d.status === "published").length;
+  const published = kept.filter((d) => d.status === "published").length;
   // Phase split — a slow import is almost always one phase, and the total alone
   // doesn't say which.
   console.log(
-    `[import] register done: registered=${docs.length} published=${published} kept=${
-      docs.length - published
+    `[import] register done: registered=${kept.length} published=${published} kept=${
+      kept.length - published
     } failed=${result.failed.length} alreadyTracked=${tracked.size}` +
       ` engineMs=${engineMs} dbMs=${Date.now() - dbStartedAt}`
   );
@@ -2398,8 +2425,12 @@ async function registerImportedDocumentsInner(
       result.failed.map((f) => `${f.id}: ${f.error}`).join(", ")
     );
   }
-  await trackEvent("nest.import.documents", { nestId, registered: docs.length });
-  return docs.length;
+  await trackEvent("nest.import.documents", { nestId, registered: kept.length });
+  const recordedIds = new Set(kept.map((d) => d.id));
+  for (const f of result.failed) {
+    if (f.id && recordedIds.has(f.id)) problems.push(`${f.id}: kept as a draft — ${f.error}`);
+  }
+  return { documents: kept.length, problems, warnings: result.warnings ?? [] };
 }
 
 /**

@@ -225,7 +225,7 @@ describe("import folder as nest (upload model)", () => {
     }
 
     const { registerImportedDocuments } = await import("../src/nodes/service.js");
-    const registered = await registerImportedDocuments(nestId, "alice@test.com");
+    const { documents: registered } = await registerImportedDocuments(nestId, "alice@test.com");
     // ONLY the new ones — the 50 already tracked must not register twice.
     expect(registered).toBe(added);
 
@@ -241,7 +241,7 @@ describe("import folder as nest (upload model)", () => {
     expect(list.data.nodes.every((d: any) => d.status === "published")).toBe(true);
 
     // A third pass has nothing left to do — the idempotency the bulk query owns.
-    expect(await registerImportedDocuments(nestId, "alice@test.com")).toBe(0);
+    expect((await registerImportedDocuments(nestId, "alice@test.com")).documents).toBe(0);
   });
 
   it("allows importing an empty folder, then creating a doc in it", async () => {

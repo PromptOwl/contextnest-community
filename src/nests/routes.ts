@@ -54,7 +54,8 @@ import {
 } from "./unsynced-service.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { grantCoversNode } from "../governance/grants-service.js";
-import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
+import { AppError, ValidationError, NotFoundError, ForbiddenError, isVaultLockTimeout } from "../shared/errors.js";
+import { ContextNestError } from "@promptowl/contextnest-engine";
 import {
   resolveUserRoles,
   getStewardsForUser,
@@ -392,6 +393,22 @@ nestRoutes.post("/", async (c) => {
   return c.json({ nest: withParsedBranding(nest) }, 201);
 });
 
+/** Run one import step; anything unexpected surfaces naming the step, not as a
+ *  bare "Something went wrong". Errors the app already maps pass through with
+ *  their own status: AppErrors, a vault-lock timeout (retryable 503) and an
+ *  engine validation refusal (400 naming the rule). */
+async function importStep<T>(step: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    const engineHandled =
+      isVaultLockTimeout(err) || (err instanceof ContextNestError && err.code === "VALIDATION_FAILED");
+    if (err instanceof AppError || engineHandled) throw err;
+    console.error(`[import] ${step} failed`, err);
+    throw new AppError(500, `Import stopped while ${step}: ${(err as Error)?.message ?? String(err)}`);
+  }
+}
+
 // POST /nests/import — import a folder the user picked in their browser. The
 // browser uploads each file's relative path + content; the server writes them
 // into the nest's own storage under DATA_ROOT (it never browses its own disk),
@@ -440,11 +457,9 @@ nestRoutes.post("/:nestId", async (c) => {
     if (body.finalize) {
       return c.json({
         nest: withParsedBranding(nest),
-        documents: await registerImportedDocuments(
-          target,
-          email,
-          attributeRequest(c, body.client),
-        ),
+        ...(await importStep("publishing documents", () =>
+          registerImportedDocuments(target, email, attributeRequest(c, body.client)),
+        )),
       });
     }
     // Staging writes files straight into vault storage, skipping the node
@@ -465,7 +480,7 @@ nestRoutes.post("/:nestId", async (c) => {
     console.log(`[import] chunk: nest=${target} files=${files.length}`);
     // `rejected` travels back so the browser can tell the user which files were
     // skipped, rather than reporting a clean import that quietly dropped some.
-    return c.json(await stageImportedFiles(target, files, email));
+    return c.json(await importStep("uploading files", () => stageImportedFiles(target, files, email)));
   }
 
   if (!body.name) {
@@ -478,19 +493,28 @@ nestRoutes.post("/:nestId", async (c) => {
   const email = await resolveCallerEmail(userId);
   const nest = await importNest(userId, body.name);
   try {
-    const { rejected } = await stageImportedFiles(nest.id, files, email);
+    const { rejected, problems, warnings } = await importStep("uploading files", () =>
+      stageImportedFiles(nest.id, files, email),
+    );
     // More chunks are coming — registering now would publish a partial folder.
     if (body.partial) {
-      return c.json({ nest: withParsedBranding(nest), rejected }, 201);
+      return c.json({ nest: withParsedBranding(nest), rejected, problems, warnings }, 201);
     }
     // Seed governance rows for the documents already in the folder so they
     // list as published and edit from their real version (not from scratch).
-    const documents = await registerImportedDocuments(
-      nest.id,
-      email,
-      attributeRequest(c, body.client),
+    const reg = await importStep("publishing documents", () =>
+      registerImportedDocuments(nest.id, email, attributeRequest(c, body.client)),
     );
-    return c.json({ nest: withParsedBranding(nest), documents, rejected }, 201);
+    return c.json(
+      {
+        nest: withParsedBranding(nest),
+        ...reg,
+        rejected,
+        problems: [...problems, ...reg.problems],
+        warnings: [...warnings, ...reg.warnings],
+      },
+      201,
+    );
   } catch (err) {
     // The nest row exists before its content does, so a failed first chunk
     // would otherwise leave an empty nest on the dashboard.
