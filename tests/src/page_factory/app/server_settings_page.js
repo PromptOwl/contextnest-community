@@ -64,8 +64,8 @@ class ServerSettingsPage {
 
     // ── Single sign-on ────────────────────────────────────────────────────
     this.oidcNotReady = page.getByRole('alert').filter({ hasText: 'Enabled but not configured' });
-    this.googleSso = page.getByTestId('settings-sso-google');
-    this.enterpriseSso = page.getByTestId('settings-sso-enterprise');
+    // Two provider cards: Google (every plan) and Enterprise (Entra ID, Okta,
+    // any issuer — needs the sso licence feature). One switch each.
     this.googleCard = page.getByTestId('settings-sso-google');
     this.enterpriseCard = page.getByTestId('settings-sso-enterprise');
     this.googleSwitch = page.getByRole('switch', { name: 'Use Google sign-in', exact: true });
