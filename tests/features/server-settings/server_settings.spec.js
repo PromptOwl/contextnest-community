@@ -336,6 +336,7 @@ test.describe('Server settings', () => {
         oidc_issuer: '',
         oidc_client_id: '',
         oidc_client_secret_set: false,
+        sso_available: true,
       },
     });
     await ss.goto();
@@ -360,6 +361,7 @@ test.describe('Server settings', () => {
     await expect(ss.oidcNotReady).toBeVisible();
     await ss.clientId.fill('qa-client-id.apps.googleusercontent.com');
     await expect(ss.oidcNotReady).toBeVisible();
+    // …and with the secret too, the warning goes.
     await ss.clientSecret.fill('qa-client-secret-value');
     await expect(ss.oidcNotReady).toHaveCount(0);
 
@@ -368,6 +370,9 @@ test.describe('Server settings', () => {
     await expect(ss.oidcNotReady).toBeVisible();
     await ss.clientId.fill('qa-client-id.apps.googleusercontent.com');
     await expect(ss.oidcNotReady).toHaveCount(0);
+    // Unpicking the provider (no issuer) brings it back as well.
+    await ss.googleSwitch.click();
+    await expect(ss.oidcNotReady).toBeVisible();
 
     // Turning the provider off again un-picks it.
     await ss.googleSwitch.click();
@@ -435,6 +440,15 @@ test.describe('Server settings', () => {
     await ss.publicBaseUrl.fill('https://other.example.org/');
     await ss.openTab('Single sign-on');
     await expect(redirect).toHaveText('https://other.example.org/auth/oidc/callback');
+
+    // Without the Enterprise licence the Enterprise card is locked; Google still works.
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
+    await stubServerSettings(page, { overrides: { oidc_enabled: true, oidc_issuer: '', sso_available: false } });
+    await ss.goto();
+    await ss.openTab('Single sign-on');
+    await expect(ss.ssoLocked).toContainText('Needs an Enterprise licence');
+    await expect(ss.enterpriseSwitch).toBeDisabled();
+    await expect(ss.googleSwitch).toBeEnabled();
   });
 
   test('CN-SET-009: the agent token-exchange card shows its warnings and gating', async ({ primary_user }) => {
@@ -766,5 +780,68 @@ test.describe('Server settings', () => {
     await ss.saveButton.click();
     await expect(ss.toast('Settings saved')).toBeVisible();
     expect(onlySave(patches)).toEqual({ workflow_plane_enabled: true, subagent_runs_enabled: true });
+  });
+
+  test('CN-SET-015: issuer presets and the redirect-URI copy work', async ({ primary_user }) => {
+    // Known start: OIDC on with no issuer, an Enterprise licence, and a public base URL.
+    await asAdmin(primary_user);
+    await primary_user.context.grantPermissions(['clipboard-read', 'clipboard-write']).catch(() => {});
+    const { page, serverSettingsPage: ss } = primary_user;
+    const { patches } = await stubServerSettings(page, {
+      overrides: { oidc_enabled: true, oidc_issuer: '', sso_available: true, public_base_url: 'https://nest.example.com' },
+    });
+    await ss.goto();
+    await ss.openTab('Single sign-on');
+    await expect(ss.googleCard).toContainText('Available on every plan');
+    await expect(ss.googleSwitch).toHaveAttribute('aria-checked', 'false');
+    await expect(ss.enterpriseSwitch).toHaveAttribute('aria-checked', 'false');
+    await expect(ss.ssoLocked).toHaveCount(0);
+
+    // Google: one switch sets Google's issuer.
+    await ss.googleSwitch.click();
+    await expect(ss.googleSwitch).toHaveAttribute('aria-checked', 'true');
+    await expect(ss.enterpriseSwitch).toHaveAttribute('aria-checked', 'false');
+    await expect(ss.googleCard.locator('code').filter({ hasText: '/auth/oidc/callback' })).toBeVisible();
+    await ss.saveButton.click();
+    await expect(ss.toast('Settings saved')).toBeVisible();
+    expect(patches[0]).toEqual({ oidc_issuer: 'https://accounts.google.com' });
+
+    // Enterprise: switching to it clears Google; the Entra tenant builds the issuer.
+    await ss.enterpriseSwitch.click();
+    await expect(ss.enterpriseSwitch).toHaveAttribute('aria-checked', 'true');
+    await expect(ss.googleSwitch).toHaveAttribute('aria-checked', 'false');
+    await expect(ss.entraTenant).toBeVisible();
+    const tenant = '11111111-2222-3333-4444-555555555555';
+    await ss.entraTenant.fill(tenant);
+    await expect(ss.issuerInput).toHaveValue(`https://login.microsoftonline.com/${tenant}/v2.0`);
+    await ss.entraTenant.fill('common');
+    await expect(page.getByRole('alert').filter({ hasText: 'Use the tenant GUID' })).toBeVisible();
+    // Any other issuer (Okta, Keycloak…) is typed in; it stays the Enterprise provider.
+    await ss.issuerInput.fill('https://sso.acme.example/realms/acme');
+    await expect(ss.enterpriseSwitch).toHaveAttribute('aria-checked', 'true');
+    await expect(ss.entraTenant).toHaveValue('');
+
+    // Redirect URI: built from the public base URL; Copy copies it.
+    const redirect = ss.enterpriseCard.locator('code').filter({ hasText: '/auth/oidc/callback' });
+    await expect(redirect).toHaveText('https://nest.example.com/auth/oidc/callback');
+    await ss.enterpriseCard.getByRole('button', { name: /^Copy$/ }).click();
+    await expect(ss.enterpriseCard.getByRole('button', { name: /^Copied$/ })).toBeVisible();
+    const clip = await page.evaluate(() => navigator.clipboard.readText()).catch(() => null);
+    if (clip !== null) expect(clip).toBe('https://nest.example.com/auth/oidc/callback');
+
+    // It follows the (unsaved) public base URL.
+    await ss.openTab('Basic');
+    await ss.publicBaseUrl.fill('https://other.example.org/');
+    await ss.openTab('Single sign-on');
+    await expect(redirect).toHaveText('https://other.example.org/auth/oidc/callback');
+
+    // Without the Enterprise licence the Enterprise card is locked; Google still works.
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
+    await stubServerSettings(page, { overrides: { oidc_enabled: true, oidc_issuer: '', sso_available: false } });
+    await ss.goto();
+    await ss.openTab('Single sign-on');
+    await expect(ss.ssoLocked).toContainText('Needs an Enterprise licence');
+    await expect(ss.enterpriseSwitch).toBeDisabled();
+    await expect(ss.googleSwitch).toBeEnabled();
   });
 });

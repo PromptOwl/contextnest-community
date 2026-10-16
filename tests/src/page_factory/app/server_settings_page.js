@@ -66,10 +66,13 @@ class ServerSettingsPage {
     this.oidcNotReady = page.getByRole('alert').filter({ hasText: 'Enabled but not configured' });
     this.googleSso = page.getByTestId('settings-sso-google');
     this.enterpriseSso = page.getByTestId('settings-sso-enterprise');
-    this.googleSwitch = page.getByRole('switch', { name: 'Use Google sign-in' });
-    this.enterpriseSwitch = page.getByRole('switch', { name: 'Use an enterprise identity provider' });
+    this.googleCard = page.getByTestId('settings-sso-google');
+    this.enterpriseCard = page.getByTestId('settings-sso-enterprise');
+    this.googleSwitch = page.getByRole('switch', { name: 'Use Google sign-in', exact: true });
+    this.enterpriseSwitch = page.getByRole('switch', { name: 'Use an enterprise identity provider', exact: true });
+    this.ssoLocked = page.getByTestId('settings-sso-locked');
     this.entraTenant = page.locator('#entra-tenant');
-    this.issuerInput = page.getByPlaceholder('https://login.microsoftonline.com/{tenant}/v2.0');
+    this.issuerInput = page.getByPlaceholder('https://login.microsoftonline.com/{tenant}/v2.0 or https://acme.okta.com');
     this.clientId = page.getByPlaceholder('Application (client) ID from your IdP app registration');
     this.clientSecret = page.locator('input[placeholder="Paste to set or replace"]').first();
     this.allowedDomains = page.getByPlaceholder('acme.com, contractors.acme.com — empty allows any');

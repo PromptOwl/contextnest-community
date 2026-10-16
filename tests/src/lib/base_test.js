@@ -32,6 +32,7 @@ import TeamsPage from '../page_factory/app/teams_page.js';
 import ApiKeysPage from '../page_factory/app/api_keys_page.js';
 import TeammatesPage from '../page_factory/app/teammates_page.js';
 import ServerSettingsPage from '../page_factory/app/server_settings_page.js';
+import ActivityTracePage from '../page_factory/app/activity_trace_page.js';
 
 // REST helper used to arrange dashboard preconditions (nests, pins, sharing)
 import DashboardApi from './dashboard_api.js';
@@ -282,6 +283,11 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
       // Admin → Server settings
       get serverSettingsPage() {
         return new ServerSettingsPage(this.page, role.alias);
+      },
+
+      // Admin → Activity trace
+      get activityTracePage() {
+        return new ActivityTracePage(this.page, role.alias);
       },
 
       /**

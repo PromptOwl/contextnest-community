@@ -35,6 +35,11 @@ test.describe('Global Cleanup', () => {
       return;
     }
 
+    // A delete on a shared server takes a few seconds, and a full run leaves
+    // dozens of entities, so the default test timeout is too short. Allow
+    // about 10s per entity, never less than the default.
+    test.setTimeout(Math.max(2 * 60 * 1000, totalPending * 10_000));
+
     console.log(`[GlobalCleanup] Found ${totalPending} entities to clean up`);
     for (const type of CLEANUP_ORDER) {
       const count = pending[type]?.length || 0;

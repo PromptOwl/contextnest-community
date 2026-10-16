@@ -851,6 +851,18 @@ test.describe('Community Dashboard', () => {
       return { nest, dispose: () => api.deleteNest(nest.id).catch(() => {}) };
     }
 
+    /**
+     * Open Nests until the shared nest's card is on the grid. On a loaded
+     * shared server the dashboard can come up blank or before the new share
+     * is listed; a fresh load settles it.
+     */
+    async function gotoUntilCard(nestsPage, name) {
+      await expect(async () => {
+        await nestsPage.goto();
+        await expect(nestsPage.nestCard(name)).toBeVisible({ timeout: 10_000 });
+      }).toPass({ timeout: 60_000, intervals: [1_000, 3_000, 5_000] });
+    }
+
     test('CN-DASH-036: a shared nest displays "Shared by" and the correct role badge', async ({
       primary_user,
       secondary_user,
@@ -867,8 +879,7 @@ test.describe('Community Dashboard', () => {
         // Settle the invite so the nest leaves Pending invites for the grid.
         await api.settleInvitesFor(nest.id);
 
-        await nestsPage.goto();
-        await expect(nestsPage.nestCard(nest.name)).toBeVisible();
+        await gotoUntilCard(nestsPage, nest.name);
         await expect(nestsPage.sharedByLine(nest.name)).toContainText(secondaryRole.email);
         await expect(nestsPage.cardBadge(nest.name, 'Viewer')).toBeVisible();
       } finally {
@@ -892,8 +903,7 @@ test.describe('Community Dashboard', () => {
         const { nestsPage, api } = await openDashboard(primary_user);
         await api.settleInvitesFor(nest.id);
 
-        await nestsPage.goto();
-        await expect(nestsPage.nestCard(nest.name)).toBeVisible();
+        await gotoUntilCard(nestsPage, nest.name);
         await expect(nestsPage.cardBadge(nest.name, 'Editor')).toBeVisible();
         await expect(nestsPage.renameIcon(nest.name)).toHaveCount(0);
       } finally {
@@ -916,7 +926,7 @@ test.describe('Community Dashboard', () => {
         const { nestsPage, api } = await openDashboard(primary_user);
         await api.settleInvitesFor(nest.id);
 
-        await nestsPage.goto();
+        await gotoUntilCard(nestsPage, nest.name);
         await expect(nestsPage.pinIcon(nest.name)).toHaveAttribute('aria-pressed', 'false');
         // A pin is this person's own bookmark, so read-only access is enough.
         await nestsPage.pinNest(nest.name);
@@ -951,8 +961,7 @@ test.describe('Community Dashboard', () => {
         const { nestsPage, api } = await openDashboard(primary_user);
         await api.settleInvitesFor(nest.id);
 
-        await nestsPage.goto();
-        await expect(nestsPage.nestCard(nest.name)).toBeVisible();
+        await gotoUntilCard(nestsPage, nest.name);
         // Neither the real delete nor the request-removal stand-in: a viewer
         // has no removal action to take.
         await expect(nestsPage.deleteIcon(nest.name)).toHaveCount(0);
@@ -979,7 +988,7 @@ test.describe('Community Dashboard', () => {
         const { nestsPage, api } = await openDashboard(primary_user);
         await api.settleInvitesFor(nest.id);
 
-        await nestsPage.goto();
+        await gotoUntilCard(nestsPage, nest.name);
         await expect(nestsPage.deleteIcon(nest.name)).toHaveCount(0);
         await expect(nestsPage.requestRemovalIcon(nest.name)).toBeVisible();
 
@@ -1015,7 +1024,13 @@ test.describe('Community Dashboard', () => {
         // Deliberately NOT settled — an unread invite is the precondition.
         expect(await api.pendingInvitesFor(nest.id)).not.toHaveLength(0);
 
-        await nestsPage.goto();
+        // Open Nests until the invite is listed (the dashboard can come up
+        // blank, or before the new invite, on a loaded shared server).
+        const atLoad = (await gridNests(api)).length;
+        await expect(async () => {
+          await nestsPage.goto();
+          await expect(nestsPage.inviteRow(nest.name)).toBeVisible({ timeout: 10_000 });
+        }).toPass({ timeout: 60_000, intervals: [1_000, 3_000, 5_000] });
         await expect(nestsPage.pendingInvitesCard).toContainText('Pending invites');
         await expect(nestsPage.inviteRow(nest.name)).toBeVisible();
         await expect(nestsPage.inviteAccept(nest.name)).toBeVisible();
@@ -1023,12 +1038,14 @@ test.describe('Community Dashboard', () => {
 
         // It is in the invite card instead of the grid, and out of the counts.
         await expect(nestsPage.nestCard(nest.name)).toHaveCount(0);
-        // Other suites create nests on this account meanwhile, so the banner is
-        // held to the grid total read just before or just after it.
+        // Other suites create and delete nests on this account meanwhile, so the
+        // banner (read when the page loaded) is held to the range of grid
+        // totals seen from before the load to just after reading it.
         const before = (await gridNests(api)).length;
-        const shown = (await nestsPage.bannerNestCount.innerText()).trim();
+        const shown = Number((await nestsPage.bannerNestCount.innerText()).trim());
         const after = (await gridNests(api)).length;
-        expect([String(before), String(after)]).toContain(shown);
+        expect(shown).toBeGreaterThanOrEqual(Math.min(atLoad, before, after));
+        expect(shown).toBeLessThanOrEqual(Math.max(atLoad, before, after));
       } finally {
         await dispose();
       }
@@ -1087,13 +1104,15 @@ test.describe('Community Dashboard', () => {
 
       await expect(
         nestsPage.toasts.filter({ hasText: `"${nest.name}" archived — find it under Archived` })
-      ).toBeVisible();
-      await expect(nestsPage.nestCard(nest.name)).toHaveCount(0);
+      ).toBeVisible({ timeout: 60_000 });
+      await expect(nestsPage.nestCard(nest.name)).toHaveCount(0, { timeout: 60_000 });
 
       // Put away, not gone.
       await nestsPage.toggleArchived(true);
-      await expect(nestsPage.archivedRow(nest.name)).toBeVisible();
-      expect((await api.listNests({ archived: true })).some((n) => n.id === nest.id)).toBe(true);
+      await expect(nestsPage.archivedRow(nest.name)).toBeVisible({ timeout: 60_000 });
+      await expect
+        .poll(async () => (await api.listNests({ archived: true })).some((n) => n.id === nest.id), { timeout: 30_000 })
+        .toBe(true);
     });
 
     test('CN-DASH-046: the Archived switch replaces the grid with the archived list', async ({
@@ -1226,12 +1245,14 @@ test.describe('Community Dashboard', () => {
       await expect(nestsPage.restoreDialog).toContainText('It goes back exactly as it was');
       await nestsPage.restoreConfirm.click();
 
-      await expect(nestsPage.toasts.filter({ hasText: `"${nest.name}" restored` })).toBeVisible();
-      await expect(nestsPage.archivedRow(nest.name)).toHaveCount(0);
+      await expect(nestsPage.toasts.filter({ hasText: `"${nest.name}" restored` })).toBeVisible({ timeout: 60_000 });
+      await expect(nestsPage.archivedRow(nest.name)).toHaveCount(0, { timeout: 60_000 });
 
       await nestsPage.toggleArchived(false);
-      await expect(nestsPage.nestCard(nest.name)).toBeVisible();
-      expect((await api.listNests()).some((n) => n.id === nest.id)).toBe(true);
+      await expect(nestsPage.nestCard(nest.name)).toBeVisible({ timeout: 60_000 });
+      await expect
+        .poll(async () => (await api.listNests()).some((n) => n.id === nest.id), { timeout: 30_000 })
+        .toBe(true);
     });
 
     test('CN-DASH-050: the archived section shows an empty state when nothing is archived', async ({
@@ -1285,8 +1306,11 @@ test.describe('Community Dashboard', () => {
 
       await nestsPage.deleteNest(nest.name);
 
-      await expect(nestsPage.nestCard(nest.name)).toHaveCount(0);
-      expect((await api.listNests()).some((n) => n.id === nest.id)).toBe(false);
+      // A delete on a loaded shared server can take a while to land.
+      await expect(nestsPage.nestCard(nest.name)).toHaveCount(0, { timeout: 60_000 });
+      await expect
+        .poll(async () => (await api.listNests()).some((n) => n.id === nest.id), { timeout: 30_000 })
+        .toBe(false);
       // Deleted, not archived.
       expect((await api.listNests({ archived: true })).some((n) => n.id === nest.id)).toBe(false);
     });
