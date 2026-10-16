@@ -70,10 +70,12 @@ export function BulkSelectionBar({
         res = r;
         done = r.done;
       } else {
-        const r = await api.bulkUpdateNodes(nestId, ids, {
-          add_tags: splitTags(addTags),
-          remove_tags: splitTags(removeTags),
-        });
+        const r = await api.bulkUpdateNodes(
+          nestId,
+          ids,
+          { add_tags: splitTags(addTags), remove_tags: splitTags(removeTags) },
+          { allowDraft: true },
+        );
         res = r;
         done = r.updated;
       }

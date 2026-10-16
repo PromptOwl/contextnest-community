@@ -194,7 +194,7 @@ nodeRoutes.post("/bulk-update", async (c) => {
     c.req.param("nestId")!,
     { userId: c.get("userId"), userEmail: await getUserEmail(c) },
     { ids: body.ids, selector: body.selector, patch: body.patch },
-    { client: attributeRequest(c, body.client) },
+    { client: attributeRequest(c, body.client), allowDraft: body.allow_draft === true },
   );
   return c.json(result);
 });

@@ -3970,10 +3970,15 @@ export interface BulkUpdateResult {
 
 export const BULK_UPDATE_MAX = 100;
 
-export async function bulkUpdateNodes(nestId: string, ids: string[], patch: BulkPatch) {
+export async function bulkUpdateNodes(
+  nestId: string,
+  ids: string[],
+  patch: BulkPatch,
+  opts: { allowDraft?: boolean } = {},
+) {
   return request<BulkUpdateResult>(`/nests/${nestId}/nodes/bulk-update`, {
     method: "POST",
-    body: JSON.stringify({ ids, patch }),
+    body: JSON.stringify({ ids, patch, ...(opts.allowDraft ? { allow_draft: true } : {}) }),
   });
 }
 
