@@ -114,7 +114,11 @@ class MyWorkPage {
    */
   async goto({ settle = true } = {}) {
     logger.info(`${this.roleAlias ? `[${this.roleAlias}] ` : ''}Navigating to My Work`);
-    await this.page.goto('/my-work');
+    // A loaded shared server can abort the navigation; try once more.
+    await this.page.goto('/my-work').catch(async (err) => {
+      if (!String(err).includes('ERR_ABORTED')) throw err;
+      await this.page.goto('/my-work');
+    });
     await this.pageTitle.waitFor({ state: 'visible' });
     if (settle) await this.loader.waitFor({ state: 'hidden' });
   }
