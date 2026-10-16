@@ -25,6 +25,7 @@ const GROUPS: Array<{ title: string; items: Array<[string, string]> }> = [
     title: "Anywhere",
     items: [
       [`${MOD} K`, "Search nests and documents"],
+      ["/", "Search nests and documents"],
       ["?", "Show this cheatsheet"],
       ["Esc", "Close a dialog or the search palette"],
     ],
