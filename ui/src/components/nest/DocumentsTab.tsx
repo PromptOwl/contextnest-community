@@ -2077,6 +2077,7 @@ export function DocumentsTab({
         <FolderMoveDialog
           nestId={nestId}
           folder={moveFolderTarget}
+          folders={allFolders}
           onClose={() => setMoveFolderTarget(null)}
           onDone={() => {
             // The old path no longer exists, so it can't stay the active filter.
