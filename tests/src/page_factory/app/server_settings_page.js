@@ -64,9 +64,10 @@ class ServerSettingsPage {
 
     // ── Single sign-on ────────────────────────────────────────────────────
     this.oidcNotReady = page.getByRole('alert').filter({ hasText: 'Enabled but not configured' });
-    this.presetGroup = page.getByRole('group', { name: 'Identity provider preset' });
-    this.entraPreset = this.presetGroup.getByRole('button', { name: 'Microsoft Entra ID', exact: true });
-    this.googlePreset = this.presetGroup.getByRole('button', { name: 'Google', exact: true });
+    this.googleSso = page.getByTestId('settings-sso-google');
+    this.enterpriseSso = page.getByTestId('settings-sso-enterprise');
+    this.googleSwitch = page.getByRole('switch', { name: 'Use Google sign-in' });
+    this.enterpriseSwitch = page.getByRole('switch', { name: 'Use an enterprise identity provider' });
     this.entraTenant = page.locator('#entra-tenant');
     this.issuerInput = page.getByPlaceholder('https://login.microsoftonline.com/{tenant}/v2.0');
     this.clientId = page.getByPlaceholder('Application (client) ID from your IdP app registration');
