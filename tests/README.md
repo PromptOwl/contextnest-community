@@ -1,9 +1,6 @@
 # ContextNest Community — Playwright E2E Tests
 
-End-to-end browser tests for the ContextNest Community server, built on the
-same automation framework as PromptOwl (TheOwl): role-based stored sessions,
-page-object model, a file-backed entity registry with orphan sweeping, and an
-ordered test-suite chain with an always-run teardown.
+End-to-end browser tests for the ContextNest Community server, built on the same automation framework as PromptOwl (TheOwl): role-based stored sessions, page-object model, a file-backed entity registry with orphan sweeping, and an ordered test-suite chain with an always-run teardown.
 
 ## Layout
 
@@ -48,8 +45,7 @@ tests/
    # edit tests/.env/.local — BASE_URL + TEST_ACCOUNT1_* credentials
    ```
 
-   The server under test must run in KEY auth mode with the test account
-   registered (self-register on an open server, or an admin invite).
+   The server under test must run in KEY auth mode with the test account registered (self-register on an open server, or an admin invite).
 
 3. Start the server (for local runs): `npm run dev` or `npm start`.
 
@@ -73,41 +69,22 @@ npx playwright test --project=test-suite --headed
 PLAYWRIGHT_SLOW_MO=500 npx playwright test --project=auth --headed
 ```
 
-Reports land in `tests/test-results/` (HTML report at
-`tests/test-results/html/index.html`).
+Reports land in `tests/test-results/` (HTML report at `tests/test-results/html/index.html`).
 
 ## How it works
 
-- **setup-auth** logs each configured role in through the UI once and stores
-  the session (`cnst_session` cookie) in `tests/src/cookies_storage/<alias>.json`.
-  Later runs reuse the stored session while the cookie is valid.
-- **Role fixtures** (`primary_user`, `secondary_user`) from
-  `tests/src/lib/base_test.js` open a pre-authenticated context lazily:
-  `await primary_user.initialize()` then `primary_user.page` /
-  `primary_user.nestsPage` etc.
-- **Entity registry**: every entity a test creates must be named with
-  `commonFunction.generateEntityName()` (AUTO_ prefix) and registered via
-  `registerEntity('nests', { id, name })`. The teardown deletes registered
-  entities through the REST API; the pre-run **orphan sweeper** deletes stale
-  registry entries and any AUTO_ nests left by crashed runs.
-- **Test chain**: `testRun` in `playwright.config.js` defines file order,
-  parallel/serial mode and independence. Add a new suite by dropping a spec
-  under `tests/features/<area>/` and adding an entry to `testRun`.
+- **setup-auth** logs each configured role in through the UI once and stores the session (`cnst_session` cookie) in `tests/src/cookies_storage/<alias>.json`. Later runs reuse the stored session while the cookie is valid.
+- **Role fixtures** (`primary_user`, `secondary_user`) from `tests/src/lib/base_test.js` open a pre-authenticated context lazily: `await primary_user.initialize()` then `primary_user.page` / `primary_user.nestsPage` etc.
+- **Entity registry**: every entity a test creates must be named with `commonFunction.generateEntityName()` (AUTO_ prefix) and registered via `registerEntity('nests', { id, name })`. The teardown deletes registered entities through the REST API; the pre-run **orphan sweeper** deletes stale registry entries and any AUTO_ nests left by crashed runs.
+- **Test chain**: `testRun` in `playwright.config.js` defines file order, parallel/serial mode and independence. Add a new suite by dropping a spec under `tests/features/<area>/` and adding an entry to `testRun`.
 
 ## Writing tests
 
-- Use the page-object model: locators and interactions live in
-  `tests/src/page_factory/`, specs stay declarative.
-- Prefer `data-testid` selectors; add missing test IDs to the UI (kebab-case,
-  `{area}-{component}-{element}`) and document them in `tests/TEST_IDS.md`.
+- Use the page-object model: locators and interactions live in `tests/src/page_factory/`, specs stay declarative.
+- Prefer `data-testid` selectors; add missing test IDs to the UI (kebab-case, `{area}-{component}-{element}`) and document them in `tests/TEST_IDS.md`.
 - Number test cases (`TC-0xx`) and keep titles behavior-focused.
 - Never hardcode credentials — everything comes from `tests/.env/`.
 
 ## CI
 
-`.github/workflows/contextnest-community-tests.yml` runs the suite on GitHub
-Actions (PRs into development/main, push to main, and manual dispatch) against
-the environment URL configured in
-repository variables, with credentials from repository secrets
-(`TEST_ACCOUNT1_USER`, `TEST_ACCOUNT1_PW`, …). The HTML report and traces are
-uploaded as a workflow artifact.
+`.github/workflows/contextnest-community-tests.yml` runs the suite on GitHub Actions (PRs into development/main, push to main, and manual dispatch) against the environment URL configured in repository variables, with credentials from repository secrets (`TEST_ACCOUNT1_USER`, `TEST_ACCOUNT1_PW`, …). The HTML report and traces are uploaded as a workflow artifact.

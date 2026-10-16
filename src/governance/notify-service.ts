@@ -15,6 +15,7 @@ import { getDb } from "../db/client.js";
 import { describeNode } from "./title-resolver.js";
 import { permissionLabel } from "./roles.js";
 import { notifyNestEvent } from "../notify/notify.js";
+import { insertNotification } from "../notify/inbox.js";
 
 export interface Watcher {
   id: string;
@@ -99,19 +100,19 @@ export async function notifyReviewRequested(params: {
     for (const r of rows) {
       // Don't notify someone about their own submission.
       if (r.user_email.toLowerCase() === requestedBy.toLowerCase()) continue;
-      await db.run(
-        `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
-         VALUES (?, ?, ?, 'review_requested', ?, ?, ?)`,
-        [
-          uuid(),
+      await insertNotification(
+        {
           nestId,
-          r.user_email.toLowerCase(),
-          reviewId,
-          r.via === nodeId
-            ? `"${label}" has a new version awaiting review (submitted by ${requestedBy})`
-            : `Agent "${await describeNode(nestId, r.via)}" produced output on "${label}" — awaiting review`,
-          now,
-        ],
+          userEmail: r.user_email,
+          kind: "review_requested",
+          subjectId: reviewId,
+          message:
+            r.via === nodeId
+              ? `"${label}" has a new version awaiting review (submitted by ${requestedBy})`
+              : `Agent "${await describeNode(nestId, r.via)}" produced output on "${label}" — awaiting review`,
+          createdAt: now,
+        },
+        { from: requestedBy, nodeId },
       );
       created++;
     }
@@ -160,17 +161,16 @@ export async function notifyPendingPush(params: {
     const nestName = nest?.name ?? nestId;
     let created = 0;
     for (const email of recipients) {
-      await db.run(
-        `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
-         VALUES (?, ?, ?, 'pending_push', ?, ?, ?)`,
-        [
-          uuid(),
+      await insertNotification(
+        {
           nestId,
-          email,
-          pendingId,
-          `${submitterLabel} wrote ${docCount} document(s) to "${nestName}" — awaiting your confirmation`,
-          now,
-        ],
+          userEmail: email,
+          kind: "pending_push",
+          subjectId: pendingId,
+          message: `${submitterLabel} wrote ${docCount} document(s) to "${nestName}" — awaiting your confirmation`,
+          createdAt: now,
+        },
+        { from: submitterEmail },
       );
       created++;
     }
@@ -201,8 +201,11 @@ export async function notifyReviewResolved(params: {
   reviewId: string;
   /** The document's describeNode label, when the caller already resolved it. */
   label?: string;
+  /** The resolver edited the document before approving it. */
+  withEdits?: boolean;
 }): Promise<number> {
   const { nestId, nodeId, status, resolvedBy, requestedBy, reviewId } = params;
+  const verdict = params.withEdits ? `edited and ${status}` : status;
   const db = getDb();
   try {
     const rows = (await db.all(
@@ -226,18 +229,16 @@ export async function notifyReviewResolved(params: {
     const label = params.label ?? (await describeNode(nestId, nodeId));
     let created = 0;
     for (const email of recipients) {
-      await db.run(
-        `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [
-          uuid(),
+      await insertNotification(
+        {
           nestId,
-          email,
-          `review_${status}`,
-          reviewId,
-          `"${label}" was ${status} by ${resolvedBy}`,
-          now,
-        ],
+          userEmail: email,
+          kind: `review_${status}`,
+          subjectId: reviewId,
+          message: `"${label}" was ${verdict} by ${resolvedBy}`,
+          createdAt: now,
+        },
+        { from: resolvedBy, nodeId },
       );
       created++;
     }
@@ -266,18 +267,13 @@ export async function notifyNestInvite(params: {
     ? `Your team "${viaTeam}" was given access to "${nestName}" as ${permissionLabel(permission)}`
     : `You were added to "${nestName}" as ${permissionLabel(permission)}`;
   try {
-    await getDb().run(
-      `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
-       VALUES (?, ?, ?, 'nest_invite', ?, ?, ?)`,
-      [
-        uuid(),
-        nestId,
-        inviteeEmail.toLowerCase(),
-        nestId,
-        message,
-        new Date().toISOString(),
-      ],
-    );
+    await insertNotification({
+      nestId,
+      userEmail: inviteeEmail,
+      kind: "nest_invite",
+      subjectId: nestId,
+      message,
+    });
   } catch (err) {
     console.error("[notify] invite inbox insert failed", nestId, inviteeEmail, err);
   }
@@ -311,9 +307,10 @@ export async function listNotifications(
               rr.node_id,
               CASE WHEN dr.target_type = 'document' THEN dr.node_id END,
               CASE WHEN ar.target_type = 'node' THEN ar.target_id END,
-              -- A mention (or a reply on a thread you're in) names the
-              -- document directly; there's no request row.
-              CASE WHEN n.kind IN ('mention', 'assigned', 'comment_reply') THEN n.subject_id END
+              -- A mention, a reply on a thread you're in, or a comment on a
+              -- document you follow names the document directly; there's no
+              -- request row.
+              CASE WHEN n.kind IN ('mention', 'assigned', 'comment_reply', 'comment') THEN n.subject_id END
             ) AS node_id,
             -- Name resolved here so the inbox never fetches the nest list for it.
             COALESCE(ns.name, n.nest_id) AS nest_name
@@ -359,6 +356,21 @@ export async function markNotificationsRead(
  * what those rows were inserted with — not the resolved kind, so a stale
  * "requested" row is cleared for every recipient regardless of who acted.
  */
+/**
+ * A review that is approved, rejected or withdrawn is no longer an ask: clear
+ * every "please review this" row it produced — the original request and any
+ * SLA escalation — for every recipient, whoever resolved it. Best-effort: a
+ * failure here must never fail the resolution.
+ */
+export async function markReviewNotificationsRead(reviewId: string): Promise<void> {
+  try {
+    await markNotificationsReadBySubject(reviewId, "review_requested");
+    await markNotificationsReadBySubject(reviewId, "review_escalated");
+  } catch (err) {
+    console.error("[notify] clearing review rows failed", reviewId, err);
+  }
+}
+
 export async function markNotificationsReadBySubject(
   subjectId: string,
   kind: string,

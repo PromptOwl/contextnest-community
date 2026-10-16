@@ -24,7 +24,9 @@ A **steward** is a person (identified by email) who governs a subset of the nest
 |---|---|---|---|
 | **Viewer** | yes | no | no |
 | **Editor** | yes | yes | no |
-| **Reviewer** | yes | yes | **yes** |
+| **Reviewer** | yes | no | **yes** |
+
+A reviewer approves or rejects; editing needs the editor role or write access too. Someone who holds both can **Edit & approve** a pending submission (below).
 
 > **Authors can't approve their own work.** Even a reviewer-level steward can't approve a version they themselves authored. Separation of duties, enforced server-side.
 
@@ -44,7 +46,7 @@ If nothing matches and no steward resolves, the **nest owner** is the implicit s
 
 1. **Author** creates or edits a doc. In governed mode it saves as a **draft**.
 2. **Author** clicks **Submit for Review**. The doc becomes **pending** and appears in the review queue for anyone whose scope resolves to that doc — and in their **My Work** page across nests. Until someone acts the author can withdraw it back to draft.
-3. A **Reviewer steward** opens the review queue (or My Work), reads the doc, clicks **Approve** or **Reject**. Rejecting requires a note.
+3. A **Reviewer steward** opens the review queue (or My Work), reads the doc, clicks **Approve** or **Reject**. Rejecting requires a note. A reviewer who can also edit may instead click **Edit**, fix the document and **Save & approve**: the fix becomes its own version under the reviewer's name, the submission still belongs to the author (so the author still can't approve it themselves), and the author is notified. Not offered on prime documents — prime means every change is seen by two people.
 4. On approve, the doc becomes **approved** and is now AI-readable. The approved version number is pinned (`approvedVersion`), so subsequent drafts don't automatically replace it — AI keeps getting the last blessed version until a new one is approved.
 
 ### Auto-publish owner & admin edits (`allow_self_approve`)
@@ -114,6 +116,33 @@ Only **future** creates are affected. Turning it on doesn't steward anyone on ex
 
 Like prime, this only applies to **governed** nests. With stewardship off there is nothing to review, so the flag is inert until you turn stewardship on.
 
+## Review SLA escalation (`review_sla_hours`)
+
+A per-nest setting (**off** by default; nest Settings → "Review SLA (hours)", or `PATCH /nests/:id/settings` with `review_sla_hours`) for reviews nobody picks up. When it's set, a review that has been pending that long is **escalated one rung** up the same ladder steward resolution already uses:
+
+| Rung | Who hears | When |
+|---|---|---|
+| 0 | Document-scope reviewers (every reviewer steward — document, tag and nest — is emailed at submit) | At submit, as always |
+| 1 | Tag-scope reviewers | SLA after submit |
+| 2 | Nest-scope reviewers | SLA after rung 1 |
+| 3 | The nest owner | SLA after rung 2 |
+
+Rungs are the `priority` steward resolution already assigns: 1 = matched by a document pattern, 2 = by one of the document's tags, 3 = nest-level; only `reviewer`-role stewards count. Each rung is limited to people who can open the document now (an account with access — the same check mentions and comment notifications use), since an escalation names it.
+
+Each rung gets a full SLA window before the next. A rung with nobody new on it — no tag reviewers for this document, only people a lower rung already reached, or nobody on it who can open the document — is skipped in the same step, so an escalation always reaches someone if anyone is left. After the owner it stops. Tag and nest reviewers already got the submit email, so for them an escalation is a reminder that the review is overdue, plus an inbox row; for the owner it is the first notice.
+
+Escalating **notifies**; it grants nothing. The new rung gets a `review_escalated` row in their inbox linking the document, an email when SMTP is configured, and it goes to Slack/Teams the same way a review request does: the server-wide Slack/Teams webhooks (super-admin Settings) post it by default, folded into the same debounced digest as review requests, and a per-nest connector posts it when subscribed to `review_escalated` or `"*"`. A connector subscribed only to `review_requested` does not receive escalations — add `review_escalated` to its events. The team-inbox email (`NOTIFY_EMAIL_TO`) is skipped for escalations; the escalated reviewers are emailed directly. Who may approve is unchanged — the same approve gate, the same separation of duties — and the submitter is never an escalation recipient, since they can't approve their own submission.
+
+Each review records the rung it reached (`escalationLevel`, `escalatedAt` on `GET /nests/:id/nodes/:nodeId/reviews`). The rung is claimed in the database before anyone is notified, so no rung hears twice — not on the next tick, not after a restart, not when two server instances tick at once. The trade-off is at-most-once: if the server dies (or a send fails) between claiming a rung and notifying it, that rung's ping is lost and logged rather than repeated; the next rung still follows one window later. When nobody is left to escalate to (no eligible reviewers above, and no owner who can open the document), the review is parked at `escalationLevel: 3` without notifying anyone, and stewards added afterwards don't restart its ladder — `3` therefore means "reached the top", not necessarily "the owner was notified". Resubmitting after a rejection is a new review and starts at rung 0; editing a pending submission keeps the same review and its rung.
+
+The check runs every minute on its own loop, independent of the workflow plane. It ignores nests with the SLA off, ungoverned nests, and archived nests. Changing or clearing the SLA never un-notifies anyone; it only governs the next escalation.
+
+When a review is approved, rejected or withdrawn, its `review_requested` and `review_escalated` inbox rows are marked read for every recipient, whoever resolved it — an answered request no longer sits in anyone's queue looking open. The rows stay in the inbox history; the submitter's verdict row is unaffected.
+
+## Comment notifications
+
+A new comment notifies the document's **watchers** and its **reviewer stewards** (document, tag and nest scope) with a `comment` inbox row and, when SMTP is set up, an email with the excerpt — on top of the `mention` rows for anyone the comment names and, for a reply, the `comment_reply` rows for the thread's earlier participants. Each person hears once, by the most specific route (mention, then thread participant, then follower). The author is never notified, and nobody who can't open the document hears about it.
+
 ## Who sees what
 
 Governance gates two things: who can **approve**, and who can **read**.
@@ -125,6 +154,14 @@ In key mode, when stewardship is enabled on a nest:
 - Node list / single-read / search / query responses are filtered to docs the caller can access
 - A non-steward gets an empty list or a 403 on the node they asked for
 - The nest **owner** and any resolved **steward (any role)** can read; **super admins** bypass the check
+
+## Structure rules — who edits them
+
+A nest's structure rules (folders, node types, name formats, templates; see `API.md → Structure rules`) are a nest setting, not a stewardship role:
+
+- **Editing** the rules (`PUT /nests/:id/structure`, the Structure page) is for the nest's **owners and admins** (`canManageStewards`), never a nest-scoped API key. Stewards, editors and reviewers read them like everyone else.
+- **Enforcing** them binds every writer the same way: owners, stewards, editors, agents and `ctx`. Rules have no per-role bypass. An approval publishes only what the rules allow, so a reviewer can't approve a change that breaks them.
+- **The compliance report** lists documents of every status, so it is for callers who read the whole nest. Readers limited by this page's read gate, or by public or org visibility, get the rules but not the report.
 
 ## Server super-admins
 
@@ -152,10 +189,7 @@ Use this for a small set of platform operators — a CEO, a head of governance, 
 
 ## Teams — sharing with a group
 
-Instead of adding people one at a time, you can create a **team** — a reusable,
-owner-managed group — and share it onto a nest. Each team member carries a
-**role** set on the membership (not on the share), and that role applies on
-**every** nest the team is shared to:
+Instead of adding people one at a time, you can create a **team** — a reusable, owner-managed group — and share it onto a nest. Each team member carries a **role** set on the membership (not on the share), and that role applies on **every** nest the team is shared to:
 
 | Member role | Nest access | Governance |
 |---|---|---|
@@ -165,62 +199,28 @@ owner-managed group — and share it onto a nest. Each team member carries a
 
 Key points:
 
-- A member's role is uniform across nests — set it once on the team. To vary
-  access per nest, use a different team (or a direct collaborator/steward grant).
-- When a user reaches a nest by several paths (a direct collaborator grant **and**
-  team membership), the **highest** access wins.
-- Sharing a team whose members carry a governance role (viewer/editor)
-  **enables stewardship** on the nest — same effect as assigning an individual
-  steward. An `admin`-only team is collaborator-style and doesn't.
-- Removing a member, deleting the team, or unsharing it **revokes access
-  immediately** — there are no per-user rows to clean up.
-- Managing a team is gated by your role on it: editor/admin members (and the
-  owner) can add people, capped to their own level; admins can also change
-  roles and remove members; only the owner can delete the team.
+- A member's role is uniform across nests — set it once on the team. To vary access per nest, use a different team (or a direct collaborator/steward grant).
+- When a user reaches a nest by several paths (a direct collaborator grant **and** team membership), the **highest** access wins.
+- Sharing a team whose members carry a governance role (viewer/editor) **enables stewardship** on the nest — same effect as assigning an individual steward. An `admin`-only team is collaborator-style and doesn't.
+- Removing a member, deleting the team, or unsharing it **revokes access immediately** — there are no per-user rows to clean up.
+- Managing a team is gated by your role on it: editor/admin members (and the owner) can add people, capped to their own level; admins can also change roles and remove members; only the owner can delete the team.
 
 ### Importing a team from PromptOwl
 
-If you already run teams in PromptOwl, the Teams page has a **PromptOwl Teams**
-tab listing your teams there with their members. Each one has a **Sync** button
-that copies it here as a normal team owned by you, instead of you retyping every
-member. Members without an account here become invited placeholders, exactly as
-if you'd added them by hand.
+If you already run teams in PromptOwl, the Teams page has a **PromptOwl Teams** tab listing your teams there with their members. Each one has a **Sync** button that copies it here as a normal team owned by you, instead of you retyping every member. Members without an account here become invited placeholders, exactly as if you'd added them by hand.
 
-**The tab only appears if you signed in with PromptOwl** — that sign-in is what
-gives this server permission to read your teams. Signing in another way (SSO,
-your identity provider, or email and password) means no PromptOwl identity to
-read teams for, so the tab isn't offered.
+**The tab only appears if you signed in with PromptOwl** — that sign-in is what gives this server permission to read your teams. Signing in another way (SSO, your identity provider, or email and password) means no PromptOwl identity to read teams for, so the tab isn't offered.
 
-**You can import a team you're an owner or editor of in PromptOwl.** Teams you're
-view-only on are listed for reference but can't be imported: the copy would be
-yours to control here — rename it, rewrite its roster, share it onto a nest —
-and that's more than PromptOwl lets you do with that team. Ask one of its owners
-or editors to import it instead.
+**You can import a team you're an owner or editor of in PromptOwl.** Teams you're view-only on are listed for reference but can't be imported: the copy would be yours to control here — rename it, rewrite its roster, share it onto a nest — and that's more than PromptOwl lets you do with that team. Ask one of its owners or editors to import it instead.
 
-Already-imported teams are marked **Synced** in that tab, and show a **PromptOwl**
-badge in the ContextNest Teams tab. Two things worth knowing before you sync
-one again:
+Already-imported teams are marked **Synced** in that tab, and show a **PromptOwl** badge in the ContextNest Teams tab. Two things worth knowing before you sync one again:
 
-- **PromptOwl is the source of truth on every sync.** The roster is reconciled to
-  match: roles are reset, and anyone no longer in the PromptOwl team is removed —
-  including people you added to this team by hand here. If you need a group that
-  differs from PromptOwl, make it a separate team rather than editing an
-  imported one.
-- **Your PromptOwl access isn't stored on this server.** The connection lives in
-  a cookie in your own browser and ends when your session does — this server's
-  database never holds anything that can reach your PromptOwl account, so a
-  stolen backup of it exposes nothing of yours. The connection is also limited
-  to reading your profile and your teams: it cannot chat as you or spend your
-  credits. Signing out ends it, and revoking the device in PromptOwl's account
-  settings ends it immediately from the other side.
+- **PromptOwl is the source of truth on every sync.** The roster is reconciled to match: roles are reset, and anyone no longer in the PromptOwl team is removed — including people you added to this team by hand here. If you need a group that differs from PromptOwl, make it a separate team rather than editing an imported one.
+- **Your PromptOwl access isn't stored on this server.** The connection lives in a cookie in your own browser and ends when your session does — this server's database never holds anything that can reach your PromptOwl account, so a stolen backup of it exposes nothing of yours. The connection is also limited to reading your profile and your teams: it cannot chat as you or spend your credits. Signing out ends it, and revoking the device in PromptOwl's account settings ends it immediately from the other side.
 
-PromptOwl's `User` role — its default membership — maps to **viewer** here, as
-does any role this version doesn't recognize; `Owner` maps to admin, and
-`Editor`/`Viewer` map across as themselves.
+PromptOwl's `User` role — its default membership — maps to **viewer** here, as does any role this version doesn't recognize; `Owner` maps to admin, and `Editor`/`Viewer` map across as themselves.
 
-Members see the teams they belong to on the **Teams** page and any team-shared
-nest on their dashboard. Manage teams there (create, add/remove members with a
-role); share them from a nest's sharing panel. See `API.md` §3a for the endpoints.
+Members see the teams they belong to on the **Teams** page and any team-shared nest on their dashboard. Manage teams there (create, add/remove members with a role); share them from a nest's sharing panel. See `API.md` §3a for the endpoints.
 
 ## Picking a scope when you assign a steward
 

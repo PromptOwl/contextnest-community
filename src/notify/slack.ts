@@ -18,7 +18,7 @@ export async function notifySlackForNest(
 ): Promise<void> {
   if (!config.SLACK_WEBHOOK_URL) return;
   const nestName = await resolveNestName(nestId);
-  return notifySlack(`*[${nestName}]* ${message}`);
+  return notifySlack(`*[${nestName}]* ${message}`, nestId);
 }
 
 /**
@@ -32,8 +32,8 @@ export function escapeMrkdwn(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-async function notifySlack(text: string): Promise<void> {
+async function notifySlack(text: string, nestId?: string): Promise<void> {
   const url = config.SLACK_WEBHOOK_URL;
   if (!url) return;
-  await postWebhook(url, { text: escapeMrkdwn(text) }, "slack");
+  await postWebhook(url, { text: escapeMrkdwn(text) }, "slack", { nestId });
 }

@@ -169,6 +169,7 @@ export const READER_HIDDEN_VIEWS = [
   "board",
   "ontology-graph",
   "definitions",
+  "structure",
 ] as const;
 
 /** Whether a nest-view page is hidden when reader mode is active for a reader. */

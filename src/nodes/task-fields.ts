@@ -180,3 +180,98 @@ export async function applyTaskFields(
 
   return { metadata, opMetadata: op };
 }
+
+/** Board fields off a request body or tool call, keeping "absent" (leave
+ *  alone) distinct from null (clear). Anything that isn't a string or null is
+ *  refused rather than coerced — a number for a due date is a client bug worth
+ *  surfacing. Shared by REST and MCP so both refuse the same shapes. */
+export function taskFieldsFromInput(body: Record<string, unknown>): TaskFieldsPatch {
+  const out: TaskFieldsPatch = {};
+  for (const k of ["assignee", "due", "priority", "parent"] as const) {
+    const v = body[k];
+    if (v === undefined) continue;
+    if (v !== null && typeof v !== "string") {
+      throw new ValidationError(`${k} must be a string or null`);
+    }
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * List filters over the board fields. `assignee: "none"` means unassigned;
+ * `due_before` is inclusive and drops nodes with no due date.
+ */
+export interface TaskFieldsFilter {
+  assignee?: string;
+  priority?: string;
+  dueBefore?: string;
+}
+
+/** Validate a filter once, up front, so a typo is an error, not an empty list. */
+export function parseTaskFieldsFilter(raw: {
+  assignee?: unknown;
+  priority?: unknown;
+  due_before?: unknown;
+}): TaskFieldsFilter {
+  const out: TaskFieldsFilter = {};
+  const str = (k: string, v: unknown) => {
+    if (v === undefined || v === null || v === "") return undefined;
+    if (typeof v !== "string") throw new ValidationError(`${k} must be a string`);
+    return v.trim();
+  };
+  const assignee = str("assignee", raw.assignee);
+  if (assignee) out.assignee = assignee.toLowerCase();
+  const priority = str("priority", raw.priority);
+  if (priority) {
+    if (priority !== "none" && !(TASK_PRIORITIES as readonly string[]).includes(priority)) {
+      throw new ValidationError(
+        `priority must be one of ${TASK_PRIORITIES.join(", ")} or none, got "${priority}"`,
+      );
+    }
+    out.priority = priority;
+  }
+  const dueBefore = str("due_before", raw.due_before);
+  if (dueBefore) {
+    if (!DATE_RE.test(dueBefore) || Number.isNaN(Date.parse(dueBefore))) {
+      throw new ValidationError(`due_before must be a date like 2026-10-31, got "${dueBefore}"`);
+    }
+    out.dueBefore = dueBefore;
+  }
+  return out;
+}
+
+export function hasTaskFieldsFilter(f: TaskFieldsFilter | undefined): boolean {
+  return !!f && (f.assignee !== undefined || f.priority !== undefined || f.dueBefore !== undefined);
+}
+
+/** Does a node's stored metadata pass the filter? */
+export function matchesTaskFieldsFilter(metadata: unknown, f: TaskFieldsFilter): boolean {
+  const t = taskFieldsOf(metadata);
+  if (f.assignee !== undefined) {
+    if (f.assignee === "none" ? !!t.assignee : t.assignee?.toLowerCase() !== f.assignee) {
+      return false;
+    }
+  }
+  if (f.priority !== undefined) {
+    if (f.priority === "none" ? !!t.priority : t.priority !== f.priority) return false;
+  }
+  if (f.dueBefore !== undefined) {
+    if (!t.due || t.due > f.dueBefore) return false;
+  }
+  return true;
+}
+
+/** Just the four settable fields — what MCP and the CLI echo back. */
+export function settableTaskFields(metadata: unknown): Pick<
+  TaskFields,
+  "assignee" | "due" | "priority" | "parent"
+> {
+  const { assignee, due, priority, parent } = taskFieldsOf(metadata);
+  return {
+    ...(assignee ? { assignee } : {}),
+    ...(due ? { due } : {}),
+    ...(priority ? { priority } : {}),
+    ...(parent ? { parent } : {}),
+  };
+}

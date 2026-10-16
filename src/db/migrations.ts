@@ -1877,6 +1877,256 @@ export function runMigrations(db: Database.Database): void {
     `);
     recordMigration("054_metacognition_agents");
   }
+
+  // 056: MCP OAuth (was 045, then 053 on its branch; both taken on development) (CU-wdqcq02p06). Three tables behind MCP_OAUTH_ENABLED —
+  // created unconditionally so turning the flag on needs no migration, but
+  // inert while it is off.
+  //
+  // Secrets are stored as SHA-256 hashes, never in the clear, the same
+  // discipline api_keys uses (src/auth/keys.ts): the values are 256 bits of
+  // randomBytes, so a plain fast hash is the right storage primitive and
+  // comparison is constant-time.
+  if (!hasMigration("056_mcp_oauth")) {
+    db.transaction(() => {
+      db.exec(`
+        -- A client is whatever registered with us: a CIMD https client_id, or
+        -- a row minted by dynamic registration. redirect_uris is a JSON array.
+        CREATE TABLE IF NOT EXISTS oauth_clients (
+          client_id TEXT PRIMARY KEY,
+          client_name TEXT NOT NULL,
+          redirect_uris TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('dcr', 'cimd')),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          last_seen_at TEXT
+        );
+
+        -- Authorization codes. Single use: consumed by setting used_at, which
+        -- is what makes replay detectable rather than merely unlikely.
+        -- code_challenge is PKCE S256 and is never optional here.
+        CREATE TABLE IF NOT EXISTS oauth_codes (
+          code_hash TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          redirect_uri TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          code_challenge TEXT NOT NULL,
+          resource TEXT,
+          expires_at TEXT NOT NULL,
+          used_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires
+          ON oauth_codes(expires_at);
+
+        -- One row per grant. The access token is short-lived; the refresh
+        -- token rotates on every use (OAuth 2.1 requires rotation for public
+        -- clients, which CIMD and DCR both make us).
+        CREATE TABLE IF NOT EXISTS oauth_tokens (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          client_id TEXT NOT NULL,
+          client_name TEXT NOT NULL,
+          access_token_hash TEXT NOT NULL UNIQUE,
+          refresh_token_hash TEXT UNIQUE,
+          scope TEXT NOT NULL,
+          resource TEXT,
+          expires_at TEXT NOT NULL,
+          refresh_expires_at TEXT,
+          revoked_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          last_used_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_user
+          ON oauth_tokens(user_id);
+        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_access
+          ON oauth_tokens(access_token_hash);
+        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_refresh
+          ON oauth_tokens(refresh_token_hash);
+      `);
+    })();
+    recordMigration("056_mcp_oauth");
+  }
+
+  // 064: task activity log. One row per interaction an agent (or a person)
+  //   registers on a task — "working on it", "done", "blocked: …" — through
+  //   MCP `context_task_log`, REST POST …/task-log or `ctx task log`. Attributed
+  //   to the authenticated user; a call on an API key also records which key
+  //   (id, label, prefix, whether it was nest-scoped), and the caller's §9.4
+  //   `client` block rides in client_json like it does on node_versions.
+  //   Outside the engine's hash chain on purpose — like comments, it is
+  //   collaboration metadata, not document content.
+  //
+  //   Numbered 064: 056–061 are taken or reserved by open branches.
+  if (!hasMigration("064_task_activity")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS task_activity (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          actor TEXT NOT NULL,             -- email of the authenticated user
+          user_id TEXT,
+          status TEXT CHECK(status IS NULL OR status IN ('working', 'done', 'blocked')),
+          note TEXT NOT NULL,
+          surface TEXT NOT NULL,           -- mcp | api
+          api_key_id TEXT,
+          api_key_label TEXT,
+          api_key_prefix TEXT,
+          key_scoped INTEGER NOT NULL DEFAULT 0,
+          client_json TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_activity_node
+          ON task_activity(nest_id, node_id, created_at);
+      `);
+    })();
+    recordMigration("064_task_activity");
+  }
+
+  // 057: review SLA escalation (056 is MCP OAuth).
+  //   `nests.review_sla_hours` is the per-nest SLA
+  //   (NULL = off, the default — the escalation tick never looks at the nest).
+  //   `review_requests.escalation_level` is the last rung a pending review was
+  //   escalated to (0 = none yet; 1 tag reviewers, 2 nest reviewers, 3 nest
+  //   owner) and `escalated_at` when that happened. Persisted on the request
+  //   row so a restart never re-notifies a rung, and a resubmission (a new
+  //   row) starts the ladder over. Plain ADD COLUMNs — no CHECK changes, so no
+  //   table rebuild.
+  if (!hasMigration("057_review_sla_escalation")) {
+    db.transaction(() => {
+      const nestCols = (
+        db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!nestCols.includes("review_sla_hours")) {
+        db.exec("ALTER TABLE nests ADD COLUMN review_sla_hours INTEGER");
+      }
+      const reviewCols = (
+        db.prepare("PRAGMA table_info(review_requests)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!reviewCols.includes("escalation_level")) {
+        db.exec(
+          "ALTER TABLE review_requests ADD COLUMN escalation_level INTEGER NOT NULL DEFAULT 0",
+        );
+      }
+      if (!reviewCols.includes("escalated_at")) {
+        db.exec("ALTER TABLE review_requests ADD COLUMN escalated_at TEXT");
+      }
+    })();
+    recordMigration("057_review_sla_escalation");
+  }
+
+  // 060: run back-links. A proposal (review_requests), comment
+  //   (annotation_comments) or access request an agent run produced carries
+  //   that run's id, so the UI can say "agent run <id>" and open the trace.
+  //   Nullable: people's rows have no run.
+  if (!hasMigration("060_run_links")) {
+    db.transaction(() => {
+      const hasRunId = (table: string) =>
+        (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === "run_id");
+      if (!hasRunId("review_requests")) db.exec("ALTER TABLE review_requests ADD COLUMN run_id TEXT");
+      if (!hasRunId("annotation_comments")) db.exec("ALTER TABLE annotation_comments ADD COLUMN run_id TEXT");
+      if (!hasRunId("access_requests")) db.exec("ALTER TABLE access_requests ADD COLUMN run_id TEXT");
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_reviews_run ON review_requests(run_id) WHERE run_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_annot_comments_run ON annotation_comments(run_id) WHERE run_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_access_requests_run ON access_requests(run_id) WHERE run_id IS NOT NULL;
+      `);
+    })();
+    recordMigration("060_run_links");
+  }
+
+  // 061: superadmin message log. Every message the server sends — email,
+  //   Slack/Teams/connector webhooks, in-app notifications, persona comments —
+  //   is recorded once at its choke point (notify/outbound-log.ts). Bodies are
+  //   redacted and capped at write time; MESSAGE_LOG_STORE_BODIES=false keeps
+  //   metadata only. message_log_views is the append-only audit of who read
+  //   the log.
+  if (!hasMigration("061_outbound_messages")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS outbound_messages (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL,           -- email | slack | msteams | webhook | inbox | comment
+        sender_kind TEXT NOT NULL DEFAULT 'system'
+          CHECK(sender_kind IN ('human', 'persona', 'system')),
+        sender_id TEXT,                  -- email / user id, or null for system
+        recipients_json TEXT NOT NULL DEFAULT '[]',
+        subject TEXT,
+        body_redacted TEXT,
+        status TEXT NOT NULL DEFAULT 'sent'
+          CHECK(status IN ('sent', 'failed', 'skipped')),
+        provider_id TEXT,
+        error TEXT,
+        nest_id TEXT,
+        node_id TEXT,
+        run_id TEXT,
+        via_proxy INTEGER,               -- 1/0 when it left through HTTPS_PROXY; null = n/a
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_created ON outbound_messages(created_at);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_channel ON outbound_messages(channel, created_at);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_status ON outbound_messages(status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_sender ON outbound_messages(sender_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_nest ON outbound_messages(nest_id, created_at);
+      CREATE TABLE IF NOT EXISTS message_log_views (
+        id TEXT PRIMARY KEY,
+        viewer_id TEXT NOT NULL,
+        action TEXT NOT NULL,            -- list | detail | views
+        filters_json TEXT,
+        message_id TEXT,
+        at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_message_log_views_at ON message_log_views(at);
+    `);
+    recordMigration("061_outbound_messages");
+  }
+
+  // 062: nest-level custom field definitions (056–061 are reserved by open
+  //   branches). One row per field a nest admin or steward defines; the VALUES
+  //   live on each node, in frontmatter `metadata.fields`, so they are
+  //   versioned and hash-chained with the document (src/nodes/custom-fields.ts).
+  //   options/default/applies_to are JSON. applies_to '["task"]' is the default;
+  //   '["*"]' means every node type.
+  if (!hasMigration("062_field_definitions")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS field_definitions (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        field_key TEXT NOT NULL,
+        label TEXT NOT NULL,
+        type TEXT NOT NULL,
+        options_json TEXT NOT NULL DEFAULT '[]',
+        required INTEGER NOT NULL DEFAULT 0,
+        default_json TEXT,
+        applies_to_json TEXT NOT NULL DEFAULT '["task"]',
+        unit TEXT,
+        preset TEXT,
+        position INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_key
+        ON field_definitions(nest_id, field_key);
+      -- One time-in-status field per nest, enforced atomically.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_one_tis
+        ON field_definitions(nest_id) WHERE type = 'time_in_status';
+      -- Audit trail of definition changes (who, what, before → after).
+      -- Definitions are plain config rows, so this is their history.
+      CREATE TABLE IF NOT EXISTS field_definition_events (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        field_key TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('create', 'update', 'delete')),
+        actor_id TEXT,
+        before_json TEXT,
+        after_json TEXT,
+        at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_field_definition_events_nest
+        ON field_definition_events(nest_id, at);
+    `);
+    recordMigration("062_field_definitions");
+  }
 }
 
 /**

@@ -23,6 +23,7 @@ import {
 import * as api from "../lib/api";
 import { DEFAULT_HOOTIE_BRAND, type HootieBrand } from "../lib/api";
 import { initAnalytics } from "../lib/analytics";
+import { captureOAuthReturn, takeOAuthReturn } from "../lib/oauth-return";
 
 type AuthMode = "open" | "key" | null;
 type Me = {
@@ -61,6 +62,9 @@ export interface AuthContextValue {
    *  existing nodes of the type stay readable. */
   typeArtifactEnabled: boolean;
   typeTableEnabled: boolean;
+  /** From /health — the server runs the MCP OAuth authorization server, so a
+   *  claude.ai / ChatGPT connector can sign each person in (no shared key). */
+  mcpOauthEnabled: boolean;
   /** The server accepts `task` nodes — the board's "+ Add task" makes tasks
    *  (which skip review) rather than documents. */
   typeTaskEnabled: boolean;
@@ -113,6 +117,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [typeArtifactEnabled, setTypeArtifactEnabled] = useState(true);
   const [sharedDeployment, setSharedDeployment] = useState(false);
   const [typeTableEnabled, setTypeTableEnabled] = useState(true);
+  const [mcpOauthEnabled, setMcpOauthEnabled] = useState(false);
   const [typeTaskEnabled, setTypeTaskEnabled] = useState(false);
   // Default OFF (mirrors config.ts: only an explicit "true" enables), so the
   // launcher never flashes on a server that has it off while /health loads.
@@ -128,6 +133,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [adminStatus, setAdminStatus] = useState<AdminStatus | null>(null);
   const [authenticated, setAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
+  // Before any child renders, so the authorize URL is parked first.
+  useState(captureOAuthReturn);
   const [error, setError] = useState<string | null>(null);
 
   const seqRef = useRef(0);
@@ -151,6 +158,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
       setTypeArtifactEnabled(h.type_artifact_enabled !== false);
       setTypeTableEnabled(h.type_table_enabled !== false);
+      setMcpOauthEnabled(h.mcp_oauth_enabled === true);
       setTypeTaskEnabled(h.type_task_enabled === true);
       setHootieEnabled(h.hootie_enabled === true);
       setMetacognitionEnabled(h.metacognition_enabled === true);
@@ -197,6 +205,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
         setTypeArtifactEnabled(h.type_artifact_enabled !== false);
         setTypeTableEnabled(h.type_table_enabled !== false);
+        setMcpOauthEnabled(h.mcp_oauth_enabled === true);
         setTypeTaskEnabled(h.type_task_enabled === true);
         setHootieEnabled(h.hootie_enabled === true);
         setMetacognitionEnabled(h.metacognition_enabled === true);
@@ -224,6 +233,13 @@ export function AuthProvider({ children }: PropsWithChildren) {
       cancelled = true;
     };
   }, [deriveAuthenticated]);
+
+  // Signed in (by any method) mid MCP OAuth flow: go back to the consent page.
+  useEffect(() => {
+    if (loading || !authenticated) return;
+    const back = takeOAuthReturn();
+    if (back) window.location.assign(back);
+  }, [authenticated, loading]);
 
   // Swap browser tab favicon to the operator's custom logo when set.
   // The fallback href in index.html stays as the inline 🪺 SVG.
@@ -372,6 +388,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         promptowlTeamsEnabled,
         typeArtifactEnabled,
         typeTableEnabled,
+        mcpOauthEnabled,
         typeTaskEnabled,
         hootieEnabled,
         metacognitionEnabled,

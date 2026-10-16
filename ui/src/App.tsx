@@ -1,5 +1,6 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { lazyChunk } from "./lib/lazy-chunk";
+import { isOAuthPath } from "./lib/oauth-return";
 import type React from "react";
 import { Login } from "./components/Login";
 // Page-sized components load on first use — one chunk each — so the shell
@@ -101,6 +102,9 @@ type View =
       /** Which of NestView's own tabs is open, mirrored to ?tab= so a link
        *  to the Review Queue lands on the Review Queue. Absent = overview. */
       tab?: string;
+      /** Open the nest settings dialog on arrival (a document's "turn on
+       *  self-approve" link). Not mirrored to the URL. */
+      openSettings?: boolean;
       /** Public Docs Reader Mode is on for this nest AND the caller is
        *  read-only — the shell hides the board/graph/definitions tabs and
        *  NestView renders the stripped ReaderView. */
@@ -147,6 +151,18 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
+      /** Nest is archived — opened from the Archived section, read-only. */
+      isArchived?: boolean;
+    }
+  | {
+      page: "structure";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+      /** Open at the rule governing this folder (?folder=), or start one for it. */
+      folder?: string;
       readerMode?: boolean;
       /** Nest is archived — opened from the Archived section, read-only. */
       isArchived?: boolean;
@@ -199,6 +215,7 @@ const NEST_TAB_LABELS: Record<string, string> = {
   "external-edits": "External edits",
   stewards: "Stewards",
   collaborators: "Collaborators",
+  fields: "Fields",
 };
 
 const NEST_TABS = [
@@ -208,9 +225,10 @@ const NEST_TABS = [
   "external-edits",
   "stewards",
   "collaborators",
+  "fields",
 ];
 
-type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" }>;
+type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure" }>;
 
 const isNestScoped = (view: View): view is NestScopedView =>
   NEST_VIEWS.some((v) => v.page === view.page);
@@ -243,10 +261,13 @@ export default function App() {
     isAdmin,
     workflowPlaneEnabled,
     subagentRunsEnabled,
+    mcpOauthEnabled,
     loading,
     error,
     logout,
   } = useAuth();
+  // What gates an app page (meta.visible). Superadmin is never open mode.
+  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled };
   const [view, setViewNow] = useState<View>(() => ({
     page: "dashboard",
     // /my-work, /teammates, … open straight onto their page.
@@ -573,7 +594,8 @@ export default function App() {
             isOwner,
             isAnonOwned: false,
             readerMode,
-          });
+            ...(subPage === "structure" && params.get("folder") ? { folder: params.get("folder")! } : {}),
+          } as View);
           return;
         }
         setView({
@@ -607,6 +629,9 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (deepLinkProbe.status === "loading") return;
+    // The OAuth authorize page shows the login form at its own URL; rewriting
+    // it would drop the params the reload after sign-in needs.
+    if (isOAuthPath(window.location.pathname)) return;
     // An unresolved ?nest is dropped from the address bar as soon as its error
     // screen goes up (CU-wdqcq01e70): leaving it there made every refresh — and
     // any link copied off that screen — land back on the same dead end. The id
@@ -643,11 +668,14 @@ export default function App() {
       view.page === "ontology-graph" ||
       view.page === "workflows" ||
       view.page === "definitions" ||
+      view.page === "structure" ||
       view.page === "board" ||
       view.page === "nest-trace"
     ) {
       pathNestId = view.nestId;
       pathView = view.page === "nest-trace" ? "trace" : nestPageForView(view.page)?.path ?? null;
+      if (view.page === "structure" && view.folder) params.set("folder", view.folder);
+      else params.delete("folder");
       params.delete("doc");
       params.delete("thread");
       params.delete("tab");
@@ -793,7 +821,7 @@ export default function App() {
   const crumbs = useMemo<Crumb[]>(() => {
     const home: Crumb = { label: "Home", go: () => setView({ page: "dashboard" }) };
     if (view.page === "dashboard") {
-      const page = visibleAppPage(view.tab, { isAdmin });
+      const page = visibleAppPage(view.tab, pageCaps);
       if (pageTail.length) return [home, ...pageTail];
       return page.id === DEFAULT_PAGE_ID ? [{ label: page.label }] : [home, { label: page.label }];
     }
@@ -821,7 +849,7 @@ export default function App() {
     }
     if (view.page === "docs") return [home, { label: "Docs" }];
     return pageTail.length ? [home, ...pageTail] : [];
-  }, [view, setView, pageTail]);
+  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled]);
 
   // What a dashboard page can do to the app. Pages read it with useAppNav()
   // instead of props, so App renders every page the same way.
@@ -1210,7 +1238,7 @@ export default function App() {
                       : setDocSidebarCollapsed(true)
                   }
                   onOpenDashboard={() => setView({ page: "dashboard" })}
-                  dashboardTab={cur.page === "dashboard" ? visibleAppPage(cur.tab, { isAdmin }).id : null}
+                  dashboardTab={cur.page === "dashboard" ? visibleAppPage(cur.tab, pageCaps).id : null}
                   onOpenDashboardTab={(tab) => setView({ page: "dashboard", tab })}
                   onOpenNest={(t) =>
                     setView({
@@ -1570,7 +1598,7 @@ export default function App() {
         {view.page === "dashboard" && (() => {
           // A gated page (admin-only) reached by URL falls back to the default
           // page — the server would refuse it anyway; this keeps the shell whole.
-          const Page = visibleAppPage(view.tab, { isAdmin }).Component;
+          const Page = visibleAppPage(view.tab, pageCaps).Component;
           return (
             <AppNavProvider value={appNav}>
               <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
@@ -1590,6 +1618,7 @@ export default function App() {
             initialTags={view.initialTags}
             initialFolder={view.initialFolder}
             initialTab={view.tab}
+            initialSettings={view.openSettings}
             initialDoc={view.readerDoc ?? null}
             onReaderDocChange={(nodeId) => setView({ ...view, readerDoc: nodeId ?? undefined })}
             onManageKeys={() => setView({ page: "dashboard", tab: "api-keys" })}
@@ -1615,6 +1644,16 @@ export default function App() {
                 nestName: view.nestName,
                 isOwner: view.isOwner,
                 isAnonOwned: view.isAnonOwned,
+              })
+            }
+            onOpenStructure={(folder) =>
+              setView({
+                page: "structure",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+                ...(folder ? { folder } : {}),
               })
             }
           />
@@ -1650,6 +1689,7 @@ export default function App() {
             initialTags?: string[];
             initialFolder?: string;
             tab?: string;
+            openSettings?: boolean;
           }) =>
             setView({
               page: "nest",
@@ -1708,6 +1748,7 @@ export default function App() {
                 openDocument({ ...entry, breadcrumb: stack.slice(0, index) });
               }}
               onReviewed={doc.returnTo ? () => setView(doc.returnTo!) : undefined}
+              onOpenNestSettings={() => openNest({ openSettings: true })}
               onSaved={() => {
                 // A fresh "new" doc has nowhere to stay open on, so land back
                 // on the nest; saving an EXISTING document must leave the
@@ -1802,6 +1843,9 @@ export default function App() {
             openNest: (opts?: { tags?: string[] }) =>
               setView({ page: "nest", nestId: v.nestId, nestName: v.nestName, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, ...(opts?.tags ? { initialTags: opts.tags } : {}) }),
             leaveNest,
+            openFolder: (folder: string) =>
+              setView({ page: "nest", nestId: v.nestId, nestName: v.nestName, isOwner: v.isOwner, isAnonOwned: v.isAnonOwned, initialFolder: folder, tab: "documents" }),
+            folder: v.page === "structure" ? v.folder : undefined,
           };
           return (
             <NestPageProvider value={ctx}>

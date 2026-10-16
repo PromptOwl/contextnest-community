@@ -34,7 +34,7 @@ export interface NestPageMeta {
   /** Sidebar / tab-strip order, ascending. */
   order: number;
   /** The App view this page renders as. */
-  viewPage: "board" | "ontology-graph" | "definitions" | "workflows";
+  viewPage: "board" | "ontology-graph" | "definitions" | "workflows" | "structure";
   beta?: boolean;
   /** Who gets the page listed and reachable. Reader mode hides every nest
    *  view regardless (see nest-caps isViewBlockedInReaderMode); this gate

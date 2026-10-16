@@ -315,6 +315,23 @@ authRoutes.post("/register", async (c) => {
   assertValidPassword(body.password);
   const email = normalizeEmail(body.email);
 
+  // With SSO live and a domain allowlist, a password account is held to the
+  // same allowlist — otherwise "open" would let any outside address in
+  // around the IdP.
+  const allowedDomains = config.OIDC_CONFIGURED ? config.OIDC_ALLOWED_DOMAINS : [];
+  if (
+    allowedDomains.length > 0 &&
+    !allowedDomains.includes(email.slice(email.lastIndexOf("@") + 1))
+  ) {
+    return c.json(
+      {
+        error:
+          "This server only accepts accounts from its organisation's email domains. Sign in with single sign-on, or ask your admin for an invite.",
+      },
+      403,
+    );
+  }
+
   const ip = clientIp(c);
   if (!tryConsume(`register:ip:${ip}`, REGISTER_LIMIT)) {
     return c.json({ error: "Too many registration attempts, try again later" }, 429);

@@ -87,10 +87,10 @@ describe("deriveNestCaps — reader mode", () => {
   });
 });
 
-describe("reader mode hides the board/graph/definitions shell tabs", () => {
-  it("READER_HIDDEN_VIEWS names exactly board, ontology-graph, definitions", () => {
+describe("reader mode hides the board/graph/definitions/structure shell tabs", () => {
+  it("READER_HIDDEN_VIEWS names exactly board, ontology-graph, definitions, structure", () => {
     expect([...READER_HIDDEN_VIEWS].sort()).toEqual(
-      ["board", "definitions", "ontology-graph"].sort(),
+      ["board", "definitions", "ontology-graph", "structure"].sort(),
     );
   });
 
@@ -98,6 +98,7 @@ describe("reader mode hides the board/graph/definitions shell tabs", () => {
     expect(isReaderHiddenView("board")).toBe(true);
     expect(isReaderHiddenView("ontology-graph")).toBe(true);
     expect(isReaderHiddenView("definitions")).toBe(true);
+    expect(isReaderHiddenView("structure")).toBe(true);
   });
 
   it("isReaderHiddenView keeps the nest + workflows tabs visible", () => {
@@ -112,6 +113,7 @@ describe("reader mode hides the board/graph/definitions shell tabs", () => {
       "ontology-graph",
       "definitions",
       "workflows",
+      "structure",
     ];
     const readerVisible = NEST_VIEWS.filter((p) => !isReaderHiddenView(p));
     expect(readerVisible).toEqual(["nest", "workflows"]);

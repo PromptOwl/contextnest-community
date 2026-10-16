@@ -31,6 +31,8 @@ export interface AccessRequest {
   resolved_by: string | null;
   resolved_at: string | null;
   resolution_note: string | null;
+  /** The agent run that filed it, if one did (links to its trace). */
+  run_id?: string | null;
   /** Denied recently: when asking again is allowed (ISO), else null. */
   can_ask_again_at?: string | null;
   title?: string;

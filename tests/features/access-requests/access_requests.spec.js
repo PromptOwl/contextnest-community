@@ -37,6 +37,17 @@ function uniqueText(label) {
   return `${label} ${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
+/**
+ * Unique text to type into the rich editor. Letters only: the editor's
+ * typography rules rewrite some character runs as you type (a digit, "x",
+ * digit becomes "×"), so a timestamp token could come back changed.
+ */
+function typableText(label) {
+  const letters = (n) =>
+    Array.from({ length: n }, () => 'abcdefghjkmnpqrstuvwyz'[Math.floor(Math.random() * 22)]).join('');
+  return `${label} ${letters(12)}`;
+}
+
 /** Open a document page as the given role. */
 async function openDoc(role, nestId, docId) {
   await role.page.goto(`/nest/${nestId}?doc=${encodeURIComponent(docId)}`);
@@ -190,7 +201,7 @@ test.describe('Request access on a denied write', () => {
     const editor = page.locator('.ProseMirror');
     await expect(editor).toBeVisible(WRITE);
     await editor.click();
-    const typed = uniqueText('unsaved line');
+    const typed = typableText('unsaved line');
     await page.keyboard.press('End');
     await page.keyboard.type(` ${typed}`);
 

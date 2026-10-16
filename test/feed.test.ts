@@ -13,7 +13,9 @@ import {
   createTestApp,
   registerUser,
   jsonRequest,
+  seedPeople,
 } from "./helpers.js";
+import { FREE_TIER_MAX_USERS } from "../src/auth/free-tier.js";
 import { getDb } from "../src/db/client.js";
 
 describe("activity feed: changes + comments, newest first", () => {
@@ -413,6 +415,8 @@ describe("activity feed: license gate", () => {
     const dbClient = await import("../src/db/client.js");
     await dbClient.resetDb();
     await dbClient.initDb();
+    // Past the Free tier, so the unlicensed gate closes.
+    await seedPeople(FREE_TIER_MAX_USERS + 1);
     const { createApp } = await import("../src/app.js");
     return createApp();
   }

@@ -9,10 +9,12 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
 import { ConflictError } from "../shared/errors.js";
+import { assertDeletionRequestable } from "../structure/writes.js";
 import {
   notifyReviewRequested,
   notifyReviewResolved,
   markNotificationsReadBySubject,
+  markReviewNotificationsRead,
 } from "./notify-service.js";
 import { dispatchEvent } from "../notify/dispatch.js";
 import { notifyNestEvent } from "../notify/notify.js";
@@ -40,6 +42,7 @@ import type {
   ReviewRequestStatus,
   ResolvedSteward,
 } from "./types.js";
+import { insertNotification } from "../notify/inbox.js";
 
 // ─── Submit for Review ──────────────────────────────────────────────────
 // Ported from PromptOwl submitForReview()
@@ -283,6 +286,8 @@ export async function approve(params: {
   /** Caller attribution for the approval (§9.4). An approval publishes, so
    *  when the engine bumps the version it seals, the new row carries it. */
   client?: ClientMetadata;
+  /** The reviewer edited the document just before approving (approve-with-edits). */
+  withEdits?: boolean;
 }): Promise<ReviewRequest> {
   // Serialize against a concurrent author edit of the same node. Authors can
   // now revise their own pending submission, so an autosave/save and this
@@ -376,6 +381,7 @@ export async function approve(params: {
     baseUrl: params.baseUrl,
     pending,
     version,
+    withEdits: params.withEdits,
   });
 
   return (await getReviewRequest(pending.id))!;
@@ -506,6 +512,9 @@ async function markApproved(p: {
      WHERE id = ?`,
     [p.approvedBy, p.note || null, p.override ? 1 : 0, p.reviewId],
   );
+  // The request (and any SLA escalation of it) is answered — single and bulk
+  // approve both land here.
+  await markReviewNotificationsRead(p.reviewId);
 
   // Update version status. We write 'published' (not 'approved') so the DB
   // mirrors the engine's terminal status — history.yaml/frontmatter record
@@ -580,14 +589,16 @@ async function notifyApproved(p: {
   baseUrl?: string;
   pending: { id: string; requested_by: string };
   version: number;
+  withEdits?: boolean;
 }): Promise<void> {
   const ctx = await buildDocContext(p.nestId, p.nodeId, p.baseUrl);
+  const verdict = p.withEdits ? "edited and approved" : "approved";
   void dispatchEvent({
     kind: "review_approved",
     nestId: p.nestId,
     subjectId: p.nodeId,
     actor: p.approvedBy,
-    message: `*${ctx.label}* v${p.version} approved by ${p.approvedBy}`,
+    message: `*${ctx.label}* v${p.version} ${verdict} by ${p.approvedBy}`,
   });
 
   // Verdict fan-out: submitter + watchers hear the approval. Best-effort.
@@ -599,11 +610,12 @@ async function notifyApproved(p: {
     requestedBy: p.pending.requested_by,
     reviewId: p.pending.id,
     label: ctx.label,
+    withEdits: p.withEdits,
   });
 
   void notifyNestEvent(
     p.nestId,
-    `:white_check_mark: *${ctx.label}* v${p.version} approved by ${p.approvedBy}`,
+    `:white_check_mark: *${ctx.label}* v${p.version} ${verdict} by ${p.approvedBy}`,
     {
       status: "approved",
       docTitle: ctx.docTitle,
@@ -673,6 +685,7 @@ export async function reject(params: {
      WHERE id = ?`,
       [params.rejectedBy, params.note, pending.id],
     );
+    await markReviewNotificationsRead(pending.id);
 
     await db.run(
       "UPDATE node_versions SET status = 'rejected' WHERE nest_id = ? AND node_id = ? AND version = ?",
@@ -778,6 +791,7 @@ export async function cancelReview(params: {
      WHERE id = ?`,
       [params.cancelledBy, pending.id],
     );
+    await markReviewNotificationsRead(pending.id);
 
     await db.run(
       "UPDATE node_versions SET status = 'draft' WHERE nest_id = ? AND node_id = ? AND version = ?",
@@ -1012,11 +1026,7 @@ export async function inboxInsert(
   const now = new Date().toISOString();
   for (const email of recipients) {
     try {
-      await db.run(
-        `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [uuid(), nestId, email.toLowerCase(), kind, subjectId, message, now],
-      );
+      await insertNotification({ nestId, userEmail: email, kind, subjectId, message, createdAt: now });
     } catch (err) {
       console.error(`[notify] ${kind} inbox insert failed`, nestId, email, err);
     }
@@ -1262,6 +1272,12 @@ export async function requestDeletion(params: {
   if (existing) {
     throw new ConflictError(`${kind} is already pending for this ${noun}`);
   }
+  // Refused when asked rather than later at approval: a required file, or a
+  // required folder alone, under enforced structure rules.
+  if (targetType === "document" || targetType === "folder") {
+    const { storage } = await engineCache.get(params.nestId);
+    await assertDeletionRequestable(storage, targetType, params.nodeId);
+  }
 
   const id = uuid();
   try {
@@ -1498,5 +1514,8 @@ function rowToReviewRequest(row: any): ReviewRequest {
     resolvedAt: row.resolved_at || undefined,
     resolutionNote: row.resolution_note || undefined,
     priority: row.priority,
+    ...(row.run_id ? { runId: row.run_id } : {}),
+    escalationLevel: Number(row.escalation_level ?? 0),
+    escalatedAt: row.escalated_at || undefined,
   };
 }

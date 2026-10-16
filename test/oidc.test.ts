@@ -1074,9 +1074,10 @@ describe("GET /auth/oidc/logout", () => {
 
 // ─── /admin/settings — OIDC fields ────────────────────────────────────────
 
+// A custom issuer needs the sso licence feature, so these run on Enterprise.
 describe("/admin/settings — OIDC", () => {
   it("is superadmin-only (403 for a non-admin)", async () => {
-    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL, tier: "enterprise" });
     const stranger = await registerUser(app, "stranger@example.com");
     const res = await jsonRequest(
       app,
@@ -1089,7 +1090,7 @@ describe("/admin/settings — OIDC", () => {
   });
 
   it("rejects a non-https issuer", async () => {
-    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL, tier: "enterprise" });
     const admin = await registerUser(app, OWNER_EMAIL);
     const res = await jsonRequest(
       app,
@@ -1103,7 +1104,7 @@ describe("/admin/settings — OIDC", () => {
   });
 
   it("rejects a malformed allowed-domains entry", async () => {
-    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL, tier: "enterprise" });
     const admin = await registerUser(app, OWNER_EMAIL);
     const res = await jsonRequest(
       app,
@@ -1117,7 +1118,7 @@ describe("/admin/settings — OIDC", () => {
   });
 
   it("refuses to enable OIDC while issuer/client/secret are missing", async () => {
-    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL, tier: "enterprise" });
     const admin = await registerUser(app, OWNER_EMAIL);
     const res = await jsonRequest(
       app,
@@ -1131,7 +1132,7 @@ describe("/admin/settings — OIDC", () => {
   });
 
   it("round-trips full config; the secret is write-only and null clears it", async () => {
-    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL, tier: "enterprise" });
     const admin = await registerUser(app, OWNER_EMAIL);
 
     const patch = await jsonRequest(
@@ -1220,7 +1221,7 @@ describe("/admin/settings — OIDC", () => {
   // only remaining way in.
 
   it("allows an SSO-only server: both classic methods off while OIDC is ready", async () => {
-    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL, tier: "enterprise" });
     const admin = await registerUser(app, OWNER_EMAIL);
 
     const res = await jsonRequest(
@@ -1245,7 +1246,7 @@ describe("/admin/settings — OIDC", () => {
   });
 
   it("still rejects disabling both classic methods when OIDC is off or unready", async () => {
-    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL, tier: "enterprise" });
     const admin = await registerUser(app, OWNER_EMAIL);
 
     // OIDC entirely off.
@@ -1284,7 +1285,7 @@ describe("/admin/settings — OIDC", () => {
   });
 
   it("rejects turning OIDC off — or clearing its secret — when it's the only sign-in path", async () => {
-    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL, tier: "enterprise" });
     const admin = await registerUser(app, OWNER_EMAIL);
 
     // Establish an SSO-only server (config getters read env live).
@@ -1332,5 +1333,28 @@ describe("/admin/settings — OIDC", () => {
     expect(swap.status).toBe(200);
     expect(swap.data.settings.oidc_enabled).toBe(false);
     expect(swap.data.settings.manual_sign_in).toBe("open");
+  });
+});
+
+describe("OIDC × manual sign-in default", () => {
+  it("turning SSO on closes password self-registration unless open was chosen, and flags an explicit open", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL, tier: "enterprise" });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const on = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { oidc_enabled: true, oidc_issuer: ISSUER, oidc_client_id: CLIENT_ID, oidc_client_secret: CLIENT_SECRET },
+      admin.apiKey,
+    );
+    expect(on.status).toBe(200);
+    expect(on.data.settings.manual_sign_in).toBe("invite-only");
+    expect(on.data.settings.manual_sign_in_open_with_sso).toBe(false);
+
+    const open = await jsonRequest(app, "PATCH", "/admin/settings", { manual_sign_in: "open" }, admin.apiKey);
+    expect(open.status).toBe(200);
+    expect(open.data.settings.manual_sign_in).toBe("open");
+    expect(open.data.settings.manual_sign_in_open_with_sso).toBe(true);
   });
 });

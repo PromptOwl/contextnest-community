@@ -77,6 +77,27 @@ export function assigneesOnBoard(nodes: BoardNode[]): string[] {
     .map(([e]) => e);
 }
 
+/**
+ * Open blockers to badge on a card: the server's count of `blocks` relations
+ * from nodes outside a done column. A card that is itself done shows no badge —
+ * what blocked it no longer matters. 0 = not blocked.
+ */
+export function openBlockers(
+  node: Pick<BoardNode, "open_blockers" | "completed_at">,
+): number {
+  if (node.completed_at) return 0;
+  const n = Number(node.open_blockers ?? 0);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+/** The board's "Hide blocked" quick filter. */
+export function matchesBlockedFilter(
+  node: Pick<BoardNode, "open_blockers" | "completed_at">,
+  hideBlocked: boolean,
+): boolean {
+  return !hideBlocked || openBlockers(node) === 0;
+}
+
 /** Parent id → its sub-items, for the card's sub-item chip. */
 export function subItemsByParent(nodes: BoardNode[]): Map<string, BoardNode[]> {
   const out = new Map<string, BoardNode[]>();

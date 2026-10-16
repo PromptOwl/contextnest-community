@@ -1,6 +1,7 @@
 /**
  * MyWorkPage — My Work (/my-work): the cross-nest review inbox, what you are waiting on, and watcher notifications.
  */
+import { RunLink } from "../../../components/RunLink";
 import { Fragment, useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import * as api from "../../../lib/api";
@@ -25,7 +26,7 @@ import { PageTitle } from "@/components/ui/page-title";
 import { APPROVE_BUTTON_CLASS, REJECT_BUTTON_CLASS } from "@/lib/review-actions-style";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ReasonDialog, ReviewActions } from "../../../components/governance";
-import { DueChip, PriorityIcon } from "../../../components/board/CardParts";
+import { BlockedBadge, DueChip, PriorityIcon } from "../../../components/board/CardParts";
 import { localToday } from "../../../lib/board-tasks";
 
 export default function MyWorkPage() {
@@ -341,6 +342,7 @@ export default function MyWorkPage() {
                     >
                       <PriorityIcon priority={a.priority ?? undefined} />
                       <span className="min-w-0 flex-1 truncate">{a.title}</span>
+                      <BlockedBadge count={a.open_blockers ?? 0} />
                       {a.due && (
                         <DueChip due={a.due} today={localToday()} editable={false} onChange={() => {}} />
                       )}
@@ -568,6 +570,7 @@ export default function MyWorkPage() {
                             {w.reason ? ` · "${w.reason}"` : ""}
                           </span>
                         </button>
+                        <RunLink nestId={w.nest_id} runId={w.run_id} className="shrink-0" />
                         <div className="flex items-center gap-2 shrink-0">
                           {w.type === "access" ? (
                             <>

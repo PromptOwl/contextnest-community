@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
+import { getSessionIdFromRequest } from "./auth/sessions.js";
 import { LinearRouter } from "hono/router/linear-router";
 import { createMiddleware } from "hono/factory";
 import { cors } from "hono/cors";
@@ -7,6 +9,7 @@ import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
 import { boardRoutes } from "./nests/board-routes.js";
+import { fieldRoutes } from "./nests/field-routes.js";
 import { listAssignedTo } from "./nodes/assigned-service.js";
 import { headlessRoutes } from "./nests/headless-routes.js";
 import { countPeople } from "./auth/headless.js";
@@ -43,6 +46,7 @@ import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { pushRoutes } from "./nests/push-routes.js";
 import { hootieRoutes } from "./hootie/routes.js";
+import { verifyModelKey } from "./hootie/model.js";
 import {
   HOOTIE_BRAND_FIELDS,
   changedHootieBrandFields,
@@ -63,6 +67,7 @@ import { scheduleRoutes } from "./workflow/schedule-routes.js";
 import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
+import { messageLogRoutes } from "./notify/message-log-routes.js";
 import { sendTestNotification } from "./notify/dispatch.js";
 import { hookNestRoutes, hookFireRoutes } from "./workflow/hook-routes.js";
 import {
@@ -70,6 +75,9 @@ import {
   markNotificationsRead,
 } from "./governance/notify-service.js";
 import { definitionRoutes } from "./definitions/routes.js";
+import { structureRoutes } from "./structure/routes.js";
+import { ContextNestError } from "@promptowl/contextnest-engine";
+import { forPeople } from "./structure/writes.js";
 import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import {
@@ -165,11 +173,21 @@ import {
   modelProvider,
 } from "./shared/model-credential.js";
 import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "./auth/license-copy.js";
+import { tryConsume } from "./shared/rate-limit.js";
+import { clientIp } from "./shared/request-ip.js";
+import { FREE_TIER_EXCEEDED_MESSAGE, withinFreeTier, writesAllowed } from "./auth/free-tier.js";
 import { SERVICE_VERSION } from "./shared/version.js";
 import { persistSetting } from "./db/settings.js";
 import { posthogKeyError } from "./shared/posthog-key.js";
 import { publicBaseUrlError } from "./shared/public-base-url.js";
-import { isOidcReady } from "./auth/oidc.js";
+import {
+  protectedResourceMetadata,
+  authorizationServerMetadata,
+  mcpChallenge,
+} from "./auth/oauth-metadata.js";
+import { oauthRoutes } from "./auth/oauth-routes.js";
+import { resolveAccessToken } from "./auth/oauth-store.js";
+import { isEnterpriseIssuer, isOidcReady } from "./auth/oidc.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
@@ -276,10 +294,97 @@ function isPublicReadEligiblePath(method: string, path: string): boolean {
   return !/\/(collaborators|visibility|settings|mcp)/.test(path);
 }
 
+/**
+ * Presence of a session cookie, not its value. Kept in one place so the two
+ * middlewares that ask cannot drift; extracting the id is
+ * getSessionIdFromRequest's job.
+ */
+function hasSessionCookie(c: Context<AuthEnv>): boolean {
+  return !!getSessionIdFromRequest(c);
+}
+
+/**
+ * The OAuth challenge on /mcp. Runs ahead of every other auth path.
+ *
+ * An MCP client's first request carries no credential on purpose: it expects a
+ * 401 whose WWW-Authenticate header points at the protected-resource metadata,
+ * and that is the ONLY thing that starts the authorization flow. Claude does
+ * not honour the header on a 200 and treats a tool-level error as a tool
+ * error, so the status and the header have to be exactly this.
+ *
+ * Deliberately narrow:
+ * - Only when a credential is entirely absent. A stale OAuth access token is
+ *   answered by mcpOAuthBearer with `error="invalid_token"`, which tells the
+ *   client to refresh or re-authorize; other bad credentials get the
+ *   ordinary rejection.
+ * - Never in open mode, where there is no credential to ask for.
+ * - Never while MCP_OAUTH_ENABLED is off, so the flag-off behaviour of this
+ *   endpoint is byte-identical to before.
+ */
+const mcpOAuthChallenge = createMiddleware<AuthEnv>(async (c, next) => {
+  if (!config.MCP_OAUTH_ENABLED || config.AUTH_MODE === "open")
+    return next();
+  if (!config.PUBLIC_BASE_URL) return next();
+  const hasAuth = !!c.req.header("Authorization");
+  if (hasAuth || hasSessionCookie(c)) return next();
+  c.header("WWW-Authenticate", mcpChallenge(config.PUBLIC_BASE_URL));
+  return c.json(
+    {
+      error: "Authentication required — authorize this client to continue.",
+      code: "missing_credentials",
+    },
+    401,
+  );
+});
+
+/**
+ * Accept an access token this server issued, and resolve it to its user.
+ *
+ * Runs after the challenge and before the ticket path. A credential that is
+ * not 64 hex is passed through untouched, so `cnst_` keys and MCP tickets keep
+ * working exactly as before. A 64-hex token that does not resolve is one of
+ * ours gone stale, and gets a 401 with `error="invalid_token"`.
+ *
+ * The user id set here is what `buildNestIndex` gates on, which is the whole
+ * point: the caller now arrives as a person rather than as whoever owns a
+ * pasted key.
+ */
+const mcpOAuthBearer = createMiddleware<AuthEnv>(async (c, next) => {
+  const fallThrough = () => flexAuthWithPromptowlTicket(c, next);
+  if (!config.MCP_OAUTH_ENABLED) return fallThrough();
+  const header = c.req.header("Authorization") || "";
+  if (!header.startsWith("Bearer ")) return fallThrough();
+  const token = header.slice("Bearer ".length);
+  // Our access tokens are 64 hex chars and share no prefix with cnst_ keys or
+  // the dotted JWT tickets, so this check costs one lookup at most.
+  if (!/^[0-9a-f]{64}$/.test(token)) return fallThrough();
+
+  const grant = await resolveAccessToken(token);
+  // Expired, revoked, or its user removed. Nothing else is 64 hex, so this is
+  // a stale token of ours: answer with the challenge so the client refreshes
+  // or re-authorizes (MCP authorization spec; RFC 6750 §3.1).
+  if (!grant) {
+    if (config.PUBLIC_BASE_URL)
+      c.header("WWW-Authenticate", mcpChallenge(config.PUBLIC_BASE_URL, "invalid_token"));
+    return c.json(
+      { error: "This connection has expired or was revoked — reconnect to continue.", code: "invalid_token" },
+      401,
+    );
+  }
+
+  c.set("userId", grant.userId);
+  // OAuth grants are never narrowed to one nest: the whole point is that one
+  // connection reads across everything the person can see.
+  c.set("nestScope", null);
+  // What the person actually consented to. Enforced at tool dispatch — a
+  // consent screen that says "read" while write tools still work is a lie.
+  c.set("oauthScope", grant.scope.split(" ").filter(Boolean));
+  return next();
+});
+
 const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   const hasBearer = c.req.header("Authorization")?.startsWith("Bearer cnst_");
-  const hasCookie = !!c.req.header("Cookie")?.includes("cnst_session=");
-  if (hasBearer || hasCookie) {
+  if (hasBearer || hasSessionCookie(c)) {
     return authMiddleware(c, next);
   }
 
@@ -570,6 +675,8 @@ export function createApp(): Hono<AuthEnv> {
       service: "contextnest-community",
       version: SERVICE_VERSION,
       auth_mode: config.AUTH_MODE,
+      // Lets a client know this server can run the OAuth flow before it tries.
+      mcp_oauth_enabled: config.MCP_OAUTH_ENABLED,
       logo_url: config.LOGO_URL,
       // Presence only, never the value: lets the UI stop prompting for a
       // runner key once runs have a credential (own key or PromptOwl's).
@@ -654,17 +761,16 @@ export function createApp(): Hono<AuthEnv> {
     });
   });
 
-  // Admin-features gate: teammate management and governance routes are
-  // blocked until a valid license is installed. Login/register/device/
-  // promptowl/admin-status stay public so users can sign in and reach
-  // the setup flow.
+  // Admin-features gate: teammate management is blocked until a valid
+  // license is installed, unless the server is within the Free tier.
+  // Login/register/device/promptowl/admin-status stay public so users can
+  // sign in and reach the setup flow.
   app.use("/auth/invite", async (c, next) => {
-    if (!getCurrentLicense()?.valid) {
+    if (!getCurrentLicense()?.valid && !(await withinFreeTier())) {
       return c.json(
         {
           error: "License required",
-          reason:
-            "Install a valid PromptOwl license key before inviting teammates.",
+          reason: FREE_TIER_EXCEEDED_MESSAGE,
         },
         503,
       );
@@ -672,12 +778,11 @@ export function createApp(): Hono<AuthEnv> {
     return next();
   });
   app.use("/auth/teammates", async (c, next) => {
-    if (!getCurrentLicense()?.valid) {
+    if (!getCurrentLicense()?.valid && !(await withinFreeTier())) {
       return c.json(
         {
           error: "License required",
-          reason:
-            "Install a valid PromptOwl license key to view teammates.",
+          reason: FREE_TIER_EXCEEDED_MESSAGE,
         },
         503,
       );
@@ -828,6 +933,9 @@ export function createApp(): Hono<AuthEnv> {
   const currentServerSettings = () => ({
     promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
     manual_sign_in: config.MANUAL_SIGN_IN,
+    // True while password self-registration is open alongside live SSO —
+    // the Settings page shows a warning on the Manual sign-in card.
+    manual_sign_in_open_with_sso: config.MANUAL_SIGN_IN_OPEN_WITH_SSO,
     community_name: config.COMMUNITY_NAME,
     logo_url: config.LOGO_URL,
     telemetry_enabled: config.TELEMETRY_ENABLED,
@@ -853,11 +961,22 @@ export function createApp(): Hono<AuthEnv> {
     byok_available: hasEntitlement("byok"),
     // Own-provider keys PromptOwl holds for this licence (masked tails only).
     own_providers: hasEntitlement("byok") ? getOwnGateway()?.providers ?? {} : {},
+    // The server's own model gateway (byok): URL + key used as a pair, ahead of
+    // PromptOwl's gateway. The key is NEVER returned — masked tail only.
+    anthropic_base_url: config.ANTHROPIC_BASE_URL,
+    anthropic_api_key_masked: process.env.ANTHROPIC_API_KEY
+      ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
+      : null,
+    // Which key Hootie's calls use: own (the server's gateway) or promptowl (credits).
+    model_source: resolveModelCredential()?.source ?? null,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     metacognition_enabled: config.FEATURE_METACOGNITION,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
+    message_log_retention_days: config.MESSAGE_LOG_RETENTION_DAYS,
+    message_log_store_bodies: config.MESSAGE_LOG_STORE_BODIES,
+    run_retention_days: config.RUN_RETENTION_DAYS,
     // OIDC SSO. The client secret is WRITE-ONLY: only its presence is
     // reported, never the value.
     oidc_enabled: config.OIDC_ENABLED,
@@ -867,9 +986,12 @@ export function createApp(): Hono<AuthEnv> {
     oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
     oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
+    // Enterprise identity providers allowed (licence feature sso). Google is on every plan.
+    sso_available: hasEntitlement("sso"),
     nest_creation: config.NEST_CREATION,
     people_suggest_all_users: config.PEOPLE_SUGGEST_ALL_USERS,
     shared_deployment: config.SHARED_DEPLOYMENT,
+    mcp_oauth_enabled: config.MCP_OAUTH_ENABLED,
     // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
     // presence is reported, never the value (same discipline as the OIDC secret).
     sso_token_exchange_enabled: config.SSO_TOKEN_EXCHANGE_ENABLED,
@@ -913,7 +1035,9 @@ export function createApp(): Hono<AuthEnv> {
       return c.json({ error: "Only the server admin can view this." }, 403);
     const credential = resolveModelCredential();
     const current = hootieModel(credential);
-    const own = hasEntitlement("byok") ? getOwnGateway()?.models ?? [] : [];
+    // On the server's own gateway every call stays there, so PromptOwl-held
+    // own-provider models aren't offered.
+    const own = hasEntitlement("byok") && credential?.source !== "own" ? getOwnGateway()?.models ?? [] : [];
     // `providers`: name → provider, read before PromptOwl's prefix comes off,
     // so the picker can group the list (OpenAI, Anthropic, …).
     const reply = (ids: string[], names: string[], extra: Record<string, unknown> = {}) => {
@@ -956,6 +1080,37 @@ export function createApp(): Hono<AuthEnv> {
     const result = await sendTestNotification(body.channel);
     return result.ok ? c.json({ ok: true }) : c.json({ error: result.error }, 502);
   });
+
+  // Network & status (Settings → Network & status). Admin-only, secret-free:
+  // see src/ops/status.ts. The probes only ever dial hosts derived from this
+  // server's own config (never a URL from the request), are rate-limited, and
+  // never follow redirects.
+  app.use("/admin/status", flexAuthMiddleware);
+  app.use("/admin/status/*", flexAuthMiddleware);
+  const OPS_PROBE_LIMIT = { max: 10, windowMs: 60_000 };
+  const opsProbeAllowed = (c: any) =>
+    tryConsume(`ops-probe:${c.get("userId") ?? clientIp(c)}`, OPS_PROBE_LIMIT);
+
+  app.get("/admin/status", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const { buildStatusReport } = await import("./ops/status.js");
+    return c.json(await buildStatusReport(c.req.url, (name) => c.req.header(name)));
+  });
+
+  for (const [path, run] of [
+    ["egress", async () => (await import("./ops/egress.js")).runEgressChecks()],
+    ["inbound", async () => (await import("./ops/egress.js")).runInboundCheck()],
+    ["oidc-discovery", async () => (await import("./ops/egress.js")).runOidcDiscoveryCheck()],
+  ] as const) {
+    app.post(`/admin/status/${path}`, async (c) => {
+      if (!(await serverAdminAllowed(c)))
+        return c.json({ error: "Only the server admin can do this." }, 403);
+      if (!opsProbeAllowed(c))
+        return c.json({ error: "Too many checks — wait a minute and try again." }, 429);
+      return c.json(await run());
+    });
+  }
 
   app.patch("/admin/settings", async (c) => {
     if (!(await serverAdminAllowed(c)))
@@ -1007,7 +1162,10 @@ export function createApp(): Hono<AuthEnv> {
         : null;
     if (
       !hasEntitlement("byok") &&
-      Object.values(providerKeysIn ?? {}).some((v) => String(v ?? "").trim() !== "")
+      ((["anthropic_api_key", "anthropic_base_url"] as const).some(
+        (f) => f in body && String(body[f] ?? "").trim() !== "",
+      ) ||
+        Object.values(providerKeysIn ?? {}).some((v) => String(v ?? "").trim() !== ""))
     ) {
       return c.json(
         {
@@ -1018,6 +1176,26 @@ export function createApp(): Hono<AuthEnv> {
         },
         403,
       );
+    }
+
+    // Enterprise IdPs (Entra, Okta, custom OIDC): Enterprise only (licence
+    // feature sso). Only switching to one or turning it on is refused, so a
+    // server already on one keeps signing in. Google is on every plan.
+    if (!hasEntitlement("sso")) {
+      const issuer =
+        "oidc_issuer" in body ? String(body.oidc_issuer ?? "").trim().replace(/\/$/, "") : config.OIDC_ISSUER;
+      const turningOn = "oidc_enabled" in body && !!body.oidc_enabled && !config.OIDC_ENABLED;
+      if (isEnterpriseIssuer(issuer) && (issuer !== config.OIDC_ISSUER || turningOn)) {
+        return c.json(
+          {
+            error:
+              "Single sign-on with Entra ID, Okta or another identity provider is an Enterprise feature. Google sign-in works on every plan.",
+            code: "sso_required",
+            settings: currentServerSettings(),
+          },
+          403,
+        );
+      }
     }
 
     if ("promptowl_sign_in_gate" in body) {
@@ -1121,6 +1299,58 @@ export function createApp(): Hono<AuthEnv> {
     }
     // Name, logo, accent colour, greeting (enterprise — gated above).
     pending.push(...validateHootieBrandFields(body, addError));
+    // The server's own model gateway (byok, gated above): an http(s) URL with
+    // no trailing slash, so the SDK joins /v1/messages onto it; empty clears.
+    if ("anthropic_base_url" in body) {
+      const v = String(body.anthropic_base_url ?? "").trim().replace(/\/$/, "");
+      if (!v) {
+        // The key goes with it: left alone, a bare key would be handed to
+        // PromptOwl's gateway at the next boot (moveStoredAnthropicKey).
+        pending.push({ name: "ANTHROPIC_BASE_URL", value: null });
+        // Only a key that WAS paired with a URL: a bare key waits for hand-over.
+        if (config.ANTHROPIC_BASE_URL && !("anthropic_api_key" in body))
+          pending.push({ name: "ANTHROPIC_API_KEY", value: null });
+      } else {
+        let ok = false;
+        try {
+          const u = new URL(v);
+          ok = (u.protocol === "http:" || u.protocol === "https:") && !!u.host;
+        } catch {
+          ok = false;
+        }
+        if (!ok)
+          addError(
+            "anthropic_base_url",
+            "Model gateway URL must be an http(s) URL, e.g. http://litellm:4000 — or empty to turn it off.",
+          );
+        else if (v !== config.ANTHROPIC_BASE_URL && process.env.ANTHROPIC_API_KEY && !("anthropic_api_key" in body))
+          // The stored key is write-only: never send it to a host it wasn't checked against.
+          addError("anthropic_api_key", "Paste the gateway key again: a new gateway URL needs its key re-entered.");
+        else pending.push({ name: "ANTHROPIC_BASE_URL", value: v });
+      }
+    }
+    // The gateway's key (a LiteLLM virtual key, or an Anthropic key behind a
+    // proxy). Any non-empty string: gateways mint their own formats. Checked
+    // against the gateway THIS patch leaves in place before it is saved.
+    if ("anthropic_api_key" in body) {
+      const v = body.anthropic_api_key;
+      if (v === null || v === "") {
+        pending.push({ name: "ANTHROPIC_API_KEY", value: null });
+      } else if (typeof v !== "string" || !v.trim() || /\s/.test(v.trim()) || v.trim().length > 512) {
+        addError("anthropic_api_key", "Gateway key must be a single token with no spaces, up to 512 characters (or empty to clear it).");
+      } else {
+        const key = v.trim();
+        const patchedBase = pending.find((p) => p.name === "ANTHROPIC_BASE_URL");
+        const baseUrl = patchedBase ? patchedBase.value : config.ANTHROPIC_BASE_URL || null;
+        if (!baseUrl) {
+          addError("anthropic_api_key", "Set the model gateway URL too: the key is only used with it.");
+        } else {
+          const rejected = await verifyModelKey(key, baseUrl);
+          if (rejected) addError("anthropic_api_key", rejected);
+          else pending.push({ name: "ANTHROPIC_API_KEY", value: key });
+        }
+      }
+    }
     // Own-provider keys (byok): checked and stored by PromptOwl, in LiteLLM
     // only — sent after every other field validates, never kept here.
     const providerKeys: Array<[string, string | null]> = [];
@@ -1205,6 +1435,40 @@ export function createApp(): Hono<AuthEnv> {
         if (!Number.isInteger(n) || n < 0 || n > 3650)
           addError("trace_retention_days", "Trace retention must be a whole number of days between 0 and 3650 (0 keeps activity forever).");
         else pending.push({ name: "TRACE_RETENTION_DAYS", value: String(n) });
+      }
+    }
+    // Message-log retention (outbound_messages). Same [0, 3650] range as the
+    // getter; 0 keeps messages forever, null clears → default (30).
+    if ("message_log_retention_days" in body) {
+      const v = body.message_log_retention_days;
+      if (v === null || v === "") {
+        pending.push({ name: "MESSAGE_LOG_RETENTION_DAYS", value: null });
+      } else {
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 0 || n > 3650)
+          addError("message_log_retention_days", "Message log retention must be a whole number of days between 0 and 3650 (0 keeps messages forever).");
+        else pending.push({ name: "MESSAGE_LOG_RETENTION_DAYS", value: String(n) });
+      }
+    }
+    // Store redacted bodies (default on). Off persists "false"; on clears to
+    // the default so an unset env stays the source of truth.
+    if ("message_log_store_bodies" in body) {
+      pending.push({
+        name: "MESSAGE_LOG_STORE_BODIES",
+        value: body.message_log_store_bodies ? null : "false",
+      });
+    }
+    // Agent-run retention in days. Same [0, 3650] range as the config getter.
+    // 0 = keep every run (the default). null clears → default (0).
+    if ("run_retention_days" in body) {
+      const v = body.run_retention_days;
+      if (v === null || v === "") {
+        pending.push({ name: "RUN_RETENTION_DAYS", value: null });
+      } else {
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 0 || n > 3650)
+          addError("run_retention_days", "Run retention must be a whole number of days between 0 and 3650 (0 keeps every run).");
+        else pending.push({ name: "RUN_RETENTION_DAYS", value: String(n) });
       }
     }
     // ── OIDC SSO ──
@@ -1298,6 +1562,29 @@ export function createApp(): Hono<AuthEnv> {
         name: "SHARED_DEPLOYMENT",
         value: body.shared_deployment ? "true" : null,
       });
+    }
+    // MCP OAuth authorization server. Turning it on without a canonical base
+    // URL produces metadata that cannot be correct — `resource` has to equal
+    // the URL the user types into their client — so the feature would be on
+    // and silently broken. Refuse the combination with a reason instead of
+    // letting an admin discover it through a failing connector. The base URL
+    // may be set in this same PATCH, so read the pending value first.
+    if ("mcp_oauth_enabled" in body) {
+      const turningOn = !!body.mcp_oauth_enabled;
+      const pendingBase = pending.find((p) => p.name === "PUBLIC_BASE_URL");
+      const baseAfter =
+        pendingBase !== undefined ? pendingBase.value : config.PUBLIC_BASE_URL;
+      if (turningOn && !baseAfter) {
+        addError(
+          "mcp_oauth_enabled",
+          "Set the public base URL first — OAuth metadata must name this server's canonical address, and a guessed one silently fails the client's check.",
+        );
+      } else {
+        pending.push({
+          name: "MCP_OAUTH_ENABLED",
+          value: turningOn ? "true" : null,
+        });
+      }
     }
     // ── Agent SSO / token-exchange (POST /auth/token-exchange) ────────────
     // Default-off toggles persist "false" as null (unset already = off). The
@@ -1826,6 +2113,14 @@ export function createApp(): Hono<AuthEnv> {
   app.use("/admin/community-sites/*", flexAuthMiddleware);
   app.route("/admin/community-sites", communitySiteRoutes);
 
+  // ─── /admin/messages — superadmin message log ────────────────────────────
+  // Every message the server sent, redacted. Superadmin ONLY (never open
+  // mode, never nest admins); every read is audited. See
+  // notify/message-log-routes.ts.
+  app.use("/admin/messages", flexAuthMiddleware);
+  app.use("/admin/messages/*", flexAuthMiddleware);
+  app.route("/admin/messages", messageLogRoutes);
+
   // GET /stats — dashboard summary counts: nests visible to caller,
   // documents across those nests, total users on the server. Uses
   // ─── My Work — cross-nest inbox of things that need this person ──────────
@@ -1890,6 +2185,8 @@ export function createApp(): Hono<AuthEnv> {
       requested_by: r.requestedBy,
       requested_at: r.requestedAt,
       priority: r.priority,
+      // Filed by an agent run (migration 060): the inbox links to its trace.
+      run_id: r.runId ?? null,
     });
     // Deletion flags ride the same inbox, as a second item type: `reason` and
     // `request_id` are the extra fields resolving one needs.
@@ -1948,6 +2245,7 @@ export function createApp(): Hono<AuthEnv> {
       request_id: r.id,
       target_type: r.target_type,
       level: r.level,
+      run_id: r.run_id ?? null,
     });
     type WorkItem =
       | ReturnType<typeof toItem>
@@ -2280,9 +2578,13 @@ export function createApp(): Hono<AuthEnv> {
   // OUTSIDE the /nests auth chain so /p/<slug> is reachable with no account
   // (public mode) or behind its own gate (email/code/invite).
   app.route("/p", publishRenderRoutes);
-  app.use("/index", flexAuthWithPromptowlTicket);
+  // Same three-way auth as /mcp: an OAuth access token, an MCP ticket, or a
+  // cnst_ key. /index is the grounded nest list the MCP tools read from, so a
+  // token that works on one must work on the other.
+  app.use("/index", mcpOAuthBearer);
   app.route("/index", nestIndexRoutes);
-  app.use("/mcp", flexAuthWithPromptowlTicket);
+  app.use("/mcp", mcpOAuthChallenge);
+  app.use("/mcp", mcpOAuthBearer);
   app.route("/mcp", serverMcpRoutes);
 
   // === All /nests routes ===
@@ -2311,8 +2613,10 @@ export function createApp(): Hono<AuthEnv> {
   });
 
   // Why a write is refused on a read-only server — suspended by PromptOwl, or
-  // no valid license — worded for who asked: admins get the reason and who to
-  // talk to, everyone else one neutral line. null = writes are allowed.
+  // no valid license past the Free tier — worded for who asked: admins get the
+  // reason and who to talk to, everyone else one neutral line. null = writes
+  // are allowed (licensed, or unlicensed with FREE_TIER_MAX_USERS or fewer
+  // people; see writesAllowed in auth/free-tier.ts).
   const readOnlyDenial = async (
     userId: string,
   ): Promise<{ error: string; extra: Record<string, unknown> } | null> => {
@@ -2329,8 +2633,8 @@ export function createApp(): Hono<AuthEnv> {
         },
       };
     }
+    if (await writesAllowed()) return null;
     const lic = getCurrentLicense();
-    if (lic?.valid) return null;
     if (!(await admin())) return { error: NEUTRAL_READ_ONLY, extra: { read_only: true } };
     // licenseTerms carries the machine reason code; expose it as
     // license_reason so it doesn't clobber the human-readable reason.
@@ -2343,7 +2647,7 @@ export function createApp(): Hono<AuthEnv> {
         reason:
           lic?.reason === "expired"
             ? "This server's PromptOwl license has ended, so it is read-only until it is renewed. Nothing has been deleted."
-            : "This server has no valid PromptOwl license installed. Ask the server admin to install one via the setup screen or POST /license/install.",
+            : FREE_TIER_EXCEEDED_MESSAGE,
         setup_url: "/setup",
       },
     };
@@ -2442,7 +2746,8 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     // License gate: block writes until a valid PromptOwl key is
-    // installed via /license/install. Reads stay open for plain
+    // installed via /license/install — unless the server is within the Free
+    // tier (readOnlyDenial → writesAllowed). Reads stay open for plain
     // node/nest browsing — but governance endpoints (stewards,
     // review-queue, approve/reject, version history, capability
     // checks) are admin features and stay locked regardless of HTTP
@@ -2458,7 +2763,8 @@ export function createApp(): Hono<AuthEnv> {
       const isCommentPath =
         /\/comments$/.test(path) ||
         /\/comments\/[^/]+\/resolve$/.test(path);
-      const isActivityPath = /\/activity$/.test(path);
+      // The task log is a slice of the same timeline.
+      const isActivityPath = /\/(activity|task-log)$/.test(path);
       // The activity feed serves the review queue's rows under another URL
       // (/nests/:id/feed?filter=changes), so it must sit behind the same
       // license gate as /review-queue. Match the exact nest-scoped route
@@ -2570,6 +2876,11 @@ export function createApp(): Hono<AuthEnv> {
     const isReadQuery =
       parts.length === 2 &&
       ["context", "query", "search", "export", "chat"].includes(parts[1]);
+    // Checking a title or folder against the structure rules reads, never
+    // writes: viewers check names in the new-document form. The handler asks
+    // for owner/admin itself when the body carries draft rules.
+    const isStructureCheck =
+      parts.length === 3 && parts[1] === "structure" && parts[2] === "check";
 
     // MCP transport is read-tier (isMcpTransport, declared above with the
     // deny helper): the Streamable HTTP protocol is ALWAYS POST — even
@@ -2629,7 +2940,7 @@ export function createApp(): Hono<AuthEnv> {
         // half of that same rule.
         grantNestVisible = access.hasGrant;
       } else if (
-        parts[1] === "definitions" &&
+        (parts[1] === "definitions" || parts[1] === "fields") &&
         parts.length === 2 &&
         c.req.method === "GET"
       ) {
@@ -2735,6 +3046,15 @@ export function createApp(): Hono<AuthEnv> {
     // the handler for anyone but the owner, a nest admin or the server admin.
     // Exact resource segment, so a node slugged "access-requests" stays a node.
     const isAccessRequestAction = parts[1] === "access-requests";
+    // Custom field definitions: a nest-wide reviewer steward may define them
+    // while holding only read collaborator access, so writes are admitted at
+    // read tier and gated in the handler (assertCanManageFields), which also
+    // refuses an archived nest. Exact resource segment.
+    // ANY route added under /fields inherits this bypass — every handler in
+    // src/nests/field-routes.ts must call assertCanManageFields itself
+    // (test/custom-fields.test.ts pins read collaborators, editor stewards
+    // and tag-scoped reviewers at 403).
+    const isFieldDefinitionAction = parts[1] === "fields";
     // isNestLifecycleAction (archive/restore) is defined above, next to
     // isMcpTransport — the open-mode branch needs it too, and that branch runs
     // before this point.
@@ -2821,10 +3141,12 @@ export function createApp(): Hono<AuthEnv> {
       !isCommentAction &&
       !isDeletionRequestAction &&
       !isAccessRequestAction &&
+      !isFieldDefinitionAction &&
       !isNestLifecycleAction &&
       !isPinAction &&
       !isAnnotationAction &&
       !isReadQuery &&
+      !isStructureCheck &&
       !isMcpTransport
     ) {
       required = "write";
@@ -3101,6 +3423,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/publications", publishRoutes);
   nestsApp.route("/:nestId/teams", nestTeamRoutes);
   nestsApp.route("/:nestId/boards", boardRoutes);
+  nestsApp.route("/:nestId/fields", fieldRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);
@@ -3111,6 +3434,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/connectors", connectorRoutes);
   nestsApp.route("/:nestId/hooks", hookNestRoutes);
   nestsApp.route("/:nestId/definitions", definitionRoutes);
+  nestsApp.route("/:nestId/structure", structureRoutes);
   nestsApp.route("/:nestId/assets", assetRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
 
@@ -3122,6 +3446,36 @@ export function createApp(): Hono<AuthEnv> {
   // `Unexpected token '<', "<!DOCTYPE "...` instead of falling back cleanly.
   // This server authenticates with Bearer cnst_ keys, not OAuth — no metadata
   // to serve, so 404 is the correct answer.
+  // OAuth discovery, served ONLY when the MCP authorization server is turned
+  // on. Registered ahead of the blanket 404 below so that with the flag off
+  // this whole surface is indistinguishable from before.
+  //
+  // PUBLIC_BASE_URL is required rather than guessed: `resource` has to equal
+  // the URL the user typed into their client, and a value derived from the
+  // request Host is both spoofable and wrong behind a proxy. 503 (not 404)
+  // because the feature is configured-but-unusable, which is an operator
+  // problem worth surfacing, not a missing endpoint.
+  app.get("/.well-known/oauth-protected-resource/mcp", (c) => {
+    if (!config.MCP_OAUTH_ENABLED) return c.json({ error: "Not found" }, 404);
+    if (!config.PUBLIC_BASE_URL)
+      return c.json(
+        { error: "PUBLIC_BASE_URL must be set to serve OAuth metadata" },
+        503,
+      );
+    return c.json(protectedResourceMetadata(config.PUBLIC_BASE_URL));
+  });
+  app.get("/.well-known/oauth-authorization-server", (c) => {
+    if (!config.MCP_OAUTH_ENABLED) return c.json({ error: "Not found" }, 404);
+    if (!config.PUBLIC_BASE_URL)
+      return c.json(
+        { error: "PUBLIC_BASE_URL must be set to serve OAuth metadata" },
+        503,
+      );
+    return c.json(authorizationServerMetadata(config.PUBLIC_BASE_URL));
+  });
+
+  app.route("/oauth", oauthRoutes);
+
   app.all("/.well-known/*", (c) => c.json({ error: "Not found" }, 404));
 
   // ─── Dashboard UI (static files served from the bundled dist/web3 dir) ──
@@ -3191,6 +3545,13 @@ export function createApp(): Hono<AuthEnv> {
     const e = err as { code?: string; message?: string };
     const code = e.code;
     const msg = e.message || "";
+
+    // The engine refusing a write it judges invalid — a structure rule the
+    // document breaks, a reserved path — is the caller's to fix: a 400 with
+    // the engine's message (it names the rule), never an opaque 500.
+    if (code === "VALIDATION_FAILED" && err instanceof ContextNestError) {
+      return c.json({ error: forPeople(msg) }, 400);
+    }
 
     // SQLite constraint errors — surface a clear conflict instead of 500.
     if (code === "SQLITE_CONSTRAINT_UNIQUE") {

@@ -24,7 +24,24 @@ import {
   permissionLevel,
 } from "../shared/access.js";
 import { isStewardshipEnabled } from "../nests/service.js";
-import { VaultBusyError, isVaultLockTimeout } from "../shared/errors.js";
+import {
+  VaultBusyError,
+  isVaultLockTimeout,
+  ForbiddenError,
+  NotFoundError,
+  ValidationError,
+  ConflictError,
+} from "../shared/errors.js";
+import { listBoards } from "../nests/board-service.js";
+import { listBoardItems } from "../nests/board-items.js";
+import { bulkUpdateNodes } from "../nodes/bulk-update.js";
+import {
+  addRelation,
+  callerCanRead,
+  listRelations,
+  relationsProse,
+  removeRelation,
+} from "../nodes/relations.js";
 import { engineApi, opContext } from "../nodes/engine.js";
 import { addCollaborator } from "../nests/sharing-service.js";
 import { holdWriteIfGated } from "../nests/push-confirmation-service.js";
@@ -36,10 +53,7 @@ import {
   setThreadStatus,
   syncAnnotationsNode,
 } from "../annotations/service.js";
-import {
-  notifyCommentMentions,
-  notifyCommentReply,
-} from "../governance/mention-notify.js";
+import { notifyComment } from "../governance/mention-notify.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
@@ -56,10 +70,33 @@ import {
   getNodeForCaller,
   isIdUnderFolder,
   isDerivedAnnotationsNode,
+  fieldsOfRaw,
 } from "../nodes/service.js";
 import { deleteNest, archiveNest } from "../nests/service.js";
+import {
+  addComputedFields,
+  createFieldDefinition,
+  deleteFieldDefinition,
+  describeFields,
+  listFieldDefinitionEvents,
+  listFieldDefinitions,
+  nodesWithInvalidValues,
+  storedFieldsOf,
+  updateFieldDefinition,
+  type FieldDefinition,
+} from "../nodes/custom-fields.js";
+import { readIndexedNodes } from "../nodes/node-index.js";
+import { AppError } from "../shared/errors.js";
 import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
+import {
+  parseTaskFieldsFilter,
+  settableTaskFields,
+  taskFieldsFromInput,
+  type TaskFieldsPatch,
+} from "../nodes/task-fields.js";
+import { logTaskInteraction } from "../nodes/task-log.js";
+import { describeTaskActivity } from "../nodes/task-activity.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
 import { recordNodeAccess, type AccessAction } from "../governance/access-log.js";
@@ -152,6 +189,47 @@ function toolError(
   extra?: Record<string, unknown>,
 ): ToolResult {
   return { text, isError: true, data: { ...extra, code, message: text } };
+}
+
+/** A field definition write's AppError → a typed tool error. */
+function fieldToolError(err: unknown): ToolResult {
+  if (!(err instanceof AppError)) throw err;
+  const code =
+    err.statusCode === 403
+      ? "UNAUTHORIZED_ACTION"
+      : err.statusCode === 404
+        ? "DOCUMENT_NOT_FOUND"
+        : "VALIDATION_FAILED";
+  return toolError(err.message, code);
+}
+
+/** A field definition, for prose. */
+function describeDefinition(d: FieldDefinition): string {
+  const bits = [d.type + (d.unit ? ` (${d.unit})` : "")];
+  if (d.options.length) bits.push(`options: ${d.options.join(", ")}`);
+  if (d.required) bits.push("required");
+  if (d.default_value !== null && d.default_value !== undefined) {
+    bits.push(`default: ${Array.isArray(d.default_value) ? d.default_value.join(", ") : String(d.default_value)}`);
+  }
+  bits.push(`applies to: ${d.applies_to.join(", ")}`);
+  if (d.type === "time_in_status") bits.push("computed, read-only");
+  return `- **${d.label}** \`${d.key}\` — ${bits.join(" · ")}`;
+}
+
+/** Stored + computed field values for a node, or undefined when it has none. */
+function nodeFieldValues(
+  node: { type?: string; metadata?: unknown; moved_at?: string; created_at?: string },
+  defs: FieldDefinition[],
+): Record<string, unknown> | undefined {
+  const stored = storedFieldsOf(node.metadata);
+  const [withComputed] = addComputedFields(
+    [{ type: node.type, fields: stored, moved_at: node.moved_at, created_at: node.created_at }],
+    defs,
+  );
+  const known = Object.fromEntries(
+    Object.entries(withComputed.fields ?? {}).filter(([k]) => defs.some((d) => d.key === k)),
+  );
+  return Object.keys(known).length > 0 ? known : undefined;
 }
 
 /**
@@ -285,6 +363,36 @@ export interface McpToolContext {
   servedVersions?: Map<string, number>;
 }
 
+/**
+ * The board fields a task carries (src/nodes/task-fields.ts), as tool
+ * properties. Shared by context_create and context_update so both advertise
+ * the same contract REST enforces: assignee must be on the roster, due is a
+ * calendar date, priority is one of four levels, parent is a node in this nest.
+ * `null` (or "") clears a field on update. Typed as string|null, which the
+ * shape builders in routes.ts / server-routes.ts read as "any" — the handler
+ * validates with the same parser REST uses.
+ */
+const TASK_FIELD_PROPERTIES = {
+  assignee: {
+    type: ["string", "null"],
+    description:
+      "Email of the person this is assigned to. Must already be on the nest's roster (owner or collaborator) — share the nest first. null or \"\" unassigns.",
+  },
+  due: {
+    type: ["string", "null"],
+    description: 'Due date, YYYY-MM-DD (e.g. "2026-10-31"). null or "" clears it.',
+  },
+  priority: {
+    type: ["string", "null"],
+    description: 'One of "urgent", "high", "medium", "low". null or "" clears it.',
+  },
+  parent: {
+    type: ["string", "null"],
+    description:
+      'Id of the parent node in this nest (e.g. "nodes/launch") — makes this a sub-item. Cycles are refused. null or "" clears it.',
+  },
+};
+
 export const TOOL_DEFINITIONS = [
   {
     name: "context_init",
@@ -365,7 +473,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_list",
     description:
-      "Browse vault contents with optional type, tag, status, or limit filters.",
+      "Browse vault contents with optional type, tag, status, assignee, priority, due_before, or limit filters. Tasks report assignee / due / priority / parent.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -384,7 +492,25 @@ export const TOOL_DEFINITIONS = [
           description:
             "Return only nodes with an approved version, each served at that version rather than the live file — the view a public nest gives a stranger.",
         },
+        assignee: {
+          type: "string",
+          description:
+            'Only nodes assigned to this email ("none" = unassigned). Each listed node reports its assignee, due, priority and parent when set.',
+        },
+        priority: {
+          type: "string",
+          description: 'Only nodes with this priority: urgent | high | medium | low | none.',
+        },
+        due_before: {
+          type: "string",
+          description: "Only nodes due on or before this date (YYYY-MM-DD). Nodes with no due date are left out.",
+        },
         limit: { type: "number", description: "Max nodes to return" },
+        fields: {
+          type: "object",
+          description:
+            'Filter by custom fields, field key → value; every entry must match. select/user/date/url/number match exactly (case-insensitive), multi_select matches when the option is one of its values, text matches a substring, checkbox takes true/false (unset counts as false), and "none" matches an unset field. E.g. {"severity": "high", "blocked": true}.',
+        },
       },
     },
   },
@@ -479,10 +605,60 @@ export const TOOL_DEFINITIONS = [
       required: ["thread"],
     },
   },
+  // Task relations (src/nodes/relations.ts) — the MCP half of the task
+  // Relations panel. Not engine operations: they live in this repo's edges
+  // table, like comments live in its annotation store.
+  {
+    name: "context_relations",
+    description:
+      "List a task's relations — what it blocks, what blocks it (blocked_by), related tasks (relates_to), and duplicates — by title or ID. Says whether the task is blocked (an open blocker is one not in a done column). Related documents you can't read are counted as hidden, never named.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the task" },
+        id: { type: "string", description: "ID of the task" },
+      },
+    },
+  },
+  {
+    name: "context_add_relation",
+    description:
+      "Relate a task to another document in the same nest. `type` is blocks | blocked_by | relates_to | duplicates | duplicated_by, read from the task's side (\"this task blocks <node>\"). blocked_by is the inverse view of blocks, not a separate link. Refuses self-relations, duplicates, and a blocks link that would make a loop. Needs edit access to the task.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the task" },
+        id: { type: "string", description: "ID of the task" },
+        type: {
+          type: "string",
+          description: "blocks | blocked_by | relates_to | duplicates | duplicated_by",
+        },
+        node: {
+          type: "string",
+          description: 'ID of the other document (e.g. "nodes/ship-the-api")',
+        },
+      },
+      required: ["type", "node"],
+    },
+  },
+  {
+    name: "context_remove_relation",
+    description:
+      "Remove one of a task's relations by its relation id (from context_relations or context_get). Needs edit access to the task.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the task" },
+        id: { type: "string", description: "ID of the task" },
+        relation: { type: "string", description: "Relation id" },
+      },
+      required: ["relation"],
+    },
+  },
   {
     name: "context_create",
     description:
-      "Create a new knowledge node in the vault. The title must not already be in use — these tools resolve documents by title, so a duplicate is refused rather than filed as an unreachable twin. To change an existing document use context_update; to refile it use context_move.",
+      "Create a new knowledge node in the vault (type \"task\" for a board task; any node may carry assignee/due/priority/parent). The title must not already be in use — these tools resolve documents by title, so a duplicate is refused rather than filed as an unreachable twin. To change an existing document use context_update; to refile it use context_move.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -507,6 +683,12 @@ export const TOOL_DEFINITIONS = [
           description:
             'Folder path under nodes/ (e.g. "gtm/deals"); segments are slugified. A leading "nodes/" is accepted and not doubled, so "nodes/gtm/deals" and "gtm/deals" mean the same folder.',
         },
+        ...TASK_FIELD_PROPERTIES,
+        fields: {
+          type: "object",
+          description:
+            "Custom field values, field key → value (see context_fields for this nest's fields and their types). Validated against the definitions: select takes one option, multi_select a list of options, user an email on the nest, date YYYY-MM-DD, url an http(s) URL, checkbox true/false, number a number. null clears a field. Computed fields (time in status) can't be set.",
+        },
       },
       required: ["title", "content"],
     },
@@ -514,7 +696,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_update",
     description:
-      "Update an existing node — replace or append content, set tags, move it through its lifecycle. Whether the edit publishes is decided by this nest's stewardship rules, not by the caller.",
+      "Update an existing node — replace or append content, set tags, set task fields (assignee, due, priority, parent), move it through its lifecycle. Whether the edit publishes is decided by this nest's stewardship rules, not by the caller.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -549,6 +731,12 @@ export const TOOL_DEFINITIONS = [
         changeNote: {
           type: "string",
           description: "Why this changed — recorded in version history",
+        },
+        ...TASK_FIELD_PROPERTIES,
+        fields: {
+          type: "object",
+          description:
+            "Custom field values, field key → value (see context_fields for this nest's fields and their types). Validated against the definitions: select takes one option, multi_select a list of options, user an email on the nest, date YYYY-MM-DD, url an http(s) URL, checkbox true/false, number a number. null clears a field; keys you leave out are untouched. Computed fields (time in status) can't be set.",
         },
       },
       // Neither is required alone — one of them is (the engine catalog's
@@ -603,6 +791,193 @@ export const TOOL_DEFINITIONS = [
         },
       },
       required: ["folder"],
+    },
+  },
+
+  // ─── Boards & bulk edit ─────────────────────────────────────────────
+  // NOT engine operations: saved boards and their list view are this repo's
+  // tables (src/nests/board-service.ts), and a bulk edit is a loop over the
+  // existing governed update, so there is no upstream descriptor to import.
+  // They mirror REST GET /boards, GET /boards/:id/items and
+  // POST /nodes/bulk-update 1:1.
+
+  {
+    name: "context_boards",
+    description:
+      "List this nest's saved boards (shared ones plus your private ones): id, name, what the columns are (folder, status, tag, assignee or priority), swimlanes and the board's filters. Use an id with context_board_items or context_bulk_update.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+    },
+  },
+  {
+    name: "context_board_items",
+    description:
+      "A saved board as a list — the same rows the board shows (its tasks-only, tag and completed filters), grouped into the board's columns in board order. Each row has title, column(s), status, assignee, priority, due, parent, tags and timestamps. Sortable and paged.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        board: { type: "string", description: "Board id or name (see context_boards)" },
+        sort: {
+          type: "string",
+          description:
+            "rank (board order, default) | title | status | assignee | priority | due | parent | updated | created",
+        },
+        dir: { type: "string", description: "asc (default) | desc" },
+        assignee: {
+          type: "array",
+          items: { type: "string" },
+          description: 'Only rows assigned to these emails; "unassigned" for nobody',
+        },
+        q: { type: "string", description: "Only rows whose title contains this" },
+        limit: { type: "number", description: "Rows per page (default 100, max 500)" },
+        offset: { type: "number", description: "Rows to skip" },
+      },
+      required: ["board"],
+    },
+  },
+  {
+    name: "context_bulk_update",
+    description:
+      "Apply one change to up to 100 nodes: move them into a board column (a done column completes tasks), add or remove tags, set priority, assignee or due date. Each node is its own governed edit with its own version. A node whose change would need review (prime, or governed without a bypass) or that you can't edit is skipped and reported, never saved as a draft. Returns a result per node.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        ids: { type: "array", items: { type: "string" }, description: "Node ids to update" },
+        selector: {
+          type: "string",
+          description: "Instead of ids: a selector like #sprint-12 or type:task — every node it resolves to",
+        },
+        patch: {
+          type: "object",
+          description:
+            "What to change. board_id + column: move into that board column. add_tags / remove_tags: tag lists. priority: urgent|high|medium|low|null. assignee: email|null. due: YYYY-MM-DD|null. change_note: recorded in each version.",
+          properties: {
+            board_id: { type: "string" },
+            column: { type: "string" },
+            add_tags: { type: "array", items: { type: "string" } },
+            remove_tags: { type: "array", items: { type: "string" } },
+            priority: { type: ["string", "null"] },
+            assignee: { type: ["string", "null"] },
+            due: { type: ["string", "null"] },
+            change_note: { type: "string" },
+          },
+        },
+      },
+      required: ["patch"],
+    },
+  },
+
+  // ─── Custom fields ──────────────────────────────────────────────────
+  // Nest configuration, not engine operations: definitions live in this
+  // repo's field_definitions table; VALUES live in each node's frontmatter
+  // (metadata.fields) and travel through context_create/update/get/list.
+
+  {
+    name: "context_fields",
+    description:
+      "List this nest's custom field definitions — key, label, type, options, required/default, which node types each applies to, and the scale label of a number. Use before setting `fields` on context_create / context_update or filtering context_list by them. Pass `history: true` for the audit trail of definition changes instead.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        history: {
+          type: "boolean",
+          description: "Return who changed which definition and how (newest first) instead of the definitions",
+        },
+      },
+    },
+  },
+  {
+    name: "context_create_field",
+    description:
+      "Define a custom field on this nest (nest admins, the owner, and nest-wide reviewer stewards only). Types: text, number, select, multi_select, date, user (a person on the nest), url, checkbox — plus the computed time_in_status. Presets: `estimate` (a number with a points/hours scale) and `time_in_status` (read-only, how long a task has sat in its current board column).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        key: {
+          type: "string",
+          description:
+            "Stable key values are stored under — lowercase letters, digits and _, starting with a letter. Can't change later. Optional with a preset.",
+        },
+        type: {
+          type: "string",
+          description:
+            "text | number | select | multi_select | date | user | url | checkbox | time_in_status. Optional with a preset.",
+        },
+        preset: {
+          type: "string",
+          description: "estimate | time_in_status — fills key, label and type",
+        },
+        label: { type: "string", description: "Display name, e.g. Severity" },
+        options: {
+          type: "array",
+          items: { type: "string" },
+          description: "Allowed values, in display order — select and multi_select only",
+        },
+        required: {
+          type: "boolean",
+          description: "New documents must carry a value (defaults fill it when set)",
+        },
+        default_value: {
+          description: "Value filled in on create when none is sent; must be valid for the type",
+        },
+        applies_to: {
+          type: "array",
+          items: { type: "string" },
+          description: 'Node types the field applies to. Default ["task"]; ["*"] for every type.',
+        },
+        unit: {
+          type: "string",
+          description: "Scale label for a number field, e.g. points or hours",
+        },
+      },
+    },
+  },
+  {
+    name: "context_update_field",
+    description:
+      "Change a custom field's label, options, required/default, node types or unit (nest admins, the owner, and nest-wide reviewer stewards only). The key and type are fixed: values on documents are stored under them.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        field: { type: "string", description: "The field's key (or id)" },
+        label: { type: "string", description: "Display name, e.g. Severity" },
+        options: {
+          type: "array",
+          items: { type: "string" },
+          description: "Allowed values, in display order — select and multi_select only",
+        },
+        required: {
+          type: "boolean",
+          description: "New documents must carry a value (defaults fill it when set)",
+        },
+        default_value: {
+          description: "Value filled in on create when none is sent; must be valid for the type",
+        },
+        applies_to: {
+          type: "array",
+          items: { type: "string" },
+          description: 'Node types the field applies to. Default ["task"]; ["*"] for every type.',
+        },
+        unit: {
+          type: "string",
+          description: "Scale label for a number field, e.g. points or hours",
+        },
+        position: { type: "number", description: "Display order, 0 first" },
+      },
+      required: ["field"],
+    },
+  },
+  {
+    name: "context_delete_field",
+    description:
+      "Remove a custom field definition (nest admins, the owner, and nest-wide reviewer stewards only). Values already on documents stay in their frontmatter and version history; they stop being shown, and defining the same key again brings them back.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        field: { type: "string", description: "The field's key (or id)" },
+      },
+      required: ["field"],
     },
   },
 
@@ -773,10 +1148,17 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_my_drafts",
     description:
-      "List YOUR unsubmitted drafts in this nest — documents you wrote that were never submitted for review (plus any that came back rejected). These are invisible to the review queue and unreadable by AI queries until submitted and approved. Use context_submit_review to hand one to a steward.",
+      "List YOUR unsubmitted drafts in this nest — documents you wrote that were never submitted for review (plus any that came back rejected). These are invisible to the review queue and unreadable by AI queries until submitted and approved — pass an id here to read one back and fix it. Use context_submit_review to hand one to a steward.",
     inputSchema: {
       type: "object" as const,
-      properties: {},
+      properties: {
+        id: {
+          type: "string",
+          description:
+            "Read one of YOUR drafts: returns its unapproved working copy (by node id) so you can fix it. Omit to list.",
+        },
+        title: { type: "string", description: "Same as id, by title." },
+      },
     },
   },
   {
@@ -822,6 +1204,25 @@ export const TOOL_DEFINITIONS = [
         note: { type: "string", description: "Required: explain what needs to change" },
       },
       required: ["title", "note"],
+    },
+  },
+  {
+    name: "context_task_log",
+    description:
+      "Register what you did on a task — one line in its activity timeline, attributed to you (and to the API key and agent you connected with). Use it to say you picked a task up (status \"working\"), finished it (\"done\") or are stuck (\"blocked\"). `claim: true` also makes you the assignee if nobody is. Needs edit access to the task; it does not change the task's content or version.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        id: { type: "string", description: 'Task id (e.g. "nodes/ship-email")' },
+        title: { type: "string", description: "Task title — use id when titles repeat" },
+        note: { type: "string", description: "What you did or found, in a sentence or two (max 2000 chars)" },
+        status: { type: "string", description: "working | done | blocked (optional)" },
+        claim: {
+          type: "boolean",
+          description: "Assign the task to yourself if it is unassigned (never takes it from someone else)",
+        },
+      },
+      required: ["note"],
     },
   },
   {
@@ -993,6 +1394,102 @@ async function resolveLlmBody(
     console.error("reconstructVersion failed", node.id, approved, err);
     return null;
   }
+}
+
+/** " · assignee x · due 2026-10-31 · high" — empty for a node with none. */
+function taskFieldsProse(n: object): string {
+  const f = n as { assignee?: string; due?: string; priority?: string; parent?: string };
+  const parts = [
+    f.assignee ? `assignee ${f.assignee}` : null,
+    f.due ? `due ${f.due}` : null,
+    f.priority ? `priority ${f.priority}` : null,
+    f.parent ? `parent ${f.parent}` : null,
+  ].filter(Boolean);
+  return parts.length ? ` · ${parts.join(" · ")}` : "";
+}
+
+/** context_get's header lines for the board fields, or null when none set. */
+function taskFieldLines(f: { assignee?: string; due?: string; priority?: string; parent?: string }): string | null {
+  const lines = [
+    f.assignee ? `**Assignee:** ${f.assignee}` : null,
+    f.due ? `**Due:** ${f.due}` : null,
+    f.priority ? `**Priority:** ${f.priority}` : null,
+    f.parent ? `**Parent:** ${f.parent}` : null,
+  ].filter(Boolean);
+  return lines.length ? lines.join("\n") : null;
+}
+
+/**
+ * Attach board fields to context_query hits. The engine's query result carries
+ * no metadata, so each visible hit's frontmatter is read once — only the hits
+ * that survived the visibility gate, and an unreadable one just goes without.
+ */
+async function withTaskFields<T extends { doc: { id: string } }>(
+  storage: NestStorage,
+  entries: T[],
+): Promise<T[]> {
+  return Promise.all(
+    entries.map(async (e) => {
+      try {
+        const n = await storage.readDocument(e.doc.id);
+        return { ...e, doc: { ...e.doc, ...settableTaskFields(n.frontmatter.metadata) } };
+      } catch {
+        return e;
+      }
+    }),
+  );
+}
+
+/**
+ * The caller's OWN unapproved working copy — context_my_drafts with an id.
+ *
+ * Under stewardship an unapproved body never reaches AI, which left an author
+ * fixing a draft through an agent editing blind: context_get refuses a
+ * never-approved draft and serves the older approved text otherwise. The
+ * author wrote these bytes and can open them in the UI, so handing them back
+ * on an explicit ask discloses nothing new.
+ *
+ * Explicit on purpose, never folded into context_get: agents run on personal
+ * keys (a support bot on the author's key must keep answering from the
+ * approved policy, not the author's half-finished rewrite), and search /
+ * query / export stay approved-only.
+ *
+ * "Own" means the caller authored the current (unapproved) version, or
+ * submitted its open review, and still holds edit rights on the node.
+ */
+async function resolveOwnDraft(
+  ctx: McpToolContext,
+  node: ContextNode,
+): Promise<{ body: string; version: number; status: string; approved: number | null } | null> {
+  if (!ctx.userEmail || !(await isStewardshipEnabled(ctx.nestId))) return null;
+  const [current, approved, pending] = await Promise.all([
+    versions.getCurrentVersion(ctx.nestId, node.id),
+    versions.getApprovedVersion(ctx.nestId, node.id),
+    reviews.getPendingReview(ctx.nestId, node.id),
+  ]);
+  if (current === 0 || (approved != null && current <= approved)) return null;
+  // node was read before these lookups: a write in between would pair one
+  // version's bytes with another version's label and author check.
+  if (Number(node.frontmatter?.version) !== current) return null;
+  const row = await versions.getVersion(ctx.nestId, node.id, current);
+  if (!row || !["draft", "rejected", "pending_review"].includes(row.status)) return null;
+  const me = ctx.userEmail.toLowerCase();
+  // The submitter counts only while their review covers the CURRENT version —
+  // otherwise these bytes may be someone else's later write.
+  const mine =
+    row.editedBy.toLowerCase() === me ||
+    (pending?.version === current && pending.requestedBy.toLowerCase() === me);
+  if (!mine) return null;
+  if (!(await stewardship.canUserEdit(ctx.nestId, node.id, ctx.userEmail)).allowed) {
+    return null;
+  }
+  ctx.servedVersions?.set(node.id, current);
+  return {
+    body: node.body || "",
+    version: current,
+    status: pending ? "pending_review" : row.status,
+    approved,
+  };
 }
 
 /** Read tools whose `data` names the documents they handed over, and what
@@ -1397,15 +1894,46 @@ async function runTool(
           } as ContextNode),
         })),
       );
-      const visible = visibility.filter((e) => e.body !== null);
+      const visible = await withTaskFields(
+        storage,
+        visibility.filter((e) => e.body !== null),
+      );
       const nodes = visible.map((e) => e.doc);
       if (!nodes.length)
         return {
           text: `No nodes matched: ${args.query}`,
           data: { documents: [], traversal },
         };
+      // Field values from the index mirror (frontmatter only, no file reads).
+      // Under stewardship resolveLlmBody served the approved version's raw
+      // markdown, so the values come from IT, never the live (draft) file.
+      const queryDefs = await listFieldDefinitions(nestId);
+      const queryGoverned = queryDefs.length > 0 && (await isStewardshipEnabled(nestId));
+      const fmById = new Map<string, ContextNode["frontmatter"]>();
+      if (queryDefs.length > 0) {
+        for (const n of await readIndexedNodes(nestId)) fmById.set(n.id, n.frontmatter);
+      }
+      const bodyById = new Map(visible.map((e) => [e.doc.id, e.body ?? ""]));
+      const queryValues = (id: string) => {
+        const fm = fmById.get(id);
+        if (!fm) return undefined;
+        return nodeFieldValues(
+          {
+            type: fm.type,
+            metadata: queryGoverned
+              ? { fields: fieldsOfRaw(id, bodyById.get(id) ?? "") }
+              : fm.metadata,
+            moved_at: (fm.metadata as any)?.moved_at,
+            created_at: fm.created_at == null ? undefined : String(fm.created_at),
+          },
+          queryDefs,
+        );
+      };
       const list = nodes
-        .map((n, i) => `${i + 1}. **${n.title}** [${n.type}] ${(n.tags || []).join(" ")}`)
+        .map((n, i) => {
+          const f = describeFields(queryValues(n.id), queryDefs);
+          return `${i + 1}. **${n.title}** [${n.type}] ${(n.tags || []).join(" ")}${taskFieldsProse(n)}${f.length ? `\n   ${f.join(" · ")}` : ""}`;
+        })
         .join("\n\n");
       return {
         text: `Found ${nodes.length} node(s) for \`${args.query}\`:\n\n${list}`,
@@ -1414,7 +1942,14 @@ async function runTool(
         // `source_nodes` is deliberately absent: this handler never gates
         // them, so serving them would hand out content the prose refuses.
         data: {
-          documents: visible.map((e) => ({ ...e.doc, body: e.body ?? undefined })),
+          documents: visible.map((e) => {
+            const values = queryValues(e.doc.id);
+            return {
+              ...e.doc,
+              body: e.body ?? undefined,
+              ...(values ? { frontmatter: { title: e.doc.title, metadata: { fields: values } } } : {}),
+            };
+          }),
           traversal,
         },
       };
@@ -1443,6 +1978,9 @@ async function runTool(
         );
       }
       const body = await resolveLlmBody(ctx, node);
+      // Board fields describe the task as it stands now, not a body version —
+      // tasks skip review, so the live frontmatter is the answer.
+      const fields = settableTaskFields(node.frontmatter.metadata);
       if (body === null) {
         // Covers both halves of resolveLlmBody's null: the caller may not read
         // this node, or it has no approved version. Either way the content is
@@ -1453,6 +1991,36 @@ async function runTool(
           "UNAUTHORIZED_ACTION",
         );
       }
+      // Relations ride along so an agent sees what blocks a task without a
+      // second call — gated per related node like the relations tool. Not for
+      // a headless access key: it reads approved content only, and a related
+      // node's title could name a draft (context_relations is closed to it too).
+      const relations = (await isServiceUser(ctx.userId))
+        ? null
+        : await listRelations({ nestId, userId: ctx.userId, userEmail }, node.id).catch(
+            (err) => {
+              // Not found = no relations to show; anything else is a real fault.
+              if (!(err instanceof NotFoundError)) {
+                console.error("context_get relations failed", node.id, err);
+              }
+              return null;
+            },
+          );
+      const hasRelations =
+        !!relations && (relations.relations.length > 0 || relations.hidden_count > 0);
+      const fieldDefs = await listFieldDefinitions(nestId);
+      // Under stewardship `body` is the approved version's raw markdown: its
+      // field values, never the live (draft) file's.
+      const fieldGoverned = fieldDefs.length > 0 && (await isStewardshipEnabled(nestId));
+      const fieldValues = nodeFieldValues(
+        {
+          type: node.frontmatter.type,
+          metadata: fieldGoverned ? { fields: fieldsOfRaw(node.id, body) } : node.frontmatter.metadata,
+          moved_at: (node.frontmatter.metadata as any)?.moved_at,
+          created_at: node.frontmatter.created_at == null ? undefined : String(node.frontmatter.created_at),
+        },
+        fieldDefs,
+      );
       const meta = [
         `**Title:** ${node.frontmatter.title}`,
         `**Type:** ${node.frontmatter.type || "document"}`,
@@ -1460,6 +2028,9 @@ async function runTool(
           ? `**Tags:** ${node.frontmatter.tags.join(" ")}`
           : null,
         pdfSourceLine(node, body),
+        taskFieldLines(fields),
+        ...describeFields(fieldValues, fieldDefs).map((l) => `**${l.replace(": ", ":** ")}`),
+        hasRelations ? `**Relations:**\n${relationsProse(relations!)}` : null,
       ]
         .filter(Boolean)
         .join("\n");
@@ -1481,8 +2052,20 @@ async function runTool(
             description: node.frontmatter.description,
             type: node.frontmatter.type || "document",
             tags: node.frontmatter.tags,
+            // Custom field values, where they are stored (metadata.fields),
+            // plus computed ones. The catalog's frontmatter carries metadata.
+            ...(fieldValues ? { metadata: { fields: fieldValues } } : {}),
           },
           body,
+          ...fields,
+          ...(hasRelations
+            ? {
+                relations: relations!.relations,
+                relations_hidden: relations!.hidden_count,
+                blocked: relations!.blocked,
+                open_blockers: relations!.open_blockers,
+              }
+            : {}),
         },
       };
     }
@@ -1490,13 +2073,41 @@ async function runTool(
     case "context_list": {
       // Same per-caller gating REST/UI use: steward access, public-reader
       // approved-only, pending/status resolution.
+      let task: ReturnType<typeof parseTaskFieldsFilter>;
+      try {
+        task = parseTaskFieldsFilter({
+          assignee: args.assignee,
+          priority: args.priority,
+          due_before: args.due_before,
+        });
+      } catch (err) {
+        return toolError((err as Error).message, "VALIDATION_FAILED");
+      }
       const nodes = await listNodesForCallerByEmail(nestId, userEmail, {
         type: args.type,
         tag: args.tag,
         status: args.status,
         approvedOnly: args.approved_only === true,
+        // Under stewardship an agent sees approved content only — field
+        // values and field filters included, never the live draft's.
+        approvedFields: await isStewardshipEnabled(nestId),
         limit: args.limit || 50,
+        task,
+        ...(args.fields && typeof args.fields === "object" && !Array.isArray(args.fields)
+          ? { fields: args.fields }
+          : {}),
+      }).catch((err) => {
+        if (err instanceof ValidationError) return err;
+        throw err;
       });
+      if (nodes instanceof ValidationError) return toolError(nodes.message, "VALIDATION_FAILED");
+      const listDefs = await listFieldDefinitions(nestId);
+      const valuesOf = (n: (typeof nodes)[number]) => {
+        const known = Object.fromEntries(
+          Object.entries(n.fields ?? {}).filter(([k]) => listDefs.some((d) => d.key === k)),
+        );
+        return Object.keys(known).length > 0 ? known : undefined;
+      };
       // No `body`: listNodesForCaller gates WHICH documents come back, but
       // the `content` it carries is the latest on-disk text — under
       // stewardship that is the unapproved draft resolveLlmBody would refuse.
@@ -1508,11 +2119,22 @@ async function runTool(
         type: n.type || "document",
         status: n.status || "draft",
         tags: n.tags,
+        // Board fields when set — a task listing is useless without them.
+        ...(n.assignee ? { assignee: n.assignee } : {}),
+        ...(n.due ? { due: n.due } : {}),
+        ...(n.priority ? { priority: n.priority } : {}),
+        ...(n.parent ? { parent: n.parent } : {}),
+        // Custom field values ride in the catalog's optional `frontmatter`,
+        // where they are stored (metadata.fields).
+        ...(valuesOf(n) ? { frontmatter: { title: n.title, metadata: { fields: valuesOf(n) } } } : {}),
       }));
       if (!nodes.length)
         return { text: "No nodes found with the given filters.", data: { documents } };
       const list = nodes
-        .map((n, i) => `${i + 1}. **${n.title}** [${n.type}]`)
+        .map((n, i) => {
+          const f = describeFields(valuesOf(n), listDefs);
+          return `${i + 1}. **${n.title}** [${n.type}]${taskFieldsProse(n)}${f.length ? ` — ${f.join(" · ")}` : ""}`;
+        })
         .join("\n");
       return { text: `${nodes.length} node(s):\n\n${list}`, data: { documents } };
     }
@@ -1616,6 +2238,62 @@ async function runTool(
       return `# Nest export — ${parts.length} document(s)\n\n${parts.join(
         "\n\n---\n\n",
       )}${note}`;
+    }
+
+    // ── Task relations ────────────────────────────────────────────────────
+    // PRIMARY permission gate (the /mcp transport admits read-tier callers):
+    // listing needs read access to the task; adding/removing needs edit access
+    // to it — canUserEdit, the same per-node rule context_update applies. The
+    // relations service then requires read access to the OTHER end and hides
+    // any related node the caller can't read.
+    case "context_relations":
+    case "context_add_relation":
+    case "context_remove_relation": {
+      const target = await resolveTargetNode(storage, args);
+      const caller = { nestId, userId: ctx.userId, userEmail };
+      if (typeof target === "string" || !(await callerCanRead(caller, target.id))) {
+        return toolError(
+          typeof target === "string" ? target : `Node not found: ${args.id || args.title}`,
+          "DOCUMENT_NOT_FOUND",
+        );
+      }
+      if (toolName !== "context_relations") {
+        const editCheck = await stewardship.canUserEdit(nestId, target.id, userEmail);
+        if (!editCheck.allowed) {
+          return writeRefusal(
+            ctx,
+            `You don't have permission to change the relations of "${target.frontmatter.title}": ${editCheck.reason}`,
+            { type: "node", id: target.id },
+          );
+        }
+      }
+      try {
+        if (toolName === "context_relations") {
+          const r = await listRelations(caller, target.id);
+          return {
+            text: `# Relations of "${target.frontmatter.title}"\n\n${relationsProse(r)}`,
+            data: r,
+          };
+        }
+        if (toolName === "context_add_relation") {
+          const { relation, relations } = await addRelation(caller, target.id, args.type, args.node);
+          return {
+            text: `Added: "${target.frontmatter.title}" ${relation.type.replace(/_/g, " ")} "${relation.node.title}" (relation ${relation.id}).\n\n${relationsProse(relations)}`,
+            data: { relation, ...relations },
+          };
+        }
+        const r = await removeRelation(caller, target.id, args.relation);
+        return {
+          text: `Removed relation ${args.relation}.\n\n${relationsProse(r)}`,
+          data: r,
+        };
+      } catch (err) {
+        if (err instanceof NotFoundError) return toolError(err.message, "DOCUMENT_NOT_FOUND");
+        if (err instanceof ValidationError || err instanceof ConflictError) {
+          return toolError(err.message, "VALIDATION_FAILED");
+        }
+        throw err;
+      }
     }
 
     case "context_comments": {
@@ -1753,31 +2431,22 @@ async function runTool(
       // be allowed to READ (the approval gate applies to context_comments, not
       // here), so the reply should tell them what THEY did and nothing about
       // what is already in the thread.
-      // A reply also notifies the thread's earlier participants, the same
-      // fan-out the REST reply route uses.
+      // The @mentions, then (for a reply) the thread's earlier participants —
+      // the same fan-out the REST reply route uses — then the document's
+      // watchers and reviewer stewards. One notification per person.
       //
       // baseUrl: without it the notification still reaches the person, but
       // its "Open document" link falls back to PUBLIC_BASE_URL and comes out
       // empty when that isn't configured — every other notifying tool in
       // this file passes it, and the REST route passes requestBaseUrl.
-      if (threadId) {
-        await notifyCommentReply({
-          nestId,
-          nodeId: node.id,
-          thread,
-          body,
-          actorEmail: userEmail,
-          baseUrl: ctx.baseUrl,
-        });
-      } else {
-        await notifyCommentMentions({
-          nestId,
-          nodeId: node.id,
-          body,
-          actorEmail: userEmail,
-          baseUrl: ctx.baseUrl,
-        });
-      }
+      await notifyComment({
+        nestId,
+        nodeId: node.id,
+        body,
+        actorEmail: userEmail,
+        baseUrl: ctx.baseUrl,
+        ...(threadId ? { thread } : {}),
+      });
       await syncAnnotationsNode(nestId, node.id, userEmail);
       return threadId
         ? `Replied on "${label}", in thread ${thread.id}.`
@@ -1801,6 +2470,14 @@ async function runTool(
       // Scan and create under one nest-wide key — createNode's own lock is per
       // id, and two twins land on DIFFERENT ids, so only a shared key stops
       // both from passing the scan before either writes.
+      // Same parser REST uses: a non-string is refused, null/"" clears. Roster,
+      // date and priority rules run inside createNode (applyTaskFields).
+      let taskFields: TaskFieldsPatch;
+      try {
+        taskFields = taskFieldsFromInput(args);
+      } catch (err) {
+        return toolError((err as Error).message, "VALIDATION_FAILED");
+      }
       const wanted = String(args.title ?? "").toLowerCase();
       return withNodeWriteLock(nodeWriteKey(nestId, "*create*"), async () => {
         const existingDocs = await storage.discoverDocuments();
@@ -1846,6 +2523,7 @@ async function runTool(
                 tags: args.tags,
                 scope: args.scope,
                 folder: args.folder,
+                ...(args.fields !== undefined ? { fields: args.fields } : {}),
               },
             ],
           },
@@ -1860,7 +2538,9 @@ async function runTool(
           );
         }
 
-        const { node, version } = await createNode(
+        let made: Awaited<ReturnType<typeof createNode>>;
+        try {
+          made = await createNode(
           nestId,
           {
             title: args.title,
@@ -1870,11 +2550,21 @@ async function runTool(
             scope: args.scope,
             folder: args.folder,
             client: ctx.client,
+            ...taskFields,
+            ...(args.fields !== undefined ? { fields: args.fields } : {}),
           },
           userEmail,
         );
+        } catch (err) {
+          if (err instanceof ValidationError) {
+            return toolError(err.message, "VALIDATION_FAILED");
+          }
+          throw err;
+        }
+        const { node, version } = made;
+        const created = settableTaskFields(node.frontmatter.metadata);
         return {
-          text: `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}`,
+          text: `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}${taskFieldsProse(created)}`,
           // checkpoint is null by construction: this server seals nothing —
           // a write becomes live through steward review, not a checkpoint.
           data: {
@@ -1882,6 +2572,7 @@ async function runTool(
             version,
             status: node.frontmatter.status,
             checkpoint: null,
+            ...created,
           },
         };
       });
@@ -1906,31 +2597,195 @@ async function runTool(
           { type: "node", id: node.id },
         );
       }
+      let taskFields: TaskFieldsPatch;
+      try {
+        taskFields = taskFieldsFromInput(args);
+      } catch (err) {
+        return toolError((err as Error).message, "VALIDATION_FAILED");
+      }
       // Tags REPLACE, per the engine catalog's context_update. This used to
       // merge ("Tags to add"), which left no way to remove a tag over MCP.
-      const { node: updated, version } = await updateNode(
-        nestId,
-        node.id,
-        {
-          content: args.content,
-          append: args.append,
-          tags: args.tags,
-          status: args.status,
-          changeNote: args.changeNote,
-          client: ctx.client,
-        },
-        userEmail,
-      );
+      let result: Awaited<ReturnType<typeof updateNode>>;
+      try {
+        result = await updateNode(
+          nestId,
+          node.id,
+          {
+            content: args.content,
+            append: args.append,
+            tags: args.tags,
+            status: args.status,
+            changeNote: args.changeNote,
+            client: ctx.client,
+            ...taskFields,
+            ...(args.fields !== undefined ? { fields: args.fields } : {}),
+          },
+          userEmail,
+        );
+      } catch (err) {
+        // Roster / date / priority / parent refusals: a typed tool error the
+        // agent can read, the same sentence REST answers 400 with.
+        if (err instanceof ValidationError) {
+          return toolError(err.message, "VALIDATION_FAILED");
+        }
+        throw err;
+      }
+      const { node: updated, version } = result;
+      const fields = settableTaskFields(updated.frontmatter.metadata);
       return {
-        text: `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}`,
+        text: `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}${taskFieldsProse(fields)}`,
         // checkpoint null — see context_create.
         data: {
           id: updated.id,
           version,
           status: updated.frontmatter.status,
           checkpoint: null,
+          ...fields,
         },
       };
+    }
+
+    case "context_task_log": {
+      const node = await resolveTargetNode(storage, args);
+      if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
+      // PRIMARY write gate — logging is a write. The same per-node edit check
+      // context_update applies; the /mcp transport admits read-tier callers.
+      const editCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
+      if (!editCheck.allowed) {
+        return writeRefusal(
+          ctx,
+          `You don't have permission to log activity on "${node.frontmatter.title}": ${editCheck.reason}`,
+          { type: "node", id: node.id },
+        );
+      }
+      if (args.claim !== undefined && typeof args.claim !== "boolean") {
+        return toolError("claim must be true or false", "VALIDATION_FAILED");
+      }
+      let logged: Awaited<ReturnType<typeof logTaskInteraction>>;
+      try {
+        logged = await logTaskInteraction({
+          nestId,
+          nodeId: node.id,
+          userEmail,
+          userId,
+          note: args.note,
+          status: args.status,
+          claim: args.claim === true,
+          surface: "mcp",
+          apiKeyId: ctx.apiKeyId ?? null,
+          client: ctx.client,
+        });
+      } catch (err) {
+        if (err instanceof ValidationError) return toolError(err.message, "VALIDATION_FAILED");
+        throw err;
+      }
+      const claimLine =
+        logged.claim === "assigned"
+          ? " You are now the assignee."
+          : logged.claim === "assigned_to_other"
+            ? ` Not claimed — it is assigned to ${logged.assignee}.`
+            : "";
+      return {
+        text: `Logged on **${node.frontmatter.title}**: ${describeTaskActivity(logged.entry)}.${claimLine}`,
+        data: {
+          id: node.id,
+          entry: logged.entry,
+          ...(logged.claim ? { claim: logged.claim } : {}),
+          ...(logged.assignee ? { assignee: logged.assignee } : {}),
+        },
+      };
+    }
+
+    case "context_fields": {
+      if (args.history === true) {
+        const events = await listFieldDefinitionEvents(nestId);
+        if (events.length === 0) return { text: "No field definition changes recorded yet.", data: { events } };
+        const lines = events.map(
+          (e) =>
+            `- ${e.at} — ${e.actor_email ?? e.actor_id ?? "unknown"} ${e.action}d \`${e.field_key}\``,
+        );
+        return { text: `${events.length} definition change(s):\n\n${lines.join("\n")}`, data: { events } };
+      }
+      const defs = await listFieldDefinitions(nestId);
+      if (defs.length === 0) {
+        return {
+          text: "This nest defines no custom fields yet. A nest admin can add some with context_create_field.",
+          data: { fields: [] },
+        };
+      }
+      return {
+        text: `${defs.length} custom field(s):\n\n${defs.map(describeDefinition).join("\n")}`,
+        data: { fields: defs },
+      };
+    }
+
+    // PRIMARY gate for the three definition writes is assertCanManageFields
+    // inside the service (owner / nest admin / license admin / nest-wide
+    // reviewer steward, never on an archived nest) — the same function the
+    // REST routes call, so the two surfaces can't disagree.
+    case "context_create_field": {
+      try {
+        const field = await createFieldDefinition(nestId, userId, {
+          key: args.key,
+          label: args.label,
+          type: args.type,
+          options: args.options,
+          required: args.required,
+          default_value: args.default_value,
+          applies_to: args.applies_to,
+          unit: args.unit,
+          preset: args.preset,
+        });
+        return {
+          text: `Defined field:\n${describeDefinition(field)}`,
+          data: { field },
+        };
+      } catch (err) {
+        return fieldToolError(err);
+      }
+    }
+
+    case "context_update_field": {
+      try {
+        const patch: Record<string, unknown> = {};
+        for (const k of [
+          "label",
+          "options",
+          "required",
+          "default_value",
+          "applies_to",
+          "unit",
+          "position",
+          "key",
+          "type",
+        ]) {
+          if (args[k] !== undefined) patch[k] = args[k];
+        }
+        const field = await updateFieldDefinition(nestId, String(args.field ?? ""), userId, patch);
+        const invalid = await nodesWithInvalidValues(nestId, field);
+        return {
+          text: `Updated field:\n${describeDefinition(field)}${
+            invalid.length
+              ? `\n\n${invalid.length} document(s) keep a value that no longer fits this definition (it stays in their history; the next edit of that field must fix it): ${invalid.slice(0, 10).join(", ")}`
+              : ""
+          }`,
+          data: { field, invalid_values: invalid.length, invalid_nodes: invalid.slice(0, 50) },
+        };
+      } catch (err) {
+        return fieldToolError(err);
+      }
+    }
+
+    case "context_delete_field": {
+      try {
+        const field = await deleteFieldDefinition(nestId, String(args.field ?? ""), userId);
+        return {
+          text: `Removed field **${field.label}** (\`${field.key}\`). Values already on documents stay in their history.`,
+          data: { deleted: true, field },
+        };
+      } catch (err) {
+        return fieldToolError(err);
+      }
     }
 
     case "context_delete": {
@@ -1989,6 +2844,115 @@ async function runTool(
         return { text: `**${moved.frontmatter.title}** is already at \`${moved.id}\` — nothing to move.`, data };
       }
       return { text: `Moved **${moved.frontmatter.title}**: \`${previousId}\` → \`${moved.id}\``, data };
+    }
+
+    // ─── Boards & bulk edit ────────────────────────────────────────────
+
+    case "context_boards": {
+      const boards = await listBoards(nestId, userId);
+      const data = boards.map((b) => ({
+        id: b.id,
+        name: b.name,
+        private: b.private,
+        dimension: b.config.dimension,
+        tag_namespace: b.config.tagNamespace || undefined,
+        field_key: b.config.fieldKey,
+        swimlane: b.config.swimlane,
+        tasks_only: b.config.tasksOnly === true,
+        filter_tags: b.config.filterTags ?? [],
+        filter_fields: b.config.filterFields,
+        hide_done_after_days: b.config.hideDoneAfterDays,
+      }));
+      if (data.length === 0) {
+        return { text: "No saved boards in this nest yet.", data: { boards: [] } };
+      }
+      const list = data
+        .map(
+          (b, i) =>
+            `${i + 1}. **${b.name}** (\`${b.id}\`) — columns by ${b.dimension}${b.tag_namespace ? ` \`${b.tag_namespace}:\`` : ""}${b.field_key ? ` \`${b.field_key}\`` : ""}${b.private ? ", private" : ""}${b.filter_tags.length ? `, filtered to ${b.filter_tags.map((t) => `#${t}`).join(" ")}` : ""}`,
+        )
+        .join("\n");
+      return { text: `# Boards\n\n${list}`, data: { boards: data } };
+    }
+
+    case "context_board_items": {
+      const ref = String(args.board ?? "").trim();
+      if (!ref) return toolError("board is required — an id or name from context_boards.", "VALIDATION_FAILED");
+      const boards = await listBoards(nestId, userId);
+      // Board names aren't unique (a shared and a private board can share
+      // one), so a name that matches several boards is refused, not guessed.
+      const byName = boards.filter((b) => b.name.toLowerCase() === ref.toLowerCase());
+      if (!boards.some((b) => b.id === ref) && byName.length > 1) {
+        return toolError(
+          `Several boards are named "${ref}": ${byName.map((b) => `\`${b.id}\``).join(", ")}. Pass the board id.`,
+          "VALIDATION_FAILED",
+        );
+      }
+      const board = boards.find((b) => b.id === ref) ?? byName[0];
+      if (!board) return toolError(`Board not found: ${ref}`, "DOCUMENT_NOT_FOUND");
+      try {
+        const res = await listBoardItems(nestId, board.id, userId, {
+          sort: args.sort ?? undefined,
+          dir: args.dir ?? undefined,
+          limit: args.limit ?? undefined,
+          offset: args.offset ?? undefined,
+          q: args.q ?? undefined,
+          assignee: Array.isArray(args.assignee) ? args.assignee.join(",") : args.assignee,
+        });
+        const label = new Map(res.groups.map((g) => [g.key, g.label]));
+        const count = new Map(res.groups.map((g) => [g.key, g.count]));
+        let lastGroup: string | null = null;
+        const lines: string[] = [];
+        for (const r of res.items) {
+          if (r.group !== lastGroup) {
+            lastGroup = r.group;
+            lines.push(`\n## ${label.get(r.group)} (${count.get(r.group)})`);
+          }
+          const bits = [
+            r.priority,
+            r.assignee,
+            r.due ? `due ${r.due}` : null,
+            r.completed_at ? "done" : null,
+          ].filter(Boolean);
+          lines.push(`- **${r.title}** \`${r.id}\`${bits.length ? ` — ${bits.join(", ")}` : ""}`);
+        }
+        const more =
+          res.offset + res.items.length < res.total
+            ? `\n\n_Rows ${res.offset + 1}–${res.offset + res.items.length} of ${res.total}; pass offset=${res.offset + res.items.length} for more._`
+            : "";
+        return {
+          text: `# ${board.name} — ${res.total} row(s)${lines.join("\n")}${more}`,
+          data: res,
+        };
+      } catch (err) {
+        if (err instanceof ValidationError) return toolError(err.message, "VALIDATION_FAILED");
+        throw err;
+      }
+    }
+
+    case "context_bulk_update": {
+      try {
+        const res = await bulkUpdateNodes(
+          nestId,
+          { userId, userEmail },
+          { ids: args.ids ?? undefined, selector: args.selector ?? undefined, patch: args.patch },
+          { client: ctx.client },
+        );
+        const notDone = res.results
+          .filter((r) => r.outcome === "skipped" || r.outcome === "failed")
+          .map((r) => `- ${r.title ?? r.id}: ${r.outcome} (${r.code}) — ${r.reason}`);
+        const text =
+          `Bulk update: ${res.updated} updated, ${res.unchanged} unchanged, ${res.skipped} skipped, ${res.failed} failed.` +
+          (notDone.length ? `\n\n${notDone.join("\n")}` : "");
+        return { text, data: res };
+      } catch (err) {
+        if (err instanceof ForbiddenError) {
+          return writeRefusal(ctx, err.message, { type: "nest", id: nestId });
+        }
+        if (err instanceof ValidationError) return toolError(err.message, "VALIDATION_FAILED");
+        if (err instanceof NotFoundError) return toolError(err.message, "DOCUMENT_NOT_FOUND");
+        throw err;
+      }
     }
 
     // ─── Governance Tool Handlers ──────────────────────────────────────
@@ -2381,6 +3345,42 @@ async function runTool(
     }
 
     case "context_my_drafts": {
+      if (args.id || args.title) {
+        // Read one draft back. getNodeForCaller is context_get's gate: a miss
+        // and a denied id answer alike, so this is no existence oracle.
+        let node: ContextNode;
+        try {
+          node = await getNodeForCaller(
+            nestId,
+            args.title ? { title: args.title } : { id: args.id },
+            ctx.userId,
+            userEmail,
+          );
+        } catch {
+          return toolError(`Node not found: ${args.title || args.id}`, "DOCUMENT_NOT_FOUND");
+        }
+        const draft = await resolveOwnDraft(ctx, node);
+        if (!draft) {
+          return toolError(
+            `"${node.frontmatter.title}" has no unapproved draft of yours — use context_get for its approved text.`,
+            "UNAUTHORIZED_ACTION",
+          );
+        }
+        const meta = [
+          `**Title:** ${node.frontmatter.title}`,
+          `**Type:** ${node.frontmatter.type || "document"}`,
+          node.frontmatter.tags?.length
+            ? `**Tags:** ${node.frontmatter.tags.join(" ")}`
+            : null,
+          `**Status:** your unapproved draft v${draft.version} (${draft.status}) — ` +
+            (draft.approved != null
+              ? `AI readers still get approved v${draft.approved}.`
+              : `not available to AI readers until approved.`),
+        ]
+          .filter(Boolean)
+          .join("\n");
+        return `${meta}\n\n---\n\n${draft.body || "(no content)"}\n\n_Fix it with \`context_update\`; it stays a draft until approved._`;
+      }
       // Self-scoped by construction — only rows this caller authored, in a nest
       // they already hold read on, so no extra permission gate.
       const { drafts, total } = await versions.listMyDrafts({
@@ -2403,7 +3403,7 @@ async function runTool(
         total > drafts.length
           ? `\n\n_Showing the ${drafts.length} most recent of ${total}._`
           : "";
-      return `# My Drafts\n**${total} unsubmitted document(s)**\n\n${list}${more}\n\nSubmit one with \`context_submit_review\`.`;
+      return `# My Drafts\n**${total} unsubmitted document(s)**\n\n${list}${more}\n\nRead one back with \`context_my_drafts\` + its id; submit with \`context_submit_review\`.`;
     }
 
     case "context_submit_review": {
