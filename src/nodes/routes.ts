@@ -5,6 +5,7 @@ import { parseDocument } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
 import { bulkUpdateNodes } from "./bulk-update.js";
+import { bulkMoveNodes, bulkDeleteNodes } from "./bulk-actions.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 // SECURITY: `:nodeId` params on these routes become filesystem paths in the
 // engine's storage layer (join(nestRoot, id + ".md"), no containment). A `../`
@@ -196,6 +197,39 @@ nodeRoutes.post("/bulk-update", async (c) => {
     { client: attributeRequest(c, body.client) },
   );
   return c.json(result);
+});
+
+// POST /nests/:nestId/nodes/bulk-move { ids, folder } and /bulk-delete { ids } —
+// the Documents list's multi-select actions (MCP context_move / context_delete
+// with `ids`). Each document is moved or deleted on its own, with the same
+// permission and review rules as one by one (src/nodes/bulk-actions.ts).
+nodeRoutes.post("/bulk-move", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new ValidationError("request body must be a JSON object");
+  }
+  return c.json(
+    await bulkMoveNodes(
+      c.req.param("nestId")!,
+      { userId: c.get("userId"), userEmail: await getUserEmail(c) },
+      { ids: body.ids, folder: body.folder },
+    ),
+  );
+});
+
+nodeRoutes.post("/bulk-delete", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new ValidationError("request body must be a JSON object");
+  }
+  return c.json(
+    await bulkDeleteNodes(
+      c.req.param("nestId")!,
+      { userId: c.get("userId"), userEmail: await getUserEmail(c) },
+      { ids: body.ids },
+      { client: attributeRequest(c, body.client) },
+    ),
+  );
 });
 
 // POST /nests/:nestId/nodes

@@ -19,6 +19,8 @@ import { linkHealth } from "../../lib/link-health";
 import { findBacklinks, inboundLinkWarning } from "../../lib/backlinks";
 import { FolderDeleteDialog } from "./FolderDeleteDialog";
 import { FolderMoveDialog } from "./FolderMoveDialog";
+import { BulkSelectionBar } from "./BulkSelectionBar";
+import { Checkbox } from "@/components/ui/checkbox";
 import { nodeTypeSupportsMove } from "../../lib/document-actions";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
@@ -319,6 +321,19 @@ export function DocumentsTab({
   const moveNewFolderCheck = checkFolderPath(moveNewFolder ?? "");
   const moveResolvedDest =
     moveNewFolder === null ? moveDest : moveNewFolderCheck.path;
+
+  // Multi-select: the documents ticked in the list, for bulk move / tag /
+  // delete. Server still judges each one; this only decides what to offer.
+  const [selected, setSelected] = useState<Map<string, any>>(new Map());
+  const toggleSelected = (node: any) =>
+    setSelected((prev) => {
+      const next = new Map(prev);
+      if (!next.delete(node.id)) next.set(node.id, node);
+      return next;
+    });
+  const selectedNodes = [...selected.values()];
+  const isMine = (n: any) =>
+    !!n.author && !!currentEmail && n.author.toLowerCase() === currentEmail;
 
   // Every folder path in use (all prefixes, so intermediate levels with no
   // direct docs still appear) — options for the Move-to-folder dialog.
@@ -1280,6 +1295,17 @@ export function DocumentsTab({
                       </DropdownMenu>
                     </div>
                   );
+                  const selectBox =
+                    !isReadOnly && (canEditNode(node) || canDelete) ? (
+                      <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0">
+                        <Checkbox
+                          checked={selected.has(node.id)}
+                          onCheckedChange={() => toggleSelected(node)}
+                          aria-label={`Select ${node.title}`}
+                          data-testid={`select-${node.id}`}
+                        />
+                      </div>
+                    ) : null;
                   return (
                     <div
                       key={node.id}
@@ -1320,9 +1346,11 @@ export function DocumentsTab({
                       }}
                       data-testid={`document-row-${node.id}`}
                     >
+                      {!cards && selectBox}
                       {!cards && <NodeTypeIcon type={node.type} className="h-5 w-5" />}
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
+                          {cards && selectBox}
                           {cards && <NodeTypeIcon type={node.type} className="h-4 w-4" />}
                           <span
                             className="font-medium truncate min-w-0"
@@ -1933,6 +1961,16 @@ export function DocumentsTab({
           onClose={() => setShareFolder(null)}
         />
       )}
+
+      <BulkSelectionBar
+        nestId={nestId}
+        nodes={selectedNodes}
+        folders={allFolders}
+        canEdit={selectedNodes.every((n) => canEditNode(n) && nodeTypeSupportsMove(n.type || "document"))}
+        canDelete={selectedNodes.every((n) => canManage || isMine(n))}
+        onClear={() => setSelected(new Map())}
+        onDone={fetchData}
+      />
 
       {/* Move to folder — the keyboard-accessible path to the same move the
           drag-and-drop performs; both funnel through handleMoveNode. */}

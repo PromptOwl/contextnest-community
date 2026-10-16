@@ -3977,6 +3977,30 @@ export async function bulkUpdateNodes(nestId: string, ids: string[], patch: Bulk
   });
 }
 
+/** Move / delete over a selection (src/nodes/bulk-actions.ts). Per-document rows. */
+export interface BulkActionResult {
+  requested: number;
+  done: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+  results: (BulkRowResult & { new_id?: string })[];
+}
+
+export async function bulkMoveNodes(nestId: string, ids: string[], folder: string) {
+  return request<BulkActionResult>(`/nests/${nestId}/nodes/bulk-move`, {
+    method: "POST",
+    body: JSON.stringify({ ids, folder }),
+  });
+}
+
+export async function bulkDeleteNodes(nestId: string, ids: string[]) {
+  return request<BulkActionResult>(`/nests/${nestId}/nodes/bulk-delete`, {
+    method: "POST",
+    body: JSON.stringify({ ids }),
+  });
+}
+
 export async function deleteBoard(nestId: string, boardId: string) {
   return request<{ deleted: boolean }>(`/nests/${nestId}/boards/${boardId}`, {
     method: "DELETE",

@@ -267,7 +267,7 @@ async function resolveTargets(
   return ids;
 }
 
-const reasonOf = (err: unknown): { code: BulkReasonCode; reason: string; outcome: BulkOutcome } => {
+export const reasonOf = (err: unknown): { code: BulkReasonCode; reason: string; outcome: BulkOutcome } => {
   const reason = err instanceof Error ? err.message : String(err);
   if (err instanceof ReviewRequiredError) return { code: "needs_review", reason, outcome: "skipped" };
   if (err instanceof LockedError) return { code: "locked", reason, outcome: "skipped" };
