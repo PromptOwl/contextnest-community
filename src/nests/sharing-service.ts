@@ -7,6 +7,7 @@
  * nest 'write' to invite (escalation-capped here); the MCP tool checks the
  * caller's effective roles.
  */
+import { isSystemUser } from "../auth/systems.js";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { notifyNestEvent } from "../notify/notify.js";
@@ -90,6 +91,14 @@ export async function addCollaborator(params: {
   }
   if (!userId) {
     throw new ValidationError("user_id or email is required");
+  }
+  // Systems join nests only through /systems (CU-wdqcq0538g), which checks the
+  // granting admin manages the system. A plain invite would let anyone who
+  // learns a system's identity adopt it.
+  if (await isSystemUser(userId)) {
+    throw new ValidationError(
+      "That is a system, not a person. Add it to this nest from its system settings (POST /systems/:id/nests).",
+    );
   }
 
   // The nest owner already has full access — never add them as a collaborator

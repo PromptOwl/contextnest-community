@@ -90,6 +90,9 @@ export const HISTORICAL_MIGRATIONS = [
   "061_outbound_messages",
   "062_field_definitions",
   "064_task_activity",
+  "065_api_key_capability",
+  "066_api_key_origin",
+  "067_system_accounts",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -150,6 +153,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       key_prefix TEXT NOT NULL,
       nest_id TEXT REFERENCES nests(id) ON DELETE CASCADE,
       label TEXT,
+      capability TEXT NOT NULL DEFAULT 'write',
+      origin TEXT NOT NULL DEFAULT 'manual',
       created_at TEXT NOT NULL DEFAULT ${NOW},
       last_used_at TEXT
     );
@@ -158,6 +163,11 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- Migration 003 capped this at one row per user; 035 lifted it so a user
     -- can hold one key per place they connect from and rotate them singly.
     DROP INDEX IF EXISTS idx_api_keys_user_unique;
+    -- 065: per-key capability ('write' = full/historic, 'read' = read-only).
+    -- DEFAULT 'write' keeps every existing key behaving exactly as before.
+    ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS capability TEXT NOT NULL DEFAULT 'write';
+    -- 066: per-key origin ('manual' | 'exchange'), for the exchange's per-nest cap.
+    ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'manual';
 
     CREATE TABLE IF NOT EXISTS nest_collaborators (
       id TEXT PRIMARY KEY,
@@ -1169,6 +1179,18 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
     CREATE INDEX IF NOT EXISTS idx_task_activity_node
       ON task_activity(nest_id, node_id, created_at);
+  `);
+  
+  // Migration 067 parity: named systems (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS system_accounts (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      capability TEXT NOT NULL CHECK(capability IN ('read', 'write')),
+      created_by TEXT,
+      created_by_email TEXT,
+      created_at TEXT NOT NULL DEFAULT ${NOW}
+    );
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

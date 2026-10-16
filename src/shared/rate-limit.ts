@@ -61,6 +61,20 @@ export function isLimited(key: string, cfg: RateLimitConfig): boolean {
   return liveBucket(key, Date.now() - cfg.windowMs).hits.length >= cfg.max;
 }
 
+/**
+ * Seconds until the caller may try again — for a Retry-After header after
+ * tryConsume returned false. 0 when not limited. Rounded up, at least 1 while
+ * limited, so a client honouring it never retries early.
+ */
+export function retryAfterSeconds(key: string, cfg: RateLimitConfig): number {
+  const now = Date.now();
+  const bucket = liveBucket(key, now - cfg.windowMs);
+  if (bucket.hits.length < cfg.max) return 0;
+  // The slot frees when the oldest hit that keeps us at max ages out.
+  const oldest = bucket.hits[bucket.hits.length - cfg.max];
+  return Math.max(1, Math.ceil((oldest + cfg.windowMs - now) / 1000));
+}
+
 /** Record one failed attempt against the key. */
 export function recordFailure(key: string, cfg: RateLimitConfig): void {
   liveBucket(key, Date.now() - cfg.windowMs).hits.push(Date.now());

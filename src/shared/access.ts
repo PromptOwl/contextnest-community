@@ -157,6 +157,7 @@ async function resolveNestAccessRaw(
             n.archived_at  AS archived_at,
             n.shared_teams AS shared_teams,
             u.email        AS caller_email,
+            u.is_service   AS caller_is_service,
             nc.permission  AS collab_permission,
             (SELECT 1 FROM stewards s
                WHERE s.nest_id = n.id AND s.is_active = 1
@@ -182,6 +183,7 @@ async function resolveNestAccessRaw(
         archived_at: string | null;
         shared_teams: string | null;
         caller_email: string | null;
+        caller_is_service: number | null;
         collab_permission: NestPermission | null;
         steward_hit: number | boolean | null;
         grant_hit: number | boolean | null;
@@ -241,7 +243,10 @@ async function resolveNestAccessRaw(
   // The caller's email answers BOTH admin checks with no further queries —
   // isLicenseAdminEmail and isSuperAdmin are pure. The old code paid a users
   // lookup for each.
-  const email = row.caller_email ?? null;
+  // A service identity (a named system, CU-wdqcq0538g, or any other) never
+  // takes the admin paths below: its synthetic email can't be a license
+  // owner, and must not be promotable to superadmin by naming that address.
+  const email = row.caller_is_service ? null : (row.caller_email ?? null);
   const licenseAdmin = isLicenseAdminEmail(email);
 
   // 2. The ungoverned commons: the license admin keeps full control of an
