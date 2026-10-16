@@ -784,6 +784,11 @@ export const TOOL_DEFINITIONS = [
           description:
             "New lifecycle status: draft | pending_review | approved | published | rejected. Aliases are normalized.",
         },
+        type: {
+          type: "string",
+          description:
+            "Re-type the node in place (e.g. document → glossary). Same accepted set as context_create; unknown types are rejected. Version history and review state are kept.",
+        },
         changeNote: {
           type: "string",
           description: "Why this changed — recorded in version history",
@@ -2884,6 +2889,7 @@ async function runTool(
             append: args.append,
             tags: args.tags,
             status: args.status,
+            ...(args.type !== undefined ? { type: args.type } : {}),
             changeNote: args.changeNote,
             client: ctx.client,
             ...taskFields,
