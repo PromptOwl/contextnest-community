@@ -66,6 +66,7 @@ import {
   deleteNode,
   deleteFolder,
   moveNode,
+  moveFolder,
   listNodesForCallerByEmail,
   getNodeForCaller,
   isIdUnderFolder,
@@ -835,7 +836,7 @@ export const TOOL_DEFINITIONS = [
     // new concept, so the surfaces agree. If move is ever promoted to a core
     // operation upstream, adopt that descriptor and drop this schema.
     description:
-      "Move a node to a different folder. The id changes; version history, review state, annotations, comments, watchers, schedules, links, and document grants all follow. The title and its [[wiki-link]] stay valid. A node under open review is frozen unless you can approve it (owner, admin, or its reviewer).",
+      "Move a node to a different folder — or, with from_folder, rename or move a whole folder (owner/admin only; sub-folders and every document under it follow, ids change, history and review state survive). Moving a node: the id changes; version history, review state, annotations, comments, watchers, schedules, links, and document grants all follow. The title and its [[wiki-link]] stay valid. A node under open review is frozen unless you can approve it (owner, admin, or its reviewer).",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -848,7 +849,12 @@ export const TOOL_DEFINITIONS = [
         folder: {
           type: "string",
           description:
-            'Destination folder under nodes/ (e.g. "gtm/deals"); segments are slugified. Use "" to move to the nest root.',
+            'Destination folder under nodes/ (e.g. "gtm/deals"); segments are slugified. Use "" to move to the nest root. With from_folder: the folder\'s NEW full path ("archive/acme" to move projects/acme there, "projects/acme-2" to rename it).',
+        },
+        from_folder: {
+          type: "string",
+          description:
+            'Rename or move a whole folder instead of a node: the folder\'s current path (e.g. "projects/acme"). Leave title and id unset.',
         },
       },
       required: ["folder"],
@@ -3093,6 +3099,25 @@ async function runTool(
     case "context_move": {
       if (typeof args.folder !== "string") {
         return 'folder is required — a path like "gtm/deals", or "" for the nest root.';
+      }
+      if (typeof args.from_folder === "string" && args.from_folder.trim()) {
+        // Owner/admin, like the REST route and deleting a folder: many ids change at once.
+        const roles = await stewardship.resolveUserRoles(nestId, userEmail);
+        if (!roles.includes("owner") && !roles.includes("admin")) {
+          return writeRefusal(
+            ctx,
+            "You don't have permission to rename or move a folder — only a nest owner or admin can.",
+            { type: "nest", id: nestId },
+          );
+        }
+        const { folder, moved } = await moveFolder(nestId, args.from_folder, args.folder, userEmail);
+        const data = { folder, previous_folder: args.from_folder, moved };
+        return {
+          text: moved.length
+            ? `Moved folder \`${args.from_folder}\` → \`${folder}\` (${moved.length} document(s) followed).`
+            : `Folder \`${args.from_folder}\` is now \`${folder}\`.`,
+          data,
+        };
       }
       const node = await resolveTargetNode(storage, args);
       if (typeof node === "string") return node;

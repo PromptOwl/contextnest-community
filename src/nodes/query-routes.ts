@@ -39,6 +39,7 @@ import {
   nestCensus,
   RUNNABLE_NODE_TYPES,
   createEmptyFolder,
+  moveFolder,
   isDerivedAnnotationsNode,
 } from "./service.js";
 import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
@@ -485,6 +486,25 @@ queryRoutes.post("/folders", async (c) => {
   }
   const folder = await createEmptyFolder(c.req.param("nestId")!, body.folder);
   return c.json({ folder }, 201);
+});
+
+// POST /nests/:nestId/folders/move  { "folder": "projects/acme", "to": "archive/acme" }
+//
+// Rename or move a folder with everything in it — a rename is a move to a path
+// with the same parent. Owner/admin only, like deleting one.
+queryRoutes.post("/folders/move", async (c) => {
+  const permission = c.get("nestPermission");
+  if (permission !== "owner" && permission !== "admin") {
+    throw new ForbiddenError("Only the nest owner or an admin can rename or move a folder");
+  }
+  const body = await c.req
+    .json<{ folder?: string; to?: string }>()
+    .catch(() => ({}) as { folder?: string; to?: string });
+  if (typeof body.folder !== "string" || typeof body.to !== "string") {
+    throw new ValidationError('folder and to (paths like "gtm/deals") are required');
+  }
+  const userEmail = await resolveCallerEmail(c.get("userId"));
+  return c.json(await moveFolder(c.req.param("nestId")!, body.folder, body.to, userEmail));
 });
 
 // POST /nests/:nestId/reindex

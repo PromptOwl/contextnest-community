@@ -1396,6 +1396,9 @@ Body: `{ "folder": "api/limits" }`. **Owner/admin only** — a folder delete is 
 
 Folders are not stored objects — they exist only as segments of the node ids beneath them, so deleting a folder *is* deleting its documents.
 
+### POST `/nests/:nestId/folders/move`
+Body: `{ "folder": "projects/acme", "to": "archive/acme" }`. Renames or moves a folder — a rename is a move to a path with the same parent. **Owner/admin only.** Every document under it (sub-folders and empty folders included) goes through `moveNode`, so ids change but version history, review state and links follow, a document under open review blocks the move, and the nest's structure rules are enforced (a required folder can't be moved; the new path must be one the rules allow). `409` if `to` already exists; `400` if `to` is inside `folder`. Returns `{ folder, moved: [{ id, previousId }] }`. Over MCP: `context_move` with `from_folder` (the current path) and `folder` (the new path).
+
 ### GET `/nests/:nestId/deletion-requests`
 Query: `?status=pending|declined|all` (defaults to `pending`). `all` returns both states newest-first — one call for a client that shows the queue and badges declined nodes.
 

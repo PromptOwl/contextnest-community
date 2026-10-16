@@ -2026,6 +2026,14 @@ export async function deleteFolder(nestId: string, folder: string) {
   );
 }
 
+/** Rename or move a folder (`to` is its new full path) with everything in it. Owner/admin only. */
+export async function moveFolder(nestId: string, folder: string, to: string) {
+  return request<{ folder: string; moved: Array<{ id: string; previousId: string }> }>(
+    `/nests/${nestId}/folders/move`,
+    { method: "POST", body: JSON.stringify({ folder, to }) },
+  );
+}
+
 /** Flag a whole folder ("api/limits") or the nest itself. "nest_archive" asks
  *  for the nest to be archived rather than destroyed — same queue, same
  *  reviewers, different outcome when it is honoured. */

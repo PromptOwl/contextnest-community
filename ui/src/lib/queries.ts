@@ -365,7 +365,7 @@ const NEST_WRITE_SCOPES: Array<{
     ],
   },
   {
-    match: /^\/(delete-folder|request-deletion)/,
+    match: /^\/(delete-folder|folders\/move|request-deletion)/,
     affects: (n) => [keys.nodes(n), keys.nestListAll()],
   },
   // Archiving or restoring moves the nest between the two lists and takes its

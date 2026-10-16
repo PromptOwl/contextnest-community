@@ -18,6 +18,7 @@ import { activityTimestamp } from "../../lib/node-sort";
 import { linkHealth } from "../../lib/link-health";
 import { findBacklinks, inboundLinkWarning } from "../../lib/backlinks";
 import { FolderDeleteDialog } from "./FolderDeleteDialog";
+import { FolderMoveDialog } from "./FolderMoveDialog";
 import { nodeTypeSupportsMove } from "../../lib/document-actions";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
@@ -184,6 +185,10 @@ export function DocumentsTab({
     ? findBacklinks(deleteLinks.data?.nodes ?? [], deleteNodeTarget).length
     : 0;
 
+  // Folder being renamed or moved (admin/owner).
+  const [moveFolderTarget, setMoveFolderTarget] = useState<
+    { path: string; label: string } | null
+  >(null);
   // Folder pending deletion (admin) or a deletion request (everyone else).
   const [folderTarget, setFolderTarget] = useState<
     { path: string; label: string; total: number } | null
@@ -1716,6 +1721,24 @@ export function DocumentsTab({
                                 <Activity className="h-3.5 w-3.5" />
                               </button>
                             )}
+                            {canManage && (
+                              <button
+                                type="button"
+                                className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 focus-visible:opacity-100 hover:text-primary hover:bg-primary/10"
+                                title={`Rename or move ${prettyFolderPath(node.path)}`}
+                                aria-label={`Rename or move ${prettyFolderPath(node.path)}`}
+                                data-testid={`move-folder-${node.path}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setMoveFolderTarget({
+                                    path: node.path,
+                                    label: prettyFolderPath(node.path),
+                                  });
+                                }}
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                              </button>
+                            )}
                             {/* This folder's rules — where things go, how
                                 files are named. Everyone can look; owners and
                                 admins edit on the Structure page. */}
@@ -2047,6 +2070,21 @@ export function DocumentsTab({
           nodeId={publishNode.id}
           nodeTitle={publishNode.title || publishNode.id}
           onClose={() => setPublishNode(null)}
+        />
+      )}
+
+      {moveFolderTarget && (
+        <FolderMoveDialog
+          nestId={nestId}
+          folder={moveFolderTarget}
+          onClose={() => setMoveFolderTarget(null)}
+          onDone={() => {
+            // The old path no longer exists, so it can't stay the active filter.
+            const old = moveFolderTarget.path;
+            if (folderFilter && (folderFilter === old || folderFilter.startsWith(old + "/")))
+              setFolderFilter(null);
+            fetchData();
+          }}
         />
       )}
 
