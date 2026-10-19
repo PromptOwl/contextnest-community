@@ -1,4 +1,4 @@
-import { getCurrentLicense, isSuspended } from "./license.js";
+import { getCurrentLicense, isOfflineLocked, isSuspended } from "./license.js";
 import { countBilled } from "./seats.js";
 
 /**
@@ -32,11 +32,12 @@ export async function withinFreeTier(): Promise<boolean> {
 
 /**
  * May this server accept writes right now? Never while PromptOwl's kill switch
- * is engaged; otherwise yes with a valid license, or without one while the
- * server is within the Free tier. Reads the user count only when unlicensed.
+ * is engaged or the license has gone unchecked past the offline limit;
+ * otherwise yes with a valid license, or without one while the server is
+ * within the Free tier. Reads the user count only when unlicensed.
  */
 export async function writesAllowed(): Promise<boolean> {
-  if (isSuspended()) return false;
+  if (isSuspended() || isOfflineLocked()) return false;
   if (getCurrentLicense()?.valid) return true;
   return withinFreeTier();
 }

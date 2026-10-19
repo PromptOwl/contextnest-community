@@ -14,6 +14,11 @@ import { getLicenseOwnerEmail } from "./license.js";
 export const NEUTRAL_READ_ONLY =
   "This workspace is read-only right now. Your administrator has been notified.";
 
+/** What an admin is told when PromptOwl has been unreachable past the offline limit. */
+export function offlineLockMessage(since: string): string {
+  return `This server hasn't reached PromptOwl to check its license since ${since}, so it is read-only after 24 hours offline. Reading still works and nothing has been deleted. Allow outbound HTTPS to ${config.PROMPTOWL_API_URL}; writing comes back on the next successful check.`;
+}
+
 /**
  * May this caller see why the server is read-only, and fix it? Server admins
  * (open mode, the license owner, superadmins) — plus the owner of the installed

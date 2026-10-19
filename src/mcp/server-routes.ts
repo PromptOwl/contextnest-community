@@ -51,7 +51,7 @@ import {
   createNest,
 } from "../nests/service.js";
 import { ValidationError, ForbiddenError } from "../shared/errors.js";
-import { isSuspended, getSuspensionReason } from "../auth/license.js";
+import { isSuspended, getSuspensionReason, getOfflineLock } from "../auth/license.js";
 import {
   handleToolCall,
   normalizeSearchLimit,
@@ -64,7 +64,7 @@ import {
 import { DERIVED_ANNOTATIONS_SUFFIX } from "../nodes/service.js";
 import { suffixOf } from "../db/sql.js";
 import type { Nest } from "../shared/types.js";
-import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "../auth/license-copy.js";
+import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "../auth/license-copy.js";
 import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
 import { HEADLESS_READER_SERVER_TOOLS, isHeadlessIdentity } from "../auth/headless.js";
 import { isSystemUser } from "../auth/systems.js";
@@ -441,6 +441,8 @@ async function handleServerToolCall(
         reason ? ` — ${reason}` : ""
       }. Contact support@promptowl.ai.`;
     }
+    const offlineSince = getOfflineLock();
+    if (offlineSince) return offlineLockMessage(offlineSince);
     return FREE_TIER_EXCEEDED_MESSAGE;
   }
 

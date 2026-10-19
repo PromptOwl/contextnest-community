@@ -569,6 +569,8 @@ export interface AdminLicense extends LicenseTerms {
     at_limit: boolean;
   };
   pending_rejections: number;
+  /** Last good check, set once PromptOwl has been unreachable for over 24h: read-only until it answers. */
+  offline_since?: string | null;
   last_checked_at: string | null;
   /** Own model keys / LLM gateway (licence feature byok) is on for this licence. */
   byok?: boolean;
