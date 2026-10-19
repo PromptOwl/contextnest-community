@@ -908,6 +908,8 @@ export interface ApiKeyMeta {
   key_prefix: string;
   nest_id: string | null;
   label: string | null;
+  /** "read" keys can't write; anything else is read-write. */
+  capability?: string | null;
   created_at: string;
   last_used_at: string | null;
 }
@@ -927,7 +929,12 @@ export interface ApiKeyMinted {
 
 /** Mint another external-client API key. 409s at the per-user ceiling or on a
  *  duplicate name; with nest_id, 404s unless the caller can reach that nest. */
-export async function createApiKey(opts?: { label?: string; nest_id?: string }) {
+export async function createApiKey(opts?: {
+  label?: string;
+  nest_id?: string;
+  /** "read" requires nest_id — the server 400s otherwise. */
+  capability?: "read" | "write";
+}) {
   return request<ApiKeyMinted>("/auth/keys", {
     method: "POST",
     body: JSON.stringify(opts || {}),

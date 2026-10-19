@@ -5,6 +5,7 @@ import {
   createKeyRequest,
   ALL_NESTS,
   filterSortKeys,
+  keyCapability,
 } from "./api-key-scope";
 
 const nests = [
@@ -46,6 +47,26 @@ describe("createKeyRequest", () => {
   });
   it("a picked nest → nest_id", () => {
     expect(createKeyRequest("Agent", "n1")).toEqual({ label: "Agent", nest_id: "n1" });
+  });
+  it("read-only → capability: read alongside the nest", () => {
+    expect(createKeyRequest("Agent", "n1", "read")).toEqual({
+      label: "Agent",
+      nest_id: "n1",
+      capability: "read",
+    });
+  });
+  it("read-write sends no capability (server default)", () => {
+    expect(createKeyRequest("Agent", "n1", "write")).toEqual({ label: "Agent", nest_id: "n1" });
+  });
+});
+
+describe("keyCapability", () => {
+  it("labels read keys Read-only", () => {
+    expect(keyCapability({ capability: "read" })).toEqual({ kind: "read", label: "Read-only" });
+  });
+  it("labels write and legacy (missing) keys Read-write", () => {
+    expect(keyCapability({ capability: "write" }).kind).toBe("write");
+    expect(keyCapability({}).label).toBe("Read-write");
   });
 });
 
