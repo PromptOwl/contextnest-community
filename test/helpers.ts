@@ -112,6 +112,9 @@ export async function createTestApp(
       getOwnGateway: () => opts.ownGateway ?? null,
       // Kill switch: `licenseOverrides.suspended = true` engages it mid-suite.
       isSuspended: () => opts.licenseOverrides?.suspended === true || actual.isSuspended(),
+      // Offline limit: `licenseOverrides.offlineSince = <iso>` engages it mid-suite.
+      getOfflineLock: () => (opts.licenseOverrides?.offlineSince as string | undefined) ?? actual.getOfflineLock(),
+      isOfflineLocked: () => !!opts.licenseOverrides?.offlineSince || actual.isOfflineLocked(),
       getEntitlement: () => ({
         plan: "enterprise",
         maxUsers: null,

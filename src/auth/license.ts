@@ -436,6 +436,31 @@ export function getSuspensionReason(): string | null {
   return suspensionReason;
 }
 
+// ─── Offline limit ──────────────────────────────────────────────────────
+//
+// PromptOwl unreachable: keep serving the last good license, but only for
+// OFFLINE_LIMIT_MS after its last successful check (license_cache.validated_at,
+// so a restart doesn't reset the clock). Past that writes stop; reads,
+// sessions and models stay. The next answer from PromptOwl lifts it.
+// Pricing Spec v21. CU-wdqcq04t05.
+// ────────────────────────────────────────────────────────────────────────
+
+const OFFLINE_LIMIT_MS = 24 * 60 * 60 * 1000;
+/** Last successful check (ms) of the cached license served while unreachable. */
+let offlineSince: number | null = null;
+
+/** When the license was last checked, ISO, if the server is read-only because
+ *  PromptOwl has been unreachable for longer than the offline limit; else null. */
+export function getOfflineLock(): string | null {
+  return offlineSince !== null && Date.now() - offlineSince > OFFLINE_LIMIT_MS
+    ? new Date(offlineSince).toISOString()
+    : null;
+}
+
+export function isOfflineLocked(): boolean {
+  return getOfflineLock() !== null;
+}
+
 // ─── Rejection grace ────────────────────────────────────────────────────
 //
 // An explicit rejection (PromptOwl reached, answered valid:false, not
@@ -619,6 +644,14 @@ function cachedFeatures(json: string | null | undefined): string[] | null {
   }
 }
 
+/** Start (or keep) the offline clock at the cached row's last good check;
+ *  returns a log suffix once the server is past the offline limit. */
+function markOffline(cached: CachedLicenseRow): string {
+  offlineSince = new Date(cached.validated_at + "Z").getTime();
+  const since = getOfflineLock();
+  return since ? ` — not checked since ${since}, server is read-only until PromptOwl answers` : "";
+}
+
 async function fromCache(cached: CachedLicenseRow): Promise<LicenseInfo> {
   if (cached.owner_email) lastOwnerEmail = cached.owner_email;
   currentGateway = await gatewayFromCache(cached.gateway_json, parseGateway);
@@ -650,6 +683,7 @@ export async function validateLicense(
   const info = await _validateLicenseImpl(!!opts.forceFresh, !!opts.strict);
   currentLicense = info;
   if (!info.valid) {
+    offlineSince = null; // the lock only ever holds a cached valid license
     currentGateway = null;
     setOwnGateway(null);
   }
@@ -701,7 +735,7 @@ async function _validateLicenseImpl(
     if (!res.ok) {
       if (cached) {
         console.warn(
-          "  PromptOwl unreachable, using cached license (grace period)",
+          `  PromptOwl unreachable, using cached license${markOffline(cached)}`,
         );
         return fromCache(cached);
       }
@@ -730,6 +764,7 @@ async function _validateLicenseImpl(
       // v2 (optional): reason, trial, expires_at, seats, contact
       [k: string]: unknown;
     };
+    offlineSince = null; // PromptOwl answered
     const features = sanitizeFeatures(data.features);
     lastMeta = parseMeta(data, report.stats?.users ?? null);
     lastCheckedAt = new Date().toISOString();
@@ -883,7 +918,7 @@ async function _validateLicenseImpl(
   } catch (err: any) {
     if (cached) {
       console.warn(
-        `  PromptOwl validation failed (${fetchErrorText(err)}), using cached license`,
+        `  PromptOwl validation failed (${fetchErrorText(err)}), using cached license${markOffline(cached)}`,
       );
       return fromCache(cached);
     }

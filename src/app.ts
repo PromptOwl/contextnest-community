@@ -147,6 +147,7 @@ import { ensureAnonymousUser } from "./auth/anonymous.js";
 import {
   isSuspended,
   getSuspensionReason,
+  getOfflineLock,
   getCurrentLicense,
   installLicenseKey,
   getLastLicenseCheck,
@@ -169,7 +170,7 @@ import {
   bareModelName,
   modelProvider,
 } from "./shared/model-credential.js";
-import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "./auth/license-copy.js";
+import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "./auth/license-copy.js";
 import { tryConsume } from "./shared/rate-limit.js";
 import { clientIp } from "./shared/request-ip.js";
 import { FREE_TIER_EXCEEDED_MESSAGE, withinFreeTier, writesAllowed } from "./auth/free-tier.js";
@@ -825,6 +826,9 @@ export function createApp(): Hono<AuthEnv> {
       // Consecutive rejections PromptOwl has sent that haven't been acted on
       // yet (3 drop the license) — the "we're checking your license" banner.
       pending_rejections: getPendingRejections(),
+      // Set while PromptOwl has been unreachable past the 24h offline limit
+      // (the last good check); the server is read-only until it answers.
+      offline_since: getOfflineLock(),
       last_checked_at: getLastLicenseCheck(),
       // Own model keys / LLM gateway (licence feature byok), for the License tab.
       byok: hasEntitlement("byok"),
@@ -2620,6 +2624,14 @@ export function createApp(): Hono<AuthEnv> {
         },
       };
     }
+    const offlineSince = getOfflineLock();
+    if (offlineSince) {
+      if (!(await admin())) return { error: NEUTRAL_READ_ONLY, extra: { read_only: true } };
+      return {
+        error: "License check overdue",
+        extra: { reason: offlineLockMessage(offlineSince), offline_since: offlineSince },
+      };
+    }
     if (await writesAllowed()) return null;
     const lic = getCurrentLicense();
     if (!(await admin())) return { error: NEUTRAL_READ_ONLY, extra: { read_only: true } };
@@ -2725,9 +2737,9 @@ export function createApp(): Hono<AuthEnv> {
       );
     }
 
-    // Kill switch: if suspended, block writes but allow reads
+    // Kill switch or offline limit: block writes but allow reads
     // Only admins hear why; everyone else gets the neutral read-only line.
-    if (isSuspended() && c.req.method !== "GET") {
+    if ((isSuspended() || getOfflineLock()) && c.req.method !== "GET") {
       const denial = await readOnlyDenial(userId);
       if (denial) return deny(503, denial.error, denial.extra);
     }

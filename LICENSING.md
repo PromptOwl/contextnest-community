@@ -151,7 +151,7 @@ Does the license include "byok" (Enterprise)?
 
 - **At startup**, the server always asks PromptOwl fresh, so a restart can't hide a change.
 - **Every 60 seconds** afterwards it checks again in the background. User requests never wait on PromptOwl.
-- **If PromptOwl can't be reached**, the server keeps working on its last good answer, including the plan, limits and model key. It is saved in the database, so a restart doesn't lose it.
+- **If PromptOwl can't be reached**, the server keeps working on its last good answer, including the plan, limits and model key, for **24 hours** after the last successful check. It is saved in the database, so a restart doesn't lose it or reset the 24 hours. After that the server goes **read-only** until PromptOwl answers again (see below).
 
 ### What each check sends
 
@@ -171,15 +171,16 @@ It **never** sends document content or names of people. This happens whether or 
 |---|---|
 | PromptOwl rejects the key (ended past grace, deactivated) | After **3 rejections in a row**, about 3 minutes. One bad answer is never enough. |
 | PromptOwl **suspends** the key | After **2 suspended answers within an hour**, so about 1 minute |
+| PromptOwl can't be reached | **24 hours** after the last successful check. Every server goes read-only, whatever its size. |
 | PromptOwl answers "valid" again | On the next check. Nothing to reinstall. |
 
-When the license stops being valid, a server with more than 10 users goes **read-only** (10 or fewer keep writing as Free):
+When the license stops being valid, a server with more than 10 users goes **read-only** (10 or fewer keep writing as Free). A suspension or the 24-hour offline limit makes any server read-only:
 
 - **Reading keeps working:** browsing nests, search, documents and MCP reads.
 - **Writing is refused** (`503`): documents, and nest create, rename and delete.
 - **Nobody is signed out**, and the installed key stays in place. When the license is valid again, writing comes back on the next check.
 - **Who is told what:**
-  - The license owner and server admins see the reason (ended, suspended, the grace date) and who to contact.
+  - The license owner and server admins see the reason (ended, suspended, the grace date, or when PromptOwl was last reached) and who to contact.
   - Everyone else sees one neutral line: *"This workspace is read-only right now. Your administrator has been notified."*
 
 ---
@@ -201,7 +202,7 @@ When the license stops being valid, a server with more than 10 users goes **read
 
 **We moved to a smaller plan and are now over it. What happens?** Nothing is removed. New raises are refused until enough roles are lowered to bring the count under the limit.
 
-**PromptOwl is down. Does our server stop?** No. It keeps running on the last answer it saved, models included. It catches up when PromptOwl is back.
+**PromptOwl is down. Does our server stop?** No. It keeps running on the last answer it saved, models included, for 24 hours after the last successful check. After that it stays up read-only: reading works, nobody is signed out, and writing comes back on the next successful check.
 
 **Does turning off telemetry stop the license check?** No. The license check is separate from analytics, and it sends only the counts listed above.
 
