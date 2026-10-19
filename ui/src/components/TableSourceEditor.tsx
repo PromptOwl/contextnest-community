@@ -1,9 +1,10 @@
 import { useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent } from "react";
-import { AlertTriangle, Upload } from "lucide-react";
+import { AlertTriangle, Plus, Upload, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
+  editCsvTable,
   looksLikeDelimitedRow,
   looksLikeDelimitedTable,
   parseDelimited,
@@ -13,6 +14,7 @@ import {
   typedColumnIssues,
   uploadedTableErrorMessage,
 } from "../lib/csv-table";
+import type { CsvTableEdit } from "../lib/csv-table";
 import { TableGrid } from "./TableViewer";
 
 /**
@@ -59,11 +61,14 @@ export function TableSourceEditor({
   // Live grid under the source: CSV is hard to proofread as text, and the
   // reader sees a table. Comment lines and header directives are stripped the
   // same way the read view strips them.
+  // Rows of empty cells are kept so a row just added in the grid stays visible
+  // until it is filled in.
   const preview = useMemo(() => {
-    const rows = parseDelimited(value, ",").filter(
-      (r) => !(r[0] ?? "").trimStart().startsWith("#") && r.some((c) => c.trim() !== ""),
+    const rows = parseDelimited(value, ",", true).filter(
+      (r) => !(r[0] ?? "").trimStart().startsWith("#"),
     );
     return {
+      header: rows[0] ?? [],
       columns: (rows[0] ?? []).map((h) => h.split(":")[0].trim()),
       rows: rows.slice(1),
       // A preview that renders bad data as if it were fine is what made the
@@ -71,6 +76,11 @@ export function TableSourceEditor({
       issues: typedColumnIssues(rows),
     };
   }, [value]);
+
+  const applyEdit = (edit: CsvTableEdit) => {
+    if (locked) return;
+    onChange(editCsvTable(value, edit));
+  };
 
   const replaceWith = (next: string, summary: string) => {
     const prev = value;
@@ -237,9 +247,146 @@ export function TableSourceEditor({
                 </div>
               </div>
             )}
-            <TableGrid columns={preview.columns} rows={preview.rows} limit={50} />
+            {locked ? (
+              <TableGrid columns={preview.columns} rows={preview.rows} limit={50} />
+            ) : (
+              <EditableGrid header={preview.header} rows={preview.rows} onEdit={applyEdit} />
+            )}
           </div>
         )}
+      </div>
+      {preview.columns.length === 0 && !locked && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="mt-2 h-7"
+          onClick={() => applyEdit({ op: "add-column" })}
+          data-testid="table-grid-add-column"
+        >
+          <Plus className="h-3.5 w-3.5 mr-1.5" />
+          Add column
+        </Button>
+      )}
+    </div>
+  );
+}
+
+const GRID_ROW_LIMIT = 50;
+
+/**
+ * The preview grid as an editor: cells edit in place (committed on blur or
+ * Enter), and rows/columns are added at the end or removed from their ×.
+ * Long tables show the first rows plus the last one, so an added row is
+ * always on screen to fill in.
+ */
+function EditableGrid({
+  header,
+  rows,
+  onEdit,
+}: {
+  header: string[];
+  rows: string[][];
+  onEdit: (edit: CsvTableEdit) => void;
+}) {
+  const shown = rows.slice(0, GRID_ROW_LIMIT).map((r, i) => ({ r, i }));
+  const hidden = rows.length - GRID_ROW_LIMIT;
+  if (hidden > 0) shown.push({ r: rows[rows.length - 1], i: rows.length - 1 });
+
+  const cell = (row: number, col: number, text: string, isHeader = false) => (
+    <input
+      // Keyed on the text so an edit made in the CSV source re-seeds the cell.
+      key={`${row}:${col}:${text}`}
+      defaultValue={text}
+      aria-label={isHeader ? `Column ${col + 1} header` : `Row ${row + 1}, column ${col + 1}`}
+      onBlur={(e) => {
+        if (e.target.value !== text) onEdit({ op: "set-cell", row, col, value: e.target.value });
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+      }}
+      className={`w-full min-w-24 bg-transparent px-2 py-1 font-mono focus:outline-none focus:ring-1 focus:ring-ring rounded-sm ${isHeader ? "font-semibold" : ""}`}
+    />
+  );
+
+  return (
+    <div className="space-y-2" data-testid="table-grid-editor">
+      <div className="overflow-x-auto rounded-lg border">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="bg-muted/50 text-left text-muted-foreground">
+              {header.map((h, j) => (
+                <th key={j} className="p-1 align-top">
+                  <div className="flex items-center">
+                    {cell(-1, j, h, true)}
+                    <button
+                      type="button"
+                      title="Delete column"
+                      onClick={() => onEdit({ op: "delete-column", col: j })}
+                      className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                      data-testid={`table-grid-delete-column-${j}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                </th>
+              ))}
+              <th className="w-6" />
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map(({ r, i }) => (
+              <tr key={i} className="border-t">
+                {header.map((_, j) => (
+                  <td key={j} className="p-1">
+                    {cell(i, j, r[j] ?? "")}
+                  </td>
+                ))}
+                <td className="w-6 p-1">
+                  <button
+                    type="button"
+                    title="Delete row"
+                    onClick={() => onEdit({ op: "delete-row", row: i })}
+                    className="rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                    data-testid={`table-grid-delete-row-${i}`}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {hidden > 1 && (
+          <p className="px-3 py-2 text-[11px] text-muted-foreground border-t">
+            {(hidden - 1).toLocaleString()} more rows between row {GRID_ROW_LIMIT} and the last
+            row — edit them in the CSV source.
+          </p>
+        )}
+      </div>
+      <div className="flex gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-7"
+          onClick={() => onEdit({ op: "add-row" })}
+          data-testid="table-grid-add-row"
+        >
+          <Plus className="h-3.5 w-3.5 mr-1.5" />
+          Add row
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-7"
+          onClick={() => onEdit({ op: "add-column" })}
+          data-testid="table-grid-add-column"
+        >
+          <Plus className="h-3.5 w-3.5 mr-1.5" />
+          Add column
+        </Button>
       </div>
     </div>
   );
