@@ -1601,6 +1601,43 @@ export function DocumentsTab({
                         // genuinely empty folder stays a static row, no chevron.
                         const collapsible = node.total > 0;
                         const loadingHere = loadingFolders.has(node.path);
+                        // Same split as a document: admins/owners delete the
+                        // folder (and everything under it), editors raise a
+                        // request. Hidden while one is already pending, and
+                        // withheld from viewers — the server refuses a folder
+                        // flag below editor, and a folder-scope editor row
+                        // isn't enough for it either (canRequestDeletion
+                        // wants nest scope).
+                        const deleteButton =
+                          (canManage || canEditDocs) &&
+                          (canManage || !folderFlagPending(node.path)) ? (
+                            <button
+                              type="button"
+                              // An empty folder's only useful action is
+                              // removing it, so it shows without a hover.
+                              className={`rounded p-0.5 ${node.total === 0 ? "" : "opacity-0"} group-hover/fh:opacity-100 focus-visible:opacity-100 ${
+                                canManage
+                                  ? "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                                  : "text-muted-foreground hover:text-primary hover:bg-primary/10"
+                              }`}
+                              title={
+                                canManage
+                                  ? `Delete ${prettyFolderPath(node.path)} and everything in it`
+                                  : "Delete (needs admin approval)"
+                              }
+                              data-testid={`delete-folder-${node.path}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setFolderTarget({
+                                  path: node.path,
+                                  label: prettyFolderPath(node.path),
+                                  total: node.total,
+                                });
+                              }}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          ) : null;
                         return (
                           <div
                             className={`group/fh flex items-center gap-1.5 py-1.5 px-2 rounded-md select-none transition-colors ${collapsible ? "cursor-pointer" : ""
@@ -1673,6 +1710,10 @@ export function DocumentsTab({
                             <span className="text-sm font-medium">
                               {node.label}
                             </span>
+                            {/* An empty folder shows delete without a hover,
+                                so it sits right after the name — behind the
+                                hidden hover icons it floated at a fixed gap. */}
+                            {node.total === 0 && deleteButton}
                             {/* Recursive subtree total (this folder + all
                                   descendants), matching the Overview Contents
                                   card. Direct-count-only made a folder holding
@@ -1785,42 +1826,7 @@ export function DocumentsTab({
                                 <Ruler className="h-3.5 w-3.5" />
                               </button>
                             )}
-                            {/* Same split as a document: admins/owners delete
-                                the folder (and everything under it), editors
-                                raise a request. Hidden while one is already
-                                pending, and withheld from viewers — the server
-                                refuses a folder flag below editor, and a
-                                folder-scope editor row isn't enough for it
-                                either (canRequestDeletion wants nest scope). */}
-                            {(canManage || canEditDocs) &&
-                              (canManage || !folderFlagPending(node.path)) && (
-                              <button
-                                type="button"
-                                // An empty folder's only useful action is
-                                // removing it, so it shows without a hover.
-                                className={`rounded p-0.5 ${node.total === 0 ? "" : "opacity-0"} group-hover/fh:opacity-100 focus-visible:opacity-100 ${
-                                  canManage
-                                    ? "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                                    : "text-muted-foreground hover:text-primary hover:bg-primary/10"
-                                }`}
-                                title={
-                                  canManage
-                                    ? `Delete ${prettyFolderPath(node.path)} and everything in it`
-                                    : "Delete (needs admin approval)"
-                                }
-                                data-testid={`delete-folder-${node.path}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setFolderTarget({
-                                    path: node.path,
-                                    label: prettyFolderPath(node.path),
-                                    total: node.total,
-                                  });
-                                }}
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
-                            )}
+                            {node.total > 0 && deleteButton}
                             {folderFlagPending(node.path) && (() => {
                               const folderFlag = folderFlagByPath.get(node.path);
                               const isOwnFlag = folderFlag?.requestedBy.toLowerCase() === currentEmail;
