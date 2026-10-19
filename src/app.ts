@@ -958,6 +958,8 @@ export function createApp(): Hono<AuthEnv> {
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
+    // Unset shows the engine's default bound.
+    import_io_concurrency: config.IMPORT_IO_CONCURRENCY ?? 32,
     message_log_retention_days: config.MESSAGE_LOG_RETENTION_DAYS,
     message_log_store_bodies: config.MESSAGE_LOG_STORE_BODIES,
     run_retention_days: config.RUN_RETENTION_DAYS,
@@ -1420,6 +1422,16 @@ export function createApp(): Hono<AuthEnv> {
           addError("trace_retention_days", "Trace retention must be a whole number of days between 0 and 3650 (0 keeps activity forever).");
         else pending.push({ name: "TRACE_RETENTION_DAYS", value: String(n) });
       }
+    }
+    // Import I/O bound (engine limits.ioConcurrency). Capped: each in-flight
+    // file is held in memory. null clears → engine default (32).
+    if ("import_io_concurrency" in body) {
+      const v = body.import_io_concurrency;
+      const n = Number(v);
+      if (v === null || v === "") pending.push({ name: "IMPORT_IO_CONCURRENCY", value: null });
+      else if (!Number.isInteger(n) || n < 1 || n > 256)
+        addError("import_io_concurrency", "Import concurrency must be a whole number between 1 and 256.");
+      else pending.push({ name: "IMPORT_IO_CONCURRENCY", value: String(n) });
     }
     // Message-log retention (outbound_messages). Same [0, 3650] range as the
     // getter; 0 keeps messages forever, null clears → default (30).

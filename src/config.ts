@@ -951,4 +951,13 @@ export const config = {
     const mb = parseInt(process.env.PDF_MAX_MB || "25", 10);
     return (Number.isFinite(mb) && mb > 0 ? mb : 25) * 1024 * 1024;
   },
+
+  /**
+   * File operations one import keeps in flight (engine `limits.ioConcurrency`).
+   * Unset leaves the engine default (32). Raise it on a network mount (gcsfuse).
+   */
+  get IMPORT_IO_CONCURRENCY(): number | undefined {
+    const n = parseInt(process.env.IMPORT_IO_CONCURRENCY || "", 10);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  },
 };

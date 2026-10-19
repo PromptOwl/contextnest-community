@@ -337,6 +337,8 @@ export interface AdminSettings {
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
+  /** File operations one folder import keeps in flight (1–256; engine default 32). */
+  import_io_concurrency: number;
   /** Superadmin message log: retention in days (0 = forever) and whether redacted bodies are kept. */
   message_log_retention_days: number;
   message_log_store_bodies: boolean;

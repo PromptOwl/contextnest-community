@@ -270,7 +270,7 @@ export async function syncUnsyncedFolder(
   let documents: number;
   try {
     await stageImportedFiles(nest.id, files, callerEmail);
-    documents = await registerImportedDocuments(nest.id, callerEmail, client);
+    ({ documents } = await registerImportedDocuments(nest.id, callerEmail, client));
   } catch (err) {
     await deleteNest(nest.id).catch(() => {});
     throw err;
