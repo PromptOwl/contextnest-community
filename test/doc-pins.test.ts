@@ -236,21 +236,6 @@ describe("document pins", () => {
       expect((await jsonRequest(app, "PUT", `${pinsUrl()}/order`, { node_ids: "x" }, steward.apiKey)).status).toBe(400);
     });
 
-    it("caps the editorial strip at 50 pins", async () => {
-      const d = await db();
-      const have = (await pinRows("scope = 'nest'")).length;
-      for (let i = have; i < 50; i++) {
-        await d.run(
-          "INSERT INTO node_pins (id, nest_id, node_id, scope, user_id, position) VALUES (?, ?, ?, 'nest', NULL, ?)",
-          [`cap-${i}`, nestId, `nodes/cap-${i}`, 100 + i],
-        );
-      }
-      const res = await pin(owner, ids.Charlie, "nest");
-      expect(res.status).toBe(400);
-      expect(res.data.error).toMatch(/50/);
-      await d.run("DELETE FROM node_pins WHERE id LIKE 'cap-%'", []);
-    });
-
     it("a plain editor (write collaborator) and a reader get 403 on every editorial write", async () => {
       for (const u of [editor, reader]) {
         expect((await pin(u, ids.Charlie, "nest")).status).toBe(403);
@@ -630,6 +615,88 @@ describe("document pins", () => {
       ).rejects.toThrow();
     });
   });
+});
+
+// ─── Cap vs. hidden pins (review round 3) ─────────────────────────────
+// A personal pin on a document the caller can no longer read is invisible to
+// them, so it must not use up their 50. Revoking a folder grant leaves 50
+// such pins behind; the next pin on a document they CAN read must succeed.
+describe("document pins — hidden pins don't count against the cap", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: User;
+  let guest: User;
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    process.env.EXPERIMENTAL_DOC_PINS = "true";
+    app = await createTestApp("key");
+    owner = await registerUser(app, "capowner@acme.com", "Owner");
+    guest = await registerUser(app, "capguest@acme.com", "Guest");
+    const { data } = await jsonRequest(app, "POST", "/nests", { name: "Cap" }, owner.apiKey);
+    nestId = data.nest.id;
+  }, 60000);
+
+  afterAll(() => {
+    delete process.env.EXPERIMENTAL_DOC_PINS;
+    return env.cleanup();
+  });
+
+  it("a revoked grant leaves 50 hidden pins; a new readable pin still succeeds", async () => {
+    const shared: string[] = [];
+    for (let i = 0; i < 50; i++) {
+      const r = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: `Shared ${i}`, content: "x", folder: "shared" }, owner.apiKey);
+      expect(r.status).toBe(201);
+      shared.push(r.data.node.id);
+    }
+    const keep = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Keep", content: "x" }, owner.apiKey);
+    const keepId = keep.data.node.id as string;
+
+    const folder = await jsonRequest(app, "POST", `/nests/${nestId}/grants`, { target_type: "folder", target: "nodes/shared", email: guest.email, role: "read" }, owner.apiKey);
+    expect(folder.status).toBe(201);
+    const doc = await jsonRequest(app, "POST", `/nests/${nestId}/grants`, { target_type: "document", target: keepId, email: guest.email, role: "read" }, owner.apiKey);
+    expect(doc.status).toBe(201);
+
+    for (const id of shared) {
+      expect((await jsonRequest(app, "POST", `/nests/${nestId}/pins`, { node_id: id, scope: "user" }, guest.apiKey)).status).toBe(201);
+    }
+    // At the cap while they can see all 50.
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/pins`, { node_id: keepId, scope: "user" }, guest.apiKey)).status).toBe(400);
+
+    // Revoke the folder grant: the 50 pins are now hidden from the guest.
+    const del = await jsonRequest(app, "DELETE", `/nests/${nestId}/grants/${folder.data.grant.id}`, undefined, owner.apiKey);
+    expect(del.status).toBeLessThan(300);
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/pins`, undefined, guest.apiKey)).data.personal).toEqual([]);
+
+    const res = await jsonRequest(app, "POST", `/nests/${nestId}/pins`, { node_id: keepId, scope: "user" }, guest.apiKey);
+    expect(res.status).toBe(201);
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/pins`, undefined, guest.apiKey)).data.personal.map((p: any) => p.node_id)).toEqual([keepId]);
+  }, 60000);
+
+  it("caps the editorial strip at 50; a pin whose document is gone doesn't count", async () => {
+    const { getDb } = await import("../src/db/client.js");
+    const d = getDb();
+    const listed = await jsonRequest(app, "GET", `/nests/${nestId}/nodes?folder=shared`, undefined, owner.apiKey);
+    const shared: string[] = (listed.data.nodes ?? []).map((n: any) => n.id).filter((id: string) => id.startsWith("nodes/shared/"));
+    expect(shared).toHaveLength(50);
+    for (const id of shared) {
+      expect((await jsonRequest(app, "POST", `/nests/${nestId}/pins`, { node_id: id, scope: "nest" }, owner.apiKey)).status).toBe(201);
+    }
+    const keepId = "nodes/keep";
+    const full = await jsonRequest(app, "POST", `/nests/${nestId}/pins`, { node_id: keepId, scope: "nest" }, owner.apiKey);
+    expect(full.status).toBe(400);
+    expect(full.data.error).toMatch(/50/);
+
+    // Swap one real pin for a dangling row (its document is gone): still 50
+    // rows, 49 visible — the dangling one must not hold the slot.
+    expect((await jsonRequest(app, "DELETE", `/nests/${nestId}/pins?node_id=${encodeURIComponent(shared[0])}&scope=nest`, undefined, owner.apiKey)).status).toBe(200);
+    await d.run(
+      "INSERT INTO node_pins (id, nest_id, node_id, scope, user_id, position) VALUES ('ghost-cap', ?, 'nodes/ghost', 'nest', NULL, 999)",
+      [nestId],
+    );
+    expect((await jsonRequest(app, "POST", `/nests/${nestId}/pins`, { node_id: keepId, scope: "nest" }, owner.apiKey)).status).toBe(201);
+  }, 60000);
 });
 
 // ─── 6. Unlicensed ──────────────────────────────────────────────────────

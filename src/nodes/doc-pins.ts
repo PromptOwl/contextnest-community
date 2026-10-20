@@ -178,14 +178,15 @@ export async function listPins(nestId: string, userId: string | undefined): Prom
   // pinned_by is an email. Curators manage the strip and already see the
   // roster; a reader or a document grantee can't otherwise list the nest's
   // members, so it is withheld from them.
-  const visible = async (rows: PinRow[]) =>
-    (await filterAccessible(nestId, userId ?? "", email, rows.map(toPin))).map(
-      ({ id: _id, ...pin }) => (curator ? pin : { ...pin, pinned_by: null }),
-    );
+  // One access pass over both lists (each element is judged on its own, so a
+  // document in both lists survives or drops in both).
+  const visible = (
+    await filterAccessible(nestId, userId ?? "", email, [...editorialRows, ...personalRows].map(toPin))
+  ).map(({ id: _id, ...pin }) => (curator ? pin : { ...pin, pinned_by: null }));
 
   return {
-    editorial: await visible(editorialRows),
-    personal: await visible(personalRows),
+    editorial: visible.filter((p) => p.scope === "nest"),
+    personal: visible.filter((p) => p.scope === "user"),
     can_pin_editorial: curator,
   };
 }
@@ -218,6 +219,8 @@ export async function pinDocument(params: {
   const listParams = owner === null ? [nestId, scope] : [nestId, scope, owner];
   let created = false;
   if (!(await existing())) {
+    // Pins no one can see must not use up the cap (see pruneHiddenPins).
+    await pruneHiddenPins(nestId, scope, userId);
     const capped = () =>
       new ValidationError(
         `A nest can hold at most ${MAX_PINS_PER_LIST} ${scope === "nest" ? "pins for everyone" : "of your own pins"} — unpin one first.`,
@@ -350,14 +353,16 @@ export async function reorderEditorialPins(params: {
 }
 
 /**
- * Drop someone's personal pins in a nest once they no longer reach it — the
- * one rule for leaving and for being removed. Revoking a team share or a
- * document/folder grant does NOT call this: the pins linger, but listPins'
- * read filter hides every document the person can no longer read, so nothing
- * leaks; they go when the person leaves or the document is deleted. Someone who still reaches the
- * nest (a team share, a document/folder grant, its visibility) keeps their
- * bookmarks; the read filter already hides any pinned document they lost.
- * Runs after the access change has committed, so the check sees it.
+ * Drop someone's personal pins in a nest once they no longer reach it at all.
+ * One rule for leaving and for being removed as a collaborator: anyone who
+ * still reaches the nest (a team share, a document/folder grant, its
+ * visibility) keeps their pins. Runs after the access change has committed,
+ * so the access check sees it.
+ *
+ * Revoking a team share or a grant does not call this. Pins on documents the
+ * person can no longer read stay in the table, hidden by listPins' read
+ * filter, and are pruned the next time that person pins something
+ * (pruneHiddenPins), so they never count against the cap.
  */
 export async function dropPersonalPinsIfGone(nestId: string, userId: string): Promise<void> {
   const access = await resolveNestAccess(nestId, userId);
@@ -366,4 +371,54 @@ export async function dropPersonalPinsIfGone(nestId: string, userId: string): Pr
     "DELETE FROM node_pins WHERE nest_id = ? AND scope = 'user' AND user_id = ?",
     [nestId, userId],
   );
+}
+
+/**
+ * Remove pins in one list that nobody using that list can see, so they don't
+ * count against MAX_PINS_PER_LIST:
+ *   - personal (the caller's own list): pins whose document is gone, or that
+ *     the caller can no longer read (a revoked grant or team share). Nobody
+ *     else ever sees these rows, so deleting them changes nothing visible.
+ *   - editorial (shared by every member): only pins whose document is gone.
+ *     A pin one curator can't read may still be visible to other members, so
+ *     it is never pruned on access.
+ */
+async function pruneHiddenPins(nestId: string, scope: PinScope, userId: string): Promise<void> {
+  const db = getDb();
+  if (scope === "nest") {
+    await db.run(
+      `DELETE FROM node_pins
+        WHERE nest_id = ? AND scope = 'nest'
+          AND NOT EXISTS (SELECT 1 FROM node_index i
+                           WHERE i.nest_id = node_pins.nest_id AND i.node_id = node_pins.node_id)`,
+      [nestId],
+    );
+    return;
+  }
+  const rows = (await db.all(
+    `SELECT p.node_id, i.node_id AS indexed
+       FROM node_pins p
+       LEFT JOIN node_index i ON i.nest_id = p.nest_id AND i.node_id = p.node_id
+      WHERE p.nest_id = ? AND p.scope = 'user' AND p.user_id = ?`,
+    [nestId, userId],
+  )) as Array<{ node_id: string; indexed: string | null }>;
+  if (rows.length === 0) return;
+  const email = await resolveCallerEmail(userId);
+  const readable = new Set(
+    (
+      await filterAccessible(
+        nestId,
+        userId,
+        email,
+        rows.filter((r) => r.indexed !== null).map((r) => ({ id: r.node_id })),
+      )
+    ).map((r) => r.id),
+  );
+  const hidden = rows.map((r) => r.node_id).filter((id) => !readable.has(id));
+  for (const id of hidden) {
+    await db.run(
+      "DELETE FROM node_pins WHERE nest_id = ? AND node_id = ? AND scope = 'user' AND user_id = ?",
+      [nestId, id, userId],
+    );
+  }
 }
