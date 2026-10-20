@@ -377,11 +377,11 @@ Two kinds of pin on a document:
 ```
 Both lists are filtered by the same read rules as documents: a pinned document the caller can't read is left out, and a pin whose document no longer exists is never returned. `pinned_by` (an email) is returned only to callers who can pin for everyone; it is `null` for everyone else.
 
-**POST** `/nests/:nestId/pins` `{ "node_id": "nodes/start-here", "scope": "nest" | "user" }` → `201 { "pin": …, "created": true|false }`. Idempotent — pinning what is already pinned answers `201` with `created: false`. A new pin goes to the end of its list. Each list holds at most 50 pins (`400` past that). Unknown or unreadable document → `404`; bad `scope` → `400`.
+**POST** `/nests/:nestId/pins` `{ "node_id": "nodes/start-here", "scope": "nest" | "user" }` → `201 { "pin": …, "created": true|false }`. Idempotent — pinning what is already pinned answers `201` with `created: false`. A new pin goes to the end of its list. Each list holds at most 50 pins (`400` past that; approximate under concurrent writes on Postgres, where simultaneous pins can overshoot it by the number of racers). Pins in your own list that you can no longer read (a revoked grant or team share), and editorial pins whose document is gone, don't count — they are pruned when you next pin. Unknown or unreadable document → `404`; bad `scope` → `400`.
 
 **DELETE** `/nests/:nestId/pins?node_id=…&scope=nest|user` → `{ "unpinned": true|false }`. Idempotent. A personal unpin only ever removes the caller's own pin.
 
-**PUT** `/nests/:nestId/pins/order` `{ "node_ids": ["nodes/b", "nodes/a"] }` (editorial writers only) → the same body as `GET`. `node_ids` must name every editorial pin exactly once (`400` otherwise — reload and retry).
+**PUT** `/nests/:nestId/pins/order` `{ "node_ids": ["nodes/b", "nodes/a"] }` (editorial writers only) → the same body as `GET`. `node_ids` must name every editorial pin the caller can see exactly once (`400` otherwise — reload and retry); pins hidden from the caller keep their slots. On Postgres a pin added concurrently with a reorder can land with a stale position (reads tie-break on pin time, then id).
 
 The document id travels in the body/query rather than the path because node ids contain slashes: a `/nodes/:nodeId/pin` suffix can't be told apart from a document whose slug is `pin`.
 

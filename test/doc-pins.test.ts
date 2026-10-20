@@ -807,3 +807,22 @@ const PG_URL = process.env.TEST_DATABASE_URL;
     expect(await adapter.all("SELECT * FROM node_pins", [])).toEqual([]);
   });
 });
+
+// ─── Reorder with pins the curator can't see (review round 4) ───────────
+// GET filters editorial pins by the caller's read access, so a curator could in
+// principle see fewer pins than exist. Today every curator path (owner, nest
+// admin, server admin, nest-wide reviewer steward) reads the whole nest, so
+// this isn't reachable end to end — the merge rule is pinned here instead:
+// the curator's new order fills the slots of the pins they can see, and the
+// pins they can't see keep their slots.
+describe("mergeEditorialOrder", () => {
+  it("reorders the visible pins and leaves hidden ones in their slots", async () => {
+    const { mergeEditorialOrder } = await import("../src/nodes/doc-pins.js");
+    // Full order a, H, b, c (H hidden); the curator reverses what they see.
+    expect(mergeEditorialOrder(["a", "H", "b", "c"], ["c", "b", "a"])).toEqual(["c", "H", "b", "a"]);
+    // Nothing hidden: the new order is the order.
+    expect(mergeEditorialOrder(["a", "b"], ["b", "a"])).toEqual(["b", "a"]);
+    // Hidden at both ends.
+    expect(mergeEditorialOrder(["H1", "a", "b", "H2"], ["b", "a"])).toEqual(["H1", "b", "a", "H2"]);
+  });
+});

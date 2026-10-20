@@ -314,20 +314,27 @@ export async function reorderEditorialPins(params: {
   const nodeIds = params.nodeIds as string[];
   const db = getDb();
   await ensureNodeIndex(nestId);
-  // Validate and write in one transaction, so a pin added or removed between
-  // the check and the writes can't slip past "every pin exactly once".
+  const orderedSql = `SELECT p.node_id FROM node_pins p
+       JOIN node_index i ON i.nest_id = p.nest_id AND i.node_id = p.node_id
+      WHERE p.nest_id = ? AND p.scope = 'nest'
+      ORDER BY p.position, p.created_at, p.node_id`;
+  // What this curator can see — the set GET showed them. Resolved before the
+  // transaction: the access check reads through its own queries, not `tx`.
+  // Only pins whose document still exists count at all (a row whose document
+  // vanished outside the app is invisible to everyone).
+  const email = await resolveCallerEmail(userId);
+  const before = (await db.all(orderedSql, [nestId])) as Array<{ node_id: string }>;
+  const seen = new Set(
+    (await filterAccessible(nestId, userId, email, before.map((r) => ({ id: r.node_id })))).map((r) => r.id),
+  );
+  // Validate and write in one transaction. On SQLite (one writer) a pin added
+  // or removed meanwhile can't slip past the check; on Postgres READ COMMITTED
+  // a concurrent pin can still land at MAX+1 with a stale position — cosmetic,
+  // reads tie-break on (position, created_at, node_id).
   await db.transaction(async (tx) => {
-    // Only pins whose document still exists — the set GET can return. A row
-    // whose document vanished outside the app (no delete hook ran) is
-    // invisible to every client, so demanding it here would make every
-    // reorder a 400.
-    const current = (await tx.all(
-      `SELECT p.node_id FROM node_pins p
-         JOIN node_index i ON i.nest_id = p.nest_id AND i.node_id = p.node_id
-        WHERE p.nest_id = ? AND p.scope = 'nest'`,
-      [nestId],
-    )) as Array<{ node_id: string }>;
-    const have = new Set(current.map((r) => r.node_id));
+    const full = ((await tx.all(orderedSql, [nestId])) as Array<{ node_id: string }>).map((r) => r.node_id);
+    const visible = full.filter((id) => seen.has(id));
+    const have = new Set(visible);
     const given = new Set(nodeIds);
     if (
       given.size !== nodeIds.length ||
@@ -338,18 +345,32 @@ export async function reorderEditorialPins(params: {
         "node_ids must list every editorial pin exactly once (reload the pins and try again)",
       );
     }
+    const order = mergeEditorialOrder(full, nodeIds);
     // Dangling rows sink behind the real ones rather than keeping a slot.
     await tx.run(
       "UPDATE node_pins SET position = ? WHERE nest_id = ? AND scope = 'nest'",
-      [nodeIds.length, nestId],
+      [order.length, nestId],
     );
-    for (let i = 0; i < nodeIds.length; i++) {
+    for (let i = 0; i < order.length; i++) {
       await tx.run(
         "UPDATE node_pins SET position = ? WHERE nest_id = ? AND node_id = ? AND scope = 'nest'",
-        [i, nestId, nodeIds[i]],
+        [i, nestId, order[i]],
       );
     }
   });
+}
+
+/**
+ * The new editorial order when a curator reorders the pins they can see.
+ * `full` is every editorial pin in its current order; `visibleOrder` is the
+ * curator's new order of the subset they can see (every id in it is in
+ * `full`). Their order fills the slots their pins held; pins they can't see
+ * keep their slots. With nothing hidden, the result is `visibleOrder`.
+ */
+export function mergeEditorialOrder(full: string[], visibleOrder: string[]): string[] {
+  const visible = new Set(visibleOrder);
+  let next = 0;
+  return full.map((id) => (visible.has(id) ? visibleOrder[next++] : id));
 }
 
 /**
