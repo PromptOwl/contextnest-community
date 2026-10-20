@@ -65,7 +65,8 @@ export function DocStream({ pinnedNestId, onOpen }: DocStreamProps) {
       try {
         const next = await api.getDocStream({ ...filters, limit: PAGE_SIZE, offset }, pinnedNestId);
         if (mine !== seq.current) return;
-        setPage(next);
+        // Later pages carry no counts: keep the first page's chips.
+        setPage((prev) => (next.counts || !prev ? next : { ...next, counts: prev.counts }));
         setItems((prev) => (offset === 0 ? next.items : mergeStreamPages(prev, next.items)));
         setError(null);
       } catch (e) {

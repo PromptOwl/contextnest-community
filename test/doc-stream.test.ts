@@ -563,6 +563,13 @@ describe("doc stream: paging", () => {
     const versions = seen.map((s) => Number(s.split("@")[1])).sort((a, b) => a - b);
     expect(versions).toEqual(Array.from({ length: 300 }, (_, i) => i + 1));
 
+    // Facet counts don't depend on the page: only the first page carries
+    // them, so "load more" doesn't re-run four GROUP BYs.
+    const first = await jsonRequest(app, "GET", "/me/stream?limit=50", undefined, alice.apiKey);
+    expect(first.data.counts.nest[0].count).toBe(300);
+    const second = await jsonRequest(app, "GET", "/me/stream?limit=50&offset=50", undefined, alice.apiKey);
+    expect(second.data.counts).toBeNull();
+
     const past = await jsonRequest(app, "GET", "/me/stream?limit=50&offset=400", undefined, alice.apiKey);
     expect(past.status).toBe(200);
     expect(past.data.items).toEqual([]);

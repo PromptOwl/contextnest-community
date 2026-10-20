@@ -3353,8 +3353,9 @@ export interface StreamFacet {
 export interface StreamPage {
   items: StreamItem[];
   total: number;
-  /** Per-facet totals over the caller's whole stream (filters not applied). */
-  counts: {
+  /** Per-facet totals over the caller's whole stream (filters not applied).
+   *  Sent with the first page only (offset 0); null on later pages. */
+  counts: null | {
     nest: Array<{ id: string; name: string; count: number }>;
     tag: StreamFacet[];
     type: StreamFacet[];

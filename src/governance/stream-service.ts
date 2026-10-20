@@ -79,7 +79,9 @@ export interface StreamCounts {
 export interface StreamPage {
   items: StreamItem[];
   total: number;
-  counts: StreamCounts;
+  /** First page (offset 0) only; null on later pages — the facets don't
+   *  depend on the page, so "load more" keeps the ones it has. */
+  counts: StreamCounts | null;
   limit: number;
   offset: number;
   has_more: boolean;
@@ -325,11 +327,14 @@ export async function getDocStream(params: {
   const total = Number(totalRow?.c ?? 0);
 
   const memberBase = memberScopes.length ? visible(memberScopes) : null;
-  const counts = await facetCounts(
-    { sql: base.where.join(" AND "), params: base.params },
-    memberBase ? { sql: memberBase.where.join(" AND "), params: memberBase.params } : null,
-    params.nests,
-  );
+  const counts =
+    offset === 0
+      ? await facetCounts(
+          { sql: base.where.join(" AND "), params: base.params },
+          memberBase ? { sql: memberBase.where.join(" AND "), params: memberBase.params } : null,
+          params.nests,
+        )
+      : null;
 
   // Page decorations: tags and open-thread comment counts, one query each
   // over the page's documents.
