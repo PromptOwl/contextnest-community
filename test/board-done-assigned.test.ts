@@ -84,6 +84,24 @@ describe("assignment → inbox + My Work", () => {
     expect(data.assigned.some((x: any) => x.node_id === "nodes/mine")).toBe(false);
   });
 
+  it("matches an assignee written with different casing (file sync, import)", async () => {
+    await create(owner, { title: "cased", content: "x", type: "task", tags: ["doing"], assignee: ann.email });
+    // A write path that skips the API (file sync, git push, import) can leave
+    // the stored email as typed. Simulate it on the index mirror My Work reads.
+    const { getDb } = await import("../src/db/client.js");
+    const db = getDb();
+    const row = (await db.get(
+      "SELECT frontmatter_json FROM node_index WHERE nest_id = ? AND node_id = ?",
+      [nestId, "nodes/cased"],
+    )) as { frontmatter_json: string };
+    await db.run(
+      "UPDATE node_index SET frontmatter_json = ? WHERE nest_id = ? AND node_id = ?",
+      [row.frontmatter_json.replace(ann.email, "Ann@Acme.com"), nestId, "nodes/cased"],
+    );
+    const { data } = await jsonRequest(app, "GET", "/me/work", undefined, ann.apiKey);
+    expect(data.assigned.some((x: any) => x.node_id === "nodes/cased")).toBe(true);
+  });
+
   it("someone else's assignments don't show up", async () => {
     const { data } = await jsonRequest(app, "GET", "/me/work", undefined, owner.apiKey);
     expect(data.assigned.some((x: any) => x.node_id === "nodes/write-copy")).toBe(false);
