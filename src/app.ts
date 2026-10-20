@@ -2466,9 +2466,11 @@ export function createApp(): Hono<AuthEnv> {
     let since: string | undefined;
     const sinceRaw = c.req.query("since");
     if (sinceRaw) {
-      // The stream's own `at` values ("YYYY-MM-DD HH:MM:SS", UTC) round-trip.
-      const sqlShape = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(sinceRaw);
-      const t = Date.parse(sqlShape ? `${sinceRaw.replace(" ", "T")}Z` : sinceRaw);
+      // Timestamps are UTC throughout: the stream's own `at` values
+      // ("YYYY-MM-DD HH:MM:SS") round-trip, and an ISO date-time with no zone
+      // is read as UTC too, never as the server's local time.
+      const noZone = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(sinceRaw);
+      const t = Date.parse(noZone ? `${sinceRaw.replace(" ", "T")}Z` : sinceRaw);
       if (Number.isNaN(t)) return c.json({ error: "since must be a date, e.g. 2026-10-01T00:00:00Z" }, 400);
       // node_versions.created_at is "YYYY-MM-DD HH:MM:SS" (UTC) on both drivers.
       since = new Date(t).toISOString().slice(0, 19).replace("T", " ");

@@ -278,6 +278,22 @@ describe("doc stream: access-filtered, newest first, faceted", () => {
     expect(big.data.items).toEqual([]);
   });
 
+  it("reads a since without a timezone as UTC, whatever the server's zone", async () => {
+    const prevTz = process.env.TZ;
+    process.env.TZ = "America/New_York";
+    try {
+      const sql = await stream(`?since=${encodeURIComponent("2026-10-01 09:02:00")}`);
+      const iso = await stream("?since=2026-10-01T09:02:00");
+      const z = await stream("?since=2026-10-01T09:02:00Z");
+      expect(sql.data.total).toBeGreaterThan(0);
+      expect(iso.data.total).toBe(sql.data.total);
+      expect(z.data.total).toBe(sql.data.total);
+    } finally {
+      if (prevTz === undefined) delete process.env.TZ;
+      else process.env.TZ = prevTz;
+    }
+  });
+
   it("filters by since", async () => {
     const all = (await stream("")).data;
     const newest = all.items[0].at as string;
