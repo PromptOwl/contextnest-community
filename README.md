@@ -14,7 +14,7 @@ Concretely, it lets you:
 
 - Write Markdown documents — plus hosted HTML artifacts and CSV tables agents can query row by row — filed in folders, linked with `[[Title]]`, tagged, commented on, and versioned
 - Import an existing folder of Markdown in one step; export a nest as a portable bundle
-- Govern changes — draft → pending review → approved — with stewards per nest, tag or document, and a cross-nest inbox (My Work, My Drafts) for what is waiting on you
+- Govern changes — draft → pending review → approved — with stewards per nest, tag or document, and a cross-nest inbox (My Work, My Drafts) for what is waiting on you, including board tasks assigned to you
 - Share a nest with people or teams, share a single document or folder, or publish read-only to the public
 - Give agents deterministic reads: the same selector returns the same context every time, with a trace of what was pulled
 - Run agents against a nest (Workflows, Beta): an agent is a document whose body is instructions; its output lands as a pending review
@@ -93,7 +93,7 @@ One sidebar, grouped:
 | Group | Pages | Who |
 |---|---|---|
 | — | **Nests** — every nest you can see, pinned first | everyone |
-| Work | **My Work** (reviews and handoffs waiting on you, across nests) · **My Drafts** (yours, never submitted) | everyone |
+| Work | **My Work** (tasks assigned to you, reviews and handoffs waiting on you, across nests) · **My Drafts** (yours, never submitted) | everyone |
 | Workspace | **Teams** · **API keys** | everyone |
 | Admin | **Teammates** · **Server settings** · **Activity trace** | server admins |
 | Help | **How it works** | everyone |
@@ -148,7 +148,7 @@ The **Community Edition** column is the Free and Self-Hosted plans. Enterprise f
 | Comments on documents — anchored threads, resolve / reopen, same threads over MCP | ✅ | ✅ |
 | Table nodes — CSV facts with deterministic row queries (`POST /table-query`, `context_table_query`) | ✅ | ✅ |
 | Teams — share a nest with a group once; import rosters from PromptOwl | ✅ | ✅ |
-| Cross-nest inbox — My Work (reviews, handoffs) and My Drafts | ✅ | ✅ |
+| Cross-nest inbox — My Work (assigned tasks, reviews, handoffs) and My Drafts | ✅ | ✅ |
 | Nest views — Board (kanban by folder / status / tag), Graph, Definitions glossary | ✅ | ✅ |
 | Workflow plane (Beta) — agents as documents, runs, schedules, inbound hooks, Slack / Teams / webhook connectors | ✅ | ✅ |
 | Activity trace — every governance action, per nest and server-wide | ✅ | ✅ |
