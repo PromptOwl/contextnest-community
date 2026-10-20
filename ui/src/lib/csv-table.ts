@@ -22,8 +22,14 @@ export const LARGE_TABLE_ROW_THRESHOLD = 500;
 /**
  * Split delimited text into rows of raw cell strings.
  * Rows that are entirely empty (blank lines, trailing newline) are dropped.
+ * `keepBlankCellRows` keeps a row of empty cells (`,,`) — a row just added
+ * in the grid editor that the author has not filled yet.
  */
-export function parseDelimited(text: string, delimiter: Delimiter): string[][] {
+export function parseDelimited(
+  text: string,
+  delimiter: Delimiter,
+  keepBlankCellRows = false,
+): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
   let field = "";
@@ -86,7 +92,9 @@ export function parseDelimited(text: string, delimiter: Delimiter): string[][] {
   }
   if (field !== "" || row.length > 0) endRow();
 
-  return rows.filter((r) => r.some((c) => c.trim() !== ""));
+  return rows.filter(
+    (r) => r.some((c) => c.trim() !== "") || (keepBlankCellRows && r.length > 1),
+  );
 }
 
 function consistentColumns(rows: string[][]): boolean {
@@ -289,6 +297,59 @@ function csvEscapeCell(cell: string): string {
  */
 export function rowsToCsv(rows: string[][]): string {
   return rows.map((r) => r.map(csvEscapeCell).join(",")).join("\n");
+}
+
+/** One grid-editor change to a table-node CSV body. `row` is a data-row index; -1 is the header. */
+export type CsvTableEdit =
+  | { op: "set-cell"; row: number; col: number; value: string }
+  | { op: "add-row" }
+  | { op: "delete-row"; row: number }
+  | { op: "add-column" }
+  | { op: "delete-column"; col: number };
+
+const isCommentRow = (r: string[]) => (r[0] ?? "").trimStart().startsWith("#");
+
+/**
+ * Apply a grid edit to a table-node CSV body and re-serialize it. `#` comment
+ * lines stay where they are; only header + data rows take part in the edit.
+ */
+export function editCsvTable(csv: string, edit: CsvTableEdit): string {
+  const rows = parseDelimited(csv, ",", true);
+  const grid = rows.filter((r) => !isCommentRow(r)); // same arrays as `rows`
+  if (!grid.length) {
+    const header: string[] = [];
+    rows.push(header);
+    grid.push(header);
+  }
+  const width = grid.reduce((w, r) => Math.max(w, r.length), 0);
+  const target = "row" in edit ? grid[edit.row + 1] : undefined;
+
+  switch (edit.op) {
+    case "set-cell":
+      if (target) {
+        while (target.length <= edit.col) target.push("");
+        target[edit.col] = edit.value;
+      }
+      break;
+    case "add-row":
+      // ≥2 cells so the row survives a re-parse (a lone "" is a blank line).
+      rows.push(Array(Math.max(width, 2)).fill(""));
+      break;
+    case "delete-row":
+      if (target && edit.row >= 0) rows.splice(rows.indexOf(target), 1);
+      break;
+    case "add-column":
+      grid.forEach((r, i) => {
+        while (r.length < width) r.push("");
+        r.push(i === 0 ? `column_${width + 1}` : "");
+      });
+      break;
+    case "delete-column":
+      grid.forEach((r) => r.splice(edit.col, 1));
+      break;
+  }
+  // Comment lines were never quoted CSV — rejoin them raw.
+  return rows.map((r) => (isCommentRow(r) ? r.join(",") : rowsToCsv([r]))).join("\n");
 }
 
 export interface DetectedTable {

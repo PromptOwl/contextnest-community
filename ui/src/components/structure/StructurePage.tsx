@@ -8,7 +8,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FolderTree, Loader2, Plus, Copy } from "lucide-react";
+import { ListChecks, Loader2, Plus, Copy } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -311,7 +311,7 @@ export function StructurePage({ nestId, nestName, isArchived, onBack, openDocume
         onBack={onBack}
         title={
           <h1 className="flex min-w-0 items-center gap-2 truncate text-xl font-semibold">
-            <FolderTree className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden />
+            <ListChecks className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden />
             Structure
           </h1>
         }
@@ -441,7 +441,7 @@ export function StructurePage({ nestId, nestName, isArchived, onBack, openDocume
             <TabsContent value="blueprint">
               {empty ? (
                 <div className="space-y-3 rounded-lg border border-dashed p-8 text-center">
-                  <FolderTree className="mx-auto h-8 w-8 text-muted-foreground" aria-hidden />
+                  <ListChecks className="mx-auto h-8 w-8 text-muted-foreground" aria-hidden />
                   <p className="font-medium">{nestName} has no structure rules yet</p>
                   <p className="mx-auto max-w-xl text-sm text-muted-foreground">
                     Anything can go anywhere. Rules decide which folders can exist, what goes in them, how files are

@@ -58,7 +58,7 @@ function cellToMarkdown(cell: ProseMirrorNode): string {
   return parts.join("").replace(/\s*\n\s*/g, " ").trim();
 }
 
-function serializeTable(state: MarkdownSerializerState, node: ProseMirrorNode) {
+export function serializeTable(state: MarkdownSerializerState, node: ProseMirrorNode) {
   const rows: string[][] = [];
   node.forEach((rowNode) => {
     const cells: string[] = [];

@@ -120,7 +120,13 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // operation to import. It mirrors REST POST /nests/:id/nodes/:nodeId/task-log 1:1. The
 // task FIELDS added to context_create / context_update / context_list are properties on
 // existing literals (TASK_FIELD_PROPERTIES), not new schemas.
-const BASELINE = 59;
+//
+// Raised 59 -> 61 for `context_headless` and `context_systems` (CU-wdqcq0538g): MCP parity
+// for headless publishing (CU-wdqcq0314u) and named systems. Same reason as move and the
+// deletion trio: access keys and service identities are not an engine operation at all —
+// they live in this repo's auth tables — so there is no upstream descriptor to import. They
+// mirror the REST surface (/nests/:id/headless, /systems) 1:1, per the MCP-at-UI-parity rule.
+const BASELINE = 61;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

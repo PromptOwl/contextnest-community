@@ -107,6 +107,22 @@ export async function folderDeleteOrder(storage: NestStorage, folder: string, id
 }
 
 /**
+ * Moving or renaming a folder: the new path must be one the rules allow, and
+ * the old one must not be a required folder. Returns the order to move the
+ * documents in (the delete order — deepest first, required files last).
+ */
+export async function assertFolderMovable(
+  storage: NestStorage,
+  from: string,
+  to: string,
+  ids: string[],
+): Promise<string[]> {
+  const rules = await enforcedStructure(storage);
+  if (rules) await judged(() => enforceStructure(rules, checkFolder(rules, to)));
+  return folderDeleteOrder(storage, from, ids);
+}
+
+/**
  * A push held for a reviewer is judged when it is sent: a reviewer is never
  * asked to confirm documents that cannot land. `id` is the one createNode
  * will give the document.

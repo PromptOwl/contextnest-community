@@ -446,6 +446,70 @@ describe("rejection grace (CU-wdqcq01kh5)", () => {
   });
 });
 
+describe("offline limit (CU-wdqcq04t05)", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+
+  beforeEach(() => {
+    env = setupTestEnv();
+  });
+
+  afterEach(() => {
+    env.cleanup();
+    vi.restoreAllMocks();
+  });
+
+  /** Cache a valid license, then age its last good check by `hours`. */
+  async function cachedHoursAgo(key: string, hours: number) {
+    process.env.PROMPTOWL_KEY = key;
+    mockFetch({ body: { valid: true, tier: "team", org: "Acme" } });
+    const license = await loadLicense();
+    await license.validateLicense();
+    const { getDb } = await import("../src/db/client.js");
+    await getDb().run(
+      `UPDATE license_cache SET validated_at = datetime('now', '-${hours} hours') WHERE key = ?`,
+      [key],
+    );
+    return license;
+  }
+
+  it("keeps writing on the cached license inside 24 hours offline", async () => {
+    const license = await cachedHoursAgo("pk_off_23", 23);
+    mockFetch({ reject: new Error("connection refused") });
+    const result = await license.validateLicense({ forceFresh: true });
+    expect(result.valid).toBe(true);
+    expect(license.isOfflineLocked()).toBe(false);
+  });
+
+  it("goes read-only past 24 hours, keeps the license, and survives a restart", async () => {
+    const license = await cachedHoursAgo("pk_off_25", 25);
+    mockFetch({ ok: false, status: 503 });
+    const result = await license.validateLicense({ forceFresh: true });
+    // Still licensed (no demotion, sign-outs or model loss) — writes are what stop.
+    expect(result.valid).toBe(true);
+    expect(license.isOfflineLocked()).toBe(true);
+    expect(Date.now() - Date.parse(license.getOfflineLock()!)).toBeGreaterThan(24 * 3600_000);
+
+    // A restart doesn't reset the clock: it runs from the saved check.
+    mockFetch({ reject: new Error("connection refused") });
+    const restarted = await loadLicense();
+    await restarted.validateLicense();
+    expect(restarted.isOfflineLocked()).toBe(true);
+
+    // The next answer from PromptOwl lifts it.
+    mockFetch({ body: { valid: true, tier: "team", org: "Acme" } });
+    await restarted.validateLicense({ forceFresh: true });
+    expect(restarted.isOfflineLocked()).toBe(false);
+  });
+
+  it("free-tier writes are untouched: no cached license, no lock", async () => {
+    process.env.PROMPTOWL_KEY = "pk_off_none";
+    mockFetch({ reject: new Error("network down") });
+    const license = await loadLicense();
+    expect((await license.validateLicense()).valid).toBe(false);
+    expect(license.isOfflineLocked()).toBe(false);
+  });
+});
+
 // Regression for the Docker license-persist bug: the in-app License Setup
 // flow wrote PROMPTOWL_KEY to $cwd/.env (= /app/.env in the image), which is
 // not on the mounted volume and not writable as the node user — so the key

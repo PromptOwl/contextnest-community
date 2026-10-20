@@ -27,7 +27,7 @@ import {
   nodesToMarkdown,
   isMarkdownFormat,
 } from "./markdown-export.js";
-import { resolveExportBody } from "./readable-body.js";
+import { resolveExportBody, resolveReadableBody } from "./readable-body.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { countThreadsByNode } from "../annotations/service.js";
 import { permissionLevel, isPublicReader } from "../shared/access.js";
@@ -39,6 +39,7 @@ import {
   nestCensus,
   RUNNABLE_NODE_TYPES,
   createEmptyFolder,
+  moveFolder,
   isDerivedAnnotationsNode,
 } from "./service.js";
 import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
@@ -368,7 +369,22 @@ queryRoutes.get("/search", async (c) => {
 
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
-  const accessible = await filterAccessible(nestId, userId, userEmail, matches);
+  let accessible = await filterAccessible(nestId, userId, userEmail, matches);
+
+  // Public readers (anonymous, or a headless access key) may only ever see the
+  // APPROVED body. The match and the snippet above ran on the on-disk working
+  // copy, which can hold an unapproved draft edit — so swap in the approved
+  // body and re-match on it: no draft text in a snippet, and a hit that only
+  // matched draft text doesn't reveal that it did (CU-wdqcq0538g).
+  if (await isPublicReader(nestId, userId)) {
+    const approved = await Promise.all(
+      accessible.map(async (n) => ({
+        ...n,
+        body: await resolveReadableBody(nestId, n.id, userId, n.body || ""),
+      })),
+    );
+    accessible = matchDocuments(approved, q);
+  }
   recordNodeAccess({
     nestId,
     nodeIds: accessible.map((n) => n.id),
@@ -470,6 +486,25 @@ queryRoutes.post("/folders", async (c) => {
   }
   const folder = await createEmptyFolder(c.req.param("nestId")!, body.folder);
   return c.json({ folder }, 201);
+});
+
+// POST /nests/:nestId/folders/move  { "folder": "projects/acme", "to": "archive/acme" }
+//
+// Rename or move a folder with everything in it — a rename is a move to a path
+// with the same parent. Owner/admin only, like deleting one.
+queryRoutes.post("/folders/move", async (c) => {
+  const permission = c.get("nestPermission");
+  if (permission !== "owner" && permission !== "admin") {
+    throw new ForbiddenError("Only the nest owner or an admin can rename or move a folder");
+  }
+  const body = await c.req
+    .json<{ folder?: string; to?: string }>()
+    .catch(() => ({}) as { folder?: string; to?: string });
+  if (typeof body.folder !== "string" || typeof body.to !== "string") {
+    throw new ValidationError('folder and to (paths like "gtm/deals") are required');
+  }
+  const userEmail = await resolveCallerEmail(c.get("userId"));
+  return c.json(await moveFolder(c.req.param("nestId")!, body.folder, body.to, userEmail));
 });
 
 // POST /nests/:nestId/reindex

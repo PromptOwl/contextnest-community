@@ -225,7 +225,7 @@ describe("import folder as nest (upload model)", () => {
     }
 
     const { registerImportedDocuments } = await import("../src/nodes/service.js");
-    const registered = await registerImportedDocuments(nestId, "alice@test.com");
+    const { documents: registered } = await registerImportedDocuments(nestId, "alice@test.com");
     // ONLY the new ones — the 50 already tracked must not register twice.
     expect(registered).toBe(added);
 
@@ -241,7 +241,7 @@ describe("import folder as nest (upload model)", () => {
     expect(list.data.nodes.every((d: any) => d.status === "published")).toBe(true);
 
     // A third pass has nothing left to do — the idempotency the bulk query owns.
-    expect(await registerImportedDocuments(nestId, "alice@test.com")).toBe(0);
+    expect((await registerImportedDocuments(nestId, "alice@test.com")).documents).toBe(0);
   });
 
   it("allows importing an empty folder, then creating a doc in it", async () => {
@@ -646,6 +646,23 @@ describe("imported vault: discovery + registration", () => {
     expect(got.node.author).toBe("alice@test.com");
     // No phantom collaborator from the author≠version-author mismatch.
     expect(got.node.collaborators ?? []).toEqual([]);
+  });
+
+  it("drops an exported nest's .context/ settings instead of reporting them rejected", async () => {
+    const files: FileEntry[] = [
+      mdFile("notes/doc.md", "title: Doc\nstatus: published", "body"),
+      { path: ".context/config.yaml", content: "name: source\n" },
+    ];
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Exported Settings", files },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
+    expect(data.documents).toBe(1);
+    expect(data.rejected).toEqual([]);
   });
 
   it("does not import a vault's _suggestions store (no phantom external edits)", async () => {

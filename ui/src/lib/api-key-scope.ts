@@ -35,13 +35,34 @@ export function keyScope(
   };
 }
 
+export type KeyCapability = "read" | "write";
+
+/** Read-only or read-write, in words. A missing value is a write key — the
+ *  server's default (src/auth/keys.ts normalizeCapability). */
+export function keyCapability(key: { capability?: string | null }): {
+  kind: KeyCapability;
+  label: string;
+} {
+  return key.capability === "read"
+    ? { kind: "read", label: "Read-only" }
+    : { kind: "write", label: "Read-write" };
+}
+
+/** Mirrors the server's 400: a read-only key must name one nest. */
+export const READ_ONLY_NEEDS_NEST =
+  "A read-only key must be scoped to one nest — pick a nest.";
+
 /** Body for POST /auth/keys. `scope` is ALL_NESTS or a nest id. */
 export function createKeyRequest(
   label: string,
   scope: string,
-): { label: string; nest_id?: string } {
+  capability: KeyCapability = "write",
+): { label: string; nest_id?: string; capability?: KeyCapability } {
   const trimmed = label.trim();
-  return scope === ALL_NESTS ? { label: trimmed } : { label: trimmed, nest_id: scope };
+  const body: { label: string; nest_id?: string; capability?: KeyCapability } =
+    scope === ALL_NESTS ? { label: trimmed } : { label: trimmed, nest_id: scope };
+  if (capability === "read") body.capability = "read";
+  return body;
 }
 
 /** A default name for a key minted from a nest's Connect dialog, unique among
