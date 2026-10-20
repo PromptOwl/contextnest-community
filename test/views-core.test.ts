@@ -123,7 +123,9 @@ describe("injectNestData placement (AC-18)", () => {
   it("with no <head>, goes before the first script after the doctype", () => {
     const html = "<!DOCTYPE html><body><script>a()</script></body>";
     const out = injectNestData(html, "{}");
-    expect(out.startsWith("<!DOCTYPE html><script type=\"application/json\" id=\"nest-data\">")).toBe(true);
+    expect(out).toBe(
+      '<!DOCTYPE html><body><script type="application/json" id="nest-data">{}</script><script>a()</script></body>',
+    );
   });
 
   it("goes before </head> when the head has no script", () => {

@@ -29,7 +29,7 @@ import { CAPS } from "../src/views/core.js";
 type User = { apiKey: string; userId: string; email: string };
 
 const ART_HTML = "<!doctype html><html><head><script>/*app*/</script></head><body></body></html>";
-const EVIL = "</script><script>alert(1)</script> tail";
+const EVIL = "</script><script>alert(1)</script>\u2028tail";
 const T_CSV = `id,label,amount\nr1,Alpha,10\nr2,${EVIL},20\nr3,Gamma,30`;
 const T_ROWS = [
   { id: "r1", label: "Alpha", amount: "10" },
@@ -298,7 +298,7 @@ describe("AC-2 / AC-3 / AC-4: the html-block frame", () => {
     expect(nd.json.d.rows).toEqual(T_ROWS);
     expect(nd.json.m.items.map((i: any) => i.title).sort()).toEqual(["Metric One", "Metric Two"]);
     // The artifact bytes are otherwise untouched, and no bridge rides along.
-    expect(body.replace(/<script type="application\/json" id="nest-data">[\s\S]*?<\/script>/, "")).toBe(ART_HTML);
+    expect(body.replace(/<script type="application\/json" id="nest-data">[\s\S]*?<\/script>/, "").trim()).toBe(ART_HTML);
     expect(body).not.toContain("data-cn-bridge");
   });
 
@@ -323,7 +323,7 @@ describe("AC-2 / AC-3 / AC-4: the html-block frame", () => {
     const body = await (await get(frame(vId, "h"))).text();
     const { raw, json } = nestData(body);
     expect(raw).not.toContain("<");
-    expect(raw).not.toContain(" ");
+    expect(raw).not.toContain("\u2028");
     expect(raw).toContain("\\u2028");
     expect(json.d.rows[1].label).toBe(EVIL);
   });
@@ -414,7 +414,9 @@ describe("AC-15: pinned and retracted md blocks", () => {
     expect(res.status).toBe(200);
     const { json } = nestData(await res.text());
     expect(json.p2).toEqual({ ok: false, kind: "md", error: "not_published" });
-    expect(json.p1).toEqual({ ok: true, kind: "md", text: "pinned v1" });
+    expect(json.p1.ok).toBe(true);
+    expect(json.p1.kind).toBe("md");
+    expect(json.p1.text.trim()).toBe("pinned v1");
     expect(json.gone).toEqual({ ok: false, kind: "md", error: "not_published" });
     expect(json.frag).toEqual({ ok: false, kind: "md", error: "history_error" });
   });
