@@ -94,9 +94,11 @@ describe("assignment → inbox + My Work", () => {
       "SELECT frontmatter_json FROM node_index WHERE nest_id = ? AND node_id = ?",
       [nestId, "nodes/cased"],
     )) as { frontmatter_json: string };
+    const cased = row.frontmatter_json.replace(ann.email, "Ann@Acme.com");
+    expect(cased).not.toBe(row.frontmatter_json); // the rewrite actually landed
     await db.run(
       "UPDATE node_index SET frontmatter_json = ? WHERE nest_id = ? AND node_id = ?",
-      [row.frontmatter_json.replace(ann.email, "Ann@Acme.com"), nestId, "nodes/cased"],
+      [cased, nestId, "nodes/cased"],
     );
     const { data } = await jsonRequest(app, "GET", "/me/work", undefined, ann.apiKey);
     expect(data.assigned.some((x: any) => x.node_id === "nodes/cased")).toBe(true);

@@ -116,6 +116,8 @@ export default function MyWorkPage() {
   };
 
   const { reviews: reviewItems, requests: requestItems } = splitWorkItems(work.items);
+  // Assigned tasks alone keep "all caught up" away but have no inbox rows.
+  const hasInboxRows = work.items.length > 0;
   const workKey = (w: api.WorkItem) => `${w.nest_id}:${w.node_id}`;
 
   // The cap is per call and a call is per nest, so what matters is the biggest
@@ -457,7 +459,7 @@ export default function MyWorkPage() {
                 <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
                   You're all caught up — nothing waiting on you.
                 </div>
-              ) : work.items.length === 0 ? null : (
+              ) : !hasInboxRows ? null : (
                 <div className="rounded-lg border divide-y overflow-hidden">
                   {/* Batch decision bar — a folder import lands here as many
                       rows carrying the same decision. Reviews only. */}
