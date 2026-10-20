@@ -242,7 +242,11 @@ viewRoutes.get("/:nodeId{.+}/view/blocks/:blockId/hosted", async (c, next) => {
   // A frame is only ever a frame: a browser that says it is loading this as
   // a top-level document (or anything but an iframe) is refused, so the data
   // never lands where the view page's `frame-src` and the sandbox's opaque
-  // parent do not apply. Clients that send no Sec-Fetch-Dest are allowed.
+  // parent do not apply. Clients that send no Sec-Fetch-Dest are allowed:
+  // this is defense in depth, not the control. Such a client is already
+  // authenticated as the viewer and receives only data that the viewer and
+  // every version author can read (the trust rule), so nothing beyond the
+  // viewer's own access is exposed.
   const dest = c.req.header("Sec-Fetch-Dest");
   if (dest !== undefined && dest.toLowerCase() !== "iframe") {
     return c.json({ error: "This address only loads inside its view page." }, 403);
