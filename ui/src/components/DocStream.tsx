@@ -257,6 +257,7 @@ function StreamCard({
             className="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
             aria-expanded={expanded}
             onClick={onToggleComments}
+            title="Open comments on this document (all its versions)"
             data-testid="stream-comments-toggle"
           >
             <MessageSquare className="h-3.5 w-3.5" />

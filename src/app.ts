@@ -2506,6 +2506,8 @@ export function createApp(): Hono<AuthEnv> {
           // chain. The card shows no summary; say so once per document.
           const key = `${nestId}:${nodeId}`;
           if (!streamUnreadableWarned.has(key)) {
+            // Bounded: a long-lived server forgets old ones rather than grow.
+            if (streamUnreadableWarned.size >= 1000) streamUnreadableWarned.clear();
             streamUnreadableWarned.add(key);
             console.warn(`[me/stream] version body unreadable: ${key}@${version}`);
           }

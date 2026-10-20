@@ -266,6 +266,18 @@ describe("doc stream: access-filtered, newest first, faceted", () => {
     expect((await stream("?author=nobody@acme.com")).data.total).toBe(0);
   });
 
+  it("clamps a junk limit/offset instead of failing", async () => {
+    const junk = await stream("?limit=abc&offset=-5");
+    expect(junk.status).toBe(200);
+    expect(junk.data.limit).toBe(50);
+    expect(junk.data.offset).toBe(0);
+    const big = await stream("?limit=100000&offset=99999999");
+    expect(big.status).toBe(200);
+    expect(big.data.limit).toBe(100);
+    expect(big.data.offset).toBe(10000);
+    expect(big.data.items).toEqual([]);
+  });
+
   it("filters by since", async () => {
     const all = (await stream("")).data;
     const newest = all.items[0].at as string;
