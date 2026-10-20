@@ -88,7 +88,8 @@ import {
   type FieldDefinition,
 } from "../nodes/custom-fields.js";
 import { readIndexedNodes } from "../nodes/node-index.js";
-import { AppError } from "../shared/errors.js";
+import { AppError, BillingConfirmError } from "../shared/errors.js";
+import { billingConfirmed } from "../auth/seats.js";
 import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import {
@@ -187,6 +188,7 @@ function toolError(
     | "VALIDATION_FAILED"
     | "VAULT_BUSY"
     | "PENDING_CONFIRMATION"
+    | "BILLING_CONFIRMATION_REQUIRED"
     | "INTERNAL",
   /** Extra machine-readable fields beside {code, message} — e.g. the access
    *  request hint a refused write carries. */
@@ -1749,10 +1751,23 @@ export async function handleToolCall(
     );
   }
   try {
-    const result = await runTool(toolName, args, attributed);
+    // confirm_billing is the agent's X-Confirm-Billing: the user agreed to the raise.
+    const result =
+      args.confirm_billing === true
+        ? await billingConfirmed.run(true, () => runTool(toolName, args, attributed))
+        : await runTool(toolName, args, attributed);
     recordToolAccess(toolName, result, attributed);
     return result;
   } catch (err) {
+    if (err instanceof BillingConfirmError) {
+      status = 409;
+      const who = err.changes.map((c) => `${c.email ?? "a new person"} (${c.from} → ${c.to})`).join(", ");
+      return toolError(
+        `This raises what ${who} is billed. Ask the user to confirm, then call this tool again with confirm_billing: true.`,
+        "BILLING_CONFIRMATION_REQUIRED",
+        { changes: err.changes },
+      );
+    }
     // Vault write-lock timeout: map to a typed, retryable tool error HERE —
     // one seam covering both MCP surfaces — before the SDK flattens the throw
     // into prose and loses the code. Everything else keeps rethrowing.
@@ -3972,6 +3987,7 @@ async function runTool(
 
         return `Assigned **${args.email}** as ${args.role || "reviewer"} for ${targetDesc}.`;
       } catch (err: any) {
+        if (err instanceof BillingConfirmError) throw err;
         return `Failed to assign steward: ${err.message}`;
       }
     }
@@ -4005,6 +4021,7 @@ async function runTool(
               : "viewer";
         return `Shared this nest with **${args.email}** as ${label}.`;
       } catch (err: any) {
+        if (err instanceof BillingConfirmError) throw err;
         return `Failed to share nest: ${err.message}`;
       }
     }
@@ -4041,6 +4058,7 @@ async function runTool(
         });
         return `Shared ${targetType} \`${target}\` with **${args.email}** as ${role}.`;
       } catch (err: any) {
+        if (err instanceof BillingConfirmError) throw err;
         return `Failed to share: ${err.message}`;
       }
     }

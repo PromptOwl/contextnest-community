@@ -10,7 +10,7 @@ import { revokeAllHeadlessKeys } from "../auth/headless.js";
 import { isServerAdminUserId } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { ValidationError, ForbiddenError } from "../shared/errors.js";
-import { assertCanGrant } from "../auth/seats.js";
+import { assertCanGrant, billingConfirmed } from "../auth/seats.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
 import { forgetAccessLogSetting, readAccessLogSetting } from "../governance/access-log.js";
 import { rm } from "fs/promises";
@@ -510,7 +510,10 @@ export async function assertCanCreateNest(userId: string): Promise<void> {
     (await isServerAdminUserId(userId))
   ) {
     // A nest owner bills as a user (pricing §3.3). The anon commons doesn't.
-    if (userId !== ANON_USER_ID) await assertCanGrant([{ userId, next: "user" }]);
+    // Creating your own nest isn't a raise the Account Owner confirms: plan cap only.
+    if (userId !== ANON_USER_ID) {
+      await billingConfirmed.run(true, () => assertCanGrant([{ userId, next: "user" }]));
+    }
     return;
   }
   throw new ForbiddenError(

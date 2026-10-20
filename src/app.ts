@@ -134,6 +134,7 @@ import {
   ValidationError,
   VaultBusyError,
   PlanLimitError,
+  BillingConfirmError,
   isVaultLockTimeout,
 } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish } from "./config.js";
@@ -161,7 +162,7 @@ import {
   DEFAULT_LICENSE_CONTACT,
   type LicenseInfo,
 } from "./auth/license.js";
-import { countBilled, assertCanGrant, assertCanAddAccountOwner, planLimitMessage } from "./auth/seats.js";
+import { countBilled, assertCanGrant, assertCanAddAccountOwner, planLimitMessage, billingConfirmed } from "./auth/seats.js";
 import { hasEntitlement } from "./auth/entitlements.js";
 import {
   resolveModelCredential,
@@ -573,6 +574,10 @@ export function createApp(): Hono<AuthEnv> {
   // their own strict CSP (see shared/artifact-sandbox.ts) — overwriting it
   // would drop the sandbox that keeps attacker-authored artifact HTML off the
   // session. Skipped entirely when a handler set frame-ancestors itself.
+  // Pricing spec v21: a role change that raises someone's billed class needs
+  // explicit confirmation; apps and scripts give it with this header.
+  app.use("*", (c, next) => billingConfirmed.run(c.req.header("X-Confirm-Billing") === "true", next));
+
   const frameAncestors = `frame-ancestors ${config.FRAME_ANCESTORS}`;
   app.use("*", async (c, next) => {
     await next();
@@ -3601,6 +3606,9 @@ export function createApp(): Hono<AuthEnv> {
         { error: planLimitMessage(err.limit, err.max, forAdmin), code: "plan_limit", limit: err.limit, max: err.max },
         402,
       );
+    }
+    if (err instanceof BillingConfirmError) {
+      return c.json({ error: err.message, code: "billing_confirm", changes: err.changes }, 409);
     }
     if (err instanceof AppError) {
       return c.json({ error: err.message }, err.statusCode as any);

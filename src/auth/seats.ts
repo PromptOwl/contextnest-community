@@ -3,11 +3,20 @@ import { getCurrentLicense, getEntitlement } from "./license.js";
 import { getAccessConfig, isSuperAdmin } from "../governance/access-service.js";
 import { teamRoleToPermission } from "../governance/roles.js";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { z } from "zod";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { BillingConfirmError, PlanLimitError } from "../shared/errors.js";
 
-/** Per request: true when the caller confirmed a billed-class raise (X-Confirm-Billing). */
+/** Per request: whether the caller confirmed a billed-class raise (X-Confirm-Billing). */
 export const billingConfirmed = new AsyncLocalStorage<boolean>();
+
+/** The MCP counterpart of X-Confirm-Billing, offered on every tool. */
+export const confirmBillingToolField = {
+  confirm_billing: z
+    .boolean()
+    .optional()
+    .describe("Set true only after the user agreed to a change that raises what someone is billed."),
+};
 
 /**
  * Billing per person (pricing spec §3.3): each person bills once, at their
@@ -177,7 +186,8 @@ export async function assertCanGrant(
     );
   }
 
-  if (!raised.length || billingConfirmed.getStore()) return;
+  // No store = an internal call (seed, job), not a request: nothing to confirm.
+  if (!raised.length || billingConfirmed.getStore() !== false) return;
   const raisedIds = raised.map((r) => r.userId).filter((id): id is string => !!id);
   const emails = new Map<string, string>();
   if (raisedIds.length) {
