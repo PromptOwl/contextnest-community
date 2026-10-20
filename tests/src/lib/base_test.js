@@ -34,6 +34,7 @@ import TeammatesPage from '../page_factory/app/teammates_page.js';
 import ServerSettingsPage from '../page_factory/app/server_settings_page.js';
 import ActivityTracePage from '../page_factory/app/activity_trace_page.js';
 import MessageLogPage from '../page_factory/app/message_log_page.js';
+import HowItWorksPage from '../page_factory/app/how_it_works_page.js';
 
 // REST helper used to arrange dashboard preconditions (nests, pins, sharing)
 import DashboardApi from './dashboard_api.js';
@@ -294,6 +295,11 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
       // Admin → Message log
       get messageLogPage() {
         return new MessageLogPage(this.page, role.alias);
+      },
+
+      // Help → How it works
+      get howItWorksPage() {
+        return new HowItWorksPage(this.page, role.alias);
       },
 
       /**

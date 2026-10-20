@@ -134,6 +134,14 @@ const testRun = [
     independent: true, // Reads the real log; arranges its own nests and keys
   },
   {
+    // Help → How it works (CN-HELP-001 … CN-HELP-009). Serial: a static page
+    // read by two accounts. Read-only.
+    file: 'how-it-works/how_it_works.spec.js',
+    mode: 'serial',
+    enabled: true,
+    independent: true, // Static page; writes nothing
+  },
+  {
     // Request access on a denied write (CN-ACCESS-001 … CN-ACCESS-004).
     // Serial: the cases share one seeded nest and build on each other's
     // requests (ask → approve → deny → refused save).
@@ -242,7 +250,7 @@ const cliProjects = process.argv
     process.argv.filter((arg) => arg.startsWith('--project=')).map((a) => a.split('=')[1])
   );
 
-const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'access-requests'];
+const standaloneNames = ['auth', 'dashboard', 'my-work', 'my-drafts', 'teams', 'api-keys', 'teammates', 'server-settings', 'activity-trace', 'message-log', 'how-it-works', 'access-requests'];
 
 const includeStandalone =
   !!process.env.PLAYWRIGHT_INCLUDE_STANDALONE ||
@@ -469,6 +477,17 @@ export default defineConfig({
           name: 'message-log',
           dependencies: ['setup-auth'],
           testMatch: 'tests/features/message-log/**/*.spec.js',
+          fullyParallel: false,
+          use: {
+            ...devices['Desktop Chrome'],
+            screenshot: 'only-on-failure',
+            trace: 'retain-on-failure',
+          },
+        },
+        {
+          name: 'how-it-works',
+          dependencies: ['setup-auth'],
+          testMatch: 'tests/features/how-it-works/**/*.spec.js',
           fullyParallel: false,
           use: {
             ...devices['Desktop Chrome'],
