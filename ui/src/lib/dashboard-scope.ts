@@ -21,13 +21,13 @@ export type NestScope =
   | "unsynced";
 
 /**
- * The scope the dashboard opens on. "My nests" — owned or shared with me —
- * rather than everything I can read: on a shared server every customer's
- * org/public nest is readable, and a first screen full of strangers' nests
- * is noise at best and a leak of who else is here at worst. Discovery stays
- * one select away (Organization / Public / All). (CU-wdqcq02mek)
+ * The scope the dashboard opens on: everything I can read. A first screen of
+ * only "My nests" hid the org nests a team actually works in. Strangers' nests
+ * stay legible rather than hidden — every card says whose it is (see
+ * nestRelation), which is the "clearly distinguish" option CU-wdqcq02qzc
+ * allowed. (CU-wdqcq05m8z, replacing the CU-wdqcq02mek default)
  */
-export const DEFAULT_NEST_SCOPE: NestScope = "mine";
+export const DEFAULT_NEST_SCOPE: NestScope = "all";
 
 /** The shape of a nest row the scope rule needs — a subset of the list
  *  response so callers can pass the raw row. */
@@ -42,6 +42,18 @@ export interface ScopedNest {
 
 export function nestOwned(n: ScopedNest): boolean {
   return n.is_owner ?? (n.permission ?? "owner") === "owner";
+}
+
+/**
+ * Whose nest a card is, for the label it carries: one I own, one someone
+ * shared with me, or one I can only read because of its visibility tier
+ * (org/public) — nobody invited me, so it must never read as "Shared by".
+ */
+export type NestRelation = "owned" | "shared" | "discovered";
+
+export function nestRelation(n: ScopedNest): NestRelation {
+  if (n.discovered) return "discovered";
+  return nestOwned(n) ? "owned" : "shared";
 }
 
 /** Does this registered nest belong in the scope? The text query is applied
@@ -92,12 +104,22 @@ export function visibleUnsynced(
 }
 
 /**
- * The scope to open on, given the one remembered from last visit. Narrow
- * scopes are kept; the broad ones that show other organizations' nests (All,
- * Organization, Public) fall back to the default, so they are always a fresh
- * choice rather than the first screen. (CU-wdqcq02qzc)
+ * The scope to open on, given the one remembered from last visit. Every scope
+ * is remembered, broad ones included — the cards carry whose-nest labels, so
+ * reopening on All/Organization/Public no longer passes strangers' nests off
+ * as your own. Anything unrecognised falls back to the default.
+ * (CU-wdqcq05m8z)
  */
-const REMEMBERED_SCOPES: NestScope[] = ["mine", "owned", "shared", "synced", "unsynced"];
+const NEST_SCOPES: NestScope[] = [
+  "all",
+  "mine",
+  "owned",
+  "shared",
+  "org",
+  "public",
+  "synced",
+  "unsynced",
+];
 export function restoredNestScope(saved: string | null): NestScope {
-  return REMEMBERED_SCOPES.includes(saved as NestScope) ? (saved as NestScope) : DEFAULT_NEST_SCOPE;
+  return NEST_SCOPES.includes(saved as NestScope) ? (saved as NestScope) : DEFAULT_NEST_SCOPE;
 }

@@ -8,6 +8,7 @@ import {
   nestInScope,
   DEFAULT_NEST_SCOPE,
   restoredNestScope,
+  nestRelation,
   type NestScope,
 } from "./dashboard-scope";
 
@@ -62,8 +63,8 @@ describe("nestInScope — which registered nests a scope keeps", () => {
     expect(keeps("mine")).toEqual(["mine", "sharedWithMe", "myPublic"]);
   });
 
-  it("'mine' is the default scope", () => {
-    expect(DEFAULT_NEST_SCOPE).toBe("mine");
+  it("'all' is the default scope — every card says whose it is instead (CU-wdqcq05m8z)", () => {
+    expect(DEFAULT_NEST_SCOPE).toBe("all");
   });
 
   it("'shared' = granted to me only; a discovered nest was never shared with me", () => {
@@ -87,20 +88,31 @@ describe("nestInScope — which registered nests a scope keeps", () => {
 });
 
 describe("restoredNestScope", () => {
-  it("keeps a remembered narrow scope", () => {
-    for (const s of ["mine", "owned", "shared", "synced", "unsynced"]) {
+  it("remembers every scope, broad ones included (CU-wdqcq05m8z)", () => {
+    for (const s of ["all", "mine", "owned", "shared", "org", "public", "synced", "unsynced"]) {
       expect(restoredNestScope(s)).toBe(s);
     }
   });
 
-  it("opens broad scopes back on My nests", () => {
-    for (const s of ["all", "org", "public"]) {
-      expect(restoredNestScope(s)).toBe(DEFAULT_NEST_SCOPE);
-    }
+  it("falls back to All when nothing or junk is stored", () => {
+    expect(restoredNestScope(null)).toBe("all");
+    expect(restoredNestScope("bogus")).toBe("all");
+  });
+});
+
+describe("nestRelation — what a card says about whose nest it is", () => {
+  it("owned, shared with me, or only reachable through its visibility", () => {
+    expect(nestRelation({ is_owner: true, permission: "owner", visibility: "public" })).toBe("owned");
+    expect(nestRelation({ is_owner: false, permission: "write", visibility: "private" })).toBe("shared");
+    expect(nestRelation({ is_owner: false, permission: "read", visibility: "org", discovered: true })).toBe(
+      "discovered",
+    );
+    expect(
+      nestRelation({ is_owner: false, permission: "read", visibility: "public", discovered: true }),
+    ).toBe("discovered");
   });
 
-  it("falls back to the default when nothing or junk is stored", () => {
-    expect(restoredNestScope(null)).toBe(DEFAULT_NEST_SCOPE);
-    expect(restoredNestScope("bogus")).toBe(DEFAULT_NEST_SCOPE);
+  it("legacy rows without is_owner/permission read as owned, matching nestOwned", () => {
+    expect(nestRelation({})).toBe("owned");
   });
 });

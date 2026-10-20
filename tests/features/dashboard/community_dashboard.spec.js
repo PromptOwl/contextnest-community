@@ -641,7 +641,7 @@ test.describe('Community Dashboard', () => {
       expect(await nestsPage.nestCardCount()).toBeGreaterThan(0);
     });
 
-    test('CN-DASH-026: the scope select defaults to "My nests" and Owned/Shared scopes filter correctly', async ({
+    test('CN-DASH-026: the scope select defaults to "All nests", own cards say "Yours", and Owned/Shared scopes filter correctly', async ({
       primary_user,
       commonFunction,
     }) => {
@@ -651,8 +651,14 @@ test.describe('Community Dashboard', () => {
 
       await nestsPage.goto();
 
-      // "My nests" — owned or shared with me — is the first screen.
-      expect(await nestsPage.currentScope()).toBe('mine');
+      // All nests is the first screen; each card says whose it is (CU-wdqcq05m8z).
+      expect(await nestsPage.currentScope()).toBe('all');
+      await expect(nestsPage.nestCard(owned.name)).toBeVisible();
+      await expect(
+        nestsPage.nestCard(owned.name).getByTestId('nest-relation-owned')
+      ).toBeVisible();
+
+      await nestsPage.selectScope('mine');
       await expect(nestsPage.nestCard(owned.name)).toBeVisible();
 
       await nestsPage.selectScope('owned');
@@ -690,7 +696,7 @@ test.describe('Community Dashboard', () => {
       await expect(nestsPage.nestCard(privateNest.name)).toHaveCount(0);
     });
 
-    test('CN-DASH-028: narrow scopes persist after reload while broad scopes reset to default', async ({
+    test('CN-DASH-028: every scope, broad ones included, persists after reload', async ({
       primary_user,
       commonFunction,
     }) => {
@@ -704,16 +710,17 @@ test.describe('Community Dashboard', () => {
       await nestsPage.reload();
       expect(await nestsPage.currentScope()).toBe('owned');
 
-      // A broad one never becomes the first screen — it falls back to default.
+      // Broad scopes are remembered too — cards carry whose-nest labels, so
+      // reopening on them is safe (CU-wdqcq05m8z).
       await nestsPage.selectScope('public');
       await nestsPage.reload();
-      expect(await nestsPage.currentScope()).toBe('mine');
+      expect(await nestsPage.currentScope()).toBe('public');
 
       await nestsPage.selectScope('org');
       await nestsPage.reload();
-      expect(await nestsPage.currentScope()).toBe('mine');
+      expect(await nestsPage.currentScope()).toBe('org');
 
-      await nestsPage.selectScope('all');
+      await nestsPage.selectScope('mine');
       await nestsPage.reload();
       expect(await nestsPage.currentScope()).toBe('mine');
     });
@@ -1383,6 +1390,11 @@ test.describe('Community Dashboard', () => {
       await expect(nestsPage.scopeSelect).toHaveValue('all');
       await expect(nestsPage.nestCard('Stub Discovered One')).toBeVisible();
       await expect(nestsPage.nestCard('Stub Discovered Two')).toBeVisible();
+      // Reachable only through visibility — never labelled "Shared by".
+      await expect(
+        nestsPage.nestCard('Stub Discovered One').getByTestId('nest-relation-discovered')
+      ).toBeVisible();
+      await expect(nestsPage.nestCard('Stub Discovered One').getByText(/Shared by/)).toHaveCount(0);
 
       // Back on My nests, the empty state is said plainly, not as "hidden by
       // the current filter".

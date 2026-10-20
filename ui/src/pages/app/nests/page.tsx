@@ -9,7 +9,7 @@ import { reads, useNests } from "../../../lib/queries";
 import { useAuth } from "../../../auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Archive, ArchiveRestore, Bookmark,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Archive, ArchiveRestore, Bookmark, Building2, UserCheck,
 } from "lucide-react";
 import { ANON_USER_ID } from "../../../lib/constants";
 import { copyTextWithToast } from "../../../lib/clipboard";
@@ -21,6 +21,7 @@ import {
   scopeShowsNests,
   visibleUnsynced,
   nestInScope,
+  nestRelation,
   DEFAULT_NEST_SCOPE,
   restoredNestScope,
   type NestScope,
@@ -126,8 +127,9 @@ export default function NestsPage() {
   // just bounds how many cards are mounted at once.
   const [nestQuery, setNestQuery] = useState("");
   const [nestSort, setNestSort] = useState<"activity" | "name">("activity");
-  // Scope opens on "My nests"; a narrow scope is remembered per browser, but
-  // All / Organization / Public never become the first screen (CU-wdqcq02qzc).
+  // Scope opens on All and the last choice — any scope — is remembered per
+  // browser. Cards say whose nest each one is, so a broad scope never passes
+  // someone else's nest off as yours (CU-wdqcq05m8z).
   const [nestScope, setNestScopeState] = useState<NestScope>(() => {
     try {
       return restoredNestScope(localStorage.getItem(NEST_SCOPE_KEY));
@@ -144,9 +146,9 @@ export default function NestsPage() {
       /* best-effort */
     }
   };
-  // Nothing in "My nests" yet but nests reachable elsewhere (shared, org,
-  // public): open on All so they're visible. Once per visit, and not
-  // remembered — someone with their own nests still opens on "My nests".
+  // A remembered "My nests" that is empty while nests are reachable elsewhere
+  // (shared, org, public): open on All so they're visible. Once per visit, and
+  // not remembered.
   const scopeFallbackDone = useRef(false);
   useEffect(() => {
     if (scopeFallbackDone.current || loading) return;
@@ -790,7 +792,7 @@ export default function NestsPage() {
             </div>
           ) : loading ? (
             <div className="text-center py-12 text-muted-foreground">Loading...</div>
-          ) : nestScope === DEFAULT_NEST_SCOPE &&
+          ) : nestScope === "mine" &&
             nestQuery.trim() === "" &&
             filteredNests.length + filteredUnsynced.length === 0 &&
             discoveredCount > 0 ? (
@@ -962,7 +964,12 @@ export default function NestsPage() {
                   // ownership during a rolling deploy.
                   const permission: string = nest.permission ?? "owner";
                   const isOwner: boolean = nest.is_owner ?? permission === "owner";
-                  const isShared = !isOwner;
+                  // Whose nest this card is — owned, shared with me, or only
+                  // readable through its visibility tier. All is the default
+                  // scope, so the card itself has to say it (CU-wdqcq05m8z).
+                  const relation = nestRelation(nest);
+                  const isShared = relation === "shared";
+                  const isDiscovered = relation === "discovered";
                   // Mirror server delete rule: real owner, or admin caretaker
                   // on the ungoverned commons in key mode. Open-mode anon
                   // nests already report is_owner=true via effectivePermission.
@@ -1048,9 +1055,14 @@ export default function NestsPage() {
                           openNest();
                         }
                       }}
-                      className={`relative text-left p-4 rounded-lg border bg-card hover:bg-secondary/50 transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${isAnonymous
-                          ? "border-dashed border-amber-300"
-                          : "border-border"
+                      data-relation={relation}
+                      className={`relative text-left p-4 rounded-lg border hover:bg-secondary/50 transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${isAnonymous
+                          ? "bg-card border-dashed border-amber-300"
+                          : isDiscovered
+                            ? "bg-muted/40 border-dashed border-border"
+                            : relation === "owned"
+                              ? "bg-card border-border border-l-4 border-l-primary"
+                              : "bg-card border-border"
                         }`}
                     >
                       {/* Card actions — each gated to match server rules so
@@ -1166,6 +1178,42 @@ export default function NestsPage() {
                               title={nest.description}
                             >
                               {nest.description}
+                            </p>
+                          )}
+                          {relation === "owned" && !isAnonymous && (
+                            <p
+                              className="flex items-center gap-1 mt-1 text-xs text-primary"
+                              title="You own this nest"
+                              data-testid="nest-relation-owned"
+                            >
+                              <UserCheck className="h-3 w-3 shrink-0" />
+                              <span className="font-medium">Yours</span>
+                            </p>
+                          )}
+                          {isDiscovered && (
+                            <p
+                              className="flex items-center gap-1 mt-1 text-xs text-muted-foreground truncate"
+                              title={
+                                nest.visibility === "public"
+                                  ? "Not shared with you — you can read it because it is public"
+                                  : "Not shared with you — you can read it because it is open to everyone signed in to this server"
+                              }
+                              data-testid="nest-relation-discovered"
+                            >
+                              {nest.visibility === "public" ? (
+                                <Globe className="h-3 w-3 shrink-0" />
+                              ) : (
+                                <Building2 className="h-3 w-3 shrink-0" />
+                              )}
+                              <span className="truncate">
+                                Not shared with you
+                                {nest.owner_email ? (
+                                  <>
+                                    {" · "}
+                                    <span className="font-medium">{nest.owner_email}</span>
+                                  </>
+                                ) : null}
+                              </span>
                             </p>
                           )}
                           {isShared && (
