@@ -40,6 +40,8 @@ export interface PublishDoc {
   prime?: boolean;
   /** Custom field values — validated on replay, like any create. */
   fields?: Record<string, unknown>;
+  /** A type: view node's `view:` block (§1.12) — validated on replay. */
+  view?: unknown;
 }
 
 export interface PublishPayload {
@@ -156,6 +158,7 @@ export async function applyPublish(
           model: doc.model,
           prime: doc.prime,
           ...(doc.fields !== undefined ? { fields: doc.fields } : {}),
+          ...(doc.view !== undefined ? { view: doc.view } : {}),
         },
         authorEmail,
       );

@@ -44,6 +44,7 @@ import {
   removeRelation,
 } from "../nodes/relations.js";
 import { engineApi, opContext } from "../nodes/engine.js";
+import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import { addCollaborator } from "../nests/sharing-service.js";
 import { holdWriteIfGated } from "../nests/push-confirmation-service.js";
 import { queryTableNode } from "../tables/query.js";
@@ -474,6 +475,21 @@ const TASK_FIELD_PROPERTIES = {
   },
 };
 
+/**
+ * The `view` argument of context_create / context_update (§1.12), taken from
+ * the engine's own operation descriptor rather than written out here — the
+ * engine owns the view block's shape (see the Engine Logic Boundary). Empty
+ * when the engine predates view nodes, in which case the tools simply don't
+ * advertise it.
+ */
+function engineViewProperty(op: "context_create" | "context_update"): Record<string, unknown> {
+  const desc = engineApi.getOperation(op);
+  const props = desc
+    ? ((inputJsonSchema(desc) as { properties?: Record<string, unknown> }).properties ?? {})
+    : {};
+  return props.view ? { view: props.view } : {};
+}
+
 export const TOOL_DEFINITIONS = [
   {
     name: "context_init",
@@ -770,6 +786,7 @@ export const TOOL_DEFINITIONS = [
           description:
             "Custom field values, field key → value (see context_fields for this nest's fields and their types). Validated against the definitions: select takes one option, multi_select a list of options, user an email on the nest, date YYYY-MM-DD, url an http(s) URL, checkbox true/false, number a number. null clears a field. Computed fields (time in status) can't be set.",
         },
+        ...engineViewProperty("context_create"),
       },
       required: ["title", "content"],
     },
@@ -824,6 +841,7 @@ export const TOOL_DEFINITIONS = [
           description:
             "Custom field values, field key → value (see context_fields for this nest's fields and their types). Validated against the definitions: select takes one option, multi_select a list of options, user an email on the nest, date YYYY-MM-DD, url an http(s) URL, checkbox true/false, number a number. null clears a field; keys you leave out are untouched. Computed fields (time in status) can't be set.",
         },
+        ...engineViewProperty("context_update"),
       },
       // Neither is required alone — one of them is (the engine catalog's
       // `.refine(id || title)`, which JSON Schema can't express here).
@@ -2840,6 +2858,7 @@ async function runTool(
                 scope: args.scope,
                 folder: args.folder,
                 ...(args.fields !== undefined ? { fields: args.fields } : {}),
+                ...(args.view !== undefined ? { view: args.view } : {}),
               },
             ],
           },
@@ -2868,6 +2887,7 @@ async function runTool(
             client: ctx.client,
             ...taskFields,
             ...(args.fields !== undefined ? { fields: args.fields } : {}),
+            ...(args.view !== undefined ? { view: args.view } : {}),
           },
           userEmail,
         );
@@ -2936,6 +2956,7 @@ async function runTool(
             client: ctx.client,
             ...taskFields,
             ...(args.fields !== undefined ? { fields: args.fields } : {}),
+            ...(args.view !== undefined ? { view: args.view } : {}),
           },
           userEmail,
         );

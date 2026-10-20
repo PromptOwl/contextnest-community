@@ -83,6 +83,13 @@ function customFieldsFromBody(body: Record<string, unknown>): { fields?: Record<
   return { fields: v as Record<string, unknown> };
 }
 
+/** The `view:` block of a type: view node (§1.12), when the body carries one.
+ *  Shape and type are validated in the service (assertViewBlock) so REST, MCP
+ *  and a held write's replay refuse the same blocks the same way. */
+function viewFromBody(body: Record<string, unknown>): { view?: unknown } {
+  return body.view === undefined ? {} : { view: body.view };
+}
+
 /** `?field.<key>=<value>` query params → the list's field filters. */
 function fieldFiltersFromQuery(q: Record<string, string>): Record<string, string> | undefined {
   const out: Record<string, string> = {};
@@ -251,6 +258,7 @@ nodeRoutes.post("/", async (c) => {
     priority?: string | null;
     parent?: string | null;
     fields?: Record<string, unknown>;
+    view?: unknown;
   }>();
 
   if (!body.title || !body.content) {
@@ -288,6 +296,7 @@ nodeRoutes.post("/", async (c) => {
             folder: body.folder,
             prime: body.prime,
             ...customFieldsFromBody(body),
+            ...viewFromBody(body),
           },
         ],
       },
@@ -311,6 +320,7 @@ nodeRoutes.post("/", async (c) => {
       client: attributeRequest(c, body.client),
       ...taskFieldsFromInput(body),
       ...customFieldsFromBody(body),
+      ...viewFromBody(body),
     },
     authorEmail,
   );
@@ -716,6 +726,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     priority?: string | null;
     parent?: string | null;
     fields?: Record<string, unknown>;
+    view?: unknown;
   }>();
   if (body.type !== undefined && typeof body.type !== "string") {
     throw new ValidationError("type must be a string");
@@ -759,6 +770,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       type: body.type,
       ...taskFieldsFromInput(body),
       ...customFieldsFromBody(body),
+      ...viewFromBody(body),
     },
     authorEmail,
   );

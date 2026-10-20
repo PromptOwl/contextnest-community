@@ -15,6 +15,7 @@ import {
   generateIndexMd,
   readPdfBinary,
   pdfSidecarPath,
+  viewMetaSchema,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage, PdfMeta } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm, stat } from "node:fs/promises";
@@ -1589,6 +1590,9 @@ export interface CreateNodeInput extends TaskFieldsPatch {
   /** Custom field values, field key → value (see custom-fields.ts). Defaults
    *  fill what's left out; required fields must end up set. */
   fields?: FieldsPatch;
+  /** The `view:` block of a type: view node (§1.12) — validated against the
+   *  engine's view schema, refused on any other type. */
+  view?: unknown;
 }
 
 export interface UpdateNodePatch extends TaskFieldsPatch {
@@ -1616,6 +1620,33 @@ export interface UpdateNodePatch extends TaskFieldsPatch {
   /** Custom field values to set, field key → value; `null` clears one. Merged
    *  into the stored map — keys left out are untouched. */
   fields?: FieldsPatch;
+  /** Replacement `view:` block (§1.12), for a node that is or is becoming
+   *  type: view. Replaces the block wholesale; validated like create. */
+  view?: unknown;
+}
+
+/**
+ * Validate a `view:` block with the engine's own schema (§13 rules 30–36) and
+ * the type it is meant for. The engine re-validates on write; checking here
+ * turns its refusal into a 400 that names the rule, before any governance
+ * work, on every surface (REST, MCP, a held write's replay).
+ */
+export function assertViewBlock(view: unknown, type: string): void {
+  if (type !== "view") {
+    throw new ValidationError(
+      `A view block is only valid on type: view (§13 rule 31), and this node is type: "${type}". Pass type: "view" in the same call, or drop the view parameter.`,
+    );
+  }
+  if (view === null || typeof view !== "object" || Array.isArray(view)) {
+    throw new ValidationError("view must be an object: { blocks: [...] } (§1.12)");
+  }
+  const parsed = viewMetaSchema.safeParse(view);
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((i) =>
+      i.path.length ? `${i.path.join(".")}: ${i.message}` : i.message,
+    );
+    throw new ValidationError(`Invalid view block — ${issues.join("; ")}`);
+  }
 }
 
 /**
@@ -1881,6 +1912,7 @@ async function createNodeOnce(
   if (input.pdf && requestedType !== PDF_NODE_TYPE) {
     throw new ValidationError(`a PDF upload creates a "pdf" node, not "${requestedType}"`);
   }
+  if (input.view !== undefined) assertViewBlock(input.view, requestedType);
 
   assertModelId(input.model);
   for (const field of ["schedule", "model"] as const) {
@@ -2065,6 +2097,7 @@ async function createNodeOnce(
                 : {}),
               ...(tags.length ? { tags } : {}),
               ...(input.status ? { status: input.status } : {}),
+              ...(input.view !== undefined ? { view: input.view } : {}),
               metadata,
               publish: published,
               ...(publishNote ? { note: publishNote } : {}),
@@ -2657,6 +2690,12 @@ export async function updateNode(
         }
         node = { ...node, frontmatter: { ...node.frontmatter, type: patch.type as any } };
         opInput.type = patch.type;
+      }
+      if (patch.view !== undefined) {
+        // Validated against the type the node is becoming, as create does.
+        assertViewBlock(patch.view, String(node.frontmatter.type || "document"));
+        node = { ...node, frontmatter: { ...node.frontmatter, view: patch.view as any } };
+        opInput.view = patch.view;
       }
       if (patch.schedule !== undefined) {
         if (!isRunnableType(node.frontmatter.type)) {
