@@ -31,6 +31,7 @@ import { Button } from "@/components/ui/button";
 import { ReasonDialog } from "./governance";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Copy,
@@ -48,6 +49,8 @@ import {
   ChevronDown,
   Terminal,
   RefreshCw,
+  Eye,
+  Pencil,
 } from "lucide-react";
 import * as api from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
@@ -343,21 +346,37 @@ export function ConnectModal({
                 a key is shown only once, when it's created or rotated.
               </p>
               {existingNestKeys.length > 0 ? (
-                existingNestKeys.map((k) => (
+                existingNestKeys.map((k) => {
+                  const can = keyCapability(k);
+                  return (
                   <div
                     key={k.id}
                     className="flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5"
                   >
-                    <div className="min-w-0 text-xs">
-                      <span className="font-medium">
+                    <div className="flex min-w-0 items-center gap-2 text-xs">
+                      <span className="truncate font-medium">
                         {k.label || "Untitled key"}
-                      </span>{" "}
+                      </span>
                       <code className="font-mono text-muted-foreground">
                         {k.key_prefix}…
-                      </code>{" "}
-                      <span className="text-muted-foreground">
-                        · {keyCapability(k).label}
-                      </span>
+                      </code>
+                      {/* Same badge as the API keys page. */}
+                      <Badge
+                        variant="outline"
+                        className="shrink-0 gap-1"
+                        title={
+                          can.kind === "read"
+                            ? "This key can read but not change anything."
+                            : "This key can read and write."
+                        }
+                      >
+                        {can.kind === "read" ? (
+                          <Eye className="h-3 w-3" />
+                        ) : (
+                          <Pencil className="h-3 w-3" />
+                        )}
+                        {can.label}
+                      </Badge>
                     </div>
                     <Button
                       size="sm"
@@ -376,7 +395,8 @@ export function ConnectModal({
                       Rotate
                     </Button>
                   </div>
-                ))
+                  );
+                })
               ) : (
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                   <Button
