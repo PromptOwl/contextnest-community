@@ -2525,6 +2525,18 @@ export function hostedArtifactUrl(
 }
 
 /**
+ * URL of a §1.12 view node's server-rendered page (iframe `src`). `v` pins the
+ * layout of that version; the data its blocks show is always live. Unlike the
+ * artifact URL above, the node id keeps its own `nodes/` prefix: a doc or
+ * folder share grant is matched against the path under /nodes/, so only the
+ * full id lets a grantee open a view shared with them.
+ */
+export function viewPageUrl(nestId: string, nodeId: string, version?: number | null): string {
+  const qs = version != null ? `?v=${encodeURIComponent(String(version))}` : "";
+  return `${API_BASE}/nests/${nestId}/nodes/${nodeId}/view/hosted${qs}`;
+}
+
+/**
  * Fetch the artifact's served HTML as text — used to derive the *extracted
  * text* the annotation layer highlights over (same text the nest indexes).
  * Same-origin, cookie-authed; not subject to the iframe sandbox.
