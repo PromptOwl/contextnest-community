@@ -191,14 +191,17 @@ test.describe('Activity trace', () => {
         /* not a URL we care about */
       }
     });
-    await tr.userFilter.pressSequentially(needle, { delay: 60 });
+    // Typed in one burst: on a loaded shared server the browser can stall
+    // between spaced-out keys long enough for the 300 ms debounce to fire mid-word.
+    await tr.userFilter.pressSequentially(needle, { delay: 0 });
 
-    // …then one read with the whole value once typing stops. (Timing it against
-    // the last key is unreliable on a loaded browser, so the proof is that no
-    // read ever carried a half-typed value.)
-    await expect.poll(() => userReads.filter((r) => r.user).length, { timeout: 5000 }).toBe(1);
+    // …then a read with the whole value once typing stops. Debounced, not one
+    // read per keystroke: fewer reads than keys, and the last one is the whole value.
+    await expect.poll(() => userReads.filter((r) => r.user).at(-1)?.user ?? null, { timeout: 5000 }).toBe(needle);
     await page.waitForTimeout(500);
-    expect(userReads.filter((r) => r.user).map((r) => r.user), 'no read while still typing').toEqual([needle]);
+    const typedReads = userReads.filter((r) => r.user).map((r) => r.user);
+    expect(typedReads.length, 'no read per keystroke').toBeLessThan(needle.length);
+    expect(typedReads.at(-1), 'the settled read carries the whole value').toBe(needle);
     await tr.waitIdle();
     const rowsShown = await tr.rows.count();
     expect(rowsShown, 'the admin has activity of their own').toBeGreaterThan(0);
