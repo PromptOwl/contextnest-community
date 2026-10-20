@@ -383,6 +383,8 @@ Both lists are filtered by the same read rules as documents: a pinned document t
 
 **PUT** `/nests/:nestId/pins/order` `{ "node_ids": ["nodes/b", "nodes/a"] }` (editorial writers only) → the same body as `GET`. `node_ids` must name every editorial pin the caller can see exactly once (`400` otherwise — reload and retry); pins hidden from the caller keep their slots. On Postgres a pin added concurrently with a reorder can land with a stale position (reads tie-break on pin time, then id).
 
+Read-only API keys may `GET` but not write (`403`); named system keys (`cnst_sys_…`) get `403` on every pins route — pins are a person's curation, not content a sync carries.
+
 The document id travels in the body/query rather than the path because node ids contain slashes: a `/nodes/:nodeId/pin` suffix can't be told apart from a document whose slug is `pin`.
 
 Pins live in `node_pins` (migration 069). A deleted document takes its pins with it and a moved one carries them; a deleted user takes their personal pins (editorial pins they made stay — they belong to the nest); leaving a nest (`POST /me/nests/:id/leave`) or being removed as a collaborator drops that person's personal pins there, unless they still reach the nest another way (a team, a share grant); a deleted nest takes all of them. Not part of `/me/stream` yet.

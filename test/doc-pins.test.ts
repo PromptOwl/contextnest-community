@@ -585,6 +585,30 @@ describe("document pins", () => {
       expect((await jsonRequest(app, "GET", "/health")).data.workflow_plane_enabled).toBe(false);
     });
 
+    it("a read-only API key reads pins but can't write them", async () => {
+      const k = await jsonRequest(app, "POST", "/auth/keys", { label: "ro-pins", nest_id: nestId, capability: "read" }, owner.apiKey);
+      expect(k.status).toBeLessThan(300);
+      const ro = { ...owner, apiKey: k.data.api_key as string };
+      expect((await getPins(ro)).status).toBe(200);
+      expect((await pin(ro, ids.Charlie, "user")).status).toBe(403);
+      expect((await pin(ro, ids.Charlie, "nest")).status).toBe(403);
+      expect((await unpin(ro, ids.Alpha, "nest")).status).toBe(403);
+      const order = (await getPins(owner)).data.editorial.map((p: any) => p.node_id);
+      expect((await reorder(ro, order)).status).toBe(403);
+    });
+
+    it("a named system key never reaches /pins (systems sync content; they don't curate)", async () => {
+      const sys = await jsonRequest(app, "POST", "/systems", { name: "Pin bot", capability: "write", nest_ids: [nestId] }, superUser.apiKey);
+      expect(sys.status).toBe(201);
+      const bot = { ...owner, apiKey: sys.data.api_key as string };
+      // The key works on the nest's documents…
+      expect((await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${ids.Alpha}`, undefined, bot.apiKey)).status).toBe(200);
+      // …but not on pins, in either direction.
+      expect((await getPins(bot)).status).toBe(403);
+      expect((await pin(bot, ids.Alpha, "user")).status).toBe(403);
+      expect((await pin(bot, ids.Alpha, "nest")).status).toBe(403);
+    });
+
     it("a non-admin PATCH of the other switches is still 403", async () => {
       for (const body of [{ workflow_plane_enabled: true }, { metacognition_enabled: true }]) {
         expect((await jsonRequest(app, "PATCH", "/admin/settings", body, owner.apiKey)).status).toBe(403);

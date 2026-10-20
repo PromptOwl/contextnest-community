@@ -1445,12 +1445,10 @@ authRoutes.delete("/users/:userId", async (c) => {
     }
     // Their personal document pins (migration 069) go too — cascaded, explicit
     // like nest_pins. Editorial pins they made belong to the nest and stay
-    // (pinned_by is attribution only, not a foreign key).
-    try {
-      await tx.run("DELETE FROM node_pins WHERE user_id = ?", [target.id]);
-    } catch {
-      // Table not present on a DB predating migration 069.
-    }
+    // (pinned_by is attribution only, not a foreign key). No try/catch: the
+    // migration creates the table at startup, and on Postgres a failed
+    // statement aborts the whole transaction, so a catch couldn't save it.
+    await tx.run("DELETE FROM node_pins WHERE user_id = ?", [target.id]);
     await tx.run("DELETE FROM users WHERE id = ?", [target.id]);
   });
   await deleteAllSessionsForUser(target.id);

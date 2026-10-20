@@ -303,6 +303,9 @@ const SYSTEM_DENIED_RESOURCES = new Set([
   "restore",
   "push-allowlist",
   "pending-pushes",
+  // Document pins (CU-wdqcq02crw) are curation and personal bookmarks — a
+  // person's acts, not content a sync carries.
+  "pins",
 ]);
 
 // Unauth GETs in key mode: allow read-only access to a specific nest
