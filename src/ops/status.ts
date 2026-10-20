@@ -17,7 +17,7 @@ import path from "node:path";
 import { getDb } from "../db/client.js";
 import { HISTORICAL_MIGRATIONS } from "../db/migrations.postgres.js";
 import { config } from "../config.js";
-import { getCurrentLicense, getLastLicenseCheck, getModelGateway, getOwnGateway, isSuspended } from "../auth/license.js";
+import { getCurrentLicense, getLastLicenseCheck, getModelGateway, getOfflineLock, getOwnGateway, isSuspended } from "../auth/license.js";
 import { isOidcReady } from "../auth/oidc.js";
 import { isEmailConfigured, transportSettings } from "../notify/email.js";
 import { schedulerState } from "../workflow/scheduler.js";
@@ -374,6 +374,18 @@ function licenseCheck(now: number): StatusCheck {
       fix: "Install a key in Settings → License. Without one, everything except reads is refused.",
     };
   }
+  const egress = `Allow outbound HTTPS to ${hostPort(config.PROMPTOWL_API_URL, 443)?.host ?? "PromptOwl"} — see the egress table below.`;
+  const offlineSince = getOfflineLock();
+  if (offlineSince) {
+    return {
+      id: "license",
+      group: "license",
+      label: "License",
+      state: "red",
+      detail: `Read-only: PromptOwl unreachable since the last good check at ${offlineSince} (24-hour offline limit)`,
+      fix: `${egress} Writing comes back on the next successful check.`,
+    };
+  }
   const stale = !last || now - Date.parse(last) > 24 * 3600_000;
   return {
     id: "license",
@@ -382,7 +394,7 @@ function licenseCheck(now: number): StatusCheck {
     state: stale ? "amber" : "green",
     detail: `Valid (${lic.tier}) — ${lastTxt}`,
     ...(stale && {
-      fix: `The server can't reach PromptOwl to re-check its license. Allow outbound HTTPS to ${hostPort(config.PROMPTOWL_API_URL, 443)?.host ?? "PromptOwl"} — see the egress table below. It keeps working through the grace period.`,
+      fix: `The server can't reach PromptOwl to re-check its license. ${egress} It goes read-only 24 hours after the last successful check.`,
     }),
   };
 }

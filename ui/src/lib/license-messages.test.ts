@@ -66,6 +66,15 @@ describe("adminLicenseNotice", () => {
     expect(n.dismissible).toBe(true);
   });
 
+  it("offline past 24 hours: says why it's read-only and how it recovers", () => {
+    const n = adminLicenseNotice(lic({ offline_since: iso(NOW - 2 * day) }), NOW)!;
+    expect(n.title).toBe("This server can't reach PromptOwl");
+    expect(n.body).toMatch(/read-only for everyone/);
+    expect(n.body).toMatch(/editing resumes on the next successful check/);
+    expect(n.dismissible).toBe(false);
+    expect(n.level).toBe("warning");
+  });
+
   it("can't be dismissed within 3 days of a change", () => {
     const n = adminLicenseNotice(
       lic({ reason: "expired_grace", expires_at: iso(NOW - 11 * day), grace_ends_at: iso(NOW + 2 * day) }),

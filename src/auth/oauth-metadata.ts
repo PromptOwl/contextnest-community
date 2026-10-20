@@ -13,18 +13,20 @@
  * MCP authorization spec, which selects a subset of OAuth 2.1.
  */
 
-/** Scopes this server issues. Kept minimal — step-up adds more, per the spec. */
+/** Scopes this server issues. */
 export const SCOPE_READ = "nests:read";
 export const SCOPE_WRITE = "nests:write";
 /** Asking for this is how a client signals it wants a refresh token. */
 export const SCOPE_OFFLINE = "offline_access";
 
 /**
- * The scopes a bare MCP request needs. Sent in the `WWW-Authenticate`
- * challenge so a client requests least privilege up front instead of
- * everything in `scopes_supported`.
+ * The scopes a client asks for when it connects. Sent in the
+ * `WWW-Authenticate` challenge, which MCP clients request verbatim: with read
+ * alone a connected agent could never save a note (a refused write is a tool
+ * error, so no client steps up), and without offline_access it got no refresh
+ * token and was signed out hourly. The consent page lists all three.
  */
-export const CHALLENGE_SCOPE = SCOPE_READ;
+export const CHALLENGE_SCOPE = [SCOPE_READ, SCOPE_WRITE, SCOPE_OFFLINE].join(" ");
 
 /** Where the protected resource metadata for the server-level endpoint lives. */
 export const PRM_PATH = "/.well-known/oauth-protected-resource/mcp";

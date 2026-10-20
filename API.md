@@ -67,7 +67,7 @@ Flow:
 | GET | `/oauth/connected` | Your connected apps: one entry per client with a usable token — `clientId`, `clientName`, `scopes`, `redirectOrigin`, `connectedAt`, `lastUsedAt`. Session or user-level key; a nest-scoped key gets `403`. |
 | DELETE | `/oauth/connected/:clientId` | Disconnect one app: revokes every token it holds for you, at once. `404` when you have no live grant for that client. Same auth as above. |
 
-An unauthenticated request to `/mcp` is answered with `401` and `WWW-Authenticate: Bearer resource_metadata="..." scope="nests:read"`, which is what starts the flow. An expired or revoked OAuth access token on `/mcp` or `/index` gets `401` with `WWW-Authenticate: Bearer error="invalid_token" resource_metadata="..."`, so the client refreshes or re-authorizes. Other bad credentials get the ordinary rejection.
+An unauthenticated request to `/mcp` is answered with `401` and `WWW-Authenticate: Bearer resource_metadata="..." scope="nests:read nests:write offline_access"`, which is what starts the flow. Clients request those scopes, so one consent covers reading, writing and staying signed in. An expired or revoked OAuth access token on `/mcp` or `/index` gets `401` with `WWW-Authenticate: Bearer error="invalid_token" resource_metadata="..."`, so the client refreshes or re-authorizes. Other bad credentials get the ordinary rejection.
 
 Scopes: `nests:read`, `nests:write`, `offline_access` (ask for the last to receive a refresh token).
 
@@ -304,6 +304,28 @@ Returns owned + shared nests. Archived nests are **absent** — as they are from
 Response (201): `{ "nest": { ... } }`
 
 With `NEST_CREATION=admins` (the default) only a server admin may create or import a nest; anyone else gets `403` ("Only a server admin can create nests on this server…"). The same rule covers `POST /nests/import` and the MCP `nest_create` tool. `GET /health` reports it as `nest_creation`.
+
+### POST `/nests/import`
+Imports a folder the browser read, as `{ path, content }` files. Large folders upload in chunks: `{ name, files, partial: true }` creates the nest and stages the first chunk, `{ nestId, files }` stages each further chunk, `{ nestId, finalize: true }` registers the documents. `{ name, files }` with no flags is a one-shot import.
+
+Response (201 one-shot, 200 finalize):
+```json
+{
+  "nest": { ... },
+  "documents": 293,
+  "rejected": ["../escape.md"],
+  "problems": [
+    "../escape.md: path escapes the vault",
+    "notes/broken: kept as a draft — its version chain no longer reconstructs",
+    "notes/bad: not imported — <reason>"
+  ],
+  "warnings": ["notes/odd: version \"1.1\" is not a whole number of at least 1; imported as 1"]
+}
+```
+- `documents` — how many were imported. `rejected` — paths refused at upload (kept for compatibility); `problems` gives each with its reason, plus documents kept as a draft or not imported. `warnings` — repairs made on the way in (a derived title, a coerced type, a dropped tag, a whole-number version).
+- A chunk response carries `rejected`, `problems` and `warnings` for that chunk.
+- A step that fails outright returns `{ "error": "Import stopped while uploading files: …" }` (or `… while publishing documents: …`) instead of a generic error; a vault-lock timeout stays `503` with `Retry-After`, and an engine validation refusal stays `400`.
+- `.context/` (the source vault's own settings) and `_suggestions/` are dropped before staging and never reported.
 
 ### GET `/nests/:nestId`
 ```json
@@ -2637,7 +2659,7 @@ The server validates its key with PromptOwl (`POST {PROMPTOWL_API_URL}/api/licen
 `{ valid, tier, org, owner_email, suspended, suspended_reason, limits, setup_required }`. `setup_required` is true only for a server that has never been licensed; the UI shows the activation screen then. A lapsed license is not a setup case. Carries no lapse reason, dates, head-count or contact.
 
 ### GET `/admin/license` (server admin, or the key's owner)
-`{ plan, valid, tier, org, owner_email, suspended, suspended_reason, trial, expires_at, days_left, reason, grace_ends_at, contact: { url, email }, seats: { licensed, used, over_limit, at_limit }, subscribers: { licensed, used }, max_account_owners, pending_rejections, last_checked_at, manage_url }`. `plan` is `free`, `trial`, `self_hosted` or `enterprise`. `seats` counts billed users (nest owners, admins, reviewers, server admins) and `subscribers` counts editors; each person counts once, at their highest role. A `licensed` or `max_account_owners` of null means no limit. `manage_url` is PromptOwl's page for this key (`?key=` carries its last 4 characters only), or null without a key. `pending_rejections` counts rejections not yet acted on (3 make the server read-only). Drives Settings → License and the admin license banner.
+`{ plan, valid, tier, org, owner_email, suspended, suspended_reason, trial, expires_at, days_left, reason, grace_ends_at, contact: { url, email }, seats: { licensed, used, over_limit, at_limit }, subscribers: { licensed, used }, max_account_owners, pending_rejections, offline_since, last_checked_at, manage_url }`. `offline_since` is the last successful license check, set only once PromptOwl has been unreachable for over 24 hours (the server is read-only until it answers); null otherwise. `plan` is `free`, `trial`, `self_hosted` or `enterprise`. `seats` counts billed users (nest owners, admins, reviewers, server admins) and `subscribers` counts editors; each person counts once, at their highest role. A `licensed` or `max_account_owners` of null means no limit. `manage_url` is PromptOwl's page for this key (`?key=` carries its last 4 characters only), or null without a key. `pending_rejections` counts rejections not yet acted on (3 make the server read-only). Drives Settings → License and the admin license banner.
 
 ### POST `/license/install`
 `{ key }`. Public while the server has never been licensed. Once it has a license owner, only a server admin or that owner may replace the key (401/403 otherwise). A rejected key returns 400 with an operator-facing `error` plus the same term fields.

@@ -20,12 +20,12 @@ import { config } from "../config.js";
 import { ValidationError, NotFoundError, ConflictError, ForbiddenError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { resolveNestPermission, permissionLevel } from "../shared/access.js";
-import { isSuspended, getSuspensionReason } from "../auth/license.js";
+import { isSuspended, getSuspensionReason, getOfflineLock } from "../auth/license.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requireWorkflowPlane } from "./edge-type-routes.js";
 import { cancelDescendants, announceRunFailed } from "./run-service.js";
 import { envValues } from "./env-routes.js";
-import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "../auth/license-copy.js";
+import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "../auth/license-copy.js";
 import { FREE_TIER_EXCEEDED_MESSAGE, writesAllowed } from "../auth/free-tier.js";
 import { SERVER_CLAIM, getAgent } from "../metacognition/store.js";
 
@@ -459,6 +459,8 @@ async function loadRunWithPermission(
         `Server suspended by PromptOwl: ${getSuspensionReason()}`,
       );
     }
+    const offlineSince = getOfflineLock();
+    if (offlineSince) throw new ForbiddenError(offlineLockMessage(offlineSince));
     throw new ForbiddenError(FREE_TIER_EXCEEDED_MESSAGE);
   }
 
