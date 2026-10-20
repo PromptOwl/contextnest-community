@@ -367,9 +367,17 @@ describe("decideDataTrust (AC-9, AC-16)", () => {
     killSwitch: false,
   };
 
-  it("stewardship on: the viewer is the only principal", () => {
+  it("stewardship on: still the viewer plus every author — approval may be self-publication (H-1)", () => {
     const r = decideDataTrust({ ...base, stewardship: true });
-    expect(r).toEqual({ ok: true, principals: [VIEWER] });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.principals.map((p) => p.userId)).toEqual(["u-viewer", "u-author"]);
+  });
+
+  it("stewardship on: an author without access withholds, and no authors withholds (H-1)", () => {
+    expect(
+      decideDataTrust({ ...base, stewardship: true, authors: [author({ nestPermission: "none" })] }).ok,
+    ).toBe(false);
+    expect(decideDataTrust({ ...base, stewardship: true, authors: [] }).ok).toBe(false);
   });
 
   it("stewardship off: viewer plus every author", () => {
@@ -480,7 +488,7 @@ describe("frameNestData (AC-9 flow, AC-16)", () => {
         viewApproved: true,
         artifactApproved: true,
         viewer: VIEWER,
-        authors: [],
+        authors: [{ email: "author@x.test", userId: "u-author", isSystem: false, nestPermission: "write" }],
         killSwitch: false,
       },
     });
