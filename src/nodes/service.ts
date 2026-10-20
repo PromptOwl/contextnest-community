@@ -21,6 +21,7 @@ import type { ContextNode, NestStorage, PdfMeta } from "@promptowl/contextnest-e
 import { rename, mkdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { serializeNodeSafe } from "../governance/safe-publish.js";
+import { assertNoViewCollision, batchViewCollisions } from "../views/collision.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
 import { withIoStats } from "./io-stats.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
@@ -1946,6 +1947,9 @@ async function createNodeOnce(
         `A document already exists at ${id}. Update it, or create this one under a different folder or title.`,
       );
     }
+    // A view's page and frames are served at <view>/view/…: neither may be
+    // taken by another node, nor a view placed where one already is.
+    await assertNoViewCollision(storage, id, requestedType);
 
     // Rows can outlive their document when a file goes missing outside the app
     // — deleteNode's purge never runs because the delete 404s first. Those rows
@@ -2250,6 +2254,49 @@ async function stageImportedFilesInner(
     return !segs.includes("_suggestions") && !segs.includes(".context");
   });
   if (!carried.length) return { written: 0, rejected: [], problems: [], warnings: [] };
+  // View addresses (see views/collision.ts): a document arriving at a view's
+  // <view>/view/… address, or a view arriving over an occupied one, is refused
+  // like any other unusable file — named, with the reason.
+  const viewRefusals: Array<{ path: string; why: string }> = [];
+  {
+    const idOf = (path: string) => path.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\.md$/i, "");
+    const docsIn = carried
+      .filter((f) => /\.md$/i.test(String(f.path)) && !String(f.path).split(/[\\/]/).some((seg) => seg.startsWith(".")))
+      .map((f) => {
+        const id = idOf(String(f.path));
+        let type = "document";
+        try {
+          type = String(parseDocument(`${id}.md`, String(f.content ?? ""), id).frontmatter.type || "document");
+        } catch {
+          /* unparseable: the engine reports it */
+        }
+        return { id, type, path: String(f.path) };
+      });
+    if (docsIn.some((d) => d.type === "view" || /(^|\/)view(\/|$)/.test(d.id))) {
+      const { storage } = await engineCache.get(nestId);
+      const existing = (await storage.discoverDocuments({ includeRetired: true } as any)).map((d) => ({
+        id: d.id,
+        type: String(d.frontmatter.type || "document"),
+      }));
+      const refused = batchViewCollisions(docsIn, existing);
+      for (const d of docsIn) {
+        const why = refused.get(d.id);
+        if (why) viewRefusals.push({ path: d.path, why });
+      }
+    }
+  }
+  if (viewRefusals.length) {
+    const drop = new Set(viewRefusals.map((r) => r.path));
+    for (let i = carried.length - 1; i >= 0; i--) if (drop.has(String(carried[i].path))) carried.splice(i, 1);
+    if (!carried.length) {
+      return {
+        written: 0,
+        rejected: viewRefusals.map((r) => r.path),
+        problems: viewRefusals.map((r) => `${r.path}: refused — ${r.why}`),
+        warnings: [],
+      };
+    }
+  }
   const startedAt = Date.now();
   const result = await engineApi.run<{
     written?: number;
@@ -2265,7 +2312,10 @@ async function stageImportedFilesInner(
   );
   // A rejected path (traversal, empty) comes back per-file rather than throwing:
   // one bad path shouldn't cost the whole import. It must not pass silently.
-  const rejected = (result.failed ?? []).map((f) => f.id ?? "(unnamed)");
+  const rejected = [
+    ...viewRefusals.map((r) => r.path),
+    ...(result.failed ?? []).map((f) => f.id ?? "(unnamed)"),
+  ];
   if (rejected.length) {
     console.warn(
       `[import] ${rejected.length} file(s) rejected:`,
@@ -2273,9 +2323,12 @@ async function stageImportedFilesInner(
     );
   }
   // The reason travels too, as a readable `path: reason` line for the user.
-  const problems = (result.failed ?? []).map((f) =>
-    f.id && !f.error.startsWith(f.id) ? `${f.id}: ${f.error}` : f.error
-  );
+  const problems = [
+    ...viewRefusals.map((r) => `${r.path}: refused — ${r.why}`),
+    ...(result.failed ?? []).map((f) =>
+      f.id && !f.error.startsWith(f.id) ? `${f.id}: ${f.error}` : f.error
+    ),
+  ];
   return { written: result.written ?? 0, rejected, problems, warnings: result.warnings ?? [] };
 }
 
@@ -2673,6 +2726,7 @@ export async function updateNode(
       // node is becoming, as create does.
       if (patch.type !== undefined && patch.type !== node.frontmatter.type) {
         assertAcceptedType(patch.type);
+        if (patch.type === "view") await assertNoViewCollision(storage, nodeId, "view");
         // A skill node is invalid without a skill block and this surface has
         // no field for one — default the trigger from the title, as create
         // does. The engine requires the block in the same call as the re-type.
@@ -3220,6 +3274,12 @@ export async function moveNode(
       // Fail closed: only a missing document leaves the destination free.
       if (!(err instanceof DocumentNotFoundError)) throw err;
     }
+    await assertNoViewCollision(
+      storage,
+      newId,
+      String(node.frontmatter.type || "document"),
+      new Set([nodeId]),
+    );
 
     const moved: ContextNode = {
       ...node,
@@ -3672,6 +3732,20 @@ export async function moveFolder(
   const taken = new Set(all);
   const clash = targets.find((id) => taken.has(`nodes/${destOf(id)}/${id.split("/").pop()}`));
   if (clash) throw new ConflictError(`A document already exists where "${clash}" would go.`);
+  // View addresses (see views/collision.ts), checked for every node BEFORE
+  // the first one moves, so a refusal never leaves the folder half-moved.
+  {
+    const leaving = new Set(targets);
+    for (const id of targets) {
+      const doc = await storage.readDocument(id);
+      await assertNoViewCollision(
+        storage,
+        `nodes/${destOf(id)}/${id.split("/").pop()}`,
+        String(doc.frontmatter.type || "document"),
+        leaving,
+      );
+    }
+  }
 
   // Sequential, like deleteFolder: a failure names how far it got, and what
   // moved stays coherent (each move is atomic).
