@@ -546,6 +546,18 @@ export function ConnectModal({
                 </div>
                 <div className="border-t pt-3">
                   <p className="text-sm mb-3">
+                    <strong>Claude Code plugin</strong> — the easiest way: install
+                    it, then let it walk you through setup. Nothing to copy, and
+                    connecting uploads nothing.
+                  </p>
+                  <Snippet
+                    label="Run inside Claude Code"
+                    value={"/plugin marketplace add promptowl/contextnest\n/plugin install contextnest\n/contextnest:setup"}
+                    multiline
+                  />
+                </div>
+                <div className="border-t pt-3">
+                  <p className="text-sm mb-3">
                     <strong>Claude Code</strong> (the CLI) registers a server with
                     one command — it persists the config itself, no file to find
                     or edit.
