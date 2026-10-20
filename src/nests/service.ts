@@ -1,3 +1,5 @@
+import { invalidateSiteNests } from "../site/invalidate.js";
+import { claimSiteKeyIfLive } from "../site/settings.js";
 import { mkdirSync } from "fs";
 import { v4 as uuid } from "uuid";
 import { NestStorage } from "@promptowl/contextnest-engine";
@@ -169,6 +171,8 @@ export async function setReaderMode(
   if (sets.length === 0) return;
   params.push(nestId);
   await db.run(`UPDATE nests SET ${sets.join(", ")} WHERE id = ?`, params);
+  invalidateSiteNests();
+  await claimSiteKeyIfLive(nestId);
 }
 
 /** Whether the nest lets a submitter approve their own version (bypass SoD). */
@@ -482,6 +486,7 @@ export async function renameNest(
     );
     updates.push("name = ?", "slug = ?");
     params.push(trimmed, slug);
+    invalidateSiteNests();
   }
 
   if (patch.description !== undefined) {
@@ -1003,6 +1008,7 @@ export async function deleteNest(nestId: string): Promise<void> {
     // A deleted nest releases its docs-site domain for whoever claims it next.
     await tx.run("DELETE FROM site_paths WHERE nest_id = ?", [id]);
     await tx.run("DELETE FROM nest_sites WHERE nest_id = ?", [id]);
+    invalidateSiteNests();
     await tx.run("DELETE FROM node_versions WHERE nest_id = ?", [id]);
     await tx.run("DELETE FROM review_requests WHERE nest_id = ?", [id]);
     await tx.run("DELETE FROM stewards WHERE nest_id = ?", [id]);

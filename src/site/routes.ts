@@ -25,7 +25,7 @@ import { Hono, type Context } from "hono";
 import { config } from "../config.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { getSessionIdFromRequest } from "../auth/sessions.js";
-import { findSiteNest, getSite, placements, siteNests, TYPES, type Built, type SiteNest } from "./build.js";
+import { findSiteNest, getSite, placements, siteNests, TYPES, type SiteNest, type SiteView } from "./build.js";
 import { cspFor, renderServerRobots, renderSitemapIndex } from "./render.js";
 import { nestIdForDomain } from "./settings.js";
 
@@ -63,8 +63,8 @@ function notFound(c: Context) {
 }
 
 /** Serve one file of a built site, honouring If-None-Match / If-Modified-Since. */
-function serveFile(c: Context, built: Built, rest: string) {
-  const { site, files } = built;
+function serveFile(c: Context, built: SiteView, rest: string) {
+  const { site } = built;
   const prefix = site.prefix;
   let path = rest.replace(/^\/+/, "");
   // One URL per page: no trailing slash (except the home page, which is "/").
@@ -72,16 +72,16 @@ function serveFile(c: Context, built: Built, rest: string) {
   if (path === "index.html") return movedTo(c, `${prefix}/`, 86400);
   if (path.endsWith(".html")) return movedTo(c, `${prefix}/${path.slice(0, -5)}`, 86400);
   const lower = path.toLowerCase();
-  if (lower !== path && files.has(lower)) return movedTo(c, `${prefix}/${lower}`, 86400);
-  if (wantsMarkdown(c) && files.has(`${path || "index"}.md`)) path = `${path || "index"}.md`;
+  if (lower !== path && built.has(lower)) return movedTo(c, `${prefix}/${lower}`, 86400);
+  if (wantsMarkdown(c) && built.has(`${path || "index"}.md`)) path = `${path || "index"}.md`;
 
-  const file = path === "404" || path === "410" ? undefined : files.get(path);
+  const file = path === "404" || path === "410" ? undefined : built.file(path);
   if (!file) {
     const key = lower.replace(/\.md$/, "");
     const to = site.redirects.get(key);
     if (to) return movedTo(c, lower.endsWith(".md") && to.startsWith("/") ? `${to}.md` : to, 86400);
     const gone = site.gone.has(key);
-    const page = files.get(gone ? "410" : "404")!;
+    const page = built.file(gone ? "410" : "404")!;
     return c.body(page.body, gone ? 410 : 404, {
       "Content-Type": page.type,
       "Cache-Control": "public, max-age=60",

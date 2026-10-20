@@ -288,6 +288,52 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
     expect(res.status).toBe(403);
   });
 
+  it("refuses redirects that would leave the site through a protocol-relative path", async () => {
+    for (const to of ["//evil.example", "/\\evil.example", "/ok\u0007x", "javascript:alert(1)", "http://plain.example"]) {
+      const r = await site("PATCH", "", { settings: { redirects: [{ from: "/x", to }] } });
+      expect(r.status, to).toBe(400);
+    }
+  });
+
+  it("serves any number of Host headers from one build", async () => {
+    const { buildCount } = await import("../src/site/build.js");
+    await get("/d/acme-docs/getting-started").catch(() => {});
+    const before = buildCount();
+    for (let i = 0; i < 5; i++) {
+      const res = await app.request(`http://attacker-${i}.example/d/acme-docs/`, { headers: HTML });
+      expect([200, 301]).toContain(res.status);
+    }
+    expect(buildCount()).toBe(before);
+  });
+
+  it("lets only one of two nests verify the same domain, even at once", async () => {
+    const a = (await jsonRequest(app, "POST", "/nests", { name: "Race A" }, owner.apiKey)).data.nest.id;
+    const b = (await jsonRequest(app, "POST", "/nests", { name: "Race B" }, owner.apiKey)).data.nest.id;
+    const ca = await jsonRequest(app, "PATCH", `/nests/${a}/site`, { domain: "race.acme.dev" }, owner.apiKey);
+    const cb = await jsonRequest(app, "PATCH", `/nests/${b}/site`, { domain: "race.acme.dev" }, owner.apiKey);
+    txt[ca.data.dns.txt.name] = [[ca.data.dns.txt.value], [cb.data.dns.txt.value]];
+    const results = await Promise.all([
+      jsonRequest(app, "POST", `/nests/${a}/site/verify-domain`, {}, owner.apiKey),
+      jsonRequest(app, "POST", `/nests/${b}/site/verify-domain`, {}, owner.apiKey),
+    ]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+  });
+
+  it("stops serving a verified domain once its TXT record is gone", async () => {
+    const settings = await import("../src/site/settings.js");
+    const { getDb } = await import("../src/db/client.js");
+    const record = (await site("GET", "", undefined)).data.dns.txt;
+    expect((await site("GET", "", undefined)).data.domain_verified).toBe(true);
+    delete txt[record.name];
+    await getDb().run("UPDATE nest_sites SET domain_verified_at = ? WHERE nest_id = ?", ["2020-01-01T00:00:00.000Z", nestId]);
+    await settings.recheckDomain(nestId);
+    expect((await site("GET", "", undefined)).data.domain_verified).toBe(false);
+    expect((await app.request("http://localhost/site-domain-check?domain=docs.acme.dev")).status).toBe(404);
+    // Put it back for the tests that follow.
+    txt[record.name] = [[record.value]];
+    expect((await site("POST", "/verify-domain", {})).status).toBe(200);
+  });
+
   it("stops serving when the nest goes private, without stale redirects", async () => {
     await jsonRequest(app, "PATCH", `/nests/${nestId}/visibility`, { visibility: "private" }, owner.apiKey);
     // The URL stays this nest's: the other "Acme Docs" doesn't inherit it.

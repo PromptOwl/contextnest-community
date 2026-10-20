@@ -1216,6 +1216,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
     CREATE INDEX IF NOT EXISTS idx_site_paths_node ON site_paths(nest_id, node_id);
       CREATE INDEX IF NOT EXISTS idx_nest_sites_domain ON nest_sites(domain);
+      -- One nest per live domain, enforced by the database, not a check-then-write.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_nest_sites_verified_domain ON nest_sites(domain) WHERE domain_verified_at IS NOT NULL;
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

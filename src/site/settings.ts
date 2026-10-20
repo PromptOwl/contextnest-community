@@ -117,15 +117,30 @@ export async function ensureSiteKey(nestId: string, slug: string): Promise<strin
   const row = await getSiteRow(nestId);
   if (row.siteKey) return row.siteKey;
   const db = getDb();
-  const taken = await db.get("SELECT 1 FROM nest_sites WHERE site_key = ? AND nest_id != ?", [slug, nestId]);
-  const key = taken ? nestId : slug;
-  try {
-    await db.run("UPDATE nest_sites SET site_key = ? WHERE nest_id = ? AND site_key IS NULL", [key, nestId]);
-  } catch {
-    // Lost a race for the slug: fall back to the id, which nobody else can hold.
-    await db.run("UPDATE nest_sites SET site_key = ? WHERE nest_id = ? AND site_key IS NULL", [nestId, nestId]);
-  }
+  // Claim the slug only if no other row holds it, in one statement — no
+  // failing write to recover from (which would abort a Postgres transaction).
+  // If another nest won the slug in a race, this nest takes its own id,
+  // which nobody else can hold.
+  await db.run(
+    `UPDATE nest_sites SET site_key = ?
+      WHERE nest_id = ? AND site_key IS NULL
+        AND NOT EXISTS (SELECT 1 FROM nest_sites other WHERE other.site_key = ? AND other.nest_id != ?)`,
+    [slug, nestId, slug, nestId],
+  );
+  await db.run("UPDATE nest_sites SET site_key = ? WHERE nest_id = ? AND site_key IS NULL", [nestId, nestId]);
   return (await getSiteRow(nestId)).siteKey!;
+}
+
+/**
+ * Claim the nest's /d/<key> the moment it becomes a live site (public with
+ * Reader Mode on), so when two nests share a slug the one published first
+ * keeps it — decided by order of publishing, not by who is visited first.
+ */
+export async function claimSiteKeyIfLive(nestId: string): Promise<void> {
+  const nest = (await getDb().get("SELECT slug, visibility, reader_mode FROM nests WHERE id = ?", [nestId])) as
+    | { slug: string; visibility: string; reader_mode: number }
+    | undefined;
+  if (nest && nest.visibility === "public" && nest.reader_mode === 1) await ensureSiteKey(nestId, nest.slug);
 }
 
 /** The nest that holds a /d/<key>, whatever its state now. */
@@ -144,6 +159,21 @@ export async function siteRowsFor(nestIds: string[]): Promise<Map<string, SiteRo
     nestIds,
   )) as DbRow[];
   return new Map(rows.map((r) => [r.nest_id, toRow(r)]));
+}
+
+/** "/a/b" — one leading slash, no backslash, no control characters or whitespace. */
+export function isSitePath(v: string): boolean {
+  return /^\/(?![/\\])[^\\\s\x00-\x1f\x7f]*$/.test(v);
+}
+
+function isHttpsUrl(v: string): boolean {
+  if (/[\s\x00-\x1f\x7f\\]/.test(v)) return false;
+  try {
+    const u = new URL(v);
+    return u.protocol === "https:" && !!u.hostname;
+  } catch {
+    return false;
+  }
 }
 
 const HOSTNAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
@@ -179,9 +209,11 @@ export async function updateSite(
       throw new ValidationError(`settings.${issue.path.join(".")}: ${issue.message}`);
     }
     for (const r of parsed.data.redirects ?? []) {
-      if (!r.from.startsWith("/")) throw new ValidationError(`Redirect "from" must be a path starting with "/": ${r.from}`);
-      if (!r.to.startsWith("/") && !/^https:\/\//.test(r.to)) {
-        throw new ValidationError(`Redirect "to" must be a path or an https:// URL: ${r.to}`);
+      if (!isSitePath(r.from)) throw new ValidationError(`Redirect "from" must be a path starting with "/": ${r.from}`);
+      // "//evil.example" and "/\evil.example" read as other hosts in a browser:
+      // a site path must be a plain path, and anything else an absolute https URL.
+      if (!isSitePath(r.to) && !isHttpsUrl(r.to)) {
+        throw new ValidationError(`Redirect "to" must be a path on this site or an https:// URL: ${r.to}`);
       }
     }
     await db.run("UPDATE nest_sites SET settings = ?, updated_at = ? WHERE nest_id = ?", [
@@ -238,11 +270,20 @@ export async function verifyDomain(nestId: string): Promise<SiteRow> {
     [row.domain, nestId],
   )) as { nest_id: string } | undefined;
   if (taken) throw new ConflictError("That domain is already serving another nest's site");
-  await getDb().run("UPDATE nest_sites SET domain_verified_at = ?, updated_at = ? WHERE nest_id = ?", [
-    new Date().toISOString(),
-    new Date().toISOString(),
-    nestId,
-  ]);
+  try {
+    await getDb().run("UPDATE nest_sites SET domain_verified_at = ?, updated_at = ? WHERE nest_id = ?", [
+      new Date().toISOString(),
+      new Date().toISOString(),
+      nestId,
+    ]);
+  } catch (err) {
+    // Two nests verifying the same domain at once: the partial unique index
+    // lets exactly one through.
+    if (/unique|constraint/i.test(String((err as Error)?.message ?? err))) {
+      throw new ConflictError("That domain is already serving another nest's site");
+    }
+    throw err;
+  }
   clearDomainCache();
   return getSiteRow(nestId);
 }
@@ -256,6 +297,43 @@ export function clearDomainCache(): void {
   domainCache.clear();
 }
 
+const REVERIFY_AFTER_MS = 24 * 60 * 60 * 1000;
+const rechecking = new Set<string>();
+
+/**
+ * Re-run the TXT check for a verified domain. Found → the verification is
+ * renewed; definitively gone (no record / wrong value) → the domain is
+ * un-verified and stops serving. A DNS error (timeout, SERVFAIL) changes
+ * nothing, so a resolver hiccup can't take a site down.
+ */
+export async function recheckDomain(nestId: string): Promise<void> {
+  if (rechecking.has(nestId)) return;
+  rechecking.add(nestId);
+  try {
+    const row = await getSiteRow(nestId);
+    const record = verificationRecord(row);
+    if (!record || !row.domainVerifiedAt) return;
+    let found: string[];
+    try {
+      found = (await txtResolver(record.name)).map((parts) => parts.join(""));
+    } catch (err) {
+      const code = (err as { code?: string })?.code;
+      if (code !== "ENOTFOUND" && code !== "ENODATA") return;
+      found = [];
+    }
+    const now = new Date().toISOString();
+    if (found.includes(record.value)) {
+      await getDb().run("UPDATE nest_sites SET domain_verified_at = ? WHERE nest_id = ?", [now, nestId]);
+    } else {
+      console.warn(`[site] ${row.domain}: verification TXT record is gone; the domain no longer serves nest ${nestId}`);
+      await getDb().run("UPDATE nest_sites SET domain_verified_at = NULL, updated_at = ? WHERE nest_id = ?", [now, nestId]);
+    }
+    clearDomainCache();
+  } finally {
+    rechecking.delete(nestId);
+  }
+}
+
 /** The nest whose site a verified domain serves (DOCS_SITES env first). */
 export async function nestIdForDomain(host: string | undefined): Promise<string | null> {
   if (!host) return null;
@@ -266,9 +344,15 @@ export async function nestIdForDomain(host: string | undefined): Promise<string 
   const cached = domainCache.get(h);
   if (cached && Date.now() - cached.at < DOMAIN_TTL_MS) return cached.nestId;
   const row = (await getDb().get(
-    "SELECT nest_id FROM nest_sites WHERE domain = ? AND domain_verified_at IS NOT NULL",
+    "SELECT nest_id, domain_verified_at FROM nest_sites WHERE domain = ? AND domain_verified_at IS NOT NULL",
     [h],
-  )) as { nest_id: string } | undefined;
+  )) as { nest_id: string; domain_verified_at: string } | undefined;
+  // Proof of control goes stale: a domain that lapsed and was re-registered,
+  // or whose TXT record was removed, must stop being served (and stop being
+  // vouched for to the TLS edge). Re-check in the background once a day.
+  if (row && Date.now() - Date.parse(row.domain_verified_at) > REVERIFY_AFTER_MS) {
+    void recheckDomain(row.nest_id).catch(() => {});
+  }
   if (domainCache.size > 1000) domainCache.clear();
   domainCache.set(h, { nestId: row?.nest_id ?? null, at: Date.now() });
   return row?.nest_id ?? null;

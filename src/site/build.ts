@@ -41,6 +41,7 @@ import {
   domainForNest,
   ensureSiteKey,
   getSiteRow,
+  isSitePath,
   nestIdForSiteKey,
   recordPaths,
   sitePaths,
@@ -49,6 +50,8 @@ import {
   type SiteSettings,
 } from "./settings.js";
 import { pingIndexNow } from "./indexnow.js";
+import { siteNestsGeneration } from "./invalidate.js";
+import { config } from "../config.js";
 
 export interface SiteNest {
   id: string;
@@ -136,7 +139,26 @@ export interface Site {
 // ─── Which nests have a site, and where it lives ────────────────────────────
 
 /** Every nest that is public with Reader Mode on, oldest first. */
-export async function siteNests(): Promise<SiteNest[]> {
+// Read on every public request, so cached briefly. Changes on this instance
+// (visibility, reader mode, name, branding, deletion) bump the generation and
+// take effect at once; other instances catch up within the TTL.
+const SITE_NESTS_TTL_MS = 5_000;
+let siteNestsCache: { at: number; generation: number; nests: Promise<SiteNest[]> } | null = null;
+
+export function siteNests(): Promise<SiteNest[]> {
+  const gen = siteNestsGeneration();
+  if (siteNestsCache && siteNestsCache.generation === gen && Date.now() - siteNestsCache.at < SITE_NESTS_TTL_MS) {
+    return siteNestsCache.nests;
+  }
+  const nests = loadSiteNests();
+  siteNestsCache = { at: Date.now(), generation: gen, nests };
+  nests.catch(() => {
+    if (siteNestsCache?.nests === nests) siteNestsCache = null;
+  });
+  return nests;
+}
+
+async function loadSiteNests(): Promise<SiteNest[]> {
   const rows = (await getDb().all(
     `SELECT id, name, slug, description, reader_home_node, branding_json FROM nests
       WHERE visibility = 'public' AND reader_mode = 1
@@ -575,6 +597,9 @@ function buildSite(nest: SiteNest, sources: Source[], inputs: Inputs, place: Pla
     else gone.add(p.path);
   }
   for (const r of settings.redirects ?? []) {
+    // Validated on save; re-checked here so a stored value can never become
+    // an open redirect ("//evil.example" reads as another host).
+    if (!isSitePath(r.from) || (!isSitePath(r.to) && !/^https:\/\/[^\\\s]+$/.test(r.to))) continue;
     const from = r.from.replace(/^\/+|\/+$/g, "").toLowerCase();
     if (current.has(from)) continue;
     redirects.set(from, r.to.startsWith("/") ? href(r.to.replace(/^\/+/, "")) : r.to);
@@ -619,6 +644,7 @@ export interface SiteFile {
 
 export interface Built {
   key: string;
+  origin: string;
   site: Site;
   files: Map<string, SiteFile>;
 }
@@ -643,22 +669,69 @@ function httpDate(iso: string | null): string | null {
 }
 
 /**
- * The rendered site for a nest at this server origin, rebuilt only when its
- * approved content, settings or glossary change. Keys in `files` are
- * site-relative: "" (home), "guides/setup", "guides/setup.md", "tags/x",
- * "glossary", "sitemap.xml", "robots.txt", "llms.txt", "llms-full.txt",
- * "<indexnow key>.txt", "404", "410".
+ * Sites are built once per content version against ONE origin — the server's
+ * PUBLIC_BASE_URL, or a placeholder when it is unset — and each request gets
+ * a view with its own origin swapped in. So a client cycling Host headers
+ * costs a string replace, never a rebuild, and can't evict real traffic.
  */
-export async function getSite(nest: SiteNest, serverOrigin: string): Promise<Built> {
+const ORIGIN_PLACEHOLDER = "https://site-origin.invalid";
+let warnedNoBaseUrl = false;
+
+function buildOrigin(): string {
+  if (config.PUBLIC_BASE_URL) return config.PUBLIC_BASE_URL;
+  if (!warnedNoBaseUrl) {
+    warnedNoBaseUrl = true;
+    console.warn(
+      "[site] PUBLIC_BASE_URL is not set: public docs sites under /d/ build their canonical URLs from each request's Host header. Set PUBLIC_BASE_URL in production (or give the site a verified domain).",
+    );
+  }
+  return ORIGIN_PLACEHOLDER;
+}
+
+/** A built site seen from one request origin. */
+export interface SiteView {
+  site: Site;
+  has(path: string): boolean;
+  file(path: string): SiteFile | undefined;
+  paths(): string[];
+}
+
+function viewFor(built: Built, origin: string): SiteView {
+  const from = built.origin;
+  if (from === origin || from !== ORIGIN_PLACEHOLDER) {
+    return { site: built.site, has: (p) => built.files.has(p), file: (p) => built.files.get(p), paths: () => [...built.files.keys()] };
+  }
+  const swap = (v: string) => v.split(from).join(origin);
+  const tag = createHash("sha256").update(origin).digest("base64url").slice(0, 6);
+  const site: Site = { ...built.site, base: swap(built.site.base), serverOrigin: origin };
+  return {
+    site,
+    has: (p) => built.files.has(p),
+    file: (p) => {
+      const f = built.files.get(p);
+      return f && { ...f, body: swap(f.body), etag: `${f.etag.slice(0, -1)}-${tag}"` };
+    },
+    paths: () => [...built.files.keys()],
+  };
+}
+
+/**
+ * The rendered site for a nest, seen from `requestOrigin`. Rebuilt only when
+ * its approved content, settings, custom URLs or glossary change. Keys in
+ * `files` are site-relative: "" (home), "guides/setup", "guides/setup.md",
+ * "tags/x", "glossary", "sitemap.xml", "robots.txt", "llms.txt",
+ * "llms-full.txt", "<indexnow key>.txt", "404", "410".
+ */
+export async function getSite(nest: SiteNest, requestOrigin: string): Promise<SiteView> {
+  const origin = buildOrigin();
   const inputs = await inputsFor(nest);
-  const place = await placementFor(nest, inputs.row, serverOrigin);
+  const place = await placementFor(nest, inputs.row, origin);
   const key = `${inputs.key}|${place.base}`;
-  const cacheKey = `${nest.id}|${serverOrigin}`;
-  const hit = cache.get(cacheKey);
-  if (hit && hit.key === key) return hit;
+  const hit = cache.get(nest.id);
+  if (hit && hit.key === key && hit.origin === origin) return viewFor(hit, requestOrigin);
 
   const sources = await approvedSources(nest.id, inputs.rows, inputs.live);
-  const site = buildSite(nest, sources, inputs, place, serverOrigin);
+  const site = buildSite(nest, sources, inputs, place, origin);
   const files = new Map<string, SiteFile>();
   const put = (path: string, body: string, type: string, updated: string | null = null) =>
     files.set(path, { body, type, etag: etagOf(body), lastModified: httpDate(updated) });
@@ -678,11 +751,11 @@ export async function getSite(nest: SiteNest, serverOrigin: string): Promise<Bui
   put("404", renderNotFound(site), TYPES.html);
   put("410", renderGone(site), TYPES.html);
 
-  const built: Built = { key, site, files };
-  // Bounded: one entry per (nest, server origin); without PUBLIC_BASE_URL the
-  // origin comes from the request's Host, so cycling Hosts can't grow this.
-  cache.delete(cacheKey);
-  cache.set(cacheKey, built);
+  const built: Built = { key, origin, site, files };
+  builds++;
+  // One entry per nest, bounded.
+  cache.delete(nest.id);
+  cache.set(nest.id, built);
   while (cache.size > MAX_CACHED_SITES) cache.delete(cache.keys().next().value!);
 
   // Remember every served path so a later move 301s instead of 404ing.
@@ -690,11 +763,17 @@ export async function getSite(nest: SiteNest, serverOrigin: string): Promise<Bui
   void recordPaths(nest.id, site.pages, known).catch((err) => console.warn("[site] recording paths failed", err));
   // Tell IndexNow engines what changed since the last build in this process.
   if (hit) void pingIndexNow(hit.site, site).catch(() => {});
-  return built;
+  return viewFor(built, requestOrigin);
+}
+
+let builds = 0;
+/** How many full builds this process has run (tests: Host churn must not rebuild). */
+export function buildCount(): number {
+  return builds;
 }
 
 /** The built site for a nest by id (settings panel, export), or null when it has none. */
-export async function siteForNest(nestId: string, serverOrigin: string): Promise<Built | null> {
+export async function siteForNest(nestId: string, serverOrigin: string): Promise<SiteView | null> {
   const nest = (await siteNests()).find((n) => n.id === nestId);
   return nest ? getSite(nest, serverOrigin) : null;
 }
@@ -722,7 +801,8 @@ export async function buildSiteFiles(nestId: string, serverOrigin: string): Prom
   const built = await siteForNest(nestId, serverOrigin.replace(/\/$/, ""));
   if (!built) throw new Error(`Nest ${nestId} is not a public Reader Mode nest`);
   const out: Record<string, string> = {};
-  for (const [path, file] of built.files) {
+  for (const path of built.paths()) {
+    const file = built.file(path)!;
     if (path === "404") out["404.html"] = file.body;
     else if (path === "410") continue;
     else if (file.type === TYPES.html) out[path ? `${path}.html` : "index.html"] = file.body;
