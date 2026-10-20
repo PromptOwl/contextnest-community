@@ -202,9 +202,22 @@ describe("document pins", () => {
         expect(res.data.editorial.map((p: any) => p.node_id)).toEqual([ids.Alpha, ids.Bravo]);
         expect(res.data.editorial[0].title).toBe("Alpha");
       }
+      // Who pinned it is an email — curators see it, everyone else doesn't
+      // (a grantee or reader can't otherwise list the nest's members).
+      expect((await getPins(steward)).data.editorial[0].pinned_by).toBe(steward.email);
+      for (const u of [editor, reader]) {
+        expect((await getPins(u)).data.editorial.every((p: any) => p.pinned_by === null)).toBe(true);
+      }
       expect((await getPins(steward)).data.can_pin_editorial).toBe(true);
       expect((await getPins(owner)).data.can_pin_editorial).toBe(true);
       expect((await getPins(editor)).data.can_pin_editorial).toBe(false);
+    });
+
+    it("two concurrent pins of the same document both succeed and leave one row", async () => {
+      const [a, b] = await Promise.all([pin(owner, ids.Foxtrot, "nest"), pin(owner, ids.Foxtrot, "nest")]);
+      expect([a.status, b.status]).toEqual([201, 201]);
+      expect(await pinRows("scope = 'nest' AND node_id = ?", [ids.Foxtrot])).toHaveLength(1);
+      expect((await unpin(owner, ids.Foxtrot, "nest")).data.unpinned).toBe(true);
     });
 
     it("PUT /pins/order reverses them, for every member", async () => {
@@ -221,6 +234,21 @@ describe("document pins", () => {
       expect((await reorder(steward, [ids.Bravo, ids.Bravo])).status).toBe(400);
       expect((await reorder(steward, [ids.Bravo, ids.Alpha, ids.Charlie])).status).toBe(400);
       expect((await jsonRequest(app, "PUT", `${pinsUrl()}/order`, { node_ids: "x" }, steward.apiKey)).status).toBe(400);
+    });
+
+    it("caps the editorial strip at 50 pins", async () => {
+      const d = await db();
+      const have = (await pinRows("scope = 'nest'")).length;
+      for (let i = have; i < 50; i++) {
+        await d.run(
+          "INSERT INTO node_pins (id, nest_id, node_id, scope, user_id, position) VALUES (?, ?, ?, 'nest', NULL, ?)",
+          [`cap-${i}`, nestId, `nodes/cap-${i}`, 100 + i],
+        );
+      }
+      const res = await pin(owner, ids.Charlie, "nest");
+      expect(res.status).toBe(400);
+      expect(res.data.error).toMatch(/50/);
+      await d.run("DELETE FROM node_pins WHERE id LIKE 'cap-%'", []);
     });
 
     it("a plain editor (write collaborator) and a reader get 403 on every editorial write", async () => {
@@ -385,6 +413,21 @@ describe("document pins", () => {
       expect(await pinRows("user_id = ?", [leaver.userId])).toHaveLength(0);
       // Editorial pins are the nest's, not the leaver's.
       expect(await pinRows("scope = 'nest'")).not.toHaveLength(0);
+    });
+
+    it("a removed collaborator who still reaches the nest (a share grant) keeps their pins — same rule as leaving", async () => {
+      await resetAuthRateLimit();
+      const stays = await registerUser(app, "stays@acme.com", "Stays");
+      expect(
+        (await jsonRequest(app, "POST", `/nests/${nestId}/grants`, { target_type: "document", target: ids.Bravo, email: stays.email, role: "read" }, owner.apiKey)).status,
+      ).toBe(201);
+      expect((await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: stays.email, permission: "read" }, owner.apiKey)).status).toBeLessThan(300);
+      expect((await pin(stays, ids.Bravo, "user")).status).toBe(201);
+      const roster = await jsonRequest(app, "GET", `/nests/${nestId}/collaborators`, undefined, owner.apiKey);
+      const row = (roster.data.collaborators ?? roster.data).find((r: any) => (r.email ?? r.user_email) === stays.email);
+      expect((await jsonRequest(app, "DELETE", `/nests/${nestId}/collaborators/${row.id}`, undefined, owner.apiKey)).status).toBe(200);
+      expect(await pinRows("user_id = ?", [stays.userId])).toHaveLength(1);
+      expect((await getPins(stays)).data.personal.map((p: any) => p.node_id)).toEqual([ids.Bravo]);
     });
 
     it("being removed as a collaborator removes their personal pins there", async () => {

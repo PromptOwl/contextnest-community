@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { dropPersonalPinsIfGone } from "../nodes/doc-pins.js";
 import { isSystemUser } from "../auth/systems.js";
 import { getDb } from "../db/client.js";
 import type { AuthEnv } from "../auth/middleware.js";
@@ -142,13 +143,9 @@ sharingRoutes.delete("/collaborators/:collabId", async (c) => {
     throw new NotFoundError("Collaborator not found");
   }
   // Removed from the nest → their personal document pins in it go too
-  // (CU-wdqcq02crw), the same as leaving it themselves.
-  if (target?.user_id) {
-    await db.run(
-      "DELETE FROM node_pins WHERE nest_id = ? AND scope = 'user' AND user_id = ?",
-      [nestId, target.user_id],
-    );
-  }
+  // (CU-wdqcq02crw) — unless they still reach it another way. Same rule as
+  // leaving it themselves (dropPersonalPinsIfGone).
+  if (target?.user_id) await dropPersonalPinsIfGone(nestId, target.user_id);
   return c.json({ removed: true });
 });
 

@@ -375,9 +375,9 @@ Two kinds of pin on a document:
   "personal": [ … same shape, scope "user" … ],
   "can_pin_editorial": true }
 ```
-Both lists are filtered by the same read rules as documents: a pinned document the caller can't read is left out, and a pin whose document no longer exists is never returned.
+Both lists are filtered by the same read rules as documents: a pinned document the caller can't read is left out, and a pin whose document no longer exists is never returned. `pinned_by` (an email) is returned only to callers who can pin for everyone; it is `null` for everyone else.
 
-**POST** `/nests/:nestId/pins` `{ "node_id": "nodes/start-here", "scope": "nest" | "user" }` → `201 { "pin": …, "created": true|false }`. Idempotent — pinning what is already pinned answers `201` with `created: false`. A new pin goes to the end of its list. Unknown or unreadable document → `404`; bad `scope` → `400`.
+**POST** `/nests/:nestId/pins` `{ "node_id": "nodes/start-here", "scope": "nest" | "user" }` → `201 { "pin": …, "created": true|false }`. Idempotent — pinning what is already pinned answers `201` with `created: false`. A new pin goes to the end of its list. Each list holds at most 50 pins (`400` past that). Unknown or unreadable document → `404`; bad `scope` → `400`.
 
 **DELETE** `/nests/:nestId/pins?node_id=…&scope=nest|user` → `{ "unpinned": true|false }`. Idempotent. A personal unpin only ever removes the caller's own pin.
 
@@ -385,7 +385,7 @@ Both lists are filtered by the same read rules as documents: a pinned document t
 
 The document id travels in the body/query rather than the path because node ids contain slashes: a `/nodes/:nodeId/pin` suffix can't be told apart from a document whose slug is `pin`.
 
-Pins live in `node_pins` (migration 069). A deleted document takes its pins with it and a moved one carries them; a deleted user takes their personal pins (editorial pins they made stay — they belong to the nest); leaving a nest (`POST /me/nests/:id/leave`) drops the leaver's personal pins there; a deleted nest takes all of them. Not part of `/me/stream` yet.
+Pins live in `node_pins` (migration 069). A deleted document takes its pins with it and a moved one carries them; a deleted user takes their personal pins (editorial pins they made stay — they belong to the nest); leaving a nest (`POST /me/nests/:id/leave`) or being removed as a collaborator drops that person's personal pins there, unless they still reach the nest another way (a team, a share grant); a deleted nest takes all of them. Not part of `/me/stream` yet.
 
 ### GET `/nests/:nestId/settings`
 ```json

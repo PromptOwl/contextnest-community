@@ -11,6 +11,7 @@ import { sharingRoutes } from "./nests/sharing-routes.js";
 import { boardRoutes } from "./nests/board-routes.js";
 import { fieldRoutes } from "./nests/field-routes.js";
 import { pinRoutes } from "./nests/pin-routes.js";
+import { dropPersonalPinsIfGone } from "./nodes/doc-pins.js";
 import { listAssignedTo } from "./nodes/assigned-service.js";
 import { headlessRoutes } from "./nests/headless-routes.js";
 import { countPeople } from "./auth/headless.js";
@@ -2460,14 +2461,9 @@ export function createApp(): Hono<AuthEnv> {
       [new Date().toISOString(), me, nestId],
     );
     // Leaving takes the leaver's personal document pins here with them
-    // (CU-wdqcq02crw). Only when a collaborator row actually went: someone
-    // who still reaches the nest through a team keeps their bookmarks.
-    if (info.changes > 0) {
-      await db.run(
-        "DELETE FROM node_pins WHERE nest_id = ? AND scope = 'user' AND user_id = ?",
-        [nestId, c.get("userId")],
-      );
-    }
+    // (CU-wdqcq02crw) — unless they still reach the nest another way (a team,
+    // a share grant). One rule with collaborator removal.
+    if (info.changes > 0) await dropPersonalPinsIfGone(nestId, c.get("userId"));
     return c.json({ left: info.changes > 0 });
   });
 

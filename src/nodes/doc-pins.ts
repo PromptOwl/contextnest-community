@@ -37,6 +37,10 @@ import {
 
 export type PinScope = "nest" | "user";
 
+/** Most pins one list may hold — the editorial strip, or one person's own.
+ *  GET returns every pin in a list, so the list has to stay bounded. */
+export const MAX_PINS_PER_LIST = 50;
+
 export interface DocPin {
   node_id: string;
   scope: PinScope;
@@ -170,15 +174,19 @@ export async function listPins(nestId: string, userId: string | undefined): Prom
     pinned_at: r.created_at,
   });
   const email = await resolveCallerEmail(userId);
+  const curator = userId ? await canCurate(nestId, userId) : false;
+  // pinned_by is an email. Curators manage the strip and already see the
+  // roster; a reader or a document grantee can't otherwise list the nest's
+  // members, so it is withheld from them.
   const visible = async (rows: PinRow[]) =>
     (await filterAccessible(nestId, userId ?? "", email, rows.map(toPin))).map(
-      ({ id: _id, ...pin }) => pin,
+      ({ id: _id, ...pin }) => (curator ? pin : { ...pin, pinned_by: null }),
     );
 
   return {
     editorial: await visible(editorialRows),
     personal: await visible(personalRows),
-    can_pin_editorial: userId ? await canCurate(nestId, userId) : false,
+    can_pin_editorial: curator,
   };
 }
 
@@ -206,18 +214,29 @@ export async function pinDocument(params: {
       owner === null ? [nestId, nodeId, scope] : [nestId, nodeId, scope, owner],
     )) as Omit<PinRow, "title" | "type" | "status"> | undefined;
 
+  const listWhere = `nest_id = ? AND scope = ? AND ${owner === null ? "user_id IS NULL" : "user_id = ?"}`;
+  const listParams = owner === null ? [nestId, scope] : [nestId, scope, owner];
   let created = false;
   if (!(await existing())) {
-    const next = (await db.get(
-      `SELECT COALESCE(MAX(position), -1) + 1 AS pos FROM node_pins
-        WHERE nest_id = ? AND scope = ? AND ${owner === null ? "user_id IS NULL" : "user_id = ?"}`,
-      owner === null ? [nestId, scope] : [nestId, scope, owner],
-    )) as { pos: number | string };
+    const count = (await db.get(
+      `SELECT COUNT(*) AS n FROM node_pins WHERE ${listWhere}`,
+      listParams,
+    )) as { n: number | string };
+    if (Number(count.n) >= MAX_PINS_PER_LIST) {
+      throw new ValidationError(
+        `A nest can hold at most ${MAX_PINS_PER_LIST} ${scope === "nest" ? "pins for everyone" : "of your own pins"} — unpin one first.`,
+      );
+    }
     try {
+      // The position is computed in the same statement as the insert, so the
+      // new pin lands after whatever is there at that moment. Two inserts
+      // racing can still tie; reads order by (position, created_at, node_id),
+      // so a tie is deterministic and the next reorder rewrites it.
       await db.run(
         `INSERT INTO node_pins (id, nest_id, node_id, scope, user_id, position, pinned_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [randomUUID(), nestId, nodeId, scope, owner, Number(next.pos), await resolveCallerEmail(userId)],
+         SELECT ?, ?, ?, ?, ?, COALESCE(MAX(position), -1) + 1, ?
+           FROM node_pins WHERE ${listWhere}`,
+        [randomUUID(), nestId, nodeId, scope, owner, await resolveCallerEmail(userId), ...listParams],
       );
       created = true;
     } catch (err) {
@@ -228,7 +247,9 @@ export async function pinDocument(params: {
   }
 
   const row = await existing();
-  if (!row) throw new Error("pin vanished after insert");
+  // Unpinned by someone else between our insert and this read — the pin the
+  // caller asked for is gone, so say so rather than 500.
+  if (!row) throw new NotFoundError(`Document is no longer pinned: ${nodeId}`);
   const meta = (await db.get(
     "SELECT title, type, status FROM node_index WHERE nest_id = ? AND node_id = ?",
     [nestId, nodeId],
@@ -289,28 +310,31 @@ export async function reorderEditorialPins(params: {
   }
   const nodeIds = params.nodeIds as string[];
   const db = getDb();
-  // Only pins whose document still exists — the set GET can return. A row
-  // whose document vanished outside the app (no delete hook ran) is invisible
-  // to every client, so demanding it here would make every reorder a 400.
   await ensureNodeIndex(nestId);
-  const current = (await db.all(
-    `SELECT p.node_id FROM node_pins p
-       JOIN node_index i ON i.nest_id = p.nest_id AND i.node_id = p.node_id
-      WHERE p.nest_id = ? AND p.scope = 'nest'`,
-    [nestId],
-  )) as Array<{ node_id: string }>;
-  const have = new Set(current.map((r) => r.node_id));
-  const given = new Set(nodeIds);
-  if (
-    given.size !== nodeIds.length ||
-    given.size !== have.size ||
-    nodeIds.some((id) => !have.has(id))
-  ) {
-    throw new ValidationError(
-      "node_ids must list every editorial pin exactly once (reload the pins and try again)",
-    );
-  }
+  // Validate and write in one transaction, so a pin added or removed between
+  // the check and the writes can't slip past "every pin exactly once".
   await db.transaction(async (tx) => {
+    // Only pins whose document still exists — the set GET can return. A row
+    // whose document vanished outside the app (no delete hook ran) is
+    // invisible to every client, so demanding it here would make every
+    // reorder a 400.
+    const current = (await tx.all(
+      `SELECT p.node_id FROM node_pins p
+         JOIN node_index i ON i.nest_id = p.nest_id AND i.node_id = p.node_id
+        WHERE p.nest_id = ? AND p.scope = 'nest'`,
+      [nestId],
+    )) as Array<{ node_id: string }>;
+    const have = new Set(current.map((r) => r.node_id));
+    const given = new Set(nodeIds);
+    if (
+      given.size !== nodeIds.length ||
+      given.size !== have.size ||
+      nodeIds.some((id) => !have.has(id))
+    ) {
+      throw new ValidationError(
+        "node_ids must list every editorial pin exactly once (reload the pins and try again)",
+      );
+    }
     // Dangling rows sink behind the real ones rather than keeping a slot.
     await tx.run(
       "UPDATE node_pins SET position = ? WHERE nest_id = ? AND scope = 'nest'",
@@ -323,4 +347,20 @@ export async function reorderEditorialPins(params: {
       );
     }
   });
+}
+
+/**
+ * Drop someone's personal pins in a nest once they no longer reach it — the
+ * one rule for leaving and for being removed. Someone who still reaches the
+ * nest (a team share, a document/folder grant, its visibility) keeps their
+ * bookmarks; the read filter already hides any pinned document they lost.
+ * Runs after the access change has committed, so the check sees it.
+ */
+export async function dropPersonalPinsIfGone(nestId: string, userId: string): Promise<void> {
+  const access = await resolveNestAccess(nestId, userId);
+  if (access.exists && (access.permission !== "none" || access.hasGrant)) return;
+  await getDb().run(
+    "DELETE FROM node_pins WHERE nest_id = ? AND scope = 'user' AND user_id = ?",
+    [nestId, userId],
+  );
 }
