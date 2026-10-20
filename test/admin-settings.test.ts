@@ -348,6 +348,25 @@ describe("/admin/settings — validation", () => {
     expect((await jsonRequest(app, "GET", "/health")).data.experimental.doc_stream).toBe(false);
   });
 
+  it("doc stream: switching it off beats a deploy env of true, live and after a restart", async () => {
+    process.env.EXPERIMENTAL_DOC_STREAM = "true";
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    expect((await jsonRequest(app, "GET", "/health")).data.experimental.doc_stream).toBe(true);
+
+    const off = await jsonRequest(app, "PATCH", "/admin/settings", { experimental_doc_stream_enabled: false }, admin.apiKey);
+    expect(off.status).toBe(200);
+    expect(off.data.settings.experimental_doc_stream_enabled).toBe(false);
+    expect((await jsonRequest(app, "GET", "/health")).data.experimental.doc_stream).toBe(false);
+    expect(await persistedSetting("EXPERIMENTAL_DOC_STREAM")).toBeNull();
+
+    // Same deploy env on the next boot: the stored "off" still wins.
+    process.env.EXPERIMENTAL_DOC_STREAM = "true";
+    const { loadServerSettings } = await import("../src/db/settings.js");
+    await loadServerSettings();
+    expect((await jsonRequest(app, "GET", "/health")).data.experimental.doc_stream).toBe(false);
+  });
+
   it("403s a non-admin PATCH of the doc stream switch and persists nothing", async () => {
     const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
     await registerUser(app, OWNER_EMAIL);

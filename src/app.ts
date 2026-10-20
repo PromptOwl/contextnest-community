@@ -26,7 +26,7 @@ import {
   listDeletionRequests,
 } from "./governance/review-service.js";
 import { listMyDrafts } from "./governance/version-service.js";
-import { getDocStream, STREAM_MAX_LIMIT, STREAM_MAX_OFFSET } from "./governance/stream-service.js";
+import { getDocStream } from "./governance/stream-service.js";
 import { folderForNode } from "./governance/title-resolver.js";
 import { engineCache } from "./nodes/engine.js";
 import {
@@ -1394,7 +1394,9 @@ export function createApp(): Hono<AuthEnv> {
       }
     }
     // Experimental: the cross-nest document stream. Its own switch, no
-    // dependencies. Off clears the row (falls to env).
+    // dependencies. Off writes a tombstone (null): the switch is off now and
+    // stays off across a restart with the same deploy env, even if that env
+    // says true (db/settings.ts precedence) — same as FEATURE_METACOGNITION.
     if ("experimental_doc_stream_enabled" in body) {
       pending.push({
         name: "EXPERIMENTAL_DOC_STREAM",
@@ -2486,8 +2488,9 @@ export function createApp(): Hono<AuthEnv> {
         author: list("author"),
         since,
       },
-      limit: Math.min(Number(c.req.query("limit")) || 50, STREAM_MAX_LIMIT),
-      offset: Math.min(Math.max(Number(c.req.query("offset")) || 0, 0), STREAM_MAX_OFFSET),
+      // The service clamps (limit 1–100, default 50; offset 0–10000).
+      limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
+      offset: c.req.query("offset") ? Number(c.req.query("offset")) : undefined,
       readBody: async (nestId, nodeId, version) => {
         const { storage, versions } = await engineCache.get(nestId);
         try {
