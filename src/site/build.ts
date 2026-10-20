@@ -3,29 +3,52 @@
  *
  * A nest that is PUBLIC with Reader Mode on gets a docs site: every APPROVED
  * document pre-rendered to complete HTML at a clean path, plus a sitemap,
- * robots.txt, llms.txt and a Markdown twin per page. The build is a pure
- * function of the nest's approved content, so it is done once per content
- * version and served from memory — and the same output can be written to a
- * folder for any static host (`buildSiteFiles`, scripts/site-export.ts).
+ * robots.txt, llms.txt, a Markdown twin per page, tag hub pages and a
+ * glossary. The build is a pure function of the nest's approved content and
+ * its site settings, so it runs once per version of those and is served from
+ * memory — and the same output can be written to a folder for any static host
+ * (`buildSiteFiles`, scripts/site-export.ts).
  *
  * Content rule: the same one as the public reader (filterAccessible /
  * resolveReadableBody) — only nodes with an approved version, at that
  * version. A draft, or an unapproved edit to an approved page, never renders.
+ *
+ * Semantic links: every page knows what it links to (wikilinks,
+ * contextnest:// links, document links), what links to it, what it was
+ * derived from, the tags it shares with other pages and the glossary terms it
+ * mentions. The page shows backlinks and ranked related pages, and the
+ * structured data names the same relationships.
  */
 import { createHash } from "node:crypto";
 import { parseDocument } from "@promptowl/contextnest-engine";
 import { getDb } from "../db/client.js";
-import { config } from "../config.js";
 import { engineCache } from "../nodes/engine.js";
 import { reconstructApproved } from "../governance/approved-body.js";
-import { describe, renderMarkdown, type Heading } from "./markdown.js";
+import { parseStoredBranding, type NestBranding } from "../shared/branding.js";
+import { describe, renderMarkdown, slugifyHeading, type Heading } from "./markdown.js";
 import {
+  renderGlossary,
+  renderGone,
   renderLlmsTxt,
   renderNotFound,
   renderPage,
+  renderRedirectsFile,
   renderRobots,
   renderSitemap,
+  renderTagPage,
 } from "./render.js";
+import {
+  domainForNest,
+  ensureSiteKey,
+  getSiteRow,
+  nestIdForSiteKey,
+  recordPaths,
+  sitePaths,
+  siteRowsFor,
+  type SiteRow,
+  type SiteSettings,
+} from "./settings.js";
+import { pingIndexNow } from "./indexnow.js";
 
 export interface SiteNest {
   id: string;
@@ -33,6 +56,13 @@ export interface SiteNest {
   slug: string;
   description: string | null;
   home: string | null;
+  branding: NestBranding | null;
+}
+
+export interface PageRef {
+  title: string;
+  path: string;
+  description: string;
 }
 
 export interface SitePage {
@@ -49,6 +79,13 @@ export interface SitePage {
   crumbs: Array<{ title: string; path: string | null }>;
   prev: SitePage | null;
   next: SitePage | null;
+  linksTo: PageRef[];
+  linkedFrom: PageRef[];
+  basedOn: PageRef[];
+  related: PageRef[];
+  /** Tags with their own hub page. */
+  tagPages: Array<{ tag: string; path: string }>;
+  terms: Array<{ term: string; href: string }>;
 }
 
 export interface NavFolder {
@@ -58,16 +95,42 @@ export interface NavFolder {
   folders: NavFolder[];
 }
 
+export interface TagHub {
+  tag: string;
+  path: string;
+  definition: string | null;
+  pages: SitePage[];
+}
+
+export interface GlossaryEntry {
+  term: string;
+  id: string;
+  definition: string;
+  tagPath: string | null;
+}
+
 export interface Site {
   nest: SiteNest;
+  settings: SiteSettings;
+  /** Site name as shown everywhere. */
+  name: string;
   /** Absolute origin + prefix every URL hangs off, no trailing slash. */
   base: string;
   /** Path prefix for in-site links: "/d/<key>" on the server host, "" on a docs domain. */
   prefix: string;
+  /** This server's own origin — media and the MCP endpoint live here. */
+  serverOrigin: string;
   pages: SitePage[];
   byPath: Map<string, SitePage>;
   nav: NavFolder;
+  tags: TagHub[];
+  glossary: GlossaryEntry[];
   homeSynthesized: boolean;
+  /** Old paths → where they went now (history + manual redirects). */
+  redirects: Map<string, string>;
+  /** Paths of pages that are gone for good (410). */
+  gone: Set<string>;
+  indexnowKey: string;
 }
 
 // ─── Which nests have a site, and where it lives ────────────────────────────
@@ -75,38 +138,64 @@ export interface Site {
 /** Every nest that is public with Reader Mode on, oldest first. */
 export async function siteNests(): Promise<SiteNest[]> {
   const rows = (await getDb().all(
-    `SELECT id, name, slug, description, reader_home_node FROM nests
+    `SELECT id, name, slug, description, reader_home_node, branding_json FROM nests
       WHERE visibility = 'public' AND reader_mode = 1
       ORDER BY created_at, id`,
     [],
-  )) as Array<{ id: string; name: string; slug: string; description: string | null; reader_home_node: string | null }>;
-  return rows.map((r) => ({ id: r.id, name: r.name, slug: r.slug, description: r.description, home: r.reader_home_node }));
+  )) as Array<{
+    id: string;
+    name: string;
+    slug: string;
+    description: string | null;
+    reader_home_node: string | null;
+    branding_json: string | null;
+  }>;
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    slug: r.slug,
+    description: r.description,
+    home: r.reader_home_node,
+    branding: parseStoredBranding(r.branding_json, r.id),
+  }));
 }
 
 /**
- * The URL key for a nest: its slug, unless an older site already owns that
- * slug (slugs are unique per owner, not per server) — then its id. Stable:
- * enabling a newer nest never moves an existing site.
+ * Find a live site by its /d/<key>. The key belongs to one nest for good
+ * (ensureSiteKey); a nest id always works too and 301s to the key.
  */
-export function siteKey(nest: SiteNest, all: SiteNest[]): string {
-  const first = all.find((n) => n.slug === nest.slug);
-  return first && first.id !== nest.id ? nest.id : nest.slug;
-}
-
 export async function findSiteNest(key: string): Promise<{ nest: SiteNest; key: string } | null> {
+  const nestId = await nestIdForSiteKey(key);
   const all = await siteNests();
-  const nest = all.find((n) => siteKey(n, all) === key) ?? all.find((n) => n.id === key);
-  return nest ? { nest, key: siteKey(nest, all) } : null;
+  let nest = nestId ? all.find((n) => n.id === nestId) : undefined;
+  // A site never built yet has no key row: match its slug or id directly.
+  if (!nest && !nestId) nest = all.find((n) => n.id === key || n.slug === key);
+  if (!nest) return null;
+  return { nest, key: await ensureSiteKey(nest.id, nest.slug) };
 }
 
-export function hostForNest(nestId: string): string | null {
-  for (const [host, id] of config.DOCS_SITES) if (id === nestId) return host;
-  return null;
+export interface Placement {
+  base: string;
+  prefix: string;
+  /** Set when the site's real home is elsewhere (a domain or public_url). */
+  canonicalElsewhere: boolean;
+  domain: string | null;
 }
 
-export function nestIdForHost(host: string | undefined): string | null {
-  if (!host) return null;
-  return config.DOCS_SITES.get(host.toLowerCase().replace(/:\d+$/, "")) ?? null;
+/**
+ * Where a nest's site lives: its verified domain, else the public URL the
+ * owner set for a reverse-proxied path, else /d/<key> on this server.
+ */
+export async function placementFor(nest: SiteNest, row: SiteRow, serverOrigin: string): Promise<Placement> {
+  const domain = domainForNest(nest.id, row);
+  if (domain) return { base: `https://${domain}`, prefix: "", canonicalElsewhere: true, domain };
+  if (row.settings.public_url) {
+    const u = new URL(row.settings.public_url);
+    const prefix = u.pathname.replace(/\/+$/, "");
+    return { base: `${u.origin}${prefix}`, prefix, canonicalElsewhere: true, domain: null };
+  }
+  const prefix = `/d/${encodeURIComponent(await ensureSiteKey(nest.id, nest.slug))}`;
+  return { base: `${serverOrigin}${prefix}`, prefix, canonicalElsewhere: false, domain: null };
 }
 
 // ─── Building ────────────────────────────────────────────────────────────────
@@ -126,6 +215,14 @@ function humanize(slug: string): string {
     .split(/[-_]/)
     .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
     .join(" ");
+}
+
+export function tagSlug(tag: string): string {
+  return tag
+    .toLowerCase()
+    .replace(/^#/, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 /** Generic lead titles ("Overview") read as the body's own H1 when there is one. */
@@ -150,6 +247,7 @@ interface Source {
   body: string;
   description: string | null;
   tags: string[];
+  derivedFrom: string[];
   updated: string | null;
 }
 
@@ -159,26 +257,42 @@ interface ApprovedRow {
   approved_at: string;
 }
 
+interface Inputs {
+  rows: ApprovedRow[];
+  live: Set<string>;
+  row: SiteRow;
+  paths: Array<{ path: string; nodeId: string; kind: "custom" | "history" }>;
+  definitions: Array<{ term: string; definition: string; linked_tag: string | null }>;
+  key: string;
+}
+
 /**
- * What the site is built from, and a key that changes whenever it does: the
- * approved versions plus the live document set. One indexed query and the
- * engine's cached listing — cheap enough to run on every request, so a cache
- * hit never reconstructs a single document.
+ * Everything the site is built from, and a key that changes whenever any of
+ * it does. A handful of indexed queries and the engine's cached listing —
+ * cheap enough to run on every request, so a cache hit never reconstructs a
+ * single document.
  */
-async function contentState(nestId: string): Promise<{ rows: ApprovedRow[]; live: Set<string>; key: string }> {
-  const rows = (await getDb().all(
+async function inputsFor(nest: SiteNest): Promise<Inputs> {
+  const db = getDb();
+  const rows = (await db.all(
     "SELECT node_id, approved_version, approved_at FROM approved_versions WHERE nest_id = ? ORDER BY node_id",
-    [nestId],
+    [nest.id],
   )) as ApprovedRow[];
-  const { storage } = await engineCache.get(nestId);
+  const { storage } = await engineCache.get(nest.id);
   // A deleted document can keep its approved_versions row; the live listing
   // is what says it still exists.
   const live = new Set((await storage.discoverDocuments()).map((d: { id: string }) => d.id));
+  const row = await getSiteRow(nest.id);
+  const paths = await sitePaths(nest.id);
+  const definitions = (await db.all(
+    "SELECT term, definition, linked_tag FROM definitions WHERE nest_id = ? ORDER BY LOWER(term)",
+    [nest.id],
+  )) as Inputs["definitions"];
   const key = createHash("sha256")
-    .update(JSON.stringify([rows, [...live].sort()]))
+    .update(JSON.stringify([rows, [...live].sort(), nest, row, paths.filter((p) => p.kind === "custom"), definitions]))
     .digest("hex")
     .slice(0, 16);
-  return { rows, live, key };
+  return { rows, live, row, paths, definitions, key };
 }
 
 async function approvedSources(nestId: string, rows: ApprovedRow[], live: Set<string>): Promise<Source[]> {
@@ -210,14 +324,15 @@ async function approvedSources(nestId: string, rows: ApprovedRow[], live: Set<st
       title: String(fm.title || humanize(leafOf(rel))),
       body,
       description: typeof fm.description === "string" && fm.description.trim() ? fm.description.trim() : null,
-      tags: Array.isArray(fm.tags) ? fm.tags.map((t: unknown) => String(t).replace(/^#/, "")) : [],
+      tags: Array.isArray(fm.tags) ? [...new Set(fm.tags.map((t: unknown) => String(t).replace(/^#/, "")))] as string[] : [],
+      derivedFrom: Array.isArray(fm.derived_from) ? fm.derived_from.map(String) : [],
       updated: String(fm.updated_at || row.approved_at || "") || null,
     });
   }
   return sources;
 }
 
-/** Resolve `[[target]]` against the site: path first, then title, then a unique slug. */
+/** Resolve a document reference against the site: path first, then title, then a unique slug. */
 function resolveTarget(target: string, sources: Source[]): Source | null {
   const raw = target.trim().replace(/^\/+/, "").replace(/\.md$/i, "");
   if (!raw) return null;
@@ -238,46 +353,149 @@ function resolveTarget(target: string, sources: Source[]): Source | null {
   );
 }
 
-function buildSite(nest: SiteNest, sources: Source[], base: string, prefix: string): Site {
+function absolutize(url: string | null | undefined, serverOrigin: string): string | null {
+  if (!url) return null;
+  if (/^https?:\/\//i.test(url)) return url;
+  return url.startsWith("/") ? `${serverOrigin}${url}` : null;
+}
+
+function buildSite(nest: SiteNest, sources: Source[], inputs: Inputs, place: Placement, serverOrigin: string): Site {
+  const { row, paths, definitions } = inputs;
+  const settings = row.settings;
+  const name = settings.title || nest.branding?.site_title || nest.name;
+
+  // ── Paths: auto from the folder tree, overridden by custom URLs. ──
   // When every page lives under one top folder ("docs/…"), URLs start inside it.
   const tops = new Set(sources.map((s) => (s.rel.includes("/") ? s.rel.split("/")[0] : "")));
   const strip = tops.size === 1 && !tops.has("") ? `${[...tops][0]}/` : "";
-  const pathOf = new Map(sources.map((s) => [s.nodeId, s.rel.startsWith(strip) ? s.rel.slice(strip.length) : s.rel]));
-
+  const pathOf = new Map(
+    sources.map((s) => [s.nodeId, (s.rel.startsWith(strip) ? s.rel.slice(strip.length) : s.rel).toLowerCase()]),
+  );
   const home =
     sources.find((s) => s.nodeId === nest.home) ??
     sources.find((s) => !pathOf.get(s.nodeId)!.includes("/") && LEAD.test(leafOf(pathOf.get(s.nodeId)!)));
+  const custom = new Map(paths.filter((p) => p.kind === "custom").map((p) => [p.nodeId, p.path]));
+  for (const s of sources) {
+    const c = custom.get(s.nodeId);
+    if (c && s !== home) pathOf.set(s.nodeId, c);
+  }
   if (home) pathOf.set(home.nodeId, "");
+  // A custom URL that lands on another page's automatic path wins; that page
+  // steps aside to a suffixed path.
+  const taken = new Map<string, string>();
+  for (const s of [...sources].sort((a, b) => Number(custom.has(b.nodeId)) - Number(custom.has(a.nodeId)))) {
+    let p = pathOf.get(s.nodeId)!;
+    if (taken.has(p) && p !== "") {
+      let n = 2;
+      while (taken.has(`${p}-${n}`)) n++;
+      p = `${p}-${n}`;
+      pathOf.set(s.nodeId, p);
+    }
+    taken.set(p, s.nodeId);
+  }
 
-  const href = (path: string) => `${prefix}/${path}`;
+  const href = (path: string) => `${place.prefix}/${path}`;
+  const byNode = new Map(sources.map((s) => [s.nodeId, s]));
+
+  // ── Tags and glossary. ──
+  const tagCount = new Map<string, number>();
+  for (const s of sources) for (const t of s.tags) tagCount.set(t.toLowerCase(), (tagCount.get(t.toLowerCase()) ?? 0) + 1);
+  // A tag gets a hub page once two pages share it — a one-page hub is thin content.
+  const hubTags = new Set([...tagCount].filter(([, n]) => n >= 2).map(([t]) => t));
+  const glossary: GlossaryEntry[] = [];
+  const termIds = new Set<string>();
+  for (const d of definitions) {
+    let id = slugifyHeading(d.term);
+    while (termIds.has(id)) id = `${id}-x`;
+    termIds.add(id);
+    const tag = d.linked_tag?.replace(/^#/, "").toLowerCase() ?? null;
+    glossary.push({ term: d.term, id, definition: d.definition, tagPath: tag && hubTags.has(tag) ? `tags/${tagSlug(tag)}` : null });
+  }
+  const termLinks = glossary.map((g) => ({ term: g.term, href: href(`glossary#${g.id}`) }));
+
+  // ── Render bodies, collecting the links between pages. ──
+  const linksOut = new Map<string, Set<string>>();
+  const rendered = new Map<string, { html: string; headings: Heading[]; title: string; description: string }>();
+  for (const s of sources) {
+    const title = displayTitle(s.title, s.body);
+    const body = stripLeadingTitle(s.body, title);
+    const { html, headings, linked } = renderMarkdown(body, {
+      resolve: (target) => {
+        const hit = resolveTarget(target, sources);
+        return hit ? { href: href(pathOf.get(hit.nodeId)!), nodeId: hit.nodeId } : null;
+      },
+      terms: termLinks,
+    });
+    linked.delete(s.nodeId);
+    linksOut.set(s.nodeId, linked);
+    rendered.set(s.nodeId, {
+      html,
+      headings,
+      title,
+      description: s.description ?? (describe(body) || `${title} — ${name}`),
+    });
+  }
+  const linksIn = new Map<string, Set<string>>();
+  for (const [from, tos] of linksOut) for (const to of tos) {
+    if (!linksIn.has(to)) linksIn.set(to, new Set());
+    linksIn.get(to)!.add(from);
+  }
+  const ref = (nodeId: string): PageRef => ({
+    title: rendered.get(nodeId)!.title,
+    path: pathOf.get(nodeId)!,
+    description: rendered.get(nodeId)!.description,
+  });
+
+  // ── Related pages: shared tags weighted by rarity, plus links either way
+  //    and pages cited together. Deterministic, explainable, no model needed. ──
+  const N = Math.max(sources.length, 2);
+  const idf = (t: string) => Math.log(N / (tagCount.get(t.toLowerCase()) ?? N)) + 0.1;
+  function relatedFor(s: Source): PageRef[] {
+    const scores = new Map<string, number>();
+    const add = (id: string, v: number) => id !== s.nodeId && byNode.has(id) && scores.set(id, (scores.get(id) ?? 0) + v);
+    const myTags = new Set(s.tags.map((t) => t.toLowerCase()));
+    for (const o of sources) for (const t of o.tags) if (myTags.has(t.toLowerCase())) add(o.nodeId, idf(t));
+    for (const id of linksOut.get(s.nodeId) ?? []) add(id, 1.5);
+    for (const id of linksIn.get(s.nodeId) ?? []) add(id, 1.5);
+    for (const citer of linksIn.get(s.nodeId) ?? []) for (const id of linksOut.get(citer) ?? []) add(id, 0.5);
+    return [...scores]
+      .filter(([, v]) => v >= 0.5)
+      .sort((a, b) => b[1] - a[1] || ref(a[0]).title.localeCompare(ref(b[0]).title))
+      .slice(0, 5)
+      .map(([id]) => ref(id));
+  }
+
   const pages: SitePage[] = sources.map((s) => {
     const path = pathOf.get(s.nodeId)!;
-    const title = displayTitle(s.title, s.body);
-    const markdown = s.body;
-    const { html, headings } = renderMarkdown(stripLeadingTitle(markdown, title), (target) => {
-      const hit = resolveTarget(target, sources);
-      return hit ? href(pathOf.get(hit.nodeId)!) : null;
-    });
+    const r = rendered.get(s.nodeId)!;
     const segs = path ? path.split("/").slice(0, -1) : [];
-    const crumbs = segs.map((seg, i) => ({ title: humanize(seg), path: null as string | null, folder: segs.slice(0, i + 1).join("/") }));
     return {
       nodeId: s.nodeId,
       path,
-      title,
-      description: s.description ?? (describe(stripLeadingTitle(markdown, title)) || `${title} — ${nest.name}`),
-      markdown,
-      html,
-      headings,
+      title: r.title,
+      description: r.description,
+      markdown: s.body,
+      html: r.html,
+      headings: r.headings,
       updated: s.updated,
       tags: s.tags,
-      crumbs: crumbs.map(({ title, folder }) => ({ title, path: folder })),
+      crumbs: segs.map((seg, i) => ({ title: humanize(seg), path: segs.slice(0, i + 1).join("/") })),
       prev: null,
       next: null,
+      linksTo: [...(linksOut.get(s.nodeId) ?? [])].map(ref),
+      linkedFrom: [...(linksIn.get(s.nodeId) ?? [])].map(ref).sort((a, b) => a.title.localeCompare(b.title)),
+      basedOn: s.derivedFrom
+        .map((d) => resolveTarget(d, sources))
+        .filter((x): x is Source => !!x && x.nodeId !== s.nodeId)
+        .map((x) => ref(x.nodeId)),
+      related: relatedFor(s),
+      tagPages: s.tags.filter((t) => hubTags.has(t.toLowerCase())).map((t) => ({ tag: t, path: `tags/${tagSlug(t)}` })),
+      terms: [],
     };
   });
 
-  // Nav tree: lead page first in each folder, then pages by title, then subfolders.
-  const root: NavFolder = { name: nest.name, path: "", pages: [], folders: [] };
+  // ── Nav tree: lead page first in each folder, then pages by title, then subfolders. ──
+  const root: NavFolder = { name, path: "", pages: [], folders: [] };
   const folderAt = (path: string): NavFolder => {
     let node = root;
     if (!path) return node;
@@ -293,17 +511,20 @@ function buildSite(nest: SiteNest, sources: Source[], base: string, prefix: stri
     }
     return node;
   };
+  // The nav follows the document tree (not custom URLs), so moving a page's
+  // URL never reshuffles the sidebar.
+  const treePath = (s: Source) => (s.rel.startsWith(strip) ? s.rel.slice(strip.length) : s.rel).toLowerCase();
   for (const p of pages) {
     if (p.path === "") continue;
-    folderAt(p.path.split("/").slice(0, -1).join("/")).pages.push(p);
+    folderAt(treePath(byNode.get(p.nodeId)!).split("/").slice(0, -1).join("/")).pages.push(p);
   }
   const order: SitePage[] = [];
   const homePage = pages.find((p) => p.path === "");
   if (homePage) order.push(homePage);
   const sortFolder = (f: NavFolder) => {
     f.pages.sort((a, b) => {
-      const la = isLead(a.path, a.title) ? 0 : 1;
-      const lb = isLead(b.path, b.title) ? 0 : 1;
+      const la = isLead(treePath(byNode.get(a.nodeId)!), a.title) ? 0 : 1;
+      const lb = isLead(treePath(byNode.get(b.nodeId)!), b.title) ? 0 : 1;
       return la - lb || a.title.localeCompare(b.title);
     });
     f.folders.sort((a, b) => a.name.localeCompare(b.name));
@@ -318,35 +539,93 @@ function buildSite(nest: SiteNest, sources: Source[], base: string, prefix: stri
   // A crumb links to its folder's lead page when it has one.
   const leadOf = new Map<string, string>();
   const collectLeads = (f: NavFolder) => {
-    const lead = f.pages.find((p) => isLead(p.path, p.title));
+    const lead = f.pages.find((p) => isLead(treePath(byNode.get(p.nodeId)!), p.title));
     if (lead) leadOf.set(f.path, lead.path);
     f.folders.forEach(collectLeads);
   };
   collectLeads(root);
-  for (const p of pages) p.crumbs = p.crumbs.map((c) => ({ title: c.title, path: leadOf.get(c.path!) ?? null }));
+  for (const p of pages) {
+    const segs = treePath(byNode.get(p.nodeId)!).split("/").slice(0, -1);
+    p.crumbs = p.path === "" ? [] : segs.map((seg, i) => ({ title: humanize(seg), path: leadOf.get(segs.slice(0, i + 1).join("/")) ?? null }));
+  }
+
+  // ── Tag hubs. ──
+  const defByTag = new Map(
+    definitions.filter((d) => d.linked_tag).map((d) => [d.linked_tag!.replace(/^#/, "").toLowerCase(), d.definition]),
+  );
+  const defByTerm = new Map(definitions.map((d) => [d.term.toLowerCase(), d.definition]));
+  const tags: TagHub[] = [...hubTags]
+    .map((t) => ({
+      tag: pages.flatMap((p) => p.tags).find((x) => x.toLowerCase() === t) ?? t,
+      path: `tags/${tagSlug(t)}`,
+      definition: defByTag.get(t) ?? defByTerm.get(t) ?? null,
+      pages: order.filter((p) => p.tags.some((x) => x.toLowerCase() === t)),
+    }))
+    .sort((a, b) => a.tag.localeCompare(b.tag));
+
+  // ── Redirects: every path a page has had, plus the owner's own list. ──
+  const pageByNode = new Map(pages.map((p) => [p.nodeId, p]));
+  const current = new Set(pages.map((p) => p.path));
+  const redirects = new Map<string, string>();
+  const gone = new Set<string>();
+  for (const p of paths) {
+    if (current.has(p.path)) continue;
+    const now = pageByNode.get(p.nodeId);
+    if (now) redirects.set(p.path, href(now.path));
+    else gone.add(p.path);
+  }
+  for (const r of settings.redirects ?? []) {
+    const from = r.from.replace(/^\/+|\/+$/g, "").toLowerCase();
+    if (current.has(from)) continue;
+    redirects.set(from, r.to.startsWith("/") ? href(r.to.replace(/^\/+/, "")) : r.to);
+    gone.delete(from);
+  }
 
   return {
-    nest,
-    base,
-    prefix,
+    nest: {
+      ...nest,
+      branding: nest.branding && {
+        ...nest.branding,
+        logo_url: absolutize(nest.branding.logo_url, serverOrigin),
+        banner_url: absolutize(nest.branding.banner_url, serverOrigin),
+        favicon_url: absolutize(nest.branding.favicon_url, serverOrigin),
+      },
+    },
+    settings,
+    name,
+    base: place.base,
+    prefix: place.prefix,
+    serverOrigin,
     pages: order,
     byPath: new Map(order.map((p) => [p.path, p])),
     nav: root,
+    tags,
+    glossary,
     homeSynthesized: !homePage,
+    redirects,
+    gone,
+    indexnowKey: row.indexnowKey,
   };
 }
 
 // ─── Cache ───────────────────────────────────────────────────────────────────
 
-interface Built {
+export interface SiteFile {
+  body: string;
+  type: string;
+  etag: string;
+  lastModified: string | null;
+}
+
+export interface Built {
   key: string;
   site: Site;
-  files: Map<string, { body: string; type: string; etag: string }>;
+  files: Map<string, SiteFile>;
 }
 const cache = new Map<string, Built>();
 const MAX_CACHED_SITES = 32;
 
-const TYPES = {
+export const TYPES = {
   html: "text/html; charset=utf-8",
   md: "text/markdown; charset=utf-8",
   xml: "application/xml; charset=utf-8",
@@ -357,61 +636,98 @@ function etagOf(body: string): string {
   return `"${createHash("sha256").update(body).digest("base64url").slice(0, 22)}"`;
 }
 
-/**
- * The rendered site for a nest at a given base, rebuilt only when its
- * approved content (or the live document set) changes. Keys in `files` are
- * site-relative: "" (home), "guides/setup", "guides/setup.md", "sitemap.xml",
- * "robots.txt", "llms.txt", "llms-full.txt", "404".
- */
-export async function getSite(nest: SiteNest, base: string, prefix: string): Promise<Built> {
-  const state = await contentState(nest.id);
-  const key = `${state.key}|${JSON.stringify(nest)}`;
-  const cacheKey = `${nest.id}|${base}|${prefix}`;
-  const hit = cache.get(cacheKey);
-  if (hit && hit.key === key) return hit;
-
-  const sources = await approvedSources(nest.id, state.rows, state.live);
-  const site = buildSite(nest, sources, base, prefix);
-  const files = new Map<string, { body: string; type: string; etag: string }>();
-  const put = (path: string, body: string, type: string) => files.set(path, { body, type, etag: etagOf(body) });
-  if (site.homeSynthesized) put("", renderPage(site, null), TYPES.html);
-  for (const page of site.pages) {
-    put(page.path, renderPage(site, page), TYPES.html);
-    put(`${page.path || "index"}.md`, page.markdown, TYPES.md);
-  }
-  put("sitemap.xml", renderSitemap(site), TYPES.xml);
-  put("robots.txt", renderRobots(`${base}/sitemap.xml`), TYPES.txt);
-  const llms = renderLlmsTxt(site);
-  put("llms.txt", llms.index, TYPES.txt);
-  put("llms-full.txt", llms.full, TYPES.txt);
-  put("404", renderNotFound(site), TYPES.html);
-
-  const built = { key, site, files };
-  // Bounded: without PUBLIC_BASE_URL the base comes from the request's Host,
-  // so a client cycling Host values must not grow this without limit.
-  cache.delete(cacheKey);
-  cache.set(cacheKey, built);
-  while (cache.size > MAX_CACHED_SITES) cache.delete(cache.keys().next().value!);
-  return built;
+function httpDate(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso.includes("T") || iso.endsWith("Z") ? iso : `${iso.replace(" ", "T")}Z`);
+  return Number.isNaN(d.getTime()) ? null : d.toUTCString();
 }
 
 /**
- * The whole site as static files, for any static host — `index.html` per
- * page directory, the Markdown twins, sitemap, robots, llms.txt and 404.html.
- * Links are root-relative, so `base` should be the domain it will live on.
+ * The rendered site for a nest at this server origin, rebuilt only when its
+ * approved content, settings or glossary change. Keys in `files` are
+ * site-relative: "" (home), "guides/setup", "guides/setup.md", "tags/x",
+ * "glossary", "sitemap.xml", "robots.txt", "llms.txt", "llms-full.txt",
+ * "<indexnow key>.txt", "404", "410".
  */
-export async function buildSiteFiles(nestId: string, base: string): Promise<Record<string, string>> {
+export async function getSite(nest: SiteNest, serverOrigin: string): Promise<Built> {
+  const inputs = await inputsFor(nest);
+  const place = await placementFor(nest, inputs.row, serverOrigin);
+  const key = `${inputs.key}|${place.base}`;
+  const cacheKey = `${nest.id}|${serverOrigin}`;
+  const hit = cache.get(cacheKey);
+  if (hit && hit.key === key) return hit;
+
+  const sources = await approvedSources(nest.id, inputs.rows, inputs.live);
+  const site = buildSite(nest, sources, inputs, place, serverOrigin);
+  const files = new Map<string, SiteFile>();
+  const put = (path: string, body: string, type: string, updated: string | null = null) =>
+    files.set(path, { body, type, etag: etagOf(body), lastModified: httpDate(updated) });
+  if (site.homeSynthesized) put("", renderPage(site, null), TYPES.html);
+  for (const page of site.pages) {
+    put(page.path, renderPage(site, page), TYPES.html, page.updated);
+    put(`${page.path || "index"}.md`, page.markdown, TYPES.md, page.updated);
+  }
+  for (const hub of site.tags) put(hub.path, renderTagPage(site, hub), TYPES.html);
+  if (site.glossary.length) put("glossary", renderGlossary(site), TYPES.html);
+  put("sitemap.xml", renderSitemap(site), TYPES.xml);
+  put("robots.txt", renderRobots(site), TYPES.txt);
+  const llms = renderLlmsTxt(site);
+  put("llms.txt", llms.index, TYPES.txt);
+  put("llms-full.txt", llms.full, TYPES.txt);
+  put(`${site.indexnowKey}.txt`, site.indexnowKey, TYPES.txt);
+  put("404", renderNotFound(site), TYPES.html);
+  put("410", renderGone(site), TYPES.html);
+
+  const built: Built = { key, site, files };
+  // Bounded: one entry per (nest, server origin); without PUBLIC_BASE_URL the
+  // origin comes from the request's Host, so cycling Hosts can't grow this.
+  cache.delete(cacheKey);
+  cache.set(cacheKey, built);
+  while (cache.size > MAX_CACHED_SITES) cache.delete(cache.keys().next().value!);
+
+  // Remember every served path so a later move 301s instead of 404ing.
+  const known = new Set(inputs.paths.map((p) => p.path));
+  void recordPaths(nest.id, site.pages, known).catch((err) => console.warn("[site] recording paths failed", err));
+  // Tell IndexNow engines what changed since the last build in this process.
+  if (hit) void pingIndexNow(hit.site, site).catch(() => {});
+  return built;
+}
+
+/** The built site for a nest by id (settings panel, export), or null when it has none. */
+export async function siteForNest(nestId: string, serverOrigin: string): Promise<Built | null> {
+  const nest = (await siteNests()).find((n) => n.id === nestId);
+  return nest ? getSite(nest, serverOrigin) : null;
+}
+
+/** Placement for many nests at once (server sitemap index), without building. */
+export async function placements(serverOrigin: string): Promise<Array<{ nest: SiteNest; place: Placement }>> {
   const all = await siteNests();
-  const nest = all.find((n) => n.id === nestId);
-  if (!nest) throw new Error(`Nest ${nestId} is not a public Reader Mode nest`);
-  const origin = base.replace(/\/$/, "");
-  const prefix = new URL(origin).pathname.replace(/\/$/, "");
-  const { files } = await getSite(nest, origin, prefix);
+  const rows = await siteRowsFor(all.map((n) => n.id));
+  const out: Array<{ nest: SiteNest; place: Placement }> = [];
+  for (const nest of all) {
+    const row = rows.get(nest.id) ?? (await getSiteRow(nest.id));
+    out.push({ nest, place: await placementFor(nest, row, serverOrigin) });
+  }
+  return out;
+}
+
+/**
+ * The whole site as static files, for any static host: `<path>.html` per page
+ * (clean URLs on Cloudflare Pages, Netlify, Vercel, GitHub Pages), the
+ * Markdown twins, sitemap, robots, llms.txt, 404.html and a `_redirects` file
+ * with every old URL. Canonicals use the site's configured home (domain or
+ * public URL), else `base`.
+ */
+export async function buildSiteFiles(nestId: string, serverOrigin: string): Promise<Record<string, string>> {
+  const built = await siteForNest(nestId, serverOrigin.replace(/\/$/, ""));
+  if (!built) throw new Error(`Nest ${nestId} is not a public Reader Mode nest`);
   const out: Record<string, string> = {};
-  for (const [path, file] of files) {
+  for (const [path, file] of built.files) {
     if (path === "404") out["404.html"] = file.body;
-    else if (file.type === TYPES.html) out[path ? `${path}/index.html` : "index.html"] = file.body;
+    else if (path === "410") continue;
+    else if (file.type === TYPES.html) out[path ? `${path}.html` : "index.html"] = file.body;
     else out[path] = file.body;
   }
+  out["_redirects"] = renderRedirectsFile(built.site);
   return out;
 }

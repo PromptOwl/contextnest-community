@@ -1000,6 +1000,9 @@ export async function deleteNest(nestId: string): Promise<void> {
   await db.transaction(async (tx) => {
     const id = nestId;
     await tx.run("DELETE FROM approved_versions WHERE nest_id = ?", [id]);
+    // A deleted nest releases its docs-site domain for whoever claims it next.
+    await tx.run("DELETE FROM site_paths WHERE nest_id = ?", [id]);
+    await tx.run("DELETE FROM nest_sites WHERE nest_id = ?", [id]);
     await tx.run("DELETE FROM node_versions WHERE nest_id = ?", [id]);
     await tx.run("DELETE FROM review_requests WHERE nest_id = ?", [id]);
     await tx.run("DELETE FROM stewards WHERE nest_id = ?", [id]);

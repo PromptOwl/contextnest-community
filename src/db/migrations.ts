@@ -2188,6 +2188,38 @@ export function runMigrations(db: Database.Database): void {
     `);
     recordMigration("067_system_accounts");
   }
+
+  // Public docs sites (CU-wdqcq05jhm). nest_sites holds a nest's site
+  // settings — its custom domain (claimed with a DNS TXT token, served only
+  // once verified) and its SEO settings as JSON. site_paths maps public paths
+  // to documents: 'custom' is a URL the owner chose for a page; 'history' is
+  // every path a page has been served at, so a renamed or moved page 301s
+  // from its old URL instead of 404ing and losing its ranking.
+  if (!hasMigration("068_nest_sites")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS nest_sites (
+        nest_id TEXT PRIMARY KEY REFERENCES nests(id) ON DELETE CASCADE,
+        domain TEXT,
+        site_key TEXT UNIQUE,
+        domain_token TEXT NOT NULL,
+        domain_verified_at TEXT,
+        settings TEXT NOT NULL DEFAULT '{}',
+        indexnow_key TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS site_paths (
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('custom', 'history')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (nest_id, path)
+      );
+      CREATE INDEX IF NOT EXISTS idx_site_paths_node ON site_paths(nest_id, node_id);
+      CREATE INDEX IF NOT EXISTS idx_nest_sites_domain ON nest_sites(domain);
+    `);
+    recordMigration("068_nest_sites");
+  }
 }
 
 /**

@@ -23,7 +23,9 @@ import {
   robotsTxt,
   sitemapIndex,
   legacySiteRedirect,
+  siteDomainCheck,
 } from "./site/routes.js";
+import { siteSettingsRoutes } from "./site/settings-routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
 import { peopleRoutes } from "./nests/people-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
@@ -292,6 +294,7 @@ const SYSTEM_DENIED_RESOURCES = new Set([
   "visibility",
   "settings",
   "reader-mode",
+  "site",
   "grants",
   "systems",
   "headless",
@@ -653,11 +656,11 @@ export function createApp(): Hono<AuthEnv> {
   // ahead of every route (and every route's own auth) so a route added later
   // is closed to nest keys until it is allowlisted on purpose — see
   // auth/nest-scope-guard.ts for what a nest key may reach.
-  app.use("*", nestScopedKeyGuard);
-
-  // A docs domain (DOCS_SITES) is entirely its docs site — answer it before
-  // any app route can (CU-wdqcq05jhm).
+  // A docs domain (verified custom domain or DOCS_SITES) is entirely its docs
+  // site — answered before any key guard or app route sees it (CU-wdqcq05jhm).
   app.use("*", docsDomainMiddleware);
+
+  app.use("*", nestScopedKeyGuard);
 
   // Health check (public)
   app.get("/health", (c) => {
@@ -2590,6 +2593,7 @@ export function createApp(): Hono<AuthEnv> {
   app.route("/d", siteRoutes);
   app.get("/robots.txt", robotsTxt);
   app.get("/sitemap.xml", sitemapIndex);
+  app.get("/site-domain-check", siteDomainCheck);
   // Same three-way auth as /mcp: an OAuth access token, an MCP ticket, or a
   // cnst_ key. /index is the grounded nest list the MCP tools read from, so a
   // token that works on one must work on the other.
@@ -3171,6 +3175,9 @@ export function createApp(): Hono<AuthEnv> {
       resource === "visibility" ||
       resource === "reader-mode" ||
       resource === "branding" ||
+      // site (CU-wdqcq05jhm): the public docs site's domain, URLs and SEO —
+      // what the nest says about itself on the open web.
+      resource === "site" ||
       // headless (CU-wdqcq0314u): publishing API-only and minting access keys
       // decide who can read the nest — the same owner/admin tier as visibility.
       resource === "headless"
@@ -3495,6 +3502,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId", sharingRoutes);
   nestsApp.route("/:nestId", headlessRoutes);
   nestsApp.route("/:nestId", brandingRoutes);
+  nestsApp.route("/:nestId", siteSettingsRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);
   // "publications" (not "/publish") — POST /:nestId/publish is already taken by
   // the nest-snapshot endpoint in query-routes. These manage per-document

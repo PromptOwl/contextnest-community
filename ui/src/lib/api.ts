@@ -1426,6 +1426,54 @@ export async function setNestBranding(nestId: string, branding: NestBranding | n
   });
 }
 
+// Public docs site (CU-wdqcq05jhm) — owner / nest admin / server admin.
+export interface SiteSettings {
+  title?: string;
+  description?: string;
+  public_url?: string;
+  og_image_url?: string;
+  organization_name?: string;
+  organization_url?: string;
+  organization_logo_url?: string;
+  same_as?: string[];
+  twitter_site?: string;
+  google_site_verification?: string;
+  bing_site_verification?: string;
+  language?: string;
+  noindex?: boolean;
+  ai_training?: boolean;
+  ai_actions?: boolean;
+  indexnow?: boolean;
+  redirects?: Array<{ from: string; to: string }>;
+}
+export interface SiteInfo {
+  live: boolean;
+  reason: string | null;
+  url: string | null;
+  domain: string | null;
+  domain_verified: boolean;
+  domain_verified_at: string | null;
+  serving_domain: string | null;
+  dns: { txt: { name: string; value: string } | null; cname: string | null } | null;
+  settings: SiteSettings;
+  pages: Array<{ node_id: string; title: string; path: string; custom: boolean }>;
+}
+export async function getNestSite(nestId: string) {
+  return request<SiteInfo>(`/nests/${nestId}/site`);
+}
+export async function updateNestSite(nestId: string, body: { domain?: string | null; settings?: SiteSettings }) {
+  return request<SiteInfo>(`/nests/${nestId}/site`, { method: "PATCH", body: JSON.stringify(body) });
+}
+export async function verifyNestSiteDomain(nestId: string) {
+  return request<SiteInfo>(`/nests/${nestId}/site/verify-domain`, { method: "POST", body: "{}" });
+}
+export async function setNestSitePageUrl(nestId: string, nodeId: string, path: string | null) {
+  return request<SiteInfo>(`/nests/${nestId}/site/pages`, {
+    method: "PUT",
+    body: JSON.stringify({ node_id: nodeId, path }),
+  });
+}
+
 export async function getNest(nestId: string) {
   return request<{
     nest: {

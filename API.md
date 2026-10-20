@@ -571,25 +571,55 @@ The two additive columns (`nests.reader_mode`, `nests.reader_home_node`) also su
 ### Public docs site — `GET /d/:key/*` (no auth)
 A nest that is **public with Reader Mode on** is also served as a static, crawlable docs site: every **approved** document pre-rendered to complete HTML (no JavaScript needed to read it), at a clean path URL. Drafts and unapproved edits never render — the same rule as the public reader. Any other nest answers `404` (indistinguishable from "no such site").
 
-`:key` is the nest's slug, or its id when an older docs site already uses that slug.
+`:key` is fixed the first time the site is built: the nest's slug, or its id when another site already holds that slug. It never moves — not on rename, and not to another nest when this one goes private. The nest id always works too and `301`s to the key.
 
 | URL | What |
 |---|---|
 | `/d/:key/` | Home: `reader_home_node`, else a root `welcome`/`index`/`readme`/`home`/`overview` page, else a generated table of contents |
-| `/d/:key/<path>` | A page. `<path>` is the node id without `nodes/` (and without a top folder every page shares, e.g. `docs/`) |
-| `/d/:key/<path>.md` | The page's Markdown (also served for `Accept: text/markdown`) |
-| `/d/:key/sitemap.xml` | Sitemap with `lastmod` |
-| `/d/:key/llms.txt`, `/d/:key/llms-full.txt` | Agent index / every page inline |
+| `/d/:key/<path>` | A page. `<path>` is the node id without `nodes/` (and without a top folder every page shares, e.g. `docs/`), lower-cased — or the custom URL set for it (below) |
+| `/d/:key/<path>.md` | The page's Markdown (also served for `Accept: text/markdown`, with `Vary: Accept`). Sent with `X-Robots-Tag: noindex` and a `Link: <page>; rel="canonical"` so the HTML is what ranks |
+| `/d/:key/tags/<tag>` | Topic hub for every tag at least two pages share (`CollectionPage`), with the glossary definition linked to that tag |
+| `/d/:key/glossary` | The nest's definitions (`DefinedTermSet`); each page links a term's first mention here |
+| `/d/:key/sitemap.xml` | Sitemap with `lastmod` from each page's own update time |
+| `/d/:key/robots.txt` | Allows AI search and user agents (OAI-SearchBot, ChatGPT-User, Claude-SearchBot, Claude-User, PerplexityBot…) always; training crawlers (GPTBot, ClaudeBot, Google-Extended, CCBot…) per `ai_training`; `Content-Signal` line |
+| `/d/:key/llms.txt`, `/d/:key/llms-full.txt` | Agent index (with the nest's MCP endpoint) / every page inline |
+| `/d/:key/<indexnow-key>.txt` | IndexNow key file |
 | `/robots.txt` | Server-level robots (allows crawling, disallows the API paths), points at `/sitemap.xml` |
 | `/sitemap.xml` | Sitemap index of every docs site hosted under `/d/` |
+| `/site-domain-check?domain=` | `200` only for a verified domain of a live site, else `404` — the `ask` endpoint for an edge that issues TLS certificates on demand |
 
-Each page carries a unique `<title>`, meta description (frontmatter `description`, else the first ~155 characters), absolute canonical, Open Graph/Twitter tags, JSON-LD `TechArticle` + `BreadcrumbList`, prev/next, breadcrumb and an "On this page" outline. `[[wikilinks]]` become plain links; a link to a page that isn't on the site renders as text. Raw HTML in a body is escaped. Responses carry an `ETag` (`304` on `If-None-Match`) and `Cache-Control: public, max-age=300, stale-while-revalidate=86400`; the site is rebuilt only when the nest's approved content changes. Unknown paths get a real `404` marked `noindex`; a trailing slash `301`s to the slashless URL.
+**Pages.** Each page carries a unique `<title>`, a meta description (frontmatter `description`, else the first prose paragraph), absolute canonical, Open Graph/Twitter tags (share image from site settings, else the branding banner/logo), JSON-LD `@graph` with `TechArticle` (dateModified, keywords, `about` topics, `mentions` of linked pages, `isBasedOn` from `derived_from`, `relatedLink`, publisher/author `Organization`, Markdown `encoding`) and `BreadcrumbList` (`WebSite` + `Organization` on the home page), prev/next, breadcrumb, an "On this page" outline, and — from the links between pages — **Builds on**, **Related pages** (ranked by shared tags weighted by rarity, links either way and co-citation) and **Referenced by**. Every way a body names another document — `[[path|label]]`, `[label](contextnest://…)`, `[label](nodes/x)`, `[label](x.md)` — becomes a plain link to that page's URL; a link to a page that isn't on the site renders as text. Raw HTML in a body is escaped; the page's own inline style and script are pinned by CSP hashes (no `'unsafe-inline'`). Optional "Copy page" / "Open in ChatGPT" / "Open in Claude" actions. Branding (logo, favicon, colors, footer, hide powered-by) applies.
 
-**Custom domain.** With `DOCS_SITES=docs.example.com=<nestId>` (see CONFIGURATION.md) the site is served at that domain's root, and `/d/:key/*` on this host `301`s there.
+**HTTP.** `ETag` and `Last-Modified` (`304` on `If-None-Match` / `If-Modified-Since`), `Cache-Control: public, max-age=300, stale-while-revalidate=86400`, `Link` headers for the Markdown alternate and `llms.txt` (`rel="describedby"`). The site is rebuilt only when the nest's approved content, site settings, custom URLs or glossary change. Unknown paths get a real `404` marked `noindex`; a path a page used to have `301`s to where it is now (every served path is remembered); a path whose page was deleted answers `410 Gone`. A trailing slash, `.html` suffix or upper-case path `301`s to the one canonical URL. Redirects that depend on owner-changeable state carry a bounded `Cache-Control`.
 
-**Redirects from the app.** In key mode, an anonymous browser opening `/nest/<id>` or `/?nest=<id>[&doc=<nodeId>]` for a docs-site nest gets a `301` to the page. Signed-in users (session cookie or `Authorization`) and `?app=1` still get the app.
+**Custom domain.** A verified custom domain (site settings below) or a `DOCS_SITES` entry serves the site at that domain's root; `/d/:key/*` on this host `301`s there. On a docs domain the whole URL space is the read-only site: `OPTIONS` → `204`, other non-GET methods → `405`. Behind your own reverse proxy (`settings.public_url`, e.g. `https://example.com/docs`), requests arriving with that `X-Forwarded-Host` are served with links under the proxy's path; direct hits `301` to the public URL.
 
-**Static export.** `npm run site:export -- <nestId> <base-url> <out-dir>` writes the same site as files (`index.html` per page directory, `.md` twins, `sitemap.xml`, `robots.txt`, `llms.txt`, `404.html`) for any static host.
+**Redirects from the app.** In key mode, an anonymous browser opening `/nest/<id>` or `/?nest=<id>[&doc=<nodeId>]` for a docs-site nest gets a `301` (cached ≤ 1 hour, `Vary: Cookie, Authorization`) to the page; a `doc` that isn't on the site lands on the home page. Signed-in users (session cookie or `Authorization`) and `?app=1` still get the app.
+
+**IndexNow.** When a site is rebuilt, the URLs that were added, changed or removed are sent to `api.indexnow.org` (Bing, Yandex, Seznam, Naver, Yep) — https sites only, unless `indexnow: false` or `noindex`.
+
+**Static export.** `npm run site:export -- <nestId> <server-origin> <out-dir>` writes the same site as files (`<path>.html` per page for clean URLs on Pages/Netlify/Vercel/GitHub Pages, `.md` twins, `sitemap.xml`, `robots.txt`, `llms.txt`, `404.html`, and a `_redirects` file with every old URL).
+
+### `/nests/:nestId/site` — public docs site settings (nest owner / nest admin / server admin)
+```
+GET    /nests/:nestId/site                     → the site's state
+PATCH  /nests/:nestId/site  { domain?, settings? }
+POST   /nests/:nestId/site/verify-domain       → checks the DNS TXT record
+PUT    /nests/:nestId/site/pages { node_id, path | null }   → a page's custom URL
+```
+Response:
+```json
+{
+  "live": true, "reason": null, "url": "https://docs.acme.dev/",
+  "domain": "docs.acme.dev", "domain_verified": true, "domain_verified_at": "…", "serving_domain": "docs.acme.dev",
+  "dns": { "txt": { "name": "_contextnest.docs.acme.dev", "value": "contextnest-site=<token>" }, "cname": "<SITE_DNS_TARGET or null>" },
+  "settings": { "title": "Acme Docs", "ai_training": false },
+  "pages": [{ "node_id": "nodes/docs/guides/setup", "title": "Setup", "path": "getting-started", "custom": true }]
+}
+```
+- `domain` — a host name (`https://`, paths and case are stripped; IPs and this server's own host are refused). Changing it un-verifies; `null` removes it. The domain is served only after `verify-domain` finds the TXT record (`400` with the record to add otherwise) and no other nest's site serves it (`409`). Point the domain at the server (`SITE_DNS_TARGET`) and give it TLS at your edge.
+- `settings` — replaces the stored settings: `title`, `description`, `public_url`, `og_image_url`, `organization_name`, `organization_url`, `organization_logo_url`, `same_as[]`, `twitter_site`, `google_site_verification`, `bing_site_verification`, `language`, `noindex`, `ai_training` (default true), `ai_actions` (default true), `indexnow` (default true), `redirects[{from, to}]` (`from` a path; `to` a path or `https://` URL). Unknown keys → `400`.
+- `pages` — `path` is lower-cased, `a-z 0-9 - _ . ~` segments; reserved names (`sitemap`, `robots`, `llms`, `tags/…`, `glossary`, `*.md|txt|xml`) → `400`; another page's custom URL → `409`. `null` returns the page to its folder-derived URL. The previous URL keeps working as a `301`.
 
 ### PATCH `/nests/:nestId/branding` (nest owner / nest admin / server admin)
 Per-nest branding for the public reader (reader mode) and the nest's `/p` published pages. The body **replaces** the nest's branding; `null`, an empty body, or `{}` resets it to unbranded.
@@ -866,7 +896,7 @@ Scope is deliberately narrow by default, because a single server may hold severa
 
 A named machine identity ("GitHub sync", "Nightly indexer") with `capability` `read` (viewer) or `write` (editor) on one or more nests. It is built on the same **service identity** a headless access key gets (no password, never a browser session, no OIDC / SSO / PromptOwl-ticket sign-in, `/auth/login` refuses it like a wrong password, `/auth/admin/reset-password` answers 400, not a seat, not in `/auth/teammates`, people search, `/stats` or telemetry) — but it is **not** a headless reader: instead of the reader allowlist it gets an ordinary collaborator row on each granted nest, so **governance is unchanged**: stewardship, submit-review and approval apply exactly as for a human editor, and a system can't approve its own submission. **Writes are attributed to the system.** Its identity (`email`, e.g. `github-sync-1a2b3c4d@system.contextnest.invalid`, an unroutable reserved domain) is the author in version history and provenance, never the person who created it. It belongs to its nests, not its creator: removing the creator from the nest or the server revokes nothing.
 
-A system key works only inside its granted nests (others 403/404). It can list them (`GET /nests`) and use the server-level `/mcp` (but not `nest_create`). Anything else is **403** `{ "code": "system_key" }`: every `/auth/*` route (it can't mint, list or rotate keys or change a password), `/systems`, `/admin/*`, `/me/*`, `/search`, `/index`, `POST /nests` and edits/deletes of a nest itself. Inside a nest it never reaches `collaborators`, `teams`, `visibility`, `settings`, `reader-mode`, `grants`, `systems`, `headless`, `publications`, `branding`, `metacognition`, `schedules`, `hooks`, `env`, `connectors`, `trace`, `stewards`, `archive`, `restore`, `push-allowlist` or `pending-pushes`.
+A system key works only inside its granted nests (others 403/404). It can list them (`GET /nests`) and use the server-level `/mcp` (but not `nest_create`). Anything else is **403** `{ "code": "system_key" }`: every `/auth/*` route (it can't mint, list or rotate keys or change a password), `/systems`, `/admin/*`, `/me/*`, `/search`, `/index`, `POST /nests` and edits/deletes of a nest itself. Inside a nest it never reaches `collaborators`, `teams`, `visibility`, `settings`, `reader-mode`, `site`, `grants`, `systems`, `headless`, `publications`, `branding`, `metacognition`, `schedules`, `hooks`, `env`, `connectors`, `trace`, `stewards`, `archive`, `restore`, `push-allowlist` or `pending-pushes`.
 
 Who may manage a system (always a person on a full credential — a read-only key, a headless access key or a system key gets 403):
 - **see / list**: an admin of at least one nest it works in. A listing names only the nests you administer, and counts the rest (`other_nest_count`).

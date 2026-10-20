@@ -263,8 +263,9 @@ describe("public docs site on its own domain", () => {
     const { buildSiteFiles } = await import("../src/site/build.js");
     const files = await buildSiteFiles(nestId, "https://docs.example.com");
     expect(Object.keys(files)).toEqual(
-      expect.arrayContaining(["index.html", "guides/setup/index.html", "guides/setup.md", "sitemap.xml", "robots.txt", "llms.txt", "404.html"]),
+      expect.arrayContaining(["index.html", "guides/setup.html", "guides/setup.md", "sitemap.xml", "robots.txt", "llms.txt", "404.html", "_redirects"]),
     );
-    expect(String(files["guides/setup/index.html"])).toContain("steps");
+    // <path>.html serves the slashless canonical URL on Pages/Netlify/Vercel/GitHub Pages.
+    expect(String(files["guides/setup.html"])).toContain("steps");
   });
 });

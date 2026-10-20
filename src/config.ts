@@ -80,6 +80,8 @@ function dataRoot() {
   return process.env.DATA_ROOT || join(process.cwd(), "data");
 }
 
+const docsSitesCache: { raw: string | null; map: Map<string, string> } = { raw: null, map: new Map() };
+
 export const config = {
   get PORT() {
     return parseInt(process.env.PORT || "3838", 10);
@@ -239,12 +241,26 @@ export const config = {
    * at that domain's root (the nest must still be public with Reader Mode on).
    * Unset ⇒ docs sites live only under /d/<slug> on this server's own host.
    */
+  /**
+   * The DNS name customers point their docs domain at (a CNAME target), shown
+   * in the nest's site settings — e.g. the load balancer or edge proxy that
+   * terminates TLS for custom domains. Your edge should issue certificates
+   * only for domains GET /site-domain-check?domain= answers 200 for.
+   */
+  get SITE_DNS_TARGET(): string {
+    return (process.env.SITE_DNS_TARGET || "").trim();
+  },
   get DOCS_SITES(): Map<string, string> {
+    // Parsed once per distinct value: this is read on every request.
+    const raw = process.env.DOCS_SITES || "";
+    if (docsSitesCache.raw === raw) return docsSitesCache.map;
     const map = new Map<string, string>();
-    for (const pair of (process.env.DOCS_SITES || "").split(",")) {
+    for (const pair of raw.split(",")) {
       const [host, nestId] = pair.split("=").map((s) => s.trim());
       if (host && nestId) map.set(host.toLowerCase(), nestId);
     }
+    docsSitesCache.raw = raw;
+    docsSitesCache.map = map;
     return map;
   },
   /**

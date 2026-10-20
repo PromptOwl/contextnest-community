@@ -93,6 +93,7 @@ export const HISTORICAL_MIGRATIONS = [
   "065_api_key_capability",
   "066_api_key_origin",
   "067_system_accounts",
+  "068_nest_sites",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1191,6 +1192,30 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       created_by_email TEXT,
       created_at TEXT NOT NULL DEFAULT ${NOW}
     );
+  `);
+
+  // Migration 068 parity: public docs sites (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS nest_sites (
+      nest_id TEXT PRIMARY KEY REFERENCES nests(id) ON DELETE CASCADE,
+      domain TEXT,
+      site_key TEXT UNIQUE,
+      domain_token TEXT NOT NULL,
+      domain_verified_at TEXT,
+      settings TEXT NOT NULL DEFAULT '{}',
+      indexnow_key TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE TABLE IF NOT EXISTS site_paths (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      path TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('custom', 'history')),
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      PRIMARY KEY (nest_id, path)
+    );
+    CREATE INDEX IF NOT EXISTS idx_site_paths_node ON site_paths(nest_id, node_id);
+      CREATE INDEX IF NOT EXISTS idx_nest_sites_domain ON nest_sites(domain);
   `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.

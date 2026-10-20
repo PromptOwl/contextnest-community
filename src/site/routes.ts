@@ -4,29 +4,30 @@
  *
  *   /d/<key>/                 home        /d/<key>/<path>        a page
  *   /d/<key>/<path>.md        Markdown twin (also: Accept: text/markdown)
- *   /d/<key>/sitemap.xml      /d/<key>/llms.txt      /d/<key>/llms-full.txt
- *   /robots.txt, /sitemap.xml server-level (sitemap index of every site)
+ *   /d/<key>/tags/<tag>       topic hub   /d/<key>/glossary       glossary
+ *   /d/<key>/sitemap.xml  robots.txt  llms.txt  llms-full.txt  <indexnow-key>.txt
+ *   /robots.txt, /sitemap.xml        server level (sitemap index of every site)
+ *   /site-domain-check?domain=        200 only for verified docs domains (TLS `ask`)
  *
- * A docs domain from DOCS_SITES gets the same site at its root, and the
- * /d/<key> copy 301s there so search engines see one URL per page. Anonymous
- * visitors to the app's own URLs for a site nest (/nest/<id>, /?nest=<id>&doc=)
- * are 301'd to the page, which is how the links already out there keep their
- * value. Signed-in users, and `?app=1`, still get the app.
+ * A verified custom domain (or DOCS_SITES) gets the same site at its root, and
+ * the /d/<key> copy 301s there so search engines see one URL per page. So does
+ * a site whose owner set a public URL behind their own reverse proxy — except
+ * for requests that arrive through that proxy. Anonymous visitors to the
+ * app's own URLs for a site nest (/nest/<id>, /?nest=<id>&doc=) are 301'd to
+ * the page, which is how links already out there keep their value; signed-in
+ * users, and `?app=1`, still get the app.
+ *
+ * Redirects that depend on state an owner can change (reader mode, the domain)
+ * are 301s with a bounded Cache-Control, so a browser that cached one recovers
+ * when the owner changes their mind instead of being stuck forever.
  */
 import { Hono, type Context } from "hono";
 import { config } from "../config.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { getSessionIdFromRequest } from "../auth/sessions.js";
-import {
-  findSiteNest,
-  getSite,
-  hostForNest,
-  nestIdForHost,
-  siteKey,
-  siteNests,
-  type SiteNest,
-} from "./build.js";
-import { renderRobots, renderSitemapIndex } from "./render.js";
+import { findSiteNest, getSite, placements, siteNests, TYPES, type Built, type SiteNest } from "./build.js";
+import { cspFor, renderServerRobots, renderSitemapIndex } from "./render.js";
+import { nestIdForDomain } from "./settings.js";
 
 const NOT_FOUND = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>Not found</title></head><body><main><h1>Not found</h1></main></body></html>`;
 
@@ -37,21 +38,58 @@ function wantsMarkdown(c: Context): boolean {
   return /text\/markdown/.test(accept) && !/text\/html/.test(accept);
 }
 
-/** Serve one file of a built site, honouring If-None-Match. */
-async function serveSite(c: Context, nest: SiteNest, base: string, prefix: string, rest: string) {
-  const built = await getSite(nest, base, prefix);
+/** decodeURIComponent that answers null for malformed input instead of throwing. */
+function decode(s: string): string | null {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return null;
+  }
+}
+
+/** A 301 the browser may cache only for `maxAge` seconds. */
+function movedTo(c: Context, location: string, maxAge: number, vary?: string) {
+  const headers: Record<string, string> = { Location: location, "Cache-Control": `public, max-age=${maxAge}` };
+  if (vary) headers.Vary = vary;
+  return c.body(null, 301, headers);
+}
+
+function serverOrigin(c: Context): string {
+  return requestBaseUrl(c.req.url);
+}
+
+function notFound(c: Context) {
+  return c.body(NOT_FOUND, 404, { "Content-Type": "text/html; charset=utf-8", "X-Robots-Tag": "noindex" });
+}
+
+/** Serve one file of a built site, honouring If-None-Match / If-Modified-Since. */
+function serveFile(c: Context, built: Built, rest: string) {
+  const { site, files } = built;
+  const prefix = site.prefix;
   let path = rest.replace(/^\/+/, "");
   // One URL per page: no trailing slash (except the home page, which is "/").
-  if (path.endsWith("/")) return c.redirect(`${prefix}/${path.replace(/\/+$/, "")}`, 301);
-  if (path === "index.html") return c.redirect(`${prefix}/`, 301);
-  if (path.endsWith("/index.html")) return c.redirect(`${prefix}/${path.slice(0, -"/index.html".length)}`, 301);
-  if (wantsMarkdown(c) && built.files.has(`${path || "index"}.md`)) path = `${path || "index"}.md`;
+  if (path.endsWith("/")) return movedTo(c, `${prefix}/${path.replace(/\/+$/, "")}`, 86400);
+  if (path === "index.html") return movedTo(c, `${prefix}/`, 86400);
+  if (path.endsWith(".html")) return movedTo(c, `${prefix}/${path.slice(0, -5)}`, 86400);
+  const lower = path.toLowerCase();
+  if (lower !== path && files.has(lower)) return movedTo(c, `${prefix}/${lower}`, 86400);
+  if (wantsMarkdown(c) && files.has(`${path || "index"}.md`)) path = `${path || "index"}.md`;
 
-  const file = built.files.get(path);
-  if (!file || path === "404") {
-    const nf = built.files.get("404")!;
-    return c.body(nf.body, 404, { "Content-Type": nf.type, "Cache-Control": "public, max-age=60" });
+  const file = path === "404" || path === "410" ? undefined : files.get(path);
+  if (!file) {
+    const key = lower.replace(/\.md$/, "");
+    const to = site.redirects.get(key);
+    if (to) return movedTo(c, lower.endsWith(".md") && to.startsWith("/") ? `${to}.md` : to, 86400);
+    const gone = site.gone.has(key);
+    const page = files.get(gone ? "410" : "404")!;
+    return c.body(page.body, gone ? 410 : 404, {
+      "Content-Type": page.type,
+      "Cache-Control": "public, max-age=60",
+      "Content-Security-Policy": cspFor(page.body),
+      "X-Robots-Tag": "noindex",
+    });
   }
+
   const headers: Record<string, string> = {
     "Content-Type": file.type,
     "Cache-Control": CACHE,
@@ -59,26 +97,28 @@ async function serveSite(c: Context, nest: SiteNest, base: string, prefix: strin
     Vary: "Accept",
     "X-Content-Type-Options": "nosniff",
   };
-  if (file.type.startsWith("text/html")) {
-    // Static pages: our one inline style + inline filter script, nothing else.
-    headers["Content-Security-Policy"] =
-      "default-src 'none'; img-src * data:; media-src *; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
+  if (file.lastModified) headers["Last-Modified"] = file.lastModified;
+  if (file.type === TYPES.html) {
+    headers["Content-Security-Policy"] = cspFor(file.body);
     headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
+    const links = [`<${prefix}/llms.txt>; rel="describedby"; type="text/plain"`];
+    if (site.byPath.has(path)) links.unshift(`<${prefix}/${path || "index"}.md>; rel="alternate"; type="text/markdown"`);
+    headers.Link = links.join(", ");
+    if (site.settings.noindex) headers["X-Robots-Tag"] = "noindex";
+  } else if (file.type === TYPES.md) {
+    // The Markdown twin is for agents; the HTML page is the one to rank.
+    const pagePath = path === "index.md" ? "" : path.slice(0, -3);
+    headers["X-Robots-Tag"] = "noindex";
+    headers.Link = `<${site.base}/${pagePath}>; rel="canonical"`;
   }
   const inm = c.req.header("If-None-Match");
-  if (inm && inm.split(",").map((s) => s.trim()).includes(file.etag)) {
+  if (inm && inm.split(",").map((s) => s.trim()).includes(file.etag)) return c.body(null, 304, headers);
+  const ims = c.req.header("If-Modified-Since");
+  if (!inm && ims && file.lastModified && Date.parse(ims) >= Date.parse(file.lastModified)) {
     return c.body(null, 304, headers);
   }
+  if (c.req.method === "HEAD") return c.body(null, 200, headers);
   return c.body(file.body, 200, headers);
-}
-
-/** The site's absolute base and in-site link prefix for this nest. */
-async function placement(c: Context, nest: SiteNest): Promise<{ base: string; prefix: string; host: string | null }> {
-  const host = hostForNest(nest.id);
-  if (host) return { base: `https://${host}`, prefix: "", host };
-  const all = await siteNests();
-  const prefix = `/d/${encodeURIComponent(siteKey(nest, all))}`;
-  return { base: `${requestBaseUrl(c.req.url)}${prefix}`, prefix, host: null };
 }
 
 export const siteRoutes = new Hono();
@@ -88,53 +128,83 @@ export const siteRoutes = new Hono();
 siteRoutes.get("*", async (c) => {
   const pathname = new URL(c.req.url).pathname;
   const m = /^\/d\/([^/]+)(\/.*)?$/.exec(pathname);
-  if (!m) return c.html(NOT_FOUND, 404);
-  const key = decodeURIComponent(m[1]);
-  if (m[2] === undefined) return c.redirect(`/d/${m[1]}/`, 301);
-  const rest = decodeURIComponent(m[2].slice(1));
+  if (!m) return notFound(c);
+  const key = decode(m[1]);
+  const rest = m[2] === undefined ? "" : decode(m[2].slice(1));
+  if (key === null || rest === null) return notFound(c);
+  if (m[2] === undefined) return movedTo(c, `/d/${m[1]}/`, 86400);
   const found = await findSiteNest(key);
-  if (!found) return c.html(NOT_FOUND, 404);
-  const { base, prefix, host } = await placement(c, found.nest);
-  if (host) return c.redirect(`${base}/${rest}${new URL(c.req.url).search}`, 301);
+  if (!found) return notFound(c);
+  const built = await getSite(found.nest, serverOrigin(c));
+  const { site } = built;
+  if (!site.prefix.startsWith("/d/")) {
+    // The site lives on a domain or behind the owner's proxy. A request that
+    // came through that proxy is served; anything else moves to the real URL.
+    const fwd = (c.req.header("X-Forwarded-Host") || "").toLowerCase();
+    const realHost = new URL(site.base).host.toLowerCase();
+    if (fwd !== realHost) return movedTo(c, `${site.base}/${rest}${new URL(c.req.url).search}`, 3600);
+    return serveFile(c, built, rest);
+  }
   // A key that is not the canonical one (the id when the slug works) → canonical.
-  if (key !== found.key) return c.redirect(`${prefix}/${rest}`, 301);
-  return serveSite(c, found.nest, base, prefix, rest);
+  if (key !== found.key) return movedTo(c, `${site.prefix}/${rest}`, 86400);
+  return serveFile(c, built, rest);
 });
 
 /**
- * Requests to a docs domain from DOCS_SITES. Mounted ahead of every other
- * route: on that host, the whole URL space is the docs site.
+ * Requests to a docs domain — a verified custom domain or a DOCS_SITES entry.
+ * Mounted ahead of every other route (auth included): on that host the whole
+ * URL space is the docs site, read-only. OPTIONS gets an empty 204 (no CORS
+ * grant), and every other method a 405.
  */
 export async function docsDomainMiddleware(c: Context, next: () => Promise<void>) {
-  const nestId = nestIdForHost(c.req.header("Host") ?? new URL(c.req.url).host);
+  const host = c.req.header("Host") ?? new URL(c.req.url).host;
+  const nestId = await nestIdForDomain(host);
   if (!nestId) return next();
-  if (c.req.method !== "GET" && c.req.method !== "HEAD") return c.text("Method not allowed", 405);
+  if (c.req.method === "OPTIONS") return c.body(null, 204, { Allow: "GET, HEAD, OPTIONS" });
+  if (c.req.method !== "GET" && c.req.method !== "HEAD") {
+    return c.body("Method not allowed", 405, { Allow: "GET, HEAD, OPTIONS" });
+  }
   const nest = (await siteNests()).find((n) => n.id === nestId);
-  if (!nest) return c.html(NOT_FOUND, 404);
-  const host = hostForNest(nest.id)!;
-  return serveSite(c, nest, `https://${host}`, "", c.req.path);
+  if (!nest) return notFound(c);
+  const built = await getSite(nest, serverOrigin(c));
+  // Serve only while this domain IS the site's home.
+  if (built.site.prefix !== "" || new URL(built.site.base).host.toLowerCase() !== host.toLowerCase().replace(/:\d+$/, "")) {
+    return notFound(c);
+  }
+  const rest = decode(new URL(c.req.url).pathname.slice(1));
+  if (rest === null) return notFound(c);
+  return serveFile(c, built, rest);
 }
 
 /** Server-level robots.txt: crawl the public surfaces, not the API. */
 export async function robotsTxt(c: Context) {
-  const base = requestBaseUrl(c.req.url);
-  const body = renderRobots(`${base}/sitemap.xml`, ["/nests/", "/auth/", "/admin/", "/mcp", "/oauth/", "/me/"]);
+  const base = serverOrigin(c);
+  const body = renderServerRobots(`${base}/sitemap.xml`, ["/nests/", "/auth/", "/admin/", "/mcp", "/oauth/", "/me/", "/index"]);
   return c.body(body, 200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": CACHE });
 }
 
 /** Server-level sitemap index: one sitemap per docs site hosted under /d/. */
 export async function sitemapIndex(c: Context) {
-  const base = requestBaseUrl(c.req.url);
-  const all = await siteNests();
-  const maps = all
-    .filter((n) => !hostForNest(n.id))
-    .map((n) => `${base}/d/${encodeURIComponent(siteKey(n, all))}/sitemap.xml`);
+  const base = serverOrigin(c);
+  const maps = (await placements(base)).filter((p) => !p.place.canonicalElsewhere).map((p) => `${p.place.base}/sitemap.xml`);
   return c.body(renderSitemapIndex(maps), 200, { "Content-Type": "application/xml; charset=utf-8", "Cache-Control": CACHE });
 }
 
 /**
+ * For an edge proxy issuing TLS certificates on demand (Caddy `on_demand_tls
+ * ask`, and the like): 200 only for a domain verified for a live docs site.
+ */
+export async function siteDomainCheck(c: Context) {
+  const domain = (c.req.query("domain") || "").toLowerCase();
+  const nestId = domain ? await nestIdForDomain(domain) : null;
+  if (!nestId || !(await siteNests()).some((n) => n.id === nestId)) return c.text("unknown", 404);
+  return c.text("ok", 200);
+}
+
+/**
  * 301 an anonymous browser from the app's URL for a site nest to the page.
- * Returns null when the request should go on to the app as before.
+ * Returns null when the request should go on to the app as before. A `doc`
+ * that is not on the site (a draft, a typo) lands on the site's home page.
  */
 export async function legacySiteRedirect(c: Context): Promise<Response | null> {
   if (config.AUTH_MODE !== "key") return null; // open mode: every visitor is the operator
@@ -143,14 +213,11 @@ export async function legacySiteRedirect(c: Context): Promise<Response | null> {
   if (c.req.header("Authorization") || getSessionIdFromRequest(c)) return null;
   const nestId = /^\/nest\/([^/]+)\/?$/.exec(url.pathname)?.[1] ?? (url.pathname === "/" ? url.searchParams.get("nest") : null);
   if (!nestId) return null;
-  const nest = (await siteNests()).find((n) => n.id === nestId);
+  const nest: SiteNest | undefined = (await siteNests()).find((n) => n.id === nestId);
   if (!nest) return null;
-  const { base, prefix } = await placement(c, nest);
+  const built = await getSite(nest, serverOrigin(c));
   const doc = url.searchParams.get("doc");
-  let path = "";
-  if (doc) {
-    const built = await getSite(nest, base, prefix);
-    path = built.site.pages.find((p) => p.nodeId === doc)?.path ?? "";
-  }
-  return c.redirect(`${base}/${path}`, 301);
+  const path = doc ? (built.site.pages.find((p) => p.nodeId === doc)?.path ?? "") : "";
+  // Varies on the session: a signed-in visitor of the same URL gets the app.
+  return movedTo(c, `${built.site.base}/${path}`, 3600, "Cookie, Authorization");
 }
