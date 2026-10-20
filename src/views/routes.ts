@@ -13,23 +13,27 @@
  * so an access key gets the same 403 here that it gets on an artifact —
  * without touching that list. Mounted ahead of the annotation routes, whose
  * `/:nodeId{.+}/hosted` would otherwise read `<viewId>/view` as a node id;
- * when the id is not a view node, the handler falls through (next()) so an
- * artifact whose own id ends in `/view` still hosts exactly as before.
+ * when the id is not a view node but a node exists at the longer id, the
+ * handler falls through (next()) so an artifact whose own id ends in `/view`
+ * still hosts exactly as before. Otherwise a non-view id is a plain 404.
  *
  * Gates, in order: the nest middleware (non-members 404, traversal ids
  * rejected, doc/folder grantees confined to their grant), then the same
  * `canReadNode` /hosted uses, then filterAccessible for the viewer (which,
- * unlike canReadNode, narrows doc-grantees on ungoverned nests).
+ * unlike canReadNode, narrows doc-grantees on ungoverned nests). A view the
+ * caller may not read is 404, like a missing one. The frame also refuses a
+ * Sec-Fetch-Dest other than `iframe` and pins `frame-ancestors 'self'`.
  */
 import { Hono } from "hono";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
-import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
+import { applyArtifactSandboxHeaders, ARTIFACT_SANDBOX_CSP_NO_POPUPS } from "../shared/artifact-sandbox.js";
 import { canReadNode } from "../governance/access-guard.js";
 import { getApprovedVersion } from "../governance/version-service.js";
 import { recordNodeAccess } from "../governance/access-log.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { engineCache } from "../nodes/engine.js";
+import { assertSafeNodeId } from "../shared/node-id.js";
 import { readArtifact, resolveHostedNodeId } from "../annotations/service.js";
 import {
   CAPS,
@@ -102,23 +106,34 @@ interface Served {
   pinned: number | undefined;
 }
 
-type Gate = { next: true } | { status: 403 | 404; error: string } | { served: Served };
+type Gate = { next: true } | { status: 404; error: string } | { served: Served };
 
 /**
  * Everything both routes share: the view node, the gates, and which version's
  * layout to serve. A non-view id falls through to the next router.
  */
-async function loadServedView(c: any): Promise<Gate> {
+async function loadServedView(c: any, tail: string): Promise<Gate> {
   const nestId = c.req.param("nestId")!;
   const viewId = await resolveHostedNodeId(nestId, decoded(c.req.param("nodeId") as string));
   const { storage } = await engineCache.get(nestId);
-  let live: ContextNode;
+  let live: ContextNode | null = null;
   try {
     live = await storage.readDocument(viewId);
   } catch {
-    return { next: true };
+    live = null;
   }
-  if ((live.frontmatter.type as string) !== VIEW_NODE_TYPE) return { next: true };
+  if (!live || (live.frontmatter.type as string) !== VIEW_NODE_TYPE) {
+    // Not a view. Hand the request to /hosted only when a node really lives at
+    // the longer id this URL also spells (an artifact whose own id ends in
+    // `/view`…); otherwise answer 404 here, so a missing view and a denied one
+    // look the same to every caller.
+    try {
+      await storage.readDocument(assertSafeNodeId(`${viewId}/${tail}`));
+      return { next: true };
+    } catch {
+      return { status: 404, error: "Not found" };
+    }
+  }
 
   const userId = c.get("userId");
   const viewer = await viewerPrincipal(nestId, userId);
@@ -127,7 +142,8 @@ async function loadServedView(c: any): Promise<Gate> {
     !(await canReadNode(nestId, viewId, userId, viewer.email)) ||
     !(await deps.visible(nestId, [viewId], [viewer])).has(viewId)
   ) {
-    return { status: 403, error: "Access denied" };
+    // 404, not 403: a view the caller cannot read looks exactly like no view.
+    return { status: 404, error: "Not found" };
   }
 
   const pinned = versionParam(c);
@@ -183,7 +199,7 @@ function viewerHeaders(c: any, served: number | null) {
 
 // GET …/:viewId/view/hosted — the view page.
 viewRoutes.get("/:nodeId{.+}/view/hosted", async (c, next) => {
-  const gate = await loadServedView(c);
+  const gate = await loadServedView(c, "view");
   if ("next" in gate) return next();
   if ("status" in gate) return c.json({ error: gate.error }, gate.status);
   const s = gate.served;
@@ -219,10 +235,18 @@ viewRoutes.get("/:nodeId{.+}/view/hosted", async (c, next) => {
 
 // GET …/:viewId/view/blocks/:blockId/hosted — one html block's frame.
 viewRoutes.get("/:nodeId{.+}/view/blocks/:blockId/hosted", async (c, next) => {
-  const gate = await loadServedView(c);
+  const gate = await loadServedView(c, `view/blocks/${decoded(c.req.param("blockId")!)}`);
   if ("next" in gate) return next();
   if ("status" in gate) return c.json({ error: gate.error }, gate.status);
   const s = gate.served;
+  // A frame is only ever a frame: a browser that says it is loading this as
+  // a top-level document (or anything but an iframe) is refused, so the data
+  // never lands where the view page's `frame-src` and the sandbox's opaque
+  // parent do not apply. Clients that send no Sec-Fetch-Dest are allowed.
+  const dest = c.req.header("Sec-Fetch-Dest");
+  if (dest !== undefined && dest.toLowerCase() !== "iframe") {
+    return c.json({ error: "This address only loads inside its view page." }, 403);
+  }
   const notFound = () => c.json({ error: "Not found" }, 404);
   if (!s.layout.meta) return notFound();
   const block = findHtmlBlock(s.layout.meta, decoded(c.req.param("blockId")!));
@@ -254,12 +278,14 @@ viewRoutes.get("/:nodeId{.+}/view/blocks/:blockId/hosted", async (c, next) => {
   const killSwitch = viewDataKillSwitch();
   const stewardship = await isStewardshipEnabled(s.nestId);
   // Authors only matter when everything before them passed; looked up last.
+  // Every nest, governed or not: approval may have been self-publication.
   let authors: Awaited<ReturnType<typeof authorInfos>> = [];
-  if (!killSwitch && !stewardship && s.viewApproved && artifact.approved && s.served != null && artifact.version != null) {
-    authors = await authorInfos(s.nestId, [
-      ...(await listVersionAuthors(s.nestId, s.viewId, s.served)),
-      ...(await listVersionAuthors(s.nestId, target.id, artifact.version)),
-    ]);
+  let authorsIncomplete = false;
+  if (!killSwitch && s.viewApproved && artifact.approved && s.served != null && artifact.version != null) {
+    const viewAuthors = await listVersionAuthors(s.nestId, s.viewId, s.served);
+    const artAuthors = await listVersionAuthors(s.nestId, target.id, artifact.version);
+    if (viewAuthors === null || artAuthors === null) authorsIncomplete = true;
+    else authors = await authorInfos(s.nestId, [...viewAuthors, ...artAuthors]);
   }
   const { data } = await frameNestData({
     view: s.layout.meta,
@@ -272,11 +298,16 @@ viewRoutes.get("/:nodeId{.+}/view/blocks/:blockId/hosted", async (c, next) => {
       artifactApproved: artifact.approved,
       viewer: s.viewer,
       authors,
+      authorsIncomplete,
       killSwitch,
     },
   });
   const body = injectNestData(artifact.html, serializeNestData(data));
   applyArtifactSandboxHeaders(c, { popups: false });
+  // Only this app's own view page may frame a data-carrying frame, whatever
+  // FRAME_ANCESTORS allows the rest of the app (the global guard keeps a
+  // frame-ancestors a handler set).
+  c.header("Content-Security-Policy", `${ARTIFACT_SANDBOX_CSP_NO_POPUPS}; frame-ancestors 'self'`);
   viewerHeaders(c, s.served);
   return c.html(body);
 });
