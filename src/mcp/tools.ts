@@ -478,16 +478,33 @@ const TASK_FIELD_PROPERTIES = {
 /**
  * The `view` argument of context_create / context_update (§1.12), taken from
  * the engine's own operation descriptor rather than written out here — the
- * engine owns the view block's shape (see the Engine Logic Boundary). Empty
- * when the engine predates view nodes, in which case the tools simply don't
- * advertise it.
+ * engine owns the view block's shape (see the Engine Logic Boundary). Throws
+ * at module load when the engine lacks the operation or the property, so an
+ * engine downgrade fails loudly instead of silently dropping the argument
+ * (test/views-mcp-schema.test.ts).
  */
-function engineViewProperty(op: "context_create" | "context_update"): Record<string, unknown> {
-  const desc = engineApi.getOperation(op);
-  const props = desc
-    ? ((inputJsonSchema(desc) as { properties?: Record<string, unknown> }).properties ?? {})
-    : {};
-  return props.view ? { view: props.view } : {};
+export function engineViewProperty(
+  op: "context_create" | "context_update",
+  api: Pick<typeof engineApi, "getOperation"> = engineApi,
+): Record<string, unknown> {
+  const desc = api.getOperation(op);
+  if (!desc) {
+    throw new Error(
+      `The engine has no "${op}" operation, so its view argument cannot be advertised over MCP. Check the @promptowl/contextnest-engine version.`,
+    );
+  }
+  let props: Record<string, unknown> = {};
+  try {
+    props = (inputJsonSchema(desc) as { properties?: Record<string, unknown> }).properties ?? {};
+  } catch {
+    props = {};
+  }
+  if (!props.view) {
+    throw new Error(
+      `The engine's "${op}" operation has no view property (§1.12), so view nodes cannot be authored over MCP. Check the @promptowl/contextnest-engine version.`,
+    );
+  }
+  return { view: props.view };
 }
 
 export const TOOL_DEFINITIONS = [
