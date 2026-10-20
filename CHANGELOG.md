@@ -1,5 +1,34 @@
 # @promptowl/contextnest-community
 
+## 2.1.0
+
+### Minor Changes
+
+- c7fcaad: Documents can be selected in the Documents list and moved, tagged or deleted together. Adds `POST /nests/:nestId/nodes/bulk-move` and `/bulk-delete`, and an `ids` list on MCP `context_move` and `context_delete` (tags: `context_bulk_update`). Each document is its own governed write, so ones under review or that the caller can't change are skipped and reported per document while the rest go through.
+- 6c44fa3: Folders can now be renamed and moved. Owners and admins get a rename/move action on each folder in the Documents tree, `POST /nests/:nestId/folders/move`, and `context_move` with `from_folder` over MCP. Everything under the folder (sub-folders, empty ones too) follows: ids change, version history, review state and links are kept, and the nest's structure rules are enforced.
+- v2.1.0 — bulk document actions, folder rename/move, table grid editing, read-only and system API keys, faster large imports, and a 24h offline licence limit.
+
+### Patch Changes
+
+- bd435e0: **Engine bumped to `@promptowl/contextnest-engine` 3.2.0** to pick up the latest engine changes.
+- 5a2bf17: **Import concurrency is editable from Server settings.** Settings → Basic → Import concurrency sets `IMPORT_IO_CONCURRENCY` (1–256, default 32) without a redeploy: the value is stored with the other server settings and applies to the next import. Raise it on network storage (Cloud Storage) to speed up large folder imports.
+- 7e288b4: **Importing an exported nest no longer reports a false failure.** A nest export includes the source vault's `.context/config.yaml`, which the engine never imports (it holds that vault's own settings), so every import of one ended with "Imported, but 1 file could not be read or was too large: .context/config.yaml". Import now drops `.context/` before staging, the same way it drops `_suggestions/`, so a clean import reads as clean.
+- 291fe52: **Folder imports say what happened.** `POST /nests/import` responses now carry `problems` (each refused file, document kept as a draft, or document not imported, as a readable `path: reason` line) and `warnings` (repairs made on the way in, such as a whole-number version or a derived title), alongside the unchanged `documents` and `rejected`. One document whose records fail no longer fails the whole import: the rest are imported and that one is named. A step that fails outright reports "Import stopped while uploading files: …" or "… while publishing documents: …" instead of "Something went wrong"; a vault-lock timeout stays a retryable `503` and an engine validation refusal stays a `400`.
+- 4e4b54c: **New `IMPORT_IO_CONCURRENCY` setting for large imports.** It sets how many file operations one folder import keeps in flight (publishing runs half as many documents at once). Unset keeps the engine default of 32. On a network-backed `DATA_ROOT` such as Cloud Storage via gcsfuse, where every file operation is a round trip, raising it (for example to `64`) shortens large imports; each in-flight file is held in memory, so peak memory grows with it.
+- e8df9ca: **Folder imports log where their time goes.** Each import call (every uploaded chunk, and the final registration) now logs one `[import] io` line listing how many times each storage operation and database index hook ran and how long they took, slowest first. On a network-backed `DATA_ROOT` this shows which operation dominates a slow import. Logging only; import behavior is unchanged.
+- c711891: MCP OAuth: the `/mcp` sign-in challenge now asks for `nests:read nests:write offline_access`. Clients request the scopes it names, so a connected agent could previously only read (writes were refused for scope with no way to step up) and was signed out when its one-hour token expired. One consent now covers reading, writing and a refresh token. Existing read-only grants get write by reconnecting once.
+- 8088ecc: `context_update` now accepts an optional `type` over MCP (per-nest and server-level `/mcp`), so a node can be re-typed in place without delete + recreate. It uses the same gate as REST `PATCH` and the UI's "Turn into": unknown types are refused with a readable error, and version history and review state are kept.
+- ab67ce2: A server that can't reach PromptOwl now keeps its last good license for 24 hours, not indefinitely. Once 24 hours pass since the last successful license check, the server goes read-only: reading keeps working, nobody is signed out, and writing comes back on the next successful check. The clock is the saved check time, so a restart doesn't reset it. Server admins and the license owner see why in a banner, in Settings → License (`offline_since` on `GET /admin/license`), in the 503 a refused write returns, and on the status page; everyone else sees the usual neutral read-only line.
+- 9f2ade2: Tighten scoped read keys and the PromptOwl ticket exchange.
+
+  - **Read keys can't chat.** `POST /nests/:id/chat` can post a mention comment and spends model credits, so read-only keys now get 403 there. They still read, query, search and export.
+  - **`/auth/keys/exchange` is read-only and PromptOwl-only.** It accepts only `OFFICIAL_COMMUNITY_SSO_SECRET` tickets (not `MCP_SIGNING_SECRET`) and refuses `capability: "write"` (400).
+  - **Exchange is throttled.** Per-IP rate limit (429), and concurrent exchanges for the same user and nest are serialised so the 20-key cap holds.
+
+- 5cc5049: Read-only API keys can now be made from the dashboard. The API keys page has a Read-only / Read-write choice next to the scope picker. A read-only key must be scoped to one nest, so "All your nests" is unavailable while Read-only is picked, and the page explains why inline. Every listed key now shows whether it is Read-only or Read-write next to its nest badge. The Connect dialog's "Create a key for this nest only" starts out read-only, so a key handed to an agent is least-privilege by default.
+- 76ce05d: A document's status badge now explains itself. Hover it in the editor or the Documents list to see what the status means and what happens next — who submitted a pending review, that a steward approves or rejects it, and that readers and AI keep seeing the last approved version meanwhile. The editor and the Documents list now share one badge, so a status looks the same everywhere.
+- d9421ef: Table documents can now be edited as a grid. The preview next to the CSV source is editable: click a cell to change it, use Add row and Add column to grow the table, and the × on a row or column header to remove it. Changes write straight back to the CSV, so the source and the grid always match, and `#` comment lines are kept as they were.
+
 ## 2.0.0
 
 ### Major Changes
