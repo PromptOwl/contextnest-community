@@ -2436,6 +2436,7 @@ export function createApp(): Hono<AuthEnv> {
   // first, access-filtered per nest (see governance/stream-service.ts). Behind
   // its own switch: off → 404. Version history is a licensed governance view,
   // so unlicensed past the Free tier → the same 503 /nests/:id/feed answers.
+  const streamUnreadableWarned = new Set<string>();
   app.get("/me/stream", async (c) => {
     if (!config.EXPERIMENTAL_DOC_STREAM) {
       return c.json(
@@ -2495,7 +2496,15 @@ export function createApp(): Hono<AuthEnv> {
           // The unreviewed draft on top is never in the chain — its bytes are
           // the live file (same fallback as GET …/versions/:version).
           const node = await storage.readDocument(nodeId);
-          return (node.frontmatter.version ?? 1) === version ? node.body ?? "" : null;
+          if ((node.frontmatter.version ?? 1) === version) return node.body ?? "";
+          // Neither the chain nor the live file has this version: a broken
+          // chain. The card shows no summary; say so once per document.
+          const key = `${nestId}:${nodeId}`;
+          if (!streamUnreadableWarned.has(key)) {
+            streamUnreadableWarned.add(key);
+            console.warn(`[me/stream] version body unreadable: ${key}@${version}`);
+          }
+          return null;
         }
       },
     });

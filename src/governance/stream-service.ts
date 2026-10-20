@@ -29,7 +29,8 @@
 
 import { getDb } from "../db/client.js";
 import type { SqlParam } from "../db/adapter.js";
-import { filterAccessible } from "./access-guard.js";
+import { filterAccessible, readsWholeNest } from "./access-guard.js";
+import { jsonTextValues } from "../db/sql.js";
 import { isPublicReader } from "../shared/access.js";
 import { ensureNodeIndex } from "../nodes/node-index.js";
 import { normalizeTag } from "./tag-index-service.js";
@@ -89,6 +90,21 @@ export interface StreamFilters {
 }
 
 const SUMMARY_CHARS = 200;
+const SUMMARY_CONCURRENCY = 8;
+
+/** `Promise.all(items.map(fn))` with at most `limit` in flight; order kept. */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
 /** Facet lists are chips, not reports. */
 const FACET_CAP = 50;
 export const STREAM_MAX_LIMIT = 100;
@@ -137,6 +153,12 @@ async function scopeFor(
   userEmail: string,
 ): Promise<NestScope | null> {
   await ensureNodeIndex(nestId);
+  // The common case — a member who reads the whole nest — needs no document
+  // list at all: the version rows' join to node_index already limits the
+  // stream to documents that exist.
+  if (await readsWholeNest(nestId, userId, userEmail)) {
+    return { nestId, nodeIds: null, publicOnly: false };
+  }
   const rows = (await getDb().all(
     "SELECT node_id AS id FROM node_index WHERE nest_id = ?",
     [nestId],
@@ -154,16 +176,22 @@ async function scopeFor(
   };
 }
 
-/** The OR of every nest scope, as one SQL predicate over `v`. */
+/**
+ * The OR of every nest scope, as one SQL predicate over `v`. A narrowed
+ * nest's document ids ride in ONE bound JSON array, never one `?` apiece: a
+ * folder grant can cover tens of thousands of documents, past either driver's
+ * bound-variable cap.
+ */
 function scopeClause(scopes: NestScope[]): { sql: string; params: SqlParam[] } {
+  const db = getDb();
   const parts: string[] = [];
   const params: SqlParam[] = [];
   for (const s of scopes) {
     let p = "v.nest_id = ?";
     params.push(s.nestId);
     if (s.nodeIds) {
-      p += ` AND v.node_id IN (${s.nodeIds.map(() => "?").join(",")})`;
-      params.push(...s.nodeIds);
+      p += ` AND v.node_id IN (${jsonTextValues(db)})`;
+      params.push(JSON.stringify(s.nodeIds));
     }
     if (s.publicOnly) p += " AND v.status IN ('approved', 'published')";
     parts.push(`(${p})`);
@@ -206,23 +234,28 @@ export async function getDocStream(params: {
   };
   if (scopes.length === 0) return empty;
 
-  // Base: what the caller may see, inside the since-window. Facet counts are
-  // computed over exactly this; the page and total add the facet filters.
-  const base = scopeClause(scopes);
-  const baseWhere = [base.sql];
-  const baseParams: SqlParam[] = [...base.params];
-  if (f.since) {
-    baseWhere.push("v.created_at >= ?");
-    baseParams.push(f.since);
-  }
   // Authors are never exposed for public-only nests: neither counted nor
-  // filterable (a filter would turn the stream into an "did X write here"
-  // oracle).
+  // filterable (a filter would turn the stream into a "did X write here"
+  // oracle). So the author facet, and any author-filtered query, run over
+  // the member scopes only.
   const authorScopes = scopes.filter((s) => !s.publicOnly);
-  const authorBase = scopeClause(authorScopes);
+  const authors = (f.author ?? []).map((a) => a.trim().toLowerCase()).filter(Boolean);
 
-  const where = [...baseWhere];
-  const whereParams = [...baseParams];
+  // What the caller may see over `scopeList`, inside the since-window.
+  const visible = (scopeList: NestScope[]) => {
+    const scope = scopeClause(scopeList);
+    const where = [scope.sql];
+    const params: SqlParam[] = [...scope.params];
+    if (f.since) {
+      where.push("v.created_at >= ?");
+      params.push(f.since);
+    }
+    return { where, params };
+  };
+  // Facet counts run over exactly this; the page and total add the filters.
+  const base = visible(scopes);
+
+  const { where, params: whereParams } = visible(authors.length ? authorScopes : scopes);
   if (f.nest?.length) {
     where.push(`v.nest_id IN (${f.nest.map(() => "?").join(",")})`);
     whereParams.push(...f.nest);
@@ -231,11 +264,11 @@ export async function getDocStream(params: {
     where.push(`ni.type IN (${f.type.map(() => "?").join(",")})`);
     whereParams.push(...f.type);
   }
-  if (f.author?.length) {
-    where[0] = authorBase.sql;
-    whereParams.splice(0, base.params.length, ...authorBase.params);
-    where.push(`v.author IN (${f.author.map(() => "?").join(",")})`);
-    whereParams.push(...f.author.map((a) => a.trim().toLowerCase()));
+  if (authors.length) {
+    // Emails are stored lowercased; LOWER() keeps a legacy mixed-case row
+    // matching the (lowercased) chip it is counted under.
+    where.push(`LOWER(v.author) IN (${authors.map(() => "?").join(",")})`);
+    whereParams.push(...authors);
   }
   const tags = (f.tag ?? []).map(normalizeTag).filter(Boolean);
   if (tags.length) {
@@ -276,15 +309,11 @@ export async function getDocStream(params: {
   ]);
   const total = Number(totalRow?.c ?? 0);
 
+  const authorBase = authorScopes.length ? visible(authorScopes) : null;
   const counts = await facetCounts(
-    baseWhere.join(" AND "),
-    baseParams,
-    authorScopes.length
-      ? {
-          sql: [authorBase.sql, ...baseWhere.slice(1)].join(" AND "),
-          params: [...authorBase.params, ...baseParams.slice(base.params.length)],
-        }
-      : null,
+    base.where.join(" AND "),
+    base.params,
+    authorBase ? { sql: authorBase.where.join(" AND "), params: authorBase.params } : null,
     params.nests,
   );
 
@@ -327,18 +356,20 @@ export async function getDocStream(params: {
   }
 
   const publicNests = new Set(scopes.filter((s) => s.publicOnly).map((s) => s.nestId));
-  const items: StreamItem[] = await Promise.all(
-    rows.map(async (r) => {
+  // Summaries cost one body read (a version-chain replay) each: a few at a
+  // time, not the whole page at once.
+  const summaries = await mapLimit(rows, SUMMARY_CONCURRENCY, async (r) => {
+    if (!params.readBody) return "";
+    try {
+      return summarize((await params.readBody(r.nest_id, r.node_id, Number(r.version))) ?? "");
+    } catch {
+      return "";
+    }
+  });
+  const items: StreamItem[] = rows.map((r, idx) => {
       const version = Number(r.version);
       const k = `${r.nest_id}\u0000${r.node_id}`;
-      let summary = "";
-      if (params.readBody) {
-        try {
-          summary = summarize((await params.readBody(r.nest_id, r.node_id, version)) ?? "");
-        } catch {
-          summary = "";
-        }
-      }
+      const summary = summaries[idx];
       return {
         id: `${r.nest_id}:${r.node_id}@${version}`,
         nestId: r.nest_id,
@@ -355,8 +386,7 @@ export async function getDocStream(params: {
         commentCount: commentMap.get(k) ?? 0,
         kind: kindOf(version, r.status, approved.has(`${k}@${version}`)),
       };
-    }),
-  );
+  });
 
   return {
     items,
@@ -393,7 +423,7 @@ async function facetCounts(
     ) as Promise<Array<{ value: string; n: number | string }>>,
     author
       ? (db.all(
-          `SELECT v.author AS value, COUNT(*) AS n ${FROM} WHERE ${author.sql} GROUP BY v.author`,
+          `SELECT LOWER(v.author) AS value, COUNT(*) AS n ${FROM} WHERE ${author.sql} GROUP BY LOWER(v.author)`,
           author.params,
         ) as Promise<Array<{ value: string; n: number | string }>>)
       : Promise.resolve([] as Array<{ value: string; n: number | string }>),

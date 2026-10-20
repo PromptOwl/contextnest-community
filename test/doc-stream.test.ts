@@ -378,6 +378,98 @@ describe("doc stream: public nest, read without membership", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Scoped readers: a share grantee sees only the documents their grants cover
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("doc stream: scoped readers (share grants)", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let guest: { apiKey: string; userId: string };
+  let nestId: string;
+  let sharedDoc: string;
+  let hiddenDoc: string;
+  const BULK = 33_000;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    process.env.EXPERIMENTAL_DOC_STREAM = "true";
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@grant.com", "Owner");
+    guest = await registerUser(app, "guest@grant.com", "Guest");
+    nestId = (await jsonRequest(app, "POST", "/nests", { name: "Granted" }, owner.apiKey)).data.nest.id;
+    sharedDoc = (await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Shared Doc", content: "# shared\n\nshared body", tags: ["open-topic"],
+    }, owner.apiKey)).data.node.id;
+    hiddenDoc = (await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Hidden Doc", content: "# hidden\n\nhidden body", tags: ["hidden-topic"],
+    }, owner.apiKey)).data.node.id;
+    const g = await jsonRequest(app, "POST", `/nests/${nestId}/grants`, {
+      target_type: "document", target: sharedDoc, email: "guest@grant.com", role: "read",
+    }, owner.apiKey);
+    expect(g.status).toBe(201);
+    // A version authored under a mixed-case address (legacy row).
+    const d = await db();
+    await d.run(
+      `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status, created_at)
+       VALUES (?, ?, 99, 'hmixed', 'Mixed@Grant.com', 'published', '2026-10-03 00:00:00')`,
+      [nestId, sharedDoc],
+    );
+  }, 60000);
+
+  afterAll(async () => {
+    delete process.env.EXPERIMENTAL_DOC_STREAM;
+    await env.cleanup();
+  });
+
+  it("shows a grantee only the granted document — items and counts", async () => {
+    const { status, data } = await jsonRequest(app, "GET", "/me/stream", undefined, guest.apiKey);
+    expect(status).toBe(200);
+    expect(data.items.length).toBeGreaterThan(0);
+    expect(data.items.every((i: any) => i.nodeId === sharedDoc)).toBe(true);
+    expect(data.items.some((i: any) => i.nodeId === hiddenDoc)).toBe(false);
+    expect(data.counts.tag.map((t: any) => t.value)).toEqual(["open-topic"]);
+    expect(data.counts.nest).toEqual([{ id: nestId, name: "Granted", count: data.total }]);
+  });
+
+  it("matches an author filter case-insensitively against the stored address", async () => {
+    const { data } = await jsonRequest(app, "GET", "/me/stream?author=mixed@grant.com", undefined, owner.apiKey);
+    expect(data.total).toBe(1);
+    expect(data.counts.author.map((a: any) => a.value)).toContain("mixed@grant.com");
+  });
+
+  it("survives a grant covering tens of thousands of documents (no SQL variable limit)", async () => {
+    const d = await db();
+    const fm = JSON.stringify({ title: "bulk" });
+    for (let start = 0; start < BULK; start += 400) {
+      const n = Math.min(400, BULK - start);
+      const ids = Array.from({ length: n }, (_, k) => `nodes/bulk/d${start + k}`);
+      await d.run(
+        `INSERT INTO node_index (nest_id, node_id, folder, title, type, status, updated_at, frontmatter_json)
+         VALUES ${ids.map(() => "(?, ?, 'bulk', 'bulk', 'document', 'published', NULL, ?)").join(",")}`,
+        ids.flatMap((id) => [nestId, id, fm]),
+      );
+      await d.run(
+        `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status, created_at)
+         VALUES ${ids.map(() => "(?, ?, 1, 'hb', 'owner@grant.com', 'published', '2026-10-04 00:00:00')").join(",")}`,
+        ids.flatMap((id) => [nestId, id]),
+      );
+    }
+    const g = await jsonRequest(app, "POST", `/nests/${nestId}/grants`, {
+      target_type: "folder", target: "nodes/bulk", email: "guest@grant.com", role: "read",
+    }, owner.apiKey);
+    expect(g.status).toBe(201);
+    const { status, data } = await jsonRequest(app, "GET", "/me/stream?limit=5", undefined, guest.apiKey);
+    expect(status).toBe(200);
+    expect(data.items.some((i: any) => i.nodeId === hiddenDoc)).toBe(false);
+    const sharedVersions = Number(((await d.get(
+      "SELECT COUNT(*) AS c FROM node_versions WHERE nest_id = ? AND node_id = ?", [nestId, sharedDoc],
+    )) as { c: number }).c);
+    expect(data.total).toBe(BULK + sharedVersions);
+  }, 120000);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Paging: 300 versions, limit=50 — no duplicates, no gaps
 // ═══════════════════════════════════════════════════════════════════════════
 
