@@ -104,6 +104,7 @@ Inside a nest: the document tree, plus **Board** (documents as cards by folder, 
 
 Point any agent at `<server>/llms.txt` — it is the complete manual (endpoints, MCP tools, selector grammar). The short version:
 
+- **Claude Code plugin** — `/plugin marketplace add promptowl/contextnest`, `/plugin install contextnest`, then `/contextnest:setup` walks you through connecting (browser sign-in, no key to paste).
 - **MCP** — `<server>/mcp` for everything the key can read, `<server>/nests/<id>/mcp` for one nest with the full toolset. Claude Code, Cursor and VS Code connect over HTTP with `Authorization: Bearer cnst_…`; Claude Desktop goes through `npx -y mcp-remote`.
 - **REST** — `POST /nests/<id>/context` with a selector (`#tag`, `[[Title]]`, `type:document`, combined with `+ | -`) returns assembled context plus a trace. Full reference: [API.md](./API.md).
 - **ctx CLI** — `ctx vault add <alias> --url <server>/nests/<id>/mcp --bearer-env CONTEXTNEST_API_KEY`, then `ctx query "#tag" --vault <alias>`.
