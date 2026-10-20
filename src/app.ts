@@ -43,6 +43,7 @@ import {
 import { resolveNodeGrant } from "./governance/grants-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
+import { viewRoutes } from "./views/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { pushRoutes } from "./nests/push-routes.js";
 import { hootieRoutes } from "./hootie/routes.js";
@@ -3466,6 +3467,11 @@ export function createApp(): Hono<AuthEnv> {
   //      GET falls through (next()) when the id is not a pdf node, so a
   //      document whose own id ends in /pdf still reads.
   nestsApp.route("/:nestId/nodes", pdfNodeRoutes);
+  //   0b. viewRoutes — GET /:nodeId/view/hosted and /:nodeId/view/blocks/:id/hosted
+  //      (§1.12 view serving). Before annotationRoutes, whose greedy
+  //      /:nodeId{.+}/hosted would read "<viewId>/view" as the node id; it
+  //      falls through (next()) when the id is not a view node.
+  nestsApp.route("/:nestId/nodes", viewRoutes);
   nestsApp.route("/:nestId/nodes", annotationRoutes);
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
   nestsApp.route("/:nestId/nodes", nodeRoutes);

@@ -298,11 +298,16 @@ export async function readArtifact(
   html: string;
   version: number | null;
   type: string | null;
+  /** True when the served bytes ARE the node's approved version (reconstructed
+   *  from its chain) — false for the live-body fallback or a pinned version
+   *  other than the approved one. Additive: /hosted and /p ignore it; a view's
+   *  html-block frame needs it for the trust rule. */
+  approved: boolean;
 }> {
   const { storage, versions: versionManager } = await engineCache.get(nestId);
 
-  const target =
-    version ?? (await versions.getApprovedVersion(nestId, nodeId)) ?? null;
+  const approvedVersion = await versions.getApprovedVersion(nestId, nodeId);
+  const target = version ?? approvedVersion ?? null;
 
   // Title/type + live body from the on-disk doc (cheap, stable label). Missing
   // doc is only fatal when we also have no snapshot to fall back on.
@@ -322,7 +327,13 @@ export async function readArtifact(
   if (target != null) {
     try {
       const raw = await versionManager.reconstructVersion(nodeId, target);
-      return { title, html: bodyOnly(nodeId, raw), version: target, type };
+      return {
+        title,
+        html: bodyOnly(nodeId, raw),
+        version: target,
+        type,
+        approved: approvedVersion != null && target === approvedVersion,
+      };
     } catch (err) {
       console.warn(
         `[annotations] reconstruct v${target} failed for ${nestId}/${nodeId}; falling back to live body:`,
@@ -334,7 +345,7 @@ export async function readArtifact(
   if (!liveExists) {
     throw new NotFoundError(`Artifact not found: ${nodeId}`);
   }
-  return { title, html: liveHtml, version: target, type };
+  return { title, html: liveHtml, version: target, type, approved: false };
 }
 
 /**

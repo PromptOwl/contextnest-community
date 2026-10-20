@@ -25,6 +25,8 @@ import { requestBaseUrl } from "../shared/base-url.js";
 import { isSecureRequest } from "../auth/sessions.js";
 import { sendEmailToRecipient } from "../notify/email.js";
 import { readArtifact, createThread } from "../annotations/service.js";
+import { renderPublicViewPage } from "../views/render.js";
+import { readViewVersion } from "../views/deps.js";
 import { tryConsume } from "../shared/rate-limit.js";
 import { clientIp } from "../shared/request-ip.js";
 import * as publish from "./publish-service.js";
@@ -389,6 +391,21 @@ async function renderPublished(c: any, row: PublishRow, viewerEmail: string | nu
   await publish.logView(row.id, viewerEmail);
   applyArtifactSandboxHeaders(c);
   const overlays = overlayMarkup(row, viewerEmail);
+  // A §1.12 view: its own approved intro and one neutral placeholder per
+  // block. /p has no nest-user viewer, so it never resolves another node,
+  // never frames an artifact and never carries nest-data.
+  if (type === "view") {
+    let blockCount = 0;
+    try {
+      blockCount = (await readViewVersion(row.nest_id, row.node_id, artifact.version)).meta?.blocks.length ?? 0;
+    } catch {
+      blockCount = 0;
+    }
+    const page = renderPublicViewPage({ title: artifact.title || row.node_id, intro: body, blockCount });
+    return c.body(withOverlays(page, overlays), 200, {
+      "Content-Type": "text/html; charset=utf-8",
+    });
+  }
   if (isHtml) {
     return c.body(withOverlays(body, overlays), 200, {
       "Content-Type": "text/html; charset=utf-8",
