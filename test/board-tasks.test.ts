@@ -5,6 +5,7 @@ import {
   dueState,
   matchesAssigneeFilter,
   matchesBlockedFilter,
+  matchesTitleFilter,
   moveNeedsReview,
   openBlockers,
   priorityRank,
@@ -154,5 +155,13 @@ describe("blocked badge (task relations)", () => {
     expect(matchesBlockedFilter({ open_blockers: 1 }, true)).toBe(false);
     expect(matchesBlockedFilter({}, true)).toBe(true);
     expect(matchesBlockedFilter({ open_blockers: 1, completed_at: "2026-10-09T00:00:00Z" }, true)).toBe(true);
+  });
+
+  it("title filter matches part of a title, ignoring case; '#…' is a tag, not a title", () => {
+    expect(matchesTitleFilter({ title: "Task Beta" }, "beta")).toBe(true);
+    expect(matchesTitleFilter({ title: "Task Beta" }, " Task B ")).toBe(true);
+    expect(matchesTitleFilter({ title: "Task Alpha" }, "Beta")).toBe(false);
+    expect(matchesTitleFilter({ title: "Task Alpha" }, "")).toBe(true);
+    expect(matchesTitleFilter({ title: "Task Alpha" }, "#prime")).toBe(true);
   });
 });

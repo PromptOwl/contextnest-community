@@ -98,6 +98,13 @@ export function matchesBlockedFilter(
   return !hideBlocked || openBlockers(node) === 0;
 }
 
+/** The filter box, as typed: part of a title, any case. A leading "#" means a
+ *  tag still being typed (Enter adds it as a tag chip), so it filters nothing. */
+export function matchesTitleFilter(node: Pick<BoardNode, "title">, text: string): boolean {
+  const q = text.trim().toLowerCase();
+  return !q || q.startsWith("#") || node.title.toLowerCase().includes(q);
+}
+
 /** Parent id → its sub-items, for the card's sub-item chip. */
 export function subItemsByParent(nodes: BoardNode[]): Map<string, BoardNode[]> {
   const out = new Map<string, BoardNode[]>();

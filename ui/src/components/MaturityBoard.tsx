@@ -72,6 +72,7 @@ import {
   localToday,
   matchesAssigneeFilter,
   matchesBlockedFilter,
+  matchesTitleFilter,
   moveNeedsReview,
   openBlockers,
   subItemsByParent,
@@ -542,6 +543,8 @@ export function MaturityBoard({
   const boardPeople = useMemo(() => assigneesOnBoard(nodes), [nodes]);
   // "Hide blocked" — a glance, like the assignee filter, not a saved setting.
   const [hideBlocked, setHideBlocked] = useState(false);
+  // The filter box: filters titles as you type; Enter turns it into a tag chip.
+  const [filterDraft, setFilterDraft] = useState("");
   const blockedCount = useMemo(
     () => nodes.filter((n) => openBlockers(n) > 0).length,
     [nodes],
@@ -557,6 +560,7 @@ export function MaturityBoard({
           (!config.tasksOnly || !typeTaskEnabled || n.type === "task") &&
           matchesAssigneeFilter(n, assigneeFilter) &&
           matchesBlockedFilter(n, hideBlocked) &&
+          matchesTitleFilter(n, filterDraft) &&
           // Linear's "completed issues: past week/month" display option.
           !(
             config.hideDoneAfterDays !== undefined &&
@@ -570,7 +574,7 @@ export function MaturityBoard({
           ) &&
           matchesFieldFilters(n, config.filterFields, fieldDefs),
       ),
-    [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, config.filterFields, fieldDefs, config.hideDoneAfterDays, assigneeFilter, hideBlocked],
+    [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, config.filterFields, fieldDefs, config.hideDoneAfterDays, assigneeFilter, hideBlocked, filterDraft],
   );
 
   // Folders with nothing in them — the sidebar's census read (shared cache), so
@@ -944,7 +948,6 @@ export function MaturityBoard({
 
   // ── Board tabs: create / rename / duplicate / share / delete ──
   const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null);
-  const [filterDraft, setFilterDraft] = useState("");
   const selectBoard = useCallback((id: string) => setActiveId(id), []);
   const upsertBoard = useCallback(
     (saved: api.SavedBoard) =>
@@ -2006,8 +2009,9 @@ export function MaturityBoard({
               }
               setFilterDraft("");
             }}
-            placeholder="filter by tag…"
-            className="h-7 w-32 text-xs"
+            placeholder="filter by title or #tag…"
+            title="Type to filter by title. Enter adds the text as a tag filter."
+            className="h-7 w-40 text-xs"
           />
         </div>
         {/* Custom-field filters (select / person / checkbox), saved per board. */}
