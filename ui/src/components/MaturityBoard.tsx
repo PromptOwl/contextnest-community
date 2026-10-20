@@ -947,7 +947,7 @@ export function MaturityBoard({
   const draggable = canEditDocs;
 
   // ── Board tabs: create / rename / duplicate / share / delete ──
-  const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null);
+  const [renaming, setRenaming] = useState<{ id: string; value: string; fresh?: boolean } | null>(null);
   const selectBoard = useCallback((id: string) => setActiveId(id), []);
   const upsertBoard = useCallback(
     (saved: api.SavedBoard) =>
@@ -969,7 +969,8 @@ export function MaturityBoard({
         });
         upsertBoard(board);
         setActiveId(board.id);
-        setRenaming({ id: board.id, value: board.name });
+        // A duplicate keeps its "… copy" name; a brand-new board needs one.
+        setRenaming({ id: board.id, value: board.name, fresh: !from });
       } catch (e: any) {
         toast.error(e?.message || "Couldn't create the board");
       }
@@ -1731,15 +1732,20 @@ export function MaturityBoard({
                   key={b.id}
                   autoFocus
                   value={renaming.value}
-                  onChange={(e) => setRenaming({ id: b.id, value: e.target.value })}
+                  onChange={(e) => setRenaming({ ...renaming, value: e.target.value })}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                    if (e.key === "Escape") setRenaming(null);
+                    if (e.key === "Escape") {
+                      setRenaming(null);
+                      if (renaming.fresh) void removeBoard(b);
+                    }
                   }}
                   onBlur={() => {
                     const v = renaming.value.trim();
                     setRenaming(null);
-                    if (v && v !== b.name) void saveBoardMeta(b.id, { name: v });
+                    // A new board left unnamed is an accidental click — discard it.
+                    if (renaming.fresh && (!v || v === b.name)) void removeBoard(b);
+                    else if (v && v !== b.name) void saveBoardMeta(b.id, { name: v });
                   }}
                   className="h-8 w-44 mb-1"
                 />
