@@ -14,7 +14,7 @@ import { keys, reads } from "../../lib/queries";
 import { BULK_REVIEW_LIMIT } from "../../lib/constants";
 import { FEED_PAGE, useFeedComments } from "./feed-query";
 import { ReviewQueue, ReviewPane, ReasonDialog, type ReviewRequest } from "../governance";
-import { nextReviewNodeId } from "../../lib/review-pane";
+import { displayedChangeOrder, nextReviewNodeId } from "../../lib/review-pane";
 import { AgentActivityPanel } from "./AgentActivityPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -46,6 +46,10 @@ interface Props {
   onRequestChanges: (nodeId: string, note: string) => Promise<void>;
   /** Lower-cased email of the caller. */
   currentUser?: string;
+  /** The caller can edit documents here — gates the pane's Edit draft. */
+  canEditDocs: boolean;
+  /** Prime documents can't take approve-with-edits. */
+  primeTags: string[];
   onResolveDeletion: (request: api.DeletionRequest, action: "delete" | "decline") => void;
   /** Your own pending submission back to Draft. */
   onWithdrawSubmission: (nodeId: string) => void;
@@ -67,6 +71,8 @@ export function ReviewTab({
   onApproveReview,
   onRequestChanges,
   currentUser,
+  canEditDocs,
+  primeTags,
   onResolveDeletion,
   onWithdrawSubmission,
 }: Props) {
@@ -146,7 +152,8 @@ export function ReviewTab({
   };
   // A decision moves straight on to the next change in the queue.
   const decideAndAdvance = async (nodeId: string, run: () => Promise<void>) => {
-    const next = nextReviewNodeId(reviewableQueue, nodeId);
+    const shown = displayedChangeOrder(reviewableQueue, feedFilter !== "changes");
+    const next = nextReviewNodeId(shown, nodeId);
     await run();
     onOpenReview(next === nodeId ? null : next);
   };
@@ -213,7 +220,7 @@ export function ReviewTab({
             {myPendingSubmissions.map((r) => (
               <div
                 key={r.id}
-                className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted/50"
+                className={`flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted/50 ${openReviewId === r.nodeId ? "border-primary bg-muted/60" : ""}`}
               >
                 <button
                   onClick={() => onOpenReview(r.nodeId)}
@@ -463,7 +470,30 @@ export function ReviewTab({
     </>
   );
 
-  if (!openRequest) return <div className="space-y-4">{queueColumn}</div>;
+  if (!openRequest) {
+    // A ?review= link to a change that is no longer pending (decided since
+    // the link was shared) says so instead of silently showing the queue.
+    const stale = openReviewId && !loading;
+    return (
+      <div className="space-y-4">
+        {stale && (
+          <div
+            className="flex items-center gap-3 rounded-lg border bg-muted/40 px-3 py-2 text-sm"
+            data-testid="review-pane-stale"
+          >
+            <span className="flex-1">
+              That change isn&rsquo;t waiting for review any more — it was already approved,
+              sent back or withdrawn.
+            </span>
+            <Button size="sm" variant="ghost" onClick={() => onOpenReview(null)}>
+              Dismiss
+            </Button>
+          </div>
+        )}
+        {queueColumn}
+      </div>
+    );
+  }
 
   // Queue on the left, the document under review on the right. Below lg the
   // pane stacks above the queue so the open review is what you see first.
@@ -475,6 +505,8 @@ export function ReviewTab({
           nestId={nestId}
           request={openRequest}
           currentUser={currentUser}
+          canEditDocs={canEditDocs}
+          primeTags={primeTags}
           onApprove={(note) =>
             decideAndAdvance(openRequest.nodeId, () => onApproveReview(openRequest.nodeId, note))
           }

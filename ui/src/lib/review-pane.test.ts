@@ -5,6 +5,7 @@ import {
   defaultReviewTab,
   nextReviewNodeId,
   showPriorityBadge,
+  displayedChangeOrder,
   requestChangesError,
   readOnlyReason,
 } from "./review-pane";
@@ -64,6 +65,29 @@ describe("advance after a decision", () => {
   it("opens the first item when the decided one is no longer in the queue", () => {
     expect(nextReviewNodeId(q, "zzz")).toBe("a");
     expect(nextReviewNodeId([], "zzz")).toBeNull();
+  });
+});
+
+describe("advance follows the order on screen", () => {
+  // Server order is by priority; the All/feed view shows newest first.
+  const q = [
+    { id: "1", nodeId: "glossary", requestedAt: "2026-10-20 10:00:00" },
+    { id: "2", nodeId: "customer", requestedAt: "2026-10-20 10:02:00" },
+    { id: "3", nodeId: "active-user", requestedAt: "2026-10-20 10:03:00" },
+  ];
+
+  it("feed view: newest first, so next after the top row is the row below it", () => {
+    const shown = displayedChangeOrder(q, true);
+    expect(shown.map((r) => r.nodeId)).toEqual(["active-user", "customer", "glossary"]);
+    expect(nextReviewNodeId(shown, "active-user")).toBe("customer");
+  });
+
+  it("Changes chip: keeps the server's order", () => {
+    expect(displayedChangeOrder(q, false).map((r) => r.nodeId)).toEqual([
+      "glossary",
+      "customer",
+      "active-user",
+    ]);
   });
 });
 

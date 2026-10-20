@@ -47,6 +47,10 @@ interface ReviewPaneProps {
   request: ReviewRequest;
   /** Lower-cased email of the caller, for the separation-of-duties message. */
   currentUser?: string;
+  /** Edit draft hands off to approve-with-edits, which needs edit rights and
+   *  refuses prime documents — offer it only when it can work. */
+  canEditDocs: boolean;
+  primeTags: string[];
   onApprove: (note?: string) => Promise<void>;
   onRequestChanges: (note: string) => Promise<void>;
   /** Open the document in the editor (Edit, Save & approve). */
@@ -70,6 +74,8 @@ export function ReviewPane({
   nestId,
   request,
   currentUser,
+  canEditDocs,
+  primeTags,
   onApprove,
   onRequestChanges,
   onEditDraft,
@@ -120,6 +126,7 @@ export function ReviewPane({
   }, [nodeId]);
 
   const lockedReason = readOnlyReason(request, currentUser);
+  const canEditDraft = canEditDocs && !!node && !api.isPrimeNode(node, primeTags);
 
   const decide = async (kind: "approve" | "changes") => {
     if (kind === "changes") {
@@ -357,15 +364,17 @@ export function ReviewPane({
                 )}
                 {mode === "changes" ? "Send back" : "Request changes"}
               </Button>
-              <Button
-                variant="ghost"
-                className="w-full justify-center"
-                disabled={processing}
-                onClick={onEditDraft}
-                data-testid="review-pane-edit"
-              >
-                <Pencil className="mr-2 h-4 w-4" /> Edit draft
-              </Button>
+              {canEditDraft && (
+                <Button
+                  variant="ghost"
+                  className="w-full justify-center"
+                  disabled={processing}
+                  onClick={onEditDraft}
+                  data-testid="review-pane-edit"
+                >
+                  <Pencil className="mr-2 h-4 w-4" /> Edit draft
+                </Button>
+              )}
             </>
           )}
         </aside>

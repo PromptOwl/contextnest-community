@@ -1842,7 +1842,9 @@ export function NestView({
           carries the same numbers as its own summary line (CU-wdqcq02qb1). */}
         {activeTab !== "overview" && (
           <div
-            className={`grid grid-cols-1 gap-4 mb-4 ${stewardshipEnabled
+            // While a review is open, small screens skip the stats so the
+            // review itself is the first thing on screen.
+            className={`${activeTab === "review" && openReviewId ? "hidden lg:grid" : "grid"} grid-cols-1 gap-4 mb-4 ${stewardshipEnabled
               ? "md:grid-cols-4"
               : "md:grid-cols-1 max-w-sm"
               }`}
@@ -2070,6 +2072,8 @@ export function NestView({
                 onApproveReview={handleApprove}
                 onRequestChanges={handleRequestChanges}
                 currentUser={currentEmail}
+                canEditDocs={canEditDocs}
+                primeTags={primeTags}
                 onResolveDeletion={(request, action) => setResolveTarget({ request, action })}
                 onWithdrawSubmission={(id) => void withdrawSubmission(id)}
               />

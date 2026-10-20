@@ -42,6 +42,19 @@ export function nextReviewNodeId(
   return queue[i + 1]?.nodeId ?? queue[i - 1]?.nodeId ?? null;
 }
 
+/** The changes in the order the queue shows them, so "next" is the row the
+ *  reviewer sees below. The feed views list newest first (same tie-break as
+ *  the server's feed merge); the Changes chip keeps the server's order. */
+export function displayedChangeOrder<T extends { id: string; requestedAt: string }>(
+  queue: ReadonlyArray<T>,
+  feedMode: boolean,
+): T[] {
+  if (!feedMode) return [...queue];
+  return [...queue].sort(
+    (a, b) => b.requestedAt.localeCompare(a.requestedAt) || b.id.localeCompare(a.id),
+  );
+}
+
 /** Only priorities that change what a reviewer does next get a badge. */
 export function showPriorityBadge(priority: string): boolean {
   return priority === "high" || priority === "urgent";
