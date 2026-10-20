@@ -395,13 +395,18 @@ async function renderPublished(c: any, row: PublishRow, viewerEmail: string | nu
   // block. /p has no nest-user viewer, so it never resolves another node,
   // never frames an artifact and never carries nest-data.
   if (type === "view") {
+    // Title and block count from the APPROVED version, like the body: the
+    // live title may be an unapproved rename.
     let blockCount = 0;
+    let title = row.node_id;
     try {
-      blockCount = (await readViewVersion(row.nest_id, row.node_id, artifact.version)).meta?.blocks.length ?? 0;
+      const approved = await readViewVersion(row.nest_id, row.node_id, artifact.version);
+      blockCount = approved.meta?.blocks.length ?? 0;
+      title = approved.title || row.node_id;
     } catch {
       blockCount = 0;
     }
-    const page = renderPublicViewPage({ title: artifact.title || row.node_id, intro: body, blockCount });
+    const page = renderPublicViewPage({ title, intro: body, blockCount });
     return c.body(withOverlays(page, overlays), 200, {
       "Content-Type": "text/html; charset=utf-8",
     });
