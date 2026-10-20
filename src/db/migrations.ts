@@ -2188,6 +2188,44 @@ export function runMigrations(db: Database.Database): void {
     `);
     recordMigration("067_system_accounts");
   }
+
+  // 069: document pins (CU-wdqcq02crw, experimental — EXPERIMENTAL_DOC_PINS).
+  //   (068 is reserved by an open PR.) Two kinds in one table:
+  //   - scope 'nest': an editorial pin, the nest's own — user_id NULL, ordered
+  //     by position. pinned_by is attribution only (an email, NOT a foreign
+  //     key): the pin belongs to the nest, so removing the steward who made it
+  //     must neither cascade into it nor be blocked by it.
+  //   - scope 'user': a personal bookmark, user_id set, cascades with the user
+  //     (the nest_pins pattern, migration 039).
+  //   The CHECK is the "user_id is NULL iff scope = 'nest'" rule. Uniqueness is
+  //   per scope, so it is two partial unique indexes — a PRIMARY KEY can't hold
+  //   the COALESCE(user_id, '') the rule needs on either dialect. node_id is not
+  //   a foreign key (documents live on disk; node_index is a rebuildable mirror
+  //   whose full rescan would cascade every pin away): NODE_KEYED_TABLES purges
+  //   the rows on delete and repoints them on move.
+  if (!hasMigration("069_node_pins")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS node_pins (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          scope TEXT NOT NULL CHECK(scope IN ('nest', 'user')),
+          user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+          position INTEGER NOT NULL DEFAULT 0,
+          pinned_by TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          CHECK ((scope = 'nest' AND user_id IS NULL) OR (scope = 'user' AND user_id IS NOT NULL))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_editorial
+          ON node_pins(nest_id, node_id) WHERE scope = 'nest';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_node_pins_personal
+          ON node_pins(nest_id, node_id, user_id) WHERE scope = 'user';
+        CREATE INDEX IF NOT EXISTS idx_node_pins_user ON node_pins(user_id);
+      `);
+    })();
+    recordMigration("069_node_pins");
+  }
 }
 
 /**

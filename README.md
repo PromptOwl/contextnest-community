@@ -152,6 +152,7 @@ The **Community Edition** column is the Free and Self-Hosted plans. Enterprise f
 | Nest views — Board (kanban by folder / status / tag), Graph, Definitions glossary | ✅ | ✅ |
 | Workflow plane (Beta) — agents as documents, runs, schedules, inbound hooks, Slack / Teams / webhook connectors | ✅ | ✅ |
 | Activity trace — every governance action, per nest and server-wide | ✅ | ✅ |
+| Document pins (experimental, superadmin switch `EXPERIMENTAL_DOC_PINS`) — stewards pin documents to the front of a nest for everyone; anyone pins for themselves | ✅ | ✅ |
 | Notifications — Slack, Microsoft Teams, email | ✅ | ✅ |
 | Centralized multi-tenant admin console | — | ✅ |
 | Sign-in with email, Google, or Sign in with PromptOwl — [admin guide](./CONFIGURATION.md#single-sign-on-oidc) | ✅ | ✅ |

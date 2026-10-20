@@ -74,6 +74,8 @@ export interface AuthContextValue {
   hootieEnabled: boolean;
   /** Metacognition agents (FEATURE_METACOGNITION + the workflow plane). */
   metacognitionEnabled: boolean;
+  /** Experimental document pins (/health experimental.doc_pins). */
+  docPinsEnabled: boolean;
   /** The assistant's name/logo/colour/greeting from /health — the admin's
    *  custom identity on an enterprise licence, the default Hootie otherwise. */
   hootieBrand: HootieBrand;
@@ -123,6 +125,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
   // launcher never flashes on a server that has it off while /health loads.
   const [hootieEnabled, setHootieEnabled] = useState(false);
   const [metacognitionEnabled, setMetacognitionEnabled] = useState(false);
+  const [docPinsEnabled, setDocPinsEnabled] = useState(false);
   const [hootieBrand, setHootieBrand] = useState<HootieBrand>(DEFAULT_HOOTIE_BRAND);
   const [runnerKeyConfigured, setRunnerKeyConfigured] = useState(false);
   const [subagentRunsEnabled, setSubagentRunsEnabled] = useState(false);
@@ -162,6 +165,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setTypeTaskEnabled(h.type_task_enabled === true);
       setHootieEnabled(h.hootie_enabled === true);
       setMetacognitionEnabled(h.metacognition_enabled === true);
+      setDocPinsEnabled(h.experimental?.doc_pins === true);
       setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
       setRunnerKeyConfigured(!!h.runner_key_configured);
       setSharedDeployment(!!h.shared_deployment);
@@ -209,6 +213,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setTypeTaskEnabled(h.type_task_enabled === true);
         setHootieEnabled(h.hootie_enabled === true);
         setMetacognitionEnabled(h.metacognition_enabled === true);
+        setDocPinsEnabled(h.experimental?.doc_pins === true);
         setHootieBrand(h.hootie_brand ?? DEFAULT_HOOTIE_BRAND);
         setRunnerKeyConfigured(!!h.runner_key_configured);
         setSharedDeployment(!!h.shared_deployment);
@@ -392,6 +397,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         typeTaskEnabled,
         hootieEnabled,
         metacognitionEnabled,
+        docPinsEnabled,
         hootieBrand,
         runnerKeyConfigured,
         sharedDeployment,

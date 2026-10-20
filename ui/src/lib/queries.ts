@@ -49,6 +49,9 @@ export const keys = {
   // expanding a second folder reuses the first's copy. Under keys.nodes so
   // every write that drops the listing drops this with it.
   census: (nestId: string) => [...keys.nodes(nestId), "census"] as const,
+  // Experimental document pins (CU-wdqcq02crw). Under keys.nodes so every
+  // document write (rename, move, delete) drops the strip with the listing.
+  docPins: (nestId: string) => [...keys.nodes(nestId), "pins"] as const,
   stewards: (nestId: string) => [...keys.nest(nestId), "stewards"] as const,
   collaborators: (nestId: string) =>
     [...keys.nest(nestId), "collaborators"] as const,
@@ -379,6 +382,9 @@ const NEST_WRITE_SCOPES: Array<{
   // Pinning reorders the dashboard grid and the palette's nest rows, both of
   // which read `pinned` off the cached nest list. Nothing inside the nest
   // changes, so this deliberately does NOT drop keys.nest(n).
+  // Document pins (CU-wdqcq02crw) — BEFORE the nest-pin rule below, whose
+  // `/pin` is a prefix of `/pins`.
+  { match: /^\/pins(?:\/|$)/, affects: (n) => [keys.docPins(n)] },
   { match: /^\/pin/, affects: () => [keys.nestList()] },
 ];
 
@@ -551,6 +557,12 @@ export const reads = {
     queryOptions({
       queryKey: keys.peopleSuggest(q),
       queryFn: () => api.suggestPeople(q),
+      staleTime: STALE.reference,
+    }),
+  docPins: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.docPins(nestId),
+      queryFn: () => api.getDocPins(nestId),
       staleTime: STALE.reference,
     }),
   fields: (nestId: string) =>

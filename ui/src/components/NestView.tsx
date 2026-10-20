@@ -94,6 +94,7 @@ import {
   type Steward, type StewardRole, type ReviewRequest,
 } from "./governance";
 import { useAuth } from "../auth/AuthContext";
+import { PinnedStrip } from "./nest/DocPins";
 import { ActivityLogPanel } from "./ActivityLogPanel";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { toast } from "sonner";
@@ -1989,6 +1990,9 @@ export function NestView({
         </TabsContent>
 
         <TabsContent value="documents" className="space-y-4">
+          {/* Experimental document pins — renders nothing while the switch is
+              off or the nest has no pins the caller can read. */}
+          <PinnedStrip nestId={nestId} onOpenDocument={(id) => onOpenDocument(id)} />
           <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
             <DocumentsTab
               nestId={nestId}

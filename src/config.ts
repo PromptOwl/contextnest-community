@@ -697,6 +697,17 @@ export const config = {
     return process.env.FEATURE_METACOGNITION === "true";
   },
   /**
+   * Experimental: document pins (CU-wdqcq02crw). Editorial pins (a steward pins
+   * documents to the front of a nest for everyone, in an order they choose) and
+   * personal pins (my own bookmark row). Off by default; a superadmin flips it
+   * under Settings → Features (`experimental_doc_pins`) with no restart. Off →
+   * every /nests/:id/pins route 404s and the UI renders no pin control. May
+   * change or disappear.
+   */
+  get EXPERIMENTAL_DOC_PINS(): boolean {
+    return process.env.EXPERIMENTAL_DOC_PINS === "true";
+  },
+  /**
    * Development only: let a metacognition agent's feeds and MCP servers be
    * plain-http or private addresses (a local MCP server, a feed on the LAN).
    * Off, which is the only safe production setting: the server fetches these

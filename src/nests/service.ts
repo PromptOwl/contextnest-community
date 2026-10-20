@@ -1023,6 +1023,13 @@ export async function deleteNest(nestId: string): Promise<void> {
     } catch {
       // Table not present on legacy DBs — nothing to clean.
     }
+    // Document pins (migration 069) — FK-cascaded too, explicit for the same
+    // reason as the rows above.
+    try {
+      await tx.run("DELETE FROM node_pins WHERE nest_id = ?", [id]);
+    } catch {
+      // Table not present on legacy DBs — nothing to clean.
+    }
     await tx.run("DELETE FROM nests WHERE id = ?", [id]);
   });
 

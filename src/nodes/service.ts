@@ -3048,6 +3048,10 @@ export const NODE_KEYED_TABLES = [
   ["metacognition_agents", "node_id"],
   // Agent/person interactions logged on a task (migration 064).
   ["task_activity", "node_id"],
+  // Document pins (CU-wdqcq02crw, migration 069) — editorial and personal. A
+  // delete takes them with it (no pin on a document that is gone, or on the
+  // next one to take its id); a move carries them along.
+  ["node_pins", "node_id"],
 ] as const;
 
 /** Drop every row keyed to a node id. Caller supplies the transaction. */

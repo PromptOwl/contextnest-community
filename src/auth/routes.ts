@@ -1443,6 +1443,14 @@ authRoutes.delete("/users/:userId", async (c) => {
     } catch {
       // Table not present on a DB predating the pins migration.
     }
+    // Their personal document pins (migration 069) go too — cascaded, explicit
+    // like nest_pins. Editorial pins they made belong to the nest and stay
+    // (pinned_by is attribution only, not a foreign key).
+    try {
+      await tx.run("DELETE FROM node_pins WHERE user_id = ?", [target.id]);
+    } catch {
+      // Table not present on a DB predating migration 069.
+    }
     await tx.run("DELETE FROM users WHERE id = ?", [target.id]);
   });
   await deleteAllSessionsForUser(target.id);

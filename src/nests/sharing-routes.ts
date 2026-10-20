@@ -126,14 +126,28 @@ sharingRoutes.patch("/collaborators/:collabId", async (c) => {
 // Removing a collaborator stays an admin-tier action.
 sharingRoutes.delete("/collaborators/:collabId", async (c) => {
   const db = getDb();
+  const nestId = c.req.param("nestId")!;
+  // Whose row it is, so their personal document pins here can go with it.
+  const target = (await db.get(
+    "SELECT user_id FROM nest_collaborators WHERE id = ? AND nest_id = ?",
+    [c.req.param("collabId")!, nestId],
+  )) as { user_id: string } | undefined;
   // Scope to the nest in the URL (see PATCH above) — never delete a row that
   // belongs to a different nest just because the UUID matches.
   const info = await db.run(
     "DELETE FROM nest_collaborators WHERE id = ? AND nest_id = ?",
-    [c.req.param("collabId")!, c.req.param("nestId")!],
+    [c.req.param("collabId")!, nestId],
   );
   if (info.changes === 0) {
     throw new NotFoundError("Collaborator not found");
+  }
+  // Removed from the nest → their personal document pins in it go too
+  // (CU-wdqcq02crw), the same as leaving it themselves.
+  if (target?.user_id) {
+    await db.run(
+      "DELETE FROM node_pins WHERE nest_id = ? AND scope = 'user' AND user_id = ?",
+      [nestId, target.user_id],
+    );
   }
   return c.json({ removed: true });
 });

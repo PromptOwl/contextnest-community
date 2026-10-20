@@ -10,6 +10,7 @@ import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
 import { boardRoutes } from "./nests/board-routes.js";
 import { fieldRoutes } from "./nests/field-routes.js";
+import { pinRoutes } from "./nests/pin-routes.js";
 import { listAssignedTo } from "./nodes/assigned-service.js";
 import { headlessRoutes } from "./nests/headless-routes.js";
 import { countPeople } from "./auth/headless.js";
@@ -715,6 +716,12 @@ export function createApp(): Hono<AuthEnv> {
       // Metacognition agents (default OFF; needs the workflow plane too). Off →
       // /nests/:id/metacognition 404s and the Workflows view hides its tab.
       metacognition_enabled: config.FEATURE_WORKFLOW_PLANE && config.FEATURE_METACOGNITION,
+      // Experimental features, one key each (default OFF; superadmin switches
+      // under Settings → Features). Off → the feature's routes 404 and the UI
+      // renders none of it. Add new experimental switches as keys here.
+      experimental: {
+        doc_pins: config.EXPERIMENTAL_DOC_PINS,
+      },
       // The identity every surface shows: the admin's custom name/logo/
       // colour/greeting on an enterprise licence, the default Hootie
       // otherwise (enforced here, not in the client). Public: the launcher
@@ -955,6 +962,7 @@ export function createApp(): Hono<AuthEnv> {
     model_source: resolveModelCredential()?.source ?? null,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     metacognition_enabled: config.FEATURE_METACOGNITION,
+    experimental_doc_pins: config.EXPERIMENTAL_DOC_PINS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
@@ -1384,6 +1392,14 @@ export function createApp(): Hono<AuthEnv> {
       } else {
         pending.push({ name: "FEATURE_METACOGNITION", value: body.metacognition_enabled ? "true" : null });
       }
+    }
+    // Experimental: document pins (CU-wdqcq02crw). Default OFF — enabling
+    // writes "true", disabling clears the row (falls back to the default).
+    if ("experimental_doc_pins" in body) {
+      pending.push({
+        name: "EXPERIMENTAL_DOC_PINS",
+        value: body.experimental_doc_pins ? "true" : null,
+      });
     }
     // Sub-agent recursion caps. Same [min,max] the config getters clamp to, so
     // a UI-set value gates identically to an env-set one. null clears → default.
@@ -2443,6 +2459,15 @@ export function createApp(): Hono<AuthEnv> {
       `UPDATE notifications SET read_at = ? WHERE LOWER(user_email) = LOWER(?) AND nest_id = ? AND kind = 'nest_invite' AND read_at IS NULL`,
       [new Date().toISOString(), me, nestId],
     );
+    // Leaving takes the leaver's personal document pins here with them
+    // (CU-wdqcq02crw). Only when a collaborator row actually went: someone
+    // who still reaches the nest through a team keeps their bookmarks.
+    if (info.changes > 0) {
+      await db.run(
+        "DELETE FROM node_pins WHERE nest_id = ? AND scope = 'user' AND user_id = ?",
+        [nestId, c.get("userId")],
+      );
+    }
     return c.json({ left: info.changes > 0 });
   });
 
@@ -2676,6 +2701,15 @@ export function createApp(): Hono<AuthEnv> {
     }
     if (parts.length < 2) return next();
 
+    // Experimental document pins (CU-wdqcq02crw): while the switch is off the
+    // routes do not exist — 404 before the license gate, the permission merge
+    // or the nest lookup, so "off" answers the same whoever asks. Exact
+    // resource segment; documents live under /nodes, never here.
+    const isDocPinsPath = parts[1] === "pins";
+    if (isDocPinsPath && !config.EXPERIMENTAL_DOC_PINS) {
+      return c.json({ error: "Not found" }, 404);
+    }
+
     // "unsynced" is a server-admin namespace under /nests, not a nest id.
     // Without this bypass parts[0]="unsynced" is treated as a nest id and the
     // permission resolver 404s every call with "Nest not found". Its own
@@ -2814,7 +2848,10 @@ export function createApp(): Hono<AuthEnv> {
         isActivityPath ||
         isFeedPath ||
         isDeletionQueuePath ||
-        isAgentActivityPath;
+        isAgentActivityPath ||
+        // Document pins (CU-wdqcq02crw) are a curation surface, licensed like
+        // the governance views even on GET. Exact segment (parts[1]).
+        parts[1] === "pins";
       // Releasing a held push is exempt from the license gate — listing,
       // reading, confirming and rejecting alike. POST /publish is unlicensed,
       // so on a gated nest a lapsed license would hold every push at 202 and
@@ -2981,6 +3018,13 @@ export function createApp(): Hono<AuthEnv> {
         // write most often stops. Filing and reading back their OWN request is
         // all this opens; the service 404s a target they can't see, and
         // deciding stays owner/admin-only in the handler.
+        grantNestVisible = access.hasGrant;
+      } else if (parts[1] === "pins") {
+        // Document pins (CU-wdqcq02crw), for someone who reaches this nest only
+        // through a document or folder grant: the list is narrowed to the
+        // documents they can read (filterAccessible), a personal pin needs read
+        // access to its document, and editorial writes are refused in the
+        // handler — so this opens nothing past their grants.
         grantNestVisible = access.hasGrant;
       } else if (isPinAction) {
         // Pinning, for someone who reaches this nest only through a document or
@@ -3197,6 +3241,10 @@ export function createApp(): Hono<AuthEnv> {
       !isFieldDefinitionAction &&
       !isNestLifecycleAction &&
       !isPinAction &&
+      // Document pins: personal pins need only read access; editorial writes
+      // are gated in the handler (assertCanCurate) — a nest-wide reviewer
+      // steward may hold only read collaborator access.
+      !isDocPinsPath &&
       !isAnnotationAction &&
       !isReadQuery &&
       !isStructureCheck &&
@@ -3487,6 +3535,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/teams", nestTeamRoutes);
   nestsApp.route("/:nestId/boards", boardRoutes);
   nestsApp.route("/:nestId/fields", fieldRoutes);
+  nestsApp.route("/:nestId/pins", pinRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);

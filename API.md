@@ -361,6 +361,32 @@ Idempotent under concurrency, not just in sequence: two simultaneous pins of the
 
 Pins are per `(user, nest)` in the `nest_pins` table and cascade with the nest. Each row of `GET /nests` carries `pinned` for the calling user, and the dashboard floats pinned nests to the top of the grid under either sort.
 
+### Document pins — `/nests/:nestId/pins` (experimental, `EXPERIMENTAL_DOC_PINS`)
+**Experimental — may change or disappear.** Every route here answers `404` while `EXPERIMENTAL_DOC_PINS` is off (a superadmin turns it on under Settings → Features, live; `/health` reports `experimental.doc_pins`). License-gated like the governance views, `GET` included (`503` unlicensed past the Free tier).
+
+Two kinds of pin on a document:
+- **Editorial** (`scope: "nest"`) — pinned for everyone, in an order the steward chooses. Who may write: the nest owner, a nest admin, the server admin, or a **reviewer steward scoped to the whole nest**; everyone else (write collaborators and editor stewards included) gets `403`. Archived nest → `403`.
+- **Personal** (`scope: "user"`) — the caller's own bookmark, visible to nobody else. Needs only read access to the document.
+
+**GET** `/nests/:nestId/pins` (read+, including document/folder grantees) →
+```json
+{ "editorial": [{ "node_id": "nodes/start-here", "scope": "nest", "title": "Start here", "type": "document",
+                  "status": "approved", "position": 0, "pinned_by": "steward@acme.com", "pinned_at": "…" }],
+  "personal": [ … same shape, scope "user" … ],
+  "can_pin_editorial": true }
+```
+Both lists are filtered by the same read rules as documents: a pinned document the caller can't read is left out, and a pin whose document no longer exists is never returned.
+
+**POST** `/nests/:nestId/pins` `{ "node_id": "nodes/start-here", "scope": "nest" | "user" }` → `201 { "pin": …, "created": true|false }`. Idempotent — pinning what is already pinned answers `201` with `created: false`. A new pin goes to the end of its list. Unknown or unreadable document → `404`; bad `scope` → `400`.
+
+**DELETE** `/nests/:nestId/pins?node_id=…&scope=nest|user` → `{ "unpinned": true|false }`. Idempotent. A personal unpin only ever removes the caller's own pin.
+
+**PUT** `/nests/:nestId/pins/order` `{ "node_ids": ["nodes/b", "nodes/a"] }` (editorial writers only) → the same body as `GET`. `node_ids` must name every editorial pin exactly once (`400` otherwise — reload and retry).
+
+The document id travels in the body/query rather than the path because node ids contain slashes: a `/nodes/:nodeId/pin` suffix can't be told apart from a document whose slug is `pin`.
+
+Pins live in `node_pins` (migration 069). A deleted document takes its pins with it and a moved one carries them; a deleted user takes their personal pins (editorial pins they made stay — they belong to the nest); leaving a nest (`POST /me/nests/:id/leave`) drops the leaver's personal pins there; a deleted nest takes all of them. Not part of `/me/stream` yet.
+
 ### GET `/nests/:nestId/settings`
 ```json
 {
@@ -2424,6 +2450,8 @@ Two **server-level bootstrap writes** on `ALL /mcp` let a single-connection clie
 `{ "status": "ok" | "suspended", "version": "<server version>", … }`. Needs no key (like `/llms.txt` and public `/p/:slug` pages) — use it for liveness probes. `suspended` means the license was revoked and writes are refused until a valid key is installed.
 
 Hootie fields: `hootie_enabled` (default `false`), `hootie_brand` — `{ name, logo_url, accent_color, greeting }`, the identity every surface should show (the admin's custom one on an Enterprise licence, otherwise `{ name: "Hootie", logo_url: null, accent_color: null, greeting: null }`, decided server-side) — and `hootie_branding_available` (whether custom identity is allowed).
+
+Experimental features: `experimental` — one boolean per switch, e.g. `{ "doc_pins": false }` (`EXPERIMENTAL_DOC_PINS`, superadmin-switchable as `experimental_doc_pins` on `/admin/settings`). Off → that feature's routes `404` and its UI stays hidden.
 
 ### Hootie identity — `/admin/settings` fields (Enterprise)
 `hootie_name` (one line, ≤40 chars), `hootie_logo_url` (`https://` image: `.png`/`.jpg`/`.gif`/`.webp`), `hootie_accent_color` (hex, normalised to `#rrggbb`), `hootie_greeting` (one line, ≤200 chars). `""` resets a field to the default. GET returns the stored values plus `hootie_branding_available`. "Enterprise licence" here means the licence carries the `hootie_branding` feature (PromptOwl's licence check returns the licence's `features`; an Enterprise licence has it by default, and PromptOwl can grant or revoke it per licence). A PATCH that would **change** any of these without it is refused as a whole — `403 { code: "enterprise_required" }` (the code name is kept for wire compatibility; it means the licence lacks `hootie_branding`), nothing written, including the request's other fields. Sending back the stored values unchanged is allowed (they are ignored). Invalid values → `400` with `fieldErrors` keyed by field. `hootie_enabled` is written explicitly (`true`/`false`), so a UI choice beats the deploy env.
