@@ -67,7 +67,7 @@ Flow:
 | GET | `/oauth/connected` | Your connected apps: one entry per client with a usable token — `clientId`, `clientName`, `scopes`, `redirectOrigin`, `connectedAt`, `lastUsedAt`. Session or user-level key; a nest-scoped key gets `403`. |
 | DELETE | `/oauth/connected/:clientId` | Disconnect one app: revokes every token it holds for you, at once. `404` when you have no live grant for that client. Same auth as above. |
 
-An unauthenticated request to `/mcp` is answered with `401` and `WWW-Authenticate: Bearer resource_metadata="..." scope="nests:read"`, which is what starts the flow. An expired or revoked OAuth access token on `/mcp` or `/index` gets `401` with `WWW-Authenticate: Bearer error="invalid_token" resource_metadata="..."`, so the client refreshes or re-authorizes. Other bad credentials get the ordinary rejection.
+An unauthenticated request to `/mcp` is answered with `401` and `WWW-Authenticate: Bearer resource_metadata="..." scope="nests:read nests:write offline_access"`, which is what starts the flow. Clients request those scopes, so one consent covers reading, writing and staying signed in. An expired or revoked OAuth access token on `/mcp` or `/index` gets `401` with `WWW-Authenticate: Bearer error="invalid_token" resource_metadata="..."`, so the client refreshes or re-authorizes. Other bad credentials get the ordinary rejection.
 
 Scopes: `nests:read`, `nests:write`, `offline_access` (ask for the last to receive a refresh token).
 
