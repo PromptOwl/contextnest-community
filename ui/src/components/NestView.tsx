@@ -9,7 +9,7 @@ import * as api from "../lib/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
-import { decideWikiLinkAction } from "../lib/wiki-preview";
+import { reviewIdFromSearch, withReviewParam } from "../lib/review-pane";
 import { checkFolderPath } from "../lib/folder-path";
 import { createConsumeOnceFlag } from "../lib/consume-once-flag";
 import {
@@ -89,13 +89,11 @@ import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu
 import { CountSkeleton } from "@/components/ui/count-skeleton";
 import {
   StewardModal,
-  ReviewActions,
   ReasonDialog,
   type Steward, type StewardRole, type ReviewRequest,
 } from "./governance";
 import { useAuth } from "../auth/AuthContext";
 import { ActivityLogPanel } from "./ActivityLogPanel";
-import { MarkdownEditor } from "./MarkdownEditor";
 import { toast } from "sonner";
 
 
@@ -362,7 +360,21 @@ export function NestView({
   // `loading`, so a background refetch (fired by the many mutation handlers)
   // never blanks already-rendered tabs back to a spinner.
   const [initialLoad, setInitialLoad] = useState(true);
-  const [reviewNode, setReviewNode] = useState<any | null>(null);
+  // The change open in the Review tab's pane. Mirrored into ?review= so a
+  // review can be linked and survives a refresh (CU-wdqcq05mhk).
+  const [openReviewId, setOpenReviewIdState] = useState<string | null>(() =>
+    typeof window === "undefined" ? null : reviewIdFromSearch(window.location.search),
+  );
+  const setOpenReviewId = (nodeId: string | null) => {
+    setOpenReviewIdState(nodeId);
+    if (typeof window === "undefined") return;
+    const search = withReviewParam(window.location.search, nodeId);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      window.location.pathname + search + window.location.hash,
+    );
+  };
   const [showAssignSteward, setShowAssignSteward] = useState(false);
   // Admin activity log for the whole nest (CU-wdqcq03aw2).
   const [showNestActivity, setShowNestActivity] = useState(false);
@@ -427,6 +439,7 @@ export function NestView({
   // clicks that jump to Documents — mirrors into ?tab= via App.
   const setActiveTab = (tab: string) => {
     setActiveTabState(tab);
+    if (tab !== "review" && openReviewId) setOpenReviewId(null);
     onTabChange?.(tab);
   };
   // Follow tab changes made outside the tab strip (sidebar, breadcrumb, back/forward).
@@ -910,33 +923,32 @@ export function NestView({
     }
   };
 
-  const handleApprove = async (note?: string) => {
-    if (!reviewNode) return;
+  // Decisions from the review pane. Errors are rethrown so the pane shows
+  // them inline beside the button that failed (a 403 from SoD, scope or
+  // licensing must not look like nothing happened).
+  const handleApprove = async (nodeId: string, note?: string) => {
     try {
-      await api.approveNode(nestId, reviewNode.id, note);
-      toast.success("Approved");
-      // Drop the row now; fetchData below reconciles in the background.
-      setReviewQueue((q) => q.filter((r) => r.nodeId !== reviewNode.id));
-      setReviewNode(null);
-      fetchData();
+      await api.approveNode(nestId, nodeId, note);
     } catch (err: any) {
-      console.error("[NestView] approveNode failed", nestId, reviewNode?.id, err);
-      toast.error(err?.message || "Approve failed");
+      console.error("[NestView] approveNode failed", nestId, nodeId, err);
+      throw new Error(err?.message || "Approve failed");
     }
+    toast.success("Approved and published");
+    // Drop the row now; fetchData below reconciles in the background.
+    setReviewQueue((q) => q.filter((r) => r.nodeId !== nodeId));
+    fetchData();
   };
 
-  const handleReject = async (note: string) => {
-    if (!reviewNode) return;
+  const handleRequestChanges = async (nodeId: string, note: string) => {
     try {
-      await api.rejectNode(nestId, reviewNode.id, note);
-      toast.success("Rejected");
-      setReviewQueue((q) => q.filter((r) => r.nodeId !== reviewNode.id));
-      setReviewNode(null);
-      fetchData();
+      await api.rejectNode(nestId, nodeId, note);
     } catch (err: any) {
-      console.error("[NestView] rejectNode failed", nestId, reviewNode?.id, err);
-      toast.error(err?.message || "Reject failed");
+      console.error("[NestView] rejectNode failed", nestId, nodeId, err);
+      throw new Error(err?.message || "Request changes failed");
     }
+    toast.success("Sent back to the author");
+    setReviewQueue((q) => q.filter((r) => r.nodeId !== nodeId));
+    fetchData();
   };
 
   // Cancel your own pending review — the document goes back to Draft rather
@@ -2024,7 +2036,13 @@ export function NestView({
               deletionRequests={deletionRequests}
               stats={stats}
               onOpenDocument={onOpenDocument}
-              onReview={setReviewNode}
+              onReview={(node) => {
+                // Review happens in the Review tab's pane, with the diff and
+                // the author's note — not a second, thinner surface here.
+                if (!showReviewTab) return onOpenDocument(node.id);
+                setActiveTab("review");
+                setOpenReviewId(node.id);
+              }}
               onRefresh={fetchData}
               onWithdrawDeletion={(r) => void handleWithdrawDeletion(r)}
               importInputRef={importInputRef}
@@ -2047,17 +2065,11 @@ export function NestView({
                 loading={loading}
                 onRefresh={fetchData}
                 onOpenDocument={onOpenDocument}
-                onSelectRequest={(req) => {
-                  const node = nodes.find((n) => n.id === req.nodeId);
-                  if (node) {
-                    setReviewNode(node);
-                    return;
-                  }
-                  // Not in the loaded levels. Under lazy loading that usually
-                  // just means its folder was never expanded, so open the
-                  // document itself rather than calling it missing.
-                  onOpenDocument(req.nodeId);
-                }}
+                openReviewId={openReviewId}
+                onOpenReview={setOpenReviewId}
+                onApproveReview={handleApprove}
+                onRequestChanges={handleRequestChanges}
+                currentUser={currentEmail}
                 onResolveDeletion={(request, action) => setResolveTarget({ request, action })}
                 onWithdrawSubmission={(id) => void withdrawSubmission(id)}
               />
@@ -2571,19 +2583,6 @@ export function NestView({
       )}
 
 
-      {reviewNode && (
-        <ReviewDocumentModal
-          node={reviewNode}
-          nestId={nestId}
-          onApprove={handleApprove}
-          onReject={handleReject}
-          onClose={() => setReviewNode(null)}
-          onOpenDocument={(nodeId) => {
-            setReviewNode(null);
-            onOpenDocument(nodeId);
-          }}
-        />
-      )}
 
 
       {removeStewardId && (
@@ -2671,122 +2670,5 @@ export function NestView({
       )}
 
     </div>
-  );
-}
-
-// ─── Sub-modals ─────────────────────────────────────────────────
-
-function ReviewDocumentModal({
-  node,
-  nestId,
-  onApprove,
-  onReject,
-  onClose,
-  onOpenDocument,
-}: {
-  node: any;
-  nestId: string;
-  onApprove: (note?: string) => Promise<void>;
-  onReject: (note: string) => Promise<void>;
-  onClose: () => void;
-  onOpenDocument: (nodeId: string) => void;
-}) {
-  const [linkError, setLinkError] = useState<string | null>(null);
-  const qc = useQueryClient();
-
-  // The row that opened this modal comes from the document list, which carries
-  // metadata only — a body per row costs a file read per row, and nothing in
-  // the list renders one. A reviewer decides on the TEXT, so fetch it for this
-  // one document, on open. Falls back to a body the caller already had, so a
-  // row that does carry one renders without a round trip.
-  const { data: full, isLoading: bodyLoading } = useQuery({
-    ...reads.node(nestId, node.id),
-    enabled: !node.content,
-  });
-  const body = node.content || full?.node?.content || "";
-
-  // Resolve `[[Title]]` clicks to a node id and jump straight to that
-  // doc. Without this the wiki-link decoration renders but click does
-  // nothing — `MarkdownEditor` only wires nav when `onWikiLinkClick`
-  // is provided. `id` (the decoration's cached existence check) is never
-  // trusted for navigation — it can go stale between when the decoration
-  // checked and when it's clicked — so every click re-resolves against the
-  // live node list via the shared decideWikiLinkAction (same rule as the
-  // editor), which also picks up a target created after the reviewer opened
-  // the modal. Broken links are NOT routed to the create flow (canAuthor:
-  // false) — the caller is acting as a reviewer here (read-only role for
-  // this surface), so silently dropping them into an authoring page would
-  // mislead them; instead we surface an inline note.
-  const handleWikiLinkClick = async (
-    title: string,
-    _id: string | null,
-    displayText?: string | null,
-  ) => {
-    setLinkError(null);
-    try {
-      const { nodes } = await qc.fetchQuery(reads.nodes(nestId));
-      const action = decideWikiLinkAction(
-        nodes as Array<{ id: string; title: string }>,
-        title,
-        false,
-        displayText,
-      );
-      if (action.kind === "navigate") {
-        onOpenDocument(action.node.id);
-        return;
-      }
-      setLinkError(
-        `"${action.title}" doesn't exist in this nest. Reviewers can't create new documents — ask an editor to add it.`,
-      );
-    } catch (e) {
-      console.error("[NestView] wiki-link lookup failed", nestId, title, e);
-      setLinkError("Couldn't look up that document — try again later.");
-    }
-  };
-
-  return (
-    <Dialog open onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-[600px] max-h-[80vh] flex flex-col">
-        <DialogHeader>
-          <DialogTitle>{node.title}</DialogTitle>
-        </DialogHeader>
-        {linkError && (
-          <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-200">
-            {linkError}
-          </div>
-        )}
-        <div className="flex-1 overflow-y-auto rounded-md">
-          {body ? (
-            <MarkdownEditor
-              // Remount when the reviewer switches between docs in the
-              // queue. Same modal instance otherwise → TipTap keeps its
-              // previous doc's editor state and the body briefly shows
-              // the wrong content on swap.
-              key={node.id}
-              content={body}
-              onChange={() => { }}
-              editable={false}
-              nestId={nestId}
-              onWikiLinkClick={handleWikiLinkClick}
-            />
-          ) : bodyLoading ? (
-            // Distinct from "(no content)": approving on the strength of an
-            // empty box that was merely still loading is the one mistake this
-            // modal must not invite.
-            <p className="text-sm text-muted-foreground p-4">Loading content…</p>
-          ) : (
-            <p className="text-sm text-muted-foreground p-4">(no content)</p>
-          )}
-        </div>
-        <DialogFooter>
-          <ReviewActions
-            documentTitle={node.title}
-            version={node.version || 1}
-            onApprove={onApprove}
-            onReject={onReject}
-          />
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }

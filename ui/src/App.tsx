@@ -660,6 +660,7 @@ export default function App() {
       else params.delete("thread");
       params.delete("view");
       params.delete("tab");
+      params.delete("review");
     } else if (view.page === "nest") {
       pathNestId = view.nestId;
       if (view.readerMode && view.readerDoc) params.set("doc", view.readerDoc);
@@ -670,6 +671,9 @@ export default function App() {
       // link keeps working and doesn't grow a redundant &tab=overview.
       if (view.tab && view.tab !== "overview") params.set("tab", view.tab);
       else params.delete("tab");
+      // ?review= (the change open in the review pane) only means something
+      // on the Review tab; NestView writes it, App drops it everywhere else.
+      if (view.tab !== "review") params.delete("review");
     } else if (
       // Nest views ride in the path (/nest/<id>/<segment>) — the registry
       // page owns its segment; trace is the one non-registry sub-page.
@@ -688,11 +692,13 @@ export default function App() {
       params.delete("thread");
       params.delete("tab");
       params.delete("view");
+      params.delete("review");
     } else {
       params.delete("doc");
       params.delete("thread");
       params.delete("view");
       params.delete("tab");
+      params.delete("review");
     }
     const qs = params.toString();
     const path =
