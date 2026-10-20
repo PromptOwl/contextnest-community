@@ -21,7 +21,7 @@ import { config } from "../config.js";
 import { engineCache } from "../nodes/engine.js";
 import { bodyOnly } from "../nodes/service.js";
 import { filterAccessible, resolveCallerEmail } from "../governance/access-guard.js";
-import { getApprovedVersion, getVersion } from "../governance/version-service.js";
+import { getApprovedVersion, getApprovedVersions, getVersion } from "../governance/version-service.js";
 import { isPublicReader, resolveNestPermission } from "../shared/access.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { queryTableNode } from "../tables/query.js";
@@ -109,10 +109,30 @@ export function createViewDeps(): ViewDeps {
     },
 
     async selectNodes(nestId, selector, p) {
-      const { storage } = await engineCache.get(nestId);
-      const docs = (await storage.discoverDocuments()).filter(
+      const { storage, versions: versionManager } = await engineCache.get(nestId);
+      let docs = (await storage.discoverDocuments()).filter(
         (d) => isPublished(d) && !isForgotten(d),
       );
+      // An approved-only principal is entitled to approved VALUES, not just
+      // approved ids: a live copy's `status: published` is a claim, not a
+      // review. Evaluate and project over each node's approved version.
+      if (p.some((x) => x.approvedOnly)) {
+        const approved = await getApprovedVersions(nestId);
+        const live = (await storage.discoverDocuments()).filter((d) => !isForgotten(d) && !isRejected(d));
+        const rebuilt: ContextNode[] = [];
+        for (const d of live) {
+          const v = approved.get(d.id);
+          if (v == null) continue;
+          try {
+            const raw = await versionManager.reconstructVersion(d.id, v);
+            const past = parseDocument(`${d.id}.md`, raw, d.id);
+            rebuilt.push({ ...past, id: d.id, frontmatter: { ...past.frontmatter, status: "published" as any } });
+          } catch {
+            /* an unreadable approved version is simply not listed */
+          }
+        }
+        docs = rebuilt;
+      }
       const seen = await visibleTo(nestId, docs.map((d) => d.id), p);
       const documents = docs.filter((d) => seen.has(d.id));
       // The engine evaluates the selector over the reader's own scope, as it
@@ -170,18 +190,38 @@ export function createViewDeps(): ViewDeps {
   };
 }
 
-/** Distinct `node_versions.author` of versions 1..upto — the server-stamped
- *  record of who wrote each version (never the frontmatter `author`). */
+/**
+ * Distinct `node_versions.author` of versions 1..upto — the server-stamped
+ * record of who wrote each version (never the frontmatter `author`) — or
+ * `null` when that record is incomplete and the chain's authors therefore
+ * cannot all be named. Complete means: every version sealed in the engine's
+ * history up to `upto`, and `upto` itself, has a row with an author. A draft
+ * number that was never sealed (its row superseded) carries no content of
+ * its own and is not required. An unreadable history is incomplete.
+ */
 export async function listVersionAuthors(
   nestId: string,
   nodeId: string,
   uptoVersion: number,
-): Promise<string[]> {
+): Promise<string[] | null> {
   const rows = (await getDb().all(
-    "SELECT DISTINCT author FROM node_versions WHERE nest_id = ? AND node_id = ? AND version <= ?",
+    "SELECT version, author FROM node_versions WHERE nest_id = ? AND node_id = ? AND version <= ?",
     [nestId, nodeId, uptoVersion],
-  )) as Array<{ author: string | null }>;
-  return rows.map((r) => r.author ?? "");
+  )) as Array<{ version: number; author: string | null }>;
+  const byVersion = new Map(rows.map((r) => [Number(r.version), r.author]));
+  let sealed: number[];
+  try {
+    const { versions: versionManager } = await engineCache.get(nestId);
+    const history = await versionManager.getHistory(nodeId);
+    sealed = (history?.versions ?? []).map((v) => v.version).filter((v) => v <= uptoVersion);
+  } catch {
+    return null;
+  }
+  for (const v of new Set([...sealed, uptoVersion])) {
+    const author = byVersion.get(v);
+    if (author === undefined || author === null) return null;
+  }
+  return [...new Set(rows.map((r) => r.author ?? ""))];
 }
 
 /** Look authors up WITHOUT the anonymous-user fallback: an email that names
@@ -194,11 +234,21 @@ export async function authorInfos(nestId: string, emails: string[]): Promise<Aut
       out.push({ email, userId: null, isSystem, nestPermission: "none" });
       continue;
     }
-    const row = (await getDb().get("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", [email])) as
-      | { id: string }
-      | undefined;
+    const row = (await getDb().get(
+      `SELECT u.id, u.is_service,
+              (SELECT 1 FROM system_accounts sa WHERE sa.user_id = u.id) AS is_system
+         FROM users u WHERE LOWER(u.email) = LOWER(?)`,
+      [email],
+    )) as { id: string; is_service: number | null; is_system: number | null } | undefined;
     if (!row) {
       out.push({ email, userId: null, isSystem: false, nestPermission: "none" });
+      continue;
+    }
+    // Access-key, persona and named-system identities are not people who can
+    // vouch for code: agent-written versions are the likeliest to carry
+    // injected content, and such accounts often hold broad access.
+    if (row.is_service || row.is_system) {
+      out.push({ email, userId: row.id, isSystem: true, nestPermission: "none" });
       continue;
     }
     out.push({

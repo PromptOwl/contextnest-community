@@ -478,6 +478,9 @@ export interface TrustInput {
   artifactApproved: boolean;
   viewer: Principal;
   authors: AuthorInfo[];
+  /** True when some version of either chain has no author on record, so
+   *  `authors` cannot be the whole list — withholds. */
+  authorsIncomplete?: boolean;
   killSwitch: boolean;
 }
 
@@ -487,18 +490,23 @@ export type TrustDecision = { ok: true; principals: Principal[] } | { ok: false;
  * Whose access bounds a frame's data (spec §2.5). Pure, and every check runs
  * before any ACL call; the first failure withholds.
  *
- *  - On a governed nest approval is the gate: the served view AND artifact
- *    versions must be approved, and the viewer alone is the principal.
- *  - On an ungoverned nest nobody reviewed the code, so everyone who wrote a
- *    version of either chain up to the served one is a principal too — and
- *    any of them who is a system identity, unknown, or no longer a member
- *    makes the data unsafe to hand over at all.
+ *  - The served view AND artifact versions must be approved.
+ *  - On every nest, governed or not, everyone who wrote a version of either
+ *    chain up to the served one is a principal next to the viewer (approval
+ *    may have been self-publication) — and any of them who is a system or
+ *    service identity, unknown, or no longer a member makes the data unsafe
+ *    to hand over at all. `stewardship` is kept in the input for the record;
+ *    it no longer widens anything.
  */
 export function decideDataTrust(i: TrustInput): TrustDecision {
   if (i.killSwitch) return { ok: false, reason: "kill_switch" };
   if (!i.viewApproved) return { ok: false, reason: "view_not_approved" };
   if (!i.artifactApproved) return { ok: false, reason: "artifact_not_approved" };
-  if (i.stewardship) return { ok: true, principals: [i.viewer] };
+  // No governed-nest shortcut: "approved" can be the author's own publication
+  // (creator-reviews v1, a prime-only posture's non-prime documents, an
+  // owner's self-approve), so approval alone never proves a second person read
+  // the code. The authors always bound the data, on every nest.
+  if (i.authorsIncomplete) return { ok: false, reason: "authors_incomplete" };
   if (i.authors.length === 0) return { ok: false, reason: "no_authors" };
   const principals: Principal[] = [i.viewer];
   for (const a of i.authors) {
