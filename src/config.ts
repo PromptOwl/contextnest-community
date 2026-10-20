@@ -233,6 +233,21 @@ export const config = {
     return (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
   },
   /**
+   * Custom domains for public docs sites (CU-wdqcq05jhm), as
+   * `host=nestId[,host=nestId…]` — e.g. `docs.contextnest.ai=ad8fe978-…`.
+   * Point the domain's DNS at this server and the nest's docs site is served
+   * at that domain's root (the nest must still be public with Reader Mode on).
+   * Unset ⇒ docs sites live only under /d/<slug> on this server's own host.
+   */
+  get DOCS_SITES(): Map<string, string> {
+    const map = new Map<string, string>();
+    for (const pair of (process.env.DOCS_SITES || "").split(",")) {
+      const [host, nestId] = pair.split("=").map((s) => s.trim());
+      if (host && nestId) map.set(host.toLowerCase(), nestId);
+    }
+    return map;
+  },
+  /**
    * Dedicated secret this deployment uses to SIGN the short-lived MCP tickets
    * minted by the SSO token-exchange (POST /auth/token-exchange). Kept distinct
    * from OFFICIAL_COMMUNITY_SSO_SECRET so a SELF-HOSTED server can issue its own

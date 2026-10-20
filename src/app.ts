@@ -17,6 +17,13 @@ import { brandingRoutes } from "./nests/branding-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
 import { publishRoutes } from "./nests/publish-routes.js";
 import { publishRenderRoutes } from "./nests/publish-render-routes.js";
+import {
+  siteRoutes,
+  docsDomainMiddleware,
+  robotsTxt,
+  sitemapIndex,
+  legacySiteRedirect,
+} from "./site/routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
 import { peopleRoutes } from "./nests/people-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
@@ -647,6 +654,10 @@ export function createApp(): Hono<AuthEnv> {
   // is closed to nest keys until it is allowlisted on purpose — see
   // auth/nest-scope-guard.ts for what a nest key may reach.
   app.use("*", nestScopedKeyGuard);
+
+  // A docs domain (DOCS_SITES) is entirely its docs site — answer it before
+  // any app route can (CU-wdqcq05jhm).
+  app.use("*", docsDomainMiddleware);
 
   // Health check (public)
   app.get("/health", (c) => {
@@ -2574,6 +2585,11 @@ export function createApp(): Hono<AuthEnv> {
   // OUTSIDE the /nests auth chain so /p/<slug> is reachable with no account
   // (public mode) or behind its own gate (email/code/invite).
   app.route("/p", publishRenderRoutes);
+  // Public docs sites: public + Reader Mode nests as static, crawlable HTML,
+  // and real robots.txt / sitemap.xml instead of the SPA shell (CU-wdqcq05jhm).
+  app.route("/d", siteRoutes);
+  app.get("/robots.txt", robotsTxt);
+  app.get("/sitemap.xml", sitemapIndex);
   // Same three-way auth as /mcp: an OAuth access token, an MCP ticket, or a
   // cnst_ key. /index is the grounded nest list the MCP tools read from, so a
   // token that works on one must work on the other.
@@ -3567,8 +3583,9 @@ export function createApp(): Hono<AuthEnv> {
   app.get(
     "*",
     async (c, next) => {
-      if (isDocumentNavigation(c)) return next();
-      return c.json({ error: "Not found" }, 404);
+      if (!isDocumentNavigation(c)) return c.json({ error: "Not found" }, 404);
+      // An anonymous visitor to a docs-site nest's app URL gets the page.
+      return (await legacySiteRedirect(c)) ?? next();
     },
     serveIndexShell,
   );

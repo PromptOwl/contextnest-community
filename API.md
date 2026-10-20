@@ -568,6 +568,29 @@ Response (200) echoes the persisted row:
 ```
 The two additive columns (`nests.reader_mode`, `nests.reader_home_node`) also surface on `GET /nests/:nestId` via the `SELECT *` nest payload.
 
+### Public docs site — `GET /d/:key/*` (no auth)
+A nest that is **public with Reader Mode on** is also served as a static, crawlable docs site: every **approved** document pre-rendered to complete HTML (no JavaScript needed to read it), at a clean path URL. Drafts and unapproved edits never render — the same rule as the public reader. Any other nest answers `404` (indistinguishable from "no such site").
+
+`:key` is the nest's slug, or its id when an older docs site already uses that slug.
+
+| URL | What |
+|---|---|
+| `/d/:key/` | Home: `reader_home_node`, else a root `welcome`/`index`/`readme`/`home`/`overview` page, else a generated table of contents |
+| `/d/:key/<path>` | A page. `<path>` is the node id without `nodes/` (and without a top folder every page shares, e.g. `docs/`) |
+| `/d/:key/<path>.md` | The page's Markdown (also served for `Accept: text/markdown`) |
+| `/d/:key/sitemap.xml` | Sitemap with `lastmod` |
+| `/d/:key/llms.txt`, `/d/:key/llms-full.txt` | Agent index / every page inline |
+| `/robots.txt` | Server-level robots (allows crawling, disallows the API paths), points at `/sitemap.xml` |
+| `/sitemap.xml` | Sitemap index of every docs site hosted under `/d/` |
+
+Each page carries a unique `<title>`, meta description (frontmatter `description`, else the first ~155 characters), absolute canonical, Open Graph/Twitter tags, JSON-LD `TechArticle` + `BreadcrumbList`, prev/next, breadcrumb and an "On this page" outline. `[[wikilinks]]` become plain links; a link to a page that isn't on the site renders as text. Raw HTML in a body is escaped. Responses carry an `ETag` (`304` on `If-None-Match`) and `Cache-Control: public, max-age=300, stale-while-revalidate=86400`; the site is rebuilt only when the nest's approved content changes. Unknown paths get a real `404` marked `noindex`; a trailing slash `301`s to the slashless URL.
+
+**Custom domain.** With `DOCS_SITES=docs.example.com=<nestId>` (see CONFIGURATION.md) the site is served at that domain's root, and `/d/:key/*` on this host `301`s there.
+
+**Redirects from the app.** In key mode, an anonymous browser opening `/nest/<id>` or `/?nest=<id>[&doc=<nodeId>]` for a docs-site nest gets a `301` to the page. Signed-in users (session cookie or `Authorization`) and `?app=1` still get the app.
+
+**Static export.** `npm run site:export -- <nestId> <base-url> <out-dir>` writes the same site as files (`index.html` per page directory, `.md` twins, `sitemap.xml`, `robots.txt`, `llms.txt`, `404.html`) for any static host.
+
 ### PATCH `/nests/:nestId/branding` (nest owner / nest admin / server admin)
 Per-nest branding for the public reader (reader mode) and the nest's `/p` published pages. The body **replaces** the nest's branding; `null`, an empty body, or `{}` resets it to unbranded.
 ```json
