@@ -98,6 +98,7 @@ const TABS: {
       "posthog_host",
       "max_body_bytes",
       "trace_retention_days",
+      "import_io_concurrency",
       "message_log_retention_days",
       "message_log_store_bodies",
       "run_retention_days",
@@ -1011,6 +1012,29 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   </div>
                   <p className="text-xs text-muted-foreground mt-1">
                     0–3650 — 0 disables pruning entirely.
+                  </p>
+                </CardContent>
+              </Card>
+
+              {/* Folder-import I/O bound (engine limits.ioConcurrency) */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Import concurrency</CardTitle>
+                  <CardDescription>
+                    How many files a folder import reads and writes at once.
+                    On network storage (Cloud Storage) a higher value makes
+                    large imports faster; each file in flight uses memory.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <NumField
+                    value={draft.import_io_concurrency}
+                    min={1}
+                    max={256}
+                    onChange={(n) => set({ import_io_concurrency: n })}
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    1–256 — default 32.
                   </p>
                 </CardContent>
               </Card>

@@ -190,14 +190,16 @@ describe("/mcp challenge", () => {
   });
 
   /**
-   * Included so the client requests least privilege up front instead of
-   * everything in scopes_supported.
+   * Clients request exactly these, so a connected agent can write and stays
+   * signed in (refresh token) without a second consent.
    */
-  it("names the scopes the request needs", async () => {
+  it("names the scopes the client should request", async () => {
     enable();
     const app = await createTestApp("key");
     const res = await app.request("/mcp", { method: "POST" });
-    expect(res.headers.get("www-authenticate")).toContain('scope="nests:read"');
+    expect(res.headers.get("www-authenticate")).toContain(
+      'scope="nests:read nests:write offline_access"',
+    );
   });
 
   it("sends no challenge header at all while the flag is off", async () => {

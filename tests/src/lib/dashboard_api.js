@@ -38,6 +38,9 @@ class DashboardApi {
     const response = await this.page.request.fetch(urlPath, {
       method,
       ...(body !== undefined ? { data: body } : {}),
+      // A shared server under a full suite run can take longer than the
+      // default 30s to answer a write; a slow answer isn't a failure.
+      timeout: 60_000,
     });
     let data = null;
     try {

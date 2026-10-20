@@ -30,6 +30,8 @@ export function runMigrations(db: Database.Database): void {
       key_prefix TEXT NOT NULL,
       nest_id TEXT REFERENCES nests(id) ON DELETE CASCADE,
       label TEXT,
+      capability TEXT NOT NULL DEFAULT 'write',
+      origin TEXT NOT NULL DEFAULT 'manual',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       last_used_at TEXT
     );
@@ -2126,6 +2128,65 @@ export function runMigrations(db: Database.Database): void {
         ON field_definition_events(nest_id, at);
     `);
     recordMigration("062_field_definitions");
+  }
+
+  // 065: per-key capability — 'write' (full, historic behaviour) or 'read'
+  // (read-only: blocked from every write/governance mutation, enforced
+  // server-side at the REST guard and the MCP tool dispatch). DEFAULT 'write'
+  // is deliberate backward-compat: every key that exists today keeps the exact
+  // access it had, so no live integration breaks on upgrade. The column is
+  // added to the base CREATE TABLE above for fresh DBs; this ALTER covers
+  // databases created before capability existed. The PRAGMA guard keeps the
+  // ALTER idempotent even for a fresh DB that already has the column inline.
+  if (!hasMigration("065_api_key_capability")) {
+    const cols = (db.prepare("PRAGMA table_info(api_keys)").all() as Array<{
+      name: string;
+    }>).map((c) => c.name);
+    if (!cols.includes("capability")) {
+      db.exec(
+        "ALTER TABLE api_keys ADD COLUMN capability TEXT NOT NULL DEFAULT 'write'",
+      );
+    }
+    recordMigration("065_api_key_capability");
+  }
+
+  // 066: per-key origin — 'manual' (the user minted it via /auth/keys) or
+  // 'exchange' (PromptOwl minted it for them via /auth/keys/exchange). Lets the
+  // exchange cap its own keys per nest without eating the user's own budget.
+  // Same inline-column + PRAGMA-guarded ALTER pattern as 065.
+  if (!hasMigration("066_api_key_origin")) {
+    const cols = (db.prepare("PRAGMA table_info(api_keys)").all() as Array<{
+      name: string;
+    }>).map((c) => c.name);
+    if (!cols.includes("origin")) {
+      db.exec(
+        "ALTER TABLE api_keys ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'",
+      );
+    }
+    recordMigration("066_api_key_origin");
+  }
+
+  // 067: named systems (CU-wdqcq0538g). A system is a SERVICE identity
+  // (users.is_service = 1, the same no-login identity headless access keys and
+  // metacognition personas use, so every "people only" filter — seats,
+  // teammates, people search, sessions, OIDC, PromptOwl tickets — already
+  // excludes it). This table is what tells a system apart from those: its
+  // display name, its capability on the nests it is granted (read → viewer,
+  // write → editor collaborator rows) and who created it. created_by is
+  // deliberately NOT a foreign key: the system belongs to its nest(s), so
+  // removing the creator must neither cascade into it nor be blocked by it.
+  if (!hasMigration("067_system_accounts")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS system_accounts (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        capability TEXT NOT NULL CHECK(capability IN ('read', 'write')),
+        created_by TEXT,
+        created_by_email TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    recordMigration("067_system_accounts");
   }
 }
 

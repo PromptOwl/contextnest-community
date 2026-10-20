@@ -38,6 +38,8 @@ A nest **published headless** is handed out as read-only **access keys** — one
 
 Everything else is **403** `{ "code": "headless_reader" }` — the folder tree and the glossary (neither is approval-gated), every write, comments and annotations, version history, activity, reviews, stewards and collaborators, `GET …/export`, `context_export` and bundle export, hosted-artifact and PDF downloads, chat, workflow runs, pins, `/stats`, `/search`, and every account/admin route. MCP tools outside the list answer with a tool error. The allowlist is deny-by-default: a route or tool added later is closed to access keys until it is added on purpose.
 
+**Rate limit.** Each access key may make `HEADLESS_KEY_RATE_LIMIT_PER_MIN` requests a minute (default 120). Past it: `429` `{ "code": "rate_limited" }` with a `Retry-After` header (seconds). In-memory, per server instance, like the auth limiter.
+
 > Headless is a **commercial boundary, not a cryptographic seal**: `ctx` needs document bodies, so a key holder can read every *approved* document one call at a time. It cannot browse, export, see drafts or history, or write.
 
 All bodies are JSON unless noted. All errors return `{ "error": "msg" }` with appropriate HTTP status.
@@ -65,7 +67,7 @@ Flow:
 | GET | `/oauth/connected` | Your connected apps: one entry per client with a usable token — `clientId`, `clientName`, `scopes`, `redirectOrigin`, `connectedAt`, `lastUsedAt`. Session or user-level key; a nest-scoped key gets `403`. |
 | DELETE | `/oauth/connected/:clientId` | Disconnect one app: revokes every token it holds for you, at once. `404` when you have no live grant for that client. Same auth as above. |
 
-An unauthenticated request to `/mcp` is answered with `401` and `WWW-Authenticate: Bearer resource_metadata="..." scope="nests:read"`, which is what starts the flow. An expired or revoked OAuth access token on `/mcp` or `/index` gets `401` with `WWW-Authenticate: Bearer error="invalid_token" resource_metadata="..."`, so the client refreshes or re-authorizes. Other bad credentials get the ordinary rejection.
+An unauthenticated request to `/mcp` is answered with `401` and `WWW-Authenticate: Bearer resource_metadata="..." scope="nests:read nests:write offline_access"`, which is what starts the flow. Clients request those scopes, so one consent covers reading, writing and staying signed in. An expired or revoked OAuth access token on `/mcp` or `/index` gets `401` with `WWW-Authenticate: Bearer error="invalid_token" resource_metadata="..."`, so the client refreshes or re-authorizes. Other bad credentials get the ordinary rejection.
 
 Scopes: `nests:read`, `nests:write`, `offline_access` (ask for the last to receive a refresh token).
 
@@ -139,6 +141,31 @@ Response (201):
 ```
 **Plaintext shown once.** Omit `nest_id` for a **user-level key** (works on every nest the user can access — what the whole-brain Connect flow mints). With `nest_id` the key is **nest-scoped** — see [Nest-scoped API keys](#nest-scoped-api-keys) for exactly what it can reach. The caller must be able to reach that nest: an unknown nest, or one the caller has no access to, is **404** (the same answer for both, so this is no existence oracle). A nest-scoped key calling this endpoint gets **403 `nest_scoped_key`**.
 
+**Capability (read-only keys).** Optional `capability`: `"write"` (default — full access, the historic behaviour) or `"read"`. A read key may only read: GETs, the read-tier query POSTs (`/context`, `/query`, `/search`, `/export`) and the MCP transport, where `tools/list` advertises only the read tools and any write/governance tool is refused. Every other write is **403**, and the effective nest permission is capped at `read`.
+```json
+{ "label": "agent-ro", "nest_id": "<nest id>", "capability": "read" }
+```
+Response (201) also reports `"nest_id"` and `"capability"`. **400** if `capability` is anything other than `"read"`/`"write"`, or if a read key has no `nest_id` (read keys are always nest-scoped). **403** if the caller is itself authenticated with a read-only key — a read key can't mint or rotate any key.
+
+### POST `/auth/keys/exchange` (PromptOwl MCP ticket)
+Trades a PromptOwl MCP service ticket for a durable, nest-scoped key — how PromptOwl hands a signed-in user a "predefined nest endpoint". Auth is the ticket itself, as `Authorization: Bearer <jwt>`: the same short-lived HS256 ticket the per-nest MCP transport accepts (signed with `OFFICIAL_COMMUNITY_SSO_SECRET`, `scope: "mcp"`, no `jti`, `aud` = `PUBLIC_BASE_URL` when set, `sub` = the email of an **existing** user — never auto-provisions).
+```json
+{ "nest_id": "<nest id>", "label": "optional", "capability": "read" }
+```
+`capability` defaults to `"read"`. The key is minted only if the ticket's user already holds at least that permission on the nest (the exchange narrows access, it never grants it). Response (201):
+```json
+{
+  "key": "cnst_...",
+  "id": "uuid",
+  "key_prefix": "cnst_abc123...",
+  "label": "PromptOwl read key 1a2b3c4d",
+  "nest_id": "<nest id>",
+  "capability": "read",
+  "mcp_url": "https://<PUBLIC_BASE_URL>/nests/<nest id>/mcp"
+}
+```
+**Plaintext shown once.** Without `label` a unique default is generated. **401** missing/invalid ticket (bad signature, expired, wrong scope/audience, login-style `jti`, or a `cnst_` key); **404** no account for the ticket email; **400** missing `nest_id` or bad `capability`; **403** insufficient permission on the nest (an unknown nest id answers the same 403); **409** duplicate `label`; **429** the user already holds 20 live exchange-issued keys for that nest (revoke some, or reuse one); **503** ticket exchange not configured (`OFFICIAL_COMMUNITY_SSO_SECRET` unset). Exchange-issued keys appear in `GET /auth/keys` with `"origin": "exchange"` and don't count toward the per-user ceiling of 20 manual keys.
+
 ### POST `/auth/keys/rotate` (auth required)
 Replaces **one** key and returns its new plaintext; the caller's other keys are untouched.
 
@@ -148,9 +175,10 @@ Scope resolution on the optional `nest_id` field: **absent** → keep the prior 
 ```json
 { "key_id": "uuid", "label": "optional", "nest_id": "optional" }
 ```
+A rotate keeps the key's `capability` (a read key stays read; clearing a read key's `nest_id` is **400**). The response also reports `nest_id` and `capability`. A caller on a read-only key gets **403**.
 
 ### GET `/auth/keys` (auth required)
-Lists the caller's keys — id, prefix, label, `nest_id`, `created_at`, `last_used_at` — oldest first. Never returns plaintext.
+Lists the caller's keys — id, prefix, label, `nest_id`, `capability` (`read`/`write`), `origin` (`manual`/`exchange`), `created_at`, `last_used_at` — oldest first. Never returns plaintext.
 
 ### DELETE `/auth/keys/:keyId` (auth required)
 Revoke one key. 404 if the id isn't the caller's. Anything still using it stops working immediately.
@@ -276,6 +304,28 @@ Returns owned + shared nests. Archived nests are **absent** — as they are from
 Response (201): `{ "nest": { ... } }`
 
 With `NEST_CREATION=admins` (the default) only a server admin may create or import a nest; anyone else gets `403` ("Only a server admin can create nests on this server…"). The same rule covers `POST /nests/import` and the MCP `nest_create` tool. `GET /health` reports it as `nest_creation`.
+
+### POST `/nests/import`
+Imports a folder the browser read, as `{ path, content }` files. Large folders upload in chunks: `{ name, files, partial: true }` creates the nest and stages the first chunk, `{ nestId, files }` stages each further chunk, `{ nestId, finalize: true }` registers the documents. `{ name, files }` with no flags is a one-shot import.
+
+Response (201 one-shot, 200 finalize):
+```json
+{
+  "nest": { ... },
+  "documents": 293,
+  "rejected": ["../escape.md"],
+  "problems": [
+    "../escape.md: path escapes the vault",
+    "notes/broken: kept as a draft — its version chain no longer reconstructs",
+    "notes/bad: not imported — <reason>"
+  ],
+  "warnings": ["notes/odd: version \"1.1\" is not a whole number of at least 1; imported as 1"]
+}
+```
+- `documents` — how many were imported. `rejected` — paths refused at upload (kept for compatibility); `problems` gives each with its reason, plus documents kept as a draft or not imported. `warnings` — repairs made on the way in (a derived title, a coerced type, a dropped tag, a whole-number version).
+- A chunk response carries `rejected`, `problems` and `warnings` for that chunk.
+- A step that fails outright returns `{ "error": "Import stopped while uploading files: …" }` (or `… while publishing documents: …`) instead of a generic error; a vault-lock timeout stays `503` with `Retry-After`, and an engine validation refusal stays `400`.
+- `.context/` (the source vault's own settings) and `_suggestions/` are dropped before staging and never reported.
 
 ### GET `/nests/:nestId`
 ```json
@@ -488,7 +538,7 @@ Publish a **private** nest API-only and mint read-only access keys for it (what 
 | `POST /nests/:nestId/headless/keys` | `{ "label": "Acme Corp" }` | `201 { "key": {…}, "api_key": "cnst_…" }` — the token is returned **once**. `400` without a label (max 80 chars), `409` while headless is off. |
 | `DELETE /nests/:nestId/headless/keys/:keyId` | — | `{ "revoked": true }` — the key and its identity are gone for good. `404` for an unknown key. |
 
-Headless governs **people without a seat**: the owner, collaborators, team shares, stewards and document/folder grantees keep the access they already have (someone has to maintain the nest). The same goes for per-document publications (`/p/<slug>` links), which the owner creates deliberately one document at a time. Reader mode is display-only and grants no access, so a headless (private) nest is never readable in the public reader. `GET /nests/:nestId/headless` returns `shared_with` (collaborator + team-share + grant counts) so a client can say so before publishing. While a nest is headless, `PATCH /nests/:nestId/visibility` to `org` or `public` answers `409`. Deleting the nest deletes its access keys. Connect a key with ctx:
+Headless governs **people without a seat**: the owner, collaborators, team shares, stewards and document/folder grantees keep the access they already have (someone has to maintain the nest). The same goes for per-document publications (`/p/<slug>` links), which the owner creates deliberately one document at a time. Reader mode is display-only and grants no access, so a headless (private) nest is never readable in the public reader. `GET /nests/:nestId/headless` returns `shared_with` (collaborator + team-share + grant counts) so a client can say so before publishing. While a nest is headless, `PATCH /nests/:nestId/visibility` to `org` or `public` answers `409`. Deleting the nest deletes its access keys. Every route here has an MCP twin, `context_headless` (§9). Connect a key with ctx:
 ```bash
 export NEST_KEY=cnst_…
 ctx vault add my-nest --url https://<server>/nests/<nestId>/mcp --bearer-env NEST_KEY
@@ -674,6 +724,9 @@ Limits (`400` when exceeded): 100 boards per nest; `name` ≤ 80 characters; con
 
 Custom-field boards: `"dimension": "field"` with `"fieldKey": "severity"` makes the field's values the columns (layout key `field:severity`); `"swimlane": "field"` with `"swimlaneField"` makes them lanes; `"filterFields": { "severity": "high", "blocked": "true" }` keeps only matching cards (same matching as the node list's `field.<key>` filter). Keys must look like field keys; a board naming a field that was later deleted still loads.
 
+### Bulk move and delete — `POST /nests/:nestId/nodes/bulk-move`, `/bulk-delete`
+Body `{ "ids": [...], "folder": "archive" }` (move; `""` = nest root) or `{ "ids": [...] }` (delete), max 100 ids. Write tier at the nest; then **per document**, through `moveNode` / `deleteNode`: unreadable or missing is `skipped` (`not_found`), one the caller can't edit is `skipped` (`forbidden`; for delete the reason points at requesting deletion), one under open review is `skipped` (`locked`), a structure-rule refusal or a PDF move is `failed`/`skipped` with its reason. Not a transaction — the rest still go. Response `{ requested, done, unchanged, skipped, failed, results: [{ id, title, outcome, code?, reason?, new_id? }] }`. Tags over a selection: `bulk-update` below (`add_tags` works on any document). MCP: `context_move` and `context_delete` take `ids` instead of `title`/`id`; the result is in `structuredContent`.
+
 ### Bulk update — `POST /nests/:nestId/nodes/bulk-update`
 One change applied to many nodes (the board List view's bulk actions; MCP `context_bulk_update`). Write tier at the nest; then **per node**: a node the caller can't read reports `not_found` (a `selector` only ever targets — and counts toward the cap — nodes the caller can read), one they can't edit is `skipped` (`forbidden`), and the write runs through the normal governed update — its own version, its own `moved_at` / `completed_at` stamps. It is **publish or nothing**: a node whose change would land as a draft for a reviewer (a prime document, a governed document without a self-approve/prime-only/task bypass, or the caller's own open review) is `skipped` with `needs_review` and left untouched — a bulk edit never creates drafts. A node under someone else's open review is `skipped` (`locked`). A node the patch wouldn't change is `unchanged` and not written. The change is computed from the head the call read; if someone saves the node in between, that row is `skipped` with `conflict` rather than overwriting their edit. Tags the patch doesn't touch are passed back as stored. Like `PATCH /nodes/:id`, the board fields (priority, assignee, due) can be set on any node type, not only tasks — narrow `ids`/`selector` if you mean tasks only.
 
@@ -762,6 +815,8 @@ Changing an existing collaborator's level stays admin-only.
 ### DELETE `/nests/:nestId/collaborators/:collabId` (admin)
 Removing a collaborator stays admin-only.
 
+The roster rows carry `principal_kind` (`human` | `system`). A named system can't be added through `POST …/collaborators` (use `POST /systems/:id/nests`) and can't be promoted to `admin` (400).
+
 ### GET `/nests/:nestId/mentionable` (read+, members only)
 ```json
 { "people": [{ "email": "owner@x.com", "name": "Olive Owner", "member": true }] }
@@ -781,6 +836,37 @@ Server-wide, not nest-scoped: the people the caller **already works with** — a
 Scope is deliberately narrow by default, because a single server may hold several unrelated organisations: `PEOPLE_SUGGEST_ALL_USERS` (off by default, Settings → Features → People directory) widens it to every registered account, which is right for a single-company deployment and wrong for a shared one. A server admin always sees every account.
 
 `q` filters on name or address (substring, case-insensitive); `limit` caps the list (default and max 20). Suggestions are a convenience for the add-a-person pickers — an address that appears nowhere here is still valid to submit (that is how you invite someone with no account yet), and the add itself re-checks permission and the escalation cap.
+
+---
+
+## 3c. Named systems (machine identities) — `cnst_sys_…`
+
+A named machine identity ("GitHub sync", "Nightly indexer") with `capability` `read` (viewer) or `write` (editor) on one or more nests. It is built on the same **service identity** a headless access key gets (no password, never a browser session, no OIDC / SSO / PromptOwl-ticket sign-in, `/auth/login` refuses it like a wrong password, `/auth/admin/reset-password` answers 400, not a seat, not in `/auth/teammates`, people search, `/stats` or telemetry) — but it is **not** a headless reader: instead of the reader allowlist it gets an ordinary collaborator row on each granted nest, so **governance is unchanged**: stewardship, submit-review and approval apply exactly as for a human editor, and a system can't approve its own submission. **Writes are attributed to the system.** Its identity (`email`, e.g. `github-sync-1a2b3c4d@system.contextnest.invalid`, an unroutable reserved domain) is the author in version history and provenance, never the person who created it. It belongs to its nests, not its creator: removing the creator from the nest or the server revokes nothing.
+
+A system key works only inside its granted nests (others 403/404). It can list them (`GET /nests`) and use the server-level `/mcp` (but not `nest_create`). Anything else is **403** `{ "code": "system_key" }`: every `/auth/*` route (it can't mint, list or rotate keys or change a password), `/systems`, `/admin/*`, `/me/*`, `/search`, `/index`, `POST /nests` and edits/deletes of a nest itself. Inside a nest it never reaches `collaborators`, `teams`, `visibility`, `settings`, `reader-mode`, `grants`, `systems`, `headless`, `publications`, `branding`, `metacognition`, `schedules`, `hooks`, `env`, `connectors`, `trace`, `stewards`, `archive`, `restore`, `push-allowlist` or `pending-pushes`.
+
+Who may manage a system (always a person on a full credential — a read-only key, a headless access key or a system key gets 403):
+- **see / list**: an admin of at least one nest it works in. A listing names only the nests you administer, and counts the rest (`other_nest_count`).
+- **add a nest**: you manage the system (admin of one of its nests) **and** you administer the nest you're adding.
+- **remove a nest**: admin of that nest. Removing its last nest retires the system and revokes its key (`system_deleted: true`).
+- **rotate / revoke**: admin of **every** nest it works in, since both cut off all of them. Otherwise, remove your own nest from it.
+
+Every endpoint has an MCP twin, `context_systems` (§9). The plaintext key is returned **once**, on create and rotate.
+
+#### POST `/systems` (owner/admin of every listed nest)
+```json
+{ "name": "GitHub sync", "capability": "write", "nest_ids": ["<nestA>", "<nestB>"] }
+```
+→ `201 { "id", "name", "email", "capability", "key_prefix", "nests": [{ "id", "name", "permission" }], "other_nest_count", "created_by", "created_by_email", "created_at", "last_used_at", "api_key": "cnst_sys_…" }`. `capability` defaults to `read`. 400 for a missing name (max 60 chars), a capability other than read/write, or empty `nest_ids`. 403 if you don't administer one of the nests.
+
+#### GET `/systems` / GET `/nests/:nestId/systems`
+`{ "systems": [ … same shape, without api_key … ] }`. The first lists every system you can see. The second lists those working in that nest (owner/admin of it).
+
+#### POST `/systems/:systemId/rotate` · DELETE `/systems/:systemId`
+New `api_key` / `{ "deleted": true }`. The old key fails immediately.
+
+#### POST `/systems/:systemId/nests` · DELETE `/systems/:systemId/nests/:nestId`
+Body `{ "nest_id": "…" }` to add. Returns the system / `{ "removed": true, "system_deleted": false }`.
 
 ---
 
@@ -1334,6 +1420,9 @@ Editor permission, same as the per-document route — with one difference: a ste
 Body: `{ "folder": "api/limits" }`. **Owner/admin only** — a folder delete is many document deletes at once, so it sits at the nest-management tier, not `write`. Deletes every document under the prefix (sub-folders included) through the normal per-node path, so each gets its review-lock check, row purge and tombstone. Returns `{ deleted, nodeIds }`. Non-admins use the request flow above.
 
 Folders are not stored objects — they exist only as segments of the node ids beneath them, so deleting a folder *is* deleting its documents.
+
+### POST `/nests/:nestId/folders/move`
+Body: `{ "folder": "projects/acme", "to": "archive/acme" }`. Renames or moves a folder — a rename is a move to a path with the same parent. **Owner/admin only.** Every document under it (sub-folders and empty folders included) goes through `moveNode`, so ids change but version history, review state and links follow, a document under open review blocks the move, and the nest's structure rules are enforced (a required folder can't be moved; the new path must be one the rules allow). `409` if `to` already exists; `400` if `to` is inside `folder`. Returns `{ folder, moved: [{ id, previousId }] }`. Over MCP: `context_move` with `from_folder` (the current path) and `folder` (the new path).
 
 ### GET `/nests/:nestId/deletion-requests`
 Query: `?status=pending|declined|all` (defaults to `pending`). `all` returns both states newest-first — one call for a client that shows the queue and badges declined nodes.
@@ -2277,6 +2366,12 @@ Both are **read-tier**, matching REST (`isAnnotationAction` in `app.ts`): a revi
 
 **Custom fields.** `context_fields` lists the nest's definitions (any reader). `context_create_field`, `context_update_field` and `context_delete_field` mirror `POST` / `PATCH` / `DELETE /nests/:id/fields` — same validation, same gate (owner, nest admin, license admin, nest-wide reviewer steward; anyone else gets `UNAUTHORIZED_ACTION`). Values ride the existing tools: `context_create` and `context_update` take `fields` (key → value, `null` clears; a refused value is a `VALIDATION_FAILED` tool error naming the field), `context_list` takes a `fields` filter (same matching as REST `field.<key>`), and `context_get` / `context_list` / `context_query` return values in their prose and, structured, in the catalog's own `frontmatter.metadata.fields` — where they are stored — including computed time in status (seconds).
 
+**Headless publishing and systems** (nest owner/admin only, and **advertised only to them** in `tools/list` — a viewer, an editor, a read-only key, a headless access key or a system key never sees them, and a direct call is refused by the same service layer the REST routes use):
+- `context_headless` — `action`: `status` (on/off, keys, `shared_with`) | `enable` | `disable` | `create_key` (`label`; returns the token once) | `revoke_key` (`key_id`). Mirrors `/nests/:id/headless` (§2).
+- `context_systems` — `action`: `list` (systems in this nest) | `create` (`name`, `capability`, `nest_ids` — defaults to this nest) | `rotate` / `revoke` (`system_id`) | `add_nest` / `remove_nest` (`system_id`, `nest_id`). Mirrors `/systems` (§3c).
+
+Both return the REST payload as `structuredContent`.
+
 **`context_my_drafts`** mirrors `GET /me/drafts`, nest-scoped: the caller's own unsubmitted (or rejected) documents in this nest, with their path and version. Capped at the 100 most recent; the reply says so explicitly when there are more, so an agent can't read a capped page as the whole set. Self-scoped by construction — it only ever returns rows the caller authored, in a nest they already hold read on, so it needs no permission check of its own. It exists because an agent otherwise cannot see its own unsubmitted work: a draft has no review request, so `context_review_queue` never lists it, and `context_query` skips it (only approved versions are AI-readable). The response names `context_submit_review` as the next step.
 
 **Task relations** mirror `/nodes/:nodeId/relations` 1:1 and are advertised with the workflow plane off:
@@ -2564,7 +2659,7 @@ The server validates its key with PromptOwl (`POST {PROMPTOWL_API_URL}/api/licen
 `{ valid, tier, org, owner_email, suspended, suspended_reason, limits, setup_required }`. `setup_required` is true only for a server that has never been licensed; the UI shows the activation screen then. A lapsed license is not a setup case. Carries no lapse reason, dates, head-count or contact.
 
 ### GET `/admin/license` (server admin, or the key's owner)
-`{ plan, valid, tier, org, owner_email, suspended, suspended_reason, trial, expires_at, days_left, reason, grace_ends_at, contact: { url, email }, seats: { licensed, used, over_limit, at_limit }, subscribers: { licensed, used }, max_account_owners, pending_rejections, last_checked_at, manage_url }`. `plan` is `free`, `trial`, `self_hosted` or `enterprise`. `seats` counts billed users (nest owners, admins, reviewers, server admins) and `subscribers` counts editors; each person counts once, at their highest role. A `licensed` or `max_account_owners` of null means no limit. `manage_url` is PromptOwl's page for this key (`?key=` carries its last 4 characters only), or null without a key. `pending_rejections` counts rejections not yet acted on (3 make the server read-only). Drives Settings → License and the admin license banner.
+`{ plan, valid, tier, org, owner_email, suspended, suspended_reason, trial, expires_at, days_left, reason, grace_ends_at, contact: { url, email }, seats: { licensed, used, over_limit, at_limit }, subscribers: { licensed, used }, max_account_owners, pending_rejections, offline_since, last_checked_at, manage_url }`. `offline_since` is the last successful license check, set only once PromptOwl has been unreachable for over 24 hours (the server is read-only until it answers); null otherwise. `plan` is `free`, `trial`, `self_hosted` or `enterprise`. `seats` counts billed users (nest owners, admins, reviewers, server admins) and `subscribers` counts editors; each person counts once, at their highest role. A `licensed` or `max_account_owners` of null means no limit. `manage_url` is PromptOwl's page for this key (`?key=` carries its last 4 characters only), or null without a key. `pending_rejections` counts rejections not yet acted on (3 make the server read-only). Drives Settings → License and the admin license banner.
 
 ### POST `/license/install`
 `{ key }`. Public while the server has never been licensed. Once it has a license owner, only a server admin or that owner may replace the key (401/403 otherwise). A rejected key returns 400 with an operator-facing `error` plus the same term fields.

@@ -204,6 +204,31 @@ describe("valid license, any number of people", () => {
     expect(w.nestMcp.text).not.toMatch(OVER_LIMIT);
     expect(w.runStep.status).toBe(201);
   });
+
+  it("goes read-only once PromptOwl has been unreachable past 24 hours, and recovers", async () => {
+    const OFFLINE = /hasn't reached PromptOwl to check its license since/;
+    overrides.offlineSince = "2026-10-01T00:00:00.000Z";
+    try {
+      const w = await writeEverywhere();
+      expect(w.restNest.status).toBe(503);
+      expect(w.restNest.data.error).toBe("License check overdue");
+      expect(w.restNest.data.offline_since).toBe("2026-10-01T00:00:00.000Z");
+      expect(w.restNode.status).toBe(503);
+      expect(w.restNode.data.reason).toMatch(OFFLINE);
+      expect(w.serverMcp.text).toMatch(OFFLINE);
+      expect(w.nestMcp.status).toBe(503);
+      expect(w.nestMcp.text).toMatch(OFFLINE);
+      expect(w.runStep.status).toBe(403);
+      expect(w.runStep.data.error).toMatch(OFFLINE);
+      // Reads stay open.
+      expect((await jsonRequest(app, "GET", "/nests")).status).toBe(200);
+      expect((await jsonRequest(app, "GET", `/nests/${nestId}`)).status).toBe(200);
+      expect((await jsonRequest(app, "GET", "/admin/license")).data.offline_since).toBe("2026-10-01T00:00:00.000Z");
+    } finally {
+      delete overrides.offlineSince;
+    }
+    expect((await writeEverywhere()).restNode.status).toBe(201);
+  });
 });
 
 describe("people count", () => {

@@ -18,6 +18,9 @@ import { activityTimestamp } from "../../lib/node-sort";
 import { linkHealth } from "../../lib/link-health";
 import { findBacklinks, inboundLinkWarning } from "../../lib/backlinks";
 import { FolderDeleteDialog } from "./FolderDeleteDialog";
+import { FolderMoveDialog } from "./FolderMoveDialog";
+import { BulkSelectionBar } from "./BulkSelectionBar";
+import { Checkbox } from "@/components/ui/checkbox";
 import { nodeTypeSupportsMove } from "../../lib/document-actions";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
@@ -184,6 +187,10 @@ export function DocumentsTab({
     ? findBacklinks(deleteLinks.data?.nodes ?? [], deleteNodeTarget).length
     : 0;
 
+  // Folder being renamed or moved (admin/owner).
+  const [moveFolderTarget, setMoveFolderTarget] = useState<
+    { path: string; label: string } | null
+  >(null);
   // Folder pending deletion (admin) or a deletion request (everyone else).
   const [folderTarget, setFolderTarget] = useState<
     { path: string; label: string; total: number } | null
@@ -314,6 +321,19 @@ export function DocumentsTab({
   const moveNewFolderCheck = checkFolderPath(moveNewFolder ?? "");
   const moveResolvedDest =
     moveNewFolder === null ? moveDest : moveNewFolderCheck.path;
+
+  // Multi-select: the documents ticked in the list, for bulk move / tag /
+  // delete. Server still judges each one; this only decides what to offer.
+  const [selected, setSelected] = useState<Map<string, any>>(new Map());
+  const toggleSelected = (node: any) =>
+    setSelected((prev) => {
+      const next = new Map(prev);
+      if (!next.delete(node.id)) next.set(node.id, node);
+      return next;
+    });
+  const selectedNodes = [...selected.values()];
+  const isMine = (n: any) =>
+    !!n.author && !!currentEmail && n.author.toLowerCase() === currentEmail;
 
   // Every folder path in use (all prefixes, so intermediate levels with no
   // direct docs still appear) — options for the Move-to-folder dialog.
@@ -1275,6 +1295,17 @@ export function DocumentsTab({
                       </DropdownMenu>
                     </div>
                   );
+                  const selectBox =
+                    !isReadOnly && (canEditNode(node) || canDelete) ? (
+                      <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0">
+                        <Checkbox
+                          checked={selected.has(node.id)}
+                          onCheckedChange={() => toggleSelected(node)}
+                          aria-label={`Select ${node.title}`}
+                          data-testid={`select-${node.id}`}
+                        />
+                      </div>
+                    ) : null;
                   return (
                     <div
                       key={node.id}
@@ -1315,9 +1346,11 @@ export function DocumentsTab({
                       }}
                       data-testid={`document-row-${node.id}`}
                     >
+                      {!cards && selectBox}
                       {!cards && <NodeTypeIcon type={node.type} className="h-5 w-5" />}
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
+                          {cards && selectBox}
                           {cards && <NodeTypeIcon type={node.type} className="h-4 w-4" />}
                           <span
                             className="font-medium truncate min-w-0"
@@ -1568,6 +1601,43 @@ export function DocumentsTab({
                         // genuinely empty folder stays a static row, no chevron.
                         const collapsible = node.total > 0;
                         const loadingHere = loadingFolders.has(node.path);
+                        // Same split as a document: admins/owners delete the
+                        // folder (and everything under it), editors raise a
+                        // request. Hidden while one is already pending, and
+                        // withheld from viewers — the server refuses a folder
+                        // flag below editor, and a folder-scope editor row
+                        // isn't enough for it either (canRequestDeletion
+                        // wants nest scope).
+                        const deleteButton =
+                          (canManage || canEditDocs) &&
+                          (canManage || !folderFlagPending(node.path)) ? (
+                            <button
+                              type="button"
+                              // An empty folder's only useful action is
+                              // removing it, so it shows without a hover.
+                              className={`rounded p-0.5 ${node.total === 0 ? "" : "opacity-0"} group-hover/fh:opacity-100 focus-visible:opacity-100 ${
+                                canManage
+                                  ? "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                                  : "text-muted-foreground hover:text-primary hover:bg-primary/10"
+                              }`}
+                              title={
+                                canManage
+                                  ? `Delete ${prettyFolderPath(node.path)} and everything in it`
+                                  : "Delete (needs admin approval)"
+                              }
+                              data-testid={`delete-folder-${node.path}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setFolderTarget({
+                                  path: node.path,
+                                  label: prettyFolderPath(node.path),
+                                  total: node.total,
+                                });
+                              }}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          ) : null;
                         return (
                           <div
                             className={`group/fh flex items-center gap-1.5 py-1.5 px-2 rounded-md select-none transition-colors ${collapsible ? "cursor-pointer" : ""
@@ -1640,6 +1710,10 @@ export function DocumentsTab({
                             <span className="text-sm font-medium">
                               {node.label}
                             </span>
+                            {/* An empty folder shows delete without a hover,
+                                so it sits right after the name — behind the
+                                hidden hover icons it floated at a fixed gap. */}
+                            {node.total === 0 && deleteButton}
                             {/* Recursive subtree total (this folder + all
                                   descendants), matching the Overview Contents
                                   card. Direct-count-only made a folder holding
@@ -1716,6 +1790,24 @@ export function DocumentsTab({
                                 <Activity className="h-3.5 w-3.5" />
                               </button>
                             )}
+                            {canManage && (
+                              <button
+                                type="button"
+                                className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 focus-visible:opacity-100 hover:text-primary hover:bg-primary/10"
+                                title={`Rename or move ${prettyFolderPath(node.path)}`}
+                                aria-label={`Rename or move ${prettyFolderPath(node.path)}`}
+                                data-testid={`move-folder-${node.path}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setMoveFolderTarget({
+                                    path: node.path,
+                                    label: prettyFolderPath(node.path),
+                                  });
+                                }}
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                              </button>
+                            )}
                             {/* This folder's rules — where things go, how
                                 files are named. Everyone can look; owners and
                                 admins edit on the Structure page. */}
@@ -1734,42 +1826,7 @@ export function DocumentsTab({
                                 <Ruler className="h-3.5 w-3.5" />
                               </button>
                             )}
-                            {/* Same split as a document: admins/owners delete
-                                the folder (and everything under it), editors
-                                raise a request. Hidden while one is already
-                                pending, and withheld from viewers — the server
-                                refuses a folder flag below editor, and a
-                                folder-scope editor row isn't enough for it
-                                either (canRequestDeletion wants nest scope). */}
-                            {(canManage || canEditDocs) &&
-                              (canManage || !folderFlagPending(node.path)) && (
-                              <button
-                                type="button"
-                                // An empty folder's only useful action is
-                                // removing it, so it shows without a hover.
-                                className={`rounded p-0.5 ${node.total === 0 ? "" : "opacity-0"} group-hover/fh:opacity-100 focus-visible:opacity-100 ${
-                                  canManage
-                                    ? "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                                    : "text-muted-foreground hover:text-primary hover:bg-primary/10"
-                                }`}
-                                title={
-                                  canManage
-                                    ? `Delete ${prettyFolderPath(node.path)} and everything in it`
-                                    : "Delete (needs admin approval)"
-                                }
-                                data-testid={`delete-folder-${node.path}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setFolderTarget({
-                                    path: node.path,
-                                    label: prettyFolderPath(node.path),
-                                    total: node.total,
-                                  });
-                                }}
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
-                            )}
+                            {node.total > 0 && deleteButton}
                             {folderFlagPending(node.path) && (() => {
                               const folderFlag = folderFlagByPath.get(node.path);
                               const isOwnFlag = folderFlag?.requestedBy.toLowerCase() === currentEmail;
@@ -1911,6 +1968,16 @@ export function DocumentsTab({
         />
       )}
 
+      <BulkSelectionBar
+        nestId={nestId}
+        nodes={selectedNodes}
+        folders={allFolders}
+        canEdit={selectedNodes.every((n) => canEditNode(n) && nodeTypeSupportsMove(n.type || "document"))}
+        canDelete={selectedNodes.every((n) => canManage || isMine(n))}
+        onClear={() => setSelected(new Map())}
+        onDone={fetchData}
+      />
+
       {/* Move to folder — the keyboard-accessible path to the same move the
           drag-and-drop performs; both funnel through handleMoveNode. */}
       <Dialog
@@ -2047,6 +2114,22 @@ export function DocumentsTab({
           nodeId={publishNode.id}
           nodeTitle={publishNode.title || publishNode.id}
           onClose={() => setPublishNode(null)}
+        />
+      )}
+
+      {moveFolderTarget && (
+        <FolderMoveDialog
+          nestId={nestId}
+          folder={moveFolderTarget}
+          folders={allFolders}
+          onClose={() => setMoveFolderTarget(null)}
+          onDone={() => {
+            // The old path no longer exists, so it can't stay the active filter.
+            const old = moveFolderTarget.path;
+            if (folderFilter && (folderFilter === old || folderFilter.startsWith(old + "/")))
+              setFolderFilter(null);
+            fetchData();
+          }}
         />
       )}
 

@@ -53,7 +53,7 @@ import * as api from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads, useApiKeys } from "../lib/queries";
-import { nestOnlyKeyLabel } from "../lib/api-key-scope";
+import { keyCapability, nestOnlyKeyLabel } from "../lib/api-key-scope";
 import {
   nestChatPrompt,
   nestSetupPrompt,
@@ -118,6 +118,8 @@ export function ConnectModal({
     kind: "generated" | "rotated";
   } | null>(null);
   const [rotateTarget, setRotateTarget] = useState<{ id: string; name: string } | null>(null);
+  // Least privilege by default: a key handed to an agent starts read-only.
+  const [nestKeyReadOnly, setNestKeyReadOnly] = useState(true);
   // This nest already has a key → show it with Rotate instead of minting another.
   const existingNestKeys = (keyData?.keys ?? []).filter(
     (k) => k.nest_id === nestId,
@@ -134,7 +136,11 @@ export function ConnectModal({
           nestName,
           (keyData?.keys ?? []).map((k) => k.label),
         );
-        const minted = await api.createApiKey({ label, nest_id: nestId });
+        const minted = await api.createApiKey({
+          label,
+          nest_id: nestId,
+          capability: nestKeyReadOnly ? "read" : "write",
+        });
         setNestKey({ key: minted.api_key, kind: "generated" });
       }
     } catch (err: any) {
@@ -348,7 +354,10 @@ export function ConnectModal({
                       </span>{" "}
                       <code className="font-mono text-muted-foreground">
                         {k.key_prefix}…
-                      </code>
+                      </code>{" "}
+                      <span className="text-muted-foreground">
+                        · {keyCapability(k).label}
+                      </span>
                     </div>
                     <Button
                       size="sm"
@@ -384,6 +393,16 @@ export function ConnectModal({
                     )}
                     Create a key for this nest only
                   </Button>
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="nest-key-read-only"
+                      checked={nestKeyReadOnly}
+                      onCheckedChange={setNestKeyReadOnly}
+                    />
+                    <Label htmlFor="nest-key-read-only" className="text-xs font-normal">
+                      Read-only (can't change anything)
+                    </Label>
+                  </div>
                 </div>
               )}
               <Snippet label="This nest's MCP URL" value={mcpUrl} />

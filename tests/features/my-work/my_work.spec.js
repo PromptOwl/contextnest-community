@@ -983,8 +983,12 @@ test.describe('My Work', () => {
       await expect(approveDialog).toHaveCount(0);
       await expect(myWork.workRow(approveA.title)).toHaveCount(0);
       await expect(myWork.workRow(approveB.title)).toHaveCount(0);
-      expect((await api.latestReview(nest.id, approveA.id)).status).toBe('approved');
-      expect((await api.latestReview(nest.id, approveB.id)).status).toBe('approved');
+      // On a loaded shared server the verdict can land a moment after the toast.
+      for (const doc of [approveA, approveB]) {
+        await expect
+          .poll(async () => (await api.latestReview(nest.id, doc.id))?.status ?? null, { timeout: 30_000 })
+          .toBe('approved');
+      }
 
       // ── One of two is refused: a warning that says how many and why ──
       // From a freshly loaded inbox, as a second sitting would be.
@@ -1011,10 +1015,14 @@ test.describe('My Work', () => {
       await expect(warning).toHaveAttribute('data-type', 'warning');
 
       // The one that could be decided was; the other is the author's again.
+      await expect
+        .poll(async () => (await api.latestReview(nest.id, rejected.id))?.status ?? null, { timeout: 30_000 })
+        .toBe('rejected');
       const verdict = await api.latestReview(nest.id, rejected.id);
-      expect(verdict.status).toBe('rejected');
       expect(verdict.resolutionNote).toBe(reason);
-      expect((await api.latestReview(nest.id, withdrawn.id)).status).toBe('cancelled');
+      await expect
+        .poll(async () => (await api.latestReview(nest.id, withdrawn.id))?.status ?? null, { timeout: 30_000 })
+        .toBe('cancelled');
       await expect(myWork.workRow(rejected.title)).toHaveCount(0);
     });
   });

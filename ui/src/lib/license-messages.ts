@@ -159,6 +159,21 @@ export function adminLicenseNotice(
     };
   }
 
+  if (lic.offline_since) {
+    const since = formatDate(lic.offline_since);
+    return {
+      ...base,
+      id: `offline:${lic.offline_since}`,
+      level: "warning",
+      title: "This server can't reach PromptOwl",
+      body: `The license hasn't been checked${
+        since ? ` since ${since}` : ""
+      }, so after 24 hours offline the workspace is read-only for everyone. Everyone can still read, and nothing has been deleted. Check the server's outbound connection to PromptOwl; editing resumes on the next successful check.`,
+      cta: "Talk to PromptOwl",
+      dismissible: false,
+    };
+  }
+
   if (lic.pending_rejections > 0) {
     return {
       ...base,

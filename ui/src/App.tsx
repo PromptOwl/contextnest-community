@@ -431,6 +431,14 @@ export default function App() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setShowQuickOpen((v) => !v);
+        return;
+      }
+      // "/" opens search too, unless the user is typing somewhere.
+      if (e.key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const t = e.target as HTMLElement | null;
+        if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+        e.preventDefault();
+        setShowQuickOpen(true);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1410,13 +1418,15 @@ export default function App() {
                     ? "Search nests and documents (⌘K)"
                     : "Search this nest (⌘K)"
                 }
-                className="flex items-center gap-2 h-8 pl-2.5 pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+                className="flex items-center gap-2 h-9 w-9 justify-center sm:w-44 lg:w-64 sm:justify-start sm:pl-3 sm:pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
                 aria-label="Search"
                 data-testid="global-search-trigger"
               >
-                <Search className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Search</span>
-                <kbd className="ml-1 hidden sm:inline text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
+                <Search className="h-4 w-4 shrink-0" />
+                <span className="hidden sm:inline flex-1 text-left truncate">
+                  {view.page === "dashboard" ? "Search nests and documents…" : "Search this nest…"}
+                </span>
+                <kbd className="hidden sm:inline text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
                   ⌘K
                 </kbd>
               </button>

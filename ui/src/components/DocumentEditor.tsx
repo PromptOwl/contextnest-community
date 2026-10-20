@@ -128,7 +128,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { SubmitForReviewModal, ReasonDialog, ReviewActions, ExternalEditBanner, VersionHistoryModal, DiffViewer } from "./governance";
+import { SubmitForReviewModal, ReasonDialog, ReviewActions, ExternalEditBanner, VersionHistoryModal, DiffViewer, LifecycleStatusBadge, isDocumentLifecycleStatus } from "./governance";
+import { lifecycleStatusHint } from "@/lib/lifecycle-status";
 import { unifiedDiff } from "./governance/diff-util";
 import {
   DropdownMenu,
@@ -2380,7 +2381,17 @@ export function DocumentEditor({
                 Title field sits directly below (an <h1> in view mode), so the
                 trail ended in the same string the next line already shows. The
                 crumbs answer "where am I", the field answers "what is this". */}
-            {!isNew && status && <StatusBadge status={status} />}
+            {!isNew && isDocumentLifecycleStatus(status) && (
+              <LifecycleStatusBadge
+                status={status}
+                className="shrink-0 whitespace-nowrap cursor-help"
+                title={lifecycleStatusHint(status, {
+                  submittedBy: pendingReviewBy,
+                  stewardship: stewardshipEnabled,
+                })}
+                data-testid={`document-status-${status}`}
+              />
+            )}
             {/* Pending only. A DECLINED flag is a past event, not a state of
                 the document — badging it forever nags everyone who opens a doc
                 that is very much alive, with no way to dismiss it. The verdict
@@ -4381,46 +4392,6 @@ export function DocumentEditor({
 }
 
 export default DocumentEditor;
-
-// Status pill next to doc title; loud colours flag pending_review.
-function StatusBadge({ status }: { status: string }) {
-  const map: Record<string, { label: string; cls: string }> = {
-    draft: {
-      label: "Draft",
-      cls: "bg-muted text-muted-foreground",
-    },
-    pending_review: {
-      label: "Pending review",
-      cls: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
-    },
-    approved: {
-      label: "Approved",
-      cls: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
-    },
-    published: {
-      label: "Published",
-      cls: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
-    },
-    rejected: {
-      label: "Rejected",
-      cls: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
-    },
-    external_edit_pending: {
-      label: "External edit",
-      cls: "bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300",
-    },
-  };
-  const info = map[status];
-  if (!info) return null;
-  return (
-    <span
-      className={`shrink-0 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${info.cls}`}
-      data-testid={`document-status-${status}`}
-    >
-      {info.label}
-    </span>
-  );
-}
 
 /**
  * Step-wise folder chooser for the create-form breadcrumb: lists existing

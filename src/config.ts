@@ -887,6 +887,15 @@ export const config = {
       .filter(Boolean);
     return [...new Set(["'self'", ...sources])].join(" ");
   },
+  /** Requests per minute a single headless access key (CU-wdqcq0314u) may
+   *  make. The keys are handed to outside parties by design, so the limit is
+   *  what stops one from becoming an unmetered scraping endpoint. Per key,
+   *  in-memory (same single-instance limiter as the auth endpoints). Clamped
+   *  to [1, 100000]; default 120. */
+  get HEADLESS_KEY_RATE_LIMIT_PER_MIN(): number {
+    const n = parseInt(process.env.HEADLESS_KEY_RATE_LIMIT_PER_MIN || "120", 10);
+    return Number.isFinite(n) ? Math.min(100000, Math.max(1, n)) : 120;
+  },
   /**
    * Max JSON body size in bytes. Prevents DoS via giant payloads.
    * Default: 10 MB. Override via MAX_BODY_BYTES env.
@@ -941,5 +950,14 @@ export const config = {
   get PDF_MAX_BYTES() {
     const mb = parseInt(process.env.PDF_MAX_MB || "25", 10);
     return (Number.isFinite(mb) && mb > 0 ? mb : 25) * 1024 * 1024;
+  },
+
+  /**
+   * File operations one import keeps in flight (engine `limits.ioConcurrency`).
+   * Unset leaves the engine default (32). Raise it on a network mount (gcsfuse).
+   */
+  get IMPORT_IO_CONCURRENCY(): number | undefined {
+    const n = parseInt(process.env.IMPORT_IO_CONCURRENCY || "", 10);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
   },
 };

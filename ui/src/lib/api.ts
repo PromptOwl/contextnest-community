@@ -337,6 +337,8 @@ export interface AdminSettings {
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
+  /** File operations one folder import keeps in flight (1–256; engine default 32). */
+  import_io_concurrency: number;
   /** Superadmin message log: retention in days (0 = forever) and whether redacted bodies are kept. */
   message_log_retention_days: number;
   message_log_store_bodies: boolean;
@@ -569,6 +571,8 @@ export interface AdminLicense extends LicenseTerms {
     at_limit: boolean;
   };
   pending_rejections: number;
+  /** Last good check, set once PromptOwl has been unreachable for over 24h: read-only until it answers. */
+  offline_since?: string | null;
   last_checked_at: string | null;
   /** Own model keys / LLM gateway (licence feature byok) is on for this licence. */
   byok?: boolean;
@@ -908,6 +912,8 @@ export interface ApiKeyMeta {
   key_prefix: string;
   nest_id: string | null;
   label: string | null;
+  /** "read" keys can't write; anything else is read-write. */
+  capability?: string | null;
   created_at: string;
   last_used_at: string | null;
 }
@@ -927,7 +933,12 @@ export interface ApiKeyMinted {
 
 /** Mint another external-client API key. 409s at the per-user ceiling or on a
  *  duplicate name; with nest_id, 404s unless the caller can reach that nest. */
-export async function createApiKey(opts?: { label?: string; nest_id?: string }) {
+export async function createApiKey(opts?: {
+  label?: string;
+  nest_id?: string;
+  /** "read" requires nest_id — the server 400s otherwise. */
+  capability?: "read" | "write";
+}) {
   return request<ApiKeyMinted>("/auth/keys", {
     method: "POST",
     body: JSON.stringify(opts || {}),
@@ -2023,6 +2034,14 @@ export async function deleteFolder(nestId: string, folder: string) {
   return request<{ deleted: number; nodeIds: string[] }>(
     `/nests/${nestId}/delete-folder`,
     { method: "POST", body: JSON.stringify({ folder }) },
+  );
+}
+
+/** Rename or move a folder (`to` is its new full path) with everything in it. Owner/admin only. */
+export async function moveFolder(nestId: string, folder: string, to: string) {
+  return request<{ folder: string; moved: Array<{ id: string; previousId: string }> }>(
+    `/nests/${nestId}/folders/move`,
+    { method: "POST", body: JSON.stringify({ folder, to }) },
   );
 }
 
@@ -3962,10 +3981,39 @@ export interface BulkUpdateResult {
 
 export const BULK_UPDATE_MAX = 100;
 
-export async function bulkUpdateNodes(nestId: string, ids: string[], patch: BulkPatch) {
+export async function bulkUpdateNodes(
+  nestId: string,
+  ids: string[],
+  patch: BulkPatch,
+  opts: { allowDraft?: boolean } = {},
+) {
   return request<BulkUpdateResult>(`/nests/${nestId}/nodes/bulk-update`, {
     method: "POST",
-    body: JSON.stringify({ ids, patch }),
+    body: JSON.stringify({ ids, patch, ...(opts.allowDraft ? { allow_draft: true } : {}) }),
+  });
+}
+
+/** Move / delete over a selection (src/nodes/bulk-actions.ts). Per-document rows. */
+export interface BulkActionResult {
+  requested: number;
+  done: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+  results: (BulkRowResult & { new_id?: string })[];
+}
+
+export async function bulkMoveNodes(nestId: string, ids: string[], folder: string) {
+  return request<BulkActionResult>(`/nests/${nestId}/nodes/bulk-move`, {
+    method: "POST",
+    body: JSON.stringify({ ids, folder }),
+  });
+}
+
+export async function bulkDeleteNodes(nestId: string, ids: string[]) {
+  return request<BulkActionResult>(`/nests/${nestId}/nodes/bulk-delete`, {
+    method: "POST",
+    body: JSON.stringify({ ids }),
   });
 }
 

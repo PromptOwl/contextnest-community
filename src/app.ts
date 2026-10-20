@@ -117,12 +117,9 @@ import {
 } from "./governance/access-request-service.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
 import { nestScopedKeyGuard } from "./auth/nest-scope-guard.js";
-import {
-  verifySsoTicket,
-  isValidTicketSub,
-  SsoTokenError,
-  type SsoTicketClaims,
-} from "./auth/sso-token.js";
+import { isValidTicketSub } from "./auth/sso-token.js";
+import { resolveMcpTicketUser, mcpTicketSecrets } from "./auth/mcp-ticket.js";
+import { systemRoutes, nestSystemRoutes } from "./auth/system-routes.js";
 import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
@@ -150,6 +147,7 @@ import { ensureAnonymousUser } from "./auth/anonymous.js";
 import {
   isSuspended,
   getSuspensionReason,
+  getOfflineLock,
   getCurrentLicense,
   installLicenseKey,
   getLastLicenseCheck,
@@ -172,7 +170,7 @@ import {
   bareModelName,
   modelProvider,
 } from "./shared/model-credential.js";
-import { NEUTRAL_READ_ONLY, canSeeLicenseDetail } from "./auth/license-copy.js";
+import { NEUTRAL_READ_ONLY, canSeeLicenseDetail, offlineLockMessage } from "./auth/license-copy.js";
 import { tryConsume } from "./shared/rate-limit.js";
 import { clientIp } from "./shared/request-ip.js";
 import { FREE_TIER_EXCEEDED_MESSAGE, withinFreeTier, writesAllowed } from "./auth/free-tier.js";
@@ -273,8 +271,37 @@ const openModeMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   const anonId = await ensureAnonymousUser();
   c.set("userId", anonId);
   c.set("nestScope", null);
+  c.set("keyCapability", "write");
   await next();
 });
+
+/** Nest surfaces a named system key (CU-wdqcq0538g) never reaches, whatever
+ *  its collaborator standing: people, sharing, settings, publishing,
+ *  credentials and automation wiring. A system syncs content; it doesn't
+ *  administer the nest (and can't confirm its own held pushes). */
+const SYSTEM_DENIED_RESOURCES = new Set([
+  "collaborators",
+  "teams",
+  "visibility",
+  "settings",
+  "reader-mode",
+  "grants",
+  "systems",
+  "headless",
+  "publications",
+  "branding",
+  "metacognition",
+  "schedules",
+  "hooks",
+  "env",
+  "connectors",
+  "trace",
+  "stewards",
+  "archive",
+  "restore",
+  "push-allowlist",
+  "pending-pushes",
+]);
 
 // Unauth GETs in key mode: allow read-only access to a specific nest
 // (/nests/:id and its sub-routes) so public nests work without login.
@@ -376,6 +403,9 @@ const mcpOAuthBearer = createMiddleware<AuthEnv>(async (c, next) => {
   // OAuth grants are never narrowed to one nest: the whole point is that one
   // connection reads across everything the person can see.
   c.set("nestScope", null);
+  // OAuth grants are narrowed by oauthScope at tool dispatch, not by a key
+  // capability: the credential itself is the person's (full tier).
+  c.set("keyCapability", "write");
   // What the person actually consented to. Enforced at tool dispatch — a
   // consent screen that says "read" while write tools still work is a lie.
   c.set("oauthScope", grant.scope.split(" ").filter(Boolean));
@@ -392,6 +422,7 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
     const anonId = await ensureAnonymousUser();
     c.set("userId", anonId);
     c.set("nestScope", null);
+    c.set("keyCapability", "write");
     return next();
   }
 
@@ -399,6 +430,7 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
     const anonId = await ensureAnonymousUser();
     c.set("userId", anonId);
     c.set("nestScope", null);
+    c.set("keyCapability", "write");
     return next();
   }
 
@@ -443,80 +475,29 @@ const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
     // under EITHER — each attempt is an independent constant-time HMAC check,
     // and a ticket matching neither is rejected. Order is irrelevant: a forged
     // token fails both; a genuine one matches exactly the secret that signed it.
-    const secrets = [
-      config.OFFICIAL_COMMUNITY_SSO_SECRET,
-      config.MCP_SIGNING_SECRET,
-    ].filter(Boolean);
+    const secrets = mcpTicketSecrets();
     const looksLikeJwt =
       !!token && !token.startsWith("cnst_") && token.split(".").length === 3;
     if (!looksLikeJwt || secrets.length === 0) {
       return flexAuthMiddleware(c, next);
     }
 
-    let claims: SsoTicketClaims | null = null;
-    // A signature check can only find "expired" once it's already matched the
-    // signing secret, so seeing that reason from ANY candidate means this was
-    // a genuine ticket that aged out — not a forged/malformed one — even if a
-    // later candidate in the loop fails differently.
-    let expired = false;
-    for (const secret of secrets) {
-      try {
-        claims = verifySsoTicket(token, secret);
-        break;
-      } catch (err) {
-        if (err instanceof SsoTokenError && err.message === "Ticket expired") {
-          expired = true;
-        }
-        // Wrong secret (or malformed) — try the next candidate.
-      }
-    }
-    if (!claims) {
-      if (expired) {
-        return c.json(
-          { error: "Service ticket expired — reconnect to refresh.", code: "ticket_expired" },
-          401,
-        );
-      }
-      return c.json({ error: "Invalid service ticket" }, 401);
-    }
-    // Require the MCP scope AND reject a present jti. A one-time-use jti is the
-    // mark of an SSO *login* ticket (redeemable at GET /auth/sso for a browser
-    // session); an MCP bearer must carry neither, so we don't rely on the
-    // issuer keeping scope and jti mutually exclusive — this side enforces it,
-    // and /auth/sso rejects scope "mcp" for the symmetric guarantee.
-    if (claims.scope !== "mcp" || claims.jti) {
-      return c.json({ error: "Invalid service ticket" }, 401);
-    }
-    // Audience binding — same policy as GET /auth/sso: enforced when
-    // PUBLIC_BASE_URL is set (official deployments), so a ticket minted for
-    // another server can't be replayed against this one.
-    const expectedAud = config.PUBLIC_BASE_URL;
-    if (expectedAud && (claims.aud || "").replace(/\/$/, "") !== expectedAud) {
-      return c.json({ error: "Invalid service ticket" }, 401);
-    }
-
-    // Same sub-shape guard as GET /auth/sso (shared helper so the two
-    // ticket-consuming paths can't drift): a whitespace/garbage sub must never
-    // resolve a user here either.
-    const sub = claims.sub.trim();
-    if (!isValidTicketSub(sub)) {
-      return c.json({ error: "Invalid service ticket" }, 401);
-    }
-    const db = getDb();
-    // Access-key identities (CU-wdqcq0314u) are never a ticket's user.
-    const user = (await db.get(
-      "SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND COALESCE(is_service, 0) = 0",
-      [sub],
-    )) as { id: string } | undefined;
-    if (!user) {
+    // Verification (either secret, expiry code, scope:"mcp", no jti,
+    // audience, existing person) lives in auth/mcp-ticket.ts, shared with
+    // POST /auth/keys/exchange so the two ticket consumers can't drift.
+    const resolved = await resolveMcpTicketUser(token, secrets);
+    if (!resolved.ok) {
       return c.json(
-        { error: "No ContextNest account exists for this PromptOwl user" },
-        404,
+        resolved.code ? { error: resolved.error, code: resolved.code } : { error: resolved.error },
+        resolved.status,
       );
     }
+    const { claims, sub } = resolved;
 
-    c.set("userId", user.id);
+    c.set("userId", resolved.userId);
     c.set("nestScope", null);
+    // PromptOwl service tickets act as the full user (never read-only).
+    c.set("keyCapability", "write");
     // Shared agent driven by someone else: label held pushes with who asked.
     const act = typeof claims.act === "string" ? claims.act.trim() : "";
     if (isValidTicketSub(act) && act.toLowerCase() !== sub.toLowerCase()) {
@@ -845,6 +826,9 @@ export function createApp(): Hono<AuthEnv> {
       // Consecutive rejections PromptOwl has sent that haven't been acted on
       // yet (3 drop the license) — the "we're checking your license" banner.
       pending_rejections: getPendingRejections(),
+      // Set while PromptOwl has been unreachable past the 24h offline limit
+      // (the last good check); the server is read-only until it answers.
+      offline_since: getOfflineLock(),
       last_checked_at: getLastLicenseCheck(),
       // Own model keys / LLM gateway (licence feature byok), for the License tab.
       byok: hasEntitlement("byok"),
@@ -974,6 +958,8 @@ export function createApp(): Hono<AuthEnv> {
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
+    // Unset shows the engine's default bound.
+    import_io_concurrency: config.IMPORT_IO_CONCURRENCY ?? 32,
     message_log_retention_days: config.MESSAGE_LOG_RETENTION_DAYS,
     message_log_store_bodies: config.MESSAGE_LOG_STORE_BODIES,
     run_retention_days: config.RUN_RETENTION_DAYS,
@@ -1436,6 +1422,16 @@ export function createApp(): Hono<AuthEnv> {
           addError("trace_retention_days", "Trace retention must be a whole number of days between 0 and 3650 (0 keeps activity forever).");
         else pending.push({ name: "TRACE_RETENTION_DAYS", value: String(n) });
       }
+    }
+    // Import I/O bound (engine limits.ioConcurrency). Capped: each in-flight
+    // file is held in memory. null clears → engine default (32).
+    if ("import_io_concurrency" in body) {
+      const v = body.import_io_concurrency;
+      const n = Number(v);
+      if (v === null || v === "") pending.push({ name: "IMPORT_IO_CONCURRENCY", value: null });
+      else if (!Number.isInteger(n) || n < 1 || n > 256)
+        addError("import_io_concurrency", "Import concurrency must be a whole number between 1 and 256.");
+      else pending.push({ name: "IMPORT_IO_CONCURRENCY", value: String(n) });
     }
     // Message-log retention (outbound_messages). Same [0, 3650] range as the
     // getter; 0 keeps messages forever, null clears → default (30).
@@ -2587,6 +2583,13 @@ export function createApp(): Hono<AuthEnv> {
   app.use("/mcp", mcpOAuthBearer);
   app.route("/mcp", serverMcpRoutes);
 
+  // Named systems (CU-wdqcq0538g). Admin-gated in the service layer
+  // (owner/admin of the nests involved); a system or headless key never gets
+  // here (the nest-scope guard fences those out).
+  app.use("/systems", flexAuthMiddleware);
+  app.use("/systems/*", flexAuthMiddleware);
+  app.route("/systems", systemRoutes);
+
   // === All /nests routes ===
   const nestsApp = new Hono<AuthEnv>();
 
@@ -2631,6 +2634,14 @@ export function createApp(): Hono<AuthEnv> {
           contact: (lic?.contact ?? DEFAULT_LICENSE_CONTACT).email,
           contact_url: (lic?.contact ?? DEFAULT_LICENSE_CONTACT).url,
         },
+      };
+    }
+    const offlineSince = getOfflineLock();
+    if (offlineSince) {
+      if (!(await admin())) return { error: NEUTRAL_READ_ONLY, extra: { read_only: true } };
+      return {
+        error: "License check overdue",
+        extra: { reason: offlineLockMessage(offlineSince), offline_since: offlineSince },
       };
     }
     if (await writesAllowed()) return null;
@@ -2738,9 +2749,9 @@ export function createApp(): Hono<AuthEnv> {
       );
     }
 
-    // Kill switch: if suspended, block writes but allow reads
+    // Kill switch or offline limit: block writes but allow reads
     // Only admins hear why; everyone else gets the neutral read-only line.
-    if (isSuspended() && c.req.method !== "GET") {
+    if ((isSuspended() || getOfflineLock()) && c.req.method !== "GET") {
       const denial = await readOnlyDenial(userId);
       if (denial) return deny(503, denial.error, denial.extra);
     }
@@ -2881,6 +2892,48 @@ export function createApp(): Hono<AuthEnv> {
     // for owner/admin itself when the body carries draft rules.
     const isStructureCheck =
       parts.length === 3 && parts[1] === "structure" && parts[2] === "check";
+
+    // CAPABILITY GATE (read-only keys). A key minted read-only must never reach
+    // a write or governance mutation on ANY nest — enforced HERE, server-side,
+    // not by UI filtering. A "pure read" is a GET, a read-tier query POST
+    // (context/query/search/export, above), or the MCP transport (always POST;
+    // its per-tool capability gate in mcp/tools.ts blocks the write tools while
+    // leaving reads working). Everything else — node create/update/delete,
+    // approve/reject/submit-review, comments, annotations, deletion requests,
+    // stewards, sharing, sync — is a mutation and is denied. This sits BEFORE
+    // the per-route permission resolution below because a read-only credential
+    // is denied regardless of how much nest permission the underlying user has.
+    // Named system keys never touch the nest's people/settings/credential/
+    // automation surfaces, even when their collaborator standing would allow
+    // it (CU-wdqcq0538g).
+    if (
+      c.get("principalKind") === "system" &&
+      SYSTEM_DENIED_RESOURCES.has(parts[1])
+    ) {
+      return deny(
+        403,
+        "A system key can't manage this nest's people, settings, publishing, keys or automation.",
+      );
+    }
+
+    if (c.get("keyCapability") === "read") {
+      const isPureRead =
+        c.req.method === "GET" ||
+        // chat can post a mention comment and spends model credits — not a read.
+        (isReadQuery && parts[1] !== "chat") ||
+        isMcpTransport;
+      if (!isPureRead) {
+        return deny(
+          403,
+          "This API key is read-only and cannot perform write or governance actions.",
+          {
+            reason:
+              "Mint a read-write key (or use a session) for changes. Read-only keys may only read, query, search, and export.",
+            capability: "read",
+          },
+        );
+      }
+    }
 
     // MCP transport is read-tier (isMcpTransport, declared above with the
     // deny helper): the Streamable HTTP protocol is ALWAYS POST — even
@@ -3267,12 +3320,22 @@ export function createApp(): Hono<AuthEnv> {
     // caller acting purely via a grant (nest permission "none"), or a viewer
     // holding a write share on this node — so node handlers treat them
     // correctly.
-    c.set(
-      "nestPermission",
+    let effectivePermission: NestPermission =
       grantRole && permissionLevel(grantRole) > permissionLevel(permission)
         ? grantRole
-        : permission,
-    );
+        : permission;
+    // A read-only key caps the effective permission at 'read', so any handler
+    // that keys off nestPermission (and GET /nests/:id, which reports it to the
+    // UI) sees the truth: this credential cannot write here. Defense in depth —
+    // the pure-read gate above already blocked the mutation; this keeps the
+    // reported permission honest and closes any handler that gates on it.
+    if (
+      c.get("keyCapability") === "read" &&
+      permissionLevel(effectivePermission) > permissionLevel("read")
+    ) {
+      effectivePermission = "read";
+    }
+    c.set("nestPermission", effectivePermission);
     return next();
   });
 
@@ -3436,6 +3499,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/definitions", definitionRoutes);
   nestsApp.route("/:nestId/structure", structureRoutes);
   nestsApp.route("/:nestId/assets", assetRoutes);
+  nestsApp.route("/:nestId/systems", nestSystemRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
 
   app.route("/nests", nestsApp);

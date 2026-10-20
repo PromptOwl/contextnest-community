@@ -16,9 +16,11 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   Boxes,
+  Eye,
   KeyRound,
   Layers,
   Loader2,
+  Pencil,
   Plus,
   RefreshCw,
   Trash2,
@@ -40,7 +42,10 @@ import {
   ALL_NESTS,
   createKeyRequest,
   filterSortKeys,
+  keyCapability,
   keyScope,
+  READ_ONLY_NEEDS_NEST,
+  type KeyCapability,
   type KeyScopeFilter,
   type KeySort,
 } from "../../../lib/api-key-scope";
@@ -70,6 +75,9 @@ export default function ApiKeysPage() {
 
   const [label, setLabel] = useState("");
   const [scope, setScope] = useState<string>(ALL_NESTS);
+  const [capability, setCapability] = useState<KeyCapability>("write");
+  // A refused generate (e.g. the server's read-only 400) shows under the form.
+  const [formError, setFormError] = useState<string | null>(null);
   // List controls — search, scope filter, sort.
   const [query, setQuery] = useState("");
   const [scopeFilter, setScopeFilter] = useState<KeyScopeFilter>("any");
@@ -91,7 +99,8 @@ export default function ApiKeysPage() {
   const duplicateName = keys.some(
     (k) => k.label?.trim().toLowerCase() === trimmedLabel.toLowerCase(),
   );
-  const canGenerate = trimmedLabel.length > 0 && !duplicateName;
+  const readNeedsNest = capability === "read" && scope === ALL_NESTS;
+  const canGenerate = trimmedLabel.length > 0 && !duplicateName && !readNeedsNest;
 
   const refresh = () =>
     qc.invalidateQueries({ queryKey: reads.apiKeys().queryKey });
@@ -102,15 +111,19 @@ export default function ApiKeysPage() {
     kind: "generated" | "rotated",
   ) {
     setBusy(id);
+    if (id === "new") setFormError(null);
     try {
       const { api_key } = await fn();
       setReveal({ apiKey: api_key, kind });
       if (id === "new") {
         setLabel("");
         setScope(ALL_NESTS);
+        setCapability("write");
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Something went wrong.");
+      const message = err instanceof Error ? err.message : "Something went wrong.";
+      if (id === "new") setFormError(message);
+      else toast.error(message);
     } finally {
       // Refresh either way: on failure the server is still the truth about
       // what the account holds.
@@ -154,7 +167,8 @@ export default function ApiKeysPage() {
           </span>
           Reaches that one nest and nothing else — every other nest, your
           account, API keys and admin settings answer 403. Hand this one to an
-          agent or integration.
+          agent or integration. Make it read-only and it can't change anything
+          either.
         </p>
       </div>
       <form
@@ -164,7 +178,7 @@ export default function ApiKeysPage() {
           if (!canGenerate) return;
           run(
             "new",
-            () => api.createApiKey(createKeyRequest(trimmedLabel, scope)),
+            () => api.createApiKey(createKeyRequest(trimmedLabel, scope, capability)),
             "generated",
           );
         }}
@@ -192,12 +206,29 @@ export default function ApiKeysPage() {
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value={ALL_NESTS}>All your nests</SelectItem>
+            <SelectItem value={ALL_NESTS} disabled={capability === "read"}>
+              All your nests
+            </SelectItem>
             {nests.map((n) => (
               <SelectItem key={n.id} value={n.id}>
                 Only {n.name}
               </SelectItem>
             ))}
+          </SelectContent>
+        </Select>
+        <Select
+          value={capability}
+          onValueChange={(v) => setCapability(v as KeyCapability)}
+        >
+          <SelectTrigger
+            className="w-full sm:w-[140px] shrink-0"
+            aria-label="What this key can do"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="write">Read-write</SelectItem>
+            <SelectItem value="read">Read-only</SelectItem>
           </SelectContent>
         </Select>
         <Button
@@ -213,6 +244,11 @@ export default function ApiKeysPage() {
           Generate key
         </Button>
       </form>
+      {(readNeedsNest || formError) && (
+        <p className="text-xs text-destructive" role="alert">
+          {readNeedsNest ? READ_ONLY_NEEDS_NEST : formError}
+        </p>
+      )}
 
       {keys.length > 0 && (
         <div className="flex flex-col gap-2 sm:flex-row">
@@ -263,6 +299,7 @@ export default function ApiKeysPage() {
           {shown.map((k) => {
             const name = k.label || "Unnamed key";
             const reach = keyScope(k, allNests);
+            const can = keyCapability(k);
             return (
               <li
                 key={k.id}
@@ -290,6 +327,22 @@ export default function ApiKeysPage() {
                         <Layers className="h-3 w-3" />
                       )}
                       <span className="max-w-[16rem] truncate">{reach.label}</span>
+                    </Badge>
+                    <Badge
+                      variant="outline"
+                      className="shrink-0 gap-1"
+                      title={
+                        can.kind === "read"
+                          ? "This key can read but not change anything."
+                          : "This key can read and write."
+                      }
+                    >
+                      {can.kind === "read" ? (
+                        <Eye className="h-3 w-3" />
+                      ) : (
+                        <Pencil className="h-3 w-3" />
+                      )}
+                      {can.label}
                     </Badge>
                   </div>
                   <p className="text-xs text-muted-foreground">
