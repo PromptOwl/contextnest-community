@@ -1647,7 +1647,7 @@ Submitting one is the ordinary `POST /nests/:nestId/nodes/:nodeId/submit-review`
 
 > **Experimental.** Off by default; `404` unless `EXPERIMENTAL_DOC_STREAM` is on (env, or a superadmin's `experimental_doc_stream_enabled` in `PATCH /admin/settings`). The shape may change or the endpoint may be removed.
 
-Query: `?nest=&tag=&type=&author=&since=&limit=50&offset=0`. `nest`, `tag`, `type` and `author` are multi-select — repeat the param or comma-separate the values; values within one facet are OR'd, facets are AND'd. `tag` takes either `fmt` or `#fmt`. `since` is a date (`2026-10-01T00:00:00Z`, or the `at` value of an item); a bad one is `400`. `limit` clamps to 1–100, `offset` to 0–10000; an offset past the end is an empty page, not an error.
+Query: `?nest=&tag=&type=&author=&since=&limit=50&offset=0`. `nest`, `tag`, `type` and `author` are multi-select — repeat the param or comma-separate the values; values within one facet are OR'd, facets are AND'd. `tag` takes either `fmt` or `#fmt`. `since` is a date (`2026-10-01T00:00:00Z`, or the `at` value of an item); a bad one is `400`. `limit` clamps silently to 1–100 (junk → 50), `offset` to 0–10000; an offset past the end is an empty page, not an error. Each facet param keeps its first 50 distinct values.
 
 One item per **node version** across every nest the caller can read (owned, shared, stewarded, team-shared, share-granted, or readable through its `org`/`public` visibility), newest first (`at` desc, then insertion order, so pages never duplicate or skip). Access is the same rule the document listing and the governance feed use, resolved once per nest:
 
