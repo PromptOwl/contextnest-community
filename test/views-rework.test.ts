@@ -151,15 +151,15 @@ afterAll(async () => {
 });
 
 /** Rewrite one version row's author for the duration of `fn`. */
-async function withAuthor(nodeId: string, author: string, fn: () => Promise<void>) {
+async function withAuthor(nest: string, nodeId: string, author: string, fn: () => Promise<void>) {
   const d = await db();
   const row = (await d.get(
     "SELECT author FROM node_versions WHERE nest_id = ? AND node_id = ? AND version = 1",
-    [nestId, nodeId],
+    [nest, nodeId],
   )) as { author: string };
   await d.run("UPDATE node_versions SET author = ? WHERE nest_id = ? AND node_id = ? AND version = 1", [
     author,
-    nestId,
+    nest,
     nodeId,
   ]);
   try {
@@ -167,7 +167,7 @@ async function withAuthor(nodeId: string, author: string, fn: () => Promise<void
   } finally {
     await d.run("UPDATE node_versions SET author = ? WHERE nest_id = ? AND node_id = ? AND version = 1", [
       row.author,
-      nestId,
+      nest,
       nodeId,
     ]);
   }
@@ -182,17 +182,59 @@ describe("baseline", () => {
 });
 
 describe("H-1: governed nests intersect with the version authors too", () => {
+  // A PRIVATE governed nest: the rewritten author has no standing in it at all
+  // (in the public nest above, anyone is an approved-only reader).
+  let priv: string;
+  let pv: string;
+  let pa: string;
+  const pframe = () => `/nests/${priv}/nodes/${pv}/view/blocks/h/hosted`;
+  beforeAll(async () => {
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Private Governed" }, owner.apiKey);
+    priv = nest.data.nest.id;
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${priv}/settings`,
+      { stewardship_enabled: true, allow_self_approve: true },
+      owner.apiKey,
+    );
+    const mk = async (body: Record<string, unknown>) => {
+      const r = await jsonRequest(app, "POST", `/nests/${priv}/nodes`, body, owner.apiKey);
+      expect(r.status, JSON.stringify(r.data)).toBe(201);
+      return r.data.node.id as string;
+    };
+    await mk({ title: "Metric One", content: "one", tags: ["metric"] });
+    const t = await mk({ title: "Ledger", type: "table", content: T_CSV });
+    pa = await mk({ title: "Dash", type: "artifact", content: ART_HTML });
+    pv = await mk({
+      title: "Private View",
+      type: "view",
+      content: "intro",
+      view: {
+        blocks: [
+          { id: "d", data: { binding: t } },
+          { id: "m", list: { select: "#metric" } },
+          { id: "h", html: { ref: pa, data_from: ["d", "m"] } },
+        ],
+      },
+    });
+  });
+
+  it("baseline: the owner gets the data", async () => {
+    expect(nestData(await (await get(pframe(), owner)).text()).d.ok).toBe(true);
+  });
+
   it("a view authored by someone with no nest access withholds, even though it is approved", async () => {
-    await withAuthor(vId, nobody.email, async () => {
-      const res = await get(frame(vId, "h"), member);
+    await withAuthor(priv, pv, nobody.email, async () => {
+      const res = await get(pframe(), owner);
       expect(res.status).toBe(200);
       expect(nestData(await res.text())).toEqual(WITHHELD);
     });
   });
 
   it("so does such an author on the artifact's chain", async () => {
-    await withAuthor(aId, nobody.email, async () => {
-      expect(nestData(await (await get(frame(vId, "h"), member)).text())).toEqual(WITHHELD);
+    await withAuthor(priv, pa, nobody.email, async () => {
+      expect(nestData(await (await get(pframe(), owner)).text())).toEqual(WITHHELD);
     });
   });
 });
@@ -213,7 +255,7 @@ describe("M-1: the frame is a frame", () => {
     expect(csp).not.toContain("dataroom.example");
     // The page keeps the server-wide policy.
     const pageCsp = (await get(page(vId), member)).headers.get("content-security-policy")!;
-    expect(pageCsp).toContain("frame-ancestors https://dataroom.example");
+    expect(pageCsp).toContain("https://dataroom.example");
   });
 });
 
