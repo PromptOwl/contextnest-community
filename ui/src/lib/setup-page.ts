@@ -11,8 +11,13 @@
  * The CLI is the trust boundary: it re-validates every field. This side only
  * refuses a cb that is not loopback, so the page can never post to a host.
  */
+import { HARNESSES, renderHarnessDoc } from "./agent-connect-docs";
 
 export interface SetupChoices {
+  /** local: `ctx init` a vault here. cloud: `ctx login` to a hosted server and register its nests. */
+  mode: "local" | "cloud";
+  /** cloud only: the server's base URL. */
+  server: string;
   name: string;
   alias: string;
   description: string;
@@ -49,6 +54,8 @@ export const TOOLS = [
 export const ALIAS_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 export const DEFAULT_CHOICES: SetupChoices = {
+  mode: "local",
+  server: "",
   name: "My Context Nest",
   alias: "my-nest",
   description: "",
@@ -64,6 +71,18 @@ const LOOPBACK_CB = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):\d{1,5}\/callbac
 /** The CLI's callback URL, or null when the page was opened by hand or cb is not loopback. */
 export function loopbackCallback(cb: string | null): string | null {
   return cb && LOOPBACK_CB.test(cb) ? cb : null;
+}
+
+/**
+ * Agent tools `ctx setup` found on this computer, from `#detected=a,b`. The
+ * fragment never reaches the server, so the server cannot log what is
+ * installed. null when the page was not opened by `ctx setup`.
+ */
+export function detectedTools(hash: string): string[] | null {
+  const raw = new URLSearchParams(hash.replace(/^#/, "")).get("detected");
+  if (raw === null) return null;
+  const known: string[] = TOOLS.map((t) => t.id);
+  return raw.split(",").filter((t) => known.includes(t));
 }
 
 export function callbackUrl(cb: string, state: string, choices: SetupChoices): string {
@@ -83,6 +102,29 @@ export function initCommand(c: SetupChoices): string {
   if (c.description) parts.push("--description", sh(c.description));
   if (c.starter) parts.push("--starter", c.starter, "--tools", c.tools.length ? c.tools.join(",") : "none");
   if (c.encrypted) parts.push("--encrypted");
+  if (c.setDefault) parts.push("--set-default");
+  return parts.join(" ");
+}
+
+/**
+ * A cloud server's origin, or null. https only, except loopback for local
+ * testing. The origin has no quote, space or shell character, so it is safe
+ * inside the commands below.
+ */
+export function cloudServer(input: string): string | null {
+  try {
+    const u = new URL(input.trim());
+    const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+    if (u.protocol !== "https:" && !(u.protocol === "http:" && loopback)) return null;
+    return u.origin;
+  } catch {
+    return null;
+  }
+}
+
+/** The `ctx login` line a visitor without `ctx setup` can paste. */
+export function loginCommand(c: SetupChoices): string {
+  const parts = ["ctx login", cloudServer(c.server) ?? "<server url>", "--as", ALIAS_PATTERN.test(c.alias) ? c.alias : "<alias>"];
   if (c.setDefault) parts.push("--set-default");
   return parts.join(" ");
 }
@@ -189,3 +231,39 @@ export function connectGuides(vaultAlias: string): ConnectGuide[] {
 
 /** Where the page parks the choices across the round trip to the CLI. */
 export const CHOICES_KEY = "cn_setup_choices";
+
+/**
+ * Steps to connect a cloud server to each agent. Claude Code can ride the
+ * `ctx login` alias through the plugin; every other harness is the same
+ * per-harness doc the server's own Settings panel shows (agent-connect-docs).
+ */
+export function cloudGuides(server: string, vaultAlias: string): ConnectGuide[] {
+  const origin = cloudServer(server) ?? "https://<your server>";
+  const v = ALIAS_PATTERN.test(vaultAlias) ? vaultAlias : "<alias>";
+  const key = [
+    `1. Sign in at [${origin}](${origin}) and open **Connect**. Create a user-level API key.`,
+    `2. Put it in your shell profile: \`export CONTEXTNEST_API_KEY=cnst_…\`. Do not paste the key into a config file you commit.`,
+    "3. Then:",
+    "",
+  ].join("\n");
+  return [
+    {
+      id: "claude-code-plugin",
+      name: "Claude Code (plugin)",
+      steps: [
+        "The plugin uses the `ctx` CLI and the key that `ctx login` saved. You need no API key here.",
+        "",
+        "1. Start Claude Code: `claude`.",
+        "2. Add the marketplace: `/plugin marketplace add promptowl/contextnest`.",
+        "3. Install the plugin: `/plugin install contextnest`.",
+        `4. When it asks for **Pinned vault**, enter \`${v}\` (or leave it empty to use every registered vault).`,
+        "5. Restart Claude Code. The session start shows the nests on the server.",
+      ].join("\n"),
+    },
+    ...HARNESSES.map((h) => ({
+      id: h.id,
+      name: h.name,
+      steps: (h.support === "header" ? key : "") + renderHarnessDoc(h, { serverUrl: origin }),
+    })),
+  ];
+}

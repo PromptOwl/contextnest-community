@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CHOICES, callbackUrl, connectGuides, initCommand, loopbackCallback } from "./setup-page";
+import { DEFAULT_CHOICES, callbackUrl, cloudGuides, cloudServer, connectGuides, detectedTools, initCommand, loginCommand, loopbackCallback } from "./setup-page";
 
 describe("setup page", () => {
   it("accepts only a loopback /callback", () => {
@@ -27,5 +27,27 @@ describe("setup page", () => {
     const steps = connectGuides("x; rm -rf ~").map((g) => g.steps).join("\n");
     expect(steps).not.toContain("rm -rf");
     expect(steps).toContain("<vault alias or path>");
+  });
+
+  it("accepts only an https (or loopback) cloud server", () => {
+    expect(cloudServer("https://nest.promptowl.ai/app?x=1")).toBe("https://nest.promptowl.ai");
+    expect(cloudServer("http://localhost:3000")).toBe("http://localhost:3000");
+    for (const bad of ["http://nest.example.com", "javascript:alert(1)", "nest.example.com", ""]) {
+      expect(cloudServer(bad)).toBeNull();
+    }
+  });
+
+  it("builds the cloud login command and guides", () => {
+    const c = { ...DEFAULT_CHOICES, mode: "cloud" as const, server: "https://nest.example.com", alias: "work" };
+    expect(loginCommand(c)).toBe("ctx login https://nest.example.com --as work --set-default");
+    expect(loginCommand({ ...c, server: "x; rm -rf ~" })).not.toContain("rm -rf");
+    const steps = cloudGuides(c.server, c.alias).map((g) => g.steps).join("\n");
+    expect(steps).toContain("https://nest.example.com/mcp");
+  });
+
+  it("reads detected tools from the fragment, dropping unknown ids", () => {
+    expect(detectedTools("#detected=claude,gemini,evil")).toEqual(["claude", "gemini"]);
+    expect(detectedTools("#detected=")).toEqual([]);
+    expect(detectedTools("")).toBeNull();
   });
 });
