@@ -56,6 +56,16 @@ export class PlanLimitError extends AppError {
   }
 }
 
+/** A role change raises someone's billed class and wasn't confirmed (409). */
+export class BillingConfirmError extends AppError {
+  constructor(
+    public changes: Array<{ userId: string | null; email: string | null; from: string; to: string }>,
+  ) {
+    super(409, "This change raises what someone is billed. Confirm it to continue.");
+    this.name = "BillingConfirmError";
+  }
+}
+
 export class ConflictError extends AppError {
   constructor(message: string) {
     super(409, message);
