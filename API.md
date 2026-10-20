@@ -366,7 +366,7 @@ Pins are per `(user, nest)` in the `nest_pins` table and cascade with the nest. 
 
 Two kinds of pin on a document:
 - **Editorial** (`scope: "nest"`) — pinned for everyone, in an order the steward chooses. Who may write: the nest owner, a nest admin, the server admin, or a **reviewer steward scoped to the whole nest**; everyone else (write collaborators and editor stewards included) gets `403`. Archived nest → `403`.
-- **Personal** (`scope: "user"`) — the caller's own bookmark, visible to nobody else. Needs only read access to the document.
+- **Personal** (`scope: "user"`) — the caller's own bookmark, visible to nobody else. Needs only read access to the document. Allowed on an archived nest too — a bookmark is the reader's own, not nest content (the same as a dashboard nest pin).
 
 **GET** `/nests/:nestId/pins` (read+, including document/folder grantees) →
 ```json

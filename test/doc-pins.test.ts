@@ -378,6 +378,27 @@ describe("document pins", () => {
       ids.Delta = newId;
     });
 
+    it("moving onto an id that holds a stale pin row still succeeds and carries the pin", async () => {
+      const src = await createDoc("Mover");
+      expect((await pin(owner, src, "nest")).status).toBe(201);
+      // A stale row on the destination id (its document vanished outside the
+      // app, so no delete hook ran). The repoint must not trip the unique index.
+      const dest = "nodes/landing/mover";
+      await (await db()).run(
+        "INSERT INTO node_pins (id, nest_id, node_id, scope, user_id, position) VALUES ('stale-dest', ?, ?, 'nest', NULL, 77)",
+        [nestId, dest],
+      );
+      const res = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${src}/move`, { folder: "landing" }, owner.apiKey);
+      expect(res.status).toBe(200);
+      const newId = res.data.node?.id ?? res.data.id;
+      expect(newId).toBe(dest);
+      const rows = await pinRows("node_id = ? AND scope = 'nest'", [dest]);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].id).not.toBe("stale-dest");
+      expect((await getPins(reader)).data.editorial.map((p: any) => p.node_id)).toContain(dest);
+      expect((await unpin(owner, dest, "nest")).status).toBe(200);
+    });
+
     it("deleting the node removes every pin row on it", async () => {
       expect((await pin(owner, ids.Echo, "nest")).status).toBe(201);
       // reader holds a personal pin on Echo too.
@@ -468,6 +489,11 @@ describe("document pins", () => {
     expect((await pin(owner, doc, "nest", n)).status).toBe(201);
     expect((await jsonRequest(app, "POST", `/nests/${n}/archive`, undefined, owner.apiKey)).status).toBeLessThan(300);
     expect((await unpin(owner, doc, "nest", n)).status).toBe(403);
+    // A personal pin is the reader's own bookmark, not nest content — like a
+    // dashboard nest pin, it stays allowed on an archived nest (pinned here so
+    // the behaviour is a decision, not an accident).
+    expect((await pin(owner, doc, "user", n)).status).toBe(201);
+    expect((await unpin(owner, doc, "user", n)).data.unpinned).toBe(true);
     const res = await getPins(owner, n);
     expect(res.status).toBe(200);
     expect(res.data.editorial.map((p: any) => p.node_id)).toEqual([doc]);

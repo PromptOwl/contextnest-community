@@ -232,12 +232,15 @@ export async function pinDocument(params: {
       // SQLite (one writer) that is exact; on Postgres READ COMMITTED two
       // inserts racing can still tie on position or overshoot the cap by the
       // racers — reads order by (position, created_at, node_id), so a tie is
-      // deterministic and the next reorder rewrites it.
+      // deterministic and the next reorder rewrites it. The select-list
+      // parameters are cast explicitly: Postgres would otherwise have to infer
+      // their types from the target columns.
       const r = await db.run(
         `INSERT INTO node_pins (id, nest_id, node_id, scope, user_id, position, pinned_by)
-         SELECT ?, ?, ?, ?, ?, COALESCE(MAX(position), -1) + 1, ?
+         SELECT CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT),
+                COALESCE(MAX(position), -1) + 1, CAST(? AS TEXT)
            FROM node_pins WHERE ${listWhere}
-         HAVING COUNT(*) < ?`,
+         HAVING COUNT(*) < CAST(? AS INTEGER)`,
         [randomUUID(), nestId, nodeId, scope, owner, await resolveCallerEmail(userId), ...listParams, MAX_PINS_PER_LIST],
       );
       if (r.changes === 0) throw capped();

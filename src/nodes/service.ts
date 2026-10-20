@@ -3095,6 +3095,12 @@ async function rewriteNodeKeyedRows(
   oldId: string,
   newId: string,
 ): Promise<void> {
+  // Pins are the one node-keyed table with a uniqueness rule on the id
+  // (migration 069's partial unique indexes). The destination is not a live
+  // document, so any pin row already on it is stale (its document vanished
+  // outside the app) — clear it, or the repoint trips the index and the move
+  // fails.
+  await tx.run("DELETE FROM node_pins WHERE nest_id = ? AND node_id = ?", [nestId, newId]);
   for (const [table, column] of NODE_KEYED_TABLES) {
     await tx.run(
       `UPDATE ${table} SET ${column} = ? WHERE nest_id = ? AND ${column} = ?`,
