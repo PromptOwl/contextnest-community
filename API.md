@@ -1653,7 +1653,7 @@ One item per **node version** across every nest the caller can read (owned, shar
 
 - a nest the caller can't read never appears — not in `items`, `total` or `counts`;
 - a caller who reads only some documents (steward rows, share grants) sees only those documents' versions;
-- drafts follow the read rules: a member who can read the document sees its drafts (`status: "draft"`); a **public reader** (reads the nest through its visibility, not membership) sees approved/published versions only, and `author` is `null` for them — their nests are left out of the `author` facet and filter;
+- drafts follow the read rules: a member who can read the document sees its drafts (`status: "draft"`); a **public reader** (reads the nest through its visibility, not membership) sees approved/published versions only, and nothing of the document's current state (which may be an unreviewed draft): `title`, `type` and `tags` are that version's own, `author` and `commentCount` are `null`, and their nests are left out of the `tag`, `type` and `author` facets and filters;
 - versions of deleted documents are dropped.
 
 ```json
@@ -1690,7 +1690,7 @@ One item per **node version** across every nest the caller can read (owned, shar
 ```
 
 - `tags` are the document's current tags (normalized: no `#`, lowercase). `summary` is the first ~200 characters of that version's body, flattened (no diff).
-- `commentCount` counts comments on the document's **open** annotation threads — the threads `GET /nests/:nestId/nodes/:nodeId/annotations` lists; post with `POST …/annotations` (new thread) or `POST …/annotations/:threadId/comments` (reply), and deep-link with `?thread=<threadId>`.
+- `commentCount` (members only) counts comments on the document's **open** annotation threads — the threads `GET /nests/:nestId/nodes/:nodeId/annotations` lists; post with `POST …/annotations` (new thread) or `POST …/annotations/:threadId/comments` (reply), and deep-link with `?thread=<threadId>`.
 - `kind`: `created` (version 1), `updated` (a later draft / pending edit), `published` (a later edit that went live without a review), `approved` (a review approved this version), `rejected`.
 - `counts` are per-facet totals over the caller's whole readable stream with `since` applied but **no** facet filter — they don't change with the page or with the other chips. Tag, type and author lists are capped at 50 values each.
 - Licensed like `/nests/:nestId/feed`: unlicensed past the Free tier → `503` with the same body the feed answers. A nest-scoped key is refused (`403`, like every `/me/*` route).

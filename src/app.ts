@@ -79,7 +79,7 @@ import { definitionRoutes } from "./definitions/routes.js";
 import { structureRoutes } from "./structure/routes.js";
 import { ContextNestError } from "@promptowl/contextnest-engine";
 import { forPeople } from "./structure/writes.js";
-import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES, bodyOnly } from "./nodes/service.js";
+import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES, parseVersionRaw } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import {
   pdfNodeRoutes,
@@ -2491,15 +2491,17 @@ export function createApp(): Hono<AuthEnv> {
       // The service clamps (limit 1–100, default 50; offset 0–10000).
       limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
       offset: c.req.query("offset") ? Number(c.req.query("offset")) : undefined,
-      readBody: async (nestId, nodeId, version) => {
+      readVersion: async (nestId, nodeId, version) => {
         const { storage, versions } = await engineCache.get(nestId);
         try {
-          return bodyOnly(nodeId, await versions.reconstructVersion(nodeId, version));
+          return parseVersionRaw(nodeId, await versions.reconstructVersion(nodeId, version));
         } catch {
           // The unreviewed draft on top is never in the chain — its bytes are
           // the live file (same fallback as GET …/versions/:version).
           const node = await storage.readDocument(nodeId);
-          if ((node.frontmatter.version ?? 1) === version) return node.body ?? "";
+          if ((node.frontmatter.version ?? 1) === version) {
+            return { body: node.body ?? "", frontmatter: node.frontmatter as unknown as Record<string, unknown> };
+          }
           // Neither the chain nor the live file has this version: a broken
           // chain. The card shows no summary; say so once per document.
           const key = `${nestId}:${nodeId}`;

@@ -171,7 +171,7 @@ export function DocStream({ pinnedNestId, onOpen }: DocStreamProps) {
                 setItems((prev) =>
                   prev.map((i) =>
                     i.nestId === item.nestId && i.nodeId === item.nodeId
-                      ? { ...i, commentCount: i.commentCount + 1 }
+                      ? { ...i, commentCount: (i.commentCount ?? 0) + 1 }
                       : i,
                   ),
                 )
@@ -251,18 +251,22 @@ function StreamCard({
             #{t}
           </span>
         ))}
-        <button
-          type="button"
-          className="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-          aria-expanded={expanded}
-          onClick={onToggleComments}
-          data-testid="stream-comments-toggle"
-        >
-          <MessageSquare className="h-3.5 w-3.5" />
-          {item.commentCount === 1 ? "1 comment" : `${item.commentCount} comments`}
-        </button>
+        {item.commentCount !== null && (
+          <button
+            type="button"
+            className="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+            aria-expanded={expanded}
+            onClick={onToggleComments}
+            data-testid="stream-comments-toggle"
+          >
+            <MessageSquare className="h-3.5 w-3.5" />
+            {item.commentCount === 1 ? "1 comment" : `${item.commentCount} comments`}
+          </button>
+        )}
       </div>
-      {expanded && <StreamComments item={item} onOpen={onOpen} onCommented={onCommented} />}
+      {expanded && item.commentCount !== null && (
+        <StreamComments item={item} onOpen={onOpen} onCommented={onCommented} />
+      )}
     </li>
   );
 }

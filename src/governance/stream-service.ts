@@ -13,8 +13,12 @@
  *     those cover — pushed into SQL as a node-id list for that nest;
  *   - a public reader (reads the nest through its visibility, not
  *     membership) sees approved/published versions only — never a draft —
- *     and never who wrote them: the author is withheld, and the author facet
- *     and filter skip those nests, so an email can't be probed for.
+ *     and nothing of the document's CURRENT state, which may be an
+ *     unreviewed draft: title, type and tags come from the version itself,
+ *     no author, no comment activity. The tag, type and author facets and
+ *     filters run over member nests only (node_index / node_tag_index hold
+ *     current values), so neither a draft's metadata nor an email can be
+ *     probed for through them.
  * A nest the caller can't read is not in the scope at all, so nothing about
  * it reaches items, `total` or `counts`.
  *
@@ -54,8 +58,9 @@ export interface StreamItem {
   at: string;
   /** First ~200 characters of this version's body, flattened. */
   summary: string;
-  /** Comments on the document's open annotation threads. */
-  commentCount: number;
+  /** Comments on the document's open annotation threads; null where the
+   *  caller reads the nest only publicly. */
+  commentCount: number | null;
   kind: StreamKind;
 }
 
@@ -210,8 +215,14 @@ export async function getDocStream(params: {
   filters?: StreamFilters;
   limit?: number;
   offset?: number;
-  /** Body of one version, for its summary (null when it can't be read). */
-  readBody?: (nestId: string, nodeId: string, version: number) => Promise<string | null>;
+  /** One version's body and frontmatter (null when it can't be read). The
+   *  body feeds the summary; a public reader's title/type/tags come from the
+   *  frontmatter. */
+  readVersion?: (
+    nestId: string,
+    nodeId: string,
+    version: number,
+  ) => Promise<{ body: string; frontmatter?: Record<string, unknown> } | null>;
 }): Promise<StreamPage> {
   const db = getDb();
   const f = params.filters ?? {};
@@ -234,12 +245,15 @@ export async function getDocStream(params: {
   };
   if (scopes.length === 0) return empty;
 
-  // Authors are never exposed for public-only nests: neither counted nor
-  // filterable (a filter would turn the stream into a "did X write here"
-  // oracle). So the author facet, and any author-filtered query, run over
-  // the member scopes only.
-  const authorScopes = scopes.filter((s) => !s.publicOnly);
+  // Public-only nests expose neither authors nor the document's current
+  // metadata (node_index title/type, node_tag_index tags may be an
+  // unreviewed draft's). So the tag, type and author facets — and any query
+  // filtered on one of them — run over the member scopes only; a filter
+  // there would otherwise be an oracle for a draft's tag or an email.
+  const memberScopes = scopes.filter((s) => !s.publicOnly);
   const authors = (f.author ?? []).map((a) => a.trim().toLowerCase()).filter(Boolean);
+  const tags = (f.tag ?? []).map(normalizeTag).filter(Boolean);
+  const types = (f.type ?? []).map((t) => t.trim()).filter(Boolean);
 
   // What the caller may see over `scopeList`, inside the since-window.
   const visible = (scopeList: NestScope[]) => {
@@ -255,14 +269,15 @@ export async function getDocStream(params: {
   // Facet counts run over exactly this; the page and total add the filters.
   const base = visible(scopes);
 
-  const { where, params: whereParams } = visible(authors.length ? authorScopes : scopes);
+  const memberFacetFiltered = authors.length > 0 || tags.length > 0 || types.length > 0;
+  const { where, params: whereParams } = visible(memberFacetFiltered ? memberScopes : scopes);
   if (f.nest?.length) {
     where.push(`v.nest_id IN (${f.nest.map(() => "?").join(",")})`);
     whereParams.push(...f.nest);
   }
-  if (f.type?.length) {
-    where.push(`ni.type IN (${f.type.map(() => "?").join(",")})`);
-    whereParams.push(...f.type);
+  if (types.length) {
+    where.push(`ni.type IN (${types.map(() => "?").join(",")})`);
+    whereParams.push(...types);
   }
   if (authors.length) {
     // Emails are stored lowercased; LOWER() keeps a legacy mixed-case row
@@ -270,7 +285,6 @@ export async function getDocStream(params: {
     where.push(`LOWER(v.author) IN (${authors.map(() => "?").join(",")})`);
     whereParams.push(...authors);
   }
-  const tags = (f.tag ?? []).map(normalizeTag).filter(Boolean);
   if (tags.length) {
     where.push(
       `EXISTS (SELECT 1 FROM node_tag_index t
@@ -287,7 +301,7 @@ export async function getDocStream(params: {
     }>,
     db.all(
       `SELECT v.id, v.nest_id, v.node_id, v.version, v.status, v.author, v.created_at,
-              ni.title, ni.type
+              v.tags_json, ni.title, ni.type
          ${FROM}
         WHERE ${whereSql}
         ORDER BY v.created_at DESC, v.id DESC
@@ -302,6 +316,7 @@ export async function getDocStream(params: {
         status: string;
         author: string;
         created_at: string;
+        tags_json: string | null;
         title: string;
         type: string;
       }>
@@ -309,11 +324,10 @@ export async function getDocStream(params: {
   ]);
   const total = Number(totalRow?.c ?? 0);
 
-  const authorBase = authorScopes.length ? visible(authorScopes) : null;
+  const memberBase = memberScopes.length ? visible(memberScopes) : null;
   const counts = await facetCounts(
-    base.where.join(" AND "),
-    base.params,
-    authorBase ? { sql: authorBase.where.join(" AND "), params: authorBase.params } : null,
+    { sql: base.where.join(" AND "), params: base.params },
+    memberBase ? { sql: memberBase.where.join(" AND "), params: memberBase.params } : null,
     params.nests,
   );
 
@@ -356,36 +370,47 @@ export async function getDocStream(params: {
   }
 
   const publicNests = new Set(scopes.filter((s) => s.publicOnly).map((s) => s.nestId));
-  // Summaries cost one body read (a version-chain replay) each: a few at a
-  // time, not the whole page at once.
-  const summaries = await mapLimit(rows, SUMMARY_CONCURRENCY, async (r) => {
-    if (!params.readBody) return "";
+  // One version read (a chain replay) per item, a few at a time rather than
+  // the whole page at once.
+  const versionsRead = await mapLimit(rows, SUMMARY_CONCURRENCY, async (r) => {
+    if (!params.readVersion) return null;
     try {
-      return summarize((await params.readBody(r.nest_id, r.node_id, Number(r.version))) ?? "");
+      return await params.readVersion(r.nest_id, r.node_id, Number(r.version));
     } catch {
-      return "";
+      return null;
     }
   });
   const items: StreamItem[] = rows.map((r, idx) => {
-      const version = Number(r.version);
-      const k = `${r.nest_id}\u0000${r.node_id}`;
-      const summary = summaries[idx];
-      return {
-        id: `${r.nest_id}:${r.node_id}@${version}`,
-        nestId: r.nest_id,
-        nestName: params.nests.get(r.nest_id) ?? r.nest_id,
-        nodeId: r.node_id,
-        title: r.title || r.node_id,
-        type: r.type || "document",
-        tags: tagMap.get(k) ?? [],
-        version,
-        status: r.status,
-        author: publicNests.has(r.nest_id) ? null : r.author,
-        at: r.created_at,
-        summary,
-        commentCount: commentMap.get(k) ?? 0,
-        kind: kindOf(version, r.status, approved.has(`${k}@${version}`)),
-      };
+    const version = Number(r.version);
+    const k = `${r.nest_id}\u0000${r.node_id}`;
+    const read = versionsRead[idx];
+    const isPublic = publicNests.has(r.nest_id);
+    // A public reader sees this version's own metadata, never the current
+    // (possibly draft) state the index mirrors.
+    const fm = read?.frontmatter ?? {};
+    const title = isPublic
+      ? typeof fm.title === "string" && fm.title ? fm.title : r.node_id
+      : r.title || r.node_id;
+    const type = isPublic
+      ? typeof fm.type === "string" && fm.type ? fm.type : "document"
+      : r.type || "document";
+    const tags = isPublic ? versionTags(fm.tags, r.tags_json) : tagMap.get(k) ?? [];
+    return {
+      id: `${r.nest_id}:${r.node_id}@${version}`,
+      nestId: r.nest_id,
+      nestName: params.nests.get(r.nest_id) ?? r.nest_id,
+      nodeId: r.node_id,
+      title,
+      type,
+      tags,
+      version,
+      status: r.status,
+      author: isPublic ? null : r.author,
+      at: r.created_at,
+      summary: summarize(read?.body ?? ""),
+      commentCount: isPublic ? null : commentMap.get(k) ?? 0,
+      kind: kindOf(version, r.status, approved.has(`${k}@${version}`)),
+    };
   });
 
   return {
@@ -398,37 +423,62 @@ export async function getDocStream(params: {
   };
 }
 
+/** A public item's tags: the version's own frontmatter, else the tags the
+ *  version row recorded at write time. Normalized like node_tag_index. */
+function versionTags(fmTags: unknown, tagsJson: string | null): string[] {
+  let raw: unknown = fmTags;
+  if (!Array.isArray(raw) && tagsJson) {
+    try {
+      raw = JSON.parse(tagsJson);
+    } catch {
+      raw = [];
+    }
+  }
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.filter((t): t is string => typeof t === "string").map(normalizeTag).filter(Boolean))].sort();
+}
+
+type Rows = Array<{ value: string; n: number | string }>;
+
+/**
+ * `all` = every readable scope (the nest facet); `member` = member scopes
+ * only (the tag, type and author facets — see getDocStream).
+ */
 async function facetCounts(
-  whereSql: string,
-  whereParams: SqlParam[],
-  author: { sql: string; params: SqlParam[] } | null,
+  all: { sql: string; params: SqlParam[] },
+  member: { sql: string; params: SqlParam[] } | null,
   nests: Map<string, string>,
 ): Promise<StreamCounts> {
   const db = getDb();
   const byCount = <T extends { count: number }>(a: T, b: T) => b.count - a.count;
+  const none = Promise.resolve([] as Rows);
   const [nestRows, typeRows, tagRows, authorRows] = await Promise.all([
     db.all(
-      `SELECT v.nest_id AS value, COUNT(*) AS n ${FROM} WHERE ${whereSql} GROUP BY v.nest_id`,
-      whereParams,
-    ) as Promise<Array<{ value: string; n: number | string }>>,
-    db.all(
-      `SELECT ni.type AS value, COUNT(*) AS n ${FROM} WHERE ${whereSql} GROUP BY ni.type`,
-      whereParams,
-    ) as Promise<Array<{ value: string; n: number | string }>>,
-    db.all(
-      `SELECT t.tag_name AS value, COUNT(*) AS n ${FROM}
-         JOIN node_tag_index t ON t.nest_id = v.nest_id AND t.node_id = v.node_id
-        WHERE ${whereSql} GROUP BY t.tag_name`,
-      whereParams,
-    ) as Promise<Array<{ value: string; n: number | string }>>,
-    author
+      `SELECT v.nest_id AS value, COUNT(*) AS n ${FROM} WHERE ${all.sql} GROUP BY v.nest_id`,
+      all.params,
+    ) as Promise<Rows>,
+    member
       ? (db.all(
-          `SELECT LOWER(v.author) AS value, COUNT(*) AS n ${FROM} WHERE ${author.sql} GROUP BY LOWER(v.author)`,
-          author.params,
-        ) as Promise<Array<{ value: string; n: number | string }>>)
-      : Promise.resolve([] as Array<{ value: string; n: number | string }>),
+          `SELECT ni.type AS value, COUNT(*) AS n ${FROM} WHERE ${member.sql} GROUP BY ni.type`,
+          member.params,
+        ) as Promise<Rows>)
+      : none,
+    member
+      ? (db.all(
+          `SELECT t.tag_name AS value, COUNT(*) AS n ${FROM}
+             JOIN node_tag_index t ON t.nest_id = v.nest_id AND t.node_id = v.node_id
+            WHERE ${member.sql} GROUP BY t.tag_name`,
+          member.params,
+        ) as Promise<Rows>)
+      : none,
+    member
+      ? (db.all(
+          `SELECT LOWER(v.author) AS value, COUNT(*) AS n ${FROM} WHERE ${member.sql} GROUP BY LOWER(v.author)`,
+          member.params,
+        ) as Promise<Rows>)
+      : none,
   ]);
-  const facet = (rows: Array<{ value: string; n: number | string }>) =>
+  const facet = (rows: Rows) =>
     rows
       .map((r) => ({ value: r.value, count: Number(r.n) }))
       .sort((a, b) => byCount(a, b) || a.value.localeCompare(b.value))

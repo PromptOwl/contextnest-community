@@ -3339,8 +3339,9 @@ export interface StreamItem {
   author: string | null;
   at: string;
   summary: string;
-  /** Comments on the document's open threads. */
-  commentCount: number;
+  /** Comments on the document's open threads; null where the caller reads
+   *  the nest only publicly (no comment UI on those cards). */
+  commentCount: number | null;
   kind: StreamKind;
 }
 

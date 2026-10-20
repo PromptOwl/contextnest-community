@@ -371,6 +371,34 @@ describe("doc stream: public nest, read without membership", () => {
     expect(byOwner.data.total).toBe(0);
   });
 
+  it("never shows a public reader a draft's title, tags or comment activity", async () => {
+    // Tag the approved doc, then leave an unreviewed draft on top of it that
+    // renames and retags it, and comment on it.
+    const d = await db();
+    await d.run(
+      "INSERT INTO node_tag_index (nest_id, node_id, tag_name) VALUES (?, ?, 'pub-tag')",
+      [nestId, openDoc],
+    );
+    const draft = await jsonRequest(app, "PATCH", `/nests/${nestId}/nodes/${openDoc}`, {
+      title: "Secret Rename", tags: ["secret-tag"], content: "# renamed\n\nsecret draft body",
+    }, owner.apiKey);
+    expect(draft.status).toBe(200);
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${openDoc}/annotations`, { body: "internal note" }, owner.apiKey);
+
+    const { data } = await jsonRequest(app, "GET", "/me/stream", undefined, reader.apiKey);
+    const items = data.items.filter((i: any) => i.nodeId === openDoc);
+    expect(items.length).toBeGreaterThan(0);
+    for (const i of items) {
+      expect(i.title).toBe("Open Doc");
+      expect(i.tags).not.toContain("secret-tag");
+      expect(i.summary).not.toContain("secret");
+      expect(i.commentCount).toBeNull();
+    }
+    expect(data.counts.tag.map((t: any) => t.value)).not.toContain("secret-tag");
+    const probe = await jsonRequest(app, "GET", "/me/stream?tag=secret-tag", undefined, reader.apiKey);
+    expect(probe.data.total).toBe(0);
+  });
+
   it("the owner sees the draft too", async () => {
     const { data } = await jsonRequest(app, "GET", "/me/stream", undefined, owner.apiKey);
     expect(data.items.some((i: any) => i.nodeId === secretDoc && i.status === "draft")).toBe(true);
