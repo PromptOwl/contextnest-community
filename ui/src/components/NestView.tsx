@@ -63,6 +63,7 @@ import { FolderDeleteDialog, type FolderDeleteTarget } from "./nest/FolderDelete
 // Each tab is its own chunk, loaded when first opened.
 const ExternalEditsTab = lazyChunk(() => import("./nest/ExternalEditsTab").then((m) => ({ default: m.ExternalEditsTab })));
 const FieldsTab = lazyChunk(() => import("./nest/FieldsTab").then((m) => ({ default: m.FieldsTab })));
+const DocStream = lazyChunk(() => import("./DocStream").then((m) => ({ default: m.DocStream })));
 const StewardsTab = lazyChunk(() => import("./nest/StewardsTab").then((m) => ({ default: m.StewardsTab })));
 const CollaboratorsTab = lazyChunk(() => import("./nest/CollaboratorsTab").then((m) => ({ default: m.CollaboratorsTab })));
 const ReviewTab = lazyChunk(() => import("./nest/ReviewTab").then((m) => ({ default: m.ReviewTab })));
@@ -165,7 +166,7 @@ export function NestView({
   onTabChange,
   initialSettings,
 }: NestViewProps) {
-  const { isAdmin, adminStatus, authMode, sharedDeployment } = useAuth();
+  const { isAdmin, adminStatus, authMode, sharedDeployment, docStreamEnabled } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
   //   - real-owner nest → only that owner
   //   - anon-owned + open mode → any caller (server treats anon as commons)
@@ -831,6 +832,8 @@ export function NestView({
     stewards: stewardshipEnabled && canManageGovernance,
     collaborators: canManage || collabCanWrite,
     fields: !grantOnly,
+    // Experimental document stream, pinned to this nest.
+    stream: docStreamEnabled && !isReaderView,
   };
   useEffect(() => {
     if (!initialLoad && !tabVisible[activeTab]) setActiveTab("overview");
@@ -1777,6 +1780,10 @@ export function NestView({
             {!grantOnly && (
               <TabsTrigger value="fields" className={NEST_TAB}>Fields</TabsTrigger>
             )}
+            {/* Experimental: this nest's document stream (EXPERIMENTAL_DOC_STREAM). */}
+            {docStreamEnabled && !isReaderView && (
+              <TabsTrigger value="stream" className={NEST_TAB}>Stream</TabsTrigger>
+            )}
           </TabsList>
           {!isReadOnly && canEditDocs && (
             <div className="ml-auto flex shrink-0 items-center gap-2 pb-2 max-sm:order-first max-sm:w-full max-sm:justify-end">
@@ -2095,6 +2102,17 @@ export function NestView({
           <TabsContent value="fields" className="space-y-4">
             <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
               <FieldsTab nestId={nestId} />
+            </Suspense>
+          </TabsContent>
+        )}
+
+        {docStreamEnabled && !isReaderView && (
+          <TabsContent value="stream" className="space-y-4">
+            <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+              <DocStream
+                pinnedNestId={nestId}
+                onOpen={(item, threadId) => onOpenDocument(item.nodeId, threadId ? { thread: threadId } : undefined)}
+              />
             </Suspense>
           </TabsContent>
         )}

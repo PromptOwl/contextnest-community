@@ -13,6 +13,7 @@
  */
 
 import { clearDraft } from "./draft";
+import { streamQueryString, type StreamQuery } from "./doc-stream";
 import {
   ACCESS_OFFER_EVENT,
   accessOfferFromError,
@@ -252,6 +253,12 @@ export async function getHealth() {
     /** Metacognition agents: server-run, persona-attributed, proposals only.
      *  Needs the workflow plane too. Off → the Workflows "Agents" tab hides. */
     metacognition_enabled?: boolean;
+    /** Experimental features, one switch each (default OFF). Off → the
+     *  feature's UI is hidden and its routes 404. */
+    experimental?: {
+      /** Cross-nest document stream (GET /me/stream, the Stream page). */
+      doc_stream?: boolean;
+    };
     /** The assistant identity to show: the admin's custom one on an
      *  enterprise licence, the default Hootie otherwise (server-enforced). */
     hootie_brand?: HootieBrand;
@@ -334,6 +341,8 @@ export interface AdminSettings {
   hootie_model: string;
   subagent_runs_enabled: boolean;
   metacognition_enabled: boolean;
+  /** Experimental cross-nest document stream (EXPERIMENTAL_DOC_STREAM). */
+  experimental_doc_stream_enabled: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
@@ -3309,6 +3318,54 @@ export async function getMyDrafts(opts?: {
   return request<{ drafts: MyDraft[]; pagination: WorkPagination }>(
     `/me/drafts${qs ? `?${qs}` : ""}`,
   );
+}
+
+// ── Experimental: cross-nest document stream (GET /me/stream) ──────────────
+
+export type StreamKind = "created" | "updated" | "published" | "approved" | "rejected";
+
+export interface StreamItem {
+  /** Stable key: `${nestId}:${nodeId}@${version}`. */
+  id: string;
+  nestId: string;
+  nestName: string;
+  nodeId: string;
+  title: string;
+  type: string;
+  tags: string[];
+  version: number;
+  status: string;
+  /** null where the caller reads the nest only publicly. */
+  author: string | null;
+  at: string;
+  summary: string;
+  /** Comments on the document's open threads. */
+  commentCount: number;
+  kind: StreamKind;
+}
+
+export interface StreamFacet {
+  value: string;
+  count: number;
+}
+
+export interface StreamPage {
+  items: StreamItem[];
+  total: number;
+  /** Per-facet totals over the caller's whole stream (filters not applied). */
+  counts: {
+    nest: Array<{ id: string; name: string; count: number }>;
+    tag: StreamFacet[];
+    type: StreamFacet[];
+    author: StreamFacet[];
+  };
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export async function getDocStream(opts: StreamQuery = {}, pinnedNest?: string) {
+  return request<StreamPage>(`/me/stream${streamQueryString(opts, pinnedNest)}`);
 }
 
 /**

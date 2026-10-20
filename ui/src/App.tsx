@@ -262,12 +262,13 @@ export default function App() {
     workflowPlaneEnabled,
     subagentRunsEnabled,
     mcpOauthEnabled,
+    docStreamEnabled,
     loading,
     error,
     logout,
   } = useAuth();
   // What gates an app page (meta.visible). Superadmin is never open mode.
-  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled };
+  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled, docStreamEnabled };
   const [view, setViewNow] = useState<View>(() => ({
     page: "dashboard",
     // /my-work, /teammates, … open straight onto their page.
@@ -857,7 +858,7 @@ export default function App() {
     }
     if (view.page === "docs") return [home, { label: "Docs" }];
     return pageTail.length ? [home, ...pageTail] : [];
-  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled]);
+  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled]);
 
   // What a dashboard page can do to the app. Pages read it with useAppNav()
   // instead of props, so App renders every page the same way.
@@ -865,7 +866,7 @@ export default function App() {
     () => ({
       openNest: (id, name, isOwner, isAnonOwned, isArchived) =>
         setView({ page: "nest", nestId: id, nestName: name, isOwner, isAnonOwned, isArchived }),
-      openReview: (nestId, nestName, nodeId) =>
+      openReview: (nestId, nestName, nodeId, opts) =>
         setView({
           page: "document",
           nestId,
@@ -873,6 +874,7 @@ export default function App() {
           nodeId,
           isOwner: true,
           isAnonOwned: true,
+          initialThreadId: opts?.thread,
           returnTo: viewRef.current,
         }),
       manageKeys: () => setView({ page: "dashboard", tab: "api-keys" }),

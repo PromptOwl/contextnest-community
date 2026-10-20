@@ -26,6 +26,7 @@ import {
   listDeletionRequests,
 } from "./governance/review-service.js";
 import { listMyDrafts } from "./governance/version-service.js";
+import { getDocStream, STREAM_MAX_LIMIT, STREAM_MAX_OFFSET } from "./governance/stream-service.js";
 import { folderForNode } from "./governance/title-resolver.js";
 import { engineCache } from "./nodes/engine.js";
 import {
@@ -78,7 +79,7 @@ import { definitionRoutes } from "./definitions/routes.js";
 import { structureRoutes } from "./structure/routes.js";
 import { ContextNestError } from "@promptowl/contextnest-engine";
 import { forPeople } from "./structure/writes.js";
-import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES } from "./nodes/service.js";
+import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES, bodyOnly } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import {
   pdfNodeRoutes,
@@ -715,6 +716,12 @@ export function createApp(): Hono<AuthEnv> {
       // Metacognition agents (default OFF; needs the workflow plane too). Off →
       // /nests/:id/metacognition 404s and the Workflows view hides its tab.
       metacognition_enabled: config.FEATURE_WORKFLOW_PLANE && config.FEATURE_METACOGNITION,
+      // Experimental features, one switch each (default OFF). An object so a
+      // new one is one more key; the UI hides each feature while its key is
+      // false, and its routes 404.
+      experimental: {
+        doc_stream: config.EXPERIMENTAL_DOC_STREAM,
+      },
       // The identity every surface shows: the admin's custom name/logo/
       // colour/greeting on an enterprise licence, the default Hootie
       // otherwise (enforced here, not in the client). Public: the launcher
@@ -955,6 +962,7 @@ export function createApp(): Hono<AuthEnv> {
     model_source: resolveModelCredential()?.source ?? null,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     metacognition_enabled: config.FEATURE_METACOGNITION,
+    experimental_doc_stream_enabled: config.EXPERIMENTAL_DOC_STREAM,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
@@ -1384,6 +1392,14 @@ export function createApp(): Hono<AuthEnv> {
       } else {
         pending.push({ name: "FEATURE_METACOGNITION", value: body.metacognition_enabled ? "true" : null });
       }
+    }
+    // Experimental: the cross-nest document stream. Its own switch, no
+    // dependencies. Off clears the row (falls to env).
+    if ("experimental_doc_stream_enabled" in body) {
+      pending.push({
+        name: "EXPERIMENTAL_DOC_STREAM",
+        value: body.experimental_doc_stream_enabled ? "true" : null,
+      });
     }
     // Sub-agent recursion caps. Same [min,max] the config getters clamp to, so
     // a UI-set value gates identically to an env-set one. null clears → default.
@@ -2411,6 +2427,79 @@ export function createApp(): Hono<AuthEnv> {
       // page is sliced from — so this is exact in every sort and search mode.
       pagination: { total, limit, offset, has_more: offset + limit < total },
     });
+  });
+
+  // GET /me/stream — EXPERIMENTAL cross-nest document stream (CU-wdqcq02crv).
+  // ?nest=&tag=&type=&author= (each repeatable or comma-separated; OR within a
+  // facet, AND across), ?since=<ISO date>, ?limit= (≤100), ?offset= (≤10000).
+  // One item per node version across every nest the caller can read, newest
+  // first, access-filtered per nest (see governance/stream-service.ts). Behind
+  // its own switch: off → 404. Version history is a licensed governance view,
+  // so unlicensed past the Free tier → the same 503 /nests/:id/feed answers.
+  app.get("/me/stream", async (c) => {
+    if (!config.EXPERIMENTAL_DOC_STREAM) {
+      return c.json(
+        {
+          error:
+            "The document stream is an experimental feature that is not enabled on this server. A superadmin can turn it on in Settings (EXPERIMENTAL_DOC_STREAM).",
+        },
+        404,
+      );
+    }
+    const userId = c.get("userId");
+    if (!getCurrentLicense()?.valid) {
+      const denial = await readOnlyDenial(userId);
+      if (denial) return c.json({ error: denial.error, ...denial.extra }, 503);
+    }
+    const list = (name: string) =>
+      [
+        ...new Set(
+          (c.req.queries(name) ?? [])
+            .flatMap((v) => v.split(","))
+            .map((v) => v.trim())
+            .filter(Boolean),
+        ),
+      ].slice(0, 50);
+    let since: string | undefined;
+    const sinceRaw = c.req.query("since");
+    if (sinceRaw) {
+      // The stream's own `at` values ("YYYY-MM-DD HH:MM:SS", UTC) round-trip.
+      const sqlShape = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(sinceRaw);
+      const t = Date.parse(sqlShape ? `${sinceRaw.replace(" ", "T")}Z` : sinceRaw);
+      if (Number.isNaN(t)) return c.json({ error: "since must be a date, e.g. 2026-10-01T00:00:00Z" }, 400);
+      // node_versions.created_at is "YYYY-MM-DD HH:MM:SS" (UTC) on both drivers.
+      since = new Date(t).toISOString().slice(0, 19).replace("T", " ");
+    }
+    const me = await resolveCallerEmail(userId);
+    const nests = new Map<string, string>();
+    for (const n of await listVisibleNests(userId, { readable: true }))
+      nests.set(n.id, n.name ?? n.id);
+    const page = await getDocStream({
+      userId,
+      userEmail: me,
+      nests,
+      filters: {
+        nest: list("nest"),
+        tag: list("tag"),
+        type: list("type"),
+        author: list("author"),
+        since,
+      },
+      limit: Math.min(Number(c.req.query("limit")) || 50, STREAM_MAX_LIMIT),
+      offset: Math.min(Math.max(Number(c.req.query("offset")) || 0, 0), STREAM_MAX_OFFSET),
+      readBody: async (nestId, nodeId, version) => {
+        const { storage, versions } = await engineCache.get(nestId);
+        try {
+          return bodyOnly(nodeId, await versions.reconstructVersion(nodeId, version));
+        } catch {
+          // The unreviewed draft on top is never in the chain — its bytes are
+          // the live file (same fallback as GET …/versions/:version).
+          const node = await storage.readDocument(nodeId);
+          return (node.frontmatter.version ?? 1) === version ? node.body ?? "" : null;
+        }
+      },
+    });
+    return c.json(page);
   });
 
   // Watcher notifications — read + mark-read (auth via the /me/* middleware).
