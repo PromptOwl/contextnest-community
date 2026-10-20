@@ -218,26 +218,26 @@ export async function pinDocument(params: {
   const listParams = owner === null ? [nestId, scope] : [nestId, scope, owner];
   let created = false;
   if (!(await existing())) {
-    const count = (await db.get(
-      `SELECT COUNT(*) AS n FROM node_pins WHERE ${listWhere}`,
-      listParams,
-    )) as { n: number | string };
-    if (Number(count.n) >= MAX_PINS_PER_LIST) {
-      throw new ValidationError(
+    const capped = () =>
+      new ValidationError(
         `A nest can hold at most ${MAX_PINS_PER_LIST} ${scope === "nest" ? "pins for everyone" : "of your own pins"} — unpin one first.`,
       );
-    }
     try {
-      // The position is computed in the same statement as the insert, so the
-      // new pin lands after whatever is there at that moment. Two inserts
-      // racing can still tie; reads order by (position, created_at, node_id),
-      // so a tie is deterministic and the next reorder rewrites it.
-      await db.run(
+      // One statement does the cap check, the position and the insert: the
+      // new pin lands after whatever is there at that moment, and HAVING
+      // refuses it when the list is already full (no row → changes 0). On
+      // SQLite (one writer) that is exact; on Postgres READ COMMITTED two
+      // inserts racing can still tie on position or overshoot the cap by the
+      // racers — reads order by (position, created_at, node_id), so a tie is
+      // deterministic and the next reorder rewrites it.
+      const r = await db.run(
         `INSERT INTO node_pins (id, nest_id, node_id, scope, user_id, position, pinned_by)
          SELECT ?, ?, ?, ?, ?, COALESCE(MAX(position), -1) + 1, ?
-           FROM node_pins WHERE ${listWhere}`,
-        [randomUUID(), nestId, nodeId, scope, owner, await resolveCallerEmail(userId), ...listParams],
+           FROM node_pins WHERE ${listWhere}
+         HAVING COUNT(*) < ?`,
+        [randomUUID(), nestId, nodeId, scope, owner, await resolveCallerEmail(userId), ...listParams, MAX_PINS_PER_LIST],
       );
+      if (r.changes === 0) throw capped();
       created = true;
     } catch (err) {
       // Two clicks racing: the loser trips the partial unique index. The pin
@@ -351,7 +351,10 @@ export async function reorderEditorialPins(params: {
 
 /**
  * Drop someone's personal pins in a nest once they no longer reach it — the
- * one rule for leaving and for being removed. Someone who still reaches the
+ * one rule for leaving and for being removed. Revoking a team share or a
+ * document/folder grant does NOT call this: the pins linger, but listPins'
+ * read filter hides every document the person can no longer read, so nothing
+ * leaks; they go when the person leaves or the document is deleted. Someone who still reaches the
  * nest (a team share, a document/folder grant, its visibility) keeps their
  * bookmarks; the read filter already hides any pinned document they lost.
  * Runs after the access change has committed, so the check sees it.
