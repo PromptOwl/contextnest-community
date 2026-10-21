@@ -967,7 +967,7 @@ export function createApp(): Hono<AuthEnv> {
     type_table_enabled: config.TYPE_TABLE_ENABLED,
     type_task_enabled: ACCEPTED_NODE_TYPES.has("task"),
     hootie_enabled: config.HOOTIE_ENABLED,
-    // The model in use: the admin's pick, else the gateway's default (see hootieModel).
+    // The model in use: the admin's pick, else the efficient default (see hootieModel).
     hootie_model: hootieModel(resolveModelCredential()),
     // Custom identity (enterprise). The stored values are returned even when
     // the licence doesn't allow them, so a lapsed licence shows what would
