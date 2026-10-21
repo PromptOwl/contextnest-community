@@ -6,9 +6,11 @@
 import { describe, it, expect } from "vitest";
 import {
   buildColumns,
+  globMatch,
   groupByColumn,
   isColumnPattern,
   keepPatterns,
+  withoutPattern,
   planMove,
   resolveConfig,
   tagSuggestions,
@@ -16,7 +18,12 @@ import {
   type BoardNode,
   type BoardSettings,
 } from "../ui/src/lib/board-dimensions";
-import { groupForBoard, type BoardConfig as ServerBoardConfig } from "../src/nests/board-items";
+import {
+  globMatch as serverGlobMatch,
+  groupForBoard,
+  type BoardConfig as ServerBoardConfig,
+} from "../src/nests/board-items";
+import { columnInputRows } from "../ui/src/lib/tag-column-input";
 import type { NodeResponse } from "../src/nodes/service";
 
 const node = (id: string, tags: string[]): BoardNode => ({
@@ -155,5 +162,91 @@ describe("server board list (MCP/REST) sections a pattern board like the board",
     const ui = buildColumns(docs, resolveConfig(tagBoard(["launch", "status*"], ["status:doing"])));
     expect(groups.map((g) => g.key)).toEqual(ui.map((col) => col.key));
     expect(byGroup.get("launch")!.map((n) => n.id)).toEqual(["a", "d"]);
+  });
+});
+
+describe("globMatch (UI and server copies agree)", () => {
+  const cases: Array<[string, string, boolean]> = [
+    ["status*", "status:todo", true],
+    ["status*", "Status-Done", true],
+    ["status*", "status", true],
+    ["status*", "my-status", false],
+    ["*", "", true],
+    ["*", "anything", true],
+    ["*review", "status-review", true],
+    ["a**b", "ab", true],
+    ["a**b", "axxb", true],
+    ["a*b*c", "abbbc", true],
+    ["a*b*c", "acb", false],
+    ["status", "status", true],
+    ["status", "status:todo", false],
+    ["s*", "", false],
+    ["", "", true],
+    ["*a*a*a*a*a*b", "a".repeat(500), false],
+  ];
+  it.each(cases)("%s ~ %s → %s", (pattern, value, want) => {
+    expect(globMatch(pattern, value)).toBe(want);
+    expect(serverGlobMatch(pattern, value)).toBe(want);
+  });
+});
+
+describe("server parity: a listed tag plus a pattern", () => {
+  it("keeps the listed tag's own place and doesn't repeat it in the expansion", () => {
+    const order = ["status:todo", "launch", "status*"];
+    const c = { dimension: "tag", layouts: { "tag:": { columnOrder: order } } } as unknown as ServerBoardConfig;
+    const { groups } = groupForBoard(docs as unknown as NodeResponse[], c);
+    expect(groups.map((g) => g.key)).toEqual(
+      buildColumns(docs, resolveConfig(tagBoard(order))).map((col) => col.key),
+    );
+    expect(groups.map((g) => g.key)).toEqual(["status:todo", "launch", "Status-Done", "status:doing"]);
+  });
+});
+
+describe("withoutPattern", () => {
+  it("drops the pattern and every column it brought in, pinned ones included", () => {
+    expect(withoutPattern(["launch", "status:todo", "status*", "x"], "status*")).toEqual(["launch", "x"]);
+    expect(withoutPattern(undefined, "status*")).toEqual([]);
+  });
+});
+
+describe("hiding or adding next to a pattern pins nothing", () => {
+  // MaturityBoard writes hide/add against the saved order, not the visible
+  // one, so the pattern's other columns stay pattern-driven.
+  it("hide: saved order minus the key, plus hidden", () => {
+    const saved = ["launch", "status*"];
+    const order = saved.filter((k) => k !== "Status-Done");
+    const cfg = resolveConfig(tagBoard(order, ["Status-Done"]));
+    expect(cfg.columnOrder).toEqual(["launch", "status*"]);
+    expect(buildColumns(docs, cfg).map((c) => c.key)).toEqual(["launch", "status:doing", "status:todo"]);
+    expect(withoutPattern(cfg.columnOrder, "status*")).toEqual(["launch"]);
+  });
+});
+
+describe("columnInputRows (the add-column box)", () => {
+  const sugg = [
+    { value: "Status-Done", count: 3 },
+    { value: "status:todo", count: 2 },
+    { value: "launch", count: 1 },
+  ];
+  it("Enter adds what was typed: a non-tag is offered first as a new tag", () => {
+    const { rows, active } = columnInputRows("status", sugg);
+    expect(rows[active]).toMatchObject({ kind: "new", value: "status" });
+    expect(rows.slice(1).map((r) => r.value)).toEqual(["Status-Done", "status:todo"]);
+  });
+  it("an exact match is the Enter target, with no new-tag row", () => {
+    const { rows, active } = columnInputRows("#Launch", sugg);
+    expect(rows.map((r) => r.kind)).toEqual(["tag"]);
+    expect(rows[active].value).toBe("launch");
+  });
+  it("an empty box lists everything and pre-selects nothing", () => {
+    const { rows, active } = columnInputRows("  ", sugg);
+    expect(rows.map((r) => r.value)).toEqual(["Status-Done", "status:todo", "launch"]);
+    expect(active).toBe(-1);
+  });
+  it("a pattern is one row that previews its matches", () => {
+    const { rows, active } = columnInputRows("status*", sugg);
+    expect(rows).toHaveLength(1);
+    expect(rows[active]).toMatchObject({ kind: "pattern", value: "status*" });
+    expect(rows[0].hint).toContain("2 now: Status-Done, status:todo");
   });
 });

@@ -55,6 +55,7 @@ import {
   isColumnPattern,
   keepPatterns,
   tagSuggestions,
+  withoutPattern,
   newCardPlacement,
   planMove,
   resolveConfig,
@@ -1044,13 +1045,10 @@ export function MaturityBoard({
         // until the next reorder silently drops it. Folder/status re-derive
         // their columns from the data, so their saved order is left intact
         // and a column that repopulates keeps the position it was given.
+        // A column a pattern brought in isn't in the saved order; hiding it
+        // is enough, and leaves the pattern's other columns unpinned.
         ...(effectiveConfig.explicitColumns
-          ? {
-              columnOrder: keepPatterns(
-                orderedKeys.filter((k) => k !== key),
-                effectiveConfig.columnOrder,
-              ),
-            }
+          ? { columnOrder: (effectiveConfig.columnOrder ?? []).filter((k) => k !== key) }
           : {}),
         hiddenColumns: [
           ...new Set([...(effectiveConfig.hiddenColumns ?? []), key]),
@@ -1065,13 +1063,10 @@ export function MaturityBoard({
     ],
   );
 
-  /** Drop a pattern column (status*): the tags it brought in go with it,
-   *  except ones a reorder has since pinned in place. */
+  /** Drop a pattern (status*) and every column it brought in. */
   const removePattern = useCallback(
     (pattern: string) =>
-      updateLayout({
-        columnOrder: (effectiveConfig.columnOrder ?? []).filter((k) => k !== pattern),
-      }),
+      updateLayout({ columnOrder: withoutPattern(effectiveConfig.columnOrder, pattern) }),
     [effectiveConfig.columnOrder, updateLayout],
   );
 
@@ -1132,7 +1127,14 @@ export function MaturityBoard({
       updateLayout({
         // Append to the order (a key in columnOrder shows even with no cards)
         // and un-hide it if it was removed earlier.
-        columnOrder: keepPatterns([...new Set([...orderedKeys, v])], effectiveConfig.columnOrder),
+        // On a curated board that's the saved order, so a pattern's columns
+        // stay unpinned; a fresh board's auto columns are written out first.
+        columnOrder: [
+          ...new Set([
+            ...(effectiveConfig.explicitColumns ? (effectiveConfig.columnOrder ?? []) : orderedKeys),
+            v,
+          ]),
+        ],
         hiddenColumns: (effectiveConfig.hiddenColumns ?? []).filter(
           (k) => k !== v,
         ),
@@ -1678,7 +1680,7 @@ export function MaturityBoard({
                 <span
                   key={p}
                   className="inline-flex h-8 items-center gap-1 rounded-md border px-2 font-mono text-xs"
-                  title={`Every tag matching “${p}” is a column, including new ones`}
+                  title={`Every tag matching “${p}” is a column, including new ones. × removes them all.`}
                 >
                   {p}
                   <button

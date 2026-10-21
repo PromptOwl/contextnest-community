@@ -223,7 +223,9 @@ export function isColumnPattern(key: string): boolean {
   return key.includes("*");
 }
 
-/** Whole-value glob match, linear-time (no regex, no backtracking blow-up). */
+/** Whole-value glob match. No regex: the greedy last-star backtrack is
+ *  O(value × pattern) at worst — never exponential — and saved column keys
+ *  are capped at 600 characters server-side (board-service strList). */
 export function globMatch(pattern: string, value: string): boolean {
   const p = pattern.toLowerCase();
   const v = value.toLowerCase();
@@ -250,11 +252,17 @@ export function globMatch(pattern: string, value: string): boolean {
 }
 
 /**
- * A rewritten column order (after a reorder, add or remove) with the saved
+ * A column order rebuilt from the visible columns (a reorder) with the saved
  * patterns carried over. The board only ever sees a pattern's expansion, so
- * an order rebuilt from the visible columns would otherwise lose the pattern
- * and stop picking up new tags.
+ * the rebuilt order would otherwise lose the pattern and stop picking up new
+ * tags. A reorder pins the expanded tags it writes out; add and remove edit
+ * the saved order instead, so they pin nothing.
  */
+export function withoutPattern(order: string[] | undefined, pattern: string): string[] {
+  // Its columns go with it — including ones a reorder pinned in place.
+  return (order ?? []).filter((k) => k !== pattern && !globMatch(pattern, k));
+}
+
 export function keepPatterns(order: string[], saved: string[] | undefined): string[] {
   return [...new Set([...order, ...(saved ?? []).filter(isColumnPattern)])];
 }

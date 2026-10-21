@@ -2,7 +2,8 @@
  * The tag board's add-column box (CU-wdqcq05pad): type and pick a tag from the
  * nest's tags — with how many cards carry each, the ones already on the board
  * left out — or type a pattern like `status*` to add every matching tag as a
- * column, including tags that turn up later.
+ * column, including tags that turn up later. Rows and the Enter target come
+ * from lib/tag-column-input.ts.
  *
  * A native <datalist> was here before. Browsers show it inconsistently (Chrome
  * only after typing, with no counts and no hint that patterns exist), which is
@@ -15,9 +16,10 @@ import { Asterisk, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { globMatch, isColumnPattern } from "../../lib/board-dimensions";
+import { columnInputRows } from "../../lib/tag-column-input";
 
-const MAX_SHOWN = 50;
+const LIST_ID = "board-tag-column-list";
+const optionId = (i: number) => `${LIST_ID}-${i}`;
 
 export function TagColumnInput({
   suggestions,
@@ -29,47 +31,15 @@ export function TagColumnInput({
 }) {
   const [text, setText] = useState("");
   const [open, setOpen] = useState(false);
-  const [active, setActive] = useState(0);
+  const { rows, active: defaultActive } = useMemo(
+    () => columnInputRows(text, suggestions),
+    [text, suggestions],
+  );
+  const [active, setActive] = useState(defaultActive);
   const wrapRef = useRef<HTMLDivElement>(null);
-
   const typed = text.trim().replace(/^#/, "");
-  const pattern = isColumnPattern(typed);
-  const matches = useMemo(() => {
-    if (!typed) return suggestions;
-    const q = typed.toLowerCase();
-    return suggestions.filter((s) =>
-      pattern ? globMatch(typed, s.value) : s.value.toLowerCase().includes(q),
-    );
-  }, [suggestions, typed, pattern]);
 
-  // Rows: for a pattern, one "add the pattern" row (its matches are listed as
-  // a preview, not picked one by one); otherwise the matching tags, then the
-  // typed text as a new tag when it isn't one of them.
-  const rows: Array<{ value: string; label: string; hint?: string }> = pattern
-    ? [
-        {
-          value: typed,
-          label: `Add a column for every tag matching “${typed}”`,
-          hint: matches.length
-            ? `${matches.length} now: ${matches
-                .slice(0, 4)
-                .map((m) => m.value)
-                .join(", ")}${matches.length > 4 ? "…" : ""} — new matches appear by themselves`
-            : "No tags match yet — matching tags will appear as columns when they're used",
-        },
-      ]
-    : [
-        ...matches.slice(0, MAX_SHOWN).map((m) => ({
-          value: m.value,
-          label: m.value,
-          hint: `${m.count}`,
-        })),
-        ...(typed && !matches.some((m) => m.value.toLowerCase() === typed.toLowerCase())
-          ? [{ value: typed, label: `New tag “${typed}”` }]
-          : []),
-      ];
-
-  useEffect(() => setActive(0), [typed]);
+  useEffect(() => setActive(defaultActive), [defaultActive, text]);
 
   useEffect(() => {
     if (!open) return;
@@ -87,12 +57,14 @@ export function TagColumnInput({
     setOpen(false);
   };
 
+  const current = open && active >= 0 ? rows[active] : undefined;
+
   return (
     <div ref={wrapRef} className="relative">
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          add(open && rows[active] ? rows[active].value : typed);
+          add(current ? current.value : typed);
         }}
         className="flex items-center gap-1"
       >
@@ -119,7 +91,8 @@ export function TagColumnInput({
           role="combobox"
           aria-expanded={open}
           aria-autocomplete="list"
-          aria-controls="board-tag-column-list"
+          aria-controls={LIST_ID}
+          aria-activedescendant={current ? optionId(active) : undefined}
           className="h-8 w-40"
           title="Add a tag column — pick a tag, type a new one, or a pattern like status* for every matching tag"
           data-testid="board-add-tag-column"
@@ -130,17 +103,19 @@ export function TagColumnInput({
       </form>
       {open && (
         <div
-          id="board-tag-column-list"
+          id={LIST_ID}
           role="listbox"
           className="absolute right-0 z-50 mt-1 w-72 rounded-md border bg-popover text-popover-foreground shadow-md"
         >
           <div className="max-h-72 overflow-y-auto p-1">
             {rows.map((r, i) => (
               <button
-                key={`${r.value}-${i}`}
+                key={`${r.kind}-${r.value}`}
+                id={optionId(i)}
                 type="button"
                 role="option"
                 aria-selected={i === active}
+                tabIndex={-1}
                 onMouseEnter={() => setActive(i)}
                 onClick={() => add(r.value)}
                 className={cn(
@@ -150,14 +125,16 @@ export function TagColumnInput({
               >
                 <span className="min-w-0 flex-1">
                   <span className="block truncate">
-                    {pattern && <Asterisk className="mr-1 inline h-3.5 w-3.5 align-[-2px]" />}
+                    {r.kind === "pattern" && (
+                      <Asterisk className="mr-1 inline h-3.5 w-3.5 align-[-2px]" />
+                    )}
                     {r.label}
                   </span>
-                  {pattern && r.hint && (
+                  {r.kind === "pattern" && r.hint && (
                     <span className="block text-xs text-muted-foreground">{r.hint}</span>
                   )}
                 </span>
-                {!pattern && r.hint && (
+                {r.kind === "tag" && r.hint && (
                   <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{r.hint}</span>
                 )}
               </button>

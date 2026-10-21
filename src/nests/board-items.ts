@@ -74,8 +74,9 @@ const namespaceOf = (c: { tagNamespace?: string }) =>
  *  tag (board-dimensions.ts isColumnPattern, CU-wdqcq05pad). */
 const isPattern = (k: string) => k.includes("*");
 
-/** Whole-value, case-insensitive glob; linear-time, no regex — the pattern is
- *  user-saved board config evaluated here on the server. */
+/** Whole-value, case-insensitive glob. No regex — the pattern is user-saved
+ *  board config evaluated here on the server: O(value × pattern) at worst,
+ *  never exponential, with keys capped at 600 characters (strList). */
 export function globMatch(pattern: string, value: string): boolean {
   const p = pattern.toLowerCase();
   const v = value.toLowerCase();
