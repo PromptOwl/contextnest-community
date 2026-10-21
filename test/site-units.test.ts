@@ -18,7 +18,16 @@ describe("DOCS_SITES parsing", () => {
     expect(warn).toHaveBeenCalledTimes(2);
     warn.mockRestore();
   });
+  it("warns that it can't catch this server's own host when PUBLIC_BASE_URL is unset", () => {
+    delete process.env.PUBLIC_BASE_URL;
+    process.env.DOCS_SITES = "docs.example.com=n1";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect([...config.DOCS_SITES]).toEqual([["docs.example.com", "n1"]]);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/PUBLIC_BASE_URL is not/));
+    warn.mockRestore();
+  });
   it("splits each pair on the first = only, and skips pairs without one", () => {
+    process.env.PUBLIC_BASE_URL = "https://nest.example.com";
     process.env.DOCS_SITES = " Docs.Example.com = id=with=equals , broken, b.example=2";
     expect([...config.DOCS_SITES]).toEqual([
       ["docs.example.com", "id=with=equals"],

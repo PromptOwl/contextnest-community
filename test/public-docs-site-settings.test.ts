@@ -106,6 +106,12 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
     expect(cli).toContain('<a href="/d/acme-docs/glossary#vault" class="term">Vault</a>');
   });
 
+  it("publishes an editor's definition without review, like the reader's glossary (documented, by design)", async () => {
+    const r = await jsonRequest(app, "POST", `/nests/${nestId}/definitions`, { term: "Steward", definition: "Approves changes." }, writer.apiKey);
+    expect(r.status).toBeLessThan(300);
+    expect(await text("/d/acme-docs/glossary")).toContain('<dt id="steward">Steward</dt>');
+  });
+
   // ── Hardening from review ──
 
   it("escapes hostile Markdown and pins inline code by CSP hash", async () => {
@@ -232,10 +238,12 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
   });
 
   it("follows manual redirects and answers 410 for a removed page", async () => {
-    await site("PATCH", "", { settings: { redirects: [{ from: "/old-guide", to: "/getting-started" }] } });
+    await site("PATCH", "", { settings: { redirects: [{ from: "/old-guide", to: "/getting-started" }, { from: "/old-anchor", to: "/getting-started#install" }] } });
     const r = await get("/d/acme-docs/old-guide");
     expect(r.status).toBe(301);
     expect(r.headers.get("location")).toBe("/d/acme-docs/getting-started");
+    // A .md request follows to the target's twin, before its fragment.
+    expect((await get("/d/acme-docs/old-anchor.md")).headers.get("location")).toBe("/d/acme-docs/getting-started.md#install");
     expect(await text("/d/acme-docs/reference/commands")).toContain("Every command");
     await jsonRequest(app, "DELETE", `/nests/${nestId}/nodes/nodes/docs/reference/commands`, undefined, owner.apiKey);
     const gone = await get("/d/acme-docs/reference/commands");
@@ -275,6 +283,8 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
     const page = await app.request("https://docs.acme.dev/getting-started", { headers: { ...HTML, Host: "Docs.Acme.dev:443" } });
     expect(page.status).toBe(200);
     expect(await page.text()).toContain('<link rel="canonical" href="https://docs.acme.dev/getting-started">');
+    // A fully-qualified Host (trailing dot) is the same domain.
+    expect((await app.request("https://docs.acme.dev/getting-started", { headers: { ...HTML, Host: "docs.acme.dev." } })).status).toBe(200);
     expect((await app.request("http://localhost/site-domain-check?domain=docs.acme.dev")).status).toBe(200);
     // An edge may pass the SNI name with a port, a trailing dot or in capitals.
     for (const d of ["docs.acme.dev:443", "docs.acme.dev.", "DOCS.Acme.dev"]) {
@@ -334,6 +344,24 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
     }
   });
 
+  it("gives up on a DNS lookup that never answers instead of hanging the request", async () => {
+    const settings = await import("../src/site/settings.js");
+    const id = (await jsonRequest(app, "POST", "/nests", { name: "Dns Hang" }, owner.apiKey)).data.nest.id;
+    await jsonRequest(app, "PATCH", `/nests/${id}/site`, { domain: "hang.acme.dev" }, owner.apiKey);
+    settings.setTxtResolverForTests(() => new Promise(() => {}), 50);
+    try {
+      const started = Date.now();
+      const r = await jsonRequest(app, "POST", `/nests/${id}/site/verify-domain`, {}, owner.apiKey);
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(r.status).toBe(400);
+      expect(JSON.stringify(r.data)).toMatch(/lookup .* failed \(ETIMEOUT\)/);
+      const after = await jsonRequest(app, "GET", `/nests/${id}/site`, undefined, owner.apiKey);
+      expect(after.data.domain_verified).toBe(false);
+    } finally {
+      settings.setTxtResolverForTests(fakeDns);
+    }
+  });
+
   it("shares one build between requests that miss the cache together", async () => {
     const { buildCount } = await import("../src/site/build.js");
     const { getDb } = await import("../src/db/client.js");
@@ -341,6 +369,66 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
     const before = buildCount();
     await Promise.all(Array.from({ length: 6 }, () => get("/d/acme-docs/")));
     expect(buildCount()).toBe(before + 1);
+  });
+
+  it("gives two nests publishing the same slug at once one key each, with no error", async () => {
+    const make = async (key: string) => {
+      const id = (await jsonRequest(app, "POST", "/nests", { name: "Race Docs" }, key)).data.nest.id;
+      await jsonRequest(app, "POST", `/nests/${id}/nodes`, { title: "Home", content: "# Home\n\nrace" }, key);
+      await jsonRequest(app, "PATCH", `/nests/${id}/visibility`, { visibility: "public", acknowledge_public: true }, key);
+      return { id: id as string, key };
+    };
+    const nests = [await make(owner.apiKey), await make(writer.apiKey)];
+    const res = await Promise.all(nests.map((n) => jsonRequest(app, "PATCH", `/nests/${n.id}/reader-mode`, { enabled: true }, n.key)));
+    expect(res.map((r) => r.status)).toEqual([200, 200]);
+    const urls = await Promise.all(nests.map(async (n) => (await jsonRequest(app, "GET", `/nests/${n.id}/site`, undefined, n.key)).data.url));
+    expect(new Set(urls).size).toBe(2);
+    expect(urls.filter((u: string) => u.endsWith("/d/race-docs/"))).toHaveLength(1);
+  });
+
+  it("won't let a nest named after another nest's id take that nest's URL", async () => {
+    // Acme's key is its slug, so its id is free for a squatter's slug to take.
+    const squatter = (await jsonRequest(app, "POST", "/nests", { name: nestId }, writer.apiKey)).data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${squatter}/nodes`, { title: "Home", content: "# Home\n\nsquatter site" }, writer.apiKey);
+    await jsonRequest(app, "PATCH", `/nests/${squatter}/visibility`, { visibility: "public", acknowledge_public: true }, writer.apiKey);
+    await jsonRequest(app, "PATCH", `/nests/${squatter}/reader-mode`, { enabled: true }, writer.apiKey);
+    const url = (await jsonRequest(app, "GET", `/nests/${squatter}/site`, undefined, writer.apiKey)).data.url;
+    expect(url).not.toContain(`/d/${nestId}/`);
+    const page = await get(`/d/${nestId}/`);
+    expect(page.status).toBe(301);
+    expect(page.headers.get("location")).toBe("https://docs.acme.dev/");
+  });
+
+  it("renders the page list once per page, so page size grows linearly", async () => {
+    const res = await app.request("https://docs.acme.dev/reference/cli", { headers: { ...HTML, Host: "docs.acme.dev" } });
+    expect(res.status).toBe(200);
+    expect((await res.text()).match(/<nav class="side"/g)).toHaveLength(1);
+  });
+
+  it("evicts the least recently used site once the cache is over its size cap", async () => {
+    const { buildCount, setCacheBytesForTests } = await import("../src/site/build.js");
+    const acme = () => app.request("https://docs.acme.dev/", { headers: { ...HTML, Host: "docs.acme.dev" } });
+    const other = () => get(`/d/${otherId}/`);
+    expect((await acme()).status).toBe(200);
+    expect((await other()).status).toBe(200);
+    setCacheBytesForTests(1);
+    try {
+      // A rebuild over the cap keeps only the site just built.
+      const { getDb } = await import("../src/db/client.js");
+      const row = (await getDb().get("SELECT settings FROM nest_sites WHERE nest_id = ?", [nestId])) as { settings: string };
+      await getDb().run("UPDATE nest_sites SET settings = ? WHERE nest_id = ?", [JSON.stringify({ ...JSON.parse(row.settings), title: "Evict" }), nestId]);
+      const before = buildCount();
+      await acme();
+      expect(buildCount()).toBe(before + 1);
+      await acme();
+      expect(buildCount()).toBe(before + 1);
+      await other();
+      expect(buildCount()).toBe(before + 2);
+      await acme();
+      expect(buildCount()).toBe(before + 3);
+    } finally {
+      setCacheBytesForTests(null);
+    }
   });
 
   it("keeps noindex and the AI-training opt-out when stored settings can't be read", async () => {
