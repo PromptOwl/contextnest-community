@@ -211,6 +211,7 @@ const NEST_VIEWS = [
 const NEST_TAB_LABELS: Record<string, string> = {
   overview: "Overview",
   documents: "Documents",
+  instructions: "Instructions",
   review: "Review queue",
   "external-edits": "External edits",
   stewards: "Stewards",
@@ -221,6 +222,7 @@ const NEST_TAB_LABELS: Record<string, string> = {
 const NEST_TABS = [
   "overview",
   "documents",
+  "instructions",
   "review",
   "external-edits",
   "stewards",

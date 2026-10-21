@@ -36,6 +36,11 @@ export const keys = {
   nest: (nestId: string) => [...keys.nests, "detail", nestId] as const,
 
   settings: (nestId: string) => [...keys.nest(nestId), "settings"] as const,
+  // CONTEXT.md and its history (CU-wdqcq05mty). Revisions sit under it, so a
+  // save that drops the instructions drops the history with them.
+  instructions: (nestId: string) => [...keys.nest(nestId), "instructions"] as const,
+  instructionsRevisions: (nestId: string) =>
+    [...keys.instructions(nestId), "revisions"] as const,
   nodes: (nestId: string) => [...keys.nest(nestId), "nodes"] as const,
   // Under keys.nodes so every write that drops the listing drops the lazily
   // loaded folder levels with it — see the invalidation table below.
@@ -338,6 +343,8 @@ const NEST_WRITE_SCOPES: Array<{
   // Branding rides GET /nests/:id (nest.branding), which the reader and the
   // shell's header/footer both read.
   { match: /^\/branding/, affects: (n) => [keys.nest(n)] },
+  // CONTEXT.md (CU-wdqcq05mty): its text and history, nothing else.
+  { match: /^\/instructions/, affects: (n) => [keys.instructions(n)] },
   { match: /^\/definitions/, affects: (n) => [keys.definitions(n)] },
   // A structure check judges, never writes; saving rules changes only the rules.
   { match: /^\/structure\/check$/, affects: () => [] },
@@ -495,6 +502,18 @@ export const reads = {
     queryOptions({
       queryKey: keys.nest(nestId),
       queryFn: () => api.getNest(nestId),
+      staleTime: STALE.reference,
+    }),
+  instructions: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.instructions(nestId),
+      queryFn: () => api.getInstructions(nestId),
+      staleTime: STALE.reference,
+    }),
+  instructionsRevisions: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.instructionsRevisions(nestId),
+      queryFn: () => api.listInstructionsRevisions(nestId),
       staleTime: STALE.reference,
     }),
   settings: (nestId: string) =>

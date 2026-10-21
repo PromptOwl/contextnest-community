@@ -63,6 +63,9 @@ import { FolderDeleteDialog, type FolderDeleteTarget } from "./nest/FolderDelete
 // Each tab is its own chunk, loaded when first opened.
 const ExternalEditsTab = lazyChunk(() => import("./nest/ExternalEditsTab").then((m) => ({ default: m.ExternalEditsTab })));
 const FieldsTab = lazyChunk(() => import("./nest/FieldsTab").then((m) => ({ default: m.FieldsTab })));
+const InstructionsTab = lazyChunk(() =>
+  import("./nest/InstructionsTab").then((m) => ({ default: m.InstructionsTab })),
+);
 const StewardsTab = lazyChunk(() => import("./nest/StewardsTab").then((m) => ({ default: m.StewardsTab })));
 const CollaboratorsTab = lazyChunk(() => import("./nest/CollaboratorsTab").then((m) => ({ default: m.CollaboratorsTab })));
 const ReviewTab = lazyChunk(() => import("./nest/ReviewTab").then((m) => ({ default: m.ReviewTab })));
@@ -826,6 +829,7 @@ export function NestView({
   const tabVisible: Record<string, boolean> = {
     overview: true,
     documents: true,
+    instructions: !grantOnly,
     review: showReviewTab && !isReadOnly,
     "external-edits": !isReadOnly,
     stewards: stewardshipEnabled && canManageGovernance,
@@ -1734,6 +1738,10 @@ export function NestView({
           <TabsList className="h-auto min-h-0 max-w-full justify-start gap-5 overflow-x-auto rounded-none bg-transparent p-0">
             <TabsTrigger value="overview" className={NEST_TAB}>Overview</TabsTrigger>
             <TabsTrigger value="documents" className={NEST_TAB}>Documents</TabsTrigger>
+            {/* The nest's CONTEXT.md — what every agent reads first. */}
+            {!grantOnly && (
+              <TabsTrigger value="instructions" className={NEST_TAB}>Instructions</TabsTrigger>
+            )}
             {/* Governance tabs hidden for view-only. */}
             {showReviewTab && !isReadOnly && (
               <TabsTrigger value="review" className={NEST_TAB + " gap-2"}>
@@ -2087,6 +2095,14 @@ export function NestView({
                 onRemove={setRemoveStewardId}
                 onEditRole={setEditingSteward}
               />
+            </Suspense>
+          </TabsContent>
+        )}
+
+        {!grantOnly && (
+          <TabsContent value="instructions" className="space-y-4">
+            <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+              <InstructionsTab nestId={nestId} canEdit={canManage && !isReadOnly} />
             </Suspense>
           </TabsContent>
         )}

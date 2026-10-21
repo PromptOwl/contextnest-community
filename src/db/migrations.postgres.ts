@@ -93,6 +93,7 @@ export const HISTORICAL_MIGRATIONS = [
   "065_api_key_capability",
   "066_api_key_origin",
   "067_system_accounts",
+  "068_instructions_revisions",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1190,6 +1191,21 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       created_by TEXT,
       created_by_email TEXT,
       created_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+  `);
+
+  // Migration 068 parity: CONTEXT.md revisions (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS instructions_revisions (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      seq INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      author_email TEXT,
+      note TEXT,
+      source TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      UNIQUE(nest_id, seq)
     );
   `);
 

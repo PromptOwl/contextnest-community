@@ -20,6 +20,7 @@ import {
   type AccessTarget,
 } from "./access-requests";
 import type { NestBranding } from "./branding";
+import type { InstructionsRevision } from "./instructions";
 
 /**
  * A nest's visibility tier. 'org' = every authenticated user of this
@@ -1004,6 +1005,51 @@ export interface NestSettings {
   /** Reads, pulls and exports are recorded in the activity log (default on).
    *  Only the owner or server admin may turn it off. */
   access_log_enabled?: boolean;
+}
+
+// ── Instructions (CONTEXT.md) — CU-wdqcq05mty ─────────────────────────────
+
+export async function getInstructions(nestId: string) {
+  return request<{ content: string; revision: InstructionsRevision | null }>(
+    `/nests/${nestId}/instructions`,
+  );
+}
+
+/** Owner/admin. `baseRevision` is the revision the editor opened (0 = none);
+ *  a 409 means someone saved since. */
+export async function saveInstructions(
+  nestId: string,
+  data: { content: string; note?: string; baseRevision: number },
+) {
+  return request<{ content: string; revision: InstructionsRevision }>(
+    `/nests/${nestId}/instructions`,
+    { method: "PUT", body: JSON.stringify(data) },
+  );
+}
+
+export async function listInstructionsRevisions(nestId: string) {
+  return request<{ revisions: InstructionsRevision[] }>(
+    `/nests/${nestId}/instructions/revisions`,
+  );
+}
+
+export async function getInstructionsRevision(nestId: string, seq: number) {
+  return request<{
+    revision: InstructionsRevision;
+    content: string;
+    previousContent: string | null;
+  }>(`/nests/${nestId}/instructions/revisions/${seq}`);
+}
+
+export async function restoreInstructionsRevision(
+  nestId: string,
+  seq: number,
+  baseRevision: number,
+) {
+  return request<{ content: string; revision: InstructionsRevision }>(
+    `/nests/${nestId}/instructions/revisions/${seq}/restore`,
+    { method: "POST", body: JSON.stringify({ baseRevision }) },
+  );
 }
 
 export async function getNestSettings(nestId: string) {

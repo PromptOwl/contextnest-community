@@ -2188,6 +2188,29 @@ export function runMigrations(db: Database.Database): void {
     `);
     recordMigration("067_system_accounts");
   }
+
+  // 068: CONTEXT.md revisions (CU-wdqcq05mty). The nest's operating
+  // instructions are one file the engine overwrites in place, so this table is
+  // their only history: every write — the Instructions page, `ctx push`, a
+  // confirmed held push, MCP — records the full text it wrote. `seq` numbers a
+  // nest's revisions 1, 2, 3… and is what a save names as its base, so two
+  // editors can't silently overwrite each other.
+  if (!hasMigration("068_instructions_revisions")) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS instructions_revisions (
+        id TEXT PRIMARY KEY,
+        nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        author_email TEXT,
+        note TEXT,
+        source TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(nest_id, seq)
+      );
+    `);
+    recordMigration("068_instructions_revisions");
+  }
 }
 
 /**
