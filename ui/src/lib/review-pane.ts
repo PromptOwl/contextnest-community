@@ -65,6 +65,17 @@ export function requestChangesError(note: string): string | null {
   return note.trim() ? null : "Add a reason so the author knows what to change.";
 }
 
+/** The caller's steward rows on this document are only reviewer/viewer, so
+ *  they approve but never author it (the editor's isReviewerOnly rule). */
+export function isReviewerOnly(
+  stewards: ReadonlyArray<{ email?: string; role: string }>,
+  currentUser: string | null | undefined,
+): boolean {
+  const me = (currentUser ?? "").toLowerCase();
+  const roles = stewards.filter((s) => (s.email ?? "").toLowerCase() === me).map((s) => s.role);
+  return roles.length > 0 && !roles.some((r) => r === "editor" || r === "admin");
+}
+
 /** Why the pane is read-only for this caller, or null when they can decide.
  *  `canReview` is server-computed; an older server that omits it only lists
  *  reviewable items, so a missing flag means reviewable. */

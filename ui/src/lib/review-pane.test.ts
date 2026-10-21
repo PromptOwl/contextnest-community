@@ -8,6 +8,7 @@ import {
   displayedChangeOrder,
   requestChangesError,
   readOnlyReason,
+  isReviewerOnly,
 } from "./review-pane";
 
 // The Review tab's side-by-side review pane (CU-wdqcq05mhk): a queue row
@@ -105,6 +106,23 @@ describe("request changes", () => {
     expect(requestChangesError("")).toMatch(/reason/i);
     expect(requestChangesError("   ")).toMatch(/reason/i);
     expect(requestChangesError("Fix the definition")).toBeNull();
+  });
+});
+
+describe("edit draft gate", () => {
+  it("hides Edit draft from a reviewer-only steward, even with nest write access", () => {
+    expect(isReviewerOnly([{ email: "Rev@x.com", role: "reviewer" }], "rev@x.com")).toBe(true);
+  });
+
+  it("keeps it for editors, admins and non-stewards", () => {
+    const rows = [
+      { email: "rev@x.com", role: "reviewer" },
+      { email: "rev@x.com", role: "editor" },
+      { email: "adm@x.com", role: "admin" },
+    ];
+    expect(isReviewerOnly(rows, "rev@x.com")).toBe(false);
+    expect(isReviewerOnly(rows, "adm@x.com")).toBe(false);
+    expect(isReviewerOnly(rows, "other@x.com")).toBe(false);
   });
 });
 

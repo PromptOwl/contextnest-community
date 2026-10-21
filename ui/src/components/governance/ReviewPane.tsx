@@ -23,11 +23,12 @@ import {
   X,
 } from "lucide-react";
 import * as api from "../../lib/api";
-import { reads } from "../../lib/queries";
+import { reads, useNodeStewards } from "../../lib/queries";
 import { decideWikiLinkAction } from "../../lib/wiki-preview";
 import { parseServerDate } from "@/lib/dates";
 import {
   defaultReviewTab,
+  isReviewerOnly,
   readOnlyReason,
   requestChangesError,
   type ReviewPaneTab,
@@ -128,7 +129,15 @@ export function ReviewPane({
   }, [nodeId]);
 
   const lockedReason = readOnlyReason(request, currentUser);
-  const canEditDraft = canEditDocs && !!node && !api.isPrimeNode(node, primeTags);
+  // Nest write access isn't enough: a reviewer/viewer steward on this document
+  // can't author it (same rule as the editor's isReviewerOnly).
+  const { data: stewardData } = useNodeStewards(nestId, nodeId);
+  const canEditDraft =
+    canEditDocs &&
+    !!stewardData &&
+    !isReviewerOnly(stewardData.stewards ?? [], currentUser) &&
+    !!node &&
+    !api.isPrimeNode(node, primeTags);
 
   const decide = async (kind: "approve" | "changes") => {
     if (kind === "changes") {
@@ -329,44 +338,65 @@ export function ReviewPane({
                 />
               )}
               {error && <p className="text-xs text-destructive">{error}</p>}
-              <Button
-                className={cn(APPROVE_BUTTON_CLASS, "w-full justify-center")}
-                variant="outline"
-                disabled={processing || bodyLoading || !versions}
-                onClick={() => (mode === "changes" ? setMode("approve") : decide("approve"))}
-                data-testid="review-pane-approve"
-              >
-                {processing && mode !== "changes" ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                ) : (
-                  <CheckCircle2 className="mr-2 h-4 w-4" />
-                )}
-                Approve &amp; publish
-              </Button>
+              {/* Once a decision is picked, only its submit button shows under
+                  the box, so it reads as "post this" — plus Cancel. */}
+              {mode !== "changes" && (
+                <Button
+                  className={cn(APPROVE_BUTTON_CLASS, "w-full justify-center")}
+                  variant="outline"
+                  disabled={processing || bodyLoading || !versions}
+                  onClick={() => decide("approve")}
+                  data-testid="review-pane-approve"
+                >
+                  {processing ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="mr-2 h-4 w-4" />
+                  )}
+                  {mode === "approve" ? "Post comment & approve" : "Approve & publish"}
+                </Button>
+              )}
               {mode === "idle" && (
                 <button
                   type="button"
                   className="text-xs text-muted-foreground underline-offset-2 hover:underline"
                   onClick={() => setMode("approve")}
                 >
-                  Add a comment
+                  Approve with a comment
                 </button>
               )}
-              <Button
-                variant="outline"
-                className={cn(REJECT_BUTTON_CLASS, "w-full justify-center")}
-                disabled={processing}
-                onClick={() => (mode === "changes" ? decide("changes") : setMode("changes"))}
-                data-testid="review-pane-request-changes"
-              >
-                {processing && mode === "changes" ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                ) : (
-                  <CornerUpLeft className="mr-2 h-4 w-4" />
-                )}
-                {mode === "changes" ? "Send back" : "Request changes"}
-              </Button>
-              {canEditDraft && (
+              {mode !== "approve" && (
+                <Button
+                  variant="outline"
+                  className={cn(REJECT_BUTTON_CLASS, "w-full justify-center")}
+                  disabled={processing}
+                  onClick={() => (mode === "changes" ? decide("changes") : setMode("changes"))}
+                  data-testid="review-pane-request-changes"
+                >
+                  {processing ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <CornerUpLeft className="mr-2 h-4 w-4" />
+                  )}
+                  {mode === "changes" ? "Send back to author" : "Request changes"}
+                </Button>
+              )}
+              {mode !== "idle" && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={processing}
+                  onClick={() => {
+                    setMode("idle");
+                    setNote("");
+                    setError(null);
+                  }}
+                  data-testid="review-pane-cancel"
+                >
+                  Cancel
+                </Button>
+              )}
+              {mode === "idle" && canEditDraft && (
                 <Button
                   variant="ghost"
                   className="w-full justify-center"
