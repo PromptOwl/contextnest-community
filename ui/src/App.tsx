@@ -29,6 +29,7 @@ import { navigateGuarded, historyWriteMode } from "./lib/nav-guard";
 import { track } from "./lib/analytics";
 import { nestIdFromLocation, nestPath, nestViewFromLocation } from "./lib/nest-url";
 import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
+import { NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
 import { appPageIdFromPath, appPath, DEFAULT_PAGE_ID, visibleAppPage } from "./lib/pages";
 import { AppNavProvider, type AppNav } from "./lib/app-nav";
@@ -206,31 +207,6 @@ const NEST_VIEWS = [
   ...nestPages.map((p) => ({ page: p.viewPage, label: p.label, icon: p.icon, beta: !!p.beta })),
 ];
 
-/** NestView's own tab slugs — the whitelist for ?tab=. Some are permission
- *  gated inside NestView, which falls back to overview when one isn't shown. */
-/** Breadcrumb labels for those tabs. */
-const NEST_TAB_LABELS: Record<string, string> = {
-  overview: "Overview",
-  documents: "Documents",
-  instructions: "Instructions",
-  review: "Review queue",
-  "external-edits": "External edits",
-  stewards: "Stewards",
-  collaborators: "Collaborators",
-  fields: "Fields",
-};
-
-const NEST_TABS = [
-  "overview",
-  "documents",
-  "instructions",
-  "review",
-  "external-edits",
-  "stewards",
-  "collaborators",
-  "fields",
-];
-
 type NestScopedView = Extract<View, { page: "nest" | "board" | "ontology-graph" | "definitions" | "workflows" | "structure" }>;
 
 const isNestScoped = (view: View): view is NestScopedView =>
@@ -265,12 +241,13 @@ export default function App() {
     workflowPlaneEnabled,
     subagentRunsEnabled,
     mcpOauthEnabled,
+    docStreamEnabled,
     loading,
     error,
     logout,
   } = useAuth();
   // What gates an app page (meta.visible). Superadmin is never open mode.
-  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled };
+  const pageCaps = { isAdmin, isSuperadmin: isAdmin && authMode !== "open", mcpOauthEnabled, docStreamEnabled };
   const [view, setViewNow] = useState<View>(() => ({
     page: "dashboard",
     // /my-work, /teammates, … open straight onto their page.
@@ -619,9 +596,7 @@ export default function App() {
           // ?tab=<slug> → open on that NestView tab. Unknown slugs are
           // dropped rather than passed through, so a stale link can't leave
           // Radix with a value that matches no trigger (blank content area).
-          tab: NEST_TABS.includes(params.get("tab") ?? "")
-            ? params.get("tab")!
-            : undefined,
+          tab: nestTabFromParam(params.get("tab")),
         });
       } catch {
         if (!cancelled) setDeepLinkProbe({ status: "unreachable", nestId });
@@ -866,7 +841,7 @@ export default function App() {
     }
     if (view.page === "docs") return [home, { label: "Docs" }];
     return pageTail.length ? [home, ...pageTail] : [];
-  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled]);
+  }, [view, setView, pageTail, isAdmin, authMode, mcpOauthEnabled, docStreamEnabled]);
 
   // What a dashboard page can do to the app. Pages read it with useAppNav()
   // instead of props, so App renders every page the same way.
@@ -874,7 +849,7 @@ export default function App() {
     () => ({
       openNest: (id, name, isOwner, isAnonOwned, isArchived) =>
         setView({ page: "nest", nestId: id, nestName: name, isOwner, isAnonOwned, isArchived }),
-      openReview: (nestId, nestName, nodeId) =>
+      openReview: (nestId, nestName, nodeId, opts) =>
         setView({
           page: "document",
           nestId,
@@ -882,6 +857,7 @@ export default function App() {
           nodeId,
           isOwner: true,
           isAnonOwned: true,
+          initialThreadId: opts?.thread,
           returnTo: viewRef.current,
         }),
       manageKeys: () => setView({ page: "dashboard", tab: "api-keys" }),

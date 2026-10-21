@@ -398,6 +398,20 @@ function toSafeError(err: unknown, context: string, message: string): AppError {
   return new AppError(500, message);
 }
 
+/** Reconstructed markdown split into its frontmatter and body. Unparseable →
+ *  the raw text as body and no frontmatter (fail closed on metadata). */
+export function parseVersionRaw(
+  nodeId: string,
+  raw: string,
+): { body: string; frontmatter: Record<string, unknown> } {
+  try {
+    const doc = parseDocument(`${nodeId}.md`, raw, nodeId);
+    return { body: doc.body ?? "", frontmatter: (doc.frontmatter ?? {}) as unknown as Record<string, unknown> };
+  } catch {
+    return { body: raw, frontmatter: {} };
+  }
+}
+
 /** Strip YAML frontmatter from reconstructed markdown; mirrors node.body shape. */
 export function bodyOnly(nodeId: string, raw: string): string {
   try {

@@ -756,6 +756,18 @@ export const config = {
     return process.env.FEATURE_METACOGNITION === "true";
   },
   /**
+   * Experimental: the cross-nest document stream (CU-wdqcq02crv) — GET
+   * /me/stream and the Stream page, one card per node version across every
+   * nest the caller can read. Off by default; off → the route 404s and the UI
+   * hides the page. Superadmin-editable at runtime via /admin/settings
+   * (experimental_doc_stream_enabled). Experimental: its shape may change or
+   * the feature may go away.
+   */
+  get EXPERIMENTAL_DOC_STREAM(): boolean {
+    return process.env.EXPERIMENTAL_DOC_STREAM === "true";
+  },
+
+  /**
    * Experimental: document pins (CU-wdqcq02crw). Editorial pins (a steward pins
    * documents to the front of a nest for everyone, in an order they choose) and
    * personal pins (my own bookmark row). Off by default; a superadmin flips it

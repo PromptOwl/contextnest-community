@@ -104,3 +104,17 @@ export function insertOrReplace(
     ? insertSql.replace(/^\s*INSERT\s+INTO/i, "INSERT OR REPLACE INTO")
     : `${insertSql} ON CONFLICT (${conflictCols.join(", ")}) DO UPDATE SET ${set}`;
 }
+
+/**
+ * A subquery yielding each string of ONE bound JSON-array parameter as a row
+ * of `value` — `col IN (${jsonTextValues(db)})` with `JSON.stringify(ids)`
+ * bound. For id sets too large to spell as one `?` per element: SQLite caps
+ * bound variables (32766 on current builds) and Postgres at 65535, and an id
+ * list sized by the data — every document a share grant covers — can pass
+ * either.
+ */
+export function jsonTextValues(db: DatabaseAdapter): string {
+  return db.dialect === "sqlite"
+    ? "SELECT value FROM json_each(?)"
+    : "SELECT value FROM json_array_elements_text(CAST(? AS json)) AS j(value)";
+}

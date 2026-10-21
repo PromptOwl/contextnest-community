@@ -16,7 +16,7 @@ describe("dashboard page registry", () => {
   it("finds every page folder and keeps them in sidebar order", () => {
     const ids = appPages.map((p) => p.id);
     expect(ids).toEqual([
-      "nests", "my-work", "my-drafts",
+      "nests", "my-work", "my-drafts", "stream",
       "teams", "api-keys", "connected-apps",
       "teammates", "settings", "trace", "messages",
       "guide", "account",
@@ -90,5 +90,15 @@ describe("dashboard rail groups", () => {
     expect(visibleAppPage("connected-apps", { isAdmin: false, mcpOauthEnabled: true }).id).toBe(
       "connected-apps",
     );
+  });
+
+  it("lists the Stream only while the experimental doc stream is on", () => {
+    const ids = (caps: Parameters<typeof appRail>[0]) =>
+      appRail(caps).groups.flatMap((g) => g.pages).map((p) => p.id);
+    expect(ids({ isAdmin: false })).not.toContain("stream");
+    expect(ids({ isAdmin: true, isSuperadmin: true })).not.toContain("stream");
+    expect(ids({ isAdmin: false, docStreamEnabled: true })).toContain("stream");
+    expect(visibleAppPage("stream", { isAdmin: false }).id).toBe(DEFAULT_PAGE_ID);
+    expect(visibleAppPage("stream", { isAdmin: false, docStreamEnabled: true }).id).toBe("stream");
   });
 });

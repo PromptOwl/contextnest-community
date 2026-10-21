@@ -1734,6 +1734,58 @@ Included: nodes whose **latest** version row is authored by the caller with stat
 
 Submitting one is the ordinary `POST /nests/:nestId/nodes/:nodeId/submit-review` — it then leaves this list and appears in `/me/work`.
 
+### GET `/me/stream` (experimental — `EXPERIMENTAL_DOC_STREAM`)
+
+> **Experimental.** Off by default; `404` unless `EXPERIMENTAL_DOC_STREAM` is on (env, or a superadmin's `experimental_doc_stream_enabled` in `PATCH /admin/settings`). The shape may change or the endpoint may be removed.
+
+Query: `?nest=&tag=&type=&author=&since=&limit=50&offset=0`. `nest`, `tag`, `type` and `author` are multi-select — repeat the param or comma-separate the values; values within one facet are OR'd, facets are AND'd. `tag` takes either `fmt` or `#fmt`. `since` is a date (`2026-10-01T00:00:00Z`, or the `at` value of an item); one without a zone is read as UTC; a bad one is `400`. `limit` clamps silently to 1–100 (junk → 50), `offset` to 0–10000; an offset past the end is an empty page, not an error. Each facet param keeps its first 50 distinct values.
+
+One item per **node version** across every nest the caller can read (owned, shared, stewarded, team-shared, share-granted, or readable through its `org`/`public` visibility), newest first (`at` desc, then insertion order, so pages never duplicate or skip). Access is the same rule the document listing and the governance feed use, resolved once per nest:
+
+- a nest the caller can't read never appears — not in `items`, `total` or `counts`;
+- a caller who reads only some documents (steward rows, share grants) sees only those documents' versions;
+- drafts follow the read rules: a member who can read the document sees its drafts (`status: "draft"`); a **public reader** (reads the nest through its visibility, not membership) sees approved/published versions only, and nothing of the document's current state (which may be an unreviewed draft): `title`, `type` and `tags` are that version's own, `author` and `commentCount` are `null`, and their nests are left out of the `tag`, `type` and `author` facets and filters;
+- versions of deleted documents are dropped.
+
+```json
+{
+  "items": [
+    {
+      "id": "<nestId>:nodes/fmt-guide@2",
+      "nestId": "<nestId>",
+      "nestName": "Clinical",
+      "nodeId": "nodes/fmt-guide",
+      "title": "FMT Guide",
+      "type": "reference",
+      "tags": ["fmt"],
+      "version": 2,
+      "status": "published",
+      "author": "alice@acme.com",
+      "at": "2026-10-01 09:02:00",
+      "summary": "FMT Fecal transplant primer, revised.",
+      "commentCount": 1,
+      "kind": "published"
+    }
+  ],
+  "total": 42,
+  "counts": {
+    "nest": [{ "id": "<nestId>", "name": "Clinical", "count": 42 }],
+    "tag": [{ "value": "fmt", "count": 12 }],
+    "type": [{ "value": "reference", "count": 7 }],
+    "author": [{ "value": "alice@acme.com", "count": 30 }]
+  },
+  "limit": 50,
+  "offset": 0,
+  "has_more": false
+}
+```
+
+- `tags` are the document's current tags (normalized: no `#`, lowercase). `summary` is the first ~200 characters of that version's body, flattened (no diff).
+- `commentCount` (members only) counts comments on the document's **open** annotation threads — the threads `GET /nests/:nestId/nodes/:nodeId/annotations` lists; post with `POST …/annotations` (new thread) or `POST …/annotations/:threadId/comments` (reply), and deep-link with `?thread=<threadId>`.
+- `kind`: `created` (version 1), `updated` (a later draft / pending edit), `published` (a later edit that went live without a review), `approved` (a review approved this version), `rejected`.
+- `counts` are per-facet totals over the caller's whole readable stream with `since` applied but **no** facet filter — they don't change with the page or with the other chips, so only the first page (`offset=0`) carries them; later pages answer `counts: null`. Tag, type and author lists are capped at 50 values each, and cover member nests only (a public-only nest is counted under `nest` alone, and a tag/type/author filter leaves those nests out). `tags` on an item are the document's current tags for members, the version's own tags for public readers.
+- Licensed like `/nests/:nestId/feed`: unlicensed past the Free tier → `503` with the same body the feed answers. A nest-scoped key is refused (`403`, like every `/me/*` route).
+
 ---
 
 ## 7. Versions
@@ -2513,6 +2565,8 @@ Two **server-level bootstrap writes** on `ALL /mcp` let a single-connection clie
 
 ### GET `/health` (no auth)
 `{ "status": "ok" | "suspended", "version": "<server version>", … }`. Needs no key (like `/llms.txt` and public `/p/:slug` pages) — use it for liveness probes. `suspended` means the license was revoked and writes are refused until a valid key is installed.
+
+Experimental features: `experimental` — one boolean per feature, each default `false`: `{ "doc_stream": false }` (`EXPERIMENTAL_DOC_STREAM`, see `GET /me/stream`). A superadmin flips each through its own `PATCH /admin/settings` field (`experimental_doc_stream_enabled`); `/health` reflects it at once.
 
 Hootie fields: `hootie_enabled` (default `false`), `hootie_brand` — `{ name, logo_url, accent_color, greeting }`, the identity every surface should show (the admin's custom one on an Enterprise licence, otherwise `{ name: "Hootie", logo_url: null, accent_color: null, greeting: null }`, decided server-side) — and `hootie_branding_available` (whether custom identity is allowed).
 

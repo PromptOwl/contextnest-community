@@ -264,6 +264,32 @@ d("PostgresAdapter conformance", () => {
       expect.arrayContaining(["claimed_by", "claimed_at"]),
     );
   });
+
+  it("runs the doc stream's JSON id-list scope and facet SQL (CU-wdqcq02crv)", async () => {
+    const { jsonTextValues } = await import("../src/db/sql.js");
+    await adapter.run("INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)", ["u-ds", "ds@example.com", "h"]);
+    await adapter.run("INSERT INTO nests (id, user_id, name, slug) VALUES (?, ?, ?, ?)", ["n-ds", "u-ds", "DS", "ds"]);
+    for (const [node, v, author] of [["nodes/a", 1, "Ds@Example.com"], ["nodes/a", 2, "ds@example.com"], ["nodes/b", 1, "ds@example.com"]] as const) {
+      await adapter.run(
+        `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status, created_at)
+         VALUES (?, ?, ?, 'h', ?, 'published', ?)`,
+        ["n-ds", node, v, author, `2026-10-0${v} 00:00:00`],
+      );
+    }
+    const rows = await adapter.all<{ node_id: string }>(
+      `SELECT v.node_id FROM node_versions v
+        WHERE v.nest_id = ? AND v.node_id IN (${jsonTextValues(adapter)}) AND v.created_at >= ?
+        ORDER BY v.created_at DESC, v.id DESC LIMIT ? OFFSET ?`,
+      ["n-ds", JSON.stringify(["nodes/a"]), "2026-10-01 00:00:00", 10, 0],
+    );
+    expect(rows.map((r: { node_id: string }) => r.node_id)).toEqual(["nodes/a", "nodes/a"]);
+    const authors = await adapter.all<{ value: string; n: number | string }>(
+      `SELECT LOWER(v.author) AS value, COUNT(*) AS n FROM node_versions v
+        WHERE v.nest_id = ? GROUP BY LOWER(v.author)`,
+      ["n-ds"],
+    );
+    expect(authors.map((a: { value: string; n: number | string }) => [a.value, Number(a.n)])).toEqual([["ds@example.com", 3]]);
+  });
 });
 
 function hashStr(s: string): number {

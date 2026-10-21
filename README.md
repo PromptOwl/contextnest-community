@@ -93,7 +93,7 @@ One sidebar, grouped:
 | Group | Pages | Who |
 |---|---|---|
 | — | **Nests** — every nest you can see, pinned first | everyone |
-| Work | **My Work** (tasks assigned to you, reviews and handoffs waiting on you, across nests) · **My Drafts** (yours, never submitted) | everyone |
+| Work | **My Work** (tasks assigned to you, reviews and handoffs waiting on you, across nests) · **My Drafts** (yours, never submitted) · **Stream** (*experimental*, off by default — every document version across your nests, with comments inline; `EXPERIMENTAL_DOC_STREAM`) | everyone |
 | Workspace | **Teams** · **API keys** | everyone |
 | Admin | **Teammates** · **Server settings** · **Activity trace** | server admins |
 | Help | **How it works** | everyone |

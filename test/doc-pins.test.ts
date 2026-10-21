@@ -137,7 +137,7 @@ describe("document pins", () => {
   describe("the EXPERIMENTAL_DOC_PINS switch", () => {
     it("is off by default: /health and /admin/settings report it off", async () => {
       const health = await jsonRequest(app, "GET", "/health");
-      expect(health.data.experimental).toEqual({ doc_pins: false });
+      expect(health.data.experimental.doc_pins).toBe(false);
       const settings = await jsonRequest(app, "GET", "/admin/settings", undefined, superUser.apiKey);
       expect(settings.data.experimental_doc_pins).toBe(false);
     });
@@ -166,7 +166,7 @@ describe("document pins", () => {
       expect(on.status).toBe(200);
       expect(on.data.settings.experimental_doc_pins).toBe(true);
       expect(await persistedSetting("EXPERIMENTAL_DOC_PINS")).toBe("true");
-      expect((await jsonRequest(app, "GET", "/health")).data.experimental).toEqual({ doc_pins: true });
+      expect((await jsonRequest(app, "GET", "/health")).data.experimental.doc_pins).toBe(true);
 
       const res = await getPins(reader);
       expect(res.status).toBe(200);
@@ -558,7 +558,7 @@ describe("document pins", () => {
       const health = await jsonRequest(app, "GET", "/health");
       expect(health.data.workflow_plane_enabled).toBe(true);
       expect(health.data.metacognition_enabled).toBe(true);
-      expect(health.data.experimental).toEqual({ doc_pins: true });
+      expect(health.data.experimental.doc_pins).toBe(true);
       expect(await persistedSetting("FEATURE_WORKFLOW_PLANE")).toBe("true");
       expect(await persistedSetting("FEATURE_METACOGNITION")).toBe("true");
 

@@ -39,6 +39,7 @@ import {
   listDeletionRequests,
 } from "./governance/review-service.js";
 import { listMyDrafts } from "./governance/version-service.js";
+import { getDocStream } from "./governance/stream-service.js";
 import { folderForNode } from "./governance/title-resolver.js";
 import { engineCache } from "./nodes/engine.js";
 import {
@@ -91,7 +92,7 @@ import { definitionRoutes } from "./definitions/routes.js";
 import { structureRoutes } from "./structure/routes.js";
 import { ContextNestError } from "@promptowl/contextnest-engine";
 import { forPeople } from "./structure/writes.js";
-import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES } from "./nodes/service.js";
+import { isDerivedAnnotationsNode, ACCEPTED_NODE_TYPES, parseVersionRaw } from "./nodes/service.js";
 import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import {
   pdfNodeRoutes,
@@ -746,6 +747,7 @@ export function createApp(): Hono<AuthEnv> {
       // renders none of it. Add new experimental switches as keys here.
       experimental: {
         doc_pins: config.EXPERIMENTAL_DOC_PINS,
+        doc_stream: config.EXPERIMENTAL_DOC_STREAM,
       },
       // The identity every surface shows: the admin's custom name/logo/
       // colour/greeting on an enterprise licence, the default Hootie
@@ -987,6 +989,7 @@ export function createApp(): Hono<AuthEnv> {
     model_source: resolveModelCredential()?.source ?? null,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     metacognition_enabled: config.FEATURE_METACOGNITION,
+    experimental_doc_stream_enabled: config.EXPERIMENTAL_DOC_STREAM,
     experimental_doc_pins: config.EXPERIMENTAL_DOC_PINS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
@@ -1418,6 +1421,17 @@ export function createApp(): Hono<AuthEnv> {
         pending.push({ name: "FEATURE_METACOGNITION", value: body.metacognition_enabled ? "true" : null });
       }
     }
+    // Experimental: the cross-nest document stream. Its own switch, no
+    // dependencies. Off writes a tombstone (null): the switch is off now and
+    // stays off across a restart with the same deploy env, even if that env
+    // says true (db/settings.ts precedence) — same as FEATURE_METACOGNITION.
+    if ("experimental_doc_stream_enabled" in body) {
+      pending.push({
+        name: "EXPERIMENTAL_DOC_STREAM",
+        value: body.experimental_doc_stream_enabled ? "true" : null,
+      });
+    }
+
     // Experimental: document pins (CU-wdqcq02crw). Default OFF — enabling
     // writes "true", disabling clears the row (falls back to the default).
     if ("experimental_doc_pins" in body) {
@@ -2452,6 +2466,95 @@ export function createApp(): Hono<AuthEnv> {
       // page is sliced from — so this is exact in every sort and search mode.
       pagination: { total, limit, offset, has_more: offset + limit < total },
     });
+  });
+
+  // GET /me/stream — EXPERIMENTAL cross-nest document stream (CU-wdqcq02crv).
+  // ?nest=&tag=&type=&author= (each repeatable or comma-separated; OR within a
+  // facet, AND across), ?since=<ISO date>, ?limit= (≤100), ?offset= (≤10000).
+  // One item per node version across every nest the caller can read, newest
+  // first, access-filtered per nest (see governance/stream-service.ts). Behind
+  // its own switch: off → 404. Version history is a licensed governance view,
+  // so unlicensed past the Free tier → the same 503 /nests/:id/feed answers.
+  const streamUnreadableWarned = new Set<string>();
+  app.get("/me/stream", async (c) => {
+    if (!config.EXPERIMENTAL_DOC_STREAM) {
+      return c.json(
+        {
+          error:
+            "The document stream is an experimental feature that is not enabled on this server. A superadmin can turn it on in Settings (EXPERIMENTAL_DOC_STREAM).",
+        },
+        404,
+      );
+    }
+    const userId = c.get("userId");
+    if (!getCurrentLicense()?.valid) {
+      const denial = await readOnlyDenial(userId);
+      if (denial) return c.json({ error: denial.error, ...denial.extra }, 503);
+    }
+    const list = (name: string) =>
+      [
+        ...new Set(
+          (c.req.queries(name) ?? [])
+            .flatMap((v) => v.split(","))
+            .map((v) => v.trim())
+            .filter(Boolean),
+        ),
+      ].slice(0, 50);
+    let since: string | undefined;
+    const sinceRaw = c.req.query("since");
+    if (sinceRaw) {
+      // Timestamps are UTC throughout: the stream's own `at` values
+      // ("YYYY-MM-DD HH:MM:SS") round-trip, and an ISO date-time with no zone
+      // is read as UTC too, never as the server's local time.
+      const noZone = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(sinceRaw);
+      const t = Date.parse(noZone ? `${sinceRaw.replace(" ", "T")}Z` : sinceRaw);
+      if (Number.isNaN(t)) return c.json({ error: "since must be a date, e.g. 2026-10-01T00:00:00Z" }, 400);
+      // node_versions.created_at is "YYYY-MM-DD HH:MM:SS" (UTC) on both drivers.
+      since = new Date(t).toISOString().slice(0, 19).replace("T", " ");
+    }
+    const me = await resolveCallerEmail(userId);
+    const nests = new Map<string, string>();
+    for (const n of await listVisibleNests(userId, { readable: true }))
+      nests.set(n.id, n.name ?? n.id);
+    const page = await getDocStream({
+      userId,
+      userEmail: me,
+      nests,
+      filters: {
+        nest: list("nest"),
+        tag: list("tag"),
+        type: list("type"),
+        author: list("author"),
+        since,
+      },
+      // The service clamps (limit 1–100, default 50; offset 0–10000).
+      limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
+      offset: c.req.query("offset") ? Number(c.req.query("offset")) : undefined,
+      readVersion: async (nestId, nodeId, version) => {
+        const { storage, versions } = await engineCache.get(nestId);
+        try {
+          return parseVersionRaw(nodeId, await versions.reconstructVersion(nodeId, version));
+        } catch {
+          // The unreviewed draft on top is never in the chain — its bytes are
+          // the live file (same fallback as GET …/versions/:version).
+          const node = await storage.readDocument(nodeId);
+          if ((node.frontmatter.version ?? 1) === version) {
+            return { body: node.body ?? "", frontmatter: node.frontmatter as unknown as Record<string, unknown> };
+          }
+          // Neither the chain nor the live file has this version: a broken
+          // chain. The card shows no summary; say so once per document.
+          const key = `${nestId}:${nodeId}`;
+          if (!streamUnreadableWarned.has(key)) {
+            // Bounded: a long-lived server forgets old ones rather than grow.
+            if (streamUnreadableWarned.size >= 1000) streamUnreadableWarned.clear();
+            streamUnreadableWarned.add(key);
+            console.warn(`[me/stream] version body unreadable: ${key}@${version}`);
+          }
+          return null;
+        }
+      },
+    });
+    return c.json(page);
   });
 
   // Watcher notifications — read + mark-read (auth via the /me/* middleware).
