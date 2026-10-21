@@ -565,6 +565,10 @@ export function createApp(): Hono<AuthEnv> {
       : cors({ origin: corsOrigins, credentials: true }),
   );
 
+  // Pricing spec v21: a role change that raises someone's billed class needs
+  // explicit confirmation; apps and scripts give it with this header.
+  app.use("*", (c, next) => billingConfirmed.run(c.req.header("X-Confirm-Billing") === "true", next));
+
   // Clickjacking guard — only the origins in config.FRAME_ANCESTORS may frame
   // this server. CORS does not cover this: it governs who may *read* our
   // responses, not who may *embed* us, so without this any site could iframe
@@ -574,10 +578,6 @@ export function createApp(): Hono<AuthEnv> {
   // their own strict CSP (see shared/artifact-sandbox.ts) — overwriting it
   // would drop the sandbox that keeps attacker-authored artifact HTML off the
   // session. Skipped entirely when a handler set frame-ancestors itself.
-  // Pricing spec v21: a role change that raises someone's billed class needs
-  // explicit confirmation; apps and scripts give it with this header.
-  app.use("*", (c, next) => billingConfirmed.run(c.req.header("X-Confirm-Billing") === "true", next));
-
   const frameAncestors = `frame-ancestors ${config.FRAME_ANCESTORS}`;
   app.use("*", async (c, next) => {
     await next();

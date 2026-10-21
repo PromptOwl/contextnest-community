@@ -10,7 +10,7 @@ import { setupTestEnv, createTestApp, registerUser, resetAuthRateLimit } from ".
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
 type U = { apiKey: string; userId: string; email: string };
-let owner: U, alice: U, bob: U, carol: U, dan: U, erin: U, fay: U, hank: U, ivy: U;
+let owner: U, alice: U, bob: U, carol: U, dan: U, erin: U, fay: U, hank: U, ivy: U, kai: U;
 let nestId: string;
 // Unlimited, so only the confirmation gate is in play (plan caps: plan-limits.test.ts).
 const entitlement: Record<string, any> = {
@@ -75,6 +75,8 @@ beforeAll(async () => {
   fay = await registerUser(app, "fay@co.com");
   hank = await registerUser(app, "hank@co.com");
   ivy = await registerUser(app, "ivy@co.com");
+  await resetAuthRateLimit();
+  kai = await registerUser(app, "kai@co.com");
   const n = await req("POST", "/nests", { name: "Alice" }, alice);
   expect(n.status).toBe(201);
   nestId = n.data.id ?? n.data.nest?.id;
@@ -158,16 +160,49 @@ describe("billing confirmation on a raise", () => {
     });
   });
 
-  it("access request: approving write raises the requester", async () => {
+  const requestStatus = async (id: string) => {
+    const all = await req("GET", `/nests/${nestId}/access-requests?status=all`, undefined, alice);
+    return all.data.requests.find((r: any) => r.id === id).status;
+  };
 
+  it("access request: an unconfirmed approve leaves it pending; confirmed, it grants", async () => {
     expect((await req("POST", `/nests/${nestId}/collaborators`, { email: ivy.email, permission: "read" }, alice)).status).toBe(201);
     const filed = await req("POST", `/nests/${nestId}/access-requests`, { target_type: "nest", level: "write" }, ivy);
     expect(filed.status).toBe(201);
-    await confirmRequired("POST", `/nests/${nestId}/access-requests/${filed.data.request.id}/approve`, {}, alice, {
+    const id = filed.data.request.id;
+    expect((await req("POST", `/nests/${nestId}/access-requests/${id}/approve`, {}, alice)).status).toBe(409);
+    expect(await requestStatus(id)).toBe("pending");
+    await confirmRequired("POST", `/nests/${nestId}/access-requests/${id}/approve`, {}, alice, {
       email: ivy.email,
       from: "viewer",
       to: "subscriber",
     });
+    expect(await requestStatus(id)).toBe("approved");
+  });
+
+  it("access request over MCP: same, with confirm_billing", async () => {
+    expect((await req("POST", `/nests/${nestId}/collaborators`, { email: kai.email, permission: "read" }, alice)).status).toBe(201);
+    const filed = await req("POST", `/nests/${nestId}/access-requests`, { target_type: "nest", level: "write" }, kai);
+    const id = filed.data.request.id;
+    const refused = await mcp(alice.apiKey, "context_resolve_access_request", { request_id: id, decision: "approve" });
+    expect(refused.structuredContent).toMatchObject({ code: "BILLING_CONFIRMATION_REQUIRED" });
+    expect(await requestStatus(id)).toBe("pending");
+    const ok = await mcp(alice.apiKey, "context_resolve_access_request", {
+      request_id: id,
+      decision: "approve",
+      confirm_billing: true,
+    });
+    expect(ok.isError).toBeFalsy();
+    expect(await requestStatus(id)).toBe("approved");
+  });
+
+  it("MCP: confirm_billing is harmless on a tool that grants nothing", async () => {
+    const res = await mcp(alice.apiKey, "context_create", {
+      title: "Plain doc",
+      content: "x",
+      confirm_billing: true,
+    });
+    expect(res.isError).toBeFalsy();
   });
 
   it("MCP: the tool names the change, and confirm_billing saves it", async () => {
