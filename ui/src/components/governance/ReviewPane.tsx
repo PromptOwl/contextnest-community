@@ -107,7 +107,9 @@ export function ReviewPane({
   // published version exists. A tab the reviewer chose is left alone.
   const [tabChosenFor, setTabChosenFor] = useState<string | null>(null);
   useEffect(() => {
-    if (!versions || tabChosenFor === nodeId) return;
+    if (tabChosenFor === nodeId) return;
+    // New document, versions still loading: drop the last document's tab.
+    if (!versions) return setTab("preview");
     setTab(defaultReviewTab({ approvedVersion, pendingVersion }));
     setTabChosenFor(nodeId);
   }, [versions, nodeId, approvedVersion, pendingVersion, tabChosenFor]);
@@ -330,7 +332,7 @@ export function ReviewPane({
               <Button
                 className={cn(APPROVE_BUTTON_CLASS, "w-full justify-center")}
                 variant="outline"
-                disabled={processing || bodyLoading}
+                disabled={processing || bodyLoading || !versions}
                 onClick={() => (mode === "changes" ? setMode("approve") : decide("approve"))}
                 data-testid="review-pane-approve"
               >

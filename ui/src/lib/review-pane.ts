@@ -73,7 +73,7 @@ export function readOnlyReason(
   currentUser: string | null | undefined,
 ): string | null {
   if (request.canReview !== false) return null;
-  if (currentUser && request.requestedBy === currentUser) {
+  if (currentUser && request.requestedBy.toLowerCase() === currentUser.toLowerCase()) {
     return "You submitted this change, so someone else has to review it (separation of duties).";
   }
   return "This change is outside your steward scope, so you can read it but not approve it.";

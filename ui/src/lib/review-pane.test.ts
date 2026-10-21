@@ -115,6 +115,12 @@ describe("read-only reason", () => {
     );
   });
 
+  it("matches your own submission whatever the email's casing", () => {
+    expect(readOnlyReason({ canReview: false, requestedBy: "Ann@X.com" }, "ann@x.com")).toMatch(
+      /you submitted/i,
+    );
+  });
+
   it("explains scope when someone else's change is outside your review rights", () => {
     expect(readOnlyReason({ canReview: false, requestedBy: "b@x.com" }, "a@x.com")).toMatch(
       /steward scope/i,
