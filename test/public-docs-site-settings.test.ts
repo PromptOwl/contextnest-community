@@ -334,6 +334,24 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
     }
   });
 
+  it("gives up on a DNS lookup that never answers instead of hanging the request", async () => {
+    const settings = await import("../src/site/settings.js");
+    const id = (await jsonRequest(app, "POST", "/nests", { name: "Dns Hang" }, owner.apiKey)).data.nest.id;
+    await jsonRequest(app, "PATCH", `/nests/${id}/site`, { domain: "hang.acme.dev" }, owner.apiKey);
+    settings.setTxtResolverForTests(() => new Promise(() => {}), 50);
+    try {
+      const started = Date.now();
+      const r = await jsonRequest(app, "POST", `/nests/${id}/site/verify-domain`, {}, owner.apiKey);
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(r.status).toBe(400);
+      expect(JSON.stringify(r.data)).toMatch(/lookup .* failed \(ETIMEOUT\)/);
+      const after = await jsonRequest(app, "GET", `/nests/${id}/site`, undefined, owner.apiKey);
+      expect(after.data.domain_verified).toBe(false);
+    } finally {
+      settings.setTxtResolverForTests(fakeDns);
+    }
+  });
+
   it("shares one build between requests that miss the cache together", async () => {
     const { buildCount } = await import("../src/site/build.js");
     const { getDb } = await import("../src/db/client.js");

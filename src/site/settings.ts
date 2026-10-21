@@ -10,7 +10,7 @@
  * — or typing someone else's domain into the form — can't hijack anything.
  */
 import { randomBytes } from "node:crypto";
-import { resolveTxt } from "node:dns/promises";
+import { Resolver } from "node:dns/promises";
 import { z } from "zod";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
@@ -326,10 +326,24 @@ export function redirectLoops(redirects: Array<{ from: string; to: string }>): S
 }
 
 export type TxtResolver = (name: string) => Promise<string[][]>;
-let txtResolver: TxtResolver = resolveTxt;
+// c-ares bounds each query; the deadline below bounds the whole lookup, so a
+// stalled resolver can't hold an owner's Verify request (or the re-check).
+const dns = new Resolver({ timeout: 2000, tries: 2 });
+const defaultResolver: TxtResolver = (name) => dns.resolveTxt(name);
+let txtResolver: TxtResolver = defaultResolver;
+let txtDeadlineMs = 5000;
 /** Tests swap DNS out. */
-export function setTxtResolverForTests(r: TxtResolver | null): void {
-  txtResolver = r ?? resolveTxt;
+export function setTxtResolverForTests(r: TxtResolver | null, deadlineMs = 5000): void {
+  txtResolver = r ?? defaultResolver;
+  txtDeadlineMs = deadlineMs;
+}
+
+function lookupTxt(name: string): Promise<string[][]> {
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(Object.assign(new Error(`TXT lookup for ${name} timed out`), { code: "ETIMEOUT" })), txtDeadlineMs);
+  });
+  return Promise.race([txtResolver(name), deadline]).finally(() => clearTimeout(timer));
 }
 
 /**
@@ -340,7 +354,7 @@ export function setTxtResolverForTests(r: TxtResolver | null): void {
 async function requireTxt(name: string, value: string): Promise<void> {
   let found: string[];
   try {
-    found = (await txtResolver(name)).map((parts) => parts.join(""));
+    found = (await lookupTxt(name)).map((parts) => parts.join(""));
   } catch (err) {
     const code = (err as { code?: string })?.code;
     if (code !== "ENOTFOUND" && code !== "ENODATA") {
@@ -426,7 +440,7 @@ export async function recheckDomain(nestId: string): Promise<void> {
     if (!record || !row.domainVerifiedAt) return;
     let found: string[];
     try {
-      found = (await txtResolver(record.name)).map((parts) => parts.join(""));
+      found = (await lookupTxt(record.name)).map((parts) => parts.join(""));
     } catch (err) {
       const code = (err as { code?: string })?.code;
       if (code !== "ENOTFOUND" && code !== "ENODATA") return;
