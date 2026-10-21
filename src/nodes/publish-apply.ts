@@ -87,6 +87,14 @@ export function validatePublishPayload(body: PublishPayload): void {
   }
 }
 
+/** A pushed body as the vault file holds it after the frontmatter: `ctx push`
+ *  sends it from just under the closing `---`, so it starts with a blank line.
+ *  Drop whole blank lines only — HTML must open on its first tag to be served
+ *  as a page, and an indented first line of markdown means something. */
+export function stripLeadingBlankLines(content: string): string {
+  return content.replace(/^(?:[ \t]*\r?\n)+/, "");
+}
+
 /** The docs that will actually be written (title + content present). The
  *  manifest and the held-push content view both index into this list. */
 export function publishableDocs(body: PublishPayload): PublishDoc[] {
@@ -147,7 +155,7 @@ export async function applyPublish(
         nestId,
         {
           title: doc.title,
-          content: doc.content,
+          content: stripLeadingBlankLines(doc.content),
           type: doc.type,
           tags: doc.tags,
           scope: doc.scope,

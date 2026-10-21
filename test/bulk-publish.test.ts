@@ -129,4 +129,32 @@ describe("bulk publish — partial-batch reporting", () => {
     expect(res.data.published).toBe(1);
     expect(res.data.node_ids).toEqual(["nodes/subteam/nested-doc"]);
   });
+
+  it("drops the blank lines a pushed body starts with, so an HTML page stays a page", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    const nestId = await makeNest(app, admin.apiKey);
+
+    // `ctx push` sends the body as it sits after the frontmatter, which starts
+    // with the blank line under the closing `---`.
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publish`,
+      {
+        documents: [
+          { title: "Page", type: "artifact", content: "\n\n<!doctype html>\n<html><body>Hi</body></html>\n" },
+          { title: "Indented", content: "\n   \n    code on line one\n" },
+        ],
+      },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(201);
+
+    const page = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/page`, undefined, admin.apiKey);
+    expect(page.data.node.content.startsWith("<!doctype html>")).toBe(true);
+    // Only whole blank lines go: the first real line keeps its indentation.
+    const md = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/indented`, undefined, admin.apiKey);
+    expect(md.data.node.content.startsWith("    code on line one")).toBe(true);
+  });
 });
