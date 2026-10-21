@@ -43,7 +43,9 @@ header.top{border-bottom:1px solid var(--line);background:var(--head);padding:12
 header.top .brand{display:flex;align-items:center;gap:10px;font-weight:650;color:var(--fg);text-decoration:none;font-size:17px}
 header.top .brand img{height:28px;width:auto}
 .layout{display:grid;grid-template-columns:260px minmax(0,1fr) 220px;gap:40px;max-width:1280px;margin:0 auto;padding:0 24px}
-nav.side{position:sticky;top:0;align-self:start;max-height:100vh;overflow-y:auto;padding:28px 0;font-size:14.5px}
+details.navbox{position:sticky;top:0;align-self:start;max-height:100vh;overflow-y:auto}
+details.navbox summary{display:none}
+nav.side{padding:28px 0;font-size:14.5px}
 nav.side ul{list-style:none;margin:0;padding:0}
 nav.side li{margin:1px 0}
 nav.side a{display:block;padding:4px 10px;border-radius:6px;color:var(--fg);text-decoration:none;line-height:1.4}
@@ -92,15 +94,13 @@ aside.toc li{margin:4px 0}aside.toc li.h3{padding-left:12px}
 aside.toc a{color:var(--muted);text-decoration:none}aside.toc a:hover{color:var(--accent)}
 footer.foot{border-top:1px solid var(--line);padding:20px 24px;font-size:13px;color:var(--muted);text-align:center}
 footer.foot a{color:var(--muted)}
-details.mnav{display:none}
 @media (max-width:1100px){.layout{grid-template-columns:240px minmax(0,1fr)}aside.toc{display:none}}
 @media (max-width:760px){
   .layout{display:block;padding:0 16px}
   header.top{padding:12px 16px}
-  nav.side{display:none}
-  details.mnav{display:block;border-bottom:1px solid var(--line);padding:10px 16px}
-  details.mnav summary{cursor:pointer;font-weight:600}
-  details.mnav nav.side{display:block;position:static;max-height:none;padding:12px 0 0}
+  details.navbox{position:static;max-height:none;overflow:visible;border-bottom:1px solid var(--line);padding:10px 0}
+  details.navbox summary{display:list-item;cursor:pointer;font-weight:600}
+  nav.side{padding:12px 0 0}
   h1{font-size:1.75em}
   .ai{margin-left:0}
 }
@@ -109,7 +109,7 @@ details.mnav{display:none}
 }
 
 /** Nav filter + "Copy page" (fetches the page's own .md). Static, so its CSP hash is fixed. */
-const SCRIPT = `document.querySelectorAll('[data-filter]').forEach(function(i){i.addEventListener('input',function(){var q=i.value.trim().toLowerCase();i.closest('nav').querySelectorAll('li[data-t]').forEach(function(li){li.hidden=!!q&&li.getAttribute('data-t').indexOf(q)<0})})});document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){fetch(b.getAttribute('data-copy')).then(function(r){return r.text()}).then(function(t){return navigator.clipboard.writeText(t)}).then(function(){b.textContent='Copied'},function(){b.textContent='Copy failed'})})})`;
+const SCRIPT = `if(matchMedia('(max-width:760px)').matches)document.querySelectorAll('details.navbox').forEach(function(d){d.open=false});document.querySelectorAll('[data-filter]').forEach(function(i){i.addEventListener('input',function(){var q=i.value.trim().toLowerCase();i.closest('nav').querySelectorAll('li[data-t]').forEach(function(li){li.hidden=!!q&&li.getAttribute('data-t').indexOf(q)<0})})});document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){fetch(b.getAttribute('data-copy')).then(function(r){return r.text()}).then(function(t){return navigator.clipboard.writeText(t)}).then(function(){b.textContent='Copied'},function(){b.textContent='Copy failed'})})})`;
 
 const sha = (s: string) => `'sha256-${createHash("sha256").update(s).digest("base64")}'`;
 
@@ -242,9 +242,8 @@ ${head}
 <body>
 <a class="skip" href="#content">Skip to content</a>
 <header class="top"><a class="brand" href="${esc(href(site, ""))}">${logo}${esc(site.name)}</a></header>
-<details class="mnav"><summary>Contents</summary>${sideNav(site, opts.current)}</details>
 <div class="layout">
-${sideNav(site, opts.current)}
+<details class="navbox" open><summary>Contents</summary>${sideNav(site, opts.current)}</details>
 <main id="content">${opts.main}</main>
 ${opts.toc ?? "<div></div>"}
 </div>

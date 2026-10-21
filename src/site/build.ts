@@ -702,9 +702,32 @@ export interface Built {
   origin: string;
   site: Site;
   files: Map<string, SiteFile>;
+  bytes: number;
 }
+// LRU, one entry per nest, capped by count AND by size. Worst case held:
+// MAX_CACHE_BYTES, or a single site bigger than that (the one being served
+// is never evicted). Size is estimated as UTF-16 length of the bodies.
 const cache = new Map<string, Built>();
 const MAX_CACHED_SITES = 32;
+let maxCacheBytes = 256 * 1024 * 1024;
+let cacheBytes = 0;
+/** Tests shrink the size cap to exercise eviction. */
+export function setCacheBytesForTests(n: number | null): void {
+  maxCacheBytes = n ?? 256 * 1024 * 1024;
+}
+
+function cachePut(nestId: string, built: Built): void {
+  const old = cache.get(nestId);
+  if (old) cacheBytes -= old.bytes;
+  cache.delete(nestId);
+  cache.set(nestId, built);
+  cacheBytes += built.bytes;
+  while (cache.size > 1 && (cache.size > MAX_CACHED_SITES || cacheBytes > maxCacheBytes)) {
+    const [oldest, entry] = cache.entries().next().value!;
+    cache.delete(oldest);
+    cacheBytes -= entry.bytes;
+  }
+}
 
 export const TYPES = {
   html: "text/html; charset=utf-8",
@@ -783,7 +806,11 @@ export async function getSite(nest: SiteNest, requestOrigin: string, opts: SiteO
   const place = await placementFor(nest, inputs.row, origin, opts);
   const key = `${inputs.key}|${place.base}`;
   const hit = cache.get(nest.id);
-  if (hit && hit.key === key && hit.origin === origin) return viewFor(hit, requestOrigin);
+  if (hit && hit.key === key && hit.origin === origin) {
+    cache.delete(nest.id);
+    cache.set(nest.id, hit);
+    return viewFor(hit, requestOrigin);
+  }
 
   // Requests that miss together share one build: a crawler burst after an
   // edit must not start a full rebuild per request.
@@ -827,12 +854,11 @@ async function build(
   put("404", renderNotFound(site), TYPES.html);
   put("410", renderGone(site), TYPES.html);
 
-  const built: Built = { key, origin, site, files };
+  let bytes = 0;
+  for (const f of files.values()) bytes += f.body.length * 2;
+  const built: Built = { key, origin, site, files, bytes };
   builds++;
-  // One entry per nest, bounded.
-  cache.delete(nest.id);
-  cache.set(nest.id, built);
-  while (cache.size > MAX_CACHED_SITES) cache.delete(cache.keys().next().value!);
+  cachePut(nest.id, built);
 
   // Remember every served path so a later move 301s instead of 404ing.
   const known = new Set(inputs.paths.map((p) => p.path));

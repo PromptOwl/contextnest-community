@@ -361,6 +361,38 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
     expect(buildCount()).toBe(before + 1);
   });
 
+  it("renders the page list once per page, so page size grows linearly", async () => {
+    const res = await app.request("https://docs.acme.dev/reference/cli", { headers: { ...HTML, Host: "docs.acme.dev" } });
+    expect(res.status).toBe(200);
+    expect((await res.text()).match(/<nav class="side"/g)).toHaveLength(1);
+  });
+
+  it("evicts the least recently used site once the cache is over its size cap", async () => {
+    const { buildCount, setCacheBytesForTests } = await import("../src/site/build.js");
+    const acme = () => app.request("https://docs.acme.dev/", { headers: { ...HTML, Host: "docs.acme.dev" } });
+    const other = () => get(`/d/${otherId}/`);
+    expect((await acme()).status).toBe(200);
+    expect((await other()).status).toBe(200);
+    setCacheBytesForTests(1);
+    try {
+      // A rebuild over the cap keeps only the site just built.
+      const { getDb } = await import("../src/db/client.js");
+      const row = (await getDb().get("SELECT settings FROM nest_sites WHERE nest_id = ?", [nestId])) as { settings: string };
+      await getDb().run("UPDATE nest_sites SET settings = ? WHERE nest_id = ?", [JSON.stringify({ ...JSON.parse(row.settings), title: "Evict" }), nestId]);
+      const before = buildCount();
+      await acme();
+      expect(buildCount()).toBe(before + 1);
+      await acme();
+      expect(buildCount()).toBe(before + 1);
+      await other();
+      expect(buildCount()).toBe(before + 2);
+      await acme();
+      expect(buildCount()).toBe(before + 3);
+    } finally {
+      setCacheBytesForTests(null);
+    }
+  });
+
   it("keeps noindex and the AI-training opt-out when stored settings can't be read", async () => {
     const { getDb } = await import("../src/db/client.js");
     const host = { ...HTML, Host: "docs.acme.dev" };
