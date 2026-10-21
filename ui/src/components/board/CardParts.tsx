@@ -61,6 +61,7 @@ import {
   PRIORITY_LABELS,
   dueState,
   formatDue,
+  isPickedDue,
   type Priority,
 } from "../../lib/board-tasks";
 
@@ -208,7 +209,7 @@ export function DueChip({
               autoFocus
               className="h-8"
               onChange={(e) => {
-                if (e.target.value) {
+                if (isPickedDue(e.target.value)) {
                   onChange(e.target.value);
                   setOpen(false);
                 }

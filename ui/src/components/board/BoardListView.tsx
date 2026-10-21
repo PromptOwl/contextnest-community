@@ -50,6 +50,7 @@ import {
   PRIORITY_LABELS,
   PRIORITIES,
   formatDue,
+  isPickedDue,
   localToday,
   moveNeedsReview,
   type GovernanceContext,
@@ -700,7 +701,7 @@ export function BoardListView({
                     autoFocus
                     onChange={(e) => {
                       const d = e.target.value;
-                      if (d) ask({ action: `Set due date to ${d}`, patch: { due: d } });
+                      if (isPickedDue(d)) ask({ action: `Set due date to ${d}`, patch: { due: d } });
                     }}
                   />
                   <Button variant="ghost" size="sm" className="h-8" onClick={() => ask({ action: "Clear due date", patch: { due: null } })}>
