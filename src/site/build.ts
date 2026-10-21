@@ -465,6 +465,8 @@ function buildSite(nest: SiteNest, sources: Source[], inputs: Inputs, place: Pla
   for (const s of sources) for (const t of s.tags) tagCount.set(t.toLowerCase(), (tagCount.get(t.toLowerCase()) ?? 0) + 1);
   // A tag gets a hub page once two pages share it — a one-page hub is thin content.
   const hubTags = new Set([...tagCount].filter(([, n]) => n >= 2).map(([t]) => t));
+  // Definitions have no review step: any editor's definition is public at once,
+  // as it already is in the public reader. Accepted and documented in API.md.
   const glossary: GlossaryEntry[] = [];
   const termIds = new Set<string>();
   for (const d of definitions) {

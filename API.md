@@ -607,7 +607,7 @@ A nest that is **public with Reader Mode on** is also served as a static, crawla
 | `/d/:key/<path>` | A page. `<path>` is the node id without `nodes/` (and without a top folder every page shares, e.g. `docs/`), lower-cased — or the custom URL set for it (below) |
 | `/d/:key/<path>.md` | The page's Markdown (also served for `Accept: text/markdown`, with `Vary: Accept`). Sent with `X-Robots-Tag: noindex` and a `Link: <page>; rel="canonical"` so the HTML is what ranks |
 | `/d/:key/tags/<tag>` | Topic hub for every tag at least two pages share (`CollectionPage`), with the glossary definition linked to that tag |
-| `/d/:key/glossary` | The nest's definitions (`DefinedTermSet`); each page links a term's first mention here |
+| `/d/:key/glossary` | The nest's definitions (`DefinedTermSet`); each page links a term's first mention here. Definitions are **not** approval-gated: an editor's definition is public here, in `llms-full.txt` and in term links as soon as it is saved, as it already is in the public reader |
 | `/d/:key/sitemap.xml` | Sitemap with `lastmod` from each page's own update time |
 | `/d/:key/robots.txt` | Allows AI search and user agents (OAI-SearchBot, ChatGPT-User, Claude-SearchBot, Claude-User, PerplexityBot…) always; training crawlers (GPTBot, ClaudeBot, Google-Extended, CCBot…) per `ai_training`; `Content-Signal` line |
 | `/d/:key/llms.txt`, `/d/:key/llms-full.txt` | Agent index (with the nest's MCP endpoint) / every page inline |

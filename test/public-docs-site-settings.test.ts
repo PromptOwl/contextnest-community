@@ -106,6 +106,12 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
     expect(cli).toContain('<a href="/d/acme-docs/glossary#vault" class="term">Vault</a>');
   });
 
+  it("publishes an editor's definition without review, like the reader's glossary (documented, by design)", async () => {
+    const r = await jsonRequest(app, "POST", `/nests/${nestId}/definitions`, { term: "Steward", definition: "Approves changes." }, writer.apiKey);
+    expect(r.status).toBeLessThan(300);
+    expect(await text("/d/acme-docs/glossary")).toContain('<dt id="steward">Steward</dt>');
+  });
+
   // ── Hardening from review ──
 
   it("escapes hostile Markdown and pins inline code by CSP hash", async () => {
