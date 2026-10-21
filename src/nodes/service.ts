@@ -2884,6 +2884,10 @@ export async function updateNode(
         if (isAuthorEditingOwnReview) {
           await repointPendingReview({ nestId, nodeId, newVersion });
         }
+        // The working file keeps the last published frontmatter status; the
+        // version row just written is what GET reports, so say "draft" here too
+        // (the reply used to claim "published" for an edit awaiting review).
+        node = { ...node, frontmatter: { ...node.frontmatter, status: "draft" } };
         responseVersion = newVersion;
       } else {
         // Publish through the engine FIRST; only mirror into the DB once it

@@ -82,6 +82,15 @@ function dataRoot() {
 
 const docsSitesCache: { raw: string | null; map: Map<string, string> } = { raw: null, map: new Map() };
 
+/** PUBLIC_BASE_URL's host name, lower-cased, or "" when unset or invalid. */
+function ownHost(): string {
+  try {
+    return new URL(process.env.PUBLIC_BASE_URL || "").hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 export const config = {
   get PORT() {
     return parseInt(process.env.PORT || "3838", 10);
@@ -260,15 +269,23 @@ export const config = {
    */
   get DOCS_SITES(): Map<string, string> {
     // Parsed once per distinct value: this is read on every request.
-    const raw = process.env.DOCS_SITES || "";
+    const raw = `${process.env.DOCS_SITES || ""}\n${process.env.PUBLIC_BASE_URL || ""}`;
     if (docsSitesCache.raw === raw) return docsSitesCache.map;
     const map = new Map<string, string>();
-    for (const pair of raw.split(",")) {
+    for (const pair of (process.env.DOCS_SITES || "").split(",")) {
       const eq = pair.indexOf("=");
       if (eq < 0) continue;
       const host = pair.slice(0, eq).trim();
       const nestId = pair.slice(eq + 1).trim();
-      if (host && nestId) map.set(host.toLowerCase(), nestId);
+      if (!host || !nestId) continue;
+      // A docs host is the read-only site, ahead of auth and every API route,
+      // so listing this server's own host would lock out the app and the API.
+      const h = host.toLowerCase().replace(/:\d+$/, "").replace(/\.$/, "");
+      if (h === ownHost()) {
+        console.warn(`[config] DOCS_SITES: ignoring ${host}, it is this server's own host (PUBLIC_BASE_URL).`);
+        continue;
+      }
+      map.set(h, nestId);
     }
     docsSitesCache.raw = raw;
     docsSitesCache.map = map;

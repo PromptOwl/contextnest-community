@@ -606,6 +606,19 @@ Caddy sets these headers itself: `reverse_proxy 127.0.0.1:3838`.
 
 With port forwarding (router or firewall NAT), forward the public `443` to the **proxy**, never the server's `3838` directly — `3838` speaks plain HTTP.
 
+### Public docs site behind the owner's proxy (`public_url`)
+
+A nest owner can serve their docs site under a path on their own domain, for example `https://example.com/docs`. They set `public_url` in **Public site → Advanced** and prove the host with a DNS TXT record.
+
+1. Proxy `https://example.com/docs/*` to `https://<this server>/d/<key>/*`.
+2. Make the proxy **set** `X-Forwarded-Host: example.com` on every request. Overwrite any value the client sent; do not pass it through.
+
+The server serves a request through the proxy only when `X-Forwarded-Host` equals the `public_url` host. Every other request gets a `301` to the `public_url`. Anyone can send that header straight to this server and get the page, but the page is public and its links and canonical always name the `public_url`. Both answers carry `Vary: X-Forwarded-Host`.
+
+> **Caution:** a shared cache in front of this server that ignores `Vary` can store a `200` where a `301` belongs, or the opposite. Key such a cache on `X-Forwarded-Host`, or do not cache `/d/*` there.
+
+**Shutoff timing.** When a nest goes private or Reader Mode goes off, the instance that took the change stops serving its site at once. Other instances stop within 5 seconds (the site-list cache). The host-to-nest cache for custom domains is 30 seconds, but it only says which nest a host names, never that the nest is still public.
+
 ### Corporate egress proxy
 
 When outbound traffic must go through a proxy, set in the process environment (Docker `-e`, a systemd `Environment=` line, or your shell — **not** `.env`, which loads after Node has configured networking):

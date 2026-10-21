@@ -1,17 +1,18 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Check, Copy, ExternalLink, Globe, Loader2 } from "lucide-react";
+import { ExternalLink, Globe, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import * as api from "../lib/api";
-import type { SiteInfo, SiteSettings } from "../lib/api";
+import type { SiteInfo } from "../lib/api";
+import { toDraft, toSettings, type SiteDraft } from "../lib/public-site";
+import { SiteDnsPanel } from "./SiteDnsPanel";
 
 /**
  * Public site settings (CU-wdqcq05jhm) — owner / nest admin / server admin.
@@ -21,56 +22,6 @@ import type { SiteInfo, SiteSettings } from "../lib/api";
  * the search / AI-crawler settings. Server validation is the real gate.
  */
 
-type Draft = {
-  [K in keyof SiteSettings]-?: SiteSettings[K] extends boolean | undefined ? boolean : string;
-};
-
-function toDraft(s: SiteSettings): Draft {
-  return {
-    title: s.title ?? "",
-    description: s.description ?? "",
-    public_url: s.public_url ?? "",
-    og_image_url: s.og_image_url ?? "",
-    organization_name: s.organization_name ?? "",
-    organization_url: s.organization_url ?? "",
-    organization_logo_url: s.organization_logo_url ?? "",
-    same_as: (s.same_as ?? []).join("\n"),
-    twitter_site: s.twitter_site ?? "",
-    google_site_verification: s.google_site_verification ?? "",
-    bing_site_verification: s.bing_site_verification ?? "",
-    language: s.language ?? "",
-    noindex: !!s.noindex,
-    ai_training: s.ai_training !== false,
-    ai_actions: s.ai_actions !== false,
-    indexnow: s.indexnow !== false,
-    redirects: (s.redirects ?? []).map((r) => `${r.from} ${r.to}`).join("\n"),
-  };
-}
-
-function toSettings(d: Draft): SiteSettings {
-  const out: SiteSettings = {};
-  const str = (k: keyof SiteSettings, v: string) => {
-    if (v.trim()) (out as any)[k] = v.trim();
-  };
-  for (const k of [
-    "title", "description", "public_url", "og_image_url", "organization_name", "organization_url",
-    "organization_logo_url", "twitter_site", "google_site_verification", "bing_site_verification", "language",
-  ] as const) str(k, d[k]);
-  const sameAs = d.same_as.split(/\s+/).filter(Boolean);
-  if (sameAs.length) out.same_as = sameAs;
-  if (d.noindex) out.noindex = true;
-  if (!d.ai_training) out.ai_training = false;
-  if (!d.ai_actions) out.ai_actions = false;
-  if (!d.indexnow) out.indexnow = false;
-  const redirects = d.redirects
-    .split("\n")
-    .map((l) => l.trim().split(/\s+/))
-    .filter((p) => p.length === 2)
-    .map(([from, to]) => ({ from, to }));
-  if (redirects.length) out.redirects = redirects;
-  return out;
-}
-
 export interface PublicSiteDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -79,7 +30,7 @@ export interface PublicSiteDialogProps {
 
 export function PublicSiteDialog({ open, onOpenChange, nestId }: PublicSiteDialogProps) {
   const [info, setInfo] = useState<SiteInfo | null>(null);
-  const [draft, setDraft] = useState<Draft | null>(null);
+  const [draft, setDraft] = useState<SiteDraft | null>(null);
   const [domain, setDomain] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -112,7 +63,14 @@ export function PublicSiteDialog({ open, onOpenChange, nestId }: PublicSiteDialo
     }
   };
 
-  const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setDraft((d) => (d ? { ...d, [k]: v } : d));
+  const save = (d: SiteDraft) => {
+    const out = toSettings(d);
+    // A line the form can't read is reported, never dropped on the way to the server.
+    if ("error" in out) return setError(out.error);
+    void run("save", () => api.updateNestSite(nestId, { settings: out.settings }), "Site settings saved");
+  };
+
+  const set = <K extends keyof SiteDraft>(k: K, v: SiteDraft[K]) => setDraft((d) => (d ? { ...d, [k]: v } : d));
   const pages = (info?.pages ?? []).filter(
     (p) => !pageFilter || `${p.title} ${p.path}`.toLowerCase().includes(pageFilter.toLowerCase()),
   );
@@ -172,25 +130,19 @@ export function PublicSiteDialog({ open, onOpenChange, nestId }: PublicSiteDialo
                 </Button>
               </div>
               {info.domain && info.dns && (
-                <div className="space-y-2 rounded-md bg-muted/50 p-3 text-xs">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{info.domain}</span>
-                    {info.domain_verified ? <Badge variant="secondary" className="gap-1"><Check className="h-3 w-3" /> Verified</Badge> : <Badge variant="outline">Not verified yet</Badge>}
-                  </div>
-                  <p>Add these records at your DNS provider:</p>
-                  {info.dns.txt && <DnsRow type="TXT" name={info.dns.txt.name} value={info.dns.txt.value} />}
-                  {info.dns.cname ? (
-                    <DnsRow type="CNAME" name={info.domain} value={info.dns.cname} />
-                  ) : (
-                    <p className="text-muted-foreground">Point the domain at this server: ask your server admin for the CNAME target and HTTPS setup.</p>
-                  )}
-                  {!info.domain_verified && (
-                    <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void run("verify", () => api.verifyNestSiteDomain(nestId), "Domain verified")}>
-                      {busy === "verify" && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-                      Verify DNS
-                    </Button>
-                  )}
-                </div>
+                <SiteDnsPanel
+                  host={info.domain}
+                  verified={info.domain_verified}
+                  intro="Add these records at your DNS provider:"
+                  records={[
+                    ...(info.dns.txt ? [{ type: "TXT", ...info.dns.txt }] : []),
+                    ...(info.dns.cname ? [{ type: "CNAME", name: info.domain, value: info.dns.cname }] : []),
+                  ]}
+                  note={info.dns.cname ? undefined : "Point the domain at this server: ask your server admin for the CNAME target and HTTPS setup."}
+                  busy={!!busy}
+                  verifying={busy === "verify"}
+                  onVerify={() => void run("verify", () => api.verifyNestSiteDomain(nestId), "Domain verified")}
+                />
               )}
             </Section>
 
@@ -292,22 +244,15 @@ export function PublicSiteDialog({ open, onOpenChange, nestId }: PublicSiteDialo
                 <Input value={draft.public_url} onChange={(e) => set("public_url", e.target.value)} placeholder="https://example.com/docs" className="h-9" />
               </Field>
               {info.settings.public_url && info.public_url_dns && (
-                <div className="space-y-2 rounded-md bg-muted/50 p-3 text-xs">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium break-all">{info.settings.public_url}</span>
-                    {info.public_url_verified ? <Badge variant="secondary" className="gap-1"><Check className="h-3 w-3" /> Verified</Badge> : <Badge variant="outline">Not verified yet</Badge>}
-                  </div>
-                  {!info.public_url_verified && (
-                    <>
-                      <p>The site uses this URL only after you prove you control its domain. Add this record at your DNS provider:</p>
-                      <DnsRow type="TXT" name={info.public_url_dns.name} value={info.public_url_dns.value} />
-                      <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void run("verify-url", () => api.verifyNestSitePublicUrl(nestId), "Public URL verified")}>
-                        {busy === "verify-url" && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-                        Verify DNS
-                      </Button>
-                    </>
-                  )}
-                </div>
+                <SiteDnsPanel
+                  host={info.settings.public_url}
+                  verified={info.public_url_verified}
+                  intro="The site uses this URL only after you prove you control its domain. Keep this record at your DNS provider:"
+                  records={[{ type: "TXT", ...info.public_url_dns }]}
+                  busy={!!busy}
+                  verifying={busy === "verify-url"}
+                  onVerify={() => void run("verify-url", () => api.verifyNestSitePublicUrl(nestId), "Public URL verified")}
+                />
               )}
             </Section>
           </div>
@@ -319,7 +264,7 @@ export function PublicSiteDialog({ open, onOpenChange, nestId }: PublicSiteDialo
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={!!busy}>
             Close
           </Button>
-          <Button disabled={!draft || !!busy} onClick={() => draft && void run("save", () => api.updateNestSite(nestId, { settings: toSettings(draft) }), "Site settings saved")}>
+          <Button disabled={!draft || !!busy} onClick={() => draft && save(draft)}>
             {busy === "save" && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
             Save settings
           </Button>
@@ -356,31 +301,6 @@ function Toggle({ label, hint, checked, onChange }: { label: string; hint: strin
         <p className="text-xs text-muted-foreground">{hint}</p>
       </div>
       <Switch checked={checked} onCheckedChange={onChange} aria-label={label} />
-    </div>
-  );
-}
-
-function DnsRow({ type, name, value }: { type: string; name: string; value: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <div className="grid grid-cols-[3.5rem_minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-2 font-mono">
-      <span>{type}</span>
-      <span className="truncate" title={name}>{name}</span>
-      <span className="truncate" title={value}>{value}</span>
-      <Button
-        size="icon"
-        variant="ghost"
-        className="h-7 w-7"
-        aria-label={`Copy ${type} value`}
-        onClick={() => {
-          void navigator.clipboard.writeText(value).then(() => {
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1500);
-          });
-        }}
-      >
-        {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-      </Button>
     </div>
   );
 }

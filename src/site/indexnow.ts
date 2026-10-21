@@ -8,6 +8,7 @@
  * URLs under the key file's directory — which every page of the site is.
  * Best-effort and fire-and-forget: a failed ping never affects a request.
  */
+import { isIP } from "node:net";
 import type { Site } from "./build.js";
 import { url } from "./render.js";
 
@@ -17,13 +18,23 @@ const ENDPOINT = "https://api.indexnow.org/indexnow";
 export const PRIVATE_HOST =
   /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[)|\.(local|localhost|internal|lan|home\.arpa|corp|intranet)$/i;
 
+/**
+ * A name a public search engine can fetch. IP literals of any form are out
+ * (IPv4-mapped IPv6 included), as are LAN-only names. Backstop only: a site
+ * must also be on a verified host to ping at all (see getSite).
+ */
+export function isPublicHost(u: URL): boolean {
+  const host = u.hostname.replace(/^\[|\]$/g, "");
+  return host.includes(".") && isIP(host) === 0 && !PRIVATE_HOST.test(host) && !/\.(invalid|test|example)$/i.test(host);
+}
+
 /** Sites that may notify: public https hosts only, never tests or localhost. */
 function canNotify(site: Site): boolean {
   if (site.settings.indexnow === false || site.settings.noindex) return false;
   if (process.env.NODE_ENV === "test" || process.env.VITEST) return false;
   try {
     const u = new URL(site.base);
-    return u.protocol === "https:" && u.hostname.includes(".") && !PRIVATE_HOST.test(u.hostname);
+    return isPublicHost(u) && u.protocol === "https:";
   } catch {
     return false;
   }

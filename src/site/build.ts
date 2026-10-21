@@ -215,6 +215,11 @@ export interface Placement {
   /** Set when the site's real home is elsewhere (a domain or public_url). */
   canonicalElsewhere: boolean;
   domain: string | null;
+  /**
+   * The base is a host this server can vouch for: a verified domain or
+   * public_url, DOCS_SITES, or PUBLIC_BASE_URL. Only such a site pings IndexNow.
+   */
+  verified: boolean;
 }
 
 /**
@@ -230,15 +235,15 @@ export async function placementFor(
   opts: SiteOptions = {},
 ): Promise<Placement> {
   const domain = domainForNest(nest.id, row);
-  if (domain) return { base: `https://${domain}`, prefix: "", canonicalElsewhere: true, domain };
+  if (domain) return { base: `https://${domain}`, prefix: "", canonicalElsewhere: true, domain, verified: true };
   const publicUrl = opts.unverifiedPublicUrl ? (row.settings.public_url ?? null) : verifiedPublicUrl(nest.id, row);
   if (publicUrl) {
     const u = new URL(publicUrl);
     const prefix = u.pathname.replace(/\/+$/, "");
-    return { base: `${u.origin}${prefix}`, prefix, canonicalElsewhere: true, domain: null };
+    return { base: `${u.origin}${prefix}`, prefix, canonicalElsewhere: true, domain: null, verified: !opts.unverifiedPublicUrl };
   }
   const prefix = `/d/${encodeURIComponent(await ensureSiteKey(nest.id, nest.slug))}`;
-  return { base: `${serverOrigin}${prefix}`, prefix, canonicalElsewhere: false, domain: null };
+  return { base: `${serverOrigin}${prefix}`, prefix, canonicalElsewhere: false, domain: null, verified: !!config.PUBLIC_BASE_URL };
 }
 
 // ─── Building ────────────────────────────────────────────────────────────────
@@ -833,7 +838,7 @@ async function build(
   const known = new Set(inputs.paths.map((p) => p.path));
   void recordPaths(nest.id, site.pages, known).catch((err) => console.warn("[site] recording paths failed", err));
   // Tell IndexNow engines what changed since the last build in this process.
-  if (hit) void pingIndexNow(hit.site, site).catch((err) => console.warn("[site] IndexNow ping failed", err));
+  if (hit && place.verified) void pingIndexNow(hit.site, site).catch((err) => console.warn("[site] IndexNow ping failed", err));
   return built;
 }
 

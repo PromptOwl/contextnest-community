@@ -360,6 +360,27 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
     }
   });
 
+  it("301s a crawler on an old app URL even with Accept: */* or no Accept", async () => {
+    // This nest's site now lives on its verified domain; any live site will do.
+    const live = `/nest/${otherId}`;
+    for (const headers of [
+      { "User-Agent": "Mozilla/5.0; compatible; GPTBot/1.2", Accept: "*/*" },
+      { "User-Agent": "ClaudeBot/1.0" },
+      { "User-Agent": "Mozilla/5.0 (compatible; bingbot/2.0)", Accept: "*/*" },
+      { "User-Agent": "PerplexityBot/1.0", Accept: "application/json" },
+    ]) {
+      const res = await get(live, headers);
+      expect(res.status, headers["User-Agent"]).toBe(301);
+      expect(res.headers.get("location")).toMatch(new RegExp(`/d/${otherId}/$|/d/acme-docs/$`));
+    }
+    // A non-crawler client without a page Accept keeps the JSON 404.
+    const api = await get(live, { "User-Agent": "curl/8.0", Accept: "*/*" });
+    expect(api.status).toBe(404);
+    expect(await api.json()).toEqual({ error: "Not found" });
+    // A crawler on an unrelated unknown path still gets JSON 404, not the shell.
+    expect((await get("/no-such-path", { "User-Agent": "GPTBot/1.2" })).status).toBe(404);
+  });
+
   it("gives only a valid session the app instead of the page", async () => {
     const { createSession } = await import("../src/auth/sessions.js");
     const { getDb } = await import("../src/db/client.js");
@@ -496,6 +517,10 @@ describe("docs site behind the owner's reverse proxy", () => {
     expect(ok.status, JSON.stringify(ok.data)).toBe(200);
     expect(ok.data.public_url_verified).toBe(true);
     expect(ok.data.url).toBe("https://example.com/docs/");
+    const { placementFor, siteNests } = await import("../src/site/build.js");
+    const { getSiteRow } = await import("../src/site/settings.js");
+    const nest = (await siteNests()).find((n) => n.id === nestId)!;
+    expect((await placementFor(nest, await getSiteRow(nestId), "http://localhost")).verified).toBe(true);
   });
 
   it("serves proxied requests with the public URL's paths and canonicals", async () => {
@@ -542,6 +567,14 @@ describe("docs site behind the owner's reverse proxy", () => {
       // The server itself still keeps the unverified site at /d/<key>.
       const live = await app.request("http://localhost/d/proxied/setup", { headers: HTML });
       expect(live.status).toBe(200);
+      // Only a placement the server can vouch for pings IndexNow.
+      const { placementFor, siteNests } = await import("../src/site/build.js");
+      const { getSiteRow } = await import("../src/site/settings.js");
+      const nest = (await siteNests()).find((n) => n.id === nestId)!;
+      const row = await getSiteRow(nestId);
+      expect((await placementFor(nest, row, "http://localhost", { unverifiedPublicUrl: true })).verified).toBe(false);
+      // No PUBLIC_BASE_URL in tests: /d/<key> on a Host-derived origin is not vouched for either.
+      expect((await placementFor(nest, row, "http://localhost")).verified).toBe(false);
     } finally {
       await getDb().run("UPDATE nest_sites SET public_url_host = ? WHERE nest_id = ?", ["example.com", nestId]);
     }

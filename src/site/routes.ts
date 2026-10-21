@@ -27,7 +27,7 @@ import { config } from "../config.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { getSessionIdFromRequest, resolveSession } from "../auth/sessions.js";
 import { findSiteNest, getSite, placements, siteNests, TYPES, type SiteNest, type SiteView } from "./build.js";
-import { cspFor, renderServerRobots, renderSitemapIndex } from "./render.js";
+import { AI_SEARCH_AGENTS, AI_TRAINING_AGENTS, cspFor, renderServerRobots, renderSitemapIndex } from "./render.js";
 import { nestIdForDomain } from "./settings.js";
 
 const NOT_FOUND = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>Not found</title></head><body><main><h1>Not found</h1></main></body></html>`;
@@ -219,6 +219,18 @@ export async function siteDomainCheck(c: Context) {
   const nestId = domain ? await nestIdForDomain(domain) : null;
   if (!nestId || !(await siteNests()).some((n) => n.id === nestId)) return c.text("unknown", 404);
   return c.text("ok", 200);
+}
+
+// Search and AI crawlers, by User-Agent: the agents robots.txt names, plus the
+// common "bot" / "crawler" / "spider" words other indexers use.
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const CRAWLER_UA = new RegExp(
+  [...[...AI_SEARCH_AGENTS, ...AI_TRAINING_AGENTS].map(escapeRe), "bot\\b", "crawler", "spider", "slurp", "facebookexternalhit"].join("|"),
+  "i",
+);
+
+export function isCrawler(c: Context): boolean {
+  return CRAWLER_UA.test(c.req.header("User-Agent") || "");
 }
 
 /**
