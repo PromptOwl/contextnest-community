@@ -325,7 +325,9 @@ export function heldWriteResponse(nestId: string, pending: PendingPushView) {
     confirm_url: `/nests/${nestId}/pending-pushes/${pending.id}/confirm`,
     poll_url: `/nests/${nestId}/pending-pushes/${pending.id}`,
     message:
-      `This nest holds agent writes for review. Your write of ${pending.doc_count} document(s) is waiting — ` +
+      `This nest holds agent writes for review. Your write of ${
+        pending.doc_count === 0 ? "the nest instructions (CONTEXT.md)" : `${pending.doc_count} document(s)`
+      } is waiting — ` +
       `it lands once a reviewer confirms it in ${pending.nest_name}.`,
     expires_at: pending.expires_at,
   };

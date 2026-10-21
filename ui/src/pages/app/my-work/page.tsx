@@ -1,5 +1,5 @@
 /**
- * MyWorkPage — My Work (/my-work): the cross-nest review inbox, what you are waiting on, and watcher notifications.
+ * MyWorkPage — My Work (/my-work): tasks assigned to you, the cross-nest review inbox, what you are waiting on, and watcher notifications.
  */
 import { RunLink } from "../../../components/RunLink";
 import { Fragment, useState, useEffect } from "react";
@@ -18,7 +18,7 @@ import {
   Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, XCircle,
 } from "lucide-react";
 import { BULK_REVIEW_LIMIT } from "../../../lib/constants";
-import { splitWorkItems, workItemKey } from "../../../lib/my-work-groups";
+import { nothingWaitingOnMe, splitWorkItems, workItemKey } from "../../../lib/my-work-groups";
 import { toast } from "sonner";
 import { relTime, formatServerDate } from "../../../lib/dates";
 import { Button } from "@/components/ui/button";
@@ -318,7 +318,7 @@ export default function MyWorkPage() {
 
   return (
     <div className="space-y-4">
-      <PageTitle icon={Inbox} title="My Work" description="Reviews and requests waiting on you, and what you handed off." className="mb-0" />
+      <PageTitle icon={Inbox} title="My Work" description="Tasks, reviews and requests waiting on you, and what you handed off." className="mb-0" />
       <div>
           {/* My Work — cross-nest inbox. Slack/CRM-clean: two tight lists, every
           row clicks straight to the document (circular nav), approve/reject
@@ -453,11 +453,11 @@ export default function MyWorkPage() {
                   <Loader2 className="h-4 w-4 animate-spin" />
                   Loading your work…
                 </div>
-              ) : work.items.length === 0 ? (
+              ) : nothingWaitingOnMe(work) ? (
                 <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
                   You're all caught up — nothing waiting on you.
                 </div>
-              ) : (
+              ) : work.items.length > 0 ? (
                 <div className="rounded-lg border divide-y overflow-hidden">
                   {/* Batch decision bar — a folder import lands here as many
                       rows carrying the same decision. Reviews only. */}
@@ -641,7 +641,7 @@ export default function MyWorkPage() {
                     );
                   })}
                 </div>
-              )}
+              ) : null}
             </div>
 
             {work.waiting.length > 0 && (

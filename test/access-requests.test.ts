@@ -821,6 +821,8 @@ describe("request access on a denied write", () => {
     const decided = await callTool(app, nestId, owner.apiKey, "context_resolve_access_request", {
       request_id: filed.data.id,
       decision: "approve",
+      // Approving write raises the viewer to a billed editor.
+      confirm_billing: true,
     });
     expect(decided.isError).toBeFalsy();
     const retried = await callTool(app, nestId, viewer.apiKey, "context_update", {

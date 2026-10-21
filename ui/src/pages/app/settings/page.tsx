@@ -85,126 +85,127 @@ const TABS: {
   /** Hide the tab unless this holds for the draft. */
   visible?: (d: AdminSettings) => boolean;
 }[] = [
-  {
-    id: "basic",
-    label: "Basic",
-    keys: [
-      "community_name",
-      "public_base_url",
-      "logo_url",
-      "manual_sign_in",
-      "promptowl_sign_in_gate",
-      "posthog_key",
-      "posthog_host",
-      "max_body_bytes",
-      "trace_retention_days",
-      "import_io_concurrency",
-      "message_log_retention_days",
-      "message_log_store_bodies",
-      "run_retention_days",
-    ],
-  },
-  {
-    // Every on/off feature switch. Switches with their own config (SSO)
-    // open a dedicated tab while on.
-    id: "features",
-    label: "Features",
-    keys: [
-      "workflow_plane_enabled",
-      "subagent_runs_enabled",
-      "metacognition_enabled",
-      "experimental_doc_stream_enabled",
-      "subagent_max_depth",
-      "subagent_max_children",
-      "promptowl_teams_enabled",
-      "type_artifact_enabled",
-      "type_table_enabled",
-      "telemetry_enabled",
-      "nest_creation",
-      "people_suggest_all_users",
-      "shared_deployment",
-      "oidc_enabled",
-      "sso_token_exchange_enabled",
-    ],
-  },
-  {
-    id: "sso",
-    label: "Single sign-on",
-    visible: (d) => d.oidc_enabled || d.sso_token_exchange_enabled,
-    keys: [
-      "oidc_issuer",
-      "oidc_client_id",
-      "oidc_client_secret",
-      "oidc_allowed_domains",
-      "oidc_auto_provision",
-      "oidc_department_tagging",
-      "mcp_signing_secret",
-      "mcp_token_ttl_seconds",
-      "ms_token_exchange_enabled",
-      "ms_client_id",
-      "ms_tenant_id",
-      "google_token_exchange_enabled",
-      "google_client_id",
-      "mcp_oauth_enabled",
-    ],
-  },
-  {
-    // The in-app chatbot, with the model key it depends on.
-    id: "hootie",
-    label: "Hootie",
-    keys: [
-      "provider_keys",
-      "anthropic_base_url",
-      "anthropic_api_key",
-      "hootie_enabled",
-      "hootie_model",
-      "hootie_name",
-      "hootie_logo_url",
-      "hootie_accent_color",
-      "hootie_greeting",
-    ],
-  },
-  {
-    id: "notifications",
-    label: "Notifications",
-    keys: [
-      "slack_webhook_url",
-      "msteams_webhook_url",
-      "email_provider",
-      "smtp_url",
-      "ses_region",
-      "ses_access_key_id",
-      "ses_secret_access_key",
-      "notify_email_from",
-      "notify_email_to",
-    ],
-  },
-  {
-    // Not draft-backed like the tabs above — sites are added/edited/removed
-    // immediately via their own API calls (like the superadmins panel on the
-    // Teammates page), so this tab has no keys to track for the unsaved dot.
-    id: "community-sites",
-    label: "Community sites",
-    keys: [],
-  },
-  {
-    // Docs only — nothing here persists, so no keys for the unsaved dot.
-    id: "agents",
-    label: "Connecting agents",
-    keys: [],
-  },
-  {
-    // Read-only health checks, probes and the deployment guide.
-    id: "network",
-    label: "Network & status",
-    keys: [],
-  },
-  {
-    id: "license",
-    label: "License",
-    keys: [],
-  },
-];
+    {
+      id: "basic",
+      label: "Basic",
+      keys: [
+        "community_name",
+        "public_base_url",
+        "logo_url",
+        "manual_sign_in",
+        "promptowl_sign_in_gate",
+        "posthog_key",
+        "posthog_host",
+        "max_body_bytes",
+        "trace_retention_days",
+        "import_io_concurrency",
+        "message_log_retention_days",
+        "message_log_store_bodies",
+        "run_retention_days",
+      ],
+    },
+    {
+      // Every on/off feature switch. Switches with their own config (SSO)
+      // open a dedicated tab while on.
+      id: "features",
+      label: "Features",
+      keys: [
+        "workflow_plane_enabled",
+        "subagent_runs_enabled",
+        "metacognition_enabled",
+        "experimental_doc_stream_enabled",
+        "experimental_doc_pins",
+        "subagent_max_depth",
+        "subagent_max_children",
+        "promptowl_teams_enabled",
+        "type_artifact_enabled",
+        "type_table_enabled",
+        "telemetry_enabled",
+        "nest_creation",
+        "people_suggest_all_users",
+        "shared_deployment",
+        "oidc_enabled",
+        "sso_token_exchange_enabled",
+      ],
+    },
+    {
+      id: "sso",
+      label: "Single sign-on",
+      visible: (d) => d.oidc_enabled || d.sso_token_exchange_enabled,
+      keys: [
+        "oidc_issuer",
+        "oidc_client_id",
+        "oidc_client_secret",
+        "oidc_allowed_domains",
+        "oidc_auto_provision",
+        "oidc_department_tagging",
+        "mcp_signing_secret",
+        "mcp_token_ttl_seconds",
+        "ms_token_exchange_enabled",
+        "ms_client_id",
+        "ms_tenant_id",
+        "google_token_exchange_enabled",
+        "google_client_id",
+        "mcp_oauth_enabled",
+      ],
+    },
+    {
+      // The in-app chatbot, with the model key it depends on.
+      id: "hootie",
+      label: "Hootie",
+      keys: [
+        "provider_keys",
+        "anthropic_base_url",
+        "anthropic_api_key",
+        "hootie_enabled",
+        "hootie_model",
+        "hootie_name",
+        "hootie_logo_url",
+        "hootie_accent_color",
+        "hootie_greeting",
+      ],
+    },
+    {
+      id: "notifications",
+      label: "Notifications",
+      keys: [
+        "slack_webhook_url",
+        "msteams_webhook_url",
+        "email_provider",
+        "smtp_url",
+        "ses_region",
+        "ses_access_key_id",
+        "ses_secret_access_key",
+        "notify_email_from",
+        "notify_email_to",
+      ],
+    },
+    {
+      // Not draft-backed like the tabs above — sites are added/edited/removed
+      // immediately via their own API calls (like the superadmins panel on the
+      // Teammates page), so this tab has no keys to track for the unsaved dot.
+      id: "community-sites",
+      label: "Community sites",
+      keys: [],
+    },
+    {
+      // Docs only — nothing here persists, so no keys for the unsaved dot.
+      id: "agents",
+      label: "Connecting agents",
+      keys: [],
+    },
+    {
+      // Read-only health checks, probes and the deployment guide.
+      id: "network",
+      label: "Network & status",
+      keys: [],
+    },
+    {
+      id: "license",
+      label: "License",
+      keys: [],
+    },
+  ];
 
 /**
  * Attributes that keep credential managers out of the settings fields.
@@ -265,36 +266,36 @@ function ProviderKeyFields({
   };
   return (
     <>
-        {OWN_PROVIDERS.map(([p, label]) => (
-          <div key={p} className="space-y-1.5" data-testid={`settings-provider-${p}`}>
-            <Label htmlFor={`provider-key-${p}`}>{label}</Label>
-            <div className="text-xs text-muted-foreground">
-              {draft[p] === null
-                ? "Will be cleared when you save."
-                : current[p]
-                  ? `Current: ••••${current[p].masked}`
-                  : "Not set."}
-            </div>
-            <TextField
-              id={`provider-key-${p}`}
-              type="password"
-              error={fieldErrors[`provider_keys.${p}`]}
-              value={typeof draft[p] === "string" ? (draft[p] as string) : ""}
-              placeholder="Paste to set or replace"
-              onChange={(v) => stage(p, v)}
-            />
-            {current[p] && draft[p] !== null && (
-              <button type="button" className="text-xs text-destructive hover:underline" onClick={() => stage(p, null)}>
-                Clear key
-              </button>
-            )}
-            {draft[p] === null && (
-              <button type="button" className="text-xs text-muted-foreground hover:underline" onClick={() => stage(p, undefined)}>
-                Keep current key
-              </button>
-            )}
+      {OWN_PROVIDERS.map(([p, label]) => (
+        <div key={p} className="space-y-1.5" data-testid={`settings-provider-${p}`}>
+          <Label htmlFor={`provider-key-${p}`}>{label}</Label>
+          <div className="text-xs text-muted-foreground">
+            {draft[p] === null
+              ? "Will be cleared when you save."
+              : current[p]
+                ? `Current: ••••${current[p].masked}`
+                : "Not set."}
           </div>
-        ))}
+          <TextField
+            id={`provider-key-${p}`}
+            type="password"
+            error={fieldErrors[`provider_keys.${p}`]}
+            value={typeof draft[p] === "string" ? (draft[p] as string) : ""}
+            placeholder="Paste to set or replace"
+            onChange={(v) => stage(p, v)}
+          />
+          {current[p] && draft[p] !== null && (
+            <button type="button" className="text-xs text-destructive hover:underline" onClick={() => stage(p, null)}>
+              Clear key
+            </button>
+          )}
+          {draft[p] === null && (
+            <button type="button" className="text-xs text-muted-foreground hover:underline" onClick={() => stage(p, undefined)}>
+              Keep current key
+            </button>
+          )}
+        </div>
+      ))}
     </>
   );
 }
@@ -394,28 +395,28 @@ function TextField({
       {/* The reveal button spans the input alone, so an error line below
           doesn't stretch it. */}
       <div className="relative">
-      <Input
-        id={id}
-        value={value}
-        type={isPassword && reveal ? "text" : type}
-        placeholder={placeholder}
-        onChange={(e) => onChange(e.target.value)}
-        aria-invalid={!!error}
-        className={`flex-1 ${isPassword ? "pr-9" : ""} ${error ? "border-destructive focus-visible:ring-destructive" : ""}`}
-        {...noAutofill(type)}
-      />
-      {isPassword && (
-        <button
-          type="button"
-          tabIndex={-1}
-          onClick={() => setReveal((r) => !r)}
-          className="absolute inset-y-0 right-0 flex items-center px-2.5 text-muted-foreground hover:text-foreground"
-          title={reveal ? "Hide" : "Show"}
-          aria-label={reveal ? "Hide value" : "Show value"}
-        >
-          {reveal ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-        </button>
-      )}
+        <Input
+          id={id}
+          value={value}
+          type={isPassword && reveal ? "text" : type}
+          placeholder={placeholder}
+          onChange={(e) => onChange(e.target.value)}
+          aria-invalid={!!error}
+          className={`flex-1 ${isPassword ? "pr-9" : ""} ${error ? "border-destructive focus-visible:ring-destructive" : ""}`}
+          {...noAutofill(type)}
+        />
+        {isPassword && (
+          <button
+            type="button"
+            tabIndex={-1}
+            onClick={() => setReveal((r) => !r)}
+            className="absolute inset-y-0 right-0 flex items-center px-2.5 text-muted-foreground hover:text-foreground"
+            title={reveal ? "Hide" : "Show"}
+            aria-label={reveal ? "Hide value" : "Show value"}
+          >
+            {reveal ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+          </button>
+        )}
       </div>
       {error && <p className="mt-1 text-xs text-destructive">{error}</p>}
     </div>
@@ -868,13 +869,12 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                           !locked &&
                           set({ manual_sign_in: opt.value })
                         }
-                        className={`text-left rounded-lg border p-3 transition-colors ${
-                          active
+                        className={`text-left rounded-lg border p-3 transition-colors ${active
                             ? "border-primary bg-primary/5 ring-1 ring-primary"
                             : locked
                               ? "opacity-50 cursor-not-allowed"
                               : "hover:bg-muted/50"
-                        }`}
+                          }`}
                         aria-pressed={active}
                       >
                         <div className="text-sm font-medium">{opt.label}</div>
@@ -925,13 +925,12 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                           !locked &&
                           set({ promptowl_sign_in_gate: opt.value })
                         }
-                        className={`text-left rounded-lg border p-3 transition-colors ${
-                          active
+                        className={`text-left rounded-lg border p-3 transition-colors ${active
                             ? "border-primary bg-primary/5 ring-1 ring-primary"
                             : locked
                               ? "opacity-50 cursor-not-allowed"
                               : "hover:bg-muted/50"
-                        }`}
+                          }`}
                         aria-pressed={active}
                       >
                         <div className="text-sm font-medium">{opt.label}</div>
@@ -1204,6 +1203,34 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     checked={draft.experimental_doc_stream_enabled}
                     onCheckedChange={(v) => set({ experimental_doc_stream_enabled: v })}
                     aria-label="Document stream (experimental)"
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Experimental: document pins (CU-wdqcq02crw) — its own switch */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  Document pins (experimental)
+                </CardTitle>
+                <CardDescription>
+                  Pin documents to the front of a nest. Stewards pin for
+                  everyone, in the order they choose; anyone who can read a
+                  document can pin it for themselves. Pins show as a strip
+                  above the nest's document list. Experimental — this may
+                  change or disappear.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.experimental_doc_pins ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={!!draft.experimental_doc_pins}
+                    onCheckedChange={(v) => set({ experimental_doc_pins: v })}
+                    data-testid="settings-experimental-doc-pins"
                   />
                 </div>
               </CardContent>
@@ -1579,7 +1606,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 draft.oidc_client_secret === null
                   ? false
                   : typeof draft.oidc_client_secret === "string" &&
-                      draft.oidc_client_secret.trim() !== ""
+                    draft.oidc_client_secret.trim() !== ""
                     ? true
                     : !!settings?.oidc_client_secret_set;
               const ready = !!issuer && !!draft.oidc_client_id?.trim() && secretPresent;
@@ -1922,7 +1949,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                       draft.mcp_signing_secret === null
                         ? false
                         : typeof draft.mcp_signing_secret === "string" &&
-                            draft.mcp_signing_secret.trim() !== ""
+                          draft.mcp_signing_secret.trim() !== ""
                           ? true
                           : !!settings?.mcp_signing_secret_set;
                     // A provider counts as ready only with the ids its verifier
@@ -2113,19 +2140,19 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     </p>
                   </div>
                 ) : (
-                <div className="space-y-4">
-                {Object.keys(settings?.own_providers ?? {}).length === 0 && (
-                  <p className="text-xs text-muted-foreground" data-testid="settings-no-own-keys">
-                    No own keys set — Hootie and runs use PromptOwl's virtual key on your plan's credits.
-                  </p>
-                )}
-                <ProviderKeyFields
-                  draft={draft.provider_keys ?? {}}
-                  current={settings?.own_providers ?? {}}
-                  fieldErrors={fieldErrors}
-                  set={(provider_keys) => set({ provider_keys })}
-                />
-                </div>
+                  <div className="space-y-4">
+                    {Object.keys(settings?.own_providers ?? {}).length === 0 && (
+                      <p className="text-xs text-muted-foreground" data-testid="settings-no-own-keys">
+                        No own keys set — Hootie and runs use PromptOwl's virtual key on your plan's credits.
+                      </p>
+                    )}
+                    <ProviderKeyFields
+                      draft={draft.provider_keys ?? {}}
+                      current={settings?.own_providers ?? {}}
+                      fieldErrors={fieldErrors}
+                      set={(provider_keys) => set({ provider_keys })}
+                    />
+                  </div>
                 )}
               </CardContent>
             </Card>
@@ -2164,9 +2191,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                       {draft.anthropic_api_key === null
                         ? "Will be cleared when you save."
                         : settings?.anthropic_api_key_masked
-                          ? `Current: ${settings.anthropic_api_key_masked}${
-                              settings.model_source === "own" ? " (in use)" : ""
-                            }`
+                          ? `Current: ${settings.anthropic_api_key_masked}${settings.model_source === "own" ? " (in use)" : ""
+                          }`
                           : settings?.anthropic_base_url
                             ? "No key yet: the gateway isn't used until it has one."
                             : "Not set."}
@@ -2619,7 +2645,7 @@ export default function SettingsRoute() {
     if (!isAdmin) return;
     getAdminSettings()
       .then(setServerSettings)
-      .catch(() => {});
+      .catch(() => { });
   }, [isAdmin]);
   const updateServerSettings = useCallback(async (
     patch: Partial<AdminSettings>,

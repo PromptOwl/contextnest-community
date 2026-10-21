@@ -14,7 +14,7 @@ Concretely, it lets you:
 
 - Write Markdown documents — plus hosted HTML artifacts and CSV tables agents can query row by row — filed in folders, linked with `[[Title]]`, tagged, commented on, and versioned
 - Import an existing folder of Markdown in one step; export a nest as a portable bundle
-- Govern changes — draft → pending review → approved — with stewards per nest, tag or document, and a cross-nest inbox (My Work, My Drafts) for what is waiting on you
+- Govern changes — draft → pending review → approved — with stewards per nest, tag or document, and a cross-nest inbox (My Work, My Drafts) for what is waiting on you, including board tasks assigned to you
 - Share a nest with people or teams, share a single document or folder, or publish read-only to the public
 - Give agents deterministic reads: the same selector returns the same context every time, with a trace of what was pulled
 - Run agents against a nest (Workflows, Beta): an agent is a document whose body is instructions; its output lands as a pending review
@@ -43,10 +43,12 @@ ContextNest Community Edition requires a PromptOwl Community License key (`pk_..
 
 ### 1. Create the key (free)
 
-1. Sign up or log in at <https://app.promptowl.ai>
+1. Sign up or log in at [https://app.promptowl.ai](https://app.promptowl.ai)
 2. Open the **Overview** menu → **Community License**
 3. Click **Create a Community License key**
 4. Copy the generated key — it starts with `pk_`
+
+
 
 ### 2. Activate the server
 
@@ -55,7 +57,7 @@ Pick **one** of two ways:
 **A. Browser setup page (recommended for first run)**
 
 1. Start the server: `npx @promptowl/contextnest-community`
-2. Open <http://localhost:3838> — with no license installed, the server boots into **setup mode** and shows the **License Setup Page**
+2. Open [http://localhost:3838](http://localhost:3838) — with no license installed, the server boots into **setup mode** and shows the **License Setup Page**
 3. Paste your `pk_...` key and submit
 4. The server validates it against PromptOwl, writes it to your `.env`, and exits setup mode — no restart needed
 
@@ -74,7 +76,7 @@ The key is read at boot. The server validates against PromptOwl on startup; if v
 - **Plans, seats and models** — the key's plan (Free, Self-Hosted, Enterprise) sets how many users, editors and server admins you can have, and how AI models are paid for. See [LICENSING.md](./LICENSING.md).
 - **Admin identity follows the license** — the admin user is whichever PromptOwl account owns the installed key, resolved live per request. Transferring the license to another account immediately promotes the new owner and demotes the old one.
 
-For redistribution, hosted-service, OEM, or regulated-industry licensing, contact **hoot@promptowl.ai**.
+For redistribution, hosted-service, OEM, or regulated-industry licensing, contact **[hoot@promptowl.ai](mailto:hoot@promptowl.ai)**.
 
 ## First five minutes
 
@@ -90,13 +92,15 @@ The in-app **How it works** page (sidebar → Help) is the full tour; **Docs** (
 
 One sidebar, grouped:
 
-| Group | Pages | Who |
-|---|---|---|
-| — | **Nests** — every nest you can see, pinned first | everyone |
-| Work | **My Work** (reviews and handoffs waiting on you, across nests) · **My Drafts** (yours, never submitted) · **Stream** (_experimental_, off by default — every document version across your nests, with comments inline; `EXPERIMENTAL_DOC_STREAM`) | everyone |
-| Workspace | **Teams** · **API keys** | everyone |
-| Admin | **Teammates** · **Server settings** · **Activity trace** | server admins |
-| Help | **How it works** | everyone |
+
+| Group     | Pages                                                                                                                                                                                                                                                                     | Who           |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| —         | **Nests** — every nest you can see, pinned first                                                                                                                                                                                                                          | everyone      |
+| Work      | **My Work** (tasks assigned to you, reviews and handoffs waiting on you, across nests) · **My Drafts** (yours, never submitted) · **Stream** (*experimental*, off by default — every document version across your nests, with comments inline; `EXPERIMENTAL_DOC_STREAM`) | everyone      |
+| Workspace | **Teams** · **API keys**                                                                                                                                                                                                                                                  | everyone      |
+| Admin     | **Teammates** · **Server settings** · **Activity trace**                                                                                                                                                                                                                  | server admins |
+| Help      | **How it works**                                                                                                                                                                                                                                                          | everyone      |
+
 
 Inside a nest: the document tree, plus **Board** (documents as cards by folder, status or tag), **Graph** (documents, links, tags, stewards), **Definitions** (the nest's glossary) and **Workflows** (Beta). The user menu (top right) holds **Account** (name, password), keyboard shortcuts and logout. `Ctrl`/`⌘` `K` searches every nest and document; `?` lists shortcuts.
 
@@ -114,56 +118,61 @@ Keys are minted in the app (Workspace → API keys, or the Connect dialog) — o
 ## System requirements
 
 - **Node.js** 20.x or later
-- **PromptOwl account** — free signup at <https://app.promptowl.ai/signup>
+- **PromptOwl account** — free signup at [https://app.promptowl.ai/signup](https://app.promptowl.ai/signup)
 - **OS:** Windows, macOS, or Linux
 - **Disk:** ~200 MB for the server, plus storage for your nests
+
+
 
 ## What you get
 
 The **Community Edition** column is the Free and Self-Hosted plans. Enterprise features turn on by themselves when an Enterprise licence key is installed — nothing to enable. See [LICENSING.md](./LICENSING.md#plans).
 
-| Feature | Community Edition | Enterprise |
-|---|:---:|:---:|
-| Self-hosted context server | ✅ | ✅ |
-| SQLite or PostgreSQL / Cloud SQL backend | ✅ | ✅ |
-| Configurable nest storage (external / GCS volume mount) | ✅ | ✅ |
-| Markdown + YAML frontmatter vaults | ✅ | ✅ |
-| Import existing folder / vault | ✅ | ✅ |
-| Export nest as portable bundle (.zip) | ✅ | ✅ |
-| Markdown rendering + wiki cross-linking | ✅ | ✅ |
-| External-edit detection + version diff | ✅ | ✅ |
-| Stewardship workflow (draft/review/approve) | ✅ | ✅ |
-| Per-nest sharing + collaborators | ✅ | ✅ |
-| Public read-only nests | ✅ | ✅ |
-| Custom logo / branding | ✅ | ✅ |
-| Admin password reset + user removal (in-platform) | ✅ | ✅ |
-| Wiki backlinks, outline, hover-preview, link health | ✅ | ✅ |
-| Rich editor — tables, callouts, toggles, code highlight, find/replace, image & video upload, YouTube / Vimeo embeds | ✅ | ✅ |
-| Folder organization — nested folders, move documents, lazy folder tree | ✅ | ✅ |
-| Scales to large vaults — nest listings served from a document index, not a disk crawl | ✅ | ✅ |
-| Steward version revert | ✅ | ✅ |
-| MCP server for AI agents | ✅ | ✅ |
-| One-shot agent setup — generated connect prompt + `.env` download | ✅ | ✅ |
-| Several API keys per account — one credential per client, rotate one at a time | ✅ | ✅ |
-| Comments on documents — anchored threads, resolve / reopen, same threads over MCP | ✅ | ✅ |
-| Table nodes — CSV facts with deterministic row queries (`POST /table-query`, `context_table_query`) | ✅ | ✅ |
-| Teams — share a nest with a group once; import rosters from PromptOwl | ✅ | ✅ |
-| Cross-nest inbox — My Work (reviews, handoffs) and My Drafts | ✅ | ✅ |
-| Nest views — Board (kanban by folder / status / tag), Graph, Definitions glossary | ✅ | ✅ |
-| Workflow plane (Beta) — agents as documents, runs, schedules, inbound hooks, Slack / Teams / webhook connectors | ✅ | ✅ |
-| Activity trace — every governance action, per nest and server-wide | ✅ | ✅ |
-| Notifications — Slack, Microsoft Teams, email | ✅ | ✅ |
-| Centralized multi-tenant admin console | — | ✅ |
-| Sign-in with email, Google, or Sign in with PromptOwl — [admin guide](./CONFIGURATION.md#single-sign-on-oidc) | ✅ | ✅ |
-| Enterprise single sign-on (OIDC — Entra ID, Okta, Keycloak, any issuer) — licence feature `sso` | — | ✅ |
-| Own model keys or LLM gateway (BYOK) — licence feature `byok` | — | ✅ |
-| Custom assistant name and branding — licence feature `hootie_branding` | — | ✅ |
-| SAML / SCIM provisioning | — | ✅ |
-| Audit log streaming | — | ✅ |
-| Policy transforms (redaction, summarization) | — | ✅ |
-| Priority support and SLA | — | ✅ |
 
-For Enterprise pricing and features, contact **hoot@promptowl.ai** or visit <https://promptowl.ai/contextnest/>.
+| Feature                                                                                                                                                          | Community Edition | Enterprise |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- | ---------- |
+| Self-hosted context server                                                                                                                                       | ✅                 | ✅          |
+| SQLite or PostgreSQL / Cloud SQL backend                                                                                                                         | ✅                 | ✅          |
+| Configurable nest storage (external / GCS volume mount)                                                                                                          | ✅                 | ✅          |
+| Markdown + YAML frontmatter vaults                                                                                                                               | ✅                 | ✅          |
+| Import existing folder / vault                                                                                                                                   | ✅                 | ✅          |
+| Export nest as portable bundle (.zip)                                                                                                                            | ✅                 | ✅          |
+| Markdown rendering + wiki cross-linking                                                                                                                          | ✅                 | ✅          |
+| External-edit detection + version diff                                                                                                                           | ✅                 | ✅          |
+| Stewardship workflow (draft/review/approve)                                                                                                                      | ✅                 | ✅          |
+| Per-nest sharing + collaborators                                                                                                                                 | ✅                 | ✅          |
+| Public read-only nests                                                                                                                                           | ✅                 | ✅          |
+| Custom logo / branding                                                                                                                                           | ✅                 | ✅          |
+| Admin password reset + user removal (in-platform)                                                                                                                | ✅                 | ✅          |
+| Wiki backlinks, outline, hover-preview, link health                                                                                                              | ✅                 | ✅          |
+| Rich editor — tables, callouts, toggles, code highlight, find/replace, image & video upload, YouTube / Vimeo embeds                                              | ✅                 | ✅          |
+| Folder organization — nested folders, move documents, lazy folder tree                                                                                           | ✅                 | ✅          |
+| Scales to large vaults — nest listings served from a document index, not a disk crawl                                                                            | ✅                 | ✅          |
+| Steward version revert                                                                                                                                           | ✅                 | ✅          |
+| MCP server for AI agents                                                                                                                                         | ✅                 | ✅          |
+| One-shot agent setup — generated connect prompt + `.env` download                                                                                                | ✅                 | ✅          |
+| Several API keys per account — one credential per client, rotate one at a time                                                                                   | ✅                 | ✅          |
+| Comments on documents — anchored threads, resolve / reopen, same threads over MCP                                                                                | ✅                 | ✅          |
+| Table nodes — CSV facts with deterministic row queries (`POST /table-query`, `context_table_query`)                                                              | ✅                 | ✅          |
+| Teams — share a nest with a group once; import rosters from PromptOwl                                                                                            | ✅                 | ✅          |
+| Cross-nest inbox — My Work (assigned tasks, reviews, handoffs) and My Drafts                                                                                     | ✅                 | ✅          |
+| Nest views — Board (kanban by folder / status / tag), Graph, Definitions glossary                                                                                | ✅                 | ✅          |
+| Workflow plane (Beta) — agents as documents, runs, schedules, inbound hooks, Slack / Teams / webhook connectors                                                  | ✅                 | ✅          |
+| Activity trace — every governance action, per nest and server-wide                                                                                               | ✅                 | ✅          |
+| Document pins (experimental, superadmin switch `EXPERIMENTAL_DOC_PINS`) — stewards pin documents to the front of a nest for everyone; anyone pins for themselves | ✅                 | ✅          |
+| Notifications — Slack, Microsoft Teams, email                                                                                                                    | ✅                 | ✅          |
+| Centralized multi-tenant admin console                                                                                                                           | —                 | ✅          |
+| Sign-in with email, Google, or Sign in with PromptOwl — [admin guide](./CONFIGURATION.md#single-sign-on-oidc)                                                    | ✅                 | ✅          |
+| Enterprise single sign-on (OIDC — Entra ID, Okta, Keycloak, any issuer) — licence feature `sso`                                                                  | —                 | ✅          |
+| Own model keys or LLM gateway (BYOK) — licence feature `byok`                                                                                                    | —                 | ✅          |
+| Custom assistant name and branding — licence feature `hootie_branding`                                                                                           | —                 | ✅          |
+| SAML / SCIM provisioning                                                                                                                                         | —                 | ✅          |
+| Audit log streaming                                                                                                                                              | —                 | ✅          |
+| Policy transforms (redaction, summarization)                                                                                                                     | —                 | ✅          |
+| Priority support and SLA                                                                                                                                         | —                 | ✅          |
+
+
+For Enterprise pricing and features, contact **[hoot@promptowl.ai](mailto:hoot@promptowl.ai)** or visit [https://promptowl.ai/contextnest/](https://promptowl.ai/contextnest/).
 
 ## What's new
 
@@ -185,16 +194,20 @@ Full release notes live in [CHANGELOG.md](./CHANGELOG.md).
 - `<server>/llms.txt` — the agent manual the running server publishes; rendered as **Docs** in the app
 - **How it works** inside the app — a page-by-page tour
 
+
+
 ## Licensing
 
 ContextNest Community Edition is **commercial software**. It is **not open source**.
 
 **You may:**
+
 - Install and run the Software on devices You own or control
 - Use the Software for internal business purposes, tied to a valid PromptOwl account
 - Make backup and archival copies
 
 **You may not:**
+
 - Redistribute, resell, rent, lease, or sublicense the Software
 - Offer the Software as a hosted, managed, or software-as-a-service product to third parties
 - Reverse engineer, decompile, or create derivative works
@@ -203,25 +216,29 @@ ContextNest Community Edition is **commercial software**. It is **not open sourc
 
 Full license text: [LICENSE.md](./LICENSE.md)
 
-**For redistribution, hosted-service, OEM, or regulated-industry use,** contact **hoot@promptowl.ai** for a commercial license agreement.
+**For redistribution, hosted-service, OEM, or regulated-industry use,** contact **[hoot@promptowl.ai](mailto:hoot@promptowl.ai)** for a commercial license agreement.
 
 ## Platform terms
 
 Because the Software requires a PromptOwl account, the following terms also apply to Your use:
 
-- **End User License Agreement** — <https://promptowl.ai/eula/>
-- **Terms of Service** — <https://promptowl.ai/terms-of-service/>
-- **Privacy Policy** — <https://promptowl.ai/privacy-policy/>
-- **Acceptable Use Policy** — <https://promptowl.ai/acceptable-use/>
-- **Disclaimer** — <https://promptowl.ai/disclaimer/>
-- **Cookie Policy** — <https://promptowl.ai/cookies/>
+- **End User License Agreement** — [https://promptowl.ai/eula/](https://promptowl.ai/eula/)
+- **Terms of Service** — [https://promptowl.ai/terms-of-service/](https://promptowl.ai/terms-of-service/)
+- **Privacy Policy** — [https://promptowl.ai/privacy-policy/](https://promptowl.ai/privacy-policy/)
+- **Acceptable Use Policy** — [https://promptowl.ai/acceptable-use/](https://promptowl.ai/acceptable-use/)
+- **Disclaimer** — [https://promptowl.ai/disclaimer/](https://promptowl.ai/disclaimer/)
+- **Cookie Policy** — [https://promptowl.ai/cookies/](https://promptowl.ai/cookies/)
+
+
 
 ## Support
 
-- **Documentation:** <https://promptowl.ai/contextnest/>
-- **Product questions:** <https://promptowl.ai/contact-us/>
+- **Documentation:** [https://promptowl.ai/contextnest/](https://promptowl.ai/contextnest/)
+- **Product questions:** [https://promptowl.ai/contact-us/](https://promptowl.ai/contact-us/)
 - **Support & bugs:** `hoot@promptowl.ai`
 - **Commercial licensing:** `hoot@promptowl.ai` (subject: *ContextNest Commercial License*)
+
+
 
 ## AI output disclaimer
 

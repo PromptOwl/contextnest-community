@@ -89,3 +89,29 @@ describe("invalidateForPath — admin settings", () => {
     expect(r.drops(keys.collaborators(NEST))).toBe(true);
   });
 });
+
+describe("invalidateForPath — document pins vs nest pins (CU-wdqcq02crw)", () => {
+  // `/pin` (the dashboard nest bookmark) is a prefix of `/pins` (document
+  // pins). The nest-pin rule must not swallow document-pin writes, or the
+  // pinned strip keeps showing the old pins until a reload.
+  it("a document-pin write drops the pins read, not just the nest list", () => {
+    for (const path of [`/nests/${NEST}/pins`, `/nests/${NEST}/pins?node_id=nodes/a&scope=user`, `/nests/${NEST}/pins/order`]) {
+      const r = recorder();
+      invalidateForPath(r.qc, path);
+      expect(r.drops(keys.docPins(NEST))).toBe(true);
+    }
+  });
+
+  it("a nest-pin write still drops only the nest list", () => {
+    const r = recorder();
+    invalidateForPath(r.qc, `/nests/${NEST}/pin`);
+    expect(r.drops(keys.nestList())).toBe(true);
+    expect(r.drops(keys.docPins(NEST))).toBe(false);
+  });
+
+  it("a document write (rename, move, delete) drops the pins read too", () => {
+    const r = recorder();
+    invalidateForPath(r.qc, `/nests/${NEST}/nodes/nodes/a`);
+    expect(r.drops(keys.docPins(NEST))).toBe(true);
+  });
+});

@@ -46,6 +46,13 @@ import {
 import { engineApi, opContext } from "../nodes/engine.js";
 import { addCollaborator } from "../nests/sharing-service.js";
 import { holdWriteIfGated } from "../nests/push-confirmation-service.js";
+import {
+  getInstructionsRevision,
+  listInstructionsRevisions,
+  validateInstructions,
+  writeInstructions,
+  type InstructionsRevision,
+} from "../nests/instructions-service.js";
 import { queryTableNode } from "../tables/query.js";
 import {
   addComment,
@@ -88,7 +95,8 @@ import {
   type FieldDefinition,
 } from "../nodes/custom-fields.js";
 import { readIndexedNodes } from "../nodes/node-index.js";
-import { AppError } from "../shared/errors.js";
+import { AppError, BillingConfirmError } from "../shared/errors.js";
+import { billingConfirmed } from "../auth/seats.js";
 import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import {
@@ -177,6 +185,12 @@ export type ToolResult = string | { text: string; data: unknown; isError?: true 
  * `ERROR_CODES` in `@promptowl/contextnest-engine/api`) so `ctx` can map the
  * result back to a typed engine error instead of string-matching the sentence.
  */
+/** One history line: "r3 · 2026-10-20 14:02 · ana@x.com (ui) — add citation rule". */
+function describeRevision(r: InstructionsRevision): string {
+  const who = r.authorEmail ?? "unknown";
+  return `r${r.seq} · ${r.createdAt} · ${who} (${r.source})${r.note ? ` — ${r.note}` : ""}`;
+}
+
 function toolError(
   text: string,
   code:
@@ -187,6 +201,7 @@ function toolError(
     | "VALIDATION_FAILED"
     | "VAULT_BUSY"
     | "PENDING_CONFIRMATION"
+    | "BILLING_CONFIRMATION_REQUIRED"
     | "INTERNAL",
   /** Extra machine-readable fields beside {code, message} — e.g. the access
    *  request hint a refused write carries. */
@@ -408,6 +423,7 @@ export interface McpToolContext {
 export const MCP_READ_TOOLS = new Set<string>([
   // per-nest read tools
   "context_init",
+  "context_instructions_history",
   "context_overview",
   "context_search",
   "context_query",
@@ -443,7 +459,11 @@ export const MCP_READ_TOOLS = new Set<string>([
  *  and holds a full credential (mcp/routes.ts), and re-checked on every call
  *  by the same service layer the REST routes use. Not in MCP_READ_TOOLS or
  *  HEADLESS_READER_TOOLS, so read-only and access keys can never call them. */
-export const MCP_ADMIN_TOOLS = new Set<string>(["context_headless", "context_systems"]);
+export const MCP_ADMIN_TOOLS = new Set<string>([
+  "context_headless",
+  "context_systems",
+  "context_instructions_update",
+]);
 /** 
  * The board fields a task carries (src/nodes/task-fields.ts), as tool
  * properties. Shared by context_create and context_update so both advertise
@@ -480,6 +500,35 @@ export const TOOL_DEFINITIONS = [
     description:
       "Load the vault's CONTEXT.md which contains operating instructions and behavioral guidelines. Call this FIRST in every conversation.",
     inputSchema: { type: "object" as const, properties: {} },
+  },
+  {
+    name: "context_instructions_history",
+    description:
+      "History of this nest's operating instructions (CONTEXT.md, what context_init returns): who changed them, when, and why, newest first. Pass `revision` for that revision's full text and the text it replaced.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        revision: { type: "number", description: "Revision number, from the list." },
+      },
+    },
+  },
+  {
+    name: "context_instructions_update",
+    description:
+      "Nest owners/admins: replace this nest's operating instructions (CONTEXT.md — what every agent reads first via context_init). Send the WHOLE file as `content`: read it with context_init, edit, send it back. Recorded in context_instructions_history. On a nest that holds agent writes, the change waits for a reviewer to confirm it.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        content: { type: "string", description: "The complete new CONTEXT.md (markdown)." },
+        note: { type: "string", description: "Why it changed — shown in the history." },
+        base_revision: {
+          type: "number",
+          description:
+            "The latest revision number when you read it (0 if none). If someone changed the instructions since, the update is refused instead of overwriting them.",
+        },
+      },
+      required: ["content"],
+    },
   },
   {
     name: "context_overview",
@@ -1749,10 +1798,27 @@ export async function handleToolCall(
     );
   }
   try {
-    const result = await runTool(toolName, args, attributed);
+    // confirm_billing is the agent's X-Confirm-Billing: the user agreed to the raise.
+    const result =
+      args.confirm_billing === true
+        ? await billingConfirmed.run(true, () => runTool(toolName, args, attributed))
+        : await runTool(toolName, args, attributed);
     recordToolAccess(toolName, result, attributed);
     return result;
   } catch (err) {
+    if (err instanceof BillingConfirmError) {
+      status = 409;
+      // Same words as Settings → License and the UI dialog.
+      const label: Record<string, string> = { viewer: "viewer", subscriber: "editor", user: "user" };
+      const who = err.changes
+        .map((c) => `${c.email ?? "a new person"} (${label[c.from]} → ${label[c.to]})`)
+        .join(", ");
+      return toolError(
+        `This raises what ${who} is billed. Ask the user to confirm, then call this tool again with confirm_billing: true.`,
+        "BILLING_CONFIRMATION_REQUIRED",
+        { changes: err.changes },
+      );
+    }
     // Vault write-lock timeout: map to a typed, retryable tool error HERE —
     // one seam covering both MCP surfaces — before the SDK flattens the throw
     // into prose and loses the code. Everything else keeps rethrowing.
@@ -2024,6 +2090,92 @@ async function runTool(
       if (!context_md)
         return "No CONTEXT.md found. Use context_overview to see what's available.";
       return `# Vault Instructions (CONTEXT.md)\n\n${context_md}`;
+    }
+
+    case "context_instructions_history": {
+      if (args.revision !== undefined && args.revision !== null) {
+        const seq = Number(args.revision);
+        if (!Number.isInteger(seq) || seq < 1) {
+          return toolError("revision must be a revision number from the list", "VALIDATION_FAILED");
+        }
+        try {
+          const r = await getInstructionsRevision(nestId, seq);
+          return {
+            text:
+              `# Instructions revision ${seq}\n\n${describeRevision(r.revision)}\n\n## Text\n\n${r.content}` +
+              (r.previousContent !== null ? `\n\n## Replaced (revision ${seq - 1})\n\n${r.previousContent}` : ""),
+            data: r,
+          };
+        } catch (err) {
+          if (err instanceof NotFoundError) return toolError(err.message, "VERSION_NOT_FOUND");
+          throw err;
+        }
+      }
+      const revisions = await listInstructionsRevisions(nestId);
+      if (revisions.length === 0) {
+        return {
+          text: "No recorded changes yet — the instructions are as the nest was created or last pushed. Read them with context_init.",
+          data: { revisions },
+        };
+      }
+      return {
+        text: revisions.map((r) => `- ${describeRevision(r)}`).join("\n"),
+        data: { revisions },
+      };
+    }
+
+    case "context_instructions_update": {
+      // Owner/admin, the same tier as the REST PUT /instructions (app.ts).
+      const callerPermission =
+        config.AUTH_MODE === "open"
+          ? ("owner" as const)
+          : await resolveNestPermission(nestId, userId);
+      if (permissionLevel(callerPermission) < permissionLevel("admin")) {
+        return toolError(
+          "Only the nest owner or a nest admin can change the instructions. Suggest the change to them instead.",
+          "UNAUTHORIZED_ACTION",
+        );
+      }
+      let content: string;
+      try {
+        content = validateInstructions(args.content);
+      } catch (err) {
+        return toolError((err as Error).message, "VALIDATION_FAILED");
+      }
+      // MCP is an agent surface whatever it authenticated with, so — like
+      // context_create — a gated nest holds a cookie call too.
+      const held = await holdWriteIfGated({
+        nestId,
+        userId,
+        keyId: ctx.apiKeyId ?? null,
+        keyLabel: ctx.apiKeyLabel ?? null,
+        userEmail,
+        payload: { context_md: content },
+      });
+      if (held) {
+        return toolError(
+          `This nest holds agent writes for review. Your instructions change is queued as ${held.id} and takes effect only when a reviewer confirms it in ${held.nest_name}. Until then context_init returns the current text.`,
+          "PENDING_CONFIRMATION",
+        );
+      }
+      try {
+        const revision = await writeInstructions(nestId, content, {
+          authorEmail: userEmail,
+          note: typeof args.note === "string" ? args.note : null,
+          source: "mcp",
+          baseSeq:
+            args.base_revision === undefined || args.base_revision === null
+              ? undefined
+              : Number(args.base_revision),
+        });
+        return {
+          text: `Instructions updated (revision ${revision.seq}). Agents get the new text from context_init.`,
+          data: { revision },
+        };
+      } catch (err) {
+        if (err instanceof ConflictError) return toolError(err.message, "VALIDATION_FAILED");
+        throw err;
+      }
     }
 
     case "context_overview": {
@@ -3972,6 +4124,7 @@ async function runTool(
 
         return `Assigned **${args.email}** as ${args.role || "reviewer"} for ${targetDesc}.`;
       } catch (err: any) {
+        if (err instanceof BillingConfirmError) throw err;
         return `Failed to assign steward: ${err.message}`;
       }
     }
@@ -4005,6 +4158,7 @@ async function runTool(
               : "viewer";
         return `Shared this nest with **${args.email}** as ${label}.`;
       } catch (err: any) {
+        if (err instanceof BillingConfirmError) throw err;
         return `Failed to share nest: ${err.message}`;
       }
     }
@@ -4041,6 +4195,7 @@ async function runTool(
         });
         return `Shared ${targetType} \`${target}\` with **${args.email}** as ${role}.`;
       } catch (err: any) {
+        if (err instanceof BillingConfirmError) throw err;
         return `Failed to share: ${err.message}`;
       }
     }

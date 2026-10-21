@@ -21,6 +21,7 @@ import {
   type AccessTarget,
 } from "./access-requests";
 import type { NestBranding } from "./branding";
+import type { InstructionsRevision } from "./instructions";
 
 /**
  * A nest's visibility tier. 'org' = every authenticated user of this
@@ -79,6 +80,19 @@ async function request<T = any>(
   }
 
   if (!res.ok) {
+    // A role change that raises someone's billed class: one listener
+    // (BillingConfirmHost) asks, and a yes resends with the confirm header.
+    if (res.status === 409 && data.code === "billing_confirm" && !headers["X-Confirm-Billing"] && typeof window !== "undefined") {
+      const ok = await new Promise<boolean>((resolve) => {
+        const ev = new CustomEvent<BillingConfirmRequest>(BILLING_CONFIRM_EVENT, {
+          detail: { changes: data.changes ?? [], resolve },
+          cancelable: true,
+        });
+        if (window.dispatchEvent(ev)) resolve(false); // no host mounted
+      });
+      if (ok) return request<T>(path, { ...options, headers: { ...headers, "X-Confirm-Billing": "true" } });
+      data.error = "Cancelled. Nothing was saved and no one's billing changed.";
+    }
     // 401 = the server says we're not logged in. Drop any legacy
     // localStorage entry and signal the auth context to reset UI state
     // (re-render to logged-out without a manual page refresh).
@@ -156,6 +170,19 @@ export function invalidateNestReads(nestId?: string): void {
 }
 
 /** Error thrown by `request` on a non-2xx response, with the parsed body. */
+/** A role change the server says raises someone's billed class (409 billing_confirm). */
+export interface BillingChange {
+  userId: string | null;
+  email: string | null;
+  from: "viewer" | "subscriber" | "user";
+  to: "viewer" | "subscriber" | "user";
+}
+export interface BillingConfirmRequest {
+  changes: BillingChange[];
+  resolve: (confirmed: boolean) => void;
+}
+export const BILLING_CONFIRM_EVENT = "billing:confirm";
+
 export interface ApiError extends Error {
   status?: number;
   body?: { error?: string; fieldErrors?: Record<string, string>; [k: string]: unknown };
@@ -253,9 +280,11 @@ export async function getHealth() {
     /** Metacognition agents: server-run, persona-attributed, proposals only.
      *  Needs the workflow plane too. Off → the Workflows "Agents" tab hides. */
     metacognition_enabled?: boolean;
-    /** Experimental features, one switch each (default OFF). Off → the
-     *  feature's UI is hidden and its routes 404. */
+    /** Experimental features, one key each (default off; superadmin switches
+     *  under Settings → Features). Off → the routes 404 and the UI hides it. */
     experimental?: {
+      /** Document pins: editorial + personal (CU-wdqcq02crw). */
+      doc_pins?: boolean;
       /** Cross-nest document stream (GET /me/stream, the Stream page). */
       doc_stream?: boolean;
     };
@@ -343,6 +372,8 @@ export interface AdminSettings {
   metacognition_enabled: boolean;
   /** Experimental cross-nest document stream (EXPERIMENTAL_DOC_STREAM). */
   experimental_doc_stream_enabled: boolean;
+  /** Experimental document pins (EXPERIMENTAL_DOC_PINS). */
+  experimental_doc_pins: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
@@ -1015,6 +1046,51 @@ export interface NestSettings {
   access_log_enabled?: boolean;
 }
 
+// ── Instructions (CONTEXT.md) — CU-wdqcq05mty ─────────────────────────────
+
+export async function getInstructions(nestId: string) {
+  return request<{ content: string; revision: InstructionsRevision | null }>(
+    `/nests/${nestId}/instructions`,
+  );
+}
+
+/** Owner/admin. `baseRevision` is the revision the editor opened (0 = none);
+ *  a 409 means someone saved since. */
+export async function saveInstructions(
+  nestId: string,
+  data: { content: string; note?: string; baseRevision: number },
+) {
+  return request<{ content: string; revision: InstructionsRevision }>(
+    `/nests/${nestId}/instructions`,
+    { method: "PUT", body: JSON.stringify(data) },
+  );
+}
+
+export async function listInstructionsRevisions(nestId: string) {
+  return request<{ revisions: InstructionsRevision[] }>(
+    `/nests/${nestId}/instructions/revisions`,
+  );
+}
+
+export async function getInstructionsRevision(nestId: string, seq: number) {
+  return request<{
+    revision: InstructionsRevision;
+    content: string;
+    previousContent: string | null;
+  }>(`/nests/${nestId}/instructions/revisions/${seq}`);
+}
+
+export async function restoreInstructionsRevision(
+  nestId: string,
+  seq: number,
+  baseRevision: number,
+) {
+  return request<{ content: string; revision: InstructionsRevision }>(
+    `/nests/${nestId}/instructions/revisions/${seq}/restore`,
+    { method: "POST", body: JSON.stringify({ baseRevision }) },
+  );
+}
+
 export async function getNestSettings(nestId: string) {
   return request<NestSettings>(`/nests/${nestId}/settings`);
 }
@@ -1196,6 +1272,46 @@ export async function restoreNest(nestId: string) {
 export async function setNestPinned(nestId: string, pinned: boolean) {
   return request<{ pinned: boolean }>("/nests/" + nestId + "/pin", {
     method: pinned ? "POST" : "DELETE",
+  });
+}
+
+// ─── Document pins (experimental, CU-wdqcq02crw) ──────────────────────────
+export type DocPinScope = "nest" | "user";
+export interface DocPin {
+  node_id: string;
+  scope: DocPinScope;
+  title: string;
+  type: string;
+  status: string;
+  position: number;
+  pinned_by: string | null;
+  pinned_at: string;
+}
+export interface DocPins {
+  /** Pinned for everyone, in the steward's order. */
+  editorial: DocPin[];
+  /** The caller's own bookmarks. */
+  personal: DocPin[];
+  /** The caller may pin for everyone and reorder. */
+  can_pin_editorial: boolean;
+}
+export async function getDocPins(nestId: string) {
+  return request<DocPins>(`/nests/${nestId}/pins`);
+}
+export async function pinDoc(nestId: string, nodeId: string, scope: DocPinScope) {
+  return request<{ pin: DocPin; created: boolean }>(`/nests/${nestId}/pins`, {
+    method: "POST",
+    body: JSON.stringify({ node_id: nodeId, scope }),
+  });
+}
+export async function unpinDoc(nestId: string, nodeId: string, scope: DocPinScope) {
+  const q = new URLSearchParams({ node_id: nodeId, scope });
+  return request<{ unpinned: boolean }>(`/nests/${nestId}/pins?${q}`, { method: "DELETE" });
+}
+export async function reorderDocPins(nestId: string, nodeIds: string[]) {
+  return request<DocPins>(`/nests/${nestId}/pins/order`, {
+    method: "PUT",
+    body: JSON.stringify({ node_ids: nodeIds }),
   });
 }
 
@@ -1432,6 +1548,59 @@ export async function setNestBranding(nestId: string, branding: NestBranding | n
   return request<{ branding: NestBranding | null }>(`/nests/${nestId}/branding`, {
     method: "PATCH",
     body: JSON.stringify(branding),
+  });
+}
+
+// Public docs site (CU-wdqcq05jhm) — owner / nest admin / server admin.
+export interface SiteSettings {
+  title?: string;
+  description?: string;
+  public_url?: string;
+  og_image_url?: string;
+  organization_name?: string;
+  organization_url?: string;
+  organization_logo_url?: string;
+  same_as?: string[];
+  twitter_site?: string;
+  google_site_verification?: string;
+  bing_site_verification?: string;
+  language?: string;
+  noindex?: boolean;
+  ai_training?: boolean;
+  ai_actions?: boolean;
+  indexnow?: boolean;
+  redirects?: Array<{ from: string; to: string }>;
+}
+export interface SiteInfo {
+  live: boolean;
+  reason: string | null;
+  url: string | null;
+  domain: string | null;
+  domain_verified: boolean;
+  domain_verified_at: string | null;
+  serving_domain: string | null;
+  dns: { txt: { name: string; value: string } | null; cname: string | null } | null;
+  public_url_verified: boolean;
+  public_url_dns: { name: string; value: string } | null;
+  settings: SiteSettings;
+  pages: Array<{ node_id: string; title: string; path: string; custom: boolean }>;
+}
+export async function getNestSite(nestId: string) {
+  return request<SiteInfo>(`/nests/${nestId}/site`);
+}
+export async function updateNestSite(nestId: string, body: { domain?: string | null; settings?: SiteSettings }) {
+  return request<SiteInfo>(`/nests/${nestId}/site`, { method: "PATCH", body: JSON.stringify(body) });
+}
+export async function verifyNestSiteDomain(nestId: string) {
+  return request<SiteInfo>(`/nests/${nestId}/site/verify-domain`, { method: "POST", body: "{}" });
+}
+export async function verifyNestSitePublicUrl(nestId: string) {
+  return request<SiteInfo>(`/nests/${nestId}/site/verify-public-url`, { method: "POST", body: "{}" });
+}
+export async function setNestSitePageUrl(nestId: string, nodeId: string, path: string | null) {
+  return request<SiteInfo>(`/nests/${nestId}/site/pages`, {
+    method: "PUT",
+    body: JSON.stringify({ node_id: nodeId, path }),
   });
 }
 
