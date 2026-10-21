@@ -187,6 +187,19 @@ describe("ctx push", () => {
     expect(data.content).toContain("Pushed rules.");
     expect(data.revision).toMatchObject({ source: "push", authorEmail: owner.email });
   });
+
+  it("does not record a revision when a push re-sends the same CONTEXT.md", async () => {
+    const nestId = await makeNest("Push Same Nest");
+    const push = () =>
+      jsonRequest(app, "POST", `/nests/${nestId}/publish`, { context_md: "# Same\n\nRules.\n" }, owner.apiKey);
+    await push();
+    const count = async () =>
+      (await jsonRequest(app, "GET", `/nests/${nestId}/instructions/revisions`, undefined, owner.apiKey))
+        .data.revisions.length;
+    const before = await count();
+    await push();
+    expect(await count()).toBe(before);
+  });
 });
 
 describe("MCP", () => {

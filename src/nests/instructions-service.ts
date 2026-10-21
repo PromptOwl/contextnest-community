@@ -17,6 +17,10 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { engineCache } from "../nodes/engine.js";
 import { ConflictError, NotFoundError, ValidationError } from "../shared/errors.js";
+import { isUniqueViolation } from "../governance/stewardship-service.js";
+
+const STALE_MESSAGE =
+  "The instructions changed since you opened them. Reload to see the latest, then make your edit again.";
 
 export type InstructionsSource = "initial" | "ui" | "api" | "push" | "mcp" | "restore";
 
@@ -101,6 +105,9 @@ export async function writeInstructions(
   const before = await readFile(nestId);
   const { storage } = await engineCache.get(nestId);
 
+  const selectRevision = `SELECT seq, content, author_email, note, source, created_at
+         FROM instructions_revisions WHERE nest_id = ? AND seq = ?`;
+
   const recorded = await getDb().transaction(async (tx) => {
     const latest = (await tx.get(
       "SELECT MAX(seq) AS seq FROM instructions_revisions WHERE nest_id = ?",
@@ -108,9 +115,11 @@ export async function writeInstructions(
     )) as { seq: number | null } | undefined;
     let seq = latest?.seq ?? 0;
     if (opts.baseSeq !== undefined && opts.baseSeq !== seq) {
-      throw new ConflictError(
-        "The instructions changed since you opened them. Reload to see the latest, then make your edit again.",
-      );
+      throw new ConflictError(STALE_MESSAGE);
+    }
+    // Same text as now (e.g. a push that re-sends CONTEXT.md): no new revision.
+    if (seq > 0 && before === content) {
+      return (await tx.get(selectRevision, [nestId, seq])) as RevisionRow;
     }
     const insert = async (
       text: string,
@@ -134,11 +143,11 @@ export async function writeInstructions(
     // revision claiming text agents were never served. Same direct write the
     // push path has always done — the engine has no op for CONTEXT.md.
     await storage.writeContextMd(content);
-    return (await tx.get(
-      `SELECT seq, content, author_email, note, source, created_at
-         FROM instructions_revisions WHERE nest_id = ? AND seq = ?`,
-      [nestId, seq],
-    )) as RevisionRow;
+    return (await tx.get(selectRevision, [nestId, seq])) as RevisionRow;
+  }).catch((err) => {
+    // Two writers raced to the same seq (Postgres READ COMMITTED): a stale save, not a 500.
+    if (isUniqueViolation(err)) throw new ConflictError(STALE_MESSAGE);
+    throw err;
   });
 
   // Keeps graph-mode reads (seeded from context.yaml) aware of the change.

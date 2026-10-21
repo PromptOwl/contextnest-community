@@ -15,9 +15,16 @@ describe("frontmatter", () => {
 
   it("edits the body and keeps the frontmatter block as it was", () => {
     const { frontmatter, body } = splitFrontmatter(raw);
-    expect(frontmatter).toBe('---\ntitle: "Glossary"\n---\n');
+    expect(frontmatter).toBe('---\ntitle: "Glossary"\n---\n\n');
     expect(body).toBe("# Glossary\n\nRules.\n");
     expect(joinFrontmatter(frontmatter, body)).toBe(raw);
+  });
+
+  it("does not add a blank line the file never had", () => {
+    const tight = '---\ntitle: "Glossary"\n---\n# Glossary\n';
+    const { frontmatter, body } = splitFrontmatter(tight);
+    expect(body).toBe("# Glossary\n");
+    expect(joinFrontmatter(frontmatter, body)).toBe(tight);
   });
 
   it("round-trips an edited body", () => {

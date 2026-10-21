@@ -14,20 +14,20 @@ export interface InstructionsRevision {
   createdAt: string;
 }
 
-const FRONTMATTER = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/;
+// Takes the blank line after the block too, so a save keeps whatever separator the file had.
+const FRONTMATTER = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n){0,2}/;
 
 /** CONTEXT.md opens with a frontmatter block (its title). The page edits the
  *  body; the block rides along untouched. */
 export function splitFrontmatter(raw: string): { frontmatter: string; body: string } {
   const m = raw.match(FRONTMATTER);
   if (!m) return { frontmatter: "", body: raw };
-  return { frontmatter: m[0], body: raw.slice(m[0].length).replace(/^\r?\n/, "") };
+  return { frontmatter: m[0], body: raw.slice(m[0].length) };
 }
 
 export function joinFrontmatter(frontmatter: string, body: string): string {
   if (!frontmatter) return body;
-  const fm = frontmatter.endsWith("\n") ? frontmatter : `${frontmatter}\n`;
-  return `${fm}\n${body}`;
+  return frontmatter.endsWith("\n") ? `${frontmatter}${body}` : `${frontmatter}\n${body}`;
 }
 
 const SOURCE_LABELS: Record<InstructionsSource, string> = {
