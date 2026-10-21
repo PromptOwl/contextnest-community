@@ -137,7 +137,7 @@ export async function countBilled(): Promise<{ users: number; subscribers: numbe
  * last seat can both pass; serialise check+write if the cap must be exact.
  */
 export async function assertCanGrant(
-  changes: Array<{ userId: string | null | undefined; next: BillingClass }>,
+  changes: Array<{ userId: string | null | undefined; next: BillingClass; email?: string }>,
 ): Promise<void> {
   const ent = getEntitlement();
   let raises = changes.filter((c) => c.next !== "viewer" && c.userId !== ANON_USER_ID);
@@ -157,15 +157,15 @@ export async function assertCanGrant(
   const before = tally(classes);
   const after = { ...before };
   const seen = new Set<string>();
-  const raised: Array<{ userId: string | null; from: BillingClass; to: BillingClass }> = [];
-  for (const { userId, next } of raises) {
+  const raised: Array<{ userId: string | null; email?: string; from: BillingClass; to: BillingClass }> = [];
+  for (const { userId, next, email } of raises) {
     if (userId) {
       if (seen.has(userId)) continue;
       seen.add(userId);
     }
     const cur = (userId && classes.get(userId)) || "viewer";
     if (RANK[next] <= RANK[cur]) continue;
-    raised.push({ userId: userId ?? null, from: cur, to: next });
+    raised.push({ userId: userId ?? null, email, from: cur, to: next });
     if (cur === "subscriber") after.subscribers--;
     if (next === "user") after.users++;
     else after.subscribers++;
@@ -198,7 +198,7 @@ export async function assertCanGrant(
     for (const r of rows) emails.set(r.id, r.email);
   }
   throw new BillingConfirmError(
-    raised.map((r) => ({ ...r, email: (r.userId && emails.get(r.userId)) || null })),
+    raised.map((r) => ({ ...r, email: (r.userId && emails.get(r.userId)) || r.email || null })),
   );
 }
 
