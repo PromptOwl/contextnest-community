@@ -361,6 +361,34 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
     expect(buildCount()).toBe(before + 1);
   });
 
+  it("gives two nests publishing the same slug at once one key each, with no error", async () => {
+    const make = async (key: string) => {
+      const id = (await jsonRequest(app, "POST", "/nests", { name: "Race Docs" }, key)).data.nest.id;
+      await jsonRequest(app, "POST", `/nests/${id}/nodes`, { title: "Home", content: "# Home\n\nrace" }, key);
+      await jsonRequest(app, "PATCH", `/nests/${id}/visibility`, { visibility: "public", acknowledge_public: true }, key);
+      return { id: id as string, key };
+    };
+    const nests = [await make(owner.apiKey), await make(writer.apiKey)];
+    const res = await Promise.all(nests.map((n) => jsonRequest(app, "PATCH", `/nests/${n.id}/reader-mode`, { enabled: true }, n.key)));
+    expect(res.map((r) => r.status)).toEqual([200, 200]);
+    const urls = await Promise.all(nests.map(async (n) => (await jsonRequest(app, "GET", `/nests/${n.id}/site`, undefined, n.key)).data.url));
+    expect(new Set(urls).size).toBe(2);
+    expect(urls.filter((u: string) => u.endsWith("/d/race-docs/"))).toHaveLength(1);
+  });
+
+  it("won't let a nest named after another nest's id take that nest's URL", async () => {
+    // Acme's key is its slug, so its id is free for a squatter's slug to take.
+    const squatter = (await jsonRequest(app, "POST", "/nests", { name: nestId }, writer.apiKey)).data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${squatter}/nodes`, { title: "Home", content: "# Home\n\nsquatter site" }, writer.apiKey);
+    await jsonRequest(app, "PATCH", `/nests/${squatter}/visibility`, { visibility: "public", acknowledge_public: true }, writer.apiKey);
+    await jsonRequest(app, "PATCH", `/nests/${squatter}/reader-mode`, { enabled: true }, writer.apiKey);
+    const url = (await jsonRequest(app, "GET", `/nests/${squatter}/site`, undefined, writer.apiKey)).data.url;
+    expect(url).not.toContain(`/d/${nestId}/`);
+    const page = await get(`/d/${nestId}/`);
+    expect(page.status).toBe(301);
+    expect(page.headers.get("location")).toBe("https://docs.acme.dev/");
+  });
+
   it("renders the page list once per page, so page size grows linearly", async () => {
     const res = await app.request("https://docs.acme.dev/reference/cli", { headers: { ...HTML, Host: "docs.acme.dev" } });
     expect(res.status).toBe(200);

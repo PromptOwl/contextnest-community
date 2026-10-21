@@ -14,6 +14,7 @@ import { Resolver } from "node:dns/promises";
 import { z } from "zod";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
+import { isUniqueViolation } from "../governance/stewardship-service.js";
 import { ValidationError, ConflictError, NotFoundError } from "../shared/errors.js";
 
 export const SiteSettingsSchema = z.strictObject({
@@ -137,16 +138,21 @@ export async function ensureSiteKey(nestId: string, slug: string): Promise<strin
   const row = await getSiteRow(nestId);
   if (row.siteKey) return row.siteKey;
   const db = getDb();
-  // Claim the slug only if no other row holds it, in one statement — no
-  // failing write to recover from (which would abort a Postgres transaction).
-  // If another nest won the slug in a race, this nest takes its own id,
-  // which nobody else can hold.
-  await db.run(
-    `UPDATE nest_sites SET site_key = ?
-      WHERE nest_id = ? AND site_key IS NULL
-        AND NOT EXISTS (SELECT 1 FROM nest_sites other WHERE other.site_key = ? AND other.nest_id != ?)`,
-    [slug, nestId, slug, nestId],
-  );
+  // Claim the slug only if no other site holds it and it isn't another nest's
+  // id (that URL belongs to that nest). Two concurrent claims can both pass
+  // NOT EXISTS; the loser hits the unique index and takes its own id, which
+  // nobody else can hold. Callers don't run this inside a transaction.
+  try {
+    await db.run(
+      `UPDATE nest_sites SET site_key = ?
+        WHERE nest_id = ? AND site_key IS NULL
+          AND NOT EXISTS (SELECT 1 FROM nest_sites other WHERE other.site_key = ? AND other.nest_id != ?)
+          AND NOT EXISTS (SELECT 1 FROM nests n WHERE n.id = ? AND n.id != ?)`,
+      [slug, nestId, slug, nestId, slug, nestId],
+    );
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+  }
   await db.run("UPDATE nest_sites SET site_key = ? WHERE nest_id = ? AND site_key IS NULL", [nestId, nestId]);
   return (await getSiteRow(nestId)).siteKey!;
 }
@@ -165,7 +171,11 @@ export async function claimSiteKeyIfLive(nestId: string): Promise<void> {
 
 /** The nest that holds a /d/<key>, whatever its state now. */
 export async function nestIdForSiteKey(key: string): Promise<string | null> {
-  const row = (await getDb().get("SELECT nest_id FROM nest_sites WHERE site_key = ? OR nest_id = ?", [key, key])) as
+  // A nest's own id always wins over a key that happens to equal it.
+  const row = (await getDb().get(
+    "SELECT nest_id FROM nest_sites WHERE site_key = ? OR nest_id = ? ORDER BY CASE WHEN nest_id = ? THEN 0 ELSE 1 END LIMIT 1",
+    [key, key, key],
+  )) as
     | { nest_id: string }
     | undefined;
   return row?.nest_id ?? null;
