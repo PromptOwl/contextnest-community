@@ -95,6 +95,7 @@ export const HISTORICAL_MIGRATIONS = [
   "067_system_accounts",
   "068_nest_sites",
   "069_site_public_url_host",
+  "070_instructions_revisions",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -1223,6 +1224,21 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
 
   // Migration 069 parity: the proven host of a site's public_url.
   await db.exec("ALTER TABLE nest_sites ADD COLUMN IF NOT EXISTS public_url_host TEXT");
+
+  // Migration 070 parity: CONTEXT.md revisions (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS instructions_revisions (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      seq INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      author_email TEXT,
+      note TEXT,
+      source TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      UNIQUE(nest_id, seq)
+    );
+  `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(

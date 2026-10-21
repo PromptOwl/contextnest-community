@@ -14,6 +14,7 @@ import { listAssignedTo } from "./nodes/assigned-service.js";
 import { headlessRoutes } from "./nests/headless-routes.js";
 import { countPeople } from "./auth/headless.js";
 import { brandingRoutes } from "./nests/branding-routes.js";
+import { instructionsRoutes } from "./nests/instructions-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
 import { publishRoutes } from "./nests/publish-routes.js";
 import { publishRenderRoutes } from "./nests/publish-render-routes.js";
@@ -3186,7 +3187,10 @@ export function createApp(): Hono<AuthEnv> {
       resource === "site" ||
       // headless (CU-wdqcq0314u): publishing API-only and minting access keys
       // decide who can read the nest — the same owner/admin tier as visibility.
-      resource === "headless"
+      resource === "headless" ||
+      // instructions (CU-wdqcq05mty): CONTEXT.md is what every agent reads
+      // first, so changing it is owner/admin. Reading stays at read tier.
+      (resource === "instructions" && c.req.method !== "GET")
     ) {
       // reader-mode: the nest owner/admin collaborator AND the server admin
       // may configure it — this "admin" tier already covers both
@@ -3508,6 +3512,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId", sharingRoutes);
   nestsApp.route("/:nestId", headlessRoutes);
   nestsApp.route("/:nestId", brandingRoutes);
+  nestsApp.route("/:nestId", instructionsRoutes);
   nestsApp.route("/:nestId", siteSettingsRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);
   // "publications" (not "/publish") — POST /:nestId/publish is already taken by
