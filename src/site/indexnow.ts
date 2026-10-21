@@ -13,13 +13,17 @@ import { url } from "./render.js";
 
 const ENDPOINT = "https://api.indexnow.org/indexnow";
 
+/** Loopback, private ranges, IPv6 literals and names that only resolve on a LAN. */
+export const PRIVATE_HOST =
+  /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[)|\.(local|localhost|internal|lan|home\.arpa|corp|intranet)$/i;
+
 /** Sites that may notify: public https hosts only, never tests or localhost. */
 function canNotify(site: Site): boolean {
   if (site.settings.indexnow === false || site.settings.noindex) return false;
   if (process.env.NODE_ENV === "test" || process.env.VITEST) return false;
   try {
     const u = new URL(site.base);
-    return u.protocol === "https:" && !/^(localhost|127\.|10\.|192\.168\.)/.test(u.hostname) && u.hostname.includes(".");
+    return u.protocol === "https:" && u.hostname.includes(".") && !PRIVATE_HOST.test(u.hostname);
   } catch {
     return false;
   }

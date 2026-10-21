@@ -24,7 +24,7 @@
 import { Hono, type Context } from "hono";
 import { config } from "../config.js";
 import { requestBaseUrl } from "../shared/base-url.js";
-import { getSessionIdFromRequest } from "../auth/sessions.js";
+import { getSessionIdFromRequest, resolveSession } from "../auth/sessions.js";
 import { findSiteNest, getSite, placements, siteNests, TYPES, type SiteNest, type SiteView } from "./build.js";
 import { cspFor, renderServerRobots, renderSitemapIndex } from "./render.js";
 import { nestIdForDomain } from "./settings.js";
@@ -124,11 +124,12 @@ function serveFile(c: Context, built: SiteView, rest: string) {
 export const siteRoutes = new Hono();
 
 // One catch-all, parsed by hand: the app's LinearRouter can't mix a :param
-// with a trailing * in one pattern.
-siteRoutes.get("*", async (c) => {
+// with a trailing * in one pattern. Mounted at "/d", that "*" also matches
+// "/dashboard", "/docs"…: anything that isn't /d/<key> goes on to the app.
+siteRoutes.get("*", async (c, next) => {
   const pathname = new URL(c.req.url).pathname;
   const m = /^\/d\/([^/]+)(\/.*)?$/.exec(pathname);
-  if (!m) return notFound(c);
+  if (!m) return next();
   const key = decode(m[1]);
   const rest = m[2] === undefined ? "" : decode(m[2].slice(1));
   if (key === null || rest === null) return notFound(c);
@@ -210,11 +211,16 @@ export async function legacySiteRedirect(c: Context): Promise<Response | null> {
   if (config.AUTH_MODE !== "key") return null; // open mode: every visitor is the operator
   const url = new URL(c.req.url);
   if (url.searchParams.get("app") === "1") return null;
-  if (c.req.header("Authorization") || getSessionIdFromRequest(c)) return null;
+  // An Authorization header means an API client, not a crawler.
+  if (c.req.header("Authorization")) return null;
   const nestId = /^\/nest\/([^/]+)\/?$/.exec(url.pathname)?.[1] ?? (url.pathname === "/" ? url.searchParams.get("nest") : null);
   if (!nestId) return null;
   const nest: SiteNest | undefined = (await siteNests()).find((n) => n.id === nestId);
   if (!nest) return null;
+  // Signed-in browsers keep the app. A stale session cookie doesn't count:
+  // that visitor is anonymous now and gets the page like a crawler does.
+  const sessionId = getSessionIdFromRequest(c);
+  if (sessionId && (await resolveSession(sessionId))) return null;
   const built = await getSite(nest, serverOrigin(c));
   const doc = url.searchParams.get("doc");
   const path = doc ? (built.site.pages.find((p) => p.nodeId === doc)?.path ?? "") : "";

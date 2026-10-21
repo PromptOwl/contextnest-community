@@ -224,6 +224,33 @@ d("PostgresAdapter conformance", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("creates the docs-site tables (068/069) and allows one nest per verified domain", async () => {
+    // Running the migrations again must be a no-op (CREATE / ADD COLUMN IF NOT EXISTS).
+    const { runPostgresMigrations } = await import("../src/db/migrations.postgres.js");
+    await runPostgresMigrations(adapter);
+    const cols = await adapter.all<{ column_name: string }>(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'nest_sites'",
+    );
+    expect(cols.map((c) => c.column_name)).toEqual(
+      expect.arrayContaining(["site_key", "domain", "domain_verified_at", "settings", "public_url_host"]),
+    );
+    await adapter.run("INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)", ["site-u", "site@example.com", "h"]);
+    for (const id of ["site-a", "site-b"]) {
+      await adapter.run("INSERT INTO nests (id, user_id, name, slug) VALUES (?, ?, ?, ?)", [id, "site-u", id, id]);
+      await adapter.run(
+        "INSERT INTO nest_sites (nest_id, domain, domain_token, indexnow_key) VALUES (?, ?, ?, ?)",
+        [id, "docs.example.com", `t-${id}`, `k-${id}`],
+      );
+    }
+    // Both may claim the domain; the partial unique index lets only one verify it.
+    await adapter.run("UPDATE nest_sites SET domain_verified_at = ? WHERE nest_id = ?", ["2026-01-01", "site-a"]);
+    await expect(
+      adapter.run("UPDATE nest_sites SET domain_verified_at = ? WHERE nest_id = ?", ["2026-01-01", "site-b"]),
+    ).rejects.toThrow(/unique|duplicate/i);
+    await adapter.run("UPDATE nest_sites SET public_url_host = ? WHERE nest_id = ?", ["example.com", "site-a"]);
+    expect((await adapter.get<{ h: string }>("SELECT public_url_host AS h FROM nest_sites WHERE nest_id = ?", ["site-a"]))?.h).toBe("example.com");
+  });
+
   it("adds the run claim columns to a runs table that predates them", async () => {
     // Prod's runs table was created before claimed_by existed; boot crashed
     // building the metacognition index on it (42703).

@@ -276,6 +276,11 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
     expect(page.status).toBe(200);
     expect(await page.text()).toContain('<link rel="canonical" href="https://docs.acme.dev/getting-started">');
     expect((await app.request("http://localhost/site-domain-check?domain=docs.acme.dev")).status).toBe(200);
+    // An edge may pass the SNI name with a port, a trailing dot or in capitals.
+    for (const d of ["docs.acme.dev:443", "docs.acme.dev.", "DOCS.Acme.dev"]) {
+      expect((await app.request(`http://localhost/site-domain-check?domain=${encodeURIComponent(d)}`)).status, d).toBe(200);
+    }
+    expect((await app.request("http://localhost/site-domain-check?domain=other.acme.dev")).status).toBe(404);
     const moved = await get("/d/acme-docs/getting-started");
     expect(moved.status).toBe(301);
     expect(moved.headers.get("location")).toBe("https://docs.acme.dev/getting-started");
@@ -352,6 +357,25 @@ describe("docs site: settings, domains, URLs and semantic links", () => {
       expect(await (await app.request("https://docs.acme.dev/robots.txt", { headers: host })).text()).toContain("ai-train=no");
     } finally {
       await store({});
+    }
+  });
+
+  it("gives only a valid session the app instead of the page", async () => {
+    const { createSession } = await import("../src/auth/sessions.js");
+    const { getDb } = await import("../src/db/client.js");
+    const userId = ((await getDb().get("SELECT id FROM users WHERE email = ?", ["owner@test.com"])) as { id: string }).id;
+    const valid = await createSession(userId);
+    const stale = "0".repeat(64);
+    expect((await get(`/nest/${nestId}`, { ...HTML, Cookie: `cnst_session=${valid}` })).status).not.toBe(301);
+    // A cookie for a session that no longer exists is an anonymous visitor.
+    expect((await get(`/nest/${nestId}`, { ...HTML, Cookie: `cnst_session=${stale}` })).status).toBe(301);
+  });
+
+  it("leaves app URLs that merely start with /d to the app", async () => {
+    for (const p of ["/dashboard", "/docs", "/definitions", "/d", "/d/"]) {
+      const res = await get(p);
+      // Never the docs site's own (noindex) 404 page.
+      expect(res.headers.get("x-robots-tag"), p).toBeNull();
     }
   });
 
@@ -456,6 +480,35 @@ describe("docs site behind the owner's reverse proxy", () => {
     const html = await res.text();
     expect(html).toContain('<link rel="canonical" href="https://example.com/docs/setup">');
     expect(html).toContain('href="/docs/"');
+  });
+
+  it("points a spoofed X-Forwarded-Host copy back at the public URL", async () => {
+    // Anyone can send the header and get the page on this origin. The page is
+    // public anyway, and its canonical names the public URL, so search
+    // engines index that one, not this copy.
+    const res = await app.request("http://localhost/d/proxied/setup", { headers: { ...HTML, "X-Forwarded-Host": "example.com" } });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('<link rel="canonical" href="https://example.com/docs/setup">');
+    expect(res.headers.get("x-robots-tag")).toBeNull();
+  });
+
+  it("exports static files with the public URL even before it is verified", async () => {
+    const { getDb } = await import("../src/db/client.js");
+    const { buildSiteFiles } = await import("../src/site/build.js");
+    await getDb().run("UPDATE nest_sites SET public_url_host = NULL WHERE nest_id = ?", [nestId]);
+    try {
+      const files = await buildSiteFiles(nestId, "http://localhost/");
+      expect(Object.keys(files)).toEqual(
+        expect.arrayContaining(["setup.html", "setup.md", "sitemap.xml", "robots.txt", "llms.txt", "404.html", "_redirects"]),
+      );
+      expect(files["setup.html"]).toContain('<link rel="canonical" href="https://example.com/docs/setup">');
+      expect(files["sitemap.xml"]).toContain("<loc>https://example.com/docs/setup</loc>");
+      // The server itself still keeps the unverified site at /d/<key>.
+      const live = await app.request("http://localhost/d/proxied/setup", { headers: HTML });
+      expect(live.status).toBe(200);
+    } finally {
+      await getDb().run("UPDATE nest_sites SET public_url_host = ? WHERE nest_id = ?", ["example.com", nestId]);
+    }
   });
 
   it("301s direct hits to the public URL", async () => {

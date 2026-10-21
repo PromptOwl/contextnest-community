@@ -20,7 +20,7 @@
  * structured data names the same relationships.
  */
 import { createHash } from "node:crypto";
-import { parseDocument } from "@promptowl/contextnest-engine";
+import { buildWikiTitleIndex, parseDocument, resolveWikiTarget } from "@promptowl/contextnest-engine";
 import { getDb } from "../db/client.js";
 import { engineCache } from "../nodes/engine.js";
 import { reconstructApproved } from "../governance/approved-body.js";
@@ -200,6 +200,15 @@ export async function findSiteNest(key: string): Promise<{ nest: SiteNest; key: 
   return { nest, key: await ensureSiteKey(nest.id, nest.slug) };
 }
 
+export interface SiteOptions {
+  /**
+   * Use public_url even before its host is verified. Only for a static export:
+   * its files are hosted wherever the operator puts them, and nothing this
+   * server serves redirects there.
+   */
+  unverifiedPublicUrl?: boolean;
+}
+
 export interface Placement {
   base: string;
   prefix: string;
@@ -214,10 +223,15 @@ export interface Placement {
  * 301s there, so an unproven one would make this server an open redirect),
  * else /d/<key> on this server.
  */
-export async function placementFor(nest: SiteNest, row: SiteRow, serverOrigin: string): Promise<Placement> {
+export async function placementFor(
+  nest: SiteNest,
+  row: SiteRow,
+  serverOrigin: string,
+  opts: SiteOptions = {},
+): Promise<Placement> {
   const domain = domainForNest(nest.id, row);
   if (domain) return { base: `https://${domain}`, prefix: "", canonicalElsewhere: true, domain };
-  const publicUrl = verifiedPublicUrl(nest.id, row);
+  const publicUrl = opts.unverifiedPublicUrl ? (row.settings.public_url ?? null) : verifiedPublicUrl(nest.id, row);
   if (publicUrl) {
     const u = new URL(publicUrl);
     const prefix = u.pathname.replace(/\/+$/, "");
@@ -363,8 +377,22 @@ async function approvedSources(nestId: string, rows: ApprovedRow[], live: Set<st
   return sources;
 }
 
-/** Resolve a document reference against the site: path first, then title, then a unique slug. */
-function resolveTarget(target: string, sources: Source[]): Source | null {
+/**
+ * A resolver for document references on the site. The engine's wiki grammar
+ * (id or title, `#anchor`, `[[ ]]`) comes first, so a link resolves here as it
+ * does everywhere else; then the forms only a docs page uses: a path without
+ * `nodes/`, an `x.md` link, and a leaf name that matches one page.
+ */
+function targetResolver(sources: Source[]): (target: string) => Source | null {
+  const index = buildWikiTitleIndex(sources.map((s) => ({ id: s.nodeId, frontmatter: { title: s.title }, body: "" })));
+  const byId = new Map(sources.map((s) => [s.nodeId, s]));
+  return (target) => {
+    const id = resolveWikiTarget(target.trim(), index);
+    return (id && byId.get(id)) || resolveSitePath(target, sources);
+  };
+}
+
+function resolveSitePath(target: string, sources: Source[]): Source | null {
   const raw = target.trim().replace(/^\/+/, "").replace(/\.md$/i, "");
   if (!raw) return null;
   const norm = (s: string) => s.replace(/^nodes\//, "").toLowerCase();
@@ -447,12 +475,13 @@ function buildSite(nest: SiteNest, sources: Source[], inputs: Inputs, place: Pla
   // ── Render bodies, collecting the links between pages. ──
   const linksOut = new Map<string, Set<string>>();
   const rendered = new Map<string, { html: string; headings: Heading[]; title: string; description: string }>();
+  const resolveTarget = targetResolver(sources);
   for (const s of sources) {
     const title = displayTitle(s.title, s.body);
     const body = stripLeadingTitle(s.body, title);
     const { html, headings, linked } = renderMarkdown(body, {
       resolve: (target) => {
-        const hit = resolveTarget(target, sources);
+        const hit = resolveTarget(target);
         return hit ? { href: href(pathOf.get(hit.nodeId)!), nodeId: hit.nodeId } : null;
       },
       terms: termLinks,
@@ -516,7 +545,7 @@ function buildSite(nest: SiteNest, sources: Source[], inputs: Inputs, place: Pla
       linksTo: [...(linksOut.get(s.nodeId) ?? [])].map(ref),
       linkedFrom: [...(linksIn.get(s.nodeId) ?? [])].map(ref).sort((a, b) => a.title.localeCompare(b.title)),
       basedOn: s.derivedFrom
-        .map((d) => resolveTarget(d, sources))
+        .map((d) => resolveTarget(d))
         .filter((x): x is Source => !!x && x.nodeId !== s.nodeId)
         .map((x) => ref(x.nodeId)),
       related: relatedFor(s),
@@ -744,10 +773,10 @@ function viewFor(built: Built, origin: string): SiteView {
  * "tags/x", "glossary", "sitemap.xml", "robots.txt", "llms.txt",
  * "llms-full.txt", "<indexnow key>.txt", "404", "410".
  */
-export async function getSite(nest: SiteNest, requestOrigin: string): Promise<SiteView> {
+export async function getSite(nest: SiteNest, requestOrigin: string, opts: SiteOptions = {}): Promise<SiteView> {
   const origin = buildOrigin();
   const inputs = await inputsFor(nest);
-  const place = await placementFor(nest, inputs.row, origin);
+  const place = await placementFor(nest, inputs.row, origin, opts);
   const key = `${inputs.key}|${place.base}`;
   const hit = cache.get(nest.id);
   if (hit && hit.key === key && hit.origin === origin) return viewFor(hit, requestOrigin);
@@ -816,9 +845,9 @@ export function buildCount(): number {
 }
 
 /** The built site for a nest by id (settings panel, export), or null when it has none. */
-export async function siteForNest(nestId: string, serverOrigin: string): Promise<SiteView | null> {
+export async function siteForNest(nestId: string, serverOrigin: string, opts: SiteOptions = {}): Promise<SiteView | null> {
   const nest = (await siteNests()).find((n) => n.id === nestId);
-  return nest ? getSite(nest, serverOrigin) : null;
+  return nest ? getSite(nest, serverOrigin, opts) : null;
 }
 
 /** Placement for many nests at once (server sitemap index), without building. */
@@ -841,7 +870,7 @@ export async function placements(serverOrigin: string): Promise<Array<{ nest: Si
  * public URL), else `base`.
  */
 export async function buildSiteFiles(nestId: string, serverOrigin: string): Promise<Record<string, string>> {
-  const built = await siteForNest(nestId, serverOrigin.replace(/\/$/, ""));
+  const built = await siteForNest(nestId, serverOrigin.replace(/\/$/, ""), { unverifiedPublicUrl: true });
   if (!built) throw new Error(`Nest ${nestId} is not a public Reader Mode nest`);
   const out: Record<string, string> = {};
   for (const path of built.paths()) {

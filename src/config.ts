@@ -235,13 +235,6 @@ export const config = {
     return (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
   },
   /**
-   * Custom domains for public docs sites (CU-wdqcq05jhm), as
-   * `host=nestId[,host=nestId…]` — e.g. `docs.contextnest.ai=ad8fe978-…`.
-   * Point the domain's DNS at this server and the nest's docs site is served
-   * at that domain's root (the nest must still be public with Reader Mode on).
-   * Unset ⇒ docs sites live only under /d/<slug> on this server's own host.
-   */
-  /**
    * The DNS name customers point their docs domain at (a CNAME target), shown
    * in the nest's site settings — e.g. the load balancer or edge proxy that
    * terminates TLS for custom domains. Your edge should issue certificates
@@ -250,6 +243,13 @@ export const config = {
   get SITE_DNS_TARGET(): string {
     return (process.env.SITE_DNS_TARGET || "").trim();
   },
+  /**
+   * Custom domains for public docs sites (CU-wdqcq05jhm), as
+   * `host=nestId[,host=nestId…]` — e.g. `docs.contextnest.ai=ad8fe978-…`.
+   * Point the domain's DNS at this server and the nest's docs site is served
+   * at that domain's root (the nest must still be public with Reader Mode on).
+   * Unset ⇒ docs sites live only under /d/<slug> on this server's own host.
+   */
   get DOCS_SITES(): Map<string, string> {
     // Parsed once per distinct value: this is read on every request.
     const raw = process.env.DOCS_SITES || "";
